@@ -416,6 +416,69 @@ class TestTheActualToDateJoinsItsPartner:
         assert duck == postgres == 0.0
 
 
+class TestTheSmartGoalsForecastSignal:
+    """Signal 3 of a smart goal — actual Gold revenue for the month so far plus
+    the stored predictions for the rest (DN-12).
+
+    It used to read both on `generate_smart_goals`' own DuckDB connection, so
+    after step 13 it would have summed a frozen Gold. Both halves now go
+    through `_goals_run`, and the actual half is exactly the read
+    `_get_actual_month_revenue` is: `{gold_revenue_rollup}` or Postgres counts
+    every order twice. `internal` is here because the method has always summed
+    every row for any sales_type but retail and b2b, and still does.
+    """
+
+    @pytest_asyncio.fixture
+    async def with_signal(self, both_engines):
+        from core.pg import get_pool
+        from core.pg_gold import rebuild_gold
+
+        store = both_engines
+        pool = await get_pool()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            await rebuild_gold(pool=pool)
+        async with store.connection() as conn:
+            conn.executemany(
+                "INSERT INTO revenue_predictions (prediction_date, sales_type,"
+                " predicted_revenue, model_mae, model_mape, model_wape)"
+                " VALUES (?,?,?,?,?,?)", PREDICTIONS)
+        async with pool.acquire() as conn:
+            await conn.executemany(
+                "INSERT INTO app.revenue_predictions (prediction_date, sales_type,"
+                " predicted_revenue, model_mae, model_mape, model_wape)"
+                " VALUES ($1,$2,$3,$4,$5,$6)", PREDICTIONS)
+        return store
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all", "internal"])
+    async def test_the_actual_part_agrees(self, with_signal, monkeypatch, sales_type):
+        duck, postgres = await _both(
+            with_signal, monkeypatch, "_forecast_actual_revenue",
+            (TODAY - timedelta(days=60), TODAY, sales_type))
+        assert round(duck, 2) == round(postgres, 2)
+
+    @pytest.mark.asyncio
+    async def test_the_actual_part_is_money_not_two_zeros(self, with_signal, monkeypatch):
+        window = (TODAY - timedelta(days=60), TODAY)
+        retail, _ = await _both(
+            with_signal, monkeypatch, "_forecast_actual_revenue", (*window, "retail"))
+        everything, _ = await _both(
+            with_signal, monkeypatch, "_forecast_actual_revenue", (*window, "all"))
+        assert retail > 0
+        assert everything > retail, "the b2b order must be inside 'all' only"
+
+    @pytest.mark.asyncio
+    async def test_the_whole_signal_agrees(self, with_signal, monkeypatch):
+        """Both halves through one engine. The Postgres leg runs with DuckDB
+        made fatal, and the method swallows errors into 0.0 — so a fallback
+        shows up as a mismatch against a DuckDB answer that is not zero."""
+        duck, postgres = await _both(
+            with_signal, monkeypatch, "_get_ml_forecast_total",
+            (TODAY.year, TODAY.month, "retail"))
+        assert duck > 0, "no prediction for today — the signal compared nothing"
+        assert round(duck, 2) == round(postgres, 2)
+
+
 class TestTheForecastTrainingFrame:
     """`_query_daily_revenue` is what the forecast model learns from — training,
     `evaluate`, `tune`, and `predict_range` live on `/trend?include_forecast`.
