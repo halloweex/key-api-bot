@@ -2529,7 +2529,10 @@ inside its transaction: the sync's mirror in `upsert_orders` skips, the ids-diff
 and header-only repair refuse, the hourly diff returns `stood_down`, the
 comment ship reports `skipped`, `POST /api/mirror/backfill/orders` answers 409,
 and the bucket comparison files `mirror_stood_down` (INFO). Either table stands
-both down, because they go in one transaction. The question is asked only of
+both down, because ownership of the order tables passes as a unit: a chain that
+declares one declares both, which `tests/unit/test_write_chains.py` walks the
+registry for. It is not that they cannot ship apart — the 05:15 refresh and the
+comment ship send headers alone every day. The question is asked only of
 chains that declare an order table (`write_chains.stood_down_among`) — none do
 today, so it reads no variable and no file, and nothing changed in production.
 `tests/unit/test_write_chains.py` walks `core/`, `web/` and `scripts/` for any

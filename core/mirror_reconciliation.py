@@ -1413,9 +1413,9 @@ def _orders_stood_down(
             description=(
                 f"Not compared: {', '.join(sorted(moved))} is written by a "
                 "write chain, so the orders mirror no longer ships DuckDB's "
-                "copy of either order table — they go in one transaction. "
-                "A difference here would be the chain's own writes, not a "
-                "loss."
+                "copy of either order table — ownership of the order tables "
+                "passes as a unit. A difference here would be the chain's "
+                "own writes, not a loss."
             ),
         )
         for spec in specs if spec.pg_table in order_tables

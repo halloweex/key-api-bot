@@ -253,6 +253,41 @@ async def _store(tmp_path, ids=()):
     return store
 
 
+def _chains_splitting_the_order_tables(chains) -> list:
+    """The chains that declare one order table and not the other."""
+    from core.write_chains import chain_name
+
+    both = {ORDERS, LINES}
+    return [chain_name(c) for c in chains
+            if both & set(c.CHAIN_TABLES) and not both <= set(c.CHAIN_TABLES)]
+
+
+class TestOwnershipOfTheOrderTablesPassesAsAUnit:
+    """Why either order table stands both down. Not that they ship together —
+    `write_orders(replace_products=False)` ships headers alone every day, from
+    the 05:15 status refresh and the comment ship — but that whoever takes the
+    headers takes their line items: a chain declares both or neither. Walked
+    over the real registry, which `TestEveryWriteChainIsRegistered` holds equal
+    to every module that declares a chain."""
+
+    def test_no_registered_chain_declares_one_without_the_other(self):
+        from core.write_chains import WRITE_CHAINS
+
+        assert _chains_splitting_the_order_tables(WRITE_CHAINS) == []
+
+    def test_the_check_sees_a_split_when_there_is_one(self):
+        """So the empty answer above is a finding, not a check that cannot fail."""
+        import types
+
+        for tables in ((ORDERS,), (LINES,), (LINES, "app.something_else")):
+            fake = types.ModuleType("core.pg_orders_write")
+            fake.CHAIN_TABLES = tables
+            assert _chains_splitting_the_order_tables((fake,)) == ["pg_orders_write"]
+        whole = types.ModuleType("core.pg_orders_write")
+        whole.CHAIN_TABLES = (ORDERS, LINES)
+        assert _chains_splitting_the_order_tables((whole,)) == []
+
+
 class TestTheOrderTablesAskOnlyTheirOwnChain:
     def test_nothing_stands_down_in_production_today(self, flags):
         """KS_WRITE_EXPENSES=postgres is live; its table is not an order table."""
@@ -350,8 +385,10 @@ class TestTheSyncMirror:
     @pytest.mark.parametrize("tables", [(ORDERS,), (LINES,)])
     async def test_either_table_owned_ships_nothing_at_all(
             self, pool, order_chain, tmp_path, tables):
-        """Headers and line items go in one transaction, so a chain on either
-        one stops both — and DuckDB's own write is untouched."""
+        """Ownership of the order tables passes as a unit, so a chain on either
+        one stops both — and DuckDB's own write is untouched. No real chain may
+        declare only one (`TestOwnershipOfTheOrderTablesPassesAsAUnit`); this
+        is the stand-down holding if one ever did."""
         order_chain(tables=tables)
         store = await _store(tmp_path)
         result = await store.upsert_orders([_order(1)])

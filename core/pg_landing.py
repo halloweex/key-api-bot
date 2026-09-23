@@ -298,10 +298,14 @@ def order_tables_stood_down() -> FrozenSet[str]:
     in `app.order_versions` as a change that never happened, in the one table
     nothing can delete from.
 
-    **Either table stands both down.** Headers and line items go in one
-    transaction (`write_orders`), so there is no shipping one without the
-    other, and a comparison of the one still "shipped" would report every
-    order the mirror stopped carrying as lost.
+    **Either table stands both down, because ownership of the order tables
+    passes as a unit.** A chain that takes over the headers takes their line
+    items with it, so a chain declaring either table declares both — a
+    registry invariant `tests/unit/test_write_chains.py` walks `WRITE_CHAINS`
+    for. Standing both down on either is that invariant held defensively, and
+    not a property of the shipping: the two tables do ship apart, since
+    `write_orders(replace_products=False)` ships headers alone every day, from
+    the 05:15 status refresh and from `ship_orders_by_id`.
 
     Asked BEFORE `write_orders` and never inside it. The capture's contract is
     that the version and the row it describes land together or neither does
