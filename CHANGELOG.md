@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.236
+
+- A resolve ends the incident; review found the timing rule could not
+- An emitter that runs every six hours was a new incident every six hours
+
+
 ## 3.0.235
 
 - test: a failure after the owner rows never stamps a table Postgres owns
