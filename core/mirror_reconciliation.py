@@ -2670,12 +2670,15 @@ async def reconcile_order_utm(
 # order as it now stands reached Postgres. Under KS_PG_DERIVE=own the order
 # reaches `silver.orders` on Postgres' own signal, while its verdict waits for
 # DuckDB's next warehouse tick (two minutes) and then the ship's floor
-# (`KS_PG_SILVER_INTERVAL_S`, 600 s) — the gap #213 accepted rather than
-# patched. `SILVER_GRACE_MINUTES` is sized against exactly that floor, and the
-# comparison above uses it for this same table, so this takes it rather than a
-# third number. `deploy/stage4_soak/11_utm_gap.sql` asks the same question by
-# hand with fifteen minutes: right for a reading, and a page on a slow tick
-# here.
+# (`KS_PG_SILVER_INTERVAL_S`, 600 s by default) — the gap #213 accepted rather
+# than patched. So the grace is resolved from that variable when the check
+# runs, through `pg_warehouse_dq.silver_grace_minutes()`: the floor plus the
+# twins' ten-minute margin, twenty minutes at the default — the number
+# `SILVER_GRACE_MINUTES` fixes for the comparison above. A constant here would
+# go on paging the old floor's width the day somebody raised it, and the floor
+# and the grace would then be two numbers somebody has to remember to move
+# together. `deploy/stage4_soak/11_utm_gap.sql` asks the same question by hand
+# with fifteen minutes: right for a reading, and a page on a slow tick here.
 #
 # **Not the ship's watermark**, which was the other clock available. A ship
 # that stops being *called* records nothing at all — a warehouse refresh that
@@ -2821,7 +2824,7 @@ async def order_utm_completeness_row(
 async def reconcile_order_utm_completeness(
     *,
     now: Optional[datetime] = None,
-    grace_minutes: int = SILVER_GRACE_MINUTES,
+    grace_minutes: Optional[int] = None,
     max_samples: int = 10,
 ) -> List[IntegrityIssue]:
     """Does every order the UTM parser reads have a current verdict in
@@ -2829,13 +2832,21 @@ async def reconcile_order_utm_completeness(
 
     Takes no store: both sides of the question are in Postgres, which is what
     lets it outlive `reconcile_order_utm` when the parse moves there.
+
+    `grace_minutes=None` — what the job passes — is the ship's floor plus the
+    twins' margin, read from `KS_PG_SILVER_INTERVAL_S` now rather than at
+    import, so the two move together. A floor that is not a number raises
+    here, and the job's `check` names the error on the run.
     """
     from core import pg_landing
     from core.pg import get_pool, require_revision
+    from core.pg_warehouse_dq import silver_grace_minutes
 
     if not pg_landing.enabled():
         return []
 
+    if grace_minutes is None:
+        grace_minutes = silver_grace_minutes()
     now = now or datetime.now(timezone.utc)
     pool = await get_pool()
     await require_revision()

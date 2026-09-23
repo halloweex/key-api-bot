@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from core.data_quality import (
     DEFAULT_REMEDIATION,
     HUMAN_CHECK_NAMES,
@@ -62,6 +64,10 @@ class TestEachCountMeansOneThing:
         assert issue.check_name == "pg_order_utm_stale"
         assert issue.severity is Severity.CRITICAL
         assert issue.sample_ids == (11,)
+        # Its own oldest arrival, not the missing count's: with nothing
+        # missing, reading the wrong key would print "unknown" here.
+        assert SINCE.isoformat() in issue.description
+        assert f"{SILVER_GRACE_MINUTES} minutes" in issue.description
 
     def test_in_flight_is_counted_and_never_pages(self):
         (issue,) = _findings(in_flight=2, in_flight_ids=[5, 6])
@@ -80,6 +86,62 @@ class TestEachCountMeansOneThing:
             ("pg_order_utm_stale", (2,)),
             ("pg_order_utm_in_flight", (3,)),
         ]
+
+
+class TestTheGraceFollowsTheFloor:
+    """The job calls the check with no grace at all, so the default *is* the
+    production grace. It is the ship's floor plus the twins' margin, read when
+    the check runs: raise `KS_PG_SILVER_INTERVAL_S` and the grace moves with
+    it, instead of paging on the old floor's width.
+
+    The SQL half is proved on a server in the integration twin of this file;
+    this pins which number reaches it, which needs no server.
+    """
+
+    NOW = datetime(2030, 6, 5, 4, 30, tzinfo=timezone.utc)
+
+    async def _grace_used(self, monkeypatch, **kwargs):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from core import mirror_reconciliation as mr
+
+        monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
+        seen = {}
+
+        async def _fake_row(conn, *, now, grace_minutes, max_samples):
+            seen["grace"] = grace_minutes
+            return _row(missing=1, missing_ids=[7], missing_since=SINCE)
+
+        pool = MagicMock()
+        pool.acquire.return_value.__aenter__ = AsyncMock(return_value=object())
+        pool.acquire.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
+             patch("core.pg.require_revision", new=AsyncMock()), \
+             patch.object(mr, "order_utm_completeness_row", new=_fake_row):
+            (issue,) = await mr.reconcile_order_utm_completeness(now=self.NOW, **kwargs)
+        # And the finding says the same number the query was given.
+        assert f"more than {seen['grace']} minutes" in issue.description
+        return seen["grace"]
+
+    @pytest.mark.asyncio
+    async def test_the_default_floor_gives_the_comparisons_twenty(self, monkeypatch):
+        monkeypatch.delenv("KS_PG_SILVER_INTERVAL_S", raising=False)
+        assert await self._grace_used(monkeypatch) == SILVER_GRACE_MINUTES == 20
+
+    @pytest.mark.asyncio
+    async def test_raising_the_floor_raises_the_grace(self, monkeypatch):
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "1200")
+        assert await self._grace_used(monkeypatch) == 30
+
+    @pytest.mark.asyncio
+    async def test_lowering_the_floor_lowers_it(self, monkeypatch):
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "60")
+        assert await self._grace_used(monkeypatch) == 11
+
+    @pytest.mark.asyncio
+    async def test_a_grace_given_explicitly_is_the_one_used(self, monkeypatch):
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "1200")
+        assert await self._grace_used(monkeypatch, grace_minutes=5) == 5
 
 
 class TestTheReaderIsToldWhatToDo:

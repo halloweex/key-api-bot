@@ -80,11 +80,13 @@ def _critical(name):
     )
 
 
-async def _run(outcomes):
+async def _run(outcomes, mocks=None):
     """Run the real job with every check stubbed to `outcomes[name]`.
 
     An outcome is a list of issues, or an Exception to raise. Returns what the
-    job persisted, what it paged, and whether it announced a recovery.
+    job persisted, what it paged, and whether it announced a recovery. Pass a
+    dict as `mocks` to get each check's stub back by name, to ask how the job
+    called it.
     """
     from core.scheduler import BackgroundScheduler
 
@@ -114,6 +116,8 @@ async def _run(outcomes):
             outcome = outcomes.get(name, [])
             mock = (AsyncMock(side_effect=outcome) if isinstance(outcome, Exception)
                     else AsyncMock(return_value=list(outcome)))
+            if mocks is not None:
+                mocks[name] = mock
             patches.append(patch(f"{module}.{name}", new=mock))
 
     scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
@@ -186,3 +190,28 @@ class TestOneRaisingCheckSilencesNothing:
         assert persisted["error_message"] is None
         assert persisted["issues"] == [] and paged == []
         assert resolved == [[]]
+
+
+class TestTheUtmCompletenessCheckRunsAsProductionRunsIt:
+    """The AST walk above finds the label; only running the job runs the
+    lambda under it. That lambda is where the production grace is decided:
+    `reconcile_order_utm_completeness` resolves it from the ship's floor when
+    it is given none, and every test of the check itself passes one or relies
+    on that default — so a keyword added here would move the grace the job
+    pages on with nothing watching (DN-16)."""
+
+    @pytest.mark.asyncio
+    async def test_its_finding_reaches_the_run_and_it_is_called_with_nothing(self):
+        mocks = {}
+        missing = IntegrityIssue(
+            check_name="pg_order_utm_missing", table_name="silver.order_utm",
+            severity=Severity.CRITICAL, count=1, sample_ids=(301,),
+            description="an order with a comment and no verdict",
+        )
+        persisted, paged, _ = await _run(
+            {"reconcile_order_utm_completeness": [missing]}, mocks=mocks)
+
+        assert [i.check_name for i in persisted["issues"]] == ["pg_order_utm_missing"]
+        assert persisted["error_message"] is None
+        assert paged == [["pg_order_utm_missing"]]
+        mocks["reconcile_order_utm_completeness"].assert_awaited_once_with()

@@ -189,6 +189,8 @@ class TestPastTheGraceIsCritical:
         assert stale.severity is Severity.CRITICAL
         assert stale.count == 1
         assert stale.sample_ids == (102,)
+        # The oldest arrival, as the missing finding names its own.
+        assert PAST.isoformat() in stale.description
 
     @pytest.mark.asyncio
     async def test_the_two_are_told_apart(self, conn):
@@ -284,6 +286,45 @@ class TestThroughTheJob:
 
         assert [(i.check_name, i.sample_ids) for i in issues] == [
             ("pg_order_utm_missing", (301,))]
+
+    @pytest.mark.asyncio
+    async def test_the_grace_it_uses_when_given_none(self, conn, monkeypatch):
+        """The job passes no grace, so the default is the production grace,
+        and every other scenario here passes one. One second inside it is in
+        flight and one second past it pages: twenty minutes at the default
+        floor, exactly, on the server."""
+        monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
+        monkeypatch.delenv("KS_PG_SILVER_INTERVAL_S", raising=False)
+        await order(conn, 303, mirrored_at=INSIDE)
+        await order(conn, 304, mirrored_at=PAST)
+        with patch("core.pg.get_pool",
+                   new=AsyncMock(return_value=_OneConnectionPool(conn))), \
+             patch("core.pg.require_revision", new=AsyncMock()):
+            found = by_name(await mr.reconcile_order_utm_completeness(now=NOW))
+
+        assert set(found) == {"pg_order_utm_in_flight", "pg_order_utm_missing"}
+        assert found["pg_order_utm_in_flight"].sample_ids == (303,)
+        assert found["pg_order_utm_missing"].sample_ids == (304,)
+
+    @pytest.mark.asyncio
+    async def test_a_wider_floor_widens_that_grace(self, conn, monkeypatch):
+        """KS_PG_SILVER_INTERVAL_S at 1 200 s: the verdict may legitimately be
+        ten minutes later, so the order that paged above is in flight now, and
+        the page moves to thirty minutes."""
+        monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
+        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "1200")
+        wider = NOW - timedelta(minutes=30)
+        await order(conn, 305, mirrored_at=PAST)
+        await order(conn, 306, mirrored_at=wider + timedelta(seconds=1))
+        await order(conn, 307, mirrored_at=wider - timedelta(seconds=1))
+        with patch("core.pg.get_pool",
+                   new=AsyncMock(return_value=_OneConnectionPool(conn))), \
+             patch("core.pg.require_revision", new=AsyncMock()):
+            found = by_name(await mr.reconcile_order_utm_completeness(now=NOW))
+
+        assert found["pg_order_utm_in_flight"].sample_ids == (305, 306)
+        assert found["pg_order_utm_missing"].sample_ids == (307,)
+        assert "more than 30 minutes" in found["pg_order_utm_missing"].description
 
     @pytest.mark.asyncio
     async def test_it_stands_down_with_the_mirror(self, conn, monkeypatch):
