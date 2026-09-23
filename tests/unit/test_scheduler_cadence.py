@@ -120,3 +120,53 @@ class TestTheWrapper:
 
         assert BackgroundScheduler._trigger_cadence_s(
             DateTrigger(run_date=datetime.now(SCHEDULER_TIMEZONE))) is None
+
+
+class TestTheCadenceIsElapsedTime:
+    def test_an_interval_trigger_is_its_interval(self):
+        from core.scheduler import BackgroundScheduler
+
+        assert BackgroundScheduler._trigger_cadence_s(
+            IntervalTrigger(minutes=7)) == 420.0
+
+    def test_the_night_the_clocks_go_back_is_seven_hours(self):
+        """Europe/Kyiv leaves summer time at 04:00 on 2026-10-25. The 01:00
+        and 07:00 slots that night are seven hours apart; subtracting two
+        aware datetimes in one zone gives wall time and reads six."""
+        from core.scheduler import (
+            BackgroundScheduler, INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE,
+        )
+
+        trigger = CronTrigger(hour=INVARIANT_CHECK_HOURS,
+                              timezone=SCHEDULER_TIMEZONE)
+        before = datetime(2026, 10, 23, 12, 0, tzinfo=SCHEDULER_TIMEZONE)
+        assert BackgroundScheduler._trigger_cadence_s(trigger, before) == 7 * 3600
+
+
+class TestARequestedRunIsMarked:
+    def test_the_run_a_human_asked_for_is_marked_and_only_that_one(self):
+        from core.alerting import ALERT_REQUESTED
+        from core.scheduler import BackgroundScheduler, SCHEDULER_TIMEZONE
+
+        seen = []
+
+        async def probe():
+            seen.append(ALERT_REQUESTED.get())
+
+        s = BackgroundScheduler()
+        s._scheduler = AsyncIOScheduler(timezone=SCHEDULER_TIMEZONE)
+        s._add_job(job_id="probe", name="probe", description="probe",
+                   func=probe, trigger=IntervalTrigger(hours=6))
+        job = s._scheduler.get_job("probe")
+
+        s._requested_runs.add("probe")   # what run_job_now records
+        asyncio.run(job.func())
+        asyncio.run(job.func())          # the next scheduled run
+        assert seen == [True, False]
+
+    def test_run_job_now_records_the_request(self):
+        import inspect
+        from core.scheduler import BackgroundScheduler
+
+        src = inspect.getsource(BackgroundScheduler.run_job_now)
+        assert "_requested_runs.add(job_id)" in src

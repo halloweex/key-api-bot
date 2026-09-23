@@ -212,6 +212,10 @@ class BackgroundScheduler:
         self._scheduler: Optional[AsyncIOScheduler] = None
         self._job_history: Dict[str, List[JobExecution]] = {}
         self._job_info: Dict[str, JobInfo] = {}
+        # Jobs whose next run was asked for by a human (`run_job_now`). The
+        # cadence wrapper consumes the mark on that run and tells the alert
+        # Gate, so the verdict the button promised is not held by a cooldown.
+        self._requested_runs: set = set()
         self._max_history = 50  # Keep last N executions per job
         self._started = False
         # Protects _job_info and _job_history: APScheduler event listeners
@@ -830,7 +834,7 @@ class BackgroundScheduler:
         logger.info(f"Registered {len(self._job_info)} background jobs")
 
     @staticmethod
-    def _trigger_cadence_s(trigger) -> Optional[float]:
+    def _trigger_cadence_s(trigger, now: Optional[datetime] = None) -> Optional[float]:
         """The longest normal gap between two firings of `trigger`, in seconds.
 
         What the alert Gate needs to know to tell a new incident from the next
@@ -848,7 +852,8 @@ class BackgroundScheduler:
         if not isinstance(trigger, CronTrigger):
             return None
         try:
-            t = trigger.get_next_fire_time(None, datetime.now(SCHEDULER_TIMEZONE))
+            t = trigger.get_next_fire_time(
+                None, now or datetime.now(SCHEDULER_TIMEZONE))
             gaps = []
             for _ in range(12):
                 if t is None:
@@ -856,7 +861,10 @@ class BackgroundScheduler:
                 nxt = trigger.get_next_fire_time(t, t + timedelta(microseconds=1))
                 if nxt is None:
                     break
-                gaps.append((nxt - t).total_seconds())
+                # Elapsed seconds, not a wall-clock difference: two aware
+                # datetimes in the same ZoneInfo subtract as wall time, so the
+                # night the clocks go back reads 6h for a gap that is 7h.
+                gaps.append(nxt.timestamp() - t.timestamp())
                 t = nxt
             return max(gaps) if gaps else None
         except Exception:  # noqa: BLE001 — a cadence is advice; the job must register
@@ -906,12 +914,16 @@ class BackgroundScheduler:
 
         @functools.wraps(func)
         async def _at_cadence(*args, **kwargs):
-            from core.alerting import ALERT_CADENCE_S
+            from core.alerting import ALERT_CADENCE_S, ALERT_REQUESTED
 
+            requested = job_id in self._requested_runs
+            self._requested_runs.discard(job_id)
             token = ALERT_CADENCE_S.set(cadence_s)
+            req_token = ALERT_REQUESTED.set(requested)
             try:
                 return await func(*args, **kwargs)
             finally:
+                ALERT_REQUESTED.reset(req_token)
                 ALERT_CADENCE_S.reset(token)
 
         self._scheduler.add_job(
@@ -4009,6 +4021,7 @@ class BackgroundScheduler:
 
         # Run the job immediately
         logger.info(f"Manually triggering job: {job_id}")
+        self._requested_runs.add(job_id)
         job.modify(next_run_time=datetime.now(SCHEDULER_TIMEZONE))
 
         return {"status": "triggered", "job_id": job_id}

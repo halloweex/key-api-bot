@@ -443,10 +443,16 @@ class TestSchedulerJob:
         try:
             # Pretend we alerted 1 minute ago
             # A delivery 60s ago, recorded where the policy now lives: the Gate.
+            # Both halves of what `raise_alert` records on a delivery: the
+            # bucket's cooldown and the condition's delivered-notice. Seeding
+            # only the first describes a condition that has since been
+            # announced resolved — and a resolved condition coming back is
+            # news, which is the Gate working, not a throttle failing.
             from core.alerting import _gate
             for bucket in ("disk:WARN", "disk:CRITICAL"):
-                _gate.decide(bucket, has_condition=True)
+                _gate.decide(bucket, has_condition=True, conditions=[bucket])
                 _gate.record_delivery(bucket)
+                _gate.note_delivered_conditions([bucket], "disk")
 
             scheduler = BackgroundScheduler()
             with patch(

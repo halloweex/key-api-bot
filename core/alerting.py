@@ -388,6 +388,14 @@ ALERT_CADENCE_S: "_ContextVar[float | None]" = _ContextVar(
     "alert_cadence_s", default=None,
 )
 
+# True while a job runs because a human asked for it — the "🔄 Перепроверить
+# сейчас" button or POST /api/jobs/{id}/trigger — rather than on its schedule.
+# That button promises "результат придёт отдельным сообщением", and a standing
+# cooldown would otherwise swallow the one verdict it was pressed to get.
+ALERT_REQUESTED: "_ContextVar[bool]" = _ContextVar(
+    "alert_requested", default=False,
+)
+
 
 @dataclass
 class _BucketState:
@@ -397,6 +405,12 @@ class _BucketState:
     # on the next raise, and a zero would read as "sent at epoch".
     last_sent: "float | None" = None
     suppressed: int = 0
+    # The fastest cadence this bucket has been raised at. A bucket's rhythm is
+    # its emitter's, not whichever job happens to be on the stack: the
+    # warehouse validator raises from the two-minute tick AND from inside the
+    # daily status refresh and the weekly full sync, and judging its quiet by
+    # a day would stretch every window it is measured by.
+    cadence_s: "float | None" = None
 
 
 def _default_state_path() -> "_Path | None":
@@ -496,6 +510,8 @@ class AlertGate:
     def decide(
         self, bucket: str, *, has_condition: bool, now: "float | None" = None,
         cadence_s: "float | None" = None,
+        conditions: "Sequence[str]" = (),
+        requested: bool = False,
     ) -> "tuple[bool, str]":
         """(should_send, context_suffix) — without committing the cooldown.
 
@@ -505,22 +521,42 @@ class AlertGate:
         received.
         """
         now = _time.time() if now is None else now
-        cadence = float(cadence_s) if cadence_s else 0.0
         st = self._state.get(bucket)
-        # Quiet long enough that this is a new incident, not a repeat — where
-        # "quiet" is measured against the emitter's own rhythm. An emitter
-        # raises on every pass the condition still holds, so a gap longer than
-        # one of its periods means at least one pass saw the condition clear.
-        # That is what keeps a return after a "✅ Resolved" loud: it is at
-        # least two periods after the last raise, never within one.
+
+        # A condition announced cleared and raised again is news, however
+        # soon. The emitter that sent "✅ Resolved" took the key out of
+        # `_delivered`; seeing it on a raise of a bucket that has already been
+        # delivered means it cleared and came back. Timing cannot know this: a
+        # clean pass off the schedule — the recheck button, a manual trigger,
+        # a catch-up — resolves between two slots, and the next slot is well
+        # inside any quiet window. Measured before this line existed: resolved
+        # at 02:00, back at 07:00, suppressed until 01:00 the next day.
+        # Conditions only: events never enter `_delivered`, by kind.
+        if st is not None and st.last_sent is not None and any(
+            is_condition(k) and k not in self._delivered for k in conditions
+        ):
+            st = None
+
+        # The fallback, for what no emitter has said: quiet longer than one
+        # period of the bucket's own rhythm means no pass has raised it since
+        # — an emitter that died, or one that never resolves. The hour stands
+        # alone for callers with no rhythm (a webhook, a startup path).
+        cadence = float(cadence_s) if cadence_s else 0.0
+        if cadence and st is not None and st.cadence_s:
+            cadence = min(cadence, st.cadence_s)
         if st is not None and (now - st.last_attempt) > self.INCIDENT_RESET_S + cadence:
             st = None
         if st is None:
-            self._state[bucket] = _BucketState(first_seen=now, last_attempt=now)
+            self._state[bucket] = _BucketState(
+                first_seen=now, last_attempt=now,
+                cadence_s=float(cadence_s) if cadence_s else None,
+            )
             self._dirty = True
             self._save(now)
             return True, ""
 
+        if cadence_s and (st.cadence_s is None or cadence_s < st.cadence_s):
+            st.cadence_s = float(cadence_s)
         st.last_attempt = now
         self._dirty = True
         self._save(now)
@@ -537,11 +573,18 @@ class AlertGate:
         # already more than a day after the last, so each one reminds.)
         if standing and cadence:
             cooldown = max(0.0, cooldown - cadence / 2)
+        # A human asked for this run: the verdict goes out whatever the
+        # cooldown says. It stays the same incident — the suffix is non-empty
+        # below — so a recheck never re-summons the diagnostic agent.
+        if requested:
+            cooldown = 0.0
         if st.last_sent is not None and (now - st.last_sent) < cooldown:
             st.suppressed += 1
             return False, ""
 
         parts = []
+        if requested:
+            parts.append("recheck on request")
         if standing:
             parts.append(f"standing {int(age // 3600)}h")
         if st.suppressed:
@@ -712,6 +755,8 @@ async def raise_alert(
         should_send, suffix = _gate.decide(
             bucket, has_condition=has_condition,
             cadence_s=ALERT_CADENCE_S.get(),
+            conditions=conditions,
+            requested=ALERT_REQUESTED.get(),
         )
         if not should_send:
             log.debug("Alert suppressed by gate (bucket=%s)", bucket)
