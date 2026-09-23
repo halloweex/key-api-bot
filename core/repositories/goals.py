@@ -116,11 +116,11 @@ _FORECAST_PREDICTED_SQL = """
 #
 # The calculators below — seasonality, YoY, weekly patterns, the growth cap and
 # the two history reads of `generate_smart_goals` — used to narrow `orders` with
-# an EXISTS over DuckDB `silver_orders`. Silver stops moving at step 13 and is
-# emptied by the next compaction, and then that EXISTS matches nothing: the
-# Monday job persists empty seasonality, and `calculate_yoy_growth` persisted
-# its 0.10 fallback over the measured value, which the hourly replace then
-# carried into Postgres.
+# an EXISTS over DuckDB `silver_orders`. Silver stops moving at step 13, so
+# from then on that EXISTS drops every newer order and seasonality and YoY skew
+# a little further each week; the next compaction empties it, the EXISTS
+# matches nothing, and `calculate_yoy_growth` persisted its 0.10 fallback over
+# the measured value — which the hourly replace then carried into Postgres.
 #
 # So the answer Silver would have stored is computed here instead, from the one
 # definition — `silver_sales_type_case` — rendered over `orders o`. It selects

@@ -2,10 +2,10 @@
 
 Seasonality, YoY, weekly patterns, the growth cap and the two history reads of
 `generate_smart_goals` narrowed `orders` through an EXISTS over DuckDB
-`silver_orders`. Silver stops moving at step 13 and the next compaction empties
-it; from then on that EXISTS matched nothing, the Monday job persisted empty
-tables, and `calculate_yoy_growth` wrote its 0.10 placeholder over the measured
-rate — which the hourly full replace carried into Postgres.
+`silver_orders`. Silver stops moving at step 13, after which that EXISTS drops
+every newer order; the next compaction empties it, the EXISTS matches nothing,
+and `calculate_yoy_growth` wrote its 0.10 placeholder over the measured rate —
+which the hourly full replace carried into Postgres.
 
 The replacement renders the one definition, `silver_sales_type_case`, over
 `orders o`. Four things are proved here:
