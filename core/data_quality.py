@@ -1785,14 +1785,23 @@ def _persist_run_rows(
     return run_id
 
 
+# `severity` is text, so `ORDER BY severity DESC` ranked WARN, INFO, CRITICAL:
+# the worst finding came last in the digest and was the first to fall past a
+# LIMIT or into "…+N more". Ranked explicitly, as `evidence_for_agent` does.
+_WORST_FIRST = (
+    "CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 "
+    "WHEN 'INFO' THEN 2 ELSE 3 END"
+)
+
+
 def fetch_run_diffs(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]:
     """Read all discrepancies for a run. For health/UI surface and digest."""
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT month, source_id, diff_class, field,
                dk_value, kc_value, severity, order_ids
         FROM data_quality_diffs
         WHERE run_id = ?
-        ORDER BY severity DESC, month, source_id
+        ORDER BY {_WORST_FIRST}, month, source_id
         LIMIT ?
     """, [run_id, limit]).fetchall()
     out: List[Dict[str, Any]] = []
@@ -1808,11 +1817,11 @@ def fetch_run_diffs(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]
 
 
 def fetch_run_issues(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-    rows = conn.execute("""
+    rows = conn.execute(f"""
         SELECT check_name, table_name, severity, count, sample_ids, description
         FROM data_quality_issues
         WHERE run_id = ?
-        ORDER BY severity DESC, check_name
+        ORDER BY {_WORST_FIRST}, check_name
         LIMIT ?
     """, [run_id, limit]).fetchall()
     out: List[Dict[str, Any]] = []
