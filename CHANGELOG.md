@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.237
+
+- DN-21: stop dating the page to a merge that has not happened
+- DN-21 soak: pin four rules of the history check that no test held
+- DN-21: say what the opt-in rested on, and what reconciliation_pg rides on
+- DN-21 soak: the history check measures the silence the canary pages on
+- DN-21: the canary pages when reconciliation_pg goes quiet
+
+
 ## 3.0.236
 
 - A resolve ends the incident; review found the timing rule could not
