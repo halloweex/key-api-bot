@@ -390,9 +390,17 @@ class FakeConn:
     def transaction(self, **options):
         self.transactions.append(options)
 
+        # The boundary goes into the statement log, so a test can say what
+        # was asked inside the transaction and not merely what came last.
         @asynccontextmanager
         async def _tx():
-            yield
+            self.statements.append("BEGIN")
+            try:
+                yield
+            except BaseException:
+                self.statements.append("ROLLBACK")
+                raise
+            self.statements.append("COMMIT")
 
         return _tx()
 
@@ -497,8 +505,10 @@ class TestNothingIsWritten:
         conn = FakeConn()
         state = await script.read_state(conn, tmp_path / "s.csv.gz")
         assert conn.transactions == [{"isolation": "repeatable_read", "readonly": True}]
-        # The transaction-id question is the last thing asked inside it.
-        assert conn.statements[-1] == script.XID_SQL
+        # The transaction-id question is the last thing asked inside it —
+        # before COMMIT, where a raise still rolls the write back. Asked after,
+        # it would find no id in a fresh transaction and bless what committed.
+        assert conn.statements[-2:] == [script.XID_SQL, "COMMIT"]
         assert script.SESSION["default_transaction_read_only"] == "on"
         assert state.snapshot is not None and state.snapshot.rows == 3
 
