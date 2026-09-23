@@ -32,9 +32,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict, List, Sequence, Tuple
+from collections import Counter
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 from core.gender import RULES_VERSION, classify
+from core.sql_dialect import DUCKDB, POSTGRES
 
 logger = logging.getLogger(__name__)
 
@@ -143,3 +145,112 @@ async def derive_gender(store, *, rebuild_all: bool = False) -> Dict[str, Any]:
     finally:
         out["ms"] = int((time.monotonic() - started) * 1000)
     return out
+
+
+# ── previewing what the current rules would change ───────────────────────────
+#
+# The write path above needs DuckDB, and in production the web container holds
+# that file exclusively: a second process cannot open it even read-only, which
+# is why `scripts/backfill_gender.py` died there with an IOException for its
+# first eleven days. The preview needs nothing but the names and the stored
+# verdicts, and Postgres holds an exact copy of both — measured 2026-09-23,
+# 20 533 buyers equal in every column, `decided_at` included — so it reads
+# there, inside a read-only transaction, and runs beside a live web.
+#
+# One body, two engines (charter rule 1): the table names are the only thing
+# the two renderings differ in, and they come from the same `Dialect` fields the
+# SMS audience uses.
+
+_STORED = """
+    SELECT b.id, b.full_name, g.gender, g.rules_version, g.override_by_human
+    FROM {buyers} b
+    LEFT JOIN {buyer_gender} g ON g.buyer_id = b.id
+"""
+
+
+def stored_sql(buyers: str, buyer_gender: str) -> str:
+    """Every buyer beside its stored verdict, if any, for one engine."""
+    return _STORED.format(buyers=buyers, buyer_gender=buyer_gender)
+
+
+def _label(gender) -> str:
+    return "NULL" if gender is None else gender
+
+
+def summarise(rows: Iterable[tuple]) -> Dict[str, Any]:
+    """What the hourly tick would write, and what the current rules would change.
+
+    `rows` are `(buyer_id, full_name, gender, rules_version, override_by_human)`
+    with the verdict columns NULL where no verdict is stored. Pure, and counts
+    only: nothing it returns names a customer, so the result can be printed.
+
+    * `tick_would_write` — rows with no verdict or one from an older
+      RULES_VERSION: exactly what `pending` selects, so what the next hourly
+      tick will rewrite without anyone asking.
+    * `rules_would_change` — stored verdicts the CURRENT code decides
+      differently, as `from→to` transitions. This is the number to read before
+      bumping RULES_VERSION: it is what the bump will rewrite.
+    * Human overrides are never counted as changes — nothing rewrites them —
+      but `overrides_disagree` says how many the rules would have decided
+      otherwise, because that is the classifier's measured error on the only
+      rows a person has checked.
+    * `after_rederive` is the gender split a full re-derivation would leave.
+    """
+    rows = list(rows)
+    missing = stale = overrides = overrides_disagree = 0
+    changes: Counter = Counter()
+    after: Counter = Counter()
+    for _buyer_id, name, gender, version, override in rows:
+        verdict = classify(name).gender
+        if version is None:
+            missing += 1
+            after[_label(verdict)] += 1
+            continue
+        if override:
+            overrides += 1
+            after[_label(gender)] += 1
+            if verdict != gender:
+                overrides_disagree += 1
+            continue
+        if version < RULES_VERSION:
+            stale += 1
+        after[_label(verdict)] += 1
+        if verdict != gender:
+            changes[f"{_label(gender)}→{_label(verdict)}"] += 1
+    return {
+        "rules_version": RULES_VERSION,
+        "buyers": len(rows),
+        "stored": len(rows) - missing,
+        "overrides": overrides,
+        "missing": missing,
+        "stale": stale,
+        "tick_would_write": missing + stale,
+        "rules_would_change": sum(changes.values()),
+        "changes": dict(sorted(changes.items())),
+        "overrides_disagree": overrides_disagree,
+        "after_rederive": {k: after.get(k, 0) for k in ("f", "m", "NULL")},
+    }
+
+
+async def read_stored_duckdb(store) -> List[tuple]:
+    """The preview's rows from DuckDB — a laptop copy, or a stopped web."""
+    async with store.connection() as conn:
+        sql = stored_sql(DUCKDB.buyers, DUCKDB.buyer_gender)
+        return [tuple(r) for r in conn.execute(sql).fetchall()]
+
+
+async def read_stored_postgres(
+    conn, *, buyers: str = POSTGRES.buyers,
+    buyer_gender: str = POSTGRES.buyer_gender,
+) -> List[tuple]:
+    """The preview's rows from Postgres, in one read-only snapshot.
+
+    `readonly=True` is the guarantee, not a courtesy: in production the only
+    DSN at hand is the web container's, which is a writer, and a preview that
+    could write would inherit that — the lesson of the benchmark that once ran
+    a TRUNCATE there against the live roster. The snapshot keeps buyers and
+    verdicts consistent with each other while the hourly tick rewrites them.
+    """
+    async with conn.transaction(isolation="repeatable_read", readonly=True):
+        rows = await conn.fetch(stored_sql(buyers, buyer_gender))
+    return [tuple(r) for r in rows]
