@@ -1244,7 +1244,7 @@ Cap what rebounds; only delete what stays deleted.
   run per layer, keyed on `error_message IS NULL` — a failed run writes a row
   too, so row-existence alone reads green. `bot/canary.py` judges it from the
   *other* container every 15 min: 30 h for reconciliation, 12 h for integrity,
-  30 h for mirror_landing, and since DN-21 (2026-09-18) 30 h for
+  30 h for mirror_landing, and since DN-21 30 h for
   reconciliation_pg — the Postgres half of the 05:30 job, and the comparison
   against KeyCRM meant to outlive DuckDB. It does not yet: the job runs it
   only once the DuckDB extraction has succeeded, and journals it in DuckDB,
