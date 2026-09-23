@@ -256,7 +256,8 @@ class TestTheRowValuesSql:
         assert args == [20, 80, DROPPED_MARK_MARGIN, LAYER]
 
     def test_the_snapshot_runs_without_jit(self):
-        """~950 ms of a 1.2 s read was JIT compilation, all of it under
+        """JIT compilation never paid for itself on the recompute, and past
+        jit_optimize_above_cost it was ~1.4 s of a ~1.7 s read, all of it under
         PG_LAYER_LOCK. Parsed out of `read_facts`: the SET must be a statement
         the snapshot executes."""
         tree = ast.parse(textwrap.dedent(inspect.getsource(twins.read_facts)))

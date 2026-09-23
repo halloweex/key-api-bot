@@ -524,12 +524,15 @@ async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
             async with pool.acquire(timeout=HOLD_BUDGET_S) as conn:
                 async with conn.transaction(isolation="repeatable_read", readonly=True):
                     await conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
-                    # No JIT. The row-values recompute is costed past the JIT
-                    # thresholds, and compiling it cost more than running it:
-                    # 1.2 s against 0.22 s over 48,000 orders, 1.4 s against
-                    # 0.48 s over 96,000 (postgres:17.2-alpine, measured for
-                    # DN-13) — time spent holding PG_LAYER_LOCK, to speed up a
-                    # query that runs four times a day.
+                    # No JIT. The row-values recompute is costed past
+                    # jit_above_cost, and compiling it never paid for itself
+                    # (postgres:17.2-alpine, a fresh backend per run, measured
+                    # for DN-13): +0.12 s on a 0.21 s query over 48,000 orders
+                    # (cost ~147k), +0.10 s on 0.52 s over 96,000 (~447k). Past
+                    # jit_optimize/inline_above_cost (500k, which 96,000 orders
+                    # all but reach) it is +1.4 s and +0.9 s on the same two.
+                    # Time spent holding PG_LAYER_LOCK, to speed up a query that
+                    # runs four times a day.
                     await conn.execute("SET LOCAL jit = off")
                     w = await conn.fetchrow(_WATERMARK_SQL, grace)
                     watermark = Watermark(
