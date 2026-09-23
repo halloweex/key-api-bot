@@ -117,8 +117,17 @@ $(cat "$task")"
     rc=$?
 
     if [ $rc -ne 0 ] || [ -z "$report" ]; then
-        log "task $base: agent failed rc=$rc"
-        notify "🔎 Агент-диагност не справился с $bucket (rc=$rc) — смотри $SPOOL/agent.log" "agent:failed"
+        # `claude -p` prints its own refusals on stdout, not stderr — "Credit
+        # balance is too low" among them — so the reason was in `$report` and
+        # this branch threw it away. From 2026-09-22 04:01 five failures in a
+        # row each said "смотри agent.log", and the log held nothing but
+        # "agent failed rc=1". The first line says why, in both places.
+        # Cut by characters, not bytes: `cut -c` is byte-based in GNU
+        # coreutils, and half a Cyrillic letter is invalid UTF-8 that Telegram
+        # rejects — losing the very notice this line exists to send.
+        why="$(printf '%s' "$report" | python3 -c 'import sys; l=[x for x in sys.stdin.read().splitlines() if x.strip()]; print((l[0] if l else "")[:200])')"
+        log "task $base: agent failed rc=$rc: ${why:-no output}"
+        notify "🔎 Агент-диагност не справился с $bucket (rc=$rc: ${why:-нет вывода}) — смотри $SPOOL/agent.log" "agent:failed"
         mv "$task" "$SPOOL/done/$base.failed"
         return 0
     fi

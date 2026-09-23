@@ -233,3 +233,268 @@ class TestPreThrottledChannel:
             await bot_main.send_admin_message("same", pre_throttled=True)
             await bot_main.send_admin_message("same", pre_throttled=True)
         assert http.await_count == 2
+
+
+class TestTheEmitterSetsTheRhythm:
+    """"An hour of quiet = a new incident" holds only for emitters that run
+    more often than hourly. The disk watchdog and the integrity layer run every
+    six hours, the reconciliation layers daily, so between two of their passes
+    there is always more than an hour of quiet — and every pass of theirs was a
+    new incident: loud, and a fresh summons for the diagnostic agent.
+
+    Measured 2026-09-23: fourteen disk deliveries, fourteen agent runs, standing
+    WARNs every 6.0 h, and the agent's API credit spent to nothing on 09-22.
+    """
+
+    SIX_H = 6 * 3600.0
+    DAY = 86400.0
+
+    @staticmethod
+    def replay(gate, times, cadence_s, bucket="disk:WARN"):
+        """Raise at each time; deliver whatever the Gate admits."""
+        sent = []
+        for t in times:
+            ok, suffix = gate.decide(bucket, has_condition=True, now=t,
+                                     cadence_s=cadence_s)
+            if ok:
+                sent.append((t, suffix))
+                gate.record_delivery(bucket, now=t)
+        return sent
+
+    def test_a_six_hour_emitter_reminds_once_a_day_not_every_pass(self):
+        """The 2026-09-18..23 WARN, replayed: one raise every six hours for
+        five days. One loud first message, then one reminder a day."""
+        times = [i * self.SIX_H for i in range(21)]  # 0h .. 120h
+        sent = self.replay(AlertGate(), times, self.SIX_H)
+
+        assert [t / 3600 for t, _ in sent] == [0, 24, 48, 72, 96, 120]
+        # Exactly one fresh incident — the only raise that summons the agent.
+        assert [sfx for _, sfx in sent].count("") == 1
+        assert all("standing" in sfx for _, sfx in sent[1:])
+
+    def test_without_a_cadence_the_old_rule_still_applies(self):
+        """What every slow emitter got until now, pinned so the difference is
+        visible: every six-hour pass a new incident, every one loud. Callers
+        outside the scheduler — a webhook, a startup path — still get this,
+        which is right for them: they have no rhythm to measure quiet by."""
+        times = [i * self.SIX_H for i in range(5)]
+        sent = self.replay(AlertGate(), times, None)
+
+        assert len(sent) == 5
+        assert all(sfx == "" for _, sfx in sent)
+
+    def test_a_return_after_a_clear_is_loud_again(self):
+        """The case the reset cannot be allowed to swallow. The condition
+        holds for two passes, one pass finds it clear (the emitter resolves
+        it and a "✅ Resolved" goes out), and the next pass finds it back. The
+        reader was just told it cleared; silence now would be a lie.
+
+        This is why the reset is one period, not two: the earliest a
+        condition can come back after being seen clear is two periods after
+        its last raise, and one period plus the hour keeps that loud."""
+        g = AlertGate()
+        self.replay(g, [0.0, self.SIX_H], self.SIX_H)
+        # 12h: a pass that saw the condition clear raises nothing.
+        ok, suffix = g.decide("disk:WARN", has_condition=True,
+                              now=3 * self.SIX_H, cadence_s=self.SIX_H)
+        assert ok and suffix == ""
+
+    def test_cron_jitter_does_not_push_the_reminder_a_period_late(self):
+        """The first delivery lands a second after its slot and the pass a
+        day later lands exactly on it, so the gap is 24h minus a second.
+        Without slack that reminder waits for the next pass: 30h for this
+        emitter, 48h for a daily one, depending on which side of the second
+        the scheduler woke."""
+        g = AlertGate()
+        g.decide("disk:WARN", has_condition=True, now=1.0, cadence_s=self.SIX_H)
+        g.record_delivery("disk:WARN", now=1.0)
+        for i in (1, 2, 3):
+            assert g.decide("disk:WARN", has_condition=True, now=i * self.SIX_H,
+                            cadence_s=self.SIX_H)[0] is False
+        ok, suffix = g.decide("disk:WARN", has_condition=True, now=self.DAY,
+                              cadence_s=self.SIX_H)
+        assert ok and "standing 23h" in suffix
+
+    def test_a_daily_emitter_reminds_daily_and_summons_the_agent_once(self):
+        times = [i * self.DAY for i in range(5)]
+        sent = self.replay(AlertGate(), times, self.DAY,
+                           bucket="dq:reconciliation:CRITICAL:x")
+
+        assert len(sent) == 5
+        assert [sfx for _, sfx in sent].count("") == 1
+        assert all("standing" in sfx for _, sfx in sent[1:])
+
+    def test_a_fast_emitter_is_unchanged(self):
+        """The validator's two-minute rhythm, replayed exactly as the original
+        daily-reminder test does. A cadence this short moves the reset by two
+        minutes and the reminder by one — nothing a reader could notice."""
+        sent = self.replay(AlertGate(), [float(t) for t in range(0, 25 * 3600, 120)],
+                           120.0, bucket="b")
+        assert [t for t, _ in sent if t < 3600] == [0, 1800]
+        assert len([t for t, _ in sent if t >= 3600]) == 1
+
+
+class TestRaiseAlertHearsTheRhythm:
+    def teardown_method(self):
+        reset_gate()
+
+    @pytest.mark.asyncio
+    async def test_the_cadence_in_context_reaches_the_gate(self):
+        from core.alerting import ALERT_CADENCE_S, _gate
+
+        token = ALERT_CADENCE_S.set(21600.0)
+        try:
+            with patch.object(_gate, "decide",
+                              wraps=_gate.decide) as decide, \
+                 patch("bot.main.send_admin_message",
+                       new=AsyncMock(return_value=1)):
+                await raise_alert("x", conditions=["disk:WARN"],
+                                  bucket="disk:WARN")
+        finally:
+            ALERT_CADENCE_S.reset(token)
+        assert decide.call_args.kwargs["cadence_s"] == 21600.0
+
+    @pytest.mark.asyncio
+    async def test_outside_a_job_there_is_no_cadence(self):
+        from core.alerting import _gate
+
+        with patch.object(_gate, "decide", wraps=_gate.decide) as decide, \
+             patch("bot.main.send_admin_message",
+                   new=AsyncMock(return_value=1)):
+            await raise_alert("x", conditions=["disk:WARN"], bucket="disk:WARN")
+        assert decide.call_args.kwargs["cadence_s"] is None
+
+
+class TestAResolveEndsTheIncident:
+    """Timing alone cannot tell a standing condition from one that cleared
+    and came back: a clean pass off the schedule — the recheck button, a
+    manual trigger, a catch-up — resolves between two slots, and the next slot
+    lands well inside any quiet window. Found by review, reproduced before the
+    fix: resolved at 02:00, back at 07:00, silent until 01:00 the next day.
+    """
+
+    H = 3600.0
+
+    @staticmethod
+    def raise_(g, bucket, conds, t, cadence, group="g", requested=False):
+        ok, sfx = g.decide(bucket, has_condition=True, now=t, cadence_s=cadence,
+                           conditions=conds, requested=requested)
+        if ok:
+            g.record_delivery(bucket, now=t)
+            g.note_delivered_conditions(conds, group, now=t)
+        return ok, sfx
+
+    def test_a_clean_pass_off_the_schedule_makes_the_return_news(self):
+        g = AlertGate()
+        self.raise_(g, "disk:CRITICAL", ["disk:CRITICAL"], 0.0, 6 * self.H, "disk")
+        assert g.take_resolved("disk", [], now=1 * self.H)  # "✅ Resolved"
+        ok, sfx = self.raise_(g, "disk:CRITICAL", ["disk:CRITICAL"],
+                              6 * self.H, 6 * self.H, "disk")
+        assert ok and sfx == ""
+
+    def test_a_check_that_dropped_below_critical_and_returned_is_news(self):
+        """The integrity fingerprint names every issue, WARN included, so a
+        check can leave the CRITICAL set, be announced resolved, and come back
+        under the very same bucket."""
+        g = AlertGate()
+        b = "dq:integrity:CRITICAL:fk_orphan_order_products_order_id,pg_silver_missing_rows"
+        self.raise_(g, b, ["fk_orphan_order_products_order_id", "pg_silver_missing_rows"], 0.0, 6 * self.H)
+        self.raise_(g, b, ["fk_orphan_order_products_order_id"], 6 * self.H, 6 * self.H)
+        g.take_resolved("g", ["fk_orphan_order_products_order_id"], now=6 * self.H)
+        ok, sfx = self.raise_(g, b, ["fk_orphan_order_products_order_id", "pg_silver_missing_rows"],
+                              12 * self.H, 6 * self.H)
+        assert ok and sfx == ""
+
+    def test_a_check_newly_critical_in_a_standing_bucket_is_news(self):
+        g = AlertGate()
+        b = "dq:integrity:CRITICAL:fk_orphan_order_products_order_id,freshness_orders"
+        self.raise_(g, b, ["fk_orphan_order_products_order_id"], 0.0, 6 * self.H)
+        ok, sfx = self.raise_(g, b, ["fk_orphan_order_products_order_id", "freshness_orders"], 6 * self.H, 6 * self.H)
+        assert ok and sfx == ""
+
+    def test_a_standing_condition_nobody_resolved_stays_standing(self):
+        g = AlertGate()
+        self.raise_(g, "disk:WARN", ["disk:WARN"], 0.0, 6 * self.H, "disk")
+        ok, _ = self.raise_(g, "disk:WARN", ["disk:WARN"], 6 * self.H,
+                            6 * self.H, "disk")
+        assert ok is False
+
+    def test_events_are_untouched_by_the_resolved_check(self):
+        """Events never enter `_delivered`, by kind. Reading their absence as
+        "resolved" would make every repeat of an event a new incident."""
+        g = AlertGate()
+        ev = "warehouse:backup_failed"
+        ok, _ = g.decide(ev, has_condition=False, now=0.0, conditions=[ev])
+        g.record_delivery(ev, now=0.0)
+        g.note_delivered_conditions([ev], "warehouse", now=0.0)
+        ok, _ = g.decide(ev, has_condition=False, now=600.0, conditions=[ev])
+        assert ok is False  # still inside the 30-minute base cooldown
+
+
+class TestARequestedRecheckDeliversItsVerdict:
+    """The button promises "результат придёт отдельным сообщением". A recheck
+    that still fails, inside a standing cooldown, used to be held — leaving the
+    executor's green tick as the only reply, which reads as fixed."""
+
+    H = 3600.0
+
+    def test_the_verdict_goes_out_inside_the_cooldown(self):
+        g = AlertGate()
+        g.decide("b", has_condition=True, now=0.0, cadence_s=6 * self.H,
+                 conditions=["fk_orphan_order_products_order_id"])
+        g.record_delivery("b", now=0.0)
+        g.note_delivered_conditions(["fk_orphan_order_products_order_id"], "g", now=0.0)
+        ok, sfx = g.decide("b", has_condition=True, now=2 * self.H,
+                           cadence_s=6 * self.H, conditions=["fk_orphan_order_products_order_id"],
+                           requested=True)
+        assert ok
+        # Same incident: a non-empty suffix never summons the agent again.
+        assert sfx != "" and "recheck on request" in sfx
+
+    def test_an_unrequested_pass_at_the_same_moment_is_held(self):
+        g = AlertGate()
+        g.decide("b", has_condition=True, now=0.0, cadence_s=6 * self.H,
+                 conditions=["fk_orphan_order_products_order_id"])
+        g.record_delivery("b", now=0.0)
+        g.note_delivered_conditions(["fk_orphan_order_products_order_id"], "g", now=0.0)
+        ok, _ = g.decide("b", has_condition=True, now=2 * self.H,
+                         cadence_s=6 * self.H, conditions=["fk_orphan_order_products_order_id"])
+        assert ok is False
+
+
+class TestTheBucketKeepsItsOwnRhythm:
+    H = 3600.0
+
+    def test_a_fast_bucket_raised_from_a_slow_job_keeps_the_fast_window(self):
+        """The warehouse validator raises from the two-minute tick and from
+        inside the daily status refresh. Its quiet is judged by the tick."""
+        g = AlertGate()
+        g.decide("wh", has_condition=True, now=0.0, cadence_s=120.0)
+        g.record_delivery("wh", now=0.0)
+        ok, sfx = g.decide("wh", has_condition=True, now=3 * self.H,
+                           cadence_s=86400.0)
+        assert ok and sfx == ""  # 3h > 1h + 2min: new, not a 25h window
+
+    def test_the_reset_is_exactly_one_hour_past_one_period(self):
+        """Pins the hour of slack on top of the period — a mutant that drops
+        it survived review."""
+        six = 6 * self.H
+        g = AlertGate()
+        for b in ("inside", "outside"):
+            g.decide(b, has_condition=True, now=0.0, cadence_s=six)
+            g.record_delivery(b, now=0.0)
+        inside = g.decide("inside", has_condition=True,
+                          now=six + self.H - 1, cadence_s=six)
+        outside = g.decide("outside", has_condition=True,
+                           now=six + self.H + 1, cadence_s=six)
+        assert inside[0] is False
+        assert outside == (True, "")
+
+    def test_the_slack_is_for_standing_reminders_only(self):
+        """The loud-phase 30 minutes is not shortened by a cadence — another
+        mutant that survived review."""
+        g = AlertGate()
+        g.decide("b", has_condition=True, now=0.0, cadence_s=600.0)
+        g.record_delivery("b", now=0.0)
+        ok, _ = g.decide("b", has_condition=True, now=26 * 60.0, cadence_s=600.0)
+        assert ok is False

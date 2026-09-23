@@ -65,8 +65,18 @@ _ks_archive_event() {
     # host without the stack (or during a Postgres restart) skips silently.
     local key="$1" delivered="$2" text="$3"
     command -v docker >/dev/null 2>&1 || return 0
-    docker exec -i ks-postgres psql -U ks_app -d ks -q \
-        -c "INSERT INTO app.alert_events (condition_key, event_type, instance, delivered_to, message) VALUES (\$\$${key}\$\$, 'fired', \$\$$(_ks_instance)\$\$, ${delivered}, left(\$\$${text}\$\$, 4000))" \
+    # Values travel as psql variables and are quoted by psql itself (`:'x'`),
+    # never spliced into the statement. They used to sit inside `$$...$$`,
+    # and the text is whatever the caller sends — including the diagnostic
+    # agent's report, written from logs it was told to treat as untrusted. A
+    # `$$` in that text closed the quote and the rest ran as SQL, as `ks_app`,
+    # which owns every table in `app`. Variables interpolate only in SQL read
+    # from a file or stdin, not from -c, hence the pipe.
+    case "$delivered" in ''|*[!0-9]*) delivered=0 ;; esac
+    printf '%s\n' "INSERT INTO app.alert_events (condition_key, event_type, instance, delivered_to, message) VALUES (:'key', 'fired', :'inst', :delivered, left(:'text', 4000));" \
+        | docker exec -i ks-postgres psql -U ks_app -d ks -q -X \
+            -v ON_ERROR_STOP=1 -v key="$key" -v inst="$(_ks_instance)" \
+            -v delivered="$delivered" -v text="$text" \
         >/dev/null 2>&1 || true
 }
 

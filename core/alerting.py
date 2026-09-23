@@ -366,6 +366,35 @@ import os as _os
 import tempfile as _tempfile
 import time as _time
 from pathlib import Path as _Path
+from contextvars import ContextVar as _ContextVar
+
+# How often the emitter raising right now runs, in seconds, or None when it is
+# not a scheduled job (a webhook, a startup path, the bot's own ticker).
+#
+# Set by the scheduler around every job it runs, derived from that job's own
+# trigger — never passed by an emitter. The Gate needs it because "an hour of
+# quiet = a new incident" is only true of emitters that run more often than
+# hourly: the disk watchdog and the integrity layer run every six hours, the
+# reconciliation layers and model training daily, so between two of their
+# passes there is ALWAYS more than an hour of quiet. Every pass of theirs was
+# a new incident: loud, and a fresh summons for the diagnostic agent.
+#
+# Measured 2026-09-23: fourteen disk deliveries, fourteen agent runs; standing
+# WARNs arriving every 6.0 h where the charter promises one reminder a day;
+# and the agent's API credit exhausted on 2026-09-22 04:01 by exactly that
+# cadence. Derived from the trigger rather than declared at the call site so a
+# fifth slow emitter cannot be forgotten the way four were.
+ALERT_CADENCE_S: "_ContextVar[float | None]" = _ContextVar(
+    "alert_cadence_s", default=None,
+)
+
+# True while a job runs because a human asked for it — the "🔄 Перепроверить
+# сейчас" button or POST /api/jobs/{id}/trigger — rather than on its schedule.
+# That button promises "результат придёт отдельным сообщением", and a standing
+# cooldown would otherwise swallow the one verdict it was pressed to get.
+ALERT_REQUESTED: "_ContextVar[bool]" = _ContextVar(
+    "alert_requested", default=False,
+)
 
 
 @dataclass
@@ -376,6 +405,12 @@ class _BucketState:
     # on the next raise, and a zero would read as "sent at epoch".
     last_sent: "float | None" = None
     suppressed: int = 0
+    # The fastest cadence this bucket has been raised at. A bucket's rhythm is
+    # its emitter's, not whichever job happens to be on the stack: the
+    # warehouse validator raises from the two-minute tick AND from inside the
+    # daily status refresh and the weekly full sync, and judging its quiet by
+    # a day would stretch every window it is measured by.
+    cadence_s: "float | None" = None
 
 
 def _default_state_path() -> "_Path | None":
@@ -474,6 +509,9 @@ class AlertGate:
 
     def decide(
         self, bucket: str, *, has_condition: bool, now: "float | None" = None,
+        cadence_s: "float | None" = None,
+        conditions: "Sequence[str]" = (),
+        requested: bool = False,
     ) -> "tuple[bool, str]":
         """(should_send, context_suffix) — without committing the cooldown.
 
@@ -484,26 +522,69 @@ class AlertGate:
         """
         now = _time.time() if now is None else now
         st = self._state.get(bucket)
-        if st is not None and (now - st.last_attempt) > self.INCIDENT_RESET_S:
-            # Quiet long enough that this is a new incident, not a repeat.
+
+        # A condition announced cleared and raised again is news, however
+        # soon. The emitter that sent "✅ Resolved" took the key out of
+        # `_delivered`; seeing it on a raise of a bucket that has already been
+        # delivered means it cleared and came back. Timing cannot know this: a
+        # clean pass off the schedule — the recheck button, a manual trigger,
+        # a catch-up — resolves between two slots, and the next slot is well
+        # inside any quiet window. Measured before this line existed: resolved
+        # at 02:00, back at 07:00, suppressed until 01:00 the next day.
+        # Conditions only: events never enter `_delivered`, by kind.
+        if st is not None and st.last_sent is not None and any(
+            is_condition(k) and k not in self._delivered for k in conditions
+        ):
+            st = None
+
+        # The fallback, for what no emitter has said: quiet longer than one
+        # period of the bucket's own rhythm means no pass has raised it since
+        # — an emitter that died, or one that never resolves. The hour stands
+        # alone for callers with no rhythm (a webhook, a startup path).
+        cadence = float(cadence_s) if cadence_s else 0.0
+        if cadence and st is not None and st.cadence_s:
+            cadence = min(cadence, st.cadence_s)
+        if st is not None and (now - st.last_attempt) > self.INCIDENT_RESET_S + cadence:
             st = None
         if st is None:
-            self._state[bucket] = _BucketState(first_seen=now, last_attempt=now)
+            self._state[bucket] = _BucketState(
+                first_seen=now, last_attempt=now,
+                cadence_s=float(cadence_s) if cadence_s else None,
+            )
             self._dirty = True
             self._save(now)
             return True, ""
 
+        if cadence_s and (st.cadence_s is None or cadence_s < st.cadence_s):
+            st.cadence_s = float(cadence_s)
         st.last_attempt = now
         self._dirty = True
         self._save(now)
         age = now - st.first_seen
         standing = has_condition and age >= self.LOUD_PHASE_S
         cooldown = self.STANDING_COOLDOWN_S if standing else self.BASE_COOLDOWN_S
+        # "One reminder a day" from an emitter that runs every `cadence` is due
+        # at the first pass at or after 24h. Without slack, cron jitter of a
+        # second puts that pass fractionally short of the line and pushes the
+        # reminder a whole period later — 30h for the disk watchdog, 48h for a
+        # daily layer, at random. Half a period absorbs any jitter and cannot
+        # admit the pass before, which is a whole period earlier.
+        # (A weekly emitter takes the line below zero: every pass of it is
+        # already more than a day after the last, so each one reminds.)
+        if standing and cadence:
+            cooldown = max(0.0, cooldown - cadence / 2)
+        # A human asked for this run: the verdict goes out whatever the
+        # cooldown says. It stays the same incident — the suffix is non-empty
+        # below — so a recheck never re-summons the diagnostic agent.
+        if requested:
+            cooldown = 0.0
         if st.last_sent is not None and (now - st.last_sent) < cooldown:
             st.suppressed += 1
             return False, ""
 
         parts = []
+        if requested:
+            parts.append("recheck on request")
         if standing:
             parts.append(f"standing {int(age // 3600)}h")
         if st.suppressed:
@@ -671,7 +752,12 @@ async def raise_alert(
     suffix = ""
     if bucket is not None:
         has_condition = any(is_condition(k) for k in conditions)
-        should_send, suffix = _gate.decide(bucket, has_condition=has_condition)
+        should_send, suffix = _gate.decide(
+            bucket, has_condition=has_condition,
+            cadence_s=ALERT_CADENCE_S.get(),
+            conditions=conditions,
+            requested=ALERT_REQUESTED.get(),
+        )
         if not should_send:
             log.debug("Alert suppressed by gate (bucket=%s)", bucket)
             return 0
