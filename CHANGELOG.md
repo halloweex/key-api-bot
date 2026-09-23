@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.233
+
+- fix: DQ findings are read worst first
+
+
 ## 3.0.232
 
 - test: require deploy/ in the walk only where it exists
