@@ -288,8 +288,9 @@ class TestTheGraceClockIsTheLastWrite:
             self, conn, monkeypatch):
         from core import pg_landing
 
-        # Postgres stamps `now()`, which is the wall clock; the fixed NOW of
-        # the other scenarios cannot stand in for it here.
+        # Postgres stamps `now()`, which inside the fixture's transaction is
+        # the transaction's start: real time, which the fixed NOW of the other
+        # scenarios is not, so it cannot stand in for it here.
         wall = datetime.now(timezone.utc)
         await order(conn, 601, mirrored_at=wall - timedelta(days=3))
 
