@@ -718,6 +718,9 @@ async def replicate_operational(
             # holds — and its tables are stamped failing, so the watermark says so
             # rather than aging quietly. Every other table still ships (DN-01).
             stood_down, chain_errors = stood_down_tables_checked()
+            # Before the owner rows are read, the local markers and flags are all
+            # this run has, so a failure this early may stamp a table an owner row
+            # would have held down. It is never written either way.
             shipping = _tables_to_ship(stood_down)
 
             # A chain that owns its tables in Postgres while its variable says
