@@ -490,3 +490,52 @@ class TestTheShipperOverwroteDetector:
 
         issues = await reconcile_operational(store)
         assert [i for i in issues if i.check_name == "chain_shipper_overwrote"] == []
+
+
+class TestTheOrderTablesOnAnOwnerRowAlone:
+    """DN-22a against the real `meta.chain_watermarks`. An image rolled back to
+    a build older than the orders chain keeps the chain's owner row and forgets
+    the chain: no module here declares an order table, so `claimed_tables`
+    cannot expand the row, and only the row itself can say the tables moved.
+    The recorder in the unit tests hands back keys it made up; this reads the
+    ones `read_owners` actually strips out of the table."""
+
+    ORDER_ID = 990_001
+
+    @pytest.mark.asyncio
+    async def test_the_backfill_refuses_and_postgres_gains_no_order(self, stores):
+        from core.pg_backfill import backfill_orders
+        from core.pg_landing import (
+            ORDER_PRODUCTS_TABLE, ORDERS_TABLE, order_tables_stood_down_or_owned,
+        )
+        from core.write_chains import WRITE_CHAINS
+
+        store, pool, _env = stores
+        orders = {ORDERS_TABLE, ORDER_PRODUCTS_TABLE}
+        assert not [c for c in WRITE_CHAINS if orders & set(c.CHAIN_TABLES)]
+
+        when = "2026-09-20T12:00:00+00:00"
+        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
+            await store.upsert_orders([{
+                "id": self.ORDER_ID, "source_id": 1, "status_id": 12,
+                "status_group_id": 4, "grand_total": "100.00",
+                "ordered_at": when, "created_at": when, "updated_at": when,
+                "buyer": {"id": 5001}, "manager": {"id": 4},
+                "manager_comment": None, "promocode": None,
+                "products": [{"name": "Товар", "quantity": 1, "price_sold": "100.00",
+                              "offer": {"product_id": 701}}],
+            }])
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                "VALUES ($1, $2, now())", chain_latch.owner_key(ORDERS_TABLE), when)
+            versions = await conn.fetchval("SELECT count(*) FROM app.order_versions")
+
+        assert await order_tables_stood_down_or_owned(pool) == frozenset(orders)
+        with pytest.raises(RuntimeError, match="write chain"):
+            await backfill_orders(store)
+
+        async with pool.acquire() as conn:
+            assert await conn.fetchval(
+                "SELECT count(*) FROM bronze.orders WHERE id = $1", self.ORDER_ID) == 0
+            assert await conn.fetchval("SELECT count(*) FROM app.order_versions") == versions
