@@ -1394,48 +1394,70 @@ def _orders_stood_down(
     specs: Sequence[BucketedTable], moved: FrozenSet[str],
     *, owner_rows_only: bool = False,
 ) -> Tuple[List[IntegrityIssue], Tuple[BucketedTable, ...]]:
-    """The INFO findings for the order tables a write chain holds, and the
-    specs left to compare. Nothing and every spec when `moved` is empty.
+    """The findings for the order tables a write chain holds, and the specs
+    left to compare. Nothing and every spec when `moved` is empty.
 
     One function for both of `reconcile_orders`' questions — the local answer
-    and the owner rows — so a stand-down found either way has one check name.
-    What it says differs, because what is true differs. On the local answer
-    the sync's mirror has stopped too. On the owner rows alone
-    (`owner_rows_only`) it has not: the per-tick mirror in `upsert_orders`
-    asks only the local answer, which is empty, so it is still shipping
-    DuckDB's copy over the chain's rows — and a finding that said otherwise
-    would tell the one reader who could act that there is nothing to do."""
+    and the owner rows — because both stand the same two tables down. What
+    they file differs, because what is true differs.
+
+    **On the local answer, `mirror_stood_down` (INFO).** The marker or the
+    flag routes the order writes to the chain, and the sync's mirror asks
+    that same answer, so it has stopped too: a decision somebody took, with
+    nothing left writing DuckDB's copy over the chain's rows.
+
+    **On the owner rows alone (`owner_rows_only`),
+    `order_owner_row_without_marker` (CRITICAL).** The per-tick mirror in
+    `upsert_orders` asks only the local answer, which is empty, so it is
+    still shipping DuckDB's copy over the chain's rows and archiving every
+    overwrite in `app.order_versions` — damage done once a minute, not a
+    decision. It was the same INFO once, and every surface a human reads
+    prints the check's name, its label and its lever, never the
+    description: all three said "not a defect" about the one state here that
+    is. One finding, not one per table: it is one fact, and the page would
+    otherwise print the same line twice."""
     from core import pg_landing
 
     specs = tuple(specs)
     if not moved:
         return [], specs
     order_tables = {pg_landing.ORDERS_TABLE, pg_landing.ORDER_PRODUCTS_TABLE}
+    not_compared = [s.pg_table for s in specs if s.pg_table in order_tables]
+    left = tuple(s for s in specs if s.pg_table not in order_tables)
+    if not not_compared:
+        return [], left
     tables = ", ".join(sorted(moved))
     if owner_rows_only:
-        description = _owner_rows_only_description(tables, order_tables)
-    else:
-        description = (
-            f"Not compared: {tables} is written by a write chain, so the "
-            "orders mirror no longer ships DuckDB's copy of either order "
-            "table — ownership of the order tables passes as a unit. A "
-            "difference here would be the chain's own writes, not a loss."
-        )
+        issues = [IntegrityIssue(
+            check_name="order_owner_row_without_marker",
+            table_name=", ".join(sorted(not_compared)),
+            severity=Severity.CRITICAL,
+            count=len(not_compared),
+            description=_owner_rows_only_description(tables, order_tables),
+        )]
+        return issues, left
+    description = (
+        f"Not compared: {tables} is written by a write chain, so the "
+        "orders mirror no longer ships DuckDB's copy of either order "
+        "table — ownership of the order tables passes as a unit. A "
+        "difference here would be the chain's own writes, not a loss."
+    )
     issues = [
         IntegrityIssue(
             check_name="mirror_stood_down",
-            table_name=spec.pg_table,
+            table_name=table,
             severity=Severity.INFO,
             count=1,
             description=description,
         )
-        for spec in specs if spec.pg_table in order_tables
+        for table in not_compared
     ]
-    return issues, tuple(s for s in specs if s.pg_table not in order_tables)
+    return issues, left
 
 
 def _owner_rows_only_description(tables: str, order_tables: set) -> str:
-    """The stand-down that only the owner rows in Postgres could see.
+    """What `order_owner_row_without_marker` says: the ownership that only the
+    owner rows in Postgres could see.
 
     Two roads lead here and they take different levers. A chain this build
     declares, flagged `duckdb`, with no marker: the marker was lost, and
@@ -1457,12 +1479,12 @@ def _owner_rows_only_description(tables: str, order_tables: set) -> str:
             "from one"
         )
     return (
-        f"Not compared: an owner row in Postgres says a write chain owns "
-        f"{tables}, but this process's own answer says "
-        f"DuckDB still writes them: {why}. Until "
+        f"An owner row in Postgres says a write chain owns {tables}, but this "
+        f"process's own answer says DuckDB still writes them: {why}. Until "
         "then every sync tick writes DuckDB's copy over the chain's rows and "
-        "archives each overwrite in app.order_versions; the ids-diff, the "
-        "comment ship and this comparison stand down on the owner row."
+        "archives each overwrite in app.order_versions. Not compared: the "
+        "ids-diff, the comment ship and this comparison stand down on the "
+        "owner row, and only the sync's mirror does not."
     )
 
 
@@ -1494,10 +1516,11 @@ async def reconcile_orders(
     # shipping DuckDB's copy, so every order the chain writes would read as
     # lost from DuckDB and every one DuckDB receives as missing from Postgres
     # — findings the check itself created, `reconcile_operational`'s reason.
-    # Said at INFO rather than left as silence, because unlike that function's
-    # tables these have no standing watch of their own yet, and a comparison
-    # that stopped without a word reads the same as one that passed. Asked
-    # before any read, so a stood-down run costs neither store anything.
+    # On this, the local answer, it is said at INFO rather than left as
+    # silence, because unlike that function's tables these have no standing
+    # watch of their own yet, and a comparison that stopped without a word
+    # reads the same as one that passed. Asked before any read, so a
+    # stood-down run costs neither store anything.
     issues, specs = _orders_stood_down(
         specs, pg_landing.order_tables_stood_down())
     if not specs:
@@ -1513,10 +1536,11 @@ async def reconcile_orders(
     # watermarks and the fingerprints, so this run too reads no order table.
     # Here it is normally the owner rows alone that stand a table down — had
     # the local answer named one, the first call would already have taken both
-    # order tables out of `specs` — and then the finding says the sync mirror
-    # is still shipping, because on the local answer alone it is. Asked again
-    # rather than assumed, so a chain that latched between the two questions
-    # is not reported as a lost marker.
+    # order tables out of `specs` — and then it is not a stand-down at all but
+    # `order_owner_row_without_marker`, CRITICAL: the sync's mirror asks the
+    # local answer alone, so it is still shipping over the chain's rows. Asked
+    # again rather than assumed, so a chain that latched between the two
+    # questions is not paged as a lost marker.
     moved = await pg_landing.order_tables_stood_down_or_owned(pool)
     found, specs = _orders_stood_down(
         specs, moved, owner_rows_only=not pg_landing.order_tables_stood_down())

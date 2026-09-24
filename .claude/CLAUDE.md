@@ -2551,12 +2551,18 @@ An owner row naming an order table counts even when no chain in this build
 declares it: after an image rollback to a build older than the orders chain,
 `claimed_tables` alone would drop `owner:bronze.orders` and hand the tables
 back to DuckDB, so the helper reads the row as itself too, and either order
-table owned stands both down. The comparison's `mirror_stood_down` text says
-which answer it was, because the two are not the same state: on the local
-answer the sync's mirror has stopped too; on the owner rows alone it has not,
-so the finding says the marker is missing and the sync mirror is still
-shipping, and names `data/write-chain-owners` and `scripts/chain_copy_back.py`
-(or, with no chain declared in this build, a redeploy of one that does).
+table owned stands both down. The comparison files a different check for
+each answer, because the two are not the same state. On the local answer the
+sync's mirror has stopped too, and `mirror_stood_down` stays INFO — a decision
+somebody took. On the owner rows alone it has not — the per-tick mirror asks
+only the local answer — so every tick writes DuckDB's copy over the chain's
+rows, and that is `order_owner_row_without_marker`, **CRITICAL**, whose lever
+names `data/write-chain-owners` and `scripts/chain_copy_back.py` (or, with no
+chain declared in this build, a redeploy of one that does). It was the same
+INFO once, and a page or the digest prints only the check's label and lever,
+never its description: all three said "not a defect" about the one state
+here that is. Production today files neither: no chain declares an order
+table and no owner row names one.
 `POST /api/mirror/backfill/orders` asks the owner rows too, before anything
 starts: a lost marker is a 409, not a "started" whose refusal lands in the web
 log, and an owner read that fails — `SchemaVersionError` included — is a 503.

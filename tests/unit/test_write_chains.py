@@ -676,14 +676,17 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
         assert owned.only_asked_who_owns()
 
     @pytest.mark.asyncio
-    async def test_the_bucket_comparison_files_info_and_reads_no_order_table(self, owned):
+    async def test_the_bucket_comparison_pages_and_reads_no_order_table(self, owned):
+        """Not the INFO stand-down: on the owner rows alone the sync's mirror
+        is still shipping, so this is a CRITICAL — one, for both tables."""
         from core.data_quality import Severity
         from core.mirror_reconciliation import reconcile_orders
 
         issues = await reconcile_orders(_NoStore())
-        assert [(i.check_name, i.table_name, i.severity) for i in issues] == [
-            ("mirror_stood_down", ORDERS, Severity.INFO),
-            ("mirror_stood_down", LINES, Severity.INFO),
+        assert [(i.check_name, i.table_name, i.severity, i.count)
+                for i in issues] == [
+            ("order_owner_row_without_marker", f"{LINES}, {ORDERS}",
+             Severity.CRITICAL, 2),
         ]
         assert owned.only_asked_who_owns()
 
@@ -730,7 +733,7 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
 
 
 class TestTheStandDownFindingSaysWhetherTheSyncStillShips:
-    """The INFO finding is read by the one person who could act, so its claim
+    """The finding is read by the one person who could act, so its claim
     about the sync's mirror is parsed out of it and checked against what the
     mirror then does with the same recorder. On the local answer the mirror
     has stopped; on the owner rows alone it has not — it asks only the local
@@ -738,9 +741,17 @@ class TestTheStandDownFindingSaysWhetherTheSyncStillShips:
 
     @staticmethod
     def _claim(issues) -> str:
-        """The one description both order tables carry."""
-        assert [(i.check_name, i.table_name) for i in issues] == [
-            ("mirror_stood_down", ORDERS), ("mirror_stood_down", LINES)]
+        """The one description the stand-down carries: the INFO on both
+        tables on the local answer, the one CRITICAL on the owner rows."""
+        from core.data_quality import Severity
+
+        shape = [(i.check_name, i.table_name, i.severity) for i in issues]
+        assert shape in (
+            [("mirror_stood_down", ORDERS, Severity.INFO),
+             ("mirror_stood_down", LINES, Severity.INFO)],
+            [("order_owner_row_without_marker", f"{LINES}, {ORDERS}",
+              Severity.CRITICAL)],
+        ), shape
         (text,) = {i.description for i in issues}
         stopped = "no longer ships DuckDB's copy" in text
         shipping = "the sync mirror is still shipping" in text
@@ -761,12 +772,16 @@ class TestTheStandDownFindingSaysWhetherTheSyncStillShips:
             else:
                 _rolled_back(flags)             # nothing here declares them
             pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
-        text = self._claim(await reconcile_orders(_NoStore()))
+        issues = await reconcile_orders(_NoStore())
+        text = self._claim(issues)
 
         pool.sql.clear()
         store = await _store(tmp_path)
         await store.upsert_orders([_order(9)])
         assert pool.wrote(ORDERS) == ("the sync mirror is still shipping" in text), text
+        # And the severity says the same thing the text does: a page exactly
+        # when the mirror is still writing over the chain's rows.
+        assert pool.wrote(ORDERS) == (issues[0].severity.value == "CRITICAL")
 
         if state == "flagged":
             assert "owner row" not in text
@@ -777,6 +792,137 @@ class TestTheStandDownFindingSaysWhetherTheSyncStillShips:
         else:
             assert "the marker is missing" not in text
             assert "no chain in this build declares the order tables" in text
+
+
+async def _persisted(store, issues):
+    """The run as the 07:30 job writes it, read back the way the digest and
+    `/api/health/data-quality` read it: `(run row, issue rows)`."""
+    from datetime import datetime, timezone
+
+    from core.data_quality import fetch_latest_run, fetch_run_issues, persist_run
+    from core.mirror_reconciliation import MIRROR_LAYER
+
+    now = datetime.now(timezone.utc)
+    async with store.connection() as conn:
+        run_id = persist_run(
+            conn, started_at=now, ended_at=now, as_of=now,
+            window_start=now.date(), window_end=now.date(),
+            layer=MIRROR_LAYER, issues=issues, discrepancies=[],
+        )
+        return fetch_latest_run(conn, MIRROR_LAYER), fetch_run_issues(conn, run_id)
+
+
+def _what_a_human_reads(run, rows) -> str:
+    """Every surface that reaches a person prints the check's label, the count
+    and — on a page — the lever, and never the description: the page the job
+    sends when the run is CRITICAL, and the digest's one line per finding.
+    Rebuilt from the persisted rows, not from the objects that were written."""
+    from core.data_quality import (
+        IntegrityIssue, Severity, format_alert_message, human_check_name,
+    )
+    from core.mirror_reconciliation import MIRROR_LAYER
+
+    issues = [IntegrityIssue(
+        check_name=r["check_name"], table_name=r["table_name"],
+        severity=Severity(r["severity"]), count=r["count"],
+        description=r["description"]) for r in rows]
+    digest = [f"• {human_check_name(r['check_name'])}: {r['count']}" for r in rows]
+    page = (format_alert_message(MIRROR_LAYER, Severity.CRITICAL, issues, [])
+            if run["status"] == "CRITICAL" else "")
+    return "\n".join([page, *digest])
+
+
+class TestWhatTheStandDownTellsAHuman:
+    """DN-22a's review: with only the owner rows standing the order tables
+    down, the finding stayed INFO — and its label, its lever and its registry
+    entry all said "not a defect", while the per-tick sync mirror, which asks
+    only the local answer, went on writing DuckDB's copy over the chain's rows.
+    Pages and the digest print the label and the lever, never the description
+    that did say so. Each state is run through `reconcile_orders`, persisted
+    as the 07:30 job persists it, and judged from the rows read back."""
+
+    STAND_DOWN = {"mirror_stood_down", "order_owner_row_without_marker"}
+
+    @pytest.mark.asyncio
+    async def test_no_chain_owns_the_order_tables_files_nothing_about_them(
+            self, pool, tmp_path):
+        """Production today: no chain declares an order table and no owner row
+        names one. The comparison runs, and no stand-down of either kind and
+        no CRITICAL is persisted."""
+        from core.mirror_reconciliation import reconcile_orders
+
+        store = await _store(tmp_path, [1])
+        run, rows = await _persisted(store, await reconcile_orders(store))
+
+        assert pool.acquired > 0, "the comparison did not run — nothing proved"
+        assert not self.STAND_DOWN & {r["check_name"] for r in rows}, rows
+        assert run["critical_count"] == 0 and run["status"] != "CRITICAL", run
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["marker_present", "flagged"])
+    async def test_on_the_local_answer_it_stays_info(
+            self, pool, order_chain, tmp_path, state):
+        """The marker is present (flag back at duckdb, both copies agree), or
+        the flag says postgres: the sync's mirror has stopped on the same
+        answer, and the stand-down is a decision — INFO, no page."""
+        from core import chain_latch
+        from core.mirror_reconciliation import reconcile_orders
+
+        if state == "marker_present":
+            order_chain(env=lambda: False)
+            chain_latch.latch("pg_orders_write")
+            pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
+        else:
+            order_chain()
+        store = await _store(tmp_path)
+        run, rows = await _persisted(store, await reconcile_orders(store))
+
+        assert sorted((r["check_name"], r["table_name"], r["severity"])
+                      for r in rows) == [
+            ("mirror_stood_down", LINES, "INFO"),
+            ("mirror_stood_down", ORDERS, "INFO"),
+        ]
+        assert run["status"] == "PASS" and run["critical_count"] == 0, run
+        assert "order_owner_row_without_marker" not in _what_a_human_reads(run, rows)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("road", ["marker_lost", "rolled_back"])
+    async def test_on_the_owner_rows_alone_it_pages_and_never_says_not_a_defect(
+            self, flags, pool, order_chain, tmp_path, road):
+        from core.mirror_reconciliation import reconcile_orders
+        from core.pg_landing import order_tables_stood_down
+
+        if road == "marker_lost":
+            order_chain(env=lambda: False)      # declared, flag duckdb, no marker
+        else:
+            _rolled_back(flags)                 # nothing here declares them
+        pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
+        assert order_tables_stood_down() == frozenset()
+        store = await _store(tmp_path)
+        run, rows = await _persisted(store, await reconcile_orders(store))
+
+        assert [(r["check_name"], r["table_name"], r["severity"], r["count"])
+                for r in rows] == [
+            ("order_owner_row_without_marker", f"{LINES}, {ORDERS}", "CRITICAL", 2),
+        ]
+        assert run["status"] == "CRITICAL" and run["critical_count"] == 1, run
+
+        read = _what_a_human_reads(run, rows)
+        assert "not a defect" not in read.lower(), read
+        assert "the sync is overwriting order tables a write chain owns" in read
+        (lever,) = [line for line in read.splitlines() if line.startswith("→ ")]
+        assert "scripts/chain_copy_back.py" in lever
+        assert "data/write-chain-owners" in lever
+
+    def test_the_registry_says_it_does_not_clear_by_itself(self):
+        """The REGISTRY comment on `mirror_stood_down` reads "a decision
+        somebody took, not a fault"; the owner-rows finding is the fault, and
+        its entry must not inherit that — nor clear on a job."""
+        from core.alerting import REGISTRY, Kind
+
+        spec = REGISTRY["order_owner_row_without_marker"]
+        assert spec.kind is Kind.CONDITION
+        assert "a human, not a job" in spec.clears
 
 
 class TestTheAdminBackfill:

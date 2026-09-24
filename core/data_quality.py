@@ -1849,9 +1849,15 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "POST /api/mirror/backfill/<orders|expenses> for the table named, "
      "then wait for 07:30"),
     # The generic `mirror_` line would send the reader to a re-ship the stand
-    # down exists to prevent.
+    # down exists to prevent. Filed on the local answer only — the marker or
+    # the flag — where the sync's mirror has stopped too.
     ("mirror_stood_down",
      "Not a defect: a write chain owns the order tables. Never backfill them from DuckDB"),
+    # The owner rows alone: the sync's mirror has NOT stopped, and every tick
+    # writes DuckDB's copy over the chain's rows. Two roads, one line each.
+    ("order_owner_row_without_marker",
+     "Sync overwrites chain-owned orders each tick: restore data/write-chain-owners "
+     "(or redeploy the chain's build), else scripts/chain_copy_back.py"),
     ("ch_", "Wait for the hourly ch_sync; stuck — check KS_CH_URL and the grant"),
     ("ch_history_", "Lost in PG and CH at once is unrepairable — a human decides"),
     ("order_versions_", "Do not repair: the archive is the only chronicle. Check the writer is alive"),
@@ -1970,6 +1976,7 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",
     "mirror_stood_down": "copy not compared: a write chain owns it",
+    "order_owner_row_without_marker": "the sync is overwriting order tables a write chain owns",
     "mirror_failing": "mirror failing",
     "orders_without_line_items": "orders without line items",
     "headline_vs_line_items": "order total ≠ line items",
