@@ -158,6 +158,12 @@ DERIVED_MAX_AGE_S = 90 * 60
 LAYER = "warehouse"
 SIGNAL_TABLE = "meta.derivation_signal"
 
+# The trigger a process's first run is journalled under when nothing was owed
+# (`due`). Named because a reader keys on it: `pg_warehouse_dq`'s signal-missed
+# detector does not judge such a run, since a boot sync configured before
+# DN-05b wrote orders with no mark and this run is what covered them.
+FIRST_TICK = "first_tick"
+
 # The journal's bound, as a count (revision 0033). At the ten-minute floor that
 # is ~140 days of runs; at a run a minute, two weeks. Either is far more than
 # the forensics this replaces ever needed at once.
@@ -407,10 +413,29 @@ async def record_run(
 
 _ADDITIVE = ("revenue", "orders_count", "returns_count", "returns_revenue")
 
+# ─── The high-water mark: what bronze held when the run looked (DN-14) ───────
+#
+# `validate` records `max(bronze.orders.mirrored_at)` beside the Bronze count,
+# from the same snapshot, so every journal row says how far bronze had got as
+# well as how many marks it had seen (`requested_seen`). Two consecutive runs
+# where the high-water mark moved on and `requested_seen` did not are a bronze
+# write that raised no derivation mark: `pg_warehouse_dq`'s `pg_signal_missed`
+# judges exactly that, on a code path the marks do not share. The heartbeat
+# rebuilds such rows within the hour, so nothing is lost — what the detector
+# sees is the signal failing, which the heartbeat otherwise hides for good.
+#
+# Read at validation, not with `requested_seen` at the run's start, for the
+# row count's reason: every orders writer holds `_heavy_job_lock` and so does
+# the run, so nothing lands in between. A writer outside that lock would read
+# as a missed signal — loud, not silent, the way it reads as a row-count
+# mismatch.
+HIGH_WATER = "bronze_max_mirrored_at"
+
 
 async def validate(conn) -> Dict[str, Any]:
     """Checks over the derived layers. `passed` excludes the partition, for
-    DuckDB's reason: no rebuild can repair a sales_type the code does not know."""
+    DuckDB's reason: no rebuild can repair a sales_type the code does not know.
+    Also carries `HIGH_WATER`, which judges nothing here."""
     from core.duckdb_constants import KNOWN_SALES_TYPES
 
     known = list(KNOWN_SALES_TYPES)
@@ -419,6 +444,7 @@ async def validate(conn) -> Dict[str, Any]:
             """
             SELECT
                 (SELECT count(*) FROM bronze.orders) AS bronze_orders,
+                (SELECT max(mirrored_at) FROM bronze.orders) AS bronze_max_mirrored_at,
                 (SELECT count(*) FROM silver.orders) AS silver_rows,
                 (SELECT COALESCE(SUM(grand_total), 0) FROM silver.orders
                   WHERE NOT is_return AND is_active_source) AS silver_revenue,
@@ -478,7 +504,11 @@ async def validate(conn) -> Dict[str, Any]:
     checksum_match = abs(silver_revenue - totals["gold_revenue"]) < 0.01
     cells_match = missing_cells == 0 and extra_cells == 0
     rollup_match = rollup_mismatch == 0
+    high_water = totals["bronze_max_mirrored_at"]
     return {
+        # ISO text with microseconds, so `::timestamptz` gives back the very
+        # value Postgres stamped: the detector compares these for equality.
+        HIGH_WATER: None if high_water is None else high_water.isoformat(),
         "passed": row_count_match and checksum_match and cells_match and rollup_match,
         "row_count_match": row_count_match,
         "checksum_match": checksum_match,
@@ -524,4 +554,4 @@ def due(
         return False, "floor"
     if owed:
         return True, "signal"
-    return True, "first_tick" if first_tick else "heartbeat"
+    return True, FIRST_TICK if first_tick else "heartbeat"

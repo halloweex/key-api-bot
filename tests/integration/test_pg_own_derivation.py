@@ -7,6 +7,7 @@ and says so.
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
@@ -498,3 +499,148 @@ class TestADroppedMarkHeals:
         after = await _signal_state(pool)
         assert (after["last_ok_at"], after["last_attempted_at"]) == (
             before["last_ok_at"], before["last_attempted_at"])
+
+
+# ─── DN-14: the high-water mark and the signal it lets us check ──────────────
+
+
+async def _unmarked(monkeypatch, *orders):
+    """Land orders the way a process whose mode was never configured would:
+    through the real writer, raising no mark."""
+    from core import pg_derivation
+    from core.pg_landing import write_orders
+
+    monkeypatch.setenv("KS_PG_DERIVE", "piggyback")
+    pg_derivation.configure_mode()
+    try:
+        await write_orders(list(orders), [], replace_products=False)
+    finally:
+        monkeypatch.setenv("KS_PG_DERIVE", "own")
+        pg_derivation.configure_mode()
+
+
+async def _missed(pool):
+    """What the twins file for the journal the real derivation wrote."""
+    from core.pg_warehouse_dq import check_pg_warehouse, read_facts
+
+    facts = await read_facts(pool=pool)
+    assert facts.whole is None, facts.whole
+    return [i for i in check_pg_warehouse(facts) if i.check_name == "pg_signal_missed"]
+
+
+async def _high_water(pool, run_id):
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT (validation ->> 'bronze_max_mirrored_at')::timestamptz"
+            " FROM meta.derivation_runs WHERE id = $1", run_id)
+
+
+class TestTheHighWaterMark:
+    @pytest.mark.asyncio
+    async def test_a_run_records_the_latest_mirrored_at_bronze_held(self, own):
+        from core.pg_landing import write_orders
+
+        pool, scheduler, _a = own
+        await write_orders([_order(IDS[0]), _order(IDS[1], days_ago=3)], [],
+                           replace_products=False)
+        assert (await scheduler._run_pg_derivation())["status"] == "success"
+
+        (run,) = await _runs(pool)
+        async with pool.acquire() as conn:
+            truth = await conn.fetchval("SELECT max(mirrored_at) FROM bronze.orders")
+        text = json.loads(run["validation"])["bronze_max_mirrored_at"]
+        assert datetime.fromisoformat(text) == truth           # to the microsecond
+        assert await _high_water(pool, run["id"]) == truth     # and as Postgres reads it
+
+    @pytest.mark.asyncio
+    async def test_a_failed_run_records_none(self, own):
+        pool, scheduler, _a = own
+        with patch("core.pg_gold.rebuild_gold", AsyncMock(side_effect=RuntimeError("boom"))):
+            await scheduler._run_pg_derivation()
+        (run,) = await _runs(pool)
+        assert run["error"] and run["validation"] is None
+
+
+class TestTheSignalMissed:
+    """The real derivation writes the journal; the twins read it back. Between
+    two runs an order lands with no mark, and the second run's pair is the
+    finding — unless that run is a process's first.
+
+    Every test lands one order, marked, before its first run: over an empty
+    bronze the high-water mark is None and no pair is judged, which would let
+    a quiet-hour test pass on nothing."""
+
+    @staticmethod
+    async def _first_run(pool, scheduler):
+        from core.pg_landing import write_orders
+
+        await write_orders([_order(IDS[2], days_ago=5)], [], replace_products=False)
+        assert (await scheduler._run_pg_derivation())["trigger"] == "signal"
+        (run,) = await _runs(pool)
+        assert await _high_water(pool, run["id"]) is not None
+        return run
+
+    @pytest.mark.asyncio
+    async def test_an_unmarked_write_between_two_runs_is_a_warning_naming_the_run(
+        self, own, monkeypatch,
+    ):
+        from core.data_quality import Severity
+
+        pool, scheduler, _a = own
+        await self._first_run(pool, scheduler)
+        await _unmarked(monkeypatch, _order(IDS[0]))
+        result = await scheduler._run_pg_derivation(force=True)
+        assert result["trigger"] == "manual" and result["requested_seen"] == 2
+
+        first, second = await _runs(pool)
+        assert await _high_water(pool, second["id"]) > await _high_water(pool, first["id"])
+        (issue,) = await _missed(pool)
+        assert (issue.severity, issue.count, issue.sample_ids) == (
+            Severity.WARN, 1, (second["id"],))
+
+    @pytest.mark.asyncio
+    async def test_a_marked_write_between_two_runs_is_nothing(self, own):
+        from core.pg_landing import write_orders
+
+        pool, scheduler, _a = own
+        await self._first_run(pool, scheduler)
+        await write_orders([_order(IDS[0])], [], replace_products=False)
+        assert (await scheduler._run_pg_derivation())["trigger"] == "signal"
+        first, second = await _runs(pool)
+        assert await _high_water(pool, second["id"]) > await _high_water(pool, first["id"])
+        assert await _missed(pool) == []
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_hour_is_nothing(self, own):
+        pool, scheduler, _a = own
+        await self._first_run(pool, scheduler)
+        await scheduler._run_pg_derivation(force=True)
+        first, second = await _runs(pool)
+        assert await _high_water(pool, second["id"]) == await _high_water(pool, first["id"])
+        assert await _missed(pool) == []
+
+    @pytest.mark.asyncio
+    async def test_a_first_tick_after_an_unmarked_boot_write_is_nothing_and_the_next_is_judged(
+        self, own, monkeypatch,
+    ):
+        """A process that came up, let its boot sync land an order unmarked
+        (before DN-05b, the mode was read after the sync), and derived with
+        nothing owed: that run is `first_tick` and not judged. An unmarked write
+        after it is."""
+        from core.scheduler import BackgroundScheduler
+
+        pool, scheduler, _a = own
+        first = await self._first_run(pool, scheduler)
+        await _unmarked(monkeypatch, _order(IDS[0]))
+        BackgroundScheduler._pg_derive_ran = False              # the restart
+        assert (await scheduler._run_pg_derivation())["trigger"] == "first_tick"
+        tick = (await _runs(pool))[-1]
+        assert await _high_water(pool, tick["id"]) > await _high_water(pool, first["id"])
+        assert tick["requested_seen"] == first["requested_seen"]
+        assert await _missed(pool) == []
+
+        await _unmarked(monkeypatch, _order(IDS[1]))
+        await scheduler._run_pg_derivation(force=True)
+        runs = await _runs(pool)
+        (issue,) = await _missed(pool)
+        assert issue.sample_ids == (runs[-1]["id"],)

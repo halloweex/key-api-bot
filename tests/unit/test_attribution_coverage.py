@@ -197,3 +197,46 @@ class TestItIsWiredIn:
         lever = " ".join(remediation_for(["attribution_coverage_website"]))
         assert lever, "the check has no remediation entry"
         assert "utm_source" in lever
+
+
+class TestWhatItMeasuredIsHandedOver:
+    """DN-14: the Postgres twins' pairing record sets DuckDB's coverage beside
+    Postgres'. On a healthy week this check files nothing, so what it measured
+    has to leave some other way — `counts_out`, finding or not."""
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_week_hands_over_both_windows(self, tmp_path):
+        store = await _store(tmp_path)
+        nxt = await _week(store, days_ago=3, orders=100, tagged=34)
+        await _week(store, days_ago=20, orders=200, tagged=68, first_id=nxt)
+
+        measured = {}
+        assert await _run(store, counts_out=measured) == []
+        assert measured == {"orders": 100, "tagged": 34,
+                            "base_orders": 200, "base_tagged": 68}
+
+    @pytest.mark.asyncio
+    async def test_a_quiet_week_hands_over_what_it_counted(self, tmp_path):
+        """Too few orders to judge is still a count; the baseline is never
+        read, so it is not invented."""
+        store = await _store(tmp_path)
+        await _week(store, days_ago=3, orders=12, tagged=3)
+
+        measured = {}
+        assert await _run(store, counts_out=measured) == []
+        assert measured == {"orders": 12, "tagged": 3}
+
+    @pytest.mark.asyncio
+    async def test_the_scan_files_it_under_the_guards_name(self, tmp_path):
+        from core.data_quality import check_internal_integrity
+
+        store = await _store(tmp_path)
+        nxt = await _week(store, days_ago=3, orders=100, tagged=8)
+        await _week(store, days_ago=20, orders=200, tagged=60, first_id=nxt)
+
+        measured = {}
+        async with store.connection() as conn:
+            issues = check_internal_integrity(conn, pairing_out=measured)
+        assert "attribution_coverage_website" in {i.check_name for i in issues}
+        assert measured == {"attribution_coverage": {
+            "orders": 100, "tagged": 8, "base_orders": 200, "base_tagged": 60}}

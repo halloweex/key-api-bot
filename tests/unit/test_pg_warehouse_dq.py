@@ -9,14 +9,15 @@ from __future__ import annotations
 import ast
 import inspect
 import textwrap
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from core import pg_warehouse_dq as twins
 from core.data_quality import IntegrityIssue, Severity
 from core.pg_warehouse_dq import (
-    Attribution, Facts, LineItems, RowValues, SilverArc, Unwatched, Watermark,
+    Attribution, DerivationJournal, Facts, JournalRun, LineItems, RowValues, SilverArc,
+    Unwatched, Watermark,
 )
 
 WM = Watermark(today=date(2026, 9, 17), in_flight=2, backfilled=True,
@@ -35,6 +36,7 @@ def _rv(**kw):
 
 
 RV_CLEAN = _rv()
+JOURNAL_QUIET = DerivationJournal(since=REBUILT, runs=())
 
 
 def _names(issues):
@@ -149,7 +151,7 @@ class TestLineItems:
 
 def _facts(**groups):
     base = dict(silver_arc=ARC_CLEAN, attribution=ATT_OK, line_items=LI_NONE,
-                silver_row_values=RV_CLEAN)
+                derivation_signal=JOURNAL_QUIET, silver_row_values=RV_CLEAN)
     base.update(groups)
     return Facts(whole=None, watermark=WM, **base)
 
@@ -490,3 +492,248 @@ class TestTheLevers:
         assert len({row_values, unwatched, generic}) == 3
         assert "compare silver.orders with bronze.orders" in row_values
         assert "HOLD_BUDGET_S" in unwatched
+
+
+# ─── DN-14 ────────────────────────────────────────────────────────────────────
+
+T0 = datetime(2026, 9, 17, 0, 0, tzinfo=timezone.utc)
+
+
+def _at(minutes):
+    return T0 + timedelta(minutes=minutes)
+
+
+def _run(id, *, minutes, seen, water, trigger="heartbeat"):
+    """A journal row: started `minutes` after T0, having seen `seen` marks and
+    bronze mirrored up to `water` minutes after T0 (None: no mark recorded)."""
+    return JournalRun(id=id, trigger=trigger, started_at=_at(minutes), requested_seen=seen,
+                      high_water=None if water is None else _at(water))
+
+
+def _journal(*runs, since_minutes=0):
+    return DerivationJournal(since=_at(since_minutes), runs=tuple(runs))
+
+
+class TestTheSignalMissed:
+    """`pg_signal_missed` over pre-read journal rows. The rows are read by
+    `tests/integration/test_pg_warehouse_dq.py` from a real journal the real
+    derivation wrote."""
+
+    def test_bronze_moved_on_and_the_mark_did_not_is_a_warning(self):
+        journal = _journal(_run(1, minutes=0, seen=7, water=-5),
+                           _run(2, minutes=60, seen=7, water=30))
+        (issue,) = twins._signal_check(journal)
+        assert (issue.check_name, issue.severity, issue.count, issue.sample_ids) == (
+            "pg_signal_missed", Severity.WARN, 1, (2,))
+        assert "requested still at 7" in issue.description
+        assert _at(30).isoformat(timespec="seconds") in issue.description
+
+    def test_an_equal_high_water_mark_is_nothing(self):
+        """A quiet hour: nothing written, nothing marked."""
+        assert twins._signal_check(_journal(_run(1, minutes=0, seen=7, water=-5),
+                                            _run(2, minutes=60, seen=7, water=-5))) == []
+
+    def test_a_first_tick_run_is_nothing(self):
+        """A boot sync configured before DN-05b wrote with no mark by design,
+        and the process's first run is what rebuilt it."""
+        journal = _journal(_run(1, minutes=0, seen=7, water=-5),
+                           _run(2, minutes=60, seen=7, water=30, trigger="first_tick"))
+        assert twins._signal_check(journal) == []
+
+    def test_the_run_after_a_first_tick_is_judged_against_it(self):
+        """The exclusion is the first run's pair only: what the boot sync wrote
+        is inside its high-water mark, so the next pair starts from there."""
+        journal = _journal(_run(1, minutes=0, seen=7, water=-5),
+                           _run(2, minutes=60, seen=7, water=30, trigger="first_tick"),
+                           _run(3, minutes=120, seen=7, water=90))
+        (issue,) = twins._signal_check(journal)
+        assert issue.sample_ids == (3,)
+
+    def test_a_mark_that_moved_is_nothing(self):
+        assert twins._signal_check(_journal(_run(1, minutes=0, seen=7, water=-5),
+                                            _run(2, minutes=12, seen=8, water=10,
+                                                 trigger="signal"))) == []
+
+    def test_a_run_before_dn14_says_nothing_either_way(self):
+        assert twins._signal_check(_journal(_run(1, minutes=0, seen=7, water=None),
+                                            _run(2, minutes=60, seen=7, water=30))) == []
+
+    def test_only_runs_inside_the_lookback_are_judged(self):
+        """The run before the lookback is the first judged run's predecessor,
+        and is not judged itself."""
+        journal = _journal(_run(1, minutes=0, seen=7, water=-10),
+                           _run(2, minutes=60, seen=7, water=30),
+                           _run(3, minutes=120, seen=7, water=90), since_minutes=90)
+        (issue,) = twins._signal_check(journal)
+        assert (issue.count, issue.sample_ids) == (1, (3,))
+        journal = _journal(_run(1, minutes=0, seen=7, water=-10),
+                           _run(2, minutes=60, seen=7, water=30), since_minutes=50)
+        (issue,) = twins._signal_check(journal)
+        assert issue.sample_ids == (2,)
+
+    def test_every_pair_counts_and_the_sample_leads_with_the_latest(self):
+        journal = _journal(*(_run(i, minutes=60 * i, seen=7, water=60 * i - 5)
+                             for i in range(1, 14)))
+        (issue,) = twins._signal_check(journal)
+        assert issue.count == 12
+        assert issue.sample_ids == tuple(range(13, 3, -1))
+
+    def test_an_unreadable_journal_is_named_and_held(self):
+        held = []
+        issues = twins.check_pg_warehouse(_facts(derivation_signal=Unwatched("timeout")),
+                                          held_out=held)
+        assert _names(issues) == ["pg_derivation_signal_unwatched"]
+        assert held == ["pg_signal_missed"]
+
+    def test_it_reaches_the_run_through_the_twins(self):
+        journal = _journal(_run(1, minutes=0, seen=7, water=-5),
+                           _run(2, minutes=60, seen=7, water=30))
+        assert _names(twins.check_pg_warehouse(_facts(derivation_signal=journal))) == [
+            "pg_signal_missed"]
+
+    def test_it_has_a_lever_of_its_own(self):
+        from core.data_quality import DEFAULT_REMEDIATION, remediation_for
+
+        for name in ("pg_signal_missed", "pg_derivation_signal_unwatched"):
+            assert remediation_for([name]) != [DEFAULT_REMEDIATION], name
+        assert "dropped marks" in remediation_for(["pg_signal_missed"])[0]
+
+
+def _pairing(facts, **kw):
+    import json
+
+    issue = twins.pairing_record(facts, **kw)
+    assert (issue.check_name, issue.severity, issue.count) == (
+        "pg_twin_pairing", Severity.INFO, 1)
+    return json.loads(issue.description)
+
+
+DUCK_LOOKED = frozenset({"silver_arc", "attribution_coverage", "headline_vs_line_items",
+                         "goods_shipped_without_sale"})
+
+
+class TestThePairingRecord:
+    """Parsed, never grepped: the soak reads this JSON, so the JSON is what
+    is asserted on."""
+
+    LI = LineItems(5, 500.0, (1,), 7, 700.0, (2,))
+
+    def test_with_duckdb_findings_it_carries_both_sides_and_the_standalone_verdict(self):
+        """DuckDB's headline and goods findings are present, so the real run
+        compares and files neither twin (7 against 6 is inside the 2 orders in
+        flight). The record still says what each engine counted, and what the
+        twins would have filed on their own."""
+        duck = [_duck("headline_vs_line_items", 5),
+                _duck("goods_shipped_without_sale", 6, Severity.INFO),
+                _duck("silver_missing_rows", 3, Severity.CRITICAL)]
+        facts = _facts(line_items=self.LI,
+                       silver_arc=SilverArc(3, 3, 300.0, 9000, (4, 5, 6), 0, 0.0, ()))
+        real = twins.check_pg_warehouse(facts, duckdb_issues=duck, duckdb_looked=DUCK_LOOKED)
+        assert not {"pg_headline_vs_line_items", "pg_goods_shipped_without_sale"} & set(
+            _names(real))
+
+        record = _pairing(facts, duckdb_issues=duck, duckdb_looked=DUCK_LOOKED,
+                          duckdb_attribution={"orders": 90, "tagged": 27,
+                                              "base_orders": 380, "base_tagged": 114})
+
+        assert record["version"] == twins.PAIRING_VERSION and record["in_flight"] == 2
+        d, p = record["duckdb"], record["postgres"]
+        assert (d["headline_vs_line_items"], p["headline_vs_line_items"]) == (5, 5)
+        assert (d["goods_shipped_without_sale"], p["goods_shipped_without_sale"]) == (6, 7)
+        assert (d["silver_missing_rows"], p["silver_missing_rows"]) == (3, 3)
+        assert (d["silver_orphan_rows"], p["silver_orphan_rows"]) == (0, 0)
+        assert (d["attribution"]["pct"], p["attribution"]["pct"]) == (30.0, 30.0)
+        assert (d["attribution"]["base_pct"], p["attribution"]["base_pct"]) == (30.0, 30.0)
+        assert d["looked"] == sorted(DUCK_LOOKED) and p["unwatched"] == {}
+        assert record["standalone"]["pg_headline_vs_line_items"] == 5
+        assert record["standalone"]["pg_goods_shipped_without_sale"] == 7
+        assert record["standalone"]["pg_silver_missing_rows"] == 3
+        assert "pg_line_items_disagree" not in record["standalone"]
+
+    def test_a_duckdb_guard_that_did_not_look_is_none_not_zero(self):
+        record = _pairing(_facts(line_items=self.LI), duckdb_issues=[],
+                          duckdb_looked=frozenset({"silver_arc"}))
+        d = record["duckdb"]
+        assert d["silver_missing_rows"] == 0
+        assert d["headline_vs_line_items"] is None and d["attribution"] is None
+        assert record["postgres"]["headline_vs_line_items"] == 5
+
+    def test_the_duckdb_half_failing_leaves_one_side(self):
+        record = _pairing(_facts(line_items=self.LI), duckdb_issues=[],
+                          duckdb_looked=frozenset())
+        assert record["duckdb"]["looked"] == []
+        assert set(record["standalone"]) == {"pg_headline_vs_line_items",
+                                             "pg_goods_shipped_without_sale"}
+
+    def test_a_blind_group_is_none_with_its_reason(self):
+        record = _pairing(_facts(attribution=Unwatched("timeout")),
+                          duckdb_looked=DUCK_LOOKED,
+                          duckdb_attribution={"orders": 90, "tagged": 27})
+        p = record["postgres"]
+        assert p["attribution"] is None and p["unwatched"] == {"attribution": "timeout"}
+        assert record["duckdb"]["attribution"]["pct"] == 30.0
+        assert record["duckdb"]["attribution"]["base_pct"] is None
+        assert record["standalone"] == {"pg_attribution_coverage_unwatched": 1}
+
+    def test_a_blind_snapshot_is_recorded_not_skipped(self):
+        record = _pairing(Facts.blind("KS_PG_DSN is not set"), duckdb_looked=DUCK_LOOKED)
+        assert record["postgres"]["unwatched"] == {"*": "KS_PG_DSN is not set"}
+        assert record["in_flight"] is None
+        assert record["standalone"] == {"pg_warehouse_unwatched": len(twins.GROUPS)}
+
+    def test_a_signal_miss_rides_the_standalone_as_the_real_run_files_it(self):
+        journal = _journal(_run(1, minutes=0, seen=7, water=-5),
+                           _run(2, minutes=60, seen=7, water=30))
+        record = _pairing(_facts(derivation_signal=journal), duckdb_looked=DUCK_LOOKED)
+        assert record["standalone"] == {"pg_signal_missed": 1}
+
+    def test_it_never_raises(self, monkeypatch):
+        def boom(*_a, **_k):
+            raise ValueError("bad")
+        monkeypatch.setattr(twins, "_pairing", boom)
+        record = _pairing(_facts())
+        assert record == {"version": twins.PAIRING_VERSION, "error": "ValueError: bad"}
+
+    def test_the_standalone_evaluation_reads_nothing(self):
+        """Pure over what was read: no await anywhere in the record's path."""
+        for fn in (twins.pairing_record, twins._pairing, twins._coverage):
+            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+            assert not [n for n in ast.walk(tree) if isinstance(n, (ast.Await, ast.AsyncFunctionDef))]
+
+    def test_it_is_an_event_with_a_human_name(self):
+        from core.alerting import REGISTRY, Kind
+        from core.data_quality import HUMAN_CHECK_NAMES
+
+        assert REGISTRY["pg_twin_pairing"].kind is Kind.EVENT
+        assert REGISTRY["pg_signal_missed"].kind is Kind.CONDITION
+        for name in ("pg_twin_pairing", "pg_signal_missed", "pg_derivation_signal_unwatched"):
+            assert name in HUMAN_CHECK_NAMES
+
+
+class TestThePairingIsWired:
+    def _tree(self):
+        from core.scheduler import BackgroundScheduler
+
+        return ast.parse(textwrap.dedent(inspect.getsource(BackgroundScheduler._run_dq_integrity)))
+
+    def test_it_is_filed_with_the_twins_findings_only_when_they_ran(self):
+        """Inside the `elif pg_on` branch, appended to `pg_issues`, fed the
+        DuckDB half's own findings, what it looked at and what it measured."""
+        (branch,) = [n for n in ast.walk(self._tree()) if isinstance(n, ast.If)
+                     and isinstance(n.test, ast.Name) and n.test.id == "pg_on"]
+        calls = [n for n in ast.walk(branch) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute) and n.func.attr == "pairing_record"]
+        (call,) = calls
+        kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
+        assert kw["duckdb_issues"] == "issues" and kw["duckdb_looked"] == "duckdb_looked"
+        assert "attribution_coverage" in kw["duckdb_attribution"]
+        appends = [n for n in ast.walk(branch) if isinstance(n, ast.Call)
+                   and isinstance(n.func, ast.Attribute) and n.func.attr == "append"
+                   and ast.unparse(n.func.value) == "pg_issues"]
+        assert appends
+
+    def test_the_duckdb_scan_hands_over_what_it_measured(self):
+        scans = [n for n in ast.walk(self._tree()) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name) and n.func.id == "check_internal_integrity"]
+        (scan,) = scans
+        assert "pairing_out" in {k.arg for k in scan.keywords}

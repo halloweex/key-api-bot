@@ -1107,3 +1107,159 @@ class TestTheJobEndToEnd:
         assert read.await_count == 0 and recompute.await_count == 0
         assert "pg_silver_row_values" not in await self._issues(store, result["run_id"])
         assert sent.await_count == 0
+
+
+# ─── DN-14: the journal the signal check reads, and the pairing record ───────
+
+
+@pytest_asyncio.fixture
+async def journal(pool):
+    """An empty derivation journal, emptied again afterwards — the way
+    `test_pg_own_derivation` and `rv` treat it."""
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM meta.derivation_runs")
+    yield pool
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM meta.derivation_runs")
+
+
+async def _journalled(conn, *, hours_ago, seen=7, water_hours_ago=None, water=None,
+                      trigger="heartbeat", error=None):
+    """A run `hours_ago` by Postgres' clock that saw `seen` marks and bronze up
+    to `water_hours_ago` — or the raw `water` text, to store something that is
+    not a time. Returns its id."""
+    from core.pg_derivation import HIGH_WATER, record_run
+
+    started = await conn.fetchval("SELECT now() - make_interval(secs => $1)",
+                                  float(hours_ago * 3600))
+    if water is None and water_hours_ago is not None:
+        water = (await conn.fetchval("SELECT now() - make_interval(secs => $1)",
+                                     float(water_hours_ago * 3600))).isoformat()
+    return await record_run(
+        conn, trigger=trigger, started_at=started, ended_at=started, requested_seen=seen,
+        validation=None if error else {HIGH_WATER: water}, error=error)
+
+
+class TestTheJournalRead:
+    @pytest.mark.asyncio
+    async def test_a_day_of_error_free_runs_led_by_the_one_before(self, journal):
+        """What `read_facts` hands the signal check: the lookback's error-free
+        runs and the one before them. An errored run is not a link in the
+        chain, and a malformed value older than that is never cast — so it
+        cannot blind the group for good."""
+        from core.data_quality import Severity
+        from core.pg_warehouse_dq import read_facts
+
+        async with journal.acquire() as conn:
+            await _journalled(conn, hours_ago=72, water="not a time")
+            before = await _journalled(conn, hours_ago=30, water_hours_ago=31)
+            await _journalled(conn, hours_ago=20, error="silver.orders: boom")
+            run = await _journalled(conn, hours_ago=2, water_hours_ago=3)
+            tick = await _journalled(conn, hours_ago=1, water_hours_ago=1.5,
+                                     trigger="first_tick")
+        facts = await read_facts(pool=journal)
+
+        signal = facts.derivation_signal
+        assert [r.id for r in signal.runs] == [before, run, tick]
+        assert all(r.high_water is not None and r.requested_seen == 7 for r in signal.runs)
+        issue = _judge(facts)["pg_signal_missed"]
+        assert (issue.severity, issue.count, issue.sample_ids) == (Severity.WARN, 1, (run,))
+
+    @pytest.mark.asyncio
+    async def test_an_empty_journal_judges_nothing(self, journal):
+        """Piggyback journals nothing; that is not blindness."""
+        from core.pg_warehouse_dq import read_facts
+
+        facts = await read_facts(pool=journal)
+        assert facts.derivation_signal.runs == ()
+        judged = _judge(facts)
+        assert "pg_signal_missed" not in judged
+        assert "pg_derivation_signal_unwatched" not in judged
+
+    @pytest.mark.asyncio
+    async def test_a_malformed_value_inside_the_day_blinds_this_group_alone(self, journal):
+        """Its savepoint takes the failed cast with it: the recompute, read
+        after it in the same snapshot, still looks."""
+        from core.pg_warehouse_dq import Unwatched, read_facts
+
+        async with journal.acquire() as conn:
+            await _journalled(conn, hours_ago=2, water="not a time")
+        facts = await read_facts(pool=journal)
+        assert isinstance(facts.derivation_signal, Unwatched)
+        assert "timestamp" in facts.derivation_signal.reason
+        for group in ("silver_arc", "attribution", "line_items", "silver_row_values"):
+            assert not isinstance(getattr(facts, group), Unwatched), group
+        assert "pg_derivation_signal_unwatched" in _judge(facts)
+
+
+class TestThePairingThroughTheJob:
+    """The record as the integrity job persists it, parsed. The DuckDB store is
+    empty, so every DuckDB number is a looked-at 0; Postgres holds one
+    zero-total order with line items and one internal shipment."""
+
+    job = TestTheJobEndToEnd.job           # the same job, not its tests again
+    _issues = TestTheJobEndToEnd._issues
+
+    @pytest.mark.asyncio
+    async def test_it_carries_both_engines_and_what_the_twins_file_alone(
+        self, pool, job, monkeypatch,
+    ):
+        import json
+
+        scheduler, store, _sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        async with pool.acquire() as conn:
+            for oid, sales_type in ((IDS[72], "retail"), (IDS[73], "internal")):
+                await _bronze(conn, oid, total=0, minutes_ago=150)
+                await _silver(conn, oid, total=0, sales_type=sales_type)
+                await conn.execute(
+                    "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity,"
+                    " price_sold) VALUES ($1, $2, NULL, 'x', 2, 150)", oid * 1000 + 1, oid)
+
+        result = await scheduler._run_dq_integrity()
+
+        issues = await self._issues(store, result["run_id"])
+        row = issues["pg_twin_pairing"]
+        assert (row["severity"], row["count"]) == ("INFO", 1)
+        record = json.loads(row["description"])
+        duck, pg, alone = record["duckdb"], record["postgres"], record["standalone"]
+        assert {"headline_vs_line_items", "goods_shipped_without_sale", "silver_arc",
+                "attribution_coverage"} <= set(duck["looked"])
+        assert (duck["headline_vs_line_items"], duck["goods_shipped_without_sale"]) == (0, 0)
+        assert pg["headline_vs_line_items"] >= 1 and pg["goods_shipped_without_sale"] >= 1
+        assert duck["attribution"]["orders"] == 0 and duck["attribution"]["pct"] is None
+        assert pg["attribution"]["orders"] >= 2 and pg["unwatched"] == {}
+        # Standing alone the twins file both line-item findings, with Postgres'
+        # counts; beside a DuckDB that looked they file neither, and disagree
+        # exactly when the counts differ by more than the orders in flight.
+        assert alone["pg_headline_vs_line_items"] == pg["headline_vs_line_items"]
+        assert alone["pg_goods_shipped_without_sale"] == pg["goods_shipped_without_sale"]
+        assert "pg_headline_vs_line_items" not in issues
+        assert "pg_goods_shipped_without_sale" not in issues
+        assert ("pg_line_items_disagree" in issues) == (
+            pg["headline_vs_line_items"] > record["in_flight"])
+
+    @pytest.mark.asyncio
+    async def test_off_there_is_no_record(self, pool, job, monkeypatch):
+        scheduler, store, _sent = job
+        monkeypatch.delenv("KS_DQ_PG_WAREHOUSE", raising=False)
+        result = await scheduler._run_dq_integrity()
+        assert "pg_twin_pairing" not in await self._issues(store, result["run_id"])
+
+    @pytest.mark.asyncio
+    async def test_the_duckdb_half_failing_still_records_the_postgres_side(
+        self, pool, job, monkeypatch,
+    ):
+        import json
+
+        scheduler, store, _sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        with patch("core.data_quality.check_internal_integrity",
+                   side_effect=RuntimeError("duckdb")), \
+             patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
+            result = await scheduler._run_dq_integrity()
+        record = json.loads(
+            (await self._issues(store, result["run_id"]))["pg_twin_pairing"]["description"])
+        assert record["duckdb"]["looked"] == []
+        assert record["duckdb"]["headline_vs_line_items"] is None
+        assert record["postgres"]["headline_vs_line_items"] is not None

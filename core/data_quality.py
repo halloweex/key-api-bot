@@ -774,6 +774,7 @@ def _attribution_coverage_check(
     floor_pct: float = 15.0,
     halved_against_baseline: float = 0.5,
     min_orders: int = 40,
+    counts_out: Optional[Dict[str, int]] = None,
 ) -> List[IntegrityIssue]:
     """Are the website's orders still arriving with a campaign tag?
 
@@ -831,13 +832,20 @@ def _attribution_coverage_check(
         """).fetchone()
         return int(row[0] or 0), int(row[1] or 0)
 
+    # `counts_out` receives what was measured, finding or not: the Postgres
+    # twins' pairing record (DN-14) sets DuckDB's share beside Postgres', and
+    # on a healthy week this function files nothing to read it from.
     orders, tagged = coverage(window_days, 0)
+    if counts_out is not None:
+        counts_out.update(orders=orders, tagged=tagged)
     if orders < min_orders:
         # Too few to say anything. A quiet week must not read as an outage.
         return []
 
     pct = tagged / orders * 100.0
     base_orders, base_tagged = coverage(window_days + baseline_days, window_days)
+    if counts_out is not None:
+        counts_out.update(base_orders=base_orders, base_tagged=base_tagged)
     base_pct = (base_tagged / base_orders * 100.0) if base_orders >= min_orders else None
 
     below_floor = pct < floor_pct
@@ -1464,8 +1472,13 @@ def check_internal_integrity(
     inventory_calendar: "Optional[Tuple[Optional[date], FrozenSet[date]]]" = None,
     chain_watermarks: Optional[Dict[str, str]] = None,
     raised_out: Optional[List[str]] = None,
+    pairing_out: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
+
+    `pairing_out`, when given, receives what a check measured where its
+    findings alone would not say it — today the attribution counts, under the
+    guard's name — for the Postgres twins' pairing record.
 
     Cheap by design: only DB scans, no external I/O. Suitable for running
     every few hours alongside the heavier reconciliation job.
@@ -1543,7 +1556,9 @@ def check_internal_integrity(
     # this asks whether they still say anything. See the docstring for the
     # five-week outage that nothing else could have seen.
     issues += guarded("attribution_coverage",
-                      lambda: _attribution_coverage_check(conn))
+                      lambda: _attribution_coverage_check(
+                          conn, counts_out=None if pairing_out is None
+                          else pairing_out.setdefault("attribution_coverage", {})))
 
     # Fourteen Gold columns against a recompute from Silver. Report-only by
     # construction: an integrity finding cannot reach validation_passed.
@@ -1916,6 +1931,13 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Silver kept old values: POST /api/warehouse/refresh. If a rebuild already covered them, compare silver.orders with bronze.orders for those ids"),
     ("pg_silver_row_values_unwatched",
      "The Silver recompute did not finish: read the reason; a spent hold budget means it outgrew HOLD_BUDGET_S"),
+    # DN-14. Not a rebuild: the run that saw the write already rebuilt it.
+    # The lever is the writer that did not mark, or the mark that was dropped.
+    ("pg_signal_missed",
+     "An orders write raised no derivation mark: check meta.mirror_state for dropped marks, else find the writer in the web log at the runs' started_at"),
+    ("pg_derivation_signal_unwatched",
+     "The derivation journal could not be read: read the reason in the finding"),
+    ("pg_twin_pairing", "A record, not a fault: parse the JSON to compare the two engines"),
     ("status_group_vs_return_list", "The source's status group wins over the legacy list"),
     ("inventory_snapshot_gaps", "A missed day is gone for good; check the snapshot job"),
     ("ch_reconcile_pending", "Wait for a fresh ch_sync — never reconcile a lagging copy"),
@@ -1958,6 +1980,9 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "pg_line_items_unwatched": "Postgres line items not examined",
     "pg_silver_row_values": "stale values in Postgres Silver",
     "pg_silver_row_values_unwatched": "Postgres Silver values not examined",
+    "pg_signal_missed": "orders written with no derivation mark",
+    "pg_derivation_signal_unwatched": "derivation journal not examined",
+    "pg_twin_pairing": "both engines' numbers, recorded",
     "pg_warehouse_unwatched": "Postgres twins did not look",
     "pg_warehouse_dq_flag_invalid": "KS_DQ_PG_WAREHOUSE not understood",
     "pg_order_utm_missing": "orders with no traffic verdict (Postgres)",
