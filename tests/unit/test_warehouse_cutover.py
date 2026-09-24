@@ -273,35 +273,87 @@ class TestTheEvaluator:
 
 class TestEveryReadSwitchIsDecided:
     """A read switch added later must be put on the list or excluded by name —
-    the walk, not the list, is what finds it."""
+    the walk, not the list, is what finds it.
 
-    # `KS_READ_FALLBACK` is not a reader: it decides how every reader fails,
-    # and is its own precondition.
-    NOT_READERS = {"KS_READ_FALLBACK"}
+    It reads every string constant in every node, across `core/`, `web/` and
+    `bot/`: the first walk read module-level `NAME = "KS_READ_..."` in `core/`
+    alone, and the review declared a reader three ways it never saw — an
+    annotated assignment, an inline `os.getenv(...)` (which is how
+    `KS_SMS_STORE` has always been read) and a module under `web/`. Removing
+    `KS_SMS_STORE` from the list left the suite green."""
 
-    def _declared(self) -> set:
-        found = set()
-        for path in (REPO / "core").rglob("*.py"):
-            for node in ast.parse(path.read_text(encoding="utf-8")).body:
-                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) \
-                        and isinstance(node.value.value, str) \
-                        and re.fullmatch(r"KS_READ_[A-Z][A-Z_]*[A-Z]", node.value.value):
-                    found.add(node.value.value)
+    SWITCH = re.compile(r"KS_READ_[A-Z][A-Z_]*[A-Z]|KS_[A-Z][A-Z_]*_STORE")
+    ROOTS = ("core", "web", "bot")
+    # The list itself: counting what it names would make the walk vacuous.
+    SKIP = {pathlib.Path("core/warehouse_cutover.py")}
+
+    # Switches that are not readers of Silver, Gold or UTM, each by its reason.
+    NOT_READERS = {
+        # How every reader fails, not what it reads — its own precondition.
+        "KS_READ_FALLBACK",
+        # Where the bot's approval list and preferences live: app.*, which
+        # nothing derives and step 13 does not freeze.
+        "KS_BOT_STORE",
+        # Where the dashboard's user list and role matrix live: app.* too.
+        "KS_USER_STORE",
+    }
+
+    @classmethod
+    def _names_in(cls, source: str) -> set:
+        return {node.value for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and cls.SWITCH.fullmatch(node.value)}
+
+    @classmethod
+    def _declared(cls) -> dict:
+        """`{switch: {module that names it, ...}}`."""
+        found: dict = {}
+        for root in cls.ROOTS:
+            for path in sorted((REPO / root).rglob("*.py")):
+                rel = path.relative_to(REPO)
+                if rel in cls.SKIP or "node_modules" in rel.parts:
+                    continue
+                for name in cls._names_in(path.read_text(encoding="utf-8")):
+                    found.setdefault(name, set()).add(rel.as_posix())
         return found
 
-    def test_every_read_switch_in_core_is_a_precondition(self):
+    def test_every_read_switch_is_a_precondition_or_excluded_by_name(self):
         declared = self._declared()
-        assert len(declared) >= 18, "the walk is not looking"
+        assert len(declared) >= 22, "the walk is not looking"
         decided = set(wc.WAREHOUSE_READERS) | {wc.COHORTS} | self.NOT_READERS
-        assert declared - decided == set()
+        undecided = {name: sorted(where) for name, where in declared.items()
+                     if name not in decided}
+        assert undecided == {}, (
+            "a read switch nobody decided about: put it on WAREHOUSE_READERS "
+            "or name it in NOT_READERS with its reason")
+
+    @pytest.mark.parametrize("source", [
+        'ENV: str = "KS_READ_NEWTAB"\n',
+        'import os\n\ndef mode():\n    return os.getenv("KS_READ_NEWTAB", "duckdb")\n',
+        'class Reader:\n    FLAG = "KS_READ_NEWTAB"\n',
+        'def read(flag="KS_NEWTAB_STORE"):\n    return flag\n',
+    ], ids=["annotated", "inline-getenv", "class-attribute", "store-default-arg"])
+    def test_it_sees_every_shape_a_switch_is_declared_in(self, source):
+        assert self._names_in(source) & {"KS_READ_NEWTAB", "KS_NEWTAB_STORE"}
+
+    def test_it_walks_web_and_bot_as_well_as_core(self):
+        assert set(self.ROOTS) == {"core", "web", "bot"}
+        declared = self._declared()
+        # `bot/main.py` reads both stores inline, beside the modules in `core/`
+        # that declare them.
+        assert "bot/main.py" in declared["KS_BOT_STORE"]
+        assert "bot/main.py" in declared["KS_USER_STORE"]
+
+    def test_the_sms_store_is_found_where_the_sms_tab_reads_it(self):
+        """Inline `os.getenv("KS_SMS_STORE", ...)` in `core/pg_sms.py` — the
+        shape the first walk could not see — and on the list."""
+        assert "core/pg_sms.py" in self._declared()["KS_SMS_STORE"]
+        assert "KS_SMS_STORE" in wc.WAREHOUSE_READERS
 
     def test_the_list_names_only_switches_that_exist(self):
-        declared = self._declared() | {"KS_SMS_STORE"}
+        declared = set(self._declared())
         assert set(wc.WAREHOUSE_READERS) | {wc.COHORTS} <= declared
-
-    def test_the_sms_store_is_the_switch_the_sms_tab_reads(self):
-        source = (REPO / "core" / "pg_sms.py").read_text(encoding="utf-8")
-        assert '"KS_SMS_STORE"' in source
+        assert self.NOT_READERS <= declared
 
 
 # ─── A page under a retired check holds the switch ───────────────────────────

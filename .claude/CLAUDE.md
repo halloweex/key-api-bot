@@ -2643,8 +2643,10 @@ the mode is `duckdb`, which today is always.
 `evaluate_preconditions(env, facts)` — `KS_PG_DERIVE=own`, the twins on,
 `KS_UTM_PARSE=postgres`, `KS_READ_FALLBACK=off`, a DSN and the required
 revision, the landing mirror on, every Silver/Gold/UTM read switch on
-`postgres` (a test walks `core/` for every `KS_READ_*`, so a new one has to be
-decided), cohorts on ClickHouse with `KS_CH_URL`, and no write chain owning a
+`postgres` (a test reads every string in `core/`, `web/` and `bot/` for a
+`KS_READ_*` or `KS_*_STORE` name, so a new one has to be put on the list or
+excluded by name — `KS_SMS_STORE` is read inline and the first walk missed
+it), cohorts on ClickHouse with `KS_CH_URL`, and no write chain owning a
 table the goals bridge reads (DN-12). `preconditions_met: true` is a checklist
 done, not a switch thrown.
 

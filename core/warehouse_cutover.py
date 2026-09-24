@@ -190,9 +190,11 @@ def open_retired_conditions() -> Dict[str, Optional[str]]:
 # Every read switch whose answer comes out of Silver, Gold or the UTM verdicts,
 # and must therefore be on Postgres before DuckDB's copies freeze: each of them
 # would otherwise serve frozen numbers, and after the first Sunday compaction
-# empty ones. `tests/unit/test_warehouse_cutover.py` walks `core/` for every
-# `KS_READ_*` a module declares and fails on one that is in none of these
-# lists, so a read switch added later is decided rather than forgotten.
+# empty ones. `tests/unit/test_warehouse_cutover.py` reads every string in
+# `core/`, `web/` and `bot/` — however it is declared, an inline `os.getenv`
+# included — for a `KS_READ_*` or `KS_*_STORE` name, and fails on one that is
+# neither here nor excluded there by name, with its reason: a read switch added
+# later is decided rather than forgotten.
 WAREHOUSE_READERS: Tuple[str, ...] = (
     "KS_READ_GOLD",
     "KS_READ_SILVER",
