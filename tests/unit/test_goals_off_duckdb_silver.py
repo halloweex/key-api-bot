@@ -528,6 +528,35 @@ class TestTheForecastSignal:
                   and r.levelno == logging.WARNING]
         assert warned and "duckdb is gone" in warned[0].getMessage()
 
+    @pytest.mark.asyncio
+    async def test_a_fallback_on_one_half_mixes_the_engines(
+        self, store, monkeypatch, caplog,
+    ):
+        """What the comment on `_FORECAST_ACTUAL_SQL` says, pinned. The
+        fallback is per read, so a Postgres failure on the actual half is
+        answered by DuckDB while the predicted half is still Postgres' — the
+        sum is not 0.0, it mixes engines, and `_goals_run` says so at ERROR.
+        `PredictionService.get_forecast` accepts the same; DN-20's off mode is
+        what turns it into a refusal."""
+        await _seed_forecast(store)
+        monkeypatch.setenv("KS_READ_GOALS", "postgres")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
+
+        async def fetch(sql, params=()):
+            if "gold.daily_revenue" in sql:
+                raise ConnectionError("postgres failed on the actual half")
+            return [(1000.0,)]
+
+        caplog.set_level(logging.ERROR, logger="core.repositories.goals")
+        with patch("core.pg_goals_read.fetch", new=fetch), \
+             patch("core.repositories.goals.datetime", _FrozenClock):
+            got = await store._get_ml_forecast_total(
+                FORECAST_TODAY.year, FORECAST_TODAY.month, "retail")
+        assert got == pytest.approx(1000.0 + 200.0 + 1000.0, abs=0.005), (
+            "DuckDB's actual half (1 000 + 200) and Postgres' predicted one")
+        assert any("falling back to DuckDB" in r.getMessage()
+                   for r in caplog.records if r.levelno == logging.ERROR)
+
 
 # ─── What the smart goal narrows to, in written-out numbers ─────────────────
 #

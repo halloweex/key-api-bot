@@ -1,11 +1,15 @@
 """Which engine answers `/goals`, and — mostly — what this flag may not touch.
 
 `/goals` is the tab where the interesting assertions are about the *boundary*
-rather than the routing, because only four of its thirteen methods can move:
+rather than the routing, because not every one of its thirteen methods can
+move:
 
-  * two read `revenue_predictions`, `seasonal_indices`, `weekly_patterns` and
-    `growth_metrics`, **none of which exists in Postgres**. Routed, they would
-    fall back for ever while looking switched.
+  * `generate_smart_goals` recomputes `seasonal_indices`, `weekly_patterns`
+    and `growth_metrics` in DuckDB and then reads them back. Postgres has had
+    those three since revision 0025, but only as an hourly replica, so a
+    routed read would return them as they were before the recompute. Its ML
+    signal is the one path that is routed, and it reads only Gold and
+    `revenue_predictions` (which moved with `get_predictions`, #183).
   * seven **write**, and `app.revenue_goals` is an hourly read replica: a
     write sent to Postgres would land in a copy and be overwritten within the
     hour.
@@ -189,13 +193,14 @@ class TestTheBoundary:
         assert self._reaches_router(name), f"{name} never reaches _goals_run"
 
     @pytest.mark.parametrize("name", NOT_ROUTED)
-    def test_the_two_reading_absent_tables_do_not(self, name):
+    def test_the_recompute_then_read_is_not_routed(self, name):
         assert not self._reaches_router(
             name, excluding=ROUTED_ONLY_VIA.get(name, ())), (
-            f"{name} reads a table Postgres does not have "
-            f"(revenue_predictions / seasonal_indices / weekly_patterns / "
-            f"growth_metrics) — routed, it would fall back for ever while "
-            f"looking switched."
+            f"{name} reaches the router outside its ML signal. It recomputes "
+            f"seasonal_indices / weekly_patterns / growth_metrics in DuckDB "
+            f"and then reads them back; Postgres holds only an hourly replica "
+            f"of those three, so a routed read would return the tables as "
+            f"they were before the recompute it just ran."
         )
 
     @pytest.mark.parametrize("name", sorted(

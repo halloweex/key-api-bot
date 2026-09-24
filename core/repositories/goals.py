@@ -87,10 +87,16 @@ _STORED_GOALS_SQL = """
 """
 
 # The ML signal of a smart goal: what the target month has already earned, plus
-# what the model expects of the rest of it. Both halves go through `_goals_run`
-# and so through one engine — the rule `PredictionService._get_actual_month_revenue`
-# records: a sum that took one term from Postgres and the other from DuckDB was
-# a defect there once already. `{gold_revenue_rollup}` is not optional; Postgres'
+# what the model expects of the rest of it. Both halves go through `_goals_run`,
+# so both ask the engine the flag names — the rule
+# `PredictionService._get_actual_month_revenue` records: a sum that took one
+# term from Postgres and the other from DuckDB *by design* was a defect there
+# once already. One engine only while neither read falls back, though: the
+# fallback is per read, so a Postgres failure on one half is answered by DuckDB
+# while the other half stays Postgres', and that call's sum mixes engines —
+# after step 13, a frozen DuckDB term beside a live one. `_goals_run` logs it
+# at ERROR; `get_forecast` accepts the same mix, and DN-20's off mode is what
+# turns it into a refusal. `{gold_revenue_rollup}` is not optional; Postgres'
 # Gold holds a roll-up row beside a row per source, and a bare SUM counts every
 # order twice. `{sales_filter}` is `sales_type = ?` or `1=1`, composed here.
 _FORECAST_ACTUAL_SQL = """
@@ -823,7 +829,11 @@ class GoalsMixin:
         For past days (before today): actual revenue from Gold.
         For today and future days: ML predictions from revenue_predictions.
         Returns 0 if no predictions are available for the future portion, or
-        if either read fails — the signal is then simply absent from the blend.
+        if a read fails on the engine that finally answers it — the signal is
+        then absent from the blend. A Postgres failure alone does not return
+        0: that read falls back to DuckDB, and the sum may then take its two
+        halves from two engines (see `_FORECAST_ACTUAL_SQL`). An unknown
+        `KS_READ_GOALS` raises, as it does for every goal read.
 
         **Called without the store lock.** Both halves go through `_goals_run`,
         which takes that lock itself on the DuckDB path and the lock is not

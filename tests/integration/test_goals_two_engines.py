@@ -478,6 +478,23 @@ class TestTheSmartGoalsForecastSignal:
         assert duck > 0, "no prediction for today — the signal compared nothing"
         assert round(duck, 2) == round(postgres, 2)
 
+        # And what they agree on, written out: two engines reading one wrong
+        # window agree with each other. Retail Gold from the 1st through
+        # yesterday — no return, no retired source 3, no b2b — plus the retail
+        # predictions from today to the month's end. Which terms land inside
+        # the month depends on the day the suite runs; the unit test in
+        # `test_goals_off_duckdb_silver.py` pins the bounds on a frozen clock.
+        first = TODAY.replace(day=1)
+        actual = sum(
+            total for _oid, source, total, days_ago, is_return, manager in ORDERS
+            if not is_return and source != 3 and manager is None
+            and first <= TODAY - timedelta(days=days_ago) < TODAY)
+        predicted = sum(
+            revenue for day, sales_type, revenue, *_ in PREDICTIONS
+            if sales_type == "retail" and TODAY <= day
+            and (day.year, day.month) == (TODAY.year, TODAY.month))
+        assert round(postgres, 2) == round(actual + predicted, 2)
+
 
 class TestTheForecastTrainingFrame:
     """`_query_daily_revenue` is what the forecast model learns from — training,
