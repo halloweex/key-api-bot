@@ -509,36 +509,80 @@ async def purge_orders(
 
 # ─── Buyer Sync ────────────────────────────────────────────────────────────────
 
-# How long a buyer route waits for the heavy-job lock before answering 409. The
-# minute sync holds it for seconds; a full sync or a resync holds it for
-# minutes, and an admin is better told "busy, try again" than kept on a request
-# that times out in the proxy first.
-HEAVY_LOCK_WAIT_S = 60
+# How long the manual buyer sync waits for the heavy-job lock before answering
+# 409. It has to fit inside RequestTimeoutMiddleware's 30 s budget with room for
+# the sync itself: at 60 s the middleware answered a bare 504 first, and the
+# handler went on and wrote after that answer.
+HEAVY_LOCK_WAIT_S = 20
+# The full buyer sync runs detached, outside any request budget, and waits this
+# long for the lock before each portion. A full sync or a resync holds the lock
+# for minutes; the minute tick for seconds.
+SYNC_ALL_LOCK_WAIT_S = 300
 
 
 @contextlib.asynccontextmanager
-async def _heavy_lock_or_409(what: str):
-    """The scheduler's heavy-job lock, waited for boundedly, or a 409.
+async def _heavy_lock(wait_s: float):
+    """The scheduler's heavy-job lock, waited for boundedly.
 
-    The buyer routes write the same tables as the minute sync, and a write
-    interleaving with it is how the stores came to disagree before. `wait_for`
-    over `acquire` cannot leak the lock: asyncio.Lock only marks itself taken
-    after the waiter returns normally, so a timeout leaves it free.
+    Yields True with the lock held, False when it could not be had in time.
+    `wait_for` over `acquire` cannot leak it: asyncio.Lock marks itself taken
+    only after the waiter returns normally, so a timeout leaves it free.
     """
     from core.scheduler import get_scheduler
 
     lock = get_scheduler()._heavy_job_lock
     try:
-        await asyncio.wait_for(lock.acquire(), HEAVY_LOCK_WAIT_S)
+        await asyncio.wait_for(lock.acquire(), wait_s)
     except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=409,
-            detail=f"{what}: a heavy job holds the warehouse; try again in a minute",
-        )
+        yield False
+        return
     try:
-        yield
+        yield True
     finally:
         lock.release()
+
+
+@contextlib.asynccontextmanager
+async def _heavy_lock_or_409(what: str):
+    """The heavy-job lock for a request, or a 409 inside its time budget."""
+    async with _heavy_lock(HEAVY_LOCK_WAIT_S) as held:
+        if not held:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{what}: a heavy job holds the warehouse; try again shortly",
+            )
+        yield
+
+
+async def _sync_all_buyers(store) -> dict:
+    """Every buyer KeyCRM has, written in portions under the heavy-job lock.
+
+    Detached from the request that starts it: the ~460 KeyCRM pages alone take
+    minutes, so no request budget could hold it. The fetch runs OUTSIDE any
+    lock; each portion takes the lock, writes (and mirrors, inside
+    `upsert_buyers`), and lets go. A portion that cannot get the lock in
+    `SYNC_ALL_LOCK_WAIT_S` stops the run; what was written stays written — each
+    portion is a complete, mirrored upsert — and a rerun writes it again.
+    """
+    from core.keycrm import KeyCRMClient
+
+    async with store.connection() as conn:
+        before = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+    async with KeyCRMClient() as client:
+        buyers = await client.fetch_all_buyers() or []
+
+    portion, written = store.BUYER_WRITE_PORTION, 0
+    for start in range(0, len(buyers), portion):
+        async with _heavy_lock(SYNC_ALL_LOCK_WAIT_S) as held:
+            if not held:
+                return {"status": "stopped", "reason": "the heavy-job lock stayed busy",
+                        "buyers_fetched": len(buyers), "buyers_written": written}
+            written += await store.upsert_buyers(buyers[start:start + portion])
+
+    async with store.connection() as conn:
+        after = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+    return {"status": "done", "buyers_fetched": len(buyers), "buyers_written": written,
+            "before_count": before, "after_count": after, "new_buyers": after - before}
 
 
 @router.post("/duckdb/sync-buyers")
@@ -576,66 +620,39 @@ async def sync_buyers(
 @router.post("/duckdb/sync-all-buyers")
 @limiter.limit("1/hour")
 async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)):
-    """Sync ALL buyers from KeyCRM (including those without orders). Requires admin.
+    """Start a sync of ALL buyers from KeyCRM, detached. Requires admin.
 
     DO NOT RUN THIS IN PRODUCTION TO SEE WHETHER IT WORKS. It is the only path
     that fetches buyers with `include=loyalty,shipping`, so it fills city and
     region for every buyer — which moves `customer_profile.city` and the SMS
     audience's city filter. That is a decision, not a test.
 
-    Three things changed for chain 4's preparation, each because the old shape
-    could not complete or could not agree:
-
-    - The ~460 KeyCRM pages are fetched OUTSIDE any lock. They take minutes,
-      and holding the heavy-job lock through them stopped the minute sync.
-    - The write goes in portions of `DuckDBStore.BUYER_WRITE_PORTION`, each
-      under the heavy-job lock, released between them. One transaction of
-      twenty thousand buyers runs DuckDB out of memory (measured at 8 000).
-    - Every portion is mirrored to Postgres, because `upsert_buyers` mirrors
-      now. This route used to write DuckDB alone, and each buyer it changed
-      stayed a daily CRITICAL in the comparison that nothing could repair.
-
-    A 409 part-way leaves the portions already written in place — each is a
-    complete, mirrored upsert — and a rerun writes them again harmlessly.
+    Answers at once and runs in the background, like /mirror/backfill/orders:
+    the fetch alone takes minutes, and a request held that long was answered
+    504 by the app's own 30 s timeout while the handler kept writing behind it,
+    with its result thrown away. The outcome is logged as `Full buyer sync:`.
+    See `_sync_all_buyers` for what one run does.
     """
-    from core.keycrm import KeyCRMClient
+    if any(t.get_name() == "sync_all_buyers" and not t.done() for t in _BACKGROUND_TASKS):
+        raise HTTPException(status_code=409, detail="A full buyer sync is already running")
 
     store = await get_store()
-    portion = store.BUYER_WRITE_PORTION
-    try:
-        async with store.connection() as conn:
-            before_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
 
-        async with KeyCRMClient() as client:
-            buyers = await client.fetch_all_buyers()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Full buyer sync failed: {str(e)}")
+    async def run():
+        try:
+            result = await _sync_all_buyers(store)
+            logger.info(f"Full buyer sync: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Full buyer sync failed: {type(e).__name__}: {e}", exc_info=True)
+            raise
 
-    written = 0
-    for start in range(0, len(buyers or []), portion):
-        async with _heavy_lock_or_409(
-                f"Full buyer sync stopped after {written} of {len(buyers)} buyers"):
-            try:
-                written += await store.upsert_buyers(buyers[start:start + portion])
-            except Exception as e:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Full buyer sync failed after {written} of "
-                           f"{len(buyers)} buyers: {type(e).__name__}",
-                )
-
-    async with store.connection() as conn:
-        after_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
-
-    return {
-        "status": "success",
-        "message": "Synced all buyers from KeyCRM",
-        "buyers_fetched": len(buyers or []),
-        "buyers_written": written,
-        "before_count": before_count,
-        "after_count": after_count,
-        "new_buyers": after_count - before_count,
-    }
+    task = asyncio.create_task(run(), name="sync_all_buyers")
+    # A strong reference, or the loop may collect the task mid-flight.
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return {"status": "started", "message": "Full buyer sync started; see web's log "
+            "for 'Full buyer sync:'"}
 
 
 @router.get("/buyers/stats")

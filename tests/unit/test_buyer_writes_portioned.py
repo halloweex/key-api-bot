@@ -89,6 +89,45 @@ class TestPortions:
             await store.close()
 
     @pytest.mark.asyncio
+    async def test_a_portion_whose_mirror_failed_is_retried_at_the_end(self, tmp_path):
+        """The next portion's success would otherwise stamp the watermark
+        healthy, and the ids-diff never ships a buyer Postgres already has."""
+        store = DuckDBStore(db_path=tmp_path / "p.duckdb")
+        await store.connect()
+        store.BUYER_WRITE_PORTION = 10
+        calls = []
+
+        async def flaky(portion):
+            calls.append([b.id for b in portion])
+            return {"error": "pg down"} if len(calls) == 2 else {"rows": len(portion)}
+
+        try:
+            with patch("core.pg_buyers.mirror_buyers", new=flaky):
+                assert await store.upsert_buyers(_buyers(25)) == 25
+            assert len(calls) == 4, calls           # three portions, one retry
+            assert calls[3] == calls[1]             # the failed portion again
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_mirror_that_keeps_failing_raises_after_duckdb_committed(self, tmp_path):
+        store = DuckDBStore(db_path=tmp_path / "p.duckdb")
+        await store.connect()
+        store.BUYER_WRITE_PORTION = 10
+
+        async def down(portion):
+            return {"error": "pg down"}
+
+        try:
+            with patch("core.pg_buyers.mirror_buyers", new=down):
+                with pytest.raises(RuntimeError, match="25 buyer"):
+                    await store.upsert_buyers(_buyers(25))
+            async with store.connection() as conn:
+                assert conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0] == 25
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
     async def test_a_portion_is_mirrored_only_after_it_committed(self, tmp_path):
         store = DuckDBStore(db_path=tmp_path / "p.duckdb")
         await store.connect()
@@ -144,69 +183,95 @@ def fresh_limits():
     limiter.reset()
 
 
-class TestSyncAll:
-    def _wire(self, monkeypatch, store, fetch):
-        from core import keycrm
-        from web.routes.api import admin
+def _store_for_sync_all(upsert):
+    store = MagicMock()
+    store.BUYER_WRITE_PORTION = 1000
+    conn = MagicMock()
+    conn.execute.return_value.fetchone.return_value = (0,)
+    store.connection.return_value.__aenter__ = AsyncMock(return_value=conn)
+    store.connection.return_value.__aexit__ = AsyncMock(return_value=False)
+    store.upsert_buyers = upsert
+    return store
 
-        client = MagicMock()
-        client.fetch_all_buyers = fetch
-        client.__aenter__ = AsyncMock(return_value=client)
-        client.__aexit__ = AsyncMock(return_value=False)
-        monkeypatch.setattr(keycrm, "KeyCRMClient", MagicMock(return_value=client))
-        monkeypatch.setattr(admin, "get_store", AsyncMock(return_value=store))
 
-    def test_keycrm_is_fetched_with_the_lock_free_and_every_portion_written_under_it(
-            self, monkeypatch, tmp_path, fresh_limits):
+def _keycrm(monkeypatch, fetch):
+    from core import keycrm
+
+    client = MagicMock()
+    client.fetch_all_buyers = fetch
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(keycrm, "KeyCRMClient", MagicMock(return_value=client))
+
+
+class TestTheFullSyncRun:
+    """`_sync_all_buyers`, the detached body of sync-all-buyers, driven directly."""
+
+    @pytest.mark.asyncio
+    async def test_keycrm_is_fetched_with_the_lock_free_and_each_portion_under_it(
+            self, monkeypatch):
         from core.scheduler import get_scheduler
+        from web.routes.api.admin import _sync_all_buyers
 
-        store = MagicMock()
-        store.BUYER_WRITE_PORTION = 1000
-        conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (0,)
-        store.connection.return_value.__aenter__ = AsyncMock(return_value=conn)
-        store.connection.return_value.__aexit__ = AsyncMock(return_value=False)
         held_while_writing = []
 
         async def upsert(portion):
             held_while_writing.append(get_scheduler()._heavy_job_lock.locked())
             return len(portion)
 
-        store.upsert_buyers = upsert
-
         async def fetch():
             assert not get_scheduler()._heavy_job_lock.locked(), \
                 "the KeyCRM pages were fetched under the heavy-job lock"
             return _buyers(2100)
 
-        self._wire(monkeypatch, store, fetch)
-        r = _client().post("/api/duckdb/sync-all-buyers")
+        _keycrm(monkeypatch, fetch)
+        result = await _sync_all_buyers(_store_for_sync_all(upsert))
 
-        assert r.status_code == 200, r.text
-        assert r.json()["buyers_written"] == 2100
+        assert result["status"] == "done" and result["buyers_written"] == 2100
         assert held_while_writing == [True, True, True]
         assert not get_scheduler()._heavy_job_lock.locked()
 
-    def test_a_busy_warehouse_is_a_409_not_a_hang(self, monkeypatch, tmp_path, fresh_limits):
+    @pytest.mark.asyncio
+    async def test_a_busy_warehouse_stops_the_run_and_says_how_far_it_got(
+            self, monkeypatch):
         from core.scheduler import get_scheduler
         from web.routes.api import admin
 
-        store = MagicMock()
-        store.BUYER_WRITE_PORTION = 1000
-        conn = MagicMock()
-        conn.execute.return_value.fetchone.return_value = (0,)
-        store.connection.return_value.__aenter__ = AsyncMock(return_value=conn)
-        store.connection.return_value.__aexit__ = AsyncMock(return_value=False)
-        store.upsert_buyers = AsyncMock(side_effect=AssertionError("wrote without the lock"))
-
-        self._wire(monkeypatch, store, AsyncMock(return_value=_buyers(10)))
-        monkeypatch.setattr(admin, "HEAVY_LOCK_WAIT_S", 0.05)
+        _keycrm(monkeypatch, AsyncMock(return_value=_buyers(10)))
+        monkeypatch.setattr(admin, "SYNC_ALL_LOCK_WAIT_S", 0.05)
         monkeypatch.setattr(get_scheduler(), "_heavy_job_lock", _FakeLock())
+        upsert = AsyncMock(side_effect=AssertionError("wrote without the lock"))
+
+        result = await admin._sync_all_buyers(_store_for_sync_all(upsert))
+
+        assert result["status"] == "stopped"
+        assert (result["buyers_fetched"], result["buyers_written"]) == (10, 0)
+
+
+class TestTheRoutes:
+    def test_sync_all_answers_at_once_and_runs_detached(self, monkeypatch, fresh_limits):
+        from web.routes.api import admin
+
+        body = AsyncMock(return_value={"status": "done"})
+        monkeypatch.setattr(admin, "_sync_all_buyers", body)
+        monkeypatch.setattr(admin, "get_store", AsyncMock(return_value=MagicMock()))
+
+        r = _client().post("/api/duckdb/sync-all-buyers")
+
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "started"
+
+    def test_a_second_full_sync_while_one_runs_is_refused(self, monkeypatch, fresh_limits):
+        from web.routes.api import admin
+
+        running = MagicMock()
+        running.get_name.return_value = "sync_all_buyers"
+        running.done.return_value = False
+        monkeypatch.setattr(admin, "_BACKGROUND_TASKS", {running})
 
         r = _client().post("/api/duckdb/sync-all-buyers")
 
         assert r.status_code == 409, r.text
-        assert "0 of 10" in r.json()["detail"]
 
     def test_the_manual_sync_waits_for_the_same_lock(self, monkeypatch, fresh_limits):
         from core.scheduler import get_scheduler
@@ -218,3 +283,12 @@ class TestSyncAll:
         r = _client().post("/api/duckdb/sync-buyers")
 
         assert r.status_code == 409, r.text
+
+    def test_the_manual_syncs_409_fits_inside_the_request_budget(self):
+        """At 60 s the app's own 30 s RequestTimeoutMiddleware answered 504
+        first, and the handler kept writing behind that answer."""
+        from web import middleware
+        from web.routes.api import admin
+
+        assert "/api/duckdb/sync-buyers" not in middleware.SLOW_ENDPOINTS
+        assert admin.HEAVY_LOCK_WAIT_S < middleware.DEFAULT_REQUEST_TIMEOUT

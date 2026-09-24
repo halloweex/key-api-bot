@@ -3158,14 +3158,28 @@ class DuckDBStore(
         """
         from core.pg_buyers import mirror_buyers
 
-        written = 0
+        written, unshipped = 0, []
         for start in range(0, len(buyers or []), self.BUYER_WRITE_PORTION):
             portion = buyers[start:start + self.BUYER_WRITE_PORTION]
             written += await self._upsert_buyer_portion(portion)
-            await mirror_buyers(portion)
+            if "error" in await mirror_buyers(portion):
+                unshipped.extend(portion)
             # Let the minute sync and the warehouse tick take the lock between
             # portions of a long run.
             await asyncio.sleep(0)
+
+        if unshipped:
+            # A failed portion leaves no trace otherwise: the NEXT portion's
+            # success stamps meta.mirror_state healthy within seconds, and the
+            # hourly ids-diff ships only ids Postgres lacks — so an EXISTING
+            # buyer whose change was not shipped would differ for good, the
+            # daily CRITICAL this method was moved here to end. One retry of
+            # everything that failed, then a raise, after DuckDB has committed:
+            # the caller reports it, and a rerun ships it.
+            if "error" in await mirror_buyers(unshipped):
+                raise RuntimeError(
+                    f"Postgres mirror failed for {len(unshipped)} buyer(s) after "
+                    "a retry; DuckDB is written, and a rerun ships them")
         return written
 
     async def _upsert_buyer_portion(self, buyers: List["Buyer"]) -> int:
