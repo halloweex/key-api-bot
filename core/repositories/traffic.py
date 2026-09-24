@@ -5,7 +5,12 @@ import logging
 from datetime import date
 from typing import Optional, List, Dict, Any
 
-from core.utm_classify import classify_traffic, parse_utm_from_comment, utm_columns
+from core.utm_classify import (
+    classify_traffic,
+    parse_utm_from_comment,
+    tab_platform,
+    utm_columns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -267,14 +272,9 @@ class TrafficMixin:
         for row in rows:
             platform, traffic_type, orders, revenue = row
 
-            # Split Google into ads vs organic (numeric-campaign CPC traffic
-            # vs product_sync/free listings) — they mean different things
-            # and must not be summed under one "google" slice.
-            if platform == 'google':
-                if traffic_type in ('paid_confirmed', 'paid_likely'):
-                    platform = 'google_ads'
-                else:
-                    platform = 'google_organic'
+            # Google split into ads and organic; `tab_platform` says why,
+            # and is shared with the reclassify dry run.
+            platform = tab_platform(platform, traffic_type)
 
             if platform not in platforms:
                 platforms[platform] = {'orders': 0, 'revenue': 0.0}

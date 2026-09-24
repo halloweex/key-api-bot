@@ -124,7 +124,10 @@ of NULLs, is placed by the source-based fallback the tab's SQL applies
 (`TrafficMixin._PLATFORM_EXPR` and `_TRAFFIC_TYPE_EXPR`, pinned to
 `fallback_verdict` below by a test). The 12-week figures use the tab's own
 predicate — not a return, an active source — for `retail`, which the tab and
-the Monday report default to, and for all sales types.
+the Monday report default to, and for all sales types, and the platform table
+uses the tab's own names: Google split into `google_ads` and `google_organic`
+by traffic type (`core.utm_classify.tab_platform`, which the tab calls too).
+The transition list keeps the stored pair, which already says both.
 """
 from __future__ import annotations
 
@@ -149,7 +152,7 @@ import asyncpg
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.utm_classify import UTM_VERDICT_COLUMNS, utm_columns  # noqa: E402
+from core.utm_classify import UTM_VERDICT_COLUMNS, tab_platform, utm_columns  # noqa: E402
 from core.weekly_report import last_complete_week  # noqa: E402
 
 KYIV = ZoneInfo("Europe/Kyiv")
@@ -474,8 +477,12 @@ def diff_verdicts(
         if in_window:
             scopes = ("all", "retail") if order.sales_type == "retail" else ("all",)
             amount = order.grand_total or Decimal("0")
+            # Platforms by the tab's names, so Google moving between paid and
+            # organic shows as the two slices /traffic would move.
+            shown_before = tab_platform(before[1], before[0])
+            shown_after = tab_platform(after[1], after[0])
             for scope in scopes:
-                for table, b, a in ((platforms, before[1], after[1]),
+                for table, b, a in ((platforms, shown_before, shown_after),
                                     (traffic_types, before[0], after[0])):
                     table[scope].setdefault(b, [0, Decimal("0"), 0, Decimal("0")])
                     table[scope].setdefault(a, [0, Decimal("0"), 0, Decimal("0")])

@@ -261,6 +261,83 @@ class TestTheDiff:
         assert report.platforms["all"]["facebook"] == [2, Decimal("17.00"), 0, Decimal("0")]
         assert report.traffic_types["retail"]["organic"] == [1, Decimal("5.00"), 1, Decimal("5.00")]
 
+    def test_google_moving_between_paid_and_organic_moves_the_tab_s_two_slices(self):
+        """/traffic has no "google" slice: it shows `google_ads` and
+        `google_organic`, by traffic type. Named by the classifier's
+        `google`, the table read Δ 0 for a reclassify that moves ₴500 from
+        one slice the owner looks at to the other."""
+        report = diff_verdicts(
+            [order(1, comment="g", stored=verdict_row("paid_confirmed", "google"),
+                   total="500.00")],
+            WINDOW, reclassify=_fake_parse({"g": verdict_row("organic", "google")}))
+        assert report.platforms["retail"] == {
+            "google_ads": [1, Decimal("500.00"), 0, Decimal("0")],
+            "google_organic": [0, Decimal("0"), 1, Decimal("500.00")],
+        }
+        # The transition keeps the stored pair, which already says both.
+        (t,) = report.transitions
+        assert (t.before, t.after) == (("paid_confirmed", "google"), ("organic", "google"))
+
+    @pytest.mark.asyncio
+    async def test_the_now_columns_are_what_the_tab_shows_for_the_same_rows(self, tmp_path):
+        """The tab's own `get_traffic_analytics` over a DuckDB store, and the
+        diff over the same orders with nothing reclassified: every platform
+        and traffic type, with its orders and hryvnia, must agree. That holds
+        the Google split, the source fallback and the NULL row at once, on
+        both sides — either one naming a platform differently fails here.
+        Imported here and not at the top: the audited runs import this module,
+        and may not load DuckDB."""
+        from core.duckdb_store import DuckDBStore
+
+        rows = [  # order_id, source_id, stored verdict or None, total
+            (1, 4, verdict_row("paid_confirmed", "google"), "100.00"),
+            (2, 4, verdict_row("paid_likely", "google"), "200.00"),
+            (3, 4, verdict_row("organic", "google"), "400.00"),
+            (4, 4, verdict_row("unknown", "google"), "800.00"),
+            (5, 4, verdict_row("paid_confirmed", "facebook"), "1600.00"),
+            (6, 1, None, "3200.00"),        # no row: Instagram's fallback
+            (7, 4, None, "6400.00"),        # no row: unattributed
+            (8, 2, NULL_ROW, "12800.00"),   # a row of NULLs: Telegram's fallback
+        ]
+        day = date(2026, 9, 1)
+        store = DuckDBStore(db_path=tmp_path / "tab.duckdb")
+        await store.connect()
+        try:
+            async with store.connection() as conn:
+                for order_id, source_id, stored, total in rows:
+                    conn.execute(
+                        "INSERT INTO silver_orders (id, source_id, status_id, grand_total, "
+                        "ordered_at, buyer_id, manager_id, order_date, is_return, "
+                        "sales_type, is_active_source, source_name, is_new_customer, "
+                        "buyer_first_order_date, promocode) VALUES (?, ?, 12, ?, NULL, "
+                        "NULL, NULL, ?, FALSE, 'retail', TRUE, 'x', FALSE, NULL, NULL)",
+                        [order_id, source_id, float(total), day])
+                    if stored is not None:
+                        conn.execute(
+                            "INSERT INTO silver_order_utm (order_id, traffic_type, "
+                            "platform, parsed_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                            [order_id, stored[script.VERDICT_TYPE],
+                             stored[script.VERDICT_PLATFORM]])
+            tab = await store.get_traffic_analytics(
+                start_date=WINDOW[0], end_date=WINDOW[1], sales_type="retail")
+        finally:
+            await store.close()
+
+        orders = [order(order_id, comment=str(order_id) if stored else None,
+                        stored=stored, source_id=source_id, day=day, total=total)
+                  for order_id, source_id, stored, total in rows]
+        unchanged = {str(o.order_id): o.stored for o in orders if o.stored}
+        report = diff_verdicts(orders, WINDOW, reclassify=_fake_parse(unchanged))
+        assert report.transitions == []
+
+        def now(table):
+            return {name: {"orders": v[0], "revenue": float(v[1])}
+                    for name, v in table.items() if v[0]}
+
+        assert now(report.platforms["retail"]) == tab["by_platform"]
+        assert now(report.traffic_types["retail"]) == tab["by_traffic_type"]
+        assert {"google_ads", "google_organic"} <= set(tab["by_platform"])
+
     def test_causes_come_out_in_order_and_largest_first(self):
         a = verdict_row("organic", "instagram")
         b = verdict_row("organic", "tiktok")

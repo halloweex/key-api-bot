@@ -297,3 +297,21 @@ def utm_columns(
         utm_data.get('ttp'), utm_data.get('fbclid'),
         traffic_type, platform,
     )
+
+
+# How /traffic names a platform, which is not always the classifier's name
+# for it. The classifier files every Google order under `google`; the tab
+# splits them by the verdict's traffic type — numeric-campaign CPC against
+# free listings and product_sync — because the two mean different things and
+# summed under one slice they say neither. Here rather than on the mixin
+# because the reclassify dry run must name platforms as the tab does and may
+# not load a DuckDB store to find out; one function, so the tab, the weekly
+# traffic report that reads it and the dry run cannot name Google two ways.
+GOOGLE_PAID_TYPES: Tuple[str, ...] = ("paid_confirmed", "paid_likely")
+
+
+def tab_platform(platform: str, traffic_type: str) -> str:
+    """The platform /traffic shows for one verdict, `(platform, traffic_type)`."""
+    if platform == "google":
+        return "google_ads" if traffic_type in GOOGLE_PAID_TYPES else "google_organic"
+    return platform

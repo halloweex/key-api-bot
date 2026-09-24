@@ -41,6 +41,7 @@ from core.utm_classify import (
     UTM_VERDICT_COLUMNS,
     classify_traffic,
     parse_utm_from_comment,
+    tab_platform,
     utm_columns,
 )
 
@@ -455,3 +456,35 @@ def test_the_row_is_the_shippers_row():
     one and not the other would compare a verdict against the wrong field."""
     assert pg_order_utm.UTM_COLUMNS == ("order_id", *UTM_VERDICT_COLUMNS, "parsed_at")
     assert UTM_VERDICT_COLUMNS[-2:] == ("traffic_type", "platform")
+
+
+# ─── the tab's names for a verdict ────────────────────────────────────────────
+
+# Frozen like the verdicts above, for the same reason: which Google orders the
+# tab calls ads is a statement about the past as much as the future, and the
+# reclassify dry run's platform table is read in these names.
+TAB_PLATFORM_GOLDEN = {
+    ("google", "paid_confirmed"): "google_ads",
+    ("google", "paid_likely"): "google_ads",
+    ("google", "organic"): "google_organic",
+    ("google", "pixel_only"): "google_organic",
+    ("google", "manager"): "google_organic",
+    ("google", "unknown"): "google_organic",
+    ("facebook", "paid_confirmed"): "facebook",
+    ("unattributed", "pixel_only"): "unattributed",
+}
+
+
+@pytest.mark.parametrize("verdict, shown", list(TAB_PLATFORM_GOLDEN.items()),
+                         ids=[f"{p}-{t}" for p, t in TAB_PLATFORM_GOLDEN])
+def test_the_tab_names_the_platform_as_it_did(verdict, shown):
+    platform, traffic_type = verdict
+    assert tab_platform(platform, traffic_type) == shown
+
+
+def test_every_traffic_type_has_a_google_name_frozen():
+    """A traffic type added to the classifier lands in one of the two Google
+    slices by default; which one is a decision, so it has to be written here."""
+    types = {v[0] for _, v in CLASSIFY_GOLDEN} | {
+        row[-2] for _, _, row in PARSE_GOLDEN if row[-2] is not None}
+    assert types - {t for p, t in TAB_PLATFORM_GOLDEN if p == "google"} == set()
