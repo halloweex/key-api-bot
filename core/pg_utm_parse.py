@@ -47,6 +47,24 @@ interleave anywhere, and the second always reads what the first committed.
 `parse_incremental` does not take `PG_LAYER_LOCK` itself: its caller, the
 derivation, already holds it, and `asyncio.Lock` is not reentrant.
 
+Every wait for a lock inside Postgres is bounded by `lock_timeout`, rendered
+in milliseconds: under DN-19 the incremental waits while the derivation holds
+`PG_LAYER_LOCK`, so an unbounded wait on a key a stuck CLI or an idle psql
+holds would hang the derivation and, behind it, the sync.
+
+WHY THE FULL PARSE DELETES AND NEVER TRUNCATES
+
+TRUNCATE is not MVCC-safe: a REPEATABLE READ snapshot taken before it commits
+reads the table empty afterwards. In process that is held off by
+`PG_LAYER_LOCK` — `core/pg_warehouse_dq.py` takes its snapshot under it for
+exactly that reason — but a CLI's full parse holds a `PG_LAYER_LOCK` of its
+own, so its TRUNCATE would land inside the twins' snapshot and file 0 %
+website attribution against a table that was only being replaced. `DELETE`
+is versioned like every other write, so every snapshot sees the old verdicts
+or the new ones. It also takes no ACCESS EXCLUSIVE lock, which would queue
+every `/traffic` read behind the parse for up to `LOCK_WAIT_S`. The price is
+~33 K dead tuples per full parse, which is rare, for autovacuum to reclaim.
+
 A FULL PARSE REFUSES A SHRINK
 
 Replacing the table whole replaces it with whatever `bronze.orders` holds, and
@@ -55,7 +73,9 @@ database holds less than the truth. A missing row here is not a gap anybody
 sees — the order falls through the readers' `COALESCE` to organic or
 unattributed, on `/traffic` and in the Monday traffic report. So a full parse
 yielding under `FULL_PARSE_FLOOR_PCT` of the rows the table holds is refused,
-recorded in the watermark and returned, not raised, unless `force=True`.
+returned rather than raised, and logged at ERROR, unless `force=True`. It is
+also written into the watermark, but that row is the incremental's liveness
+stamp too, and the next successful incremental clears it — see `parse_full`.
 
 FAILURES
 
@@ -84,10 +104,9 @@ logger = logging.getLogger(__name__)
 ADVISORY_LOCK_KEY = 118142646187117
 
 # How long either shape waits for a lock before giving up — `PG_LAYER_LOCK` for
-# the full parse, and inside Postgres (`lock_timeout`) the advisory lock and the
-# full parse's TRUNCATE, which waits for every `/traffic` read in flight.
-# `core/pg_order_utm.py`'s number, for its reason: a normal wait is one Silver
-# tick, so this fires only on a genuine hang.
+# the full parse, and inside Postgres (`lock_timeout`) the advisory lock and any
+# row lock the writes meet. `core/pg_order_utm.py`'s number, for its reason: a
+# normal wait is one Silver tick, so this fires only on a genuine hang.
 LOCK_WAIT_S = 120
 
 # The share of the table's current rows a full parse must yield to replace it,
@@ -189,13 +208,23 @@ async def _write_chunked(conn, sql: str, rows: Sequence[tuple]) -> None:
         await conn.executemany(sql, rows[start:start + CHUNK])
 
 
+def lock_timeout_setting(seconds: float) -> str:
+    """`seconds` as a `lock_timeout` value Postgres cannot read as "no limit".
+
+    Milliseconds, and never under one: Postgres reads `0` as no timeout at all,
+    so whole seconds would turn any bound under a second — a test's, or a
+    tuned one — into an unbounded wait.
+    """
+    return f"{max(1, int(seconds * 1000))}ms"
+
+
 async def _lock(conn) -> None:
     """Bound every lock wait in this transaction, then take the parse's own.
 
     `SET LOCAL`, so the bound ends with the transaction and never leaks into a
     pooled connection's next user.
     """
-    await conn.execute(f"SET LOCAL lock_timeout = '{int(LOCK_WAIT_S)}s'")
+    await conn.execute(f"SET LOCAL lock_timeout = '{lock_timeout_setting(LOCK_WAIT_S)}'")
     await conn.execute("SELECT pg_advisory_xact_lock($1)", ADVISORY_LOCK_KEY)
 
 
@@ -254,8 +283,16 @@ async def parse_full(pool=None, *, force: bool = False) -> Dict[str, Any]:
     A refusal returns `{"refused": why, "parsed_rows": n, "current_rows": m}`
     rather than raising — `ship_order_utm`'s contract, for its reason: nothing
     is wrong with Postgres, the input is what is wrong, and the table holding
-    its previous verdicts is the correct state. It is still recorded in the
-    watermark, so `failures_since_ok` says a full parse was turned away.
+    its previous verdicts is the correct state.
+
+    Where a refusal, or a failure, stays on record: in what this returns or
+    raises to its caller, and in the ERROR log. It is also written into the
+    watermark, but `silver.order_utm`'s row there is the incremental's liveness
+    stamp, and the next successful incremental resets `failures_since_ok` and
+    clears `last_error` — on every derivation tick once DN-19 wires it, so
+    within minutes, and before the 07:30 `mirror_failing` or the canary looks.
+    That is right for the row, which says whether the parser is alive, and it
+    means the watermark is not where a turned-away reclassify is kept.
 
     Takes `PG_LAYER_LOCK` itself, so it must never be called by code already
     holding it: `asyncio.Lock` is not reentrant, and the call would wait out
@@ -292,15 +329,16 @@ async def _parse_full_locked(pool, *, force: bool) -> Dict[str, Any]:
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await _lock(conn)
-                # Counted in the transaction that would truncate, after the
-                # lock, so the number compared is the table this replaces.
+                # Counted in the transaction that would replace the table,
+                # after the lock, so the number compared is what it replaces.
                 current = await conn.fetchval(COUNT_SQL)
                 records = await conn.fetch(FULL_SELECT_SQL)
                 rows = await asyncio.to_thread(parse_rows, records)
                 if not force:
                     refused = refusal(len(rows), current)
                 if refused is None:
-                    await conn.execute(f"TRUNCATE {UTM_TABLE}")
+                    # DELETE, never TRUNCATE: see the module docstring.
+                    await conn.execute(f"DELETE FROM {UTM_TABLE}")
                     await _write_chunked(conn, insert_sql(), rows)
                     await conn.execute(_WATERMARK_OK, UTM_TABLE, len(rows))
     except Exception as exc:

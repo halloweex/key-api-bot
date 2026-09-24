@@ -24,8 +24,10 @@ Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` and CI supply one.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
@@ -324,6 +326,30 @@ class TestTheFullParse:
         assert wm["last_ok_at"] == ok_at and wm["last_rows"] == 10
 
     @pytest.mark.asyncio
+    async def test_a_refusal_is_kept_by_the_log_not_by_the_watermark(self, conn, caplog):
+        """The watermark row is the incremental's liveness stamp, so the next
+        successful incremental — every derivation tick under DN-19 — clears
+        a refusal written there. What keeps it is the return value and the
+        ERROR log. This pins both halves of `parse_full`'s account of where a
+        refusal lives: if the watermark starts keeping it, the docstring
+        changes with the test."""
+        await _ten_parsed(conn)
+        await conn.execute("DELETE FROM bronze.orders WHERE id > 201")
+
+        with caplog.at_level(logging.ERROR, logger=parse.__name__):
+            result = await parse.parse_full()
+
+        assert result["refused"].startswith("refused:")
+        logged = [r.getMessage() for r in caplog.records
+                  if r.name == parse.__name__ and r.levelno == logging.ERROR]
+        assert any(result["refused"] in m for m in logged), logged
+        assert (await watermark(conn))["failures_since_ok"] == 1
+
+        assert (await parse.parse_incremental())["parsed"] == 0
+        wm = await watermark(conn)
+        assert wm["failures_since_ok"] == 0 and wm["last_error"] is None
+
+    @pytest.mark.asyncio
     async def test_force_replaces_a_shrink_and_says_so(self, conn):
         await _ten_parsed(conn)
         await conn.execute("DELETE FROM bronze.orders WHERE id > 201")
@@ -346,9 +372,9 @@ class TestTheFullParse:
         assert wm["failures_since_ok"] == 1 and "bad comment" in wm["last_error"]
 
     @pytest.mark.asyncio
-    async def test_a_write_that_fails_after_the_truncate_leaves_the_table(self, conn):
-        """TRUNCATE, INSERT and the watermark are one transaction. A failure
-        after the TRUNCATE — here, once every row is already inserted — must
+    async def test_a_write_that_fails_after_the_delete_leaves_the_table(self, conn):
+        """DELETE, INSERT and the watermark are one transaction. A failure
+        after the DELETE — here, once every row is already inserted — must
         leave the verdicts a reader had, not an empty table."""
         before = await _ten_parsed(conn)
         real = parse._write_chunked
@@ -425,9 +451,12 @@ async def _held_by_another_session(pool):
     return other
 
 
+_OURS = f"order_id = ANY('{{{','.join(map(str, IDS))}}}'::int[])"
+
+
 async def _committed_rows(pool):
     async with pool.acquire() as c:
-        return await rows(c, f"order_id = ANY('{{{','.join(map(str, IDS))}}}'::int[])")
+        return await rows(c, _OURS)
 
 
 class TestTwoParsesSerialise:
@@ -488,6 +517,128 @@ class TestTwoParsesSerialise:
         assert set(await _committed_rows(pool)) == set(IDS[:-1])
         async with pool.acquire() as c:
             assert (await watermark(c))["failures_since_ok"] == 0
+
+
+class TestLockWaitsAreBounded:
+    @pytest.mark.parametrize("shape", ["full", "incremental"])
+    @pytest.mark.asyncio
+    async def test_a_key_held_elsewhere_fails_the_parse_within_the_bound(
+            self, committed, shape):
+        """Under DN-19 the incremental waits while the derivation holds
+        `PG_LAYER_LOCK`, and the sync waits behind that. A stuck CLI or an idle
+        psql holding the key must cost one failed parse, not the derivation.
+
+        Half a second on purpose: a bound rendered in whole seconds becomes
+        `'0s'`, which Postgres reads as no timeout, and the parse would wait
+        for as long as the other session cared to hold the key."""
+        pool = committed
+        run = parse.parse_full if shape == "full" else parse.parse_incremental
+        other = await _held_by_another_session(pool)
+        try:
+            started = time.monotonic()
+            with patch("core.pg_utm_parse.LOCK_WAIT_S", 0.5):
+                with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
+                    await asyncio.wait_for(run(), timeout=15)
+            waited = time.monotonic() - started
+        finally:
+            await other.close()
+
+        assert 0.4 <= waited < 10, waited
+        assert await _committed_rows(pool) == {}
+        async with pool.acquire() as c:
+            wm = await watermark(c)
+        assert wm["failures_since_ok"] == 1
+        assert "LockNotAvailableError" in wm["last_error"]
+
+
+class TestTheIncrementalIsOneTransaction:
+    @pytest.mark.asyncio
+    async def test_a_failure_between_chunks_leaves_nothing_behind(self, committed):
+        """The advisory lock, the read, every upsert chunk and the OK stamp
+        commit together or not at all. The `conn` fixture cannot show it —
+        there the parse's transaction is a savepoint inside the scenario's —
+        so this runs on the committed pool and looks from a second session."""
+        pool = committed
+        await parse.parse_incremental()
+        before = await _committed_rows(pool)
+        async with pool.acquire() as c:
+            ok_at = (await watermark(c))["last_ok_at"]
+            await order(c, IDS[0], comment=EDITED, updated_at=UPDATED + timedelta(minutes=5))
+            await order(c, IDS[-1])
+        real = parse._write_chunked
+
+        async def first_chunk_then_fail(c, sql, batch):
+            assert len(batch) > parse.CHUNK, "the batch must span several chunks"
+            await real(c, sql, batch[:parse.CHUNK])
+            raise ConnectionResetError("dropped between chunks")
+
+        with patch("core.pg_utm_parse.CHUNK", 1), \
+             patch("core.pg_utm_parse._write_chunked", new=first_chunk_then_fail):
+            with pytest.raises(ConnectionResetError):
+                await parse.parse_incremental()
+
+        assert await _committed_rows(pool) == before
+        async with pool.acquire() as c:
+            wm = await watermark(c)
+        assert wm["failures_since_ok"] == 1 and wm["last_ok_at"] == ok_at
+
+
+class TestReadersDuringAFullParse:
+    """A full parse run from a CLI holds a `PG_LAYER_LOCK` of its own, so
+    nothing in this process orders it against a reader. Here no reader takes
+    `PG_LAYER_LOCK` at all, which is that case."""
+
+    @pytest.mark.asyncio
+    async def test_a_snapshot_taken_before_it_still_reads_the_old_verdicts(self, committed):
+        """`core/pg_warehouse_dq.py` reads attribution out of one REPEATABLE
+        READ snapshot. A TRUNCATE committed after that snapshot was taken
+        would read as an empty table — 0 % website attribution, filed against
+        a table that was only being replaced."""
+        pool = committed
+        await parse.parse_full()
+        before = await _committed_rows(pool)
+        reader = await asyncpg.connect(DSN)
+        try:
+            tx = reader.transaction(isolation="repeatable_read", readonly=True)
+            await tx.start()
+            await reader.fetchval("SELECT count(*) FROM bronze.orders")   # the snapshot
+            async with pool.acquire() as c:
+                await c.execute(
+                    "UPDATE bronze.orders SET manager_comment = $1 WHERE id = ANY($2::int[])",
+                    EDITED, list(IDS))
+
+            result = await asyncio.wait_for(parse.parse_full(), timeout=30)
+            assert "refused" not in result, result
+
+            assert await rows(reader, _OURS) == before
+            await tx.rollback()
+        finally:
+            await reader.close()
+
+        after = await _committed_rows(pool)
+        assert set(after) == set(before)
+        assert {r[UTM_COLUMNS.index("utm_campaign")] for r in after.values()} == {"autumn"}
+
+    @pytest.mark.asyncio
+    async def test_an_open_read_of_the_table_does_not_hold_it_up(self, committed):
+        """A `/traffic` read holds ACCESS SHARE until its transaction ends. A
+        TRUNCATE would wait for it, and every read arriving after would queue
+        behind the TRUNCATE, for up to `LOCK_WAIT_S`."""
+        pool = committed
+        await parse.parse_full()
+        reader = await asyncpg.connect(DSN)
+        try:
+            tx = reader.transaction()
+            await tx.start()
+            await reader.fetchval(f"SELECT count(*) FROM {UTM_TABLE}")
+
+            with patch("core.pg_utm_parse.LOCK_WAIT_S", 1):
+                result = await asyncio.wait_for(parse.parse_full(), timeout=15)
+
+            assert "refused" not in result, result
+            await tx.rollback()
+        finally:
+            await reader.close()
 
 
 # ── the two engines agree ─────────────────────────────────────────────────────

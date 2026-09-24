@@ -65,3 +65,13 @@ class TestTheRowsItWrites:
         sets = parse.upsert_sql().split("DO UPDATE SET", 1)[1]
         for column in UTM_COLUMNS[1:]:
             assert f"{column} = EXCLUDED.{column}" in sets
+
+
+class TestTheLockBound:
+    @pytest.mark.parametrize("seconds, literal", [
+        (120, "120000ms"), (1, "1000ms"), (0.05, "50ms"), (0.0001, "1ms"), (0, "1ms")])
+    def test_it_is_milliseconds_and_never_zero(self, seconds, literal):
+        """Postgres reads a `lock_timeout` of 0 as no timeout at all. Whole
+        seconds would render any bound under one second as exactly that — an
+        unbounded wait wearing a bound's name."""
+        assert parse.lock_timeout_setting(seconds) == literal
