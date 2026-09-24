@@ -1985,7 +1985,7 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "manager_comment in fingerprint? Copy it to DuckDB from bronze.orders. "
      "Else read meta.mirror_state for silver.order_utm. Then POST /api/traffic/refresh"),
     ("buyers_without_verdict",
-     "Read replicate_operational's gender block in /api/jobs; a RULES_VERSION bump just before explains it"),
+     "Grep web's log for 'gender derivation failed'; read meta.mirror_state for app.buyer_gender"),
     ("buyers_missing_for_orders", "Read buyer_sync in /api/health: the step's failures and retry window"),
     ("pg_silver_arc_unwatched", "The Postgres twins did not look: read the reason in the finding"),
     ("pg_attribution_coverage_unwatched", "The orders mirror is failing or silent: see mirror freshness in /api/health"),

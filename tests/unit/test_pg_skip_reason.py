@@ -36,6 +36,11 @@ def _names(node) -> set:
            {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
 
 
+def _names_postgres(words: str) -> bool:
+    low = words.lower()
+    return any(w.lower() in low for w in POSTGRES_WORDS)
+
+
 def _is(call: ast.Call, *dotted: str) -> bool:
     """`call.func` spells one of `dotted`, e.g. 'pytest.skip' or 'mark.skipif'."""
     parts, f = [], call.func
@@ -60,12 +65,16 @@ def postgres_skips_with_the_wrong_words(root: Path = ROOT / "tests"):
                 reason = next((k.value for k in call.keywords if k.arg == "reason"), None)
                 words = _text(reason) if reason is not None else ""
                 condition = call.args[0] if call.args else None
-                reads_dsn = condition is not None and any(
-                    "DSN" in name for name in _names(condition))
-                about_pg = reads_dsn or any(w in words for w in POSTGRES_WORDS)
+                # The DSN read through a name (`not DSN`) or a literal
+                # (`not os.getenv("KS_PG_DSN")` — the ClickHouse test's shape,
+                # so the likeliest copy for a new Postgres one).
+                reads_dsn = condition is not None and (
+                    any("DSN" in name for name in _names(condition))
+                    or "PG_DSN" in _text(condition))
+                about_pg = reads_dsn or _names_postgres(words)
             elif _is(call, "pytest.skip"):
                 words = _text(call)
-                about_pg = any(w in words for w in POSTGRES_WORDS)
+                about_pg = _names_postgres(words)
             else:
                 continue
             if about_pg and PHRASE not in words:
@@ -94,6 +103,17 @@ def test_it_would_catch_both_spellings(tmp_path):
         encoding="utf-8")
     found = postgres_skips_with_the_wrong_words(tmp_path)
     assert [loc.rsplit(":", 1)[1] for loc, _ in found] == ["3", "5"]
+
+
+def test_it_sees_the_dsn_read_through_a_literal_and_any_case(tmp_path):
+    """Two shapes PR-1's review found the first walker blind to."""
+    (tmp_path / "test_x.py").write_text(
+        'import os, pytest\n'
+        'a = pytest.mark.skipif(not os.getenv("KS_PG_DSN"), reason="needs a database")\n'
+        'b = pytest.mark.skipif(True, reason="no postgres here")\n',
+        encoding="utf-8")
+    found = postgres_skips_with_the_wrong_words(tmp_path)
+    assert [loc.rsplit(":", 1)[1] for loc, _ in found] == ["2", "3"]
 
 
 def test_the_canonical_spelling_passes(tmp_path):

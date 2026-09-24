@@ -592,4 +592,24 @@ class TestBuyerSync:
 
         assert result.severity == "warn"
         assert "buyer_sync_stalled" in result.failure_keys
-        assert "Buyer sync" in canary._what_to_do(result)
+        assert "'Buyer'" in canary._what_to_do(result)
+
+    def test_a_step_never_reached_is_named_as_the_whole_tick_stopping(self):
+        """The step is attempted at least hourly. No attempt for as long as no
+        success means the tick stops before it — the orders fetch or write —
+        and blaming the buyers step would send the reader to the wrong place."""
+        stale = canary.BUYER_SYNC_STALE_S + 600
+        for attempt in (None, stale):
+            [(key, message)] = canary.check_buyer_sync(
+                self._block(last_ok_age_s=stale, last_attempt_age_s=attempt))
+            assert key == "buyer_sync_stalled"
+            assert "not reached" in message and "incremental tick" in message
+
+    def test_a_step_that_runs_and_fails_is_named_as_such_in_minutes(self):
+        """`_format_age` truncates to hours; 100 minutes read as '1h' against a
+        90-minute threshold."""
+        [(key, message)] = canary.check_buyer_sync(self._block(
+            last_ok_age_s=100 * 60, last_attempt_age_s=300,
+            last_error_class="KeyCRMConnectionError"))
+        assert "no success for 100 min" in message
+        assert "KeyCRMConnectionError" in message

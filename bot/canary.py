@@ -505,8 +505,19 @@ def check_buyer_sync(payload: Optional[dict]) -> "list[tuple[str, str]]":
                  f"buyer sync: {failures} failures in a row"
                  f" ({block.get('last_error_class') or 'unknown'})")]
     if age is not None and age > BUYER_SYNC_STALE_S:
+        # The step is attempted at least hourly, and every ten minutes after a
+        # failure. An attempt that is missing or as old as the success means
+        # the tick never REACHED the step — it stops earlier, at the orders
+        # fetch or write — and blaming the buyers step would send the reader
+        # to the wrong log line. Minutes, not `_format_age`: that truncates to
+        # hours, and "1h" read against a 90-minute threshold.
+        attempt = _number(block.get("last_attempt_age_s"))
+        if attempt is None or attempt > BUYER_SYNC_STALE_S:
+            return [("buyer_sync_stalled",
+                     f"buyer sync: step not reached for {age // 60} min — "
+                     "the incremental tick stops before it (orders fetch/write)")]
         return [("buyer_sync_stalled",
-                 f"buyer sync: no success for {_format_age(age)}"
+                 f"buyer sync: no success for {age // 60} min"
                  f" ({block.get('last_error_class') or 'no error recorded'})")]
     return []
 
@@ -841,7 +852,7 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("derivation_marks_",
      "Read meta.derivation_signal's last_error in meta.mirror_state, then meta.derivation_runs"),
     ("buyer_sync_",
-     "grep web's log for 'Buyer sync'; the step retries every 10 min, offers and stocks run regardless"),
+     "grep web's log for 'Buyer' and 'Incremental sync'; 'step not reached' means the whole tick stops"),
     ("write_chain_flag_mismatch",
      "Set the named KS_WRITE_* back to postgres, or run scripts/chain_copy_back.py to hand the tables back"),
     ("read_fallback_mode_invalid",

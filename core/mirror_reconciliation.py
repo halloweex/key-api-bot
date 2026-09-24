@@ -3377,8 +3377,11 @@ def buyer_completeness_findings(
                 "the current rules. The derivation is an hourly tick, so at "
                 "least one tick has passed them by. They are in no gendered "
                 "SMS audience — `gender IN (...)` never matches NULL — and "
-                "nothing on the page says so. Read replicate_operational's "
-                "`gender` block in /api/jobs; a RULES_VERSION bump deployed "
+                "nothing on the page says so. The derivation never fails its "
+                "job — it logs 'gender derivation failed' in web's log and "
+                "/api/jobs shows nothing — and a failed ship to Postgres is "
+                "stamped in meta.mirror_state for app.buyer_gender "
+                "(last_error, failures_since_ok). A RULES_VERSION bump deployed "
                 "shortly before this ran explains a large count by itself."
             ),
         ))
