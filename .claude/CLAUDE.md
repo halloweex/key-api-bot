@@ -2463,7 +2463,9 @@ docker run --rm --name chain-copy-back \
     -v /opt/key-api-bot/data:/app/data --env-file /opt/key-api-bot/.env \
     --network key-api-bot_default halloweex/keycrm-web:latest \
     python /app/scripts/chain_copy_back.py inventory --handover
-# BEFORE A FLIP: exit 0, or do not flip. A CRITICAL is a row the flip would
+# BEFORE A FLIP: first, with web still up, /api/health must show
+#   write_chains.pg_inventory_write.preflight.ok = true (DN-24). Then this:
+#   exit 0, or do not flip. A CRITICAL is a row the flip would
 #   strand: up -d web with the flag unchanged, let replicate_operational ship
 #   (POST /api/jobs/replicate_operational/trigger), stop, ask again.
 # TO ROLL BACK: the same command with --dry-run (also the default), then with
@@ -2574,6 +2576,38 @@ and nothing is latched, so each run reads `app.manual_expenses`' allocator and
 NULL count, and a Postgres it cannot read is `chain_invariants_unwatched`
 (WARN). Measured 2026-09-18, before chain 1's flip: 0 of 56 277
 `stock_movements` rows carry a NULL `recorded_at` or `source`.
+
+### Chain 1 before its flip (DN-24)
+
+Three things that would bite the day `KS_WRITE_INVENTORY=postgres` is set,
+closed while it is still off. None of them runs under today's flags.
+
+- **One rebuild at a time.** The stock step holds the scheduler's heavy lock;
+  the 01:00 `inventory_snapshot` job, its boot catch-up and
+  `POST /api/inventory/snapshot` do not. DuckDB's store lock hid that. In
+  Postgres two status rebuilds interleave, the second one's DELETE cannot see
+  the first one's new rows, and its INSERT dies on `offer_id` — reproduced.
+  So the rebuild and both snapshots take `pg_advisory_xact_lock(CHAIN_LOCK_KEY)`
+  as their first statement (`pg_locks`: classid 1802698752, objid 1). The
+  stock upsert does not: nothing but the stock step calls it.
+- **The pre-flip questions are asked for you.** `/api/health` publishes
+  `write_chains.pg_inventory_write.preflight` — `ok` and the `reasons` it is
+  not: the writing role lacks TEMPORARY (every status rebuild would raise), one
+  of the six tables was not copied within 50 min or its copy is failing, or
+  the latest `mirror_landing` run — read from a journal copy under 75 min old
+  — is over the canary's 30 h, failed, or filed anything against the six
+  tables or the chain. `ok` is null once the chain writes Postgres. It is not
+  a substitute for `chain_copy_back.py --handover`, which is still the gate:
+  read the preflight first, then stop web and ask the handover.
+- **A step failure is not the tick's end.** On the Postgres path the offers
+  and stocks steps run in `SyncService._inventory_step_postgres`, which never
+  raises: a failure (the watermark reads included — they are Postgres reads
+  there) is published as `write_chains.pg_inventory_write.sync_step`, error
+  class only; `last_sync_stocks` moves only after the upsert, the rebuild and
+  both snapshots commit; a failed offers step skips stocks; and the next
+  attempt waits 10 min, or the held watermark would refetch every stock from
+  KeyCRM once a minute. The DuckDB path is unchanged, a failure escaping it
+  included.
 
 ### The order write path asks the registry too (DN-22a)
 
