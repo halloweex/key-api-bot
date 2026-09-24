@@ -305,8 +305,11 @@ async def get_warehouse_status(request: Request):
     try:
         cutover = await warehouse_cutover.readiness()
     except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
+        # The class alone, as everywhere readiness reports: the text is a
+        # driver's and names the database user, host and port. Whole in the log.
+        logger.error("cutover readiness raised: %s: %s", type(e).__name__, e)
         cutover = {**warehouse_cutover.status(),
-                   "readiness_error": f"{type(e).__name__}: {e}"}
+                   "readiness_error": type(e).__name__}
     return {**status, "cutover": cutover}
 
 

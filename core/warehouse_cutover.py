@@ -337,7 +337,12 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
 
 async def gather_facts(env: Optional[Mapping[str, str]] = None) -> Facts:
     """The facts `evaluate_preconditions` needs from outside the environment.
-    Never raises: a fact that cannot be read is reported as unmet, by why."""
+    Never raises: a fact that cannot be read is reported as unmet, by why.
+
+    An exception is published by its class alone and logged whole at ERROR:
+    a driver's text names the database user, the host and the port, and a
+    status page — admin-only or not — is not where those go. `/api/health`'s
+    rule, and the log is where a person goes next anyway."""
     env = os.environ if env is None else env
     from core.pg import REQUIRED_REVISION
 
@@ -354,8 +359,10 @@ async def gather_facts(env: Optional[Mapping[str, str]] = None) -> Facts:
                 revision_error = "Postgres recorded no Alembic revision"
         except asyncio.TimeoutError:
             revision_error = f"Postgres did not answer in {REVISION_READ_TIMEOUT_S:g} s"
-        except Exception as exc:  # noqa: BLE001 — reported as unmet, by why
-            revision_error = f"{type(exc).__name__}: {exc}"
+        except Exception as exc:  # noqa: BLE001 — reported as unmet, by class
+            logger.error("cutover readiness: the Postgres revision could not be "
+                         "read: %s: %s", type(exc).__name__, exc)
+            revision_error = type(exc).__name__
 
     owners: Optional[Mapping[str, Tuple[str, ...]]]
     bridge_error = None
@@ -363,8 +370,10 @@ async def gather_facts(env: Optional[Mapping[str, str]] = None) -> Facts:
         from core.repositories.goals import sales_type_bridge_owners
 
         owners = sales_type_bridge_owners()
-    except Exception as exc:  # noqa: BLE001 — reported as unmet, by why
-        owners, bridge_error = None, f"{type(exc).__name__}: {exc}"
+    except Exception as exc:  # noqa: BLE001 — reported as unmet, by class
+        logger.error("cutover readiness: the write-chain registry could not be "
+                     "read: %s: %s", type(exc).__name__, exc)
+        owners, bridge_error = None, type(exc).__name__
 
     open_retired: Optional[Mapping[str, Optional[str]]]
     open_retired_error = None

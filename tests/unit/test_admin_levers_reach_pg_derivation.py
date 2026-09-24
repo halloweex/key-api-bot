@@ -122,9 +122,15 @@ class TestTheCutoverReadiness:
         keys = [u["key"] for u in cutover["unmet"]]
         assert keys and set(keys) <= set(cutover["preconditions"])
 
-    def test_a_readiness_that_raises_costs_the_block_not_the_page(self, mode):
+    def test_a_readiness_that_raises_costs_the_block_not_the_page(self, mode, caplog):
+        """By its class: a driver's text names the database user, host and
+        port. The whole of it goes to the log."""
         mode(None)
-        body = TestStatus()._status(readiness=AsyncMock(side_effect=RuntimeError("boom")))
+        text = 'password authentication failed for user "ks_app"'
+        with caplog.at_level("ERROR", logger="web.routes.api.admin"):
+            body = TestStatus()._status(readiness=AsyncMock(side_effect=RuntimeError(text)))
         assert body["last_refresh"] == "x"
-        assert "RuntimeError" in body["cutover"]["readiness_error"]
+        assert body["cutover"]["readiness_error"] == "RuntimeError"
+        assert "ks_app" not in repr(body)
+        assert text in caplog.text
         assert body["cutover"]["mode"] == "duckdb"

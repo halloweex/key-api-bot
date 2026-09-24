@@ -463,11 +463,21 @@ class TestGatheringTheFacts:
             facts = asyncio.run(wc.gather_facts({"KS_PG_DSN": "postgresql://x"}))
         assert facts.revision == REQUIRED_REVISION and facts.revision_error is None
 
-    def test_a_read_that_raises_is_a_reason_not_an_exception(self):
-        with patch("core.pg.current_revision",
-                   AsyncMock(side_effect=OSError("connection refused"))):
+    # What asyncpg says to a wrong password and to a closed port — the review
+    # measured both on a real server: the user, the host and the port.
+    DRIVER_TEXT = ('password authentication failed for user "ks_app"',
+                   "[Errno 61] Connect call failed ('127.0.0.1', 55582)")
+
+    @pytest.mark.parametrize("text", DRIVER_TEXT)
+    def test_a_read_that_raises_is_a_reason_by_its_class_alone(self, text, caplog):
+        with caplog.at_level(logging.ERROR, logger="core.warehouse_cutover"), \
+                patch("core.pg.current_revision", AsyncMock(side_effect=OSError(text))):
             facts = asyncio.run(wc.gather_facts({"KS_PG_DSN": "postgresql://x"}))
-        assert facts.revision is None and "OSError" in facts.revision_error
+        assert facts.revision is None and facts.revision_error == "OSError"
+        (u,) = [u for u in wc.evaluate_preconditions(MET_ENV, facts)
+                if u.key == "pg_revision"]
+        assert "OSError" in u.detail and text not in u.detail
+        assert text in caplog.text   # the whole of it, where a person looks next
 
     def test_a_read_that_hangs_is_bounded(self, monkeypatch):
         async def hang():
@@ -483,11 +493,13 @@ class TestGatheringTheFacts:
             facts = asyncio.run(wc.gather_facts({"KS_PG_DSN": "postgresql://x"}))
         assert "no Alembic revision" in facts.revision_error
 
-    def test_a_registry_that_raises_is_a_reason(self):
-        with patch("core.repositories.goals.sales_type_bridge_owners",
-                   side_effect=RuntimeError("registry")):
+    def test_a_registry_that_raises_is_a_reason_by_its_class(self, caplog):
+        with caplog.at_level(logging.ERROR, logger="core.warehouse_cutover"), \
+                patch("core.repositories.goals.sales_type_bridge_owners",
+                      side_effect=RuntimeError("registry at /opt/app")):
             facts = asyncio.run(wc.gather_facts({}))
-        assert facts.bridge_owners is None and "registry" in facts.bridge_error
+        assert facts.bridge_owners is None and facts.bridge_error == "RuntimeError"
+        assert "registry at /opt/app" in caplog.text
 
 
 class TestReadiness:
