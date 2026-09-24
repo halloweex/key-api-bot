@@ -619,16 +619,56 @@ class TestTheRowValues:
         assert issue.severity == Severity.CRITICAL and issue.sample_ids == (b,)
 
     @pytest.mark.asyncio
-    async def test_a_cancelled_first_order_leaves_the_buyers_later_order_in_flight(self, rv):
-        """The later order's own stamp is three hours old, but its pass-2
-        columns moved because its sibling changed two minutes ago. Judged by
-        its own stamp it would page before the rebuild it is owed."""
-        b, c = ROW_IDS[1], ROW_IDS[2]
+    async def test_a_cancelled_first_order_leaves_the_buyers_later_orders_in_flight(self, rv):
+        """Buyer 1's first order is cancelled two minutes ago. Their second
+        becomes their first, so `is_new_customer` and `buyer_first_order_date`
+        both move; their third moves `buyer_first_order_date` alone. Both own
+        stamps are three hours old, before the last rebuild: judged by them,
+        both would be covered CRITICALs a rebuild away from clean. The third
+        is the trigger on `buyer_first_order_date` alone, which the round-3
+        review found no test exercised."""
+        from core.pg_silver import rebuild_silver
+
+        b, third = ROW_IDS[1], ROW_IDS[7]
         async with rv.acquire() as conn:
+            await _landed(conn, third, buyer=97001, days_ago=1)
+        await rebuild_silver(rv)
+        async with rv.acquire() as conn:
+            await _rebuilt(conn, minutes_ago=60)
             await _touch(conn, b, minutes_ago=2, status_id=19, status_group_id=6)
         values, judged = await self._read(rv)
-        assert (values.reported, values.in_flight) == (0, 2)
+        assert (values.reported, values.in_flight) == (0, 3)
         assert "pg_silver_row_values" not in judged
+
+    @pytest.mark.asyncio
+    async def test_the_sample_leads_with_the_rows_that_page(self, rv):
+        """One row a rebuild covered and one still inside the repair window,
+        the covered one with the lower id. It comes first: the ids a reader
+        opens are the ones the CRITICAL is about, and waiting rows cannot push
+        it out of the ten."""
+        from core.data_quality import Severity
+
+        covered, waiting = ROW_IDS[0], ROW_IDS[6]
+        async with rv.acquire() as conn:
+            await _touch(conn, covered, minutes_ago=40, grand_total=150)
+            await _rebuilt(conn, minutes_ago=25)
+            await _touch(conn, waiting, minutes_ago=22, grand_total=150)
+        values, judged = await self._read(rv)
+        assert (values.reported, values.covered) == (2, 1)
+        issue = judged["pg_silver_row_values"]
+        assert issue.severity == Severity.CRITICAL and issue.sample_ids == (covered, waiting)
+
+    @pytest.mark.asyncio
+    async def test_half_a_hryvnia_is_a_difference(self, rv):
+        """`grand_total`'s tolerance is DuckDB's 0.01 — an allowance for float
+        arithmetic, not a threshold of materiality."""
+        from decimal import Decimal
+
+        a = ROW_IDS[0]
+        async with rv.acquire() as conn:
+            await _touch(conn, a, minutes_ago=30, grand_total=Decimal("100.50"))
+        values, _ = await self._read(rv)
+        assert (values.reported, values.columns) == (1, (("grand_total", 1),))
 
     @pytest.mark.asyncio
     async def test_an_order_moved_to_another_buyer_is_a_recent_change_for_the_old_one(self, rv):
