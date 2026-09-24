@@ -421,6 +421,11 @@ _CONNECT_CALLS = {"get_pool", "require_revision", "_pool"}
 _LATCHES_BEFORE_ACQUIRE = {
     "pg_inventory_write": "chain 1 latches before acquire; DN-24 rewrites those lines",
     "pg_expenses_write": "chain 8 latches before acquire; it is live, left for its own change",
+    # Chain 7a (DN-25) was written in parallel with this rule and merged
+    # beside it: its `set_goal` still latches between `_pool()` and the
+    # acquire. Named rather than rewritten on the rebase, so fixing it is its
+    # own change and this entry turns red the day it lands.
+    "pg_goals_write": "chain 7a latches before acquire; merged beside DN-26, left for its own change",
 }
 
 

@@ -2671,7 +2671,7 @@ Rollback is `scripts/chain_copy_back.py expense_types` once latched.
 
 **The latch waits for a connection.** 6a latches inside `pool.acquire()`, not
 between `_pool()` and it: an acquire that times out during the Sunday sync
-must not move the chain with nothing written. Chains 1 and 8 still latch
+must not move the chain with nothing written. Chains 1, 8 and 7a still latch
 before the acquire; `tests/unit/test_chain_latch.py` names them in a strict
 xfail ledger that can only shrink, and holds every other chain to the rule.
 
