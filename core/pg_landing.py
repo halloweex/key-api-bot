@@ -38,7 +38,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence
 
 # At module level, unlike the other `core.pg_*` imports here, because
 # `write_orders` names one of its constants in a default argument. Safe: that
@@ -191,11 +191,102 @@ async def _record_failure(table: str, error: str) -> bool:
         return False
 
 
+# ─── Who writes these tables: the question every shipper asks first ──────────
+#
+# DN-22a asked it on the order paths, DN-22b on every other path that ships a
+# DuckDB copy (or a KeyCRM payload DuckDB also receives) into `bronze.*` and
+# `app.*`: the catalogue, the order-level expenses, the buyers and the manager
+# classification, with their backfills, hourly ids-diffs, admin backfill routes
+# and daily comparisons. A write chain that takes one of these tables puts rows
+# in Postgres that DuckDB never sees, and each of those paths would otherwise
+# ship DuckDB's copy over them — or, for the comparisons, report every one of
+# them as a discrepancy the check itself created.
+#
+# `unit` is the tables one shipper writes in one transaction. Ownership passes
+# for a unit as a whole — whoever takes the buyers takes their contacts, and a
+# classification without its managers is not a classification — so a shipper
+# stands down on any of its unit, and `tests/unit/test_write_chains.py` derives
+# the units from what each writer writes and fails on a chain that splits one.
+
+
+def tables_stood_down(unit: Sequence[str]) -> FrozenSet[str]:
+    """Which of `unit` a write chain has taken — the local answer. Never raises.
+
+    The marker and the flag, asked of only the chains that declare one of these
+    tables (`write_chains.stood_down_among`): with none declaring them — every
+    table here today — nothing is evaluated at all, so the per-tick mirrors
+    that ask this read no variable and open no file.
+
+    This is the answer the **sync's own shippers** take — `_mirror`,
+    `pg_buyers.mirror_buyers`, `pg_replication.replicate_managers` — because
+    they are the write path, and a Postgres read there is the one
+    `writes_postgres()` exists to avoid. Everything that already holds a pool
+    asks `tables_stood_down_or_owned` instead.
+    """
+    from core.write_chains import stood_down_among
+
+    return stood_down_among(unit)
+
+
+def owned_among(owners: Mapping[str, str], unit: Sequence[str]) -> FrozenSet[str]:
+    """All of `unit` when an owner row claims any of it, else nothing. Pure.
+
+    An owner row counts through the chain that declares it (`claimed_tables`)
+    and also as itself: after an image rollback to a build older than the
+    chain, no chain here declares the table and `claimed_tables` alone would
+    hand it back to DuckDB — the lost-marker case arrived at by another road.
+    Takes the rows already read, so a caller asking about several units asks
+    Postgres once and cannot get two answers in one run.
+    """
+    from core import chain_latch
+
+    whole = frozenset(unit)
+    owned = (chain_latch.claimed_tables(owners) | set(owners)) & whole
+    return whole if owned else frozenset()
+
+
+async def tables_stood_down_or_owned(pool, unit: Sequence[str]) -> FrozenSet[str]:
+    """`tables_stood_down(unit)`, and what the owner rows in Postgres say.
+
+    DN-06's rule (`chain_latch.claimed_chains`): anything already holding a
+    Postgres connection stands down on either copy of the latch, because the
+    marker lives on a bind mount and a lost `./data` would otherwise make the
+    chain's rows look like DuckDB's again. Asked after `require_revision()` —
+    the owner rows live in `meta.chain_watermarks` (revision 0032) — and it
+    raises whatever `read_owners` raises: an owner row that could not be read
+    is not an owner row that is absent, and every caller lets the error through
+    to its own failure handling.
+    """
+    from core import chain_latch
+
+    owners = await chain_latch.read_owners(pool)
+    return tables_stood_down(unit) | owned_among(owners, unit)
+
+
+def stood_down_reason(moved) -> str:
+    """The one sentence every stood-down path reports, so a log, a job result
+    and a route's 409 say the same thing about the same state."""
+    return "stood down: a write chain owns " + ", ".join(sorted(moved))
+
+
 async def _mirror(table: str, columns: Sequence[str], rows: List[tuple]) -> MirrorOutcome:
     out = MirrorOutcome(table=table, rows=len(rows))
 
     if not enabled():
         out.skipped = f"{MIRROR_ENV} is off"
+        return out
+
+    # The catalogue and the order-level expenses, from every sync site that
+    # ships them (DN-22b): once a write chain owns the table, its writer puts
+    # rows in Postgres DuckDB never sees, and this upsert would write DuckDB's
+    # copy over them. Skipped rather than failed — nothing is recorded against
+    # the watermark, because nothing went wrong — and asked on the local answer
+    # alone, since this runs on the sync's own tick.
+    moved = tables_stood_down((table,))
+    if moved:
+        out.skipped = stood_down_reason(moved)
+        logger.info("mirror: %s; %d row(s) not shipped out of DuckDB",
+                    out.skipped, len(rows))
         return out
 
     try:
@@ -284,6 +375,9 @@ async def mirror_expenses(orders_with_expenses: List[Dict[str, Any]]) -> MirrorO
 
 ORDERS_TABLE = "bronze.orders"
 ORDER_PRODUCTS_TABLE = "bronze.order_products"
+# What `write_orders` writes in one transaction, and so what changes hands as
+# one — see `tables_stood_down`.
+ORDER_UNIT = (ORDERS_TABLE, ORDER_PRODUCTS_TABLE)
 
 
 def order_tables_stood_down() -> FrozenSet[str]:
@@ -313,9 +407,7 @@ def order_tables_stood_down() -> FrozenSet[str]:
     transaction would be the mirror's to swallow — the rows lost to Postgres
     over a question that could have been asked outside it.
     """
-    from core.write_chains import stood_down_among
-
-    return stood_down_among((ORDERS_TABLE, ORDER_PRODUCTS_TABLE))
+    return tables_stood_down(ORDER_UNIT)
 
 
 async def order_tables_stood_down_or_owned(pool) -> FrozenSet[str]:
@@ -355,12 +447,7 @@ async def order_tables_stood_down_or_owned(pool) -> FrozenSet[str]:
     order table owned stands both down, the unit rule above held where no
     chain is left to say it.
     """
-    from core import chain_latch
-
-    order_tables = frozenset({ORDERS_TABLE, ORDER_PRODUCTS_TABLE})
-    owners = await chain_latch.read_owners(pool)
-    owned = (chain_latch.claimed_tables(owners) | set(owners)) & order_tables
-    return order_tables_stood_down() | (order_tables if owned else frozenset())
+    return await tables_stood_down_or_owned(pool, ORDER_UNIT)
 
 
 # Every column except `manager_comment`, which has the COALESCE above.

@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 
 MANAGERS_TABLE = "bronze.managers"
 CLASSIFICATIONS_TABLE = "app.manager_classifications"
+# What `write_managers` replaces in one transaction, and so what changes hands
+# as one: a classification is read against its managers, never alone
+# (`pg_landing.tables_stood_down`).
+MANAGER_UNIT = (MANAGERS_TABLE, CLASSIFICATIONS_TABLE)
 
 MANAGER_COLUMNS: Tuple[str, ...] = (
     "id", "name", "email", "status", "is_retail",
@@ -126,6 +130,15 @@ async def replicate_managers(store) -> Dict[str, Any]:
     Postgres being unreachable. A failure is counted, logged at ERROR and
     written to the watermark — never swallowed at DEBUG, which is the shape of
     the 2026-08-09 incident.
+
+    **Skipped, and says so, once a write chain owns either table** (DN-22b).
+    This is a full replace out of DuckDB, so against a chain's rows it would
+    not overwrite some of them — it would delete every classification a human
+    made in Postgres since the handover and put DuckDB's frozen answer in
+    their place. Asked before DuckDB is read, and on the local answer alone:
+    the callers are the sync's manager step and the retail-status endpoint's
+    write path, the per-tick mirrors' shape. The owner rows are the daily
+    comparison's to read, where a lost marker is filed CRITICAL.
     """
     from core import pg_landing
 
@@ -136,6 +149,14 @@ async def replicate_managers(store) -> Dict[str, Any]:
 
     if not pg_landing.enabled():
         out["skipped"] = f"{pg_landing.MIRROR_ENV} is off"
+        return out
+
+    moved = pg_landing.tables_stood_down(MANAGER_UNIT)
+    if moved:
+        out["skipped"] = pg_landing.stood_down_reason(moved)
+        out["stood_down"] = sorted(moved)
+        logger.info("replicate: %s; the classification is not copied out of "
+                    "DuckDB", out["skipped"])
         return out
 
     try:

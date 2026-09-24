@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 BUYERS_STATE = "bronze.buyers"
 CONTACTS_STATE = "bronze.buyer_contacts"
+# What `_write` writes in one transaction, and so what changes hands as one:
+# whoever takes the buyers takes their contacts (`pg_landing.tables_stood_down`).
+BUYER_UNIT = (BUYERS_STATE, CONTACTS_STATE)
 
 # The shared contract: what both stores hold for a buyer, bookkeeping aside.
 BUYER_COLUMNS: Tuple[str, ...] = (
@@ -165,11 +168,23 @@ async def _record_failure(error: str) -> None:
 
 
 async def mirror_buyers(buyers: Sequence[Any]) -> Dict[str, Any]:
-    """Ship one parsed Buyer batch. Never raises."""
+    """Ship one parsed Buyer batch. Never raises.
+
+    Skipped, and says so, once a write chain owns the buyers or their contacts
+    (DN-22b): its writer puts buyers in Postgres DuckDB never sees, and this
+    upsert — with its per-buyer contact delete — would write DuckDB's copy
+    over them. The local answer only: this is the sync's own write path.
+    """
     from core import pg_landing
 
     if not pg_landing.enabled():
         return {"skipped": "KS_PG_DSN is not set"}
+    moved = pg_landing.tables_stood_down(BUYER_UNIT)
+    if moved:
+        reason = pg_landing.stood_down_reason(moved)
+        logger.info("pg_buyers: %s; %d buyer(s) not shipped out of DuckDB",
+                    reason, len(buyers))
+        return {"skipped": reason, "stood_down": sorted(moved)}
     if not buyers:
         return {"rows": 0}
     try:
@@ -204,10 +219,29 @@ async def backfill_buyers(store, *, chunk: int = 2000) -> Dict[str, Any]:
     the difference, stamp `backfilled_at` only on a run that finished with
     nothing remaining. It does not repair a buyer present on both sides and
     differing — that is the daily comparison's business.
-    """
-    from core.pg import get_pool
 
-    pool = await get_pool()
+    Refuses — raises, `backfill_orders`' way — once a write chain owns the
+    buyers or their contacts (DN-22b): "missing from Postgres" stops meaning
+    "lost by the mirror" the moment another writer fills the table. The local
+    answer before Postgres is asked anything; the owner rows once the pool is
+    in hand, after `require_revision()`, so a lost marker cannot make the
+    chain's buyers look like DuckDB's again.
+    """
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    moved = pg_landing.tables_stood_down(BUYER_UNIT)
+    if not moved:
+        pool = await get_pool()
+        await require_revision()
+        moved = await pg_landing.tables_stood_down_or_owned(pool, BUYER_UNIT)
+    if moved:
+        raise RuntimeError(
+            f"{', '.join(sorted(moved))} is written by a write chain, not "
+            "shipped out of DuckDB; refusing to backfill over rows only "
+            "Postgres holds."
+        )
+
     async with store.connection() as conn:
         dk_ids = {r[0] for r in conn.execute("SELECT id FROM buyers").fetchall()}
     async with pool.acquire() as conn:
@@ -268,6 +302,12 @@ async def hourly_ids_diff(store) -> Dict[str, Any]:
     and *differing* belongs to the comparison. Never raises — the job's
     contract. The store admits one process, which is why this rides the
     hourly job instead of being runnable from outside.
+
+    Stands down quietly once a write chain owns the buyers or their contacts
+    (DN-22b) — before it reads either table: on the local answer before it
+    asks Postgres anything, on the owner rows once it holds the pool.
+    `backfill_buyers` would refuse anyway, but as a raise, which this job
+    would turn into an ERROR every hour for a state that is a decision.
     """
     from core import pg_landing
 
@@ -278,9 +318,16 @@ async def hourly_ids_diff(store) -> Dict[str, Any]:
         # legitimately, and filing that as "the mirror lost something" would
         # cry wolf on day one. History = the watermark row already carries
         # backfilled_at from a previous clean pass.
-        from core.pg import get_pool
+        from core.pg import get_pool, require_revision
 
-        pool = await get_pool()
+        moved = pg_landing.tables_stood_down(BUYER_UNIT)
+        if not moved:
+            pool = await get_pool()
+            await require_revision()
+            moved = await pg_landing.tables_stood_down_or_owned(pool, BUYER_UNIT)
+        if moved:
+            return {"stood_down": sorted(moved)}
+
         async with pool.acquire() as conn:
             had_history = await conn.fetchval(
                 "SELECT backfilled_at IS NOT NULL FROM meta.mirror_state "

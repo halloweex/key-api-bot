@@ -929,32 +929,37 @@ class TestWhatTheStandDownTellsAHuman:
         assert "a human, not a job" in spec.clears
 
 
+def _admin_client(flags):
+    """A TestClient signed in as a hardcoded admin."""
+    import time as _time
+
+    from fastapi.testclient import TestClient
+
+    from core.permissions import ADMIN_USER_IDS
+    from web.main import app
+    from web.routes.api._deps import limiter
+    from web.routes.auth import (
+        SESSION_COOKIE, create_session_data, session_serializer,
+    )
+
+    limiter.reset()
+    admin_id = sorted(ADMIN_USER_IDS)[0]
+
+    async def _resolve(session):
+        return {"user_id": admin_id, "role": "admin"}
+
+    flags.setattr("web.routes.auth._resolve_session", _resolve)
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data(
+        {"id": str(admin_id), "first_name": "T", "last_name": "U",
+         "username": "t", "auth_date": str(int(_time.time()))}, role="admin",
+    )))
+    return client
+
+
 class TestTheAdminBackfill:
     def _client(self, flags):
-        import time as _time
-
-        from fastapi.testclient import TestClient
-
-        from core.permissions import ADMIN_USER_IDS
-        from web.main import app
-        from web.routes.api._deps import limiter
-        from web.routes.auth import (
-            SESSION_COOKIE, create_session_data, session_serializer,
-        )
-
-        limiter.reset()
-        admin_id = sorted(ADMIN_USER_IDS)[0]
-
-        async def _resolve(session):
-            return {"user_id": admin_id, "role": "admin"}
-
-        flags.setattr("web.routes.auth._resolve_session", _resolve)
-        client = TestClient(app)
-        client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data(
-            {"id": str(admin_id), "first_name": "T", "last_name": "U",
-             "username": "t", "auth_date": str(int(_time.time()))}, role="admin",
-        )))
-        return client
+        return _admin_client(flags)
 
     @pytest.fixture
     def backfill(self, flags):
@@ -1141,3 +1146,388 @@ class TestChain7aGoals:
         from core.pg_goals_write import CHAIN_TABLES
         from core.pg_operational import _FULL_REPLACE
         assert set(CHAIN_TABLES) <= {pg for pg, _d, _c, _o in _FULL_REPLACE}
+
+
+# ─── DN-22b: every other path that ships into bronze.* and app.* asks too ────
+#
+# The plan's fake chain: one table from each of chains 3–6 that is not an order
+# table. Three of the four are one half of a shipping unit — the buyers without
+# their contacts, the managers without their classifications — so every test
+# that sees a path stand down on it also sees the unit rule hold. Each
+# "ships nothing" has its control beside it, on the same recorder.
+
+BUYERS = "bronze.buyers"
+CONTACTS = "bronze.buyer_contacts"
+MANAGERS = "bronze.managers"
+CLASSIFICATIONS = "app.manager_classifications"
+EXPENSES = "bronze.expenses"
+PRODUCTS = "bronze.products"
+CATEGORIES = "bronze.categories"
+LANDING = (BUYERS, MANAGERS, EXPENSES, PRODUCTS)
+
+
+@pytest.fixture
+def landing_chain(flags):
+    """Register a fake chain owning `tables`; its flag is `env()`."""
+    import types
+
+    from core import write_chains
+
+    def register(tables=LANDING, env=lambda: True):
+        fake = types.ModuleType("core.pg_landing_write")
+        fake.WRITE_ENV = "KS_WRITE_LANDING"
+        fake.CHAIN_TABLES = tuple(tables)
+        fake.env_writes_postgres = env
+        flags.setattr(write_chains, "WRITE_CHAINS",
+                      write_chains.WRITE_CHAINS + (fake,))
+        return fake
+
+    return register
+
+
+def _no_landing_chain(flags) -> None:
+    """No chain in this build declares any table of the plan's fake chain —
+    made so, `_rolled_back`'s reason."""
+    from core import write_chains
+
+    units = {BUYERS, CONTACTS, MANAGERS, CLASSIFICATIONS, EXPENSES, PRODUCTS}
+    flags.setattr(write_chains, "WRITE_CHAINS", tuple(
+        c for c in write_chains.WRITE_CHAINS if not units & set(c.CHAIN_TABLES)))
+
+
+async def _landing_store(tmp_path):
+    """A DuckDB holding two buyers with a contact, one expense and a manager
+    with a classification — enough for every backfill to find a row to ship."""
+    from core.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(db_path=tmp_path / "dn22b.duckdb")
+    await store.connect()
+    async with store.connection() as conn:
+        conn.execute("INSERT INTO buyers (id, full_name) VALUES (1, 'Anna'), (2, 'Olha')")
+        conn.execute("INSERT INTO buyer_contacts (buyer_id, contact_type, value, "
+                     "is_primary) VALUES (1, 'phone', '+380500000001', TRUE)")
+        conn.execute("INSERT INTO expenses (id, order_id, expense_type_id, amount) "
+                     "VALUES (9, 1, 1, 100.00)")
+        conn.execute("INSERT OR REPLACE INTO managers (id, name, is_retail) "
+                     "VALUES (4, 'Manager', TRUE)")
+        conn.execute("INSERT OR REPLACE INTO manager_classifications "
+                     "(manager_id, is_retail, valid_from) VALUES (4, TRUE, DATE '1970-01-01')")
+    return store
+
+
+def _buyers():
+    from core.models import Buyer
+
+    return [Buyer(id=1, full_name="Anna", phones=["+380500000001"])]
+
+
+_EXPENSE_ORDERS = [{"id": 1, "expenses": [
+    {"id": 9, "expense_type_id": 1, "amount": "100.00", "description": "delivery",
+     "status": "paid", "payment_date": None, "created_at": WHEN}]}]
+
+
+async def _ship(path, store):
+    """Run one sync-side shipper the way its caller does."""
+    from core import pg_buyers, pg_landing, pg_replication
+
+    if path == "mirror_products":
+        return await pg_landing.mirror_products([{"id": 100, "name": "Serum"}])
+    if path == "mirror_categories":
+        return await pg_landing.mirror_categories([{"id": 7, "name": "Care"}])
+    if path == "mirror_expenses":
+        return await pg_landing.mirror_expenses(_EXPENSE_ORDERS)
+    if path == "mirror_buyers":
+        return await pg_buyers.mirror_buyers(_buyers())
+    if path == "replicate_managers":
+        return await pg_replication.replicate_managers(store)
+    raise AssertionError(path)
+
+
+# What each sync-side shipper writes, for the controls.
+_SHIPS = {
+    "mirror_products": PRODUCTS,
+    "mirror_expenses": EXPENSES,
+    "mirror_buyers": BUYERS,
+    "replicate_managers": MANAGERS,
+}
+
+
+def _skip_reason(out) -> str:
+    return out.skipped if hasattr(out, "skipped") else out.get("skipped")
+
+
+class TestTheSyncShippersStandDown:
+    """The per-tick mirrors and the classification copy: skipped with a
+    reason, and Postgres not asked anything — the write path's local answer."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_SHIPS))
+    async def test_without_a_chain_the_recorder_sees_the_write(
+            self, pool, tmp_path, path):
+        """The control. A recorder that could not see these writes would pass
+        every test below."""
+        store = await _landing_store(tmp_path)
+        await _ship(path, store)
+        assert pool.wrote(_SHIPS[path]), pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_SHIPS))
+    async def test_with_the_chain_it_reports_stood_down_and_writes_nothing(
+            self, pool, landing_chain, path):
+        landing_chain()
+        out = await _ship(path, _NoStore())
+        assert _skip_reason(out).startswith("stood down: a write chain owns "), out
+        assert pool.sql == []
+        _never_reached_postgres(pool)
+
+    @pytest.mark.asyncio
+    async def test_a_table_no_chain_declares_still_ships(self, pool, landing_chain):
+        """The question is asked per table, not as an off switch: the
+        categories are not the chain's, and they still go."""
+        landing_chain()
+        out = await _ship("mirror_categories", None)
+        assert out.ok and pool.wrote(CATEGORIES), pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path,half", [
+        ("mirror_buyers", CONTACTS), ("replicate_managers", CLASSIFICATIONS),
+    ])
+    async def test_either_half_of_a_unit_stands_the_unit_down(
+            self, pool, landing_chain, path, half):
+        """The other half of each unit: `_write` and `write_managers` write
+        both tables in one transaction, so a chain on either stops both."""
+        landing_chain(tables=(half,))
+        out = await _ship(path, _NoStore())
+        assert _skip_reason(out) == f"stood down: a write chain owns {half}", out
+        assert pool.sql == []
+
+    @pytest.mark.asyncio
+    async def test_a_flag_typo_stands_it_down_too(self, pool, landing_chain):
+        """A value no chain understands stands its tables down — the shipper
+        must not guess which store the rows belong to."""
+        def typo():
+            raise RuntimeError("KS_WRITE_LANDING='postgre' is not understood")
+
+        landing_chain(env=typo)
+        out = await _ship("mirror_products", None)
+        assert out.skipped.startswith("stood down"), out
+        assert pool.sql == []
+
+    @pytest.mark.asyncio
+    async def test_the_sync_writes_duckdb_and_ships_only_what_is_not_owned(
+            self, pool, landing_chain, tmp_path):
+        """`SyncService._upsert_orders_with_expenses`, the site that ships the
+        expenses every tick: DuckDB gets them, Postgres gets the orders — no
+        chain declares those here — and not the expenses."""
+        from core.sync_service import SyncService
+
+        landing_chain(tables=(EXPENSES,))
+        store = await _store(tmp_path)
+        order = dict(_order(1), expenses=_EXPENSE_ORDERS[0]["expenses"])
+        await SyncService(store)._upsert_orders_with_expenses([order])
+
+        async with store.connection() as conn:
+            assert conn.execute("SELECT count(*) FROM expenses").fetchone()[0] == 1
+        assert pool.wrote(ORDERS), pool.sql
+        assert not pool.wrote(EXPENSES), pool.sql
+
+
+# The backfills and the hourly diffs, which hold a pool and so read the owner
+# rows too: (the call, what it ships, how it says it stood down).
+_POOLED = {
+    "backfill_buyers": BUYERS,
+    "hourly_ids_diff": BUYERS,
+    "backfill_expenses": EXPENSES,
+    "hourly_expenses_ids_diff": EXPENSES,
+}
+
+
+async def _run_pooled(path, store):
+    from core import pg_buyers, pg_expense_backfill
+
+    return await {
+        "backfill_buyers": pg_buyers.backfill_buyers,
+        "hourly_ids_diff": pg_buyers.hourly_ids_diff,
+        "backfill_expenses": pg_expense_backfill.backfill_expenses,
+        "hourly_expenses_ids_diff": pg_expense_backfill.hourly_expenses_ids_diff,
+    }[path](store)
+
+
+# The unit each pooled path ships, for what its stand-down may name.
+_UNIT_OF = {BUYERS: {BUYERS, CONTACTS}, EXPENSES: {EXPENSES}}
+
+
+async def _expect_stood_down(path, store, caplog):
+    """A backfill refuses loudly; its hourly diff stands down quietly, naming
+    the table it ships and nothing outside that table's unit."""
+    table = _POOLED[path]
+    if path.startswith("hourly"):
+        with caplog.at_level("ERROR"):
+            out = await _run_pooled(path, store)
+        assert set(out) == {"stood_down"}, out
+        assert table in out["stood_down"], out
+        assert set(out["stood_down"]) <= _UNIT_OF[table], out
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+        return out
+    with pytest.raises(RuntimeError, match=f"{table}.* is written by a write chain"):
+        await _run_pooled(path, store)
+    return None
+
+
+class TestTheBackfillsAndTheHourlyDiffs:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_without_a_chain_it_writes(self, pool, tmp_path, path):
+        """The control: each ships DuckDB's row into the recorder. Postgres
+        holds nothing there, so everything DuckDB has is missing."""
+        store = await _landing_store(tmp_path)
+        out = await _run_pooled(path, store)
+        assert "error" not in out, out
+        assert pool.wrote(_POOLED[path]), pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_the_chain_stands_it_down_before_postgres(
+            self, pool, landing_chain, tmp_path, path, caplog):
+        landing_chain()
+        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        _never_reached_postgres(pool)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_the_owner_row_stands_it_down_when_the_marker_is_lost(
+            self, pool, landing_chain, tmp_path, path, caplog):
+        """Flag at duckdb, no marker: only the owner row in Postgres says the
+        table moved, and a path holding a pool reads it — DN-06's rule."""
+        landing_chain(env=lambda: False)
+        pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
+        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        assert pool.only_asked_who_owns(), pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_an_owner_row_no_chain_here_declares_still_holds(
+            self, flags, pool, tmp_path, path, caplog):
+        """An image older than the chain: the owner row is read as itself."""
+        _no_landing_chain(flags)
+        pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
+        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        assert pool.only_asked_who_owns(), pool.sql
+
+    @pytest.mark.asyncio
+    async def test_the_buyers_owner_row_holds_their_contacts_too(
+            self, flags, pool, tmp_path):
+        """An owner row for either half of the unit holds the whole unit."""
+        from core.pg_buyers import hourly_ids_diff
+
+        _no_landing_chain(flags)
+        pool.owner_rows = {CONTACTS: "2026-09-20T08:00:00+00:00"}
+        out = await hourly_ids_diff(await _landing_store(tmp_path))
+        assert out == {"stood_down": [CONTACTS, BUYERS]}, out
+        assert pool.only_asked_who_owns()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_an_unreadable_owner_row_ships_nothing(
+            self, pool, landing_chain, tmp_path, path):
+        """Not an absent owner row: the backfill raises it, the hourly diff
+        returns it as its error, and neither ships on the strength of it."""
+        landing_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        store = await _landing_store(tmp_path)
+        if path.startswith("hourly"):
+            out = await _run_pooled(path, store)
+            assert "unreadable" in out["error"], out
+        else:
+            with pytest.raises(RuntimeError, match="unreadable"):
+                await _run_pooled(path, store)
+        assert pool.only_asked_who_owns(), pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_a_schema_behind_the_code_breaks_before_the_owner_read(
+            self, pool, tmp_path, path):
+        """`require_revision()` first, so an old schema is a
+        `SchemaVersionError` and never a stand-down read off it — the owner
+        row is present here, so a path that read it first would stand down."""
+        from core import pg
+
+        pg.require_revision.side_effect = pg.SchemaVersionError(
+            "database at 0031, code wants 0033")
+        pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
+        store = await _landing_store(tmp_path)
+        if path.startswith("hourly"):
+            out = await _run_pooled(path, store)
+            assert out.get("error", "").startswith("SchemaVersionError"), out
+        else:
+            with pytest.raises(pg.SchemaVersionError):
+                await _run_pooled(path, store)
+        pg.require_revision.assert_awaited()
+        assert pool.sql == [] and pool.acquired == 0, pool.sql
+
+
+class TestTheAdminExpenseBackfill:
+    """`POST /api/mirror/backfill/expenses`: 409 before anything starts, the
+    orders route's arrangement. It used to hand the backfill's refusal back as
+    a 500 "Backfill failed"."""
+
+    @pytest.fixture
+    def backfill(self, flags):
+        from unittest.mock import AsyncMock
+
+        run = AsyncMock(return_value={"complete": True})
+        flags.setattr("core.pg_expense_backfill.backfill_expenses", run)
+        flags.setattr("web.routes.api.admin.get_store", AsyncMock(return_value=object()))
+        return run
+
+    def _post(self, flags):
+        return _admin_client(flags).post("/api/mirror/backfill/expenses")
+
+    REFUSAL = f"{EXPENSES} is written by a write chain, not shipped out of DuckDB"
+
+    def test_409_on_the_chain_and_postgres_is_not_asked(
+            self, flags, pool, landing_chain, backfill):
+        landing_chain()
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert res.json()["detail"].startswith(self.REFUSAL)
+        backfill.assert_not_called()
+        _never_reached_postgres(pool)
+
+    def test_409_on_the_owner_row_when_the_marker_is_lost(
+            self, flags, pool, landing_chain, backfill):
+        landing_chain(env=lambda: False)
+        pool.owner_rows = {EXPENSES: "2026-09-20T08:00:00+00:00"}
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert res.json()["detail"].startswith(self.REFUSAL)
+        backfill.assert_not_called()
+        assert pool.only_asked_who_owns()
+
+    def test_an_unreadable_owner_row_is_a_503(
+            self, flags, pool, landing_chain, backfill):
+        landing_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        res = self._post(flags)
+        assert res.status_code == 503, res.json()
+        assert "unreadable" in res.json()["detail"]
+        backfill.assert_not_called()
+
+    def test_a_schema_behind_the_code_is_a_503_before_the_owner_read(
+            self, flags, pool, backfill):
+        from core import pg
+
+        pg.require_revision.side_effect = pg.SchemaVersionError(
+            "database at 0031, code wants 0033")
+        pool.owner_rows = {EXPENSES: "2026-09-20T08:00:00+00:00"}
+        res = self._post(flags)
+        assert res.status_code == 503, res.json()
+        assert "SchemaVersionError" in res.json()["detail"]
+        assert pool.sql == [] and pool.acquired == 0
+        backfill.assert_not_called()
+
+    def test_without_a_chain_it_runs(self, flags, pool, backfill):
+        res = self._post(flags)
+        assert res.status_code == 200, res.json()
+        backfill.assert_awaited_once()
+        assert pool.only_asked_who_owns()
