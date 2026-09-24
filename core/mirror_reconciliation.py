@@ -1457,8 +1457,8 @@ def _owner_rows_only_description(tables: str, order_tables: set) -> str:
             "from one"
         )
     return (
-        f"Not compared: an owner row in Postgres (meta.chain_watermarks) says "
-        f"a write chain owns {tables}, but this process's own answer says "
+        f"Not compared: an owner row in Postgres says a write chain owns "
+        f"{tables}, but this process's own answer says "
         f"DuckDB still writes them: {why}. Until "
         "then every sync tick writes DuckDB's copy over the chain's rows and "
         "archives each overwrite in app.order_versions; the ids-diff, the "
