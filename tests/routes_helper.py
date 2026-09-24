@@ -135,3 +135,10 @@ def route_dependencies(app: Any, path: str, method: Optional[str] = None) -> Tup
     """Every dependency callable applying to an endpoint, inherited included."""
     found = find_endpoint(app, path, method)
     return found.dependencies if found else ()
+
+
+def is_required(param: Any) -> bool:
+    """Whether a route parameter (a `dependant.query_params` entry) must be
+    sent. `ModelField.required` is gone in fastapi 0.141; the pydantic
+    `FieldInfo` underneath answers the same question on both versions."""
+    return param.field_info.is_required()

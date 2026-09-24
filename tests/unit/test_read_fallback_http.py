@@ -444,7 +444,9 @@ def _request_for(endpoint) -> tuple:
     path = endpoint.path
     for param in dependant.path_params:
         path = path.replace("{" + param.name + "}", str(_example(param)))
-    params = {q.name: _example(q) for q in dependant.query_params if q.required}
+    from tests.routes_helper import is_required
+
+    params = {q.name: _example(q) for q in dependant.query_params if is_required(q)}
     return path, params
 
 
