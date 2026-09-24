@@ -667,6 +667,10 @@ class TestEveryPostgresWriterAsksTheRegistry:
             assert key[1] in walk.executors, f"{key} no longer executes what it is handed"
             assert any(key[1] in _awaited_names(walk.fns[w][1]) and walk.routed(w)
                        for w in writers), f"nothing writes through {key}"
+        # And nothing else is excused by them: a writer that also calls
+        # asyncpg itself, or any other executor, is not routed.
+        assert {w[0] for w in writers if walk.routed(w)} == {
+            "core/repositories/customers.py", "core/repositories/users.py"}
 
     def test_the_exempt_modules_are_the_registered_chains(self, walk):
         """The chain writers are the destination the registry routes to, and
@@ -769,16 +773,17 @@ class TestTheWalkSeesWhatTheReviewFound:
         """`_users_run`'s shape: rendered into a local, handed to a helper that
         hands it to asyncpg. The target is a hole the helper fills, so it
         counts as unknown — which is what makes the store's writers visible
-        and `_ROUTED_BY_SWITCH` necessary."""
+        and `_ROUTED_BY_SWITCH` necessary. The inner helper is not called
+        `execute` here, so only the fixed point can reach it."""
         assert _targets_of("""
-            async def execute(sql, params):
+            async def _send(sql, params):
                 pool = await get_pool()
                 async with pool.acquire() as conn:
                     await conn.execute(sql, *params)
 
             async def _run(self, sql, params):
                 rendered = numbered(sql.format(users=TABLE))
-                await execute(rendered, params)
+                await _send(rendered, params)
 
             async def approve(self, user_id):
                 await self._run("UPDATE {users} SET status = 'approved' "
