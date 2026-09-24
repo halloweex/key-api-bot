@@ -17,7 +17,9 @@ What is proved here, through the real app and a Postgres pool that raises:
   fallback, and the refusal is counted and published beside the mode instead;
 - the trend's forecast overlay, whose reads already degrade to "no forecast",
   drops under a refusal while the chart answers — no DuckDB number reaches
-  the page, and the refusal is counted;
+  the page, and the refusal is counted — while the forecast's own endpoint,
+  `/api/revenue/forecast`, answers 503 like any route rather than "Forecast
+  not available yet";
 - a switch naming Postgres with no `KS_PG_DSN` at all is refused under `off`
   exactly like a failed read, for every one of those routes — the gate is
   simply false there, and a lost DSN line would otherwise put the whole
@@ -89,6 +91,13 @@ CASES: List[Case] = [
          "/api/products/intel/summary", WINDOW),
     Case("inventory", "inventory", {"KS_READ_INVENTORY": "postgres"},
          "/api/stocks/summary"),
+    # The forecast's own endpoint, which the frontend calls for the last
+    # forecast date. Its reads are the goals router's; a refusal there used
+    # to come back as 200 "Forecast not available yet" — an outage read as
+    # an untrained model. The trend's overlay is the other door to the same
+    # reads, and deliberately drops instead (below).
+    Case("forecast", "goals", {"KS_READ_GOALS": "postgres"},
+         "/api/revenue/forecast"),
     # Beyond the plan's list, and not by choice: `fall_back` is one raise, so
     # every other router behind an HTTP route refuses too. Each is here to
     # prove that nothing between it and the handler turns the refusal into a
@@ -225,7 +234,8 @@ class TestOffRefuses:
         the chart answers without the overlay, nothing is served from DuckDB,
         and the refusal is still counted — so a broken goals port stays
         visible under `read_fallback_mode.refused`. What `off` forbids is
-        DuckDB's numbers, and none reach the page."""
+        DuckDB's numbers, and none reach the page. The forecast's own
+        endpoint is not an overlay and answers 503 (the `forecast` case)."""
         _mode(monkeypatch, "off")
         _switches(monkeypatch, {"KS_READ_GOALS": "postgres"})
         response = admin_client.get("/api/revenue/trend", params={

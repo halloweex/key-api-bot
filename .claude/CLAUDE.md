@@ -2327,7 +2327,9 @@ frozen numbers behind all of them. Chosen over having the canary page
 `misconfigured` under `off`, which would have kept serving DuckDB until
 somebody read the page. The trend's forecast
 overlay, which already degrades to "no forecast" on any failure, drops under
-a refusal and the chart answers. The non-HTTP consumers (the weekly reports,
+a refusal and the chart answers; the forecast's own endpoint,
+`/api/revenue/forecast`, is not an overlay and answers 503 — it used to read
+an outage as "Forecast not available yet", a model nobody had trained. The non-HTTP consumers (the weekly reports,
 the assistant, training, the sync) are DN-20c; until it lands a refusal
 reaching one of them is an exception like any other, so **`off` is not set
 before DN-20c ships**. An

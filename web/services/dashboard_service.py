@@ -57,11 +57,23 @@ async def get_revenue_trend(
 
 
 async def get_forecast_data(sales_type: str = "retail") -> Optional[Dict[str, Any]]:
-    """Get ML revenue forecast for the current month."""
+    """Get ML revenue forecast for the current month.
+
+    None is "no forecast": no model yet, nothing predicted, or a read that
+    failed. A read refused under `KS_READ_FALLBACK=off` is not one of those
+    (DN-20b) — it passes through, so `/api/revenue/forecast` answers 503
+    naming `goals` instead of "Forecast not available yet", which read an
+    outage as a model nobody had trained. The trend's overlay has a handler
+    of its own around this call and still drops the overlay, not the chart.
+    """
+    from core.read_fallback import ReadUnavailable
+
     try:
         from core.prediction_service import get_prediction_service
         service = get_prediction_service()
         return await service.get_forecast(sales_type)
+    except ReadUnavailable:
+        raise
     except Exception as e:
         logger.warning(f"Forecast data unavailable: {e}")
         return None
