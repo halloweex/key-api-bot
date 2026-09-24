@@ -113,7 +113,11 @@ class HealthResponse(BaseModel):
             "routes there whatever the variable says (DN-06); `mismatch` is "
             "that state against a variable which disagrees — a rollback "
             "somebody believes happened has not, and only "
-            "scripts/chain_copy_back.py undoes it."
+            "scripts/chain_copy_back.py undoes it. `unmet_precondition` names "
+            "a chain's own condition for moving that does not hold (chain 6a: "
+            "KS_READ_EXPENSES=postgres) — an unlatched chain then writes duckdb "
+            "whatever its variable says, and a latched one writes Postgres "
+            "while its readers read DuckDB."
         ),
     )
     derivation: Optional[Dict[str, Any]] = Field(

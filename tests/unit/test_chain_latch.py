@@ -350,6 +350,7 @@ class TestAWriteThatNeverReachesPostgres:
                 return _Ctx()
 
         flags.setenv("KS_WRITE_EXPENSE_TYPES", "postgres")
+        flags.setenv("KS_READ_EXPENSES", "postgres")      # its precondition
         with patch("core.pg.get_pool", new=AsyncMock(return_value=_Exhausted())), \
                 patch("core.pg.require_revision", new=AsyncMock()):
             with pytest.raises(asyncio.TimeoutError):

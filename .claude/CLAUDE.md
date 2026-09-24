@@ -2655,10 +2655,25 @@ daily comparison stand down. Three things differ from the chains before it:
   the hourly copy last shipped — at the same 192 h, so a first sync that
   fails still pages. Chain 1 does not declare it: its keys move hourly.
 
-**Turn `KS_READ_EXPENSES=postgres` on first.** Every reader of the dictionary
-goes through `_expenses_run`; with the read flag off the page reads DuckDB's
-copy, frozen from the switch. Chain 8 carries the same assumption unenforced.
+**`KS_READ_EXPENSES=postgres` comes first, and the chain enforces it.** Every
+reader of the dictionary goes through `_expenses_run`, so with the read flag
+off a chain writing Postgres would leave each type KeyCRM adds in Postgres
+alone, shown as "Other", with nothing to say so. `unmet_precondition()` names
+the read flag; until it is on, an unlatched chain runs as duckdb whatever
+`KS_WRITE_EXPENSE_TYPES` says — `core.write_chains` reads the same answer, so
+the hourly copy keeps shipping — and the write_chains block in `/api/health`
+publishes `unmet_precondition`, which the canary turns into
+`write_chain_precondition_unmet` (WARN). A latched chain keeps writing
+Postgres (OD-19 (a)) and the same warning says its readers are on the frozen
+copy. DN-27's rule, generic in the registry. Chain 8 carries the same
+assumption unenforced: it is live, so enforcing it is its own change.
 Rollback is `scripts/chain_copy_back.py expense_types` once latched.
+
+**The latch waits for a connection.** 6a latches inside `pool.acquire()`, not
+between `_pool()` and it: an acquire that times out during the Sunday sync
+must not move the chain with nothing written. Chains 1 and 8 still latch
+before the acquire; `tests/unit/test_chain_latch.py` names them in a strict
+xfail ledger that can only shrink, and holds every other chain to the rule.
 
 ## TODO: Full DuckDB Resync Solution
 

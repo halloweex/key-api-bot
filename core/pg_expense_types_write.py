@@ -61,13 +61,21 @@ and 8 were written before that was counted, and still latch between the two;
 `tests/unit/test_chain_latch.py` holds them to it by name, strictly, so the
 list can only shrink.
 
-A PRECONDITION THE FLAG DOES NOT ENFORCE
+A PRECONDITION THE FLAG ENFORCES
 
 Everything that reads the dictionary reads it through `_expenses_run`, which
-asks Postgres only under `KS_READ_EXPENSES=postgres`. With that flag off, the
-page reads DuckDB's copy — frozen from the switch — so a type KeyCRM adds
-afterwards shows as "Other". Chain 8 made the same assumption and does not
-enforce it either; turn the read flag on first.
+asks Postgres only under `KS_READ_EXPENSES=postgres`. With that flag off the
+page reads DuckDB's copy, so a chain writing Postgres would leave every type
+KeyCRM adds afterwards in Postgres alone, shown as "Other" — and nothing would
+say so: the daily comparison stands down for the table, and the standing watch
+reads Postgres, which is right. So `unmet_precondition()` names the read flag,
+and until it is on an unlatched chain runs as duckdb whatever
+`KS_WRITE_EXPENSE_TYPES` says — `core.write_chains` reads the same answer, so
+the hourly copy keeps shipping — while `/api/health`'s write_chains block
+publishes why and the canary warns. DN-27's rule for the buyers chain. A
+latched chain cannot go back that way (OD-19 (a)): it keeps writing Postgres,
+and the same warning then says its readers are on the frozen copy. Chain 8
+carries the same assumption unenforced; it is live, and left to its own change.
 """
 from __future__ import annotations
 
@@ -134,15 +142,40 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
+def unmet_precondition() -> Optional[str]:
+    """Why `KS_WRITE_EXPENSE_TYPES=postgres` must not move the writes yet, or
+    None. Never raises: a read flag nobody can parse is unmet, because nobody
+    can then say the readers follow the writes. `core.write_chains` asks this
+    too, so the registry and `writes_postgres()` give one answer."""
+    from core import pg_expenses_read
+
+    try:
+        if pg_expenses_read.enabled():
+            return None
+        why = f"{pg_expenses_read.ENV} is not postgres"
+    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
+        why = f"{pg_expenses_read.ENV} is not understood ({exc})"
+    return (f"{why}, so every reader of the dictionary reads DuckDB's copy and a "
+            f"type written to Postgres alone would show on /expenses as Other; "
+            f"set {pg_expenses_read.ENV}=postgres first")
+
+
 def writes_postgres() -> bool:
     """Whether this chain writes Postgres — the one answer every caller reads.
 
     The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
-    read. See `core/chain_latch.py`.
+    read. See `core/chain_latch.py`. Unlatched, the flag moves the writes only
+    once `unmet_precondition()` holds — until then the chain runs as duckdb.
     """
     if chain_latch.latched(CHAIN):
         return True
-    return env_writes_postgres()
+    if not env_writes_postgres():
+        return False
+    unmet = unmet_precondition()
+    if unmet:
+        logger.warning("%s=postgres, but the chain stays on DuckDB: %s", WRITE_ENV, unmet)
+        return False
+    return True
 
 
 def _latch() -> str:

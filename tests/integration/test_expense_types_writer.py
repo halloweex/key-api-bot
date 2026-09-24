@@ -62,12 +62,15 @@ async def _clean(pool):
 
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
-    """A real DuckDB with the whole schema and a live Postgres, flag off."""
+    """A real DuckDB with the whole schema and a live Postgres, flag off —
+    and `KS_READ_EXPENSES=postgres`, the precondition without which the flag
+    moves nothing (`TestTheReadFlagComesFirst` takes it away)."""
     from core.duckdb_store import DuckDBStore
 
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
+    monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     store = DuckDBStore(db_path=tmp_path / "expense_types.duckdb")
     await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
@@ -161,6 +164,39 @@ class TestTheNamesAreTheDuckDBPaths:
         assert names[2] == "Alias For 2"                  # a key with an alias
         assert names[3] == "Bare Kind 3"                  # a key without one
         assert not any(n.startswith("dictionaries.") for n in names.values())
+
+
+class TestTheReadFlagComesFirst:
+    @pytest.mark.asyncio
+    async def test_without_it_the_full_sync_writes_duckdb_and_the_hourly_copy_ships_it(
+        self, stores,
+    ):
+        """The review's reproduction on real stores: the flag on, the read flag
+        off, and a full sync bringing a type KeyCRM added after the flip. It
+        lands where the page reads, the chain does not latch, and the hourly
+        copy carries it to Postgres as it always has."""
+        from core.pg_operational import replicate_operational
+
+        store, pool, env = stores
+        env.delenv("KS_READ_EXPENSES")
+        env.setenv(chain.WRITE_ENV, "postgres")
+
+        stats = await _full_sync(store, _payload(
+            extra=[{"id": 28, "name": "Новий тип"}]))
+
+        assert stats["expense_types"] == 28 and "expense_types_error" not in stats
+        assert len(await _duck_rows(store)) == 28
+        assert await _pg_rows(pool) == []
+        assert not chain_latch.latched(chain.CHAIN)
+        assert await _owners(pool) == {}
+        assert 28 in [r["id"] for r in await store.get_expense_types()]
+        async with store.connection() as conn:
+            assert conn.execute(
+                "SELECT value FROM sync_metadata WHERE key = ?", [KEY]).fetchone()
+
+        shipped = await replicate_operational(store)
+        assert "error" not in shipped, shipped
+        assert shipped["replaced"][TABLE] == 28
 
 
 # ─── the full sync, and the hourly copy that must leave it alone ─────────────

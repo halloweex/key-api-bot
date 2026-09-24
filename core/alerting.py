@@ -121,6 +121,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "write_chain_flag_mismatch": _c(
         "the variable is set back to postgres, or scripts/chain_copy_back.py "
         "hands the tables back to DuckDB"),
+    # A chain's own condition for moving is unmet: held on DuckDB against its
+    # KS_WRITE_*, or latched while its readers read DuckDB (DN-26).
+    "write_chain_precondition_unmet": _c(
+        "the read flag the chain names is set to postgres and web restarts"),
     "mirror_missing:bronze.orders": _c("the table reports freshness again"),
     "mirror_never:bronze.orders": _c("the table's first successful shipment"),
     "mirror_stale:bronze.orders": _c("a shipment inside the age limit"),

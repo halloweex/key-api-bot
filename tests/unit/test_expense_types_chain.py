@@ -29,8 +29,13 @@ PAYLOAD = [
 
 @pytest.fixture
 def flags(monkeypatch):
+    """No chain's variable set — and the read flag chain 6a needs before its
+    own can move anything already on, so a test that sets
+    KS_WRITE_EXPENSE_TYPES=postgres means it. `TestTheReadFlagComesFirst`
+    takes it away."""
     for c in write_chains.WRITE_CHAINS:
         monkeypatch.delenv(c.WRITE_ENV, raising=False)
+    monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     return monkeypatch
 
 
@@ -420,3 +425,176 @@ class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
         (issue,) = self._judge(flags, self._duckdb(None), {})
         assert issue[0] == "freshness_expense_types"
         assert "never synced" in issue[3]
+
+
+class TestTheReadFlagComesFirst:
+    """`KS_WRITE_EXPENSE_TYPES=postgres` without `KS_READ_EXPENSES=postgres`
+    used to write Postgres while every reader of the dictionary read DuckDB,
+    so a type KeyCRM added after the flip showed as "Other" and nothing said
+    so (review of DN-26). DN-27's rule now: the chain runs as duckdb and says
+    why."""
+
+    def _off(self, flags, value=None):
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        if value is None:
+            flags.delenv("KS_READ_EXPENSES", raising=False)
+        else:
+            flags.setenv("KS_READ_EXPENSES", value)
+
+    def test_the_chain_stays_on_duckdb_and_every_consumer_agrees(self, flags):
+        self._off(flags)
+        state = write_chains.chain_modes()[chain.CHAIN]
+
+        assert chain.writes_postgres() is False
+        assert state["mode"] == "duckdb" and state["error"] is None
+        assert "KS_READ_EXPENSES" in state["unmet_precondition"]
+        # The hourly copy keeps shipping the table DuckDB still writes, and
+        # the watermark stays where the writer puts it.
+        assert "bronze.expense_types" not in write_chains.stood_down_tables()
+        assert "last_sync_expense_types" not in write_chains.stood_down_sync_keys()
+        assert chain.CHAIN not in inv.watched_chains()
+
+    def test_a_read_flag_nobody_can_parse_is_unmet_and_raises_nothing(self, flags):
+        self._off(flags, "postgrse")
+        assert chain.writes_postgres() is False
+        state = write_chains.chain_modes()[chain.CHAIN]
+        assert state["mode"] == "duckdb"
+        assert "not understood" in state["unmet_precondition"]
+
+    def test_with_the_read_flag_on_nothing_is_unmet(self, flags):
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        assert chain.unmet_precondition() is None
+        assert chain.writes_postgres() is True
+        assert write_chains.chain_modes()[chain.CHAIN]["unmet_precondition"] is None
+
+    def test_a_latched_chain_keeps_writing_postgres_and_says_its_readers_are_not(self, flags):
+        """OD-19 (a): the latch is not undone by a read flag either — routing
+        back would start a second writer. What changes is that it is said."""
+        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
+        self._off(flags)
+        state = write_chains.chain_modes()[chain.CHAIN]
+        assert chain.writes_postgres() is True
+        assert state["mode"] == "postgres" and state["mismatch"] is False
+        assert "KS_READ_EXPENSES" in state["unmet_precondition"]
+
+    def test_with_the_write_flag_off_it_is_not_even_asked(self, flags):
+        flags.delenv("KS_READ_EXPENSES", raising=False)
+        assert write_chains.chain_modes()[chain.CHAIN]["unmet_precondition"] is None
+
+    @pytest.mark.parametrize("write", [None, "duckdb", "postgres"])
+    @pytest.mark.parametrize("read", [None, "duckdb", "postgres", "yes"])
+    @pytest.mark.parametrize("latched", [False, True])
+    def test_the_registry_and_the_writer_give_one_answer(self, flags, write, read, latched):
+        """Two homes for the rule — `_chain_state` and `writes_postgres` — so
+        the whole matrix is asked of both. A disagreement is the shipper
+        overwriting what the writer just wrote, once an hour."""
+        for env, value in ((chain.WRITE_ENV, write), ("KS_READ_EXPENSES", read)):
+            if value is None:
+                flags.delenv(env, raising=False)
+            else:
+                flags.setenv(env, value)
+        if latched:
+            chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
+        mode = write_chains.chain_modes()[chain.CHAIN]["mode"]
+        assert mode == ("postgres" if chain.writes_postgres() else "duckdb")
+
+    @pytest.mark.asyncio
+    async def test_the_repository_writes_duckdb_and_the_page_sees_the_new_type(
+        self, flags, tmp_path,
+    ):
+        """The review's reproduction, run to the reader: a type added after
+        the flip reaches the store the page reads."""
+        from core.duckdb_store import DuckDBStore
+
+        store = DuckDBStore(db_path=tmp_path / "held.duckdb")
+        await store.connect()
+        try:
+            flags.delenv("KS_READ_EXPENSES", raising=False)
+            await store.upsert_expense_types([{"id": 1, "name": "Delivery"}])
+            flags.setenv(chain.WRITE_ENV, "postgres")
+            writer = AsyncMock(side_effect=AssertionError(
+                "Postgres written while the page reads DuckDB"))
+            with patch.object(chain, "upsert_expense_types", new=writer):
+                await store.upsert_expense_types([{"id": 1, "name": "Delivery"},
+                                                  {"id": 32, "name": "Новий тип"}])
+            assert [r["id"] for r in await store.get_expense_types()] == [1, 32]
+            assert not chain_latch.latched(chain.CHAIN)
+        finally:
+            await store.close()
+
+
+class TestTheRegistryAsksAChainsPrecondition:
+    def test_a_chain_that_names_none_has_none(self):
+        from core import pg_expenses_write
+
+        assert write_chains._unmet_precondition(pg_expenses_write) is None
+
+    def test_a_check_that_raises_is_unmet_rather_than_raising(self):
+        import types
+
+        def _boom():
+            raise RuntimeError("cannot tell")
+
+        fake = types.SimpleNamespace(unmet_precondition=_boom)
+        assert "cannot tell" in write_chains._unmet_precondition(fake)
+
+
+class TestTheCanaryWarnsOnIt:
+    def _block(self, **state):
+        base = {"env": chain.WRITE_ENV, "mode": "duckdb", "error": None,
+                "latched": False, "latched_at": None, "mismatch": False,
+                "unmet_precondition": None}
+        base.update(state)
+        return {"write_chains": {chain.CHAIN: base}}
+
+    def test_held_on_duckdb_is_named_as_held(self):
+        from bot import canary
+
+        (key, message), = canary.check_write_chain_precondition(
+            self._block(unmet_precondition="KS_READ_EXPENSES is not postgres"))
+        assert key == "write_chain_precondition_unmet"
+        assert "held on DuckDB" in message and "KS_READ_EXPENSES" in message
+
+    def test_latched_it_says_the_writes_go_to_postgres(self):
+        from bot import canary
+
+        (_key, message), = canary.check_write_chain_precondition(self._block(
+            mode="postgres", latched=True,
+            unmet_precondition="KS_READ_EXPENSES is not postgres"))
+        assert "writes Postgres" in message
+
+    def test_nothing_unmet_and_an_older_web_are_quiet(self):
+        from bot import canary
+
+        assert canary.check_write_chain_precondition(self._block()) == []
+        assert canary.check_write_chain_precondition({}) == []
+        stale = self._block()
+        del stale["write_chains"][chain.CHAIN]["unmet_precondition"]
+        assert canary.check_write_chain_precondition(stale) == []
+
+    @pytest.mark.asyncio
+    async def test_run_canary_warns_and_names_the_lever(self):
+        import httpx
+        from datetime import timedelta
+
+        from bot import canary
+        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
+
+        payload = _healthy_payload()
+        payload.update(self._block(unmet_precondition="KS_READ_EXPENSES is not postgres"))
+        future = datetime.now(timezone.utc) + timedelta(days=60)
+        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+        async with _mock_transport(lambda request: httpx.Response(200, json=payload)) as client:
+            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
+                result = await canary.run_canary(DASHBOARD, client=client)
+
+        assert result.severity == "warn"
+        assert "write_chain_precondition_unmet" in result.failure_keys
+        assert "read flag" in canary.format_alert(result, DASHBOARD)
+
+    def test_health_publishes_it(self, flags):
+        from web.routes.api.health import _write_chains
+
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        flags.delenv("KS_READ_EXPENSES", raising=False)
+        assert "KS_READ_EXPENSES" in _write_chains()[chain.CHAIN]["unmet_precondition"]
