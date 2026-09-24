@@ -1253,9 +1253,21 @@ class TestThePairingThroughTheJob:
 
         from core import warehouse_cutover
 
+        from core import data_quality
+
         scheduler, store, _sent = job
         monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
         monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
+        # DuckDB's five Silver/Gold checks as they may behave over a frozen or
+        # compacted table: raising. Stood down, none runs, so none is named.
+        ran = []
+        for fn in ("_silver_arc_check", "_attribution_coverage_check",
+                   "_gold_cell_values_check", "_headline_vs_line_items_check",
+                   "_goods_shipped_without_sale_check"):
+            def frozen(*_a, _fn=fn, **_k):
+                ran.append(_fn)
+                raise RuntimeError(f"{_fn}: silver_orders is frozen")
+            monkeypatch.setattr(data_quality, fn, frozen)
         async with pool.acquire() as conn:
             for oid, sales_type in ((IDS[72], "retail"), (IDS[73], "internal")):
                 await _bronze(conn, oid, total=0, minutes_ago=150)
@@ -1266,6 +1278,7 @@ class TestThePairingThroughTheJob:
 
         result = await scheduler._run_dq_integrity()
 
+        assert ran == []
         issues = await self._issues(store, result["run_id"])
         record = json.loads(issues["pg_twin_pairing"]["description"])
         assert not warehouse_cutover.STOOD_DOWN_WHEN_POSTGRES & set(record["duckdb"]["looked"])
