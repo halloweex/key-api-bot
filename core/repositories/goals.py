@@ -86,6 +86,80 @@ _STORED_GOALS_SQL = """
     ORDER BY period_type
 """
 
+# The ML signal of a smart goal: what the target month has already earned, plus
+# what the model expects of the rest of it. Both halves go through `_goals_run`,
+# so both ask the engine the flag names — the rule
+# `PredictionService._get_actual_month_revenue` records: a sum that took one
+# term from Postgres and the other from DuckDB *by design* was a defect there
+# once already. One engine only while neither read falls back, though: the
+# fallback is per read, so a Postgres failure on one half is answered by DuckDB
+# while the other half stays Postgres', and that call's sum mixes engines —
+# after step 13, a frozen DuckDB term beside a live one. `_goals_run` logs it
+# at ERROR; `get_forecast` accepts the same mix, and DN-20's off mode is what
+# turns it into a refusal. `{gold_revenue_rollup}` is not optional; Postgres'
+# Gold holds a roll-up row beside a row per source, and a bare SUM counts every
+# order twice. `{sales_filter}` is `sales_type = ?` or `1=1`, composed here.
+_FORECAST_ACTUAL_SQL = """
+    SELECT COALESCE(SUM(revenue), 0)
+    FROM {gold_daily_revenue}
+    WHERE date BETWEEN ? AND ?
+      AND {gold_revenue_rollup}
+      AND {sales_filter}
+"""
+
+_FORECAST_PREDICTED_SQL = """
+    SELECT SUM(predicted_revenue)
+    FROM {revenue_predictions}
+    WHERE sales_type = ?
+      AND prediction_date >= ?
+      AND prediction_date <= ?
+"""
+
+
+# ─── Which orders a goal calculator counts ──────────────────────────────────
+#
+# A BRIDGE, and it expires (DN-12, critique 8 of the stage-4 plan).
+#
+# The calculators below — seasonality, YoY, weekly patterns, the growth cap and
+# the two history reads of `generate_smart_goals` — used to narrow `orders` with
+# an EXISTS over DuckDB `silver_orders`. Silver stops moving at step 13, so
+# from then on that EXISTS drops every newer order and seasonality and YoY skew
+# a little further each week; the next compaction empties it, the EXISTS
+# matches nothing, and `calculate_yoy_growth` persisted its 0.10 fallback over
+# the measured value — which the hourly replace then carried into Postgres.
+#
+# So the answer Silver would have stored is computed here instead, from the one
+# definition — `silver_sales_type_case` — rendered over `orders o`. It selects
+# exactly the rows the EXISTS did while Silver was current
+# (`tests/unit/test_goals_off_duckdb_silver.py` proves it on every branch).
+#
+# It reads DuckDB `manager_classifications` and `managers`, so it is right only
+# while DuckDB still holds the classification (chain 5) and the orders (chain
+# 3). The chain 7b port replaces it. Until then a tripwire in that same test
+# fails the moment `core/write_chains.WRITE_CHAINS` registers a chain owning
+# `bronze.orders`, `bronze.managers` or `app.manager_classifications` while this
+# file still renders the DuckDB case.
+
+
+def _orders_sales_type_predicate(sales_type: str) -> tuple[str, List[Any]]:
+    """`(clause, params)` selecting one `sales_type` over `orders o`.
+
+    `'all'` is no predicate at all. An unknown value raises, as the Silver
+    filter did: it used to fall through an else and quietly mean retail.
+    """
+    from core.duckdb_constants import KNOWN_SALES_TYPES
+    from core.duckdb_store import silver_sales_type_case
+    from core.sql_dialect import DUCKDB
+
+    if sales_type == "all":
+        return "1=1", []
+    if sales_type not in KNOWN_SALES_TYPES:
+        raise ValueError(
+            f"unknown sales_type {sales_type!r}; expected one of "
+            f"{', '.join(KNOWN_SALES_TYPES)} or 'all'"
+        )
+    return f"({silver_sales_type_case(DUCKDB)}) = ?", [sales_type]
+
 
 class GoalsMixin:
 
@@ -377,7 +451,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+            sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
             # Get monthly revenue totals for all available history (only complete months with 25+ days)
             sql = f"""
@@ -421,7 +495,7 @@ class GoalsMixin:
                 ORDER BY ms.month
             """
 
-            results = conn.execute(sql).fetchall()
+            results = conn.execute(sql, sales_params).fetchall()
 
             indices = {}
             for row in results:
@@ -493,7 +567,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+            sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
             # Get yearly totals — only full years (12 months with orders)
             # to avoid startup partial year and current incomplete year
@@ -512,7 +586,7 @@ class GoalsMixin:
                 WHERE months_active >= 11
                 ORDER BY year
             """
-            yearly_results = conn.execute(yearly_sql).fetchall()
+            yearly_results = conn.execute(yearly_sql, sales_params).fetchall()
 
             # Calculate YoY growth between consecutive years with recency weighting
             # Oldest pair gets weight 1.0, newest gets 2.0 (linear interpolation)
@@ -561,7 +635,7 @@ class GoalsMixin:
                     AND curr.year = prev.year + 1
                 ORDER BY curr.month, curr.year
             """
-            monthly_yoy_results = conn.execute(monthly_yoy_sql).fetchall()
+            monthly_yoy_results = conn.execute(monthly_yoy_sql, sales_params).fetchall()
 
             # Group by month, apply recency-weighted average
             month_pairs: dict[int, list[float]] = defaultdict(list)
@@ -587,16 +661,33 @@ class GoalsMixin:
                 max_date = conn.execute(f"SELECT MAX({_date_in_kyiv('ordered_at')}) FROM orders").fetchone()[0]
                 now = datetime.now(DEFAULT_TZ)
 
-                conn.execute("""
-                    INSERT INTO growth_metrics (metric_type, value, period_start, period_end, sample_size, updated_at)
-                    VALUES ('yoy_overall', ?, ?, ?, ?, ?)
-                    ON CONFLICT (metric_type) DO UPDATE SET
-                        value = excluded.value,
-                        period_start = excluded.period_start,
-                        period_end = excluded.period_end,
-                        sample_size = excluded.sample_size,
-                        updated_at = excluded.updated_at
-                """, [overall_yoy, min_date, max_date, len(yoy_rates), now])
+                # The 0.10 above is a placeholder for "no pair of full years
+                # to compare", not a measurement. Written over a stored value
+                # it replaced a measured rate with a guess, and the hourly full
+                # replace then carried the guess into Postgres — exactly what
+                # an emptied history (a compaction under a Silver filter, a
+                # frozen `orders`) produces. So it is written only where there
+                # is nothing better to keep: a first run, before any row.
+                has_row = conn.execute(
+                    "SELECT 1 FROM growth_metrics WHERE metric_type = 'yoy_overall'"
+                ).fetchone() is not None
+                if yoy_rates or not has_row:
+                    conn.execute("""
+                        INSERT INTO growth_metrics (metric_type, value, period_start, period_end, sample_size, updated_at)
+                        VALUES ('yoy_overall', ?, ?, ?, ?, ?)
+                        ON CONFLICT (metric_type) DO UPDATE SET
+                            value = excluded.value,
+                            period_start = excluded.period_start,
+                            period_end = excluded.period_end,
+                            sample_size = excluded.sample_size,
+                            updated_at = excluded.updated_at
+                    """, [overall_yoy, min_date, max_date, len(yoy_rates), now])
+                else:
+                    logger.warning(
+                        "YoY: no pair of full years in the %s history; keeping "
+                        "the stored yoy_overall rather than overwriting it with "
+                        "the %.2f fallback", sales_type, overall_yoy,
+                    )
 
                 # Update seasonal_indices with monthly YoY
                 for month, yoy in monthly_yoy.items():
@@ -631,7 +722,7 @@ class GoalsMixin:
         """
         async with self.connection() as conn:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+            sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
             # Calculate weekly revenue within each month instance
             sql = f"""
@@ -670,7 +761,7 @@ class GoalsMixin:
                 ORDER BY month, week_of_month
             """
 
-            results = conn.execute(sql).fetchall()
+            results = conn.execute(sql, sales_params).fetchall()
 
             patterns = {}
             now = datetime.now(DEFAULT_TZ)
@@ -711,60 +802,87 @@ class GoalsMixin:
             logger.info(f"Calculated weekly patterns for {len(patterns)} months")
             return patterns
 
-    def _get_ml_forecast_total(
-        self, conn, target_year: int, target_month: int, sales_type: str = "retail"
+    async def _forecast_actual_revenue(
+        self, start: date, end: date, sales_type: str = "retail"
+    ) -> float:
+        """Gold revenue from `start` to `end` inclusive — the part of a month
+        that has already happened.
+
+        `retail` and `b2b` narrow to their own rows; any other value sums every
+        row, which is what this read has always done (an `'all'` smart goal is
+        the whole business). The dates go over as `date` objects: DuckDB
+        coerces an ISO string, asyncpg refuses one.
+        """
+        if sales_type in ("retail", "b2b"):
+            sales_filter, params = "sales_type = ?", [start, end, sales_type]
+        else:
+            sales_filter, params = "1=1", [start, end]
+        rows = await self._goals_run(
+            _FORECAST_ACTUAL_SQL.replace("{sales_filter}", sales_filter), params)
+        return float(rows[0][0]) if rows and rows[0][0] is not None else 0.0
+
+    async def _get_ml_forecast_total(
+        self, target_year: int, target_month: int, sales_type: str = "retail"
     ) -> float:
         """Estimate full-month revenue using actual data + ML predictions.
 
-        For past days (before today): uses actual revenue from gold_daily_revenue.
-        For today and future days: uses ML predictions from revenue_predictions.
-        Returns 0 if no predictions are available for the future portion.
+        For past days (before today): actual revenue from Gold.
+        For today and future days: ML predictions from revenue_predictions.
+        Returns 0 if no predictions are available for the future portion, or
+        if a read fails on the engine that finally answers it — the signal is
+        then absent from the blend. A Postgres failure alone does not return
+        0: that read falls back to DuckDB, and the sum may then take its two
+        halves from two engines (see `_FORECAST_ACTUAL_SQL`). An unknown
+        `KS_READ_GOALS` raises, as it does for every goal read.
+
+        **Called without the store lock.** Both halves go through `_goals_run`,
+        which takes that lock itself on the DuckDB path and the lock is not
+        reentrant — so `generate_smart_goals` asks for this before it opens its
+        own connection. It used to take that connection as an argument and read
+        DuckDB Gold on it, which after step 13 would have been a frozen Gold.
         """
+        from core import pg_goals_read
+
         first_day = date(target_year, target_month, 1)
         last_day = date(target_year, target_month, calendar.monthrange(target_year, target_month)[1])
         today = datetime.now(DEFAULT_TZ).date()
+
+        # Asked here, outside the `try`, and only for its refusal: an unknown
+        # `KS_READ_GOALS` raises, and every other goal read lets that stop it.
+        # Inside the `try` the refusal became a missing signal, and
+        # `/api/goals/forecast` answered 200 with a different goal.
+        pg_goals_read.enabled()
 
         try:
             # Get actual revenue for past days of the month
             actual_revenue = 0.0
             if first_day < today:
                 actual_end = min(today - timedelta(days=1), last_day)
-                sales_filter = "retail" if sales_type == "retail" else ("b2b" if sales_type == "b2b" else None)
-                if sales_filter:
-                    actual_row = conn.execute(
-                        """SELECT COALESCE(SUM(revenue), 0)
-                           FROM gold_daily_revenue
-                           WHERE date BETWEEN ? AND ?
-                             AND sales_type = ?""",
-                        [first_day.isoformat(), actual_end.isoformat(), sales_filter]
-                    ).fetchone()
-                else:
-                    actual_row = conn.execute(
-                        """SELECT COALESCE(SUM(revenue), 0)
-                           FROM gold_daily_revenue
-                           WHERE date BETWEEN ? AND ?""",
-                        [first_day.isoformat(), actual_end.isoformat()]
-                    ).fetchone()
-                actual_revenue = float(actual_row[0]) if actual_row else 0.0
+                actual_revenue = await self._forecast_actual_revenue(
+                    first_day, actual_end, sales_type)
 
             # Get predicted revenue for today onwards
             predict_start = max(first_day, today)
-            predicted_row = conn.execute(
-                """SELECT SUM(predicted_revenue) as total
-                   FROM revenue_predictions
-                   WHERE sales_type = ?
-                     AND prediction_date >= ?
-                     AND prediction_date <= ?""",
-                [sales_type, predict_start.isoformat(), last_day.isoformat()]
-            ).fetchone()
-            predicted_revenue = float(predicted_row[0]) if predicted_row and predicted_row[0] else 0.0
+            predicted_rows = await self._goals_run(
+                _FORECAST_PREDICTED_SQL, [sales_type, predict_start, last_day])
+            predicted_revenue = (
+                float(predicted_rows[0][0])
+                if predicted_rows and predicted_rows[0][0] else 0.0
+            )
 
             if predicted_revenue == 0.0:
                 return 0.0  # No predictions available
 
             return actual_revenue + predicted_revenue
-        except Exception:
-            logger.debug("ML predictions unavailable for %d-%02d", target_year, target_month)
+        except Exception as exc:  # noqa: BLE001
+            # What reaches here is a read that failed on the engine that
+            # finally answered — the goal is then computed without this signal,
+            # so it is said at WARNING, not DEBUG. When DN-20b makes a fallback
+            # raise, that exception has to pass through this handler, not end
+            # in it: DN-20a's walk covers it, as a handler around `_goals_run`.
+            logger.warning(
+                "goals: ML forecast signal for %d-%02d unavailable, left out of "
+                "the blend: %s", target_year, target_month, exc)
             return 0.0
 
     def _get_dynamic_growth_cap(
@@ -777,7 +895,7 @@ class GoalsMixin:
         Falls back to 0.35 if insufficient data.
         """
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        sales_filter = self._build_sales_type_filter(sales_type)
+        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
         sql = f"""
             WITH monthly_by_year AS (
@@ -801,7 +919,7 @@ class GoalsMixin:
             SELECT AVG(yoy) as avg_yoy, STDDEV(yoy) as std_yoy, COUNT(*) as cnt
             FROM yoy_pairs
         """
-        row = conn.execute(sql, [target_month]).fetchone()
+        row = conn.execute(sql, [target_month] + sales_params).fetchone()
 
         if not row or not row[2] or row[2] < 1 or row[0] is None:
             return 0.35  # fallback
@@ -848,6 +966,11 @@ class GoalsMixin:
             await self.calculate_yoy_growth(sales_type)
             await self.calculate_weekly_patterns(sales_type)
 
+        # ── Signal 3 is read here, before the connection below: it goes through
+        # `_goals_run`, which takes the store lock itself on the DuckDB path.
+        ml_forecast_goal = await self._get_ml_forecast_total(
+            target_year, target_month, sales_type)
+
         async with self.connection() as conn:
             # Dynamic growth cap per-month (replaces flat 0.35)
             dynamic_cap = self._get_dynamic_growth_cap(conn, target_month, sales_type)
@@ -878,7 +1001,7 @@ class GoalsMixin:
 
             # Get last year's same month revenue
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter = self._build_sales_type_filter(sales_type)
+            sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
             last_year_sql = f"""
                 SELECT SUM(o.grand_total) as revenue
@@ -888,7 +1011,8 @@ class GoalsMixin:
                     AND o.status_id NOT IN {return_statuses}
                     AND {sales_filter}
             """
-            last_year_result = conn.execute(last_year_sql, [target_year - 1, target_month]).fetchone()
+            last_year_result = conn.execute(
+                last_year_sql, [target_year - 1, target_month] + sales_params).fetchone()
             last_year_revenue = float(last_year_result[0] or 0) if last_year_result[0] else 0
 
             # Get recent 3-month average (last 3 complete months with at least 25 days of data)
@@ -912,7 +1036,7 @@ class GoalsMixin:
                 )
                 SELECT AVG(revenue) as avg_revenue FROM monthly_revenue
             """
-            recent_avg_result = conn.execute(recent_avg_sql).fetchone()
+            recent_avg_result = conn.execute(recent_avg_sql, sales_params).fetchone()
             recent_3_month_avg = float(recent_avg_result[0] or 0) if recent_avg_result[0] else 0
 
             # Apply growth rate with dynamic cap
@@ -929,8 +1053,7 @@ class GoalsMixin:
             if recent_3_month_avg > 0 and seasonality_index > 0:
                 recent_goal = recent_3_month_avg * seasonality_index
 
-            # ── Signal 3: ML forecast
-            ml_forecast_goal = self._get_ml_forecast_total(conn, target_year, target_month, sales_type)
+            # ── Signal 3: ML forecast — read before the connection was taken.
 
             # ── Weighted blend (replaces MAX)
             # Confidence-based weight tables

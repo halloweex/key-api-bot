@@ -6,7 +6,7 @@ from contextlib import nullcontext
 from datetime import date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
-from core.duckdb_constants import UNKNOWN_BRAND, brand_where
+from core.duckdb_constants import KNOWN_SALES_TYPES, UNKNOWN_BRAND, brand_where
 from core.models import OrderStatus
 from core.sql_dialect import TODAY_IN_KYIV
 
@@ -635,8 +635,21 @@ class RevenueMixin:
                             WHERE {where_sql}
                         """, params).fetchone()
                         # Gold doesn't have per-source return columns — query Silver
+                        # The row's own `sales_type`, which is what the Gold
+                        # cells above were built from. This was an EXISTS back
+                        # into `silver_orders` for the same id — the same row,
+                        # read twice — through a filter that has since left
+                        # (DN-12); the column is that answer without the detour.
                         ret_params = [start_date, end_date, source_id]
-                        sales_filter = self._build_sales_type_filter(sales_type, table_alias="silver_orders")
+                        sales_filter = "1=1"
+                        if sales_type != "all":
+                            if sales_type not in KNOWN_SALES_TYPES:
+                                raise ValueError(
+                                    f"unknown sales_type {sales_type!r}; expected one of "
+                                    f"{', '.join(KNOWN_SALES_TYPES)} or 'all'"
+                                )
+                            sales_filter = "sales_type = ?"
+                            ret_params.append(sales_type)
                         ret_result = conn.execute(f"""
                             SELECT COUNT(DISTINCT id), COALESCE(SUM(grand_total), 0)
                             FROM silver_orders

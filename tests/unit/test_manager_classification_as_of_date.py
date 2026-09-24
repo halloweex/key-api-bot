@@ -10,7 +10,13 @@ date, from `manager_classifications`.
 The second class of test here covers the other half of the same seam. Silver
 stores the answer; ten of the eleven `_build_sales_type_filter` call sites used
 to re-derive it from `manager_id`, which is a second definition wearing a
-different hat — and the two had already diverged over source 5.
+different hat — and the two had already diverged over source 5. That filter
+then read Silver's stored column, and since DN-12 the goal calculators — its
+last consumers — render the one definition, `silver_sales_type_case`, over
+`orders` instead (`core/repositories/goals._orders_sales_type_predicate`), so
+they stop depending on a Silver that step 13 freezes. Either way it is one
+definition, never a second copy, and the exhibition case below is the one
+that proves it.
 """
 from __future__ import annotations
 
@@ -151,7 +157,7 @@ class TestClassificationIsResolvedAsOfTheOrderDate:
             await store.close()
 
 
-class TestConsumersReadTheStoredAnswer:
+class TestConsumersUseTheOneDefinition:
     @pytest.mark.asyncio
     async def test_an_exhibition_order_is_not_counted_as_retail(self, tmp_path):
         """#101 gave source 5 its own sales_type; the filter never heard about it.
@@ -159,6 +165,8 @@ class TestConsumersReadTheStoredAnswer:
         On production that was 176 orders and ₴267,416 counted as exhibition by
         Gold and as retail by every endpoint that went through this filter.
         """
+        from core.repositories.goals import _orders_sales_type_predicate
+
         store = await _make_store(tmp_path)
         try:
             staffed_by = RETAIL_MANAGER_IDS[0]
@@ -171,31 +179,28 @@ class TestConsumersReadTheStoredAnswer:
 
             await store.refresh_warehouse_layers(trigger="manual")
 
+            def ids(sales_type):
+                clause, params = _orders_sales_type_predicate(sales_type)
+                return [r[0] for r in conn.execute(
+                    f"SELECT o.id FROM orders o WHERE {clause} ORDER BY o.id",
+                    params).fetchall()]
+
             async with store.connection() as conn:
-                retail = [r[0] for r in conn.execute(
-                    "SELECT o.id FROM orders o WHERE "
-                    + store._build_sales_type_filter("retail")
-                ).fetchall()]
-                exhibition = [r[0] for r in conn.execute(
-                    "SELECT o.id FROM orders o WHERE "
-                    + store._build_sales_type_filter("exhibition")
-                ).fetchall()]
+                retail = ids("retail")
+                exhibition = ids("exhibition")
 
             assert retail == [1], "the exhibition order leaked back into retail"
             assert exhibition == [2]
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_an_unknown_sales_type_is_refused_rather_than_read_as_retail(self, tmp_path):
+    def test_an_unknown_sales_type_is_refused_rather_than_read_as_retail(self):
         """It used to fall through the else and quietly mean 'retail'."""
-        store = await _make_store(tmp_path)
-        try:
-            with pytest.raises(ValueError):
-                store._build_sales_type_filter("wholsale")
-            assert store._build_sales_type_filter("all") == "1=1"
-        finally:
-            await store.close()
+        from core.repositories.goals import _orders_sales_type_predicate
+
+        with pytest.raises(ValueError):
+            _orders_sales_type_predicate("wholsale")
+        assert _orders_sales_type_predicate("all") == ("1=1", [])
 
 
 class TestTheClassificationWriteIsAllOrNothing:
