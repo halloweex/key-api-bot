@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.243
+
+- DN-14: say what the first-tick exclusion costs, and which mark moved
+- DN-14: a malformed journal value blinds its group and no other
+- DN-14: real-Postgres tests for the high-water mark, the missed signal and the record
+- DN-14: the pairing record, the high-water mark, and pg_signal_missed
+
+
 ## 3.0.242
 
 - DN-13: the lever line fits the arrow
