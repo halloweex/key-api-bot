@@ -492,17 +492,26 @@ def _guarded_calls(node: ast.AST) -> Dict[ast.Call, List[ast.AST]]:
     return out
 
 
+def _passes_it_on(handler: ast.ExceptHandler) -> bool:
+    """The handler raises the refusal again — a bare `raise`, or `raise`
+    of the name it bound — as a statement of its own body. Anywhere in it,
+    not only last: what follows an unconditional `raise` never runs."""
+    return any(
+        isinstance(s, ast.Raise) and s.cause is None and (
+            s.exc is None
+            or (isinstance(s.exc, ast.Name) and s.exc.id == handler.name))
+        for s in handler.body)
+
+
 def _stopped_by(tries) -> Optional[str]:
     """The kind of the handler that keeps a refusal raised under these
     `try`s from going further, or None when it leaves the function."""
-    from tests.unit.test_read_fallback_http import _lets_it_through
-
     for t in tries:
         for handler in t.handlers:
             kind = _catches(handler)
             if kind is None:
                 continue
-            if _lets_it_through(handler):
+            if _passes_it_on(handler):
                 break
             return kind
     return None
@@ -719,6 +728,10 @@ class TestTheContainmentRule:
         ("    except ReadUnavailable:\n        raise\n"
          "    except Exception:\n        return 1\n", None),
         ("    except ReadUnavailable as exc:\n        log(exc)\n        raise exc\n", None),
+        # What follows an unconditional raise never runs.
+        ("    except ReadUnavailable:\n        raise\n        return 1\n", None),
+        # Something raised in its place is not the refusal passed on.
+        ("    except Exception as exc:\n        raise RuntimeError('x') from exc\n", "broad"),
     ])
     def test_the_first_handler_that_catches_it_decides(self, handlers, kind):
         src = "async def f(store):\n    try:\n        await store.read()\n" + handlers
