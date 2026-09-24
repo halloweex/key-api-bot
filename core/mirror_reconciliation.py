@@ -4321,7 +4321,7 @@ _BUYERS_ORIGIN = (
 )
 
 def _buyers_spec():
-    from core.pg_buyers import BUYER_COLUMNS
+    from core.landing_rows import BUYER_COLUMNS
 
     return MirroredTable(
         pg_table="bronze.buyers",
@@ -4336,7 +4336,7 @@ def _buyers_spec():
 
 
 def _contacts_spec():
-    from core.pg_buyers import CONTACT_COLUMNS
+    from core.landing_rows import CONTACT_COLUMNS
 
     return MirroredTable(
         pg_table="bronze.buyer_contacts",
@@ -4368,7 +4368,7 @@ async def reconcile_buyers(
     """
     from core import chain_latch, pg_landing
     from core.pg import get_pool, require_revision
-    from core.pg_buyers import BUYER_UNIT, BUYERS_STATE, CONTACT_COLUMNS
+    from core.pg_buyers import BUYER_UNIT, BUYERS_STATE
 
     if not pg_landing.enabled():
         return []

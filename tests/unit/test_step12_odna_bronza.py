@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core import pg_gold_read
-from core.pg_buyers import buyer_row, contact_rows
+from core.landing_rows import buyer_row, contact_rows
 from core.sql_dialect import DUCKDB, POSTGRES, order_lines_select
 
 

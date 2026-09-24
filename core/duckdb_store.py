@@ -25,8 +25,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, date
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:  # pragma: no cover — the annotation's name, no import cost
+    from core.models import Buyer
 
 import duckdb
 import pandas as pd
@@ -3127,15 +3130,34 @@ class DuckDBStore(
     async def upsert_buyers(self, buyers: List["Buyer"]) -> int:
         """Insert or update buyers from KeyCRM API.
 
+        The rows come from `core.landing_rows.parse_buyers` — the same reading
+        the Postgres mirror is handed — and are built BEFORE the transaction
+        opens. This writer used to pass the raw birthday string through and
+        let DuckDB cast it, so a birthday DuckDB refuses rolled back the whole
+        batch; now it arrives as a date or as None, and the ids whose birthday
+        could not be read are logged, never the value.
+
+        The SQL is unchanged: the row is replaced whole and the buyer's
+        contacts are deleted and re-inserted, never upserted — a phone list
+        that shrank must not keep the old number.
+
         Args:
             buyers: List of Buyer objects
 
         Returns:
             Number of buyers upserted
         """
-        from core.models import Buyer
+        from core.landing_rows import parse_buyers
+
         if not buyers:
             return 0
+
+        parsed = parse_buyers(buyers)
+        if parsed.unreadable_birthdays:
+            logger.warning(
+                "buyers: %d unreadable birthday(s) stored as NULL, ids %s",
+                len(parsed.unreadable_birthdays), parsed.unreadable_birthdays,
+            )
 
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
@@ -3143,8 +3165,7 @@ class DuckDBStore(
                 count = 0
                 contacts_count = 0
 
-                for buyer in buyers:
-                    # Upsert buyer record
+                for row, (buyer_id, contacts) in zip(parsed.rows, parsed.contacts):
                     conn.execute("""
                         INSERT OR REPLACE INTO buyers
                         (id, full_name, birthday, note, phone, email,
@@ -3152,52 +3173,17 @@ class DuckDBStore(
                          loyalty_program_name, loyalty_level_name, loyalty_discount, loyalty_amount,
                          created_at, updated_at, synced_at)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, [
-                        buyer.id,
-                        buyer.full_name,
-                        buyer.birthday,
-                        buyer.note,
-                        buyer.phone,
-                        buyer.email,
-                        buyer.manager_id,
-                        buyer.company_id,
-                        buyer.company_name,
-                        buyer.city,
-                        buyer.region,
-                        buyer.loyalty_program_name,
-                        buyer.loyalty_level_name,
-                        buyer.loyalty_discount,
-                        buyer.loyalty_amount,
-                        buyer.created_at,
-                        buyer.updated_at,
-                    ])
+                    """, list(row))
                     count += 1
 
-                    # Upsert contacts (phones and emails)
-                    # First, remove existing contacts for this buyer
-                    conn.execute("DELETE FROM buyer_contacts WHERE buyer_id = ?", [buyer.id])
-
-                    # Insert all phones
-                    if buyer.phones:
-                        for i, phone in enumerate(buyer.phones):
-                            if phone:  # Skip empty values
-                                conn.execute("""
-                                    INSERT INTO buyer_contacts (buyer_id, contact_type, value, is_primary)
-                                    VALUES (?, 'phone', ?, ?)
-                                    ON CONFLICT (buyer_id, contact_type, value) DO NOTHING
-                                """, [buyer.id, phone, i == 0])
-                                contacts_count += 1
-
-                    # Insert all emails
-                    if buyer.emails:
-                        for i, email in enumerate(buyer.emails):
-                            if email:  # Skip empty values
-                                conn.execute("""
-                                    INSERT INTO buyer_contacts (buyer_id, contact_type, value, is_primary)
-                                    VALUES (?, 'email', ?, ?)
-                                    ON CONFLICT (buyer_id, contact_type, value) DO NOTHING
-                                """, [buyer.id, email, i == 0])
-                                contacts_count += 1
+                    conn.execute("DELETE FROM buyer_contacts WHERE buyer_id = ?", [buyer_id])
+                    for contact in contacts:
+                        conn.execute("""
+                            INSERT INTO buyer_contacts (buyer_id, contact_type, value, is_primary)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT (buyer_id, contact_type, value) DO NOTHING
+                        """, list(contact))
+                        contacts_count += 1
 
                 conn.execute("COMMIT")
                 logger.info(f"Upserted {count} buyers, {contacts_count} contacts to DuckDB")
