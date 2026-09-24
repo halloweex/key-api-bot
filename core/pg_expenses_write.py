@@ -34,11 +34,11 @@ row is present on both sides. Writing Postgres directly keeps a DELETE a DELETE.
 
 AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 
-Every write here latches the chain (`core/chain_latch.py`, OD-19 (a)) — after
-the connection is in hand and before the statement runs. From the first typed
-expense onward the flag cannot move these writes back to DuckDB — only
-`scripts/chain_copy_back.py` can — because a flag flip after a row has landed
-here starts a second writer rather than undoing anything.
+Every write here latches the chain (`core/chain_latch.py`, OD-19 (a)) once a
+connection has come out of the pool and before the transaction opens. From the
+first typed expense onward the flag cannot move these writes back to DuckDB —
+only `scripts/chain_copy_back.py` can — because a flag flip after a row has
+landed here starts a second writer rather than undoing anything.
 """
 from __future__ import annotations
 
@@ -119,8 +119,13 @@ def _latch() -> str:
     `require_revision` raising because `web` came up ahead of `migrate` are all
     ordinary events, and today's production state (`KS_WRITE_EXPENSES=postgres`
     since 2026-09-17 08:33 UTC, `app.manual_expenses` at zero rows) is exactly
-    the state one of them would have latched away with nothing written. After
-    `_pool()` the remaining window is the statement itself failing, which is the
+    the state one of them would have latched away with nothing written.
+
+    "In hand" means out of the pool — inside `pool.acquire()`, not merely after
+    `_pool()`. The acquire fails on its own: five connections all in use, or
+    one that will not reset. This chain latched between the two until
+    2026-09-25; chain 6a's review counted the acquire first. With a connection
+    in hand the remaining window is the statement itself failing, which is the
     case the two copies are designed to report rather than prevent.
     """
     return chain_latch.latch(CHAIN, WRITE_ENV)
@@ -164,8 +169,10 @@ async def add_expense(
     record every typed expense with no time at all.
     """
     pool = await _pool()
-    stamp = _latch()
     async with pool.acquire() as conn:
+        # Inside the acquire, not before it: an exhausted pool or a connection
+        # that will not reset is a write that never reached Postgres (`_latch`).
+        stamp = _latch()
         async with conn.transaction():
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             await _ensure_expense_id_floor(conn)
@@ -199,8 +206,8 @@ async def update_expense(expense_id: int, **fields: Any) -> Optional[Tuple[Any, 
     params.append(expense_id)
 
     pool = await _pool()
-    stamp = _latch()
     async with pool.acquire() as conn:
+        stamp = _latch()
         # A transaction where DuckDB's original needed none: the owner row and
         # the write it records land together or neither does, so a claim can
         # never outlive the statement that earned it.
@@ -217,8 +224,8 @@ async def update_expense(expense_id: int, **fields: Any) -> Optional[Tuple[Any, 
 async def delete_expense(expense_id: int) -> bool:
     """Delete one expense. A deletion stays a deletion — see the module note."""
     pool = await _pool()
-    stamp = _latch()
     async with pool.acquire() as conn:
+        stamp = _latch()
         async with conn.transaction():
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             row = await conn.fetchrow(

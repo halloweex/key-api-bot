@@ -56,10 +56,10 @@ writes back to DuckDB.
 in hand: `pool.acquire()` fails on its own — five connections, all taken by the
 Sunday full sync it runs inside, or one that fails to reset — and a latch taken
 before it would move the chain with nothing written, leaving copy-back as the
-only way back and `chain_latch_disagrees` (CRITICAL) the next morning. Chains 1
-and 8 were written before that was counted, and still latch between the two;
-`tests/unit/test_chain_latch.py` holds them to it by name, strictly, so the
-list can only shrink.
+only way back and `chain_latch_disagrees` (CRITICAL) the next morning. Chains
+1, 8 and 7a were written before that was counted and latched between the two
+until 2026-09-25; every chain now latches inside the acquire, and
+`tests/unit/test_chain_latch.py` holds each registered chain to it.
 
 A PRECONDITION THE FLAG ENFORCES
 

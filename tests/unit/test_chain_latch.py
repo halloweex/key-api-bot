@@ -413,22 +413,6 @@ _DB_CALLS = {"execute", "executemany", "fetch", "fetchrow", "fetchval"}
 _CONNECT_CALLS = {"get_pool", "require_revision", "_pool"}
 
 
-# Chains whose writers still take the latch between `_pool()` and
-# `pool.acquire()` — written before an acquire was counted as part of getting
-# the connection (review of DN-26, 2026-09-24). Strict xfail: a chain fixed
-# here turns its entry into a failure until it is removed, so this can only
-# shrink, and a chain not named here is held to the rule from its first line.
-_LATCHES_BEFORE_ACQUIRE = {
-    "pg_inventory_write": "chain 1 latches before acquire; DN-24 rewrites those lines",
-    "pg_expenses_write": "chain 8 latches before acquire; it is live, left for its own change",
-    # Chain 7a (DN-25) was written in parallel with this rule and merged
-    # beside it: its `set_goal` still latches between `_pool()` and the
-    # acquire. Named rather than rewritten on the rebase, so fixing it is its
-    # own change and this entry turns red the day it lands.
-    "pg_goals_write": "chain 7a latches before acquire; merged beside DN-26, left for its own change",
-}
-
-
 class TestEveryWriterLatchesFirst:
     def test_the_walk_finds_the_writers_that_exist(self):
         assert set(_writers(pg_expenses_write)) == {
@@ -485,16 +469,18 @@ class TestEveryWriterLatchesFirst:
                 f"{module.__name__}.{name} latches before the connection is in "
                 "hand, so a write that never reaches Postgres latches for ever")
 
-    @pytest.mark.parametrize("module", [
-        pytest.param(m, marks=pytest.mark.xfail(
-            strict=True, reason=_LATCHES_BEFORE_ACQUIRE[write_chains.chain_name(m)]))
-        if write_chains.chain_name(m) in _LATCHES_BEFORE_ACQUIRE else m
-        for m in write_chains.WRITE_CHAINS
-    ], ids=write_chains.chain_name)
+    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_nor_before_the_pool_has_handed_over_a_connection(self, module):
         """`pool.acquire()` fails on its own: an exhausted pool, a connection
-        that will not reset. Separate from the test above so the chains still
-        named in `_LATCHES_BEFORE_ACQUIRE` stay pinned to that one in full."""
+        that will not reset.
+
+        Chains 1, 8 and 7a were written before an acquire was counted as part
+        of getting the connection (review of DN-26, 2026-09-24) and sat in a
+        strict-xfail ledger here until 2026-09-25, when all three moved the
+        latch inside the acquire. No chain is exempt now; a new one is held to
+        this from its first line. What it costs to get wrong is proved against
+        a live pool in `tests/integration/test_latch_waits_for_a_connection.py`.
+        """
         for name, node in _writers(module).items():
             latches = [n.lineno for n in ast.walk(node)
                        if isinstance(n, ast.Call)
