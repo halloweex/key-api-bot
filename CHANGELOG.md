@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.250
+
+
+
 ## 3.0.249
 
 - Gates install the migration tools at the lock's versions
