@@ -1241,6 +1241,42 @@ class TestThePairingThroughTheJob:
             pg["headline_vs_line_items"] > record["in_flight"])
 
     @pytest.mark.asyncio
+    async def test_with_the_duckdb_guards_stood_down_the_twins_file_what_the_record_said(
+        self, pool, job, monkeypatch,
+    ):
+        """DN-28: the path step 13 relies on, run for real. While Postgres
+        alone derives, the scan skips DuckDB's Silver checks and
+        `duckdb_looked` leaves them out, so the line-item twins stand in — at
+        exactly the counts this record's `standalone` has been giving in
+        shadow for the same facts."""
+        import json
+
+        from core import warehouse_cutover
+
+        scheduler, store, _sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
+        async with pool.acquire() as conn:
+            for oid, sales_type in ((IDS[72], "retail"), (IDS[73], "internal")):
+                await _bronze(conn, oid, total=0, minutes_ago=150)
+                await _silver(conn, oid, total=0, sales_type=sales_type)
+                await conn.execute(
+                    "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity,"
+                    " price_sold) VALUES ($1, $2, NULL, 'x', 2, 150)", oid * 1000 + 1, oid)
+
+        result = await scheduler._run_dq_integrity()
+
+        issues = await self._issues(store, result["run_id"])
+        record = json.loads(issues["pg_twin_pairing"]["description"])
+        assert not warehouse_cutover.STOOD_DOWN_WHEN_POSTGRES & set(record["duckdb"]["looked"])
+        assert record["duckdb"]["headline_vs_line_items"] is None
+        for name in ("pg_headline_vs_line_items", "pg_goods_shipped_without_sale"):
+            assert issues[name]["count"] >= 1
+            assert issues[name]["count"] == record["standalone"][name]
+        assert "pg_line_items_disagree" not in issues
+        assert "integrity_check_raised" not in issues
+
+    @pytest.mark.asyncio
     async def test_off_there_is_no_record(self, pool, job, monkeypatch):
         scheduler, store, _sent = job
         monkeypatch.delenv("KS_DQ_PG_WAREHOUSE", raising=False)
