@@ -583,6 +583,25 @@ def check_warehouse_writer_mode(payload: Optional[dict]) -> "list[tuple[str, str
     return []
 
 
+def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `utm_parse` block: a KS_UTM_PARSE web ran as `duckdb` instead
+    of what was set — a value it did not understand, or `postgres` without
+    KS_PG_DERIVE=own (DN-19).
+
+    Warn, the derivation mode's reason: web runs as `duckdb`, which is what it
+    did before the variable existed, so /traffic is fed exactly as before —
+    but whoever set it believes Postgres parses the table, and a soak believed
+    to be running is not. It must not stop web instead: web is the only
+    process that syncs orders. An absent block is not a failure; an older web
+    publishes none.
+    """
+    block = (payload or {}).get("utm_parse")
+    if isinstance(block, dict) and block.get("error"):
+        return [("utm_parse_mode_invalid",
+                 f"UTM parse: {block['error']}")]
+    return []
+
+
 # ─── Orchestration ──────────────────────────────────────────────────────────
 
 async def run_canary(
@@ -695,6 +714,14 @@ async def run_canary(
         if warehouse_mode_failures and severity == "ok":
             severity = "warn"
 
+        # A KS_UTM_PARSE web ran as duckdb instead. Warn, for the same reason:
+        # the copy /traffic has always had is still shipped.
+        utm_mode_failures = check_utm_parse_mode(payload)
+        for key, message in utm_mode_failures:
+            fail(key, message)
+        if utm_mode_failures and severity == "ok":
+            severity = "warn"
+
         # Derivation marks dropped and demonstrably not being healed. Warn:
         # every row landed, and what is owed is a rebuild.
         marks_failures = check_derivation_marks(payload)
@@ -779,6 +806,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Set KS_WRITE_WAREHOUSE to duckdb or postgres in .env, then recreate web"),
     ("write_chain_precondition_unmet",
      "Set the read flag the message names to postgres, then docker compose up -d web"),
+    ("utm_parse_mode_invalid",
+     "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
 )
 
 def _what_to_do(result: CanaryResult) -> Optional[str]:

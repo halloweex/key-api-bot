@@ -42,7 +42,7 @@ async def _mirror_freshness() -> "dict | None":
         if _mirror_cache["data"] is not None and now < _mirror_cache["expires_at"]:
             return _mirror_cache["data"]
         try:
-            from core import pg_derivation
+            from core import pg_derivation, pg_utm_parse
             from core.mirror_reconciliation import WATCHED_MIRRORS, fetch_mirror_freshness
             from core.pg import get_pool
 
@@ -50,11 +50,22 @@ async def _mirror_freshness() -> "dict | None":
             # the limit declared here: a derivation that simply stops being
             # triggered raises nothing anywhere, and only its watermarks age.
             owned = pg_derivation.owns()
-            tables = WATCHED_MIRRORS + (pg_derivation.DERIVED_TABLES if owned else ())
+            # And under KS_UTM_PARSE=postgres (which needs own) the UTM table,
+            # whose watermark is then the parse's liveness stamp rather than a
+            # ship's (DN-19): the derivation's last step, in a try of its own,
+            # so it can stop while Silver and Gold stay fresh. Under the
+            # default the row is the ship's and is judged by the daily
+            # comparison, as before.
+            parsed = pg_utm_parse.parses_in_postgres()
+            tables = (WATCHED_MIRRORS
+                      + (pg_derivation.DERIVED_TABLES if owned else ())
+                      + ((pg_utm_parse.UTM_TABLE,) if parsed else ()))
             data = await fetch_mirror_freshness(await get_pool(), tables=tables)
             if owned:
                 for table in pg_derivation.DERIVED_TABLES:
                     data[table]["max_age_s"] = pg_derivation.DERIVED_MAX_AGE_S
+            if parsed:
+                data[pg_utm_parse.UTM_TABLE]["max_age_s"] = pg_utm_parse.MAX_AGE_S
         except Exception as e:
             # A host with no Postgres configured raises here on every call, and
             # that is not an error worth a warning every minute.
@@ -187,6 +198,15 @@ def _derivation_mode() -> dict:
     from core import pg_derivation
 
     return {"mode": pg_derivation.mode(), "error": pg_derivation.mode_error()}
+
+
+def _utm_parse_mode() -> dict:
+    """KS_UTM_PARSE as this process understood it at start, and the error when
+    it ran as `duckdb` instead of what was set — an unknown value, or
+    `postgres` without KS_PG_DERIVE=own (DN-19). Local state, no I/O."""
+    from core import pg_utm_parse
+
+    return {"mode": pg_utm_parse.mode(), "error": pg_utm_parse.mode_error()}
 
 
 # Marks dropped and not yet covered by a validated rebuild, on the same TTL as
@@ -405,6 +425,7 @@ async def health_check(request: Request):
         "read_fallbacks": _read_fallbacks(),
         "read_fallback_mode": _read_fallback_mode(),
         "warehouse_writer_mode": _warehouse_writer_mode(),
+        "utm_parse": _utm_parse_mode(),
     }
 
 

@@ -9,10 +9,15 @@ rows Postgres already holds: `bronze.orders.manager_comment` is written by the
 same mirror as DuckDB's `orders.manager_comment`, from the same parsed payload,
 with the same `COALESCE(new, stored)`.
 
-**Not wired.** Nothing in production calls this yet. DN-19 puts it behind
-`KS_UTM_PARSE` (default `duckdb`), at the end of the derivation and behind the
-four re-parse doors; until then `ship_order_utm` stays the only writer, and the
-two must never both write the table in one deploy.
+**Wired behind `KS_UTM_PARSE`** (DN-19; default `duckdb`, which is today's
+behaviour byte for byte). Under `duckdb` nothing here runs and
+`ship_order_utm` stays the only writer of the table. Under `postgres` — which
+needs `KS_PG_DERIVE=own` — the derivation's last step is `parse_incremental`
+and the DuckDB tick stops shipping. The two never both write the table in one
+process: the choice is one cached mode, read before anything writes, and both
+the tick and the four re-parse doors ask it — the doors through
+`reparse_router`, which is the one place a re-parse that went round the tick
+decides which store it reaches. See THE MODE and THE ROUTER below.
 
 ONE PARSER, NOT TWO
 
@@ -85,18 +90,122 @@ decides what a failure costs, and a parser that reported success while writing
 nothing is the worst outcome available. Every write is one transaction, so a
 failure leaves the table exactly as it was. No migration: `parsed_at` exists
 since revision 0018.
+
+THE MODE
+
+`KS_UTM_PARSE` is `duckdb`, the default, or `postgres`. Read once, by
+`configure_mode()` from `core.runtime_modes.configure_modes()` — before web's
+boot sync, like every cached mode (DN-05b) — and never on a write path:
+`parses_in_postgres()` reads the cache. `pg_derivation` is configured first
+there, which is what lets this one read its answer.
+
+`postgres` without `KS_PG_DERIVE=own` has no derivation to be the last step
+of: the tick would stop shipping and nothing would parse, so the table would
+freeze under the last OK watermark while every new order fell through the
+COALESCE. So an unknown value, or `postgres` without `own`, **runs as
+`duckdb`**, logs ERROR once, and publishes the error in `/api/health` under
+`utm_parse`; the canary warns `utm_parse_mode_invalid`. It never raises. The
+design's "startup raises" would be a crash loop in web, the only process that
+syncs orders, over a setting about where one table is parsed — OD-09's answer,
+and `KS_PG_DERIVE`'s and `KS_READ_FALLBACK`'s before it.
+
+DuckDB's own parse is not stopped by this flag, in the tick or at the doors.
+That is what makes the rollback one variable: unset it, and the next tick
+ships a DuckDB copy that never stopped being current.
+
+THE ROUTER
+
+Four doors re-parse outside the tick: `POST /api/traffic/refresh`,
+`/traffic/reclassify`, the `manager_comment` backfill behind
+`/traffic/backfill-utm`, and `scripts/backfill_utm.py`. Each runs its DuckDB
+parse and then calls `reparse_router`, and nothing else reaches Postgres from
+them:
+
+- under `duckdb`, `ship_after_reparse(store, force=force)`, as before;
+- under `postgres`, the parse itself — `parse_full` for the two doors that
+  DELETE and re-parse everything (the reclassify and the CLI),
+  `parse_incremental` under `PG_LAYER_LOCK` for the two that only add.
+
+`force` reaches `parse_full` from the CLI's flag and from nowhere else, as it
+reached the ship. The router never raises: the DuckDB half has already
+succeeded and the door reports it. `tests/unit/test_order_utm_shipping.py`
+walks the code for every out-of-tick caller of `refresh_utm_silver_layer` and
+requires the router, and for every call of a ship and requires the `duckdb`
+branch around it.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
+from core.pg_derivation import DERIVED_MAX_AGE_S
 from core.pg_order_utm import UTM_COLUMNS, UTM_TABLE
 from core.utm_classify import utm_columns
 
 logger = logging.getLogger(__name__)
+
+# ─── Who writes silver.order_utm: DuckDB's copy, or Postgres' own parse ──────
+
+ENV = "KS_UTM_PARSE"
+DUCKDB = "duckdb"
+POSTGRES = "postgres"
+_VALID = (DUCKDB, POSTGRES)
+
+_mode: Optional[str] = None
+_mode_error: Optional[str] = None
+
+# The age `/api/health` declares for this table's watermark under `postgres`,
+# which the canary judges (never looser than its own ceiling). The parse is
+# the derivation's last step and stamps the watermark on every success, zero
+# rows included, so it runs exactly as often as the derivation does — at least
+# once a heartbeat, past the floor — and the derived tables' limit is its
+# limit. Its own name because it is its own watermark: a derivation that runs
+# while this step keeps failing ages this row and not theirs.
+MAX_AGE_S = DERIVED_MAX_AGE_S
+
+
+def configure_mode() -> str:
+    """Read `KS_UTM_PARSE` once. Never raises. Called by `configure_modes()`,
+    after `pg_derivation.configure_mode()`, whose answer it depends on."""
+    global _mode, _mode_error
+    from core import pg_derivation
+
+    value = os.getenv(ENV, DUCKDB).strip().lower() or DUCKDB
+    if value not in _VALID:
+        error: Optional[str] = (f"{ENV}={value!r} is not one of {_VALID}; "
+                                f"running as {DUCKDB!r}")
+    elif value == POSTGRES and not pg_derivation.owns():
+        error = (f"{ENV}={POSTGRES!r} needs {pg_derivation.ENV}="
+                 f"{pg_derivation.OWN!r}, and it is {pg_derivation.mode()!r}; "
+                 f"running as {DUCKDB!r}")
+    else:
+        error = None
+    # Logged when it changes, not on every call: web's startup and the
+    # scheduler both configure, and one ERROR per cause is what a reader of
+    # the log can use.
+    if error and error != _mode_error:
+        logger.error(error)
+    _mode = DUCKDB if error else value
+    _mode_error = error
+    return _mode
+
+
+def mode() -> str:
+    """The configured mode; `duckdb` until `configure_mode` has run."""
+    return _mode or DUCKDB
+
+
+def mode_error() -> Optional[str]:
+    return _mode_error
+
+
+def parses_in_postgres() -> bool:
+    """Postgres parses the table and nothing ships it. Reads the cache, never
+    the environment."""
+    return _mode == POSTGRES
 
 # `int.from_bytes(b"ks:utm", "big")`. One key for every UTM parse in every
 # process, and for nothing else: an advisory lock is a number, and a number
@@ -374,3 +483,70 @@ async def _parse_full_locked(pool, *, force: bool) -> Dict[str, Any]:
         result["forced"] = True
     logger.info("Order UTM parsed in Postgres (full): %s", result)
     return result
+
+
+async def parse_incremental_locked(pool=None) -> Dict[str, Any]:
+    """`parse_incremental` under `PG_LAYER_LOCK`, waited for at most
+    `LOCK_WAIT_S`. Raises.
+
+    For the callers that do not hold the lock already: the derivation's last
+    step, which runs after the derivations have let it go, and the two doors
+    that only add. A bounded wait for `parse_full`'s reason — two of those
+    callers are HTTP handlers, and the ClickHouse shippers hold the same lock
+    across network I/O — and a wait that runs out is written into the
+    watermark the way `parse_full` writes its own: the parse did not run.
+    """
+    from core.pg_landing import _record_failure
+    from core.pg_silver import PG_LAYER_LOCK
+
+    try:
+        await asyncio.wait_for(PG_LAYER_LOCK.acquire(), timeout=LOCK_WAIT_S)
+    except Exception as exc:
+        await _record_failure(
+            UTM_TABLE,
+            f"{type(exc).__name__}: PG_LAYER_LOCK was not free within "
+            f"{LOCK_WAIT_S} s; the incremental UTM parse did not run",
+        )
+        raise
+    try:
+        return await parse_incremental(pool)
+    finally:
+        PG_LAYER_LOCK.release()
+
+
+async def reparse_router(store, *, full: bool = False,
+                         force: bool = False) -> Dict[str, Any]:
+    """Carry a re-parse that went round the tick to Postgres. Never raises.
+
+    Called by the four doors after their DuckDB parse; see THE ROUTER in the
+    module docstring. `full` says the door re-parsed everything (it DELETEd
+    first), so under `postgres` the table is replaced whole rather than
+    topped up; under `duckdb` it changes nothing, because the ship always
+    replaces the table whole. `force` is the CLI's flag and nobody else's.
+
+    Under `postgres` the DuckDB `store` is not read: the parse reads
+    `bronze.orders`, which the backfills reach through `ship_orders_by_id`
+    before they get here.
+    """
+    if not parses_in_postgres():
+        from core.pg_order_utm import ship_after_reparse
+
+        return await ship_after_reparse(store, force=force)
+
+    from core.mirror_reconciliation import configured
+
+    if not configured():
+        return {"skipped": "KS_PG_DSN is not set"}
+    try:
+        if full:
+            return await parse_full(force=force)
+        return await parse_incremental_locked()
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        # The failure is already in the watermark (both parses record before
+        # they raise); this is the line in the log beside it.
+        logger.error(
+            "Order UTM not parsed in Postgres after a re-parse — /traffic "
+            "keeps the previous verdicts until the next derivation: %s",
+            exc, exc_info=True,
+        )
+        return {"error": f"{type(exc).__name__}: {exc}"}

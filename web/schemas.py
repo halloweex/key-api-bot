@@ -58,9 +58,10 @@ class MirrorFreshness(BaseModel):
     max_age_s: Optional[int] = Field(
         None,
         description="The age limit this table is judged by, when web declares one. "
-        "Declared for the tables Postgres derives on its own signal, so the "
-        "watchdog's list switches with KS_PG_DERIVE instead of being kept in "
-        "a second container.",
+        "Declared for the tables Postgres derives on its own signal, and for "
+        "silver.order_utm once Postgres parses it (KS_UTM_PARSE=postgres), so "
+        "the watchdog's list switches with those flags instead of being kept "
+        "in a second container.",
     )
 
 
@@ -171,6 +172,17 @@ class HealthResponse(BaseModel):
             "read, `mode` as run — duckdb in this build whatever the value, "
             "the switch being DN-29 — and `error` naming a value that was not "
             "understood and ran as duckdb; judged by the canary."
+        ),
+    )
+    utm_parse: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Who writes Postgres' silver.order_utm: `mode` is KS_UTM_PARSE as "
+            "understood at start — duckdb, a copy of DuckDB's parse, or "
+            "postgres, parsed in Postgres as the derivation's last step — and "
+            "`error` names a value that ran as duckdb instead: one not "
+            "understood, or postgres without KS_PG_DERIVE=own. Judged by the "
+            "canary (DN-19)."
         ),
     )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(

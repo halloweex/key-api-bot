@@ -58,7 +58,7 @@ async def _exploding_ship(*_a, **_kw):
 
 @pytest.mark.asyncio
 async def test_the_endpoint_reparses_and_names_the_ids_it_could_not_ship(tmp_path):
-    """The route's whole second half — the re-parse and `ship_after_reparse` —
+    """The route's whole second half — the re-parse and `reparse_router` —
     must still run, and the run must say which orders the two stores now
     disagree about."""
     from web.routes.api import traffic
@@ -80,7 +80,7 @@ async def test_the_endpoint_reparses_and_names_the_ids_it_could_not_ship(tmp_pat
              patch("core.scheduler.get_scheduler", return_value=scheduler), \
              patch("core.pg_backfill.ship_orders_by_id", new=_exploding_ship), \
              patch.object(store, "refresh_utm_silver_layer", new=reparse), \
-             patch.object(traffic, "ship_after_reparse", new=AsyncMock()) as after, \
+             patch.object(traffic, "reparse_router", new=AsyncMock()) as after, \
              patch("asyncio.sleep", new=AsyncMock()):
             # Bounded: this run takes a lock per chunk, and a test that hangs
             # on one fails nobody in time.
@@ -164,7 +164,7 @@ async def test_a_successful_run_still_reports_success_and_no_failed_ids(tmp_path
              patch("core.pg_backfill.ship_orders_by_id", new=ship), \
              patch.object(store, "refresh_utm_silver_layer",
                           new=AsyncMock(return_value=[])), \
-             patch.object(traffic, "ship_after_reparse", new=AsyncMock()), \
+             patch.object(traffic, "reparse_router", new=AsyncMock()), \
              patch("asyncio.sleep", new=AsyncMock()):
             await asyncio.wait_for(traffic._run_backfill_inner(1), timeout=20)
         result = dict(traffic._backfill_status["result"])

@@ -237,7 +237,7 @@ async def test_the_comment_backfill_route_ships_what_it_changed_under_the_lock(t
              patch("core.keycrm.get_async_client", AsyncMock(return_value=Client())), \
              patch("core.scheduler.get_scheduler", return_value=scheduler), \
              patch("core.pg_backfill.ship_orders_by_id", new=ship), \
-             patch.object(traffic, "ship_after_reparse", new=AsyncMock()), \
+             patch.object(traffic, "reparse_router", new=AsyncMock()), \
              patch("asyncio.sleep", new=AsyncMock()):
             # Bounded for the reason the reconciliation test below is: a lock
             # taken and never released is a deadlock, and a test that hangs on

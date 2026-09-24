@@ -6,11 +6,13 @@ Most orders were synced before the manager_comment column existed,
 so they have NULL. This script re-fetches orders from KeyCRM API
 and updates the manager_comment column, then refreshes UTM layers.
 
-It also ships every comment it restores to `bronze.orders`. Not for the
-/traffic tab — that reads `silver.order_utm`, which the re-parse below already
-ships — but because the daily `mirror_landing` fingerprint compares
-`manager_comment` between the two stores, and because step 9's Postgres UTM
-parser reads `bronze.orders.manager_comment` directly.
+It also ships every comment it restores to `bronze.orders`, because the daily
+`mirror_landing` fingerprint compares `manager_comment` between the two stores,
+and because step 9's Postgres UTM parser reads `bronze.orders.manager_comment`
+directly. Under the default `KS_UTM_PARSE=duckdb` that is all it is for — the
+/traffic tab reads `silver.order_utm`, which the re-parse below ships. Under
+`KS_UTM_PARSE=postgres` it is also what the tab ends up showing: the re-parse
+below then parses `silver.order_utm` in Postgres out of this copy.
 
 **Stop the web container first** — see `WEB_MUST_BE_STOPPED` in
 `core/pg_backfill.py`, which this logs at startup: the scheduler's heavy-job
@@ -19,7 +21,7 @@ lock lives in that process and cannot be taken from here.
 Usage:
     PYTHONPATH=. python scripts/backfill_utm.py
     PYTHONPATH=. python scripts/backfill_utm.py --days 90   # Only last 90 days
-    PYTHONPATH=. python scripts/backfill_utm.py --force-ship  # Ship even a shrink
+    PYTHONPATH=. python scripts/backfill_utm.py --force-ship  # Replace even with a shrink
 
 In Docker:
     docker exec keycrm-web python /app/scripts/backfill_utm.py
@@ -202,18 +204,22 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
     # This script rewrites `silver_order_utm` without marking the warehouse
     # dirty, so without this the operator who just ran it would look at the
     # tab and see the classification they replaced. The three admin endpoints
-    # that do the same thing call the same function; never raises.
+    # that do the same thing call the same router; never raises. `full`,
+    # because everything was deleted and re-parsed above: under
+    # KS_UTM_PARSE=postgres the table is re-parsed whole out of
+    # `bronze.orders`, and under the default DuckDB's copy is shipped.
     #
-    # It refuses a copy under 90% of what Postgres holds, or one made while
-    # the last parse is recorded as failed, and logs the refusal rather than
-    # raising — so read the line below. `--force-ship` is the only way past
-    # that guard anywhere in the repository, and it is here, behind a flag an
-    # operator types, because this is the one caller that may mean a shrink.
-    from core.pg_order_utm import ship_after_reparse
+    # Either way it refuses a result under 90% of what Postgres holds — and
+    # the ship one made while the last DuckDB parse is recorded as failed —
+    # and logs the refusal rather than raising, so read the line below.
+    # `--force-ship` is the only way past that guard anywhere in the
+    # repository, and it is here, behind a flag an operator types, because
+    # this is the one caller that may mean a shrink.
+    from core.pg_utm_parse import reparse_router
 
     logger.info(
-        "Shipping UTM to Postgres: %s",
-        await ship_after_reparse(store, force=force_ship),
+        "UTM to Postgres: %s",
+        await reparse_router(store, full=True, force=force_ship),
     )
 
     # Show results
@@ -240,9 +246,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--force-ship", action="store_true",
         help=(
-            "Replace Postgres' silver.order_utm even when DuckDB now holds under "
-            "90%% of its rows, or the last parse failed. /traffic reads that "
-            "table: use only when the smaller table is the one you mean."
+            "Replace Postgres' silver.order_utm even when the new table holds "
+            "under 90%% of its rows (DuckDB's copy, or under KS_UTM_PARSE=postgres "
+            "the parse of bronze.orders), or the last DuckDB parse failed. "
+            "/traffic reads that table: use only when the smaller table is the "
+            "one you mean."
         ),
     )
     args = parser.parse_args()

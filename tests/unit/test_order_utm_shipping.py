@@ -6,7 +6,9 @@ one the port shipped wrong or left unguarded:
 
 1. the routed reads lost the thread-pool offload and the query timeout;
 2. a failing shipper left no trace in the watermark;
-3. three admin endpoints rewrote the UTM in DuckDB and never shipped it;
+3. three admin endpoints rewrote the UTM in DuckDB and never shipped it —
+   and since DN-19, which store a re-parse reaches is `KS_UTM_PARSE`'s to
+   say, through `reparse_router`, with no ship reachable under `postgres`;
 4. `reconcile_order_utm` was written and nothing exercised it;
 5. a full replace copied whatever DuckDB held, a half-finished re-parse
    included (DN-04) — the row guard, from `TestTheShrinkRule` down, and
@@ -166,39 +168,218 @@ class TestAFailingShipperSaysSo:
         assert "read_ms" in src
 
 
+# ─── The walks (DN-19) ────────────────────────────────────────────────────────
+#
+# Production is every module under these roots. `scripts/` is outside
+# `testpaths` and is walked deliberately: `backfill_utm.py` rewrites the same
+# table the same way, and a divergence there is just as invisible.
+PRODUCTION_ROOTS = ("core", "web", "scripts", "bot")
+
+# The one scheduled DuckDB parse: the warehouse tick. Every other caller of
+# `refresh_utm_silver_layer` is a door that went round the tick.
+TICK = ("core/duckdb_store.py", "refresh_warehouse_layers")
+
+# The four doors the design names. A floor, not the whole set: a fifth door is
+# held to the router the day it is written, without being listed here.
+DOORS = {
+    ("web/routes/api/traffic.py", "refresh_traffic_data"),
+    ("web/routes/api/traffic.py", "reclassify_traffic"),
+    ("web/routes/api/traffic.py", "_run_backfill_inner"),
+    ("scripts/backfill_utm.py", "backfill_utm"),
+}
+
+# What reaches Postgres' `silver.order_utm` other than through the router.
+DIRECT = {"ship_order_utm", "ship_after_reparse", "parse_full",
+          "parse_incremental", "parse_incremental_locked"}
+
+GUARD = "parses_in_postgres"
+
+
+def _called(call: ast.Call):
+    func = call.func
+    return func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+
+
+def _production():
+    """`(relative path, tree)` for every production module."""
+    for root in PRODUCTION_ROOTS:
+        for path in sorted((REPO / root).rglob("*.py")):
+            yield str(path.relative_to(REPO)), ast.parse(path.read_text())
+
+
+def _parents(tree) -> dict:
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    return parents
+
+
+def _owner(node, parents):
+    """The outermost function a node sits in — a method counts as outermost,
+    a class is not a function — or None at module level. Outermost, so a
+    helper nested inside a function (`ship_after_reparse`'s `_locked`) is that
+    function's body rather than a name of its own."""
+    found = None
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found = node
+    return found
+
+
+def _is_guard(test) -> "str | None":
+    """'postgres' when `test` is `parses_in_postgres()`, 'duckdb' when it is
+    `not parses_in_postgres()`, else None."""
+    if isinstance(test, ast.Call) and _called(test) == GUARD:
+        return "postgres"
+    if (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            and isinstance(test.operand, ast.Call) and _called(test.operand) == GUARD):
+        return "duckdb"
+    return None
+
+
+def _in_duckdb_branch(node, parents) -> bool:
+    """Whether an enclosing `if` on the mode puts `node` where Postgres does
+    not parse: the body of `if not parses_in_postgres()`, or the `else` of
+    `if parses_in_postgres()`."""
+    child = node
+    while child in parents:
+        parent = parents[child]
+        if isinstance(parent, ast.If):
+            guard = _is_guard(parent.test)
+            if guard == "duckdb" and child in parent.body:
+                return True
+            if guard == "postgres" and child in parent.orelse:
+                return True
+        child = parent
+    return False
+
+
 class TestAReparseReachesPostgres:
     """Finding 3, and a regression the port itself created: before it, the tab
     read the very table these endpoints write, so a reclassify was visible at
-    once. Now the tab reads Postgres."""
+    once. Now the tab reads Postgres — and since DN-19 which store a re-parse
+    reaches is decided by `KS_UTM_PARSE`, in one place, `reparse_router`."""
 
     ROUTES = REPO / "web" / "routes" / "api" / "traffic.py"
 
-    def test_every_reparse_site_ships(self):
-        """Parsed, not counted. Comparing two `str.count`s would be satisfied
-        by three ships in one handler and none in the other two, and would be
-        thrown off by the words appearing in a comment. So each function that
-        reparses is checked for a ship of its own.
+    def _doors(self):
+        """`{(path, function): (function node, names it calls)}` for every
+        production function calling `refresh_utm_silver_layer`, the tick
+        excluded."""
+        doors = {}
+        for rel, tree in _production():
+            parents = _parents(tree)
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and _called(node) == "refresh_utm_silver_layer"):
+                    continue
+                fn = _owner(node, parents)
+                assert fn is not None, f"{rel}:{node.lineno} parses at module level"
+                doors[(rel, fn.name)] = (fn, {
+                    _called(c) for c in ast.walk(fn) if isinstance(c, ast.Call)})
+        assert TICK in doors, "the walk no longer finds the tick — it is not looking"
+        del doors[TICK]
+        return doors
 
-        `scripts/` is outside `testpaths` and is checked here deliberately:
-        `backfill_utm.py` rewrites the same table the same way, and a
-        divergence there is just as invisible.
-        """
-        for path in (self.ROUTES, REPO / "scripts" / "backfill_utm.py"):
-            src = path.read_text()
-            tree = ast.parse(src)
-            for fn in ast.walk(tree):
-                if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef)):
+    def test_every_out_of_tick_reparse_goes_through_the_router(self):
+        """Parsed, not counted. Comparing two `str.count`s would be satisfied
+        by three routes in one handler and none in the other two, and would be
+        thrown off by the words appearing in a comment. So each function that
+        re-parses is checked for a router call of its own — and for no direct
+        path to the table beside it, which would ship or parse whatever the
+        mode says."""
+        doors = self._doors()
+        assert DOORS <= set(doors), sorted(DOORS - set(doors))
+        for (rel, name), (_fn, calls) in doors.items():
+            assert "reparse_router" in calls, (
+                f"{rel}:{name} re-parses the UTM in DuckDB and never reaches "
+                f"Postgres through reparse_router — the tab reads Postgres"
+            )
+            assert not calls & DIRECT, (
+                f"{rel}:{name} reaches the table directly ({sorted(calls & DIRECT)}), "
+                "past KS_UTM_PARSE"
+            )
+
+    def test_a_door_that_deletes_asks_for_a_full_parse(self):
+        """The two doors that DELETE and re-parse everything are the only way a
+        rule change reaches orders whose `updated_at` has not moved, so under
+        `postgres` they must replace the table whole — and the two that only
+        add must not, or every refresh would re-parse 33 K comments."""
+        for (rel, name), (fn, _calls) in self._doors().items():
+            deletes = any(
+                isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and "DELETE FROM silver_order_utm" in n.value
+                for n in ast.walk(fn))
+            routes = [c for c in ast.walk(fn)
+                      if isinstance(c, ast.Call) and _called(c) == "reparse_router"]
+            for call in routes:
+                full = next((k.value for k in call.keywords if k.arg == "full"), None)
+                said = isinstance(full, ast.Constant) and full.value is True
+                assert said == deletes, (
+                    f"{rel}:{name}:{call.lineno} "
+                    + ("deletes and does not ask for a full parse" if deletes
+                       else "only adds and asks for a full parse")
+                )
+
+    def test_under_postgres_no_production_function_reaches_a_ship(self):
+        """The module walk the design asks for. A ship copies DuckDB's table
+        over Postgres' own parse, so under `postgres` nothing may reach one.
+
+        Reachability by name, to a fixed point: `ship_order_utm` is a ship,
+        and so is every function that calls a ship anywhere but the `duckdb`
+        branch of an `if` on `parses_in_postgres()`. The closure must stay
+        inside `core/pg_order_utm.py`, where the ships are defined — one
+        unguarded caller anywhere else is a production path that ships under
+        `postgres`. By name, so a same-named function elsewhere is counted as
+        a ship too: the walk can only err towards failing."""
+        trees = list(_production())
+        ships = {"ship_order_utm"}
+        reaching: set = set()
+        guarded: set = set()
+        changed = True
+        while changed:
+            changed = False
+            for rel, tree in trees:
+                parents = _parents(tree)
+                for node in ast.walk(tree):
+                    if not (isinstance(node, ast.Call) and _called(node) in ships):
+                        continue
+                    fn = _owner(node, parents)
+                    if fn is None:
+                        reaching.add((rel, "<module>"))
+                        continue
+                    if _in_duckdb_branch(node, parents):
+                        guarded.add((rel, fn.name, _called(node)))
+                    elif fn.name not in ships:
+                        ships.add(fn.name)
+                        reaching.add((rel, fn.name))
+                        changed = True
+        outside = sorted(r for r in reaching if r[0] != "core/pg_order_utm.py")
+        assert outside == [], f"a ship is reachable under KS_UTM_PARSE=postgres: {outside}"
+        assert ships == {"ship_order_utm", "ship_after_reparse"}, sorted(ships)
+        # Non-vacuity: the two guarded sites DN-19 wrote, found by the walk.
+        assert {("core/scheduler.py", "_rebuild_pg_layers", "ship_order_utm"),
+                ("core/pg_utm_parse.py", "reparse_router", "ship_after_reparse"),
+                } <= guarded, sorted(guarded)
+
+    def test_a_ship_is_never_handed_on_uncalled(self):
+        """The walk above follows calls. A ship passed as a value — to a
+        `partial`, a task, a dict of handlers — would be called somewhere the
+        walk cannot see, so outside its own module a ship is only ever called."""
+        for rel, tree in _production():
+            if rel == "core/pg_order_utm.py":
+                continue
+            parents = _parents(tree)
+            for node in ast.walk(tree):
+                name = (node.id if isinstance(node, ast.Name)
+                        else node.attr if isinstance(node, ast.Attribute) else None)
+                if name not in {"ship_order_utm", "ship_after_reparse"}:
                     continue
-                calls = {
-                    node.func.attr if isinstance(node.func, ast.Attribute)
-                    else getattr(node.func, "id", None)
-                    for node in ast.walk(fn) if isinstance(node, ast.Call)
-                }
-                if "refresh_utm_silver_layer" not in calls:
-                    continue
-                assert "ship_after_reparse" in calls, (
-                    f"{path.name}:{fn.name} reparses the UTM in DuckDB and "
-                    f"never ships it — the tab reads Postgres"
+                parent = parents.get(node)
+                assert isinstance(parent, ast.Call) and parent.func is node, (
+                    f"{rel}:{node.lineno} hands {name} on without calling it"
                 )
 
     def test_it_ships_under_the_layer_lock(self):
@@ -619,9 +800,11 @@ class TestTheParserRecordsItsOutcome:
 
 class TestOnlyTheCliForces:
     """`force=True` defeats the guard, so where it may come from is pinned by
-    structure, not left to convention."""
+    structure, not left to convention. Since DN-19 it reaches the ship or the
+    full Postgres parse through `reparse_router`, and the parse has a shrink
+    guard of its own, so both are shippers here."""
 
-    SHIPPERS = {"ship_order_utm", "ship_after_reparse"}
+    SHIPPERS = {"ship_order_utm", "ship_after_reparse", "reparse_router", "parse_full"}
 
     @pytest.mark.asyncio
     async def test_ship_after_reparse_as_the_endpoints_call_it_does_not_force(
@@ -693,7 +876,7 @@ class TestOnlyTheCliForces:
         tree = ast.parse(path.read_text())
 
         passes = self._calls_passing_force(path)
-        assert len(passes) == 1, "the script should ship exactly once"
+        assert len(passes) == 1, "the script should reach Postgres exactly once"
         value = passes[0][2]
         assert isinstance(value, ast.Name) and value.id == "force_ship", (
             "the script must forward its flag, never a literal"

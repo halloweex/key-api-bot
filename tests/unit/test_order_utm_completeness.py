@@ -213,13 +213,15 @@ class TestTheReaderIsToldWhatToDo:
         today parse in DuckDB without marking the warehouse dirty, and a
         restart forgets the tick's deferral — so a lever that waits for the
         next dirty tick can wait all morning. The route the line names must
-        parse and ship by itself, which is what `ship_after_reparse` is."""
+        parse and reach Postgres by itself, which is what `reparse_router`
+        does under either KS_UTM_PARSE: it ships DuckDB's parse, or parses in
+        Postgres (DN-19)."""
         from tests.routes_helper import find_endpoint
         from web.main import app
 
         endpoint = find_endpoint(app, "/api/traffic/refresh", "POST").route.endpoint
         called = _names_called(endpoint)
-        assert {"refresh_utm_silver_layer", "ship_after_reparse"} <= called
+        assert {"refresh_utm_silver_layer", "reparse_router"} <= called
 
     def test_the_warehouse_refresh_is_not_offered_because_it_does_not_ship_this(self):
         """The lever every Silver alert names rebuilds DuckDB, and under own
@@ -229,7 +231,8 @@ class TestTheReaderIsToldWhatToDo:
         from web.main import app
 
         endpoint = find_endpoint(app, "/api/warehouse/refresh", "POST").route.endpoint
-        assert not {"ship_order_utm", "ship_after_reparse"} & _names_called(endpoint)
+        assert not {"ship_order_utm", "ship_after_reparse",
+                    "reparse_router"} & _names_called(endpoint)
         (line,) = remediation_for(["pg_order_utm_missing"])
         assert "/api/warehouse/refresh" not in line
 
@@ -321,7 +324,7 @@ class TestTheBackfillIsNotTheCommentsLever:
                  patch("core.pg_backfill.ship_orders_by_id", new=ship), \
                  patch.object(store, "refresh_utm_silver_layer",
                               new=AsyncMock(return_value=[])), \
-                 patch.object(traffic, "ship_after_reparse", new=AsyncMock()), \
+                 patch.object(traffic, "reparse_router", new=AsyncMock()), \
                  patch("asyncio.sleep", new=AsyncMock()):
                 # Bounded: the run takes a lock per chunk.
                 await asyncio.wait_for(traffic._run_backfill_inner(30), timeout=20)
