@@ -9,6 +9,8 @@ from datetime import date, datetime, timedelta
 from dataclasses import asdict, dataclass
 from typing import Optional, Dict, Any, List, Sequence, Union
 
+from core import read_fallback
+
 logger = logging.getLogger(__name__)
 
 
@@ -1400,10 +1402,7 @@ class CustomersMixin:
                     render(CLICKHOUSE_ANALYTICS), params, types,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "customer analytics: ClickHouse failed, falling back to "
-                    "DuckDB: %s", exc, exc_info=True,
-                )
+                read_fallback.fall_back("cohorts", exc)
 
         async with self.connection() as conn:
             return conn.execute(render(DUCKDB_ANALYTICS), list(params)).fetchall()

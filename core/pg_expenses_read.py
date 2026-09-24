@@ -89,6 +89,10 @@ def available() -> bool:
 _backfilled: bool = False
 _checked_at: float = 0.0
 _RECHECK_S = 60.0
+# The failure the last check ended in, or None. While the recheck window
+# holds, every call answers the question that check could not, so every one
+# of them is served by DuckDB because of it — and is counted as such.
+_check_failed: "BaseException | None" = None
 
 
 async def backfilled() -> bool:
@@ -114,13 +118,17 @@ async def backfilled() -> bool:
     Cheap: false is re-checked at most once a minute, and true is remembered
     for the life of the process.
     """
-    global _backfilled, _checked_at
+    global _backfilled, _checked_at, _check_failed
     import time as _time
+
+    from core import read_fallback
 
     if _backfilled:
         return True
     now = _time.monotonic()
     if now - _checked_at < _RECHECK_S:
+        if _check_failed is not None:
+            read_fallback.fall_back("expenses", _check_failed)
         return False
     _checked_at = now
 
@@ -137,10 +145,15 @@ async def backfilled() -> bool:
             )
     except Exception as exc:  # noqa: BLE001
         # Unreachable Postgres answers the question by itself: this read is
-        # not going to succeed either, so say no and let DuckDB serve.
-        logger.warning("expenses: cannot read the backfill watermark: %s", exc)
+        # not going to succeed either, so say no and let DuckDB serve — which
+        # is a fallback like any router's, and counted as one. It used to log
+        # under words of its own ("cannot read the backfill watermark") that
+        # no grep for "falling back to DuckDB" could find (DN-20a).
+        _check_failed = exc
+        read_fallback.fall_back("expenses", exc)
         return False
 
+    _check_failed = None
     _backfilled = bool(done)
     if not _backfilled:
         logger.warning(

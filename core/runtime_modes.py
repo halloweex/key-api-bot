@@ -39,7 +39,7 @@ def configure_modes() -> Dict[str, str]:
     to know whether the other already has. The latch is re-read rather than
     assumed unchanged, because a copy-back between two calls releases it.
     """
-    from core import chain_latch, pg_derivation
+    from core import chain_latch, pg_derivation, read_fallback
 
     # Not in the returned mapping: that maps an environment variable to the
     # value read from it, and the latch is read from disk and answers over the
@@ -48,4 +48,11 @@ def configure_modes() -> Dict[str, str]:
     # `app.manual_expenses` still holds zero rows, so no chain has written
     # Postgres and none is latched. The first typed expense takes it.
     chain_latch.load()
-    return {pg_derivation.ENV: pg_derivation.configure_mode()}
+    # `KS_READ_FALLBACK` (DN-20a), and with it the read switches that name an
+    # engine this process has no address for. Never raises: web is the only
+    # syncer, and a crash loop over how a read degrades would stop order
+    # intake — see `core/read_fallback.py`.
+    return {
+        pg_derivation.ENV: pg_derivation.configure_mode(),
+        read_fallback.ENV: read_fallback.configure_mode(),
+    }

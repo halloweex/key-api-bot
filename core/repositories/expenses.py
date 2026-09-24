@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any
 
 from core.duckdb_constants import _date_in_kyiv
 from core.models import OrderStatus
+from core import read_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +51,7 @@ class ExpensesMixin:
                 )
                 return (rows[0] if rows else None) if mode == "one" else rows
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "expenses: Postgres failed, falling back to DuckDB: %s",
-                    exc, exc_info=True,
-                )
+                read_fallback.fall_back("expenses", exc)
 
         duck = render_tables(sql, DUCKDB)
         if mode == "one":

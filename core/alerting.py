@@ -106,6 +106,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "mirror_block_missing": _c("health payload carries a mirrors block again"),
     # KS_PG_DERIVE set to a value web did not understand (fell back to piggyback).
     "derivation_mode_invalid": _c("web restarts with a valid KS_PG_DERIVE"),
+    # KS_READ_FALLBACK set to a value web did not understand (ran as duckdb,
+    # DN-20a). Not a stop: web is the only syncer.
+    "read_fallback_mode_invalid": _c("web restarts with a valid KS_READ_FALLBACK"),
     # Derivation marks dropped and demonstrably not being healed: the latest
     # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
     "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),

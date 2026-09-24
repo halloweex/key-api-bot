@@ -138,17 +138,11 @@ async def startup_event():
 
     # A half-enabled read switch is the same trap as a typo in it: the flag
     # says postgres, the missing DSN quietly serves the old store, and nobody
-    # learns until the numbers disagree. Loud at startup, once.
-    import os as _os
-    if (
-        _os.getenv("KS_READ_GOLD", "").strip().lower() == "postgres"
-        and not _os.getenv("KS_PG_DSN", "").strip()
-    ):
-        logger.error(
-            "KS_READ_GOLD=postgres but KS_PG_DSN is not set — every Gold "
-            "read will silently fall back to DuckDB. Set the DSN or unset "
-            "the flag."
-        )
+    # learns until the numbers disagree. This used to be checked here for
+    # KS_READ_GOLD alone; `configure_modes()` below now checks every
+    # `KS_READ_*` that names an engine without its address, logs each once and
+    # publishes them on /api/health (`read_fallback_mode.misconfigured`) —
+    # without raising, because web is the only process that syncs orders.
 
     # Validate configuration early - fail fast with clear errors
     try:

@@ -9,6 +9,7 @@ from core.sql_dialect import (
     DUCKDB, POSTGRES, TODAY_IN_KYIV, Dialect, sku_status_rebuild_select,
 )
 from core import pg_inventory_write
+from core import read_fallback
 from core.pg_inventory_write import writes_postgres
 from core.landing_rows import (
     STOCK_MOVEMENT_COLUMNS,
@@ -81,10 +82,7 @@ class InventoryMixin:
                     [(_render(sql, POSTGRES, **extra), params) for sql, params in queries]
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "inventory: Postgres failed, falling back to DuckDB: %s",
-                    exc, exc_info=True,
-                )
+                read_fallback.fall_back("inventory", exc)
 
         async with self.connection() as conn:
             return [

@@ -2293,6 +2293,40 @@ DuckDB уже удалась. Тест обходит AST: функция, зо�
 Часы сверки — `synced_at` (бухгалтерия DuckDB), не `created_at`: штамп KeyCRM
 прочитал бы только что синканный старый расход как потерянный.
 
+### Every read that falls back to DuckDB is counted
+
+Every ported tab answers from DuckDB when Postgres (for cohorts, ClickHouse)
+fails, and until DN-20a each said so in its own words — or, in
+`pg_expenses_read.backfilled()`, in words no grep for "falling back to DuckDB"
+could find. After step 13 each of those paths serves frozen Silver and Gold,
+and after the first Sunday compaction empty ones, behind a page that looks as
+if it works. So every such site calls `core.read_fallback.fall_back(surface,
+exc)`: one uniform ERROR line carrying that phrase, and a per-surface counter
+`/api/health` publishes as `read_fallbacks {surface: {count, last_at}}` — no
+exception text, the endpoint is public. **Nothing a read returns changed.**
+
+`KS_READ_FALLBACK` (`duckdb` default | `off`) is read in `configure_modes()`,
+before the boot sync. `off` is validated and published but **not enforced**:
+refusing is DN-20b (HTTP, a 503 naming the surface) and DN-20c (reports,
+assistant, training, sync), which raise `ReadUnavailable` from `fall_back`. An
+unknown value **runs as `duckdb` and never raises** — web is the only syncer,
+so a crash loop over how a read degrades would stop order intake (OD-09); it
+publishes `read_fallback_mode.error` and the canary warns
+`read_fallback_mode_invalid`. The same call lists, under
+`read_fallback_mode.misconfigured`, every `KS_READ_*=postgres` without
+`KS_PG_DSN` and `=clickhouse` without `KS_CH_URL` — found by prefix in the
+environment, not listed: those reads serve DuckDB with nothing failing to count.
+
+`tests/unit/test_read_fallback_sites.py` walks `core/` and `web/` for the
+shapes, never a list of routers: a "falling back to DuckDB" log; an
+`enabled() and available()` gate whose handler carries on toward DuckDB; and
+**every** handler in a function reaching another engine under
+`core/repositories/` or `core/pg_*_read*.py`, because `backfilled()` returns
+False and `_pg_gold_summary` returns None and it is the caller that then reads
+DuckDB. Each must call `fall_back`, re-raise, or say in the same `try` what
+`ReadUnavailable` means — `_get_ml_forecast_total` lets it through, so a
+refusal is never turned into a goal computed without its signal.
+
 ### A write flag is no longer a rollback
 
 Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
