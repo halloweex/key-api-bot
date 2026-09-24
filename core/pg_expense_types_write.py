@@ -46,10 +46,19 @@ products and orders, because one dictionary must not cost a week's orders
 
 AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 
-Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) after the
-connection is in hand and before the statement runs. From the first dictionary
-written here, only `scripts/chain_copy_back.py` can move the writes back to
-DuckDB.
+Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) once a
+connection has come out of the pool and before the transaction opens. From the
+first dictionary written here, only `scripts/chain_copy_back.py` can move the
+writes back to DuckDB.
+
+"Once a connection has come out of the pool", and not merely once the pool is
+in hand: `pool.acquire()` fails on its own — five connections, all taken by the
+Sunday full sync it runs inside, or one that fails to reset — and a latch taken
+before it would move the chain with nothing written, leaving copy-back as the
+only way back and `chain_latch_disagrees` (CRITICAL) the next morning. Chains 1
+and 8 were written before that was counted, and still latch between the two;
+`tests/unit/test_chain_latch.py` holds them to it by name, strictly, so the
+list can only shrink.
 
 A PRECONDITION THE FLAG DOES NOT ENFORCE
 
@@ -126,9 +135,9 @@ def writes_postgres() -> bool:
 def _latch() -> str:
     """Take the local half of the latch before this process writes Postgres.
 
-    Called after the pool is in hand and `require_revision()` has passed —
-    `pg_expenses_write._latch` has the reason: the latch is permanent, and a
-    write that never reaches Postgres must not spend the rollback.
+    Called with a connection already acquired, after `require_revision()` has
+    passed — `pg_expenses_write._latch` has the reason: the latch is permanent,
+    and a write that never reaches Postgres must not spend the rollback.
     """
     return chain_latch.latch(CHAIN, WRITE_ENV)
 
@@ -165,8 +174,10 @@ async def upsert_expense_types(rows: List[ExpenseTypeRow]) -> int:
         + ", mirrored_at = EXCLUDED.mirrored_at"
     )
     pool = await _pool()
-    stamp = _latch()
     async with pool.acquire() as conn:
+        # Inside the acquire, not before it: an exhausted pool is an ordinary
+        # event during the full sync this runs in (module docstring).
+        stamp = _latch()
         async with conn.transaction():
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             await conn.executemany(sql, [tuple(r) for r in rows])
