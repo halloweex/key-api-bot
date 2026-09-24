@@ -209,6 +209,16 @@ class TestProductionToday:
             assert chain_1 not in read, chain_1
         # Zero rows: an allocator with nothing to collide with, no NULLs.
         assert inv.check_chain_invariants(facts) == []
+        # Nothing latched, so a NULL would be named as older than the
+        # handover rather than laid on a writer that has not run.
+        assert facts.expenses.latched_at is None
+
+    @pytest.mark.asyncio
+    async def test_the_first_expense_brings_its_stamp_to_the_verdict(self, production):
+        _latch("pg_expenses_write")
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(_Recorder()))
+        assert facts.expenses.latched_at == UTC_NOW
 
     @pytest.mark.asyncio
     async def test_an_unreachable_postgres_is_one_warn(self, production):
