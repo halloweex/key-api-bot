@@ -2333,7 +2333,8 @@ Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
 variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVENTORY`
 (chain 1, off), `KS_WRITE_GOALS` (chain 7a, off — `app.revenue_goals`, the three
 goal amounts typed on /goals, whose POST wrote DuckDB while the GET read an
-hourly copy in Postgres). Putting one back to `duckdb` reads like an undo and is not one:
+hourly copy in Postgres), `KS_WRITE_EXPENSE_TYPES` (chain 6a, off). Putting one
+back to `duckdb` reads like an undo and is not one:
 once rows have landed in Postgres, it starts a **second writer beside the
 first** — a typed expense in the store the page does not read, DuckDB's
 `seq_stock_movements_id` reissuing ids the Postgres sequence already handed out
@@ -2473,8 +2474,9 @@ docker run --rm --name chain-copy-back \
 #   1. set KS_WRITE_INVENTORY=duckdb in .env   (the flag decides again)
 #   2. docker compose up -d web bot
 #   3. at +2 min: deploy/stage4_soak.sh — E1/E2 for chain 8, I1/I2/I3 for
-#      chain 1; chain 7a has no soak check yet, so meta.mirror_state for
-#      app.revenue_goals. The hourly copy must be shipping the chain's tables again.
+#      chain 1; chains 7a and 6a have no soak check yet, so meta.mirror_state
+#      for app.revenue_goals or bronze.expense_types. The hourly copy must be
+#      shipping the chain's tables again.
 ```
 
 `--network key-api-bot_default` is observed, not derived: on 2026-09-18 web and
@@ -2623,6 +2625,33 @@ log, and an owner read that fails — `SchemaVersionError` included — is a 503
 With `KS_MIRROR_LANDING` off it answers 409 before any of that, asking
 Postgres nothing: the backfill refuses a switched-off mirror, and the route
 used to say "started" (or 500 in the foreground) to the run it refused.
+
+### Chain 6a: the expense-type dictionary (DN-26, off)
+
+`bronze.expense_types` was the one catalogue table in chain 8's exact shape:
+KeyCRM serves the 27 rows only to the weekly full sync, so DuckDB was its
+source and the hourly full replace copied it. Under
+`KS_WRITE_EXPENSE_TYPES=postgres` `upsert_expense_types` writes Postgres
+directly (`core/pg_expense_types_write.py`), **after** `core.landing_rows`
+has resolved the localisation-key names, so both stores are handed the same
+names; `last_sync_expense_types` moves with it, and the hourly copy and the
+daily comparison stand down. Two things differ from the chains before it:
+
+- **`full_sync` contains the raise.** A Postgres fault, or a flag nobody can
+  read, leaves the watermark where it was and the sync carries on with
+  products and orders — one dictionary must not cost a week's orders, or the
+  whole history on a boot with an empty DuckDB. With the chain on DuckDB the
+  raise goes out as it always has.
+- **Its watermark is not judged at 90 minutes.** It moves weekly;
+  `CHAIN_WATERMARK_MAX_AGE_MIN = None` leaves it to `_freshness_check`'s
+  192 h. The standing watch judges instead that the table is not empty
+  (CRITICAL — /expenses collapses into "Other") and that no name is still a
+  localisation key (WARN).
+
+**Turn `KS_READ_EXPENSES=postgres` on first.** Every reader of the dictionary
+goes through `_expenses_run`; with the read flag off the page reads DuckDB's
+copy, frozen from the switch. Chain 8 carries the same assumption unenforced.
+Rollback is `scripts/chain_copy_back.py expense_types` once latched.
 
 ## TODO: Full DuckDB Resync Solution
 
