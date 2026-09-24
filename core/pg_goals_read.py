@@ -16,7 +16,10 @@ WHAT IS HERE AND WHAT IS NOT
   * **not here either** — the seven writes. This tab is the only one that
     writes from the interface, and `app.revenue_goals` is an hourly read
     replica: DuckDB is still the writer, so a write routed here would land in
-    a copy and be overwritten within the hour.
+    a copy and be overwritten within the hour. The one write that may move
+    is `set_goal`, and it moves as a write chain rather than through this
+    reader — `KS_WRITE_GOALS` (chain 7a, `core/pg_goals_write.py`), which
+    stands the hourly replace down for the table in the same breath.
 
 WHAT THE PORT REMOVES
 

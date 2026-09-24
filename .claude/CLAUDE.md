@@ -2331,7 +2331,9 @@ refusal is never turned into a goal computed without its signal.
 
 Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
 variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVENTORY`
-(chain 1, off). Putting one back to `duckdb` reads like an undo and is not one:
+(chain 1, off), `KS_WRITE_GOALS` (chain 7a, off — `app.revenue_goals`, the three
+goal amounts typed on /goals, whose POST wrote DuckDB while the GET read an
+hourly copy in Postgres). Putting one back to `duckdb` reads like an undo and is not one:
 once rows have landed in Postgres, it starts a **second writer beside the
 first** — a typed expense in the store the page does not read, DuckDB's
 `seq_stock_movements_id` reissuing ids the Postgres sequence already handed out
@@ -2341,7 +2343,7 @@ between.
 
 So the first Postgres write a chain performs **latches** it (owner decision
 OD-19 (a), `core/chain_latch.py`): `writes_postgres()` answers True from then
-on whatever the variable says, and every consumer — the eight writers, the sync
+on whatever the variable says, and every consumer — the nine writers, the sync
 keys, the hourly shipper, the daily comparison — reads that one answer. The
 latch has two copies, a marker file under `data/write-chain-owners/` that
 routes the writes without needing a database, and an `owner:<table>` row in
@@ -2411,7 +2413,8 @@ written:
 - in an append-only table, a Postgres row at or below DuckDB's watermark, which
   a copy reading only above it can never bring back;
 - a DuckDB version later than Postgres's by a clock both stores carry as a value
-  (`manual_expenses`, `inventory_history`).
+  (`manual_expenses`, `inventory_history`, `revenue_goals` — whose two writers
+  stamp `updated_at` from the web container's clock for exactly this reason).
 
 Any other difference after the latch is taken as Postgres being newer, and that
 is true by construction only when `--handover` was clean before the flip —
@@ -2470,7 +2473,8 @@ docker run --rm --name chain-copy-back \
 #   1. set KS_WRITE_INVENTORY=duckdb in .env   (the flag decides again)
 #   2. docker compose up -d web bot
 #   3. at +2 min: deploy/stage4_soak.sh — E1/E2 for chain 8, I1/I2/I3 for
-#      chain 1. The hourly copy must be shipping the chain's tables again.
+#      chain 1; chain 7a has no soak check yet, so meta.mirror_state for
+#      app.revenue_goals. The hourly copy must be shipping the chain's tables again.
 ```
 
 `--network key-api-bot_default` is observed, not derived: on 2026-09-18 web and
@@ -2481,6 +2485,14 @@ the whole copy-back is ~9 s on a laptop, because rows go in 1,000 to a
 statement. `executemany` runs once per row in DuckDB's client: about eight
 minutes for the history alone with no memory limit, and under the store's own
 4 GB — what the one-off container gets — `OutOfMemoryException` in 17 s.
+
+**Chain 7a moves the write, not the read.** `KS_WRITE_GOALS=postgres` routes
+`set_goal` — and `reset_goal_to_auto` through it — to `core/pg_goals_write.py`,
+but `get_goals`, `get_smart_goals` and the /marketing target line still read
+on `KS_READ_GOALS` and `KS_READ_MARKETING`, chain 8's arrangement. Flip it only
+with both at `postgres`, or a typed goal lands in the store the page does not
+read. `scripts/chain_copy_back.py goals` is its way back; there is no sequence
+and no sync key to carry.
 
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue
@@ -2536,7 +2548,8 @@ Once a chain is latched or flagged, `replicate_operational` and
 a finding — so `core/pg_chain_invariants.py` watches them on the integrity layer
 instead (01, 07, 13, 19). It judges what is true of the Postgres copy alone: the
 allocator above `MAX(id)`; no NULL where Postgres has no default
-(`manual_expenses.created_at`, `stock_movements.recorded_at` and `.source`);
+(`manual_expenses.created_at`, `stock_movements.recorded_at` and `.source`,
+`revenue_goals.updated_at` and `.is_custom`);
 chain 1's `last_sync_*` under 90 minutes; and from chain 1's handover on, no
 burst of `initial` movements, no offer first seen after a day it was already
 photographed, and both snapshots every day. Who is watched comes from

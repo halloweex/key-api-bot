@@ -2198,9 +2198,11 @@ class RevenueMixin:
             })
 
         # The target line. Postgres holds an hourly read replica of the goals
-        # (revision 0017); the goals API still writes DuckDB, so a target set
-        # this hour appears here next hour. That is a display lag on a figure
-        # changed a few times a year.
+        # (revision 0017); the goals API writes DuckDB by default, so a target
+        # set this hour appears here next hour. That is a display lag on a
+        # figure changed a few times a year. Under `KS_WRITE_GOALS=postgres`
+        # (chain 7a) the goal is written to Postgres directly and there is no
+        # lag — provided this reads Postgres too (`KS_READ_MARKETING`).
         goal_rows = await self._marketing_run(
             "SELECT goal_amount FROM {revenue_goals} WHERE period_type = 'monthly'"
         )

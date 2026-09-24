@@ -170,7 +170,11 @@ class GoalsMixin:
         `/goals` keeps its own switch for every other tab's reason, sharpened:
         this is the one tab that writes from the interface, and
         `app.revenue_goals` is an hourly read replica. Reading it from Postgres
-        is safe; writing there would land in a copy.
+        is safe; writing there through this router would land in a copy. The
+        write moves only as chain 7a (`KS_WRITE_GOALS`, `set_goal` below),
+        which stands the replica down for that table, and it presupposes this
+        flag at `postgres` — otherwise the page reads the store the goal was
+        not written to.
         """
         from core.sql_dialect import DUCKDB, POSTGRES, render_tables
 
