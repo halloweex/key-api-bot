@@ -74,6 +74,13 @@ class TestEveryWriteChainIsRegistered:
 # `write_orders`, `pg_buyers._write` and `write_managers` are such primitives,
 # and it is their callers that ask. What is exempt is the destination side,
 # each entry with its reason, and the list must be exactly what the walk finds.
+#
+# Two shapes the walk used to miss, found by the DN-22b review, are read now: a
+# helper that transforms the SQL it is handed before executing it
+# (`conn.execute(numbered(sql))`, or handing it on to another such helper —
+# `_users_run` → `execute(rendered)`), whose caller's literal names the target;
+# and `copy_records_to_table`/`copy_to_table`, which carry no SQL at all and
+# are read by their `schema_name` — an unresolved or absent one counts.
 
 _WALKED = ("core", "web", "scripts")
 _WRITE_SQL = re.compile(
@@ -81,8 +88,10 @@ _WRITE_SQL = re.compile(
     r"(?:ONLY\s+)?(bronze\.\w+|app\.\w+|\{[^}]*\})",
     re.IGNORECASE)
 # An awaited call on one of these is asyncpg; DuckDB's are synchronous.
-_PG_EXECUTE = {"execute", "executemany", "copy_records_to_table",
+_PG_EXECUTE = {"execute", "executemany", "copy_records_to_table", "copy_to_table",
                "fetch", "fetchval", "fetchrow"}
+# The two that write rows without a statement the regex could read.
+_PG_COPY_IN = {"copy_records_to_table", "copy_to_table"}
 
 # The destination side: code that writes Postgres because Postgres is where
 # that table's writer lives, not because it ships a copy out of DuckDB. Each
@@ -116,6 +125,22 @@ _DESTINATION = {
         "moved by its own switch before the registry existed", "user_store_is_postgres"),
     ("core/pg_bot_state.py", "replicate_bot_state"): (
         "moved by its own switch before the registry existed", "ENGINE_ENV"),
+    ("core/chain_transfer.py", "copy_back"): (
+        "DN-08's copy-back writes DuckDB out of Postgres; its one Postgres write "
+        "is `release_chain`'s delete of meta.chain_watermarks — the walk reads "
+        "`_write_duckdb`'s DuckDB statements as its own", None),
+}
+
+# The store helpers that route every statement handed to them by a switch of
+# their own, and so are where the Postgres half of a moved store is written —
+# the destination side, like the replicators above. A writer whose only
+# Postgres calls are to one of these is exempt through it: `{helper: switch}`,
+# and the test checks the helper evaluates the switch and still routes a
+# writer. This is what the walk saw once `_users_run` stopped being invisible.
+_ROUTED_BY_SWITCH = {
+    ("core/repositories/customers.py", "_sms_run"): "sms_store_is_postgres",
+    ("core/repositories/users.py", "_users_run"): "user_store_is_postgres",
+    ("core/repositories/users.py", "_perms_run"): "user_store_is_postgres",
 }
 
 
@@ -123,9 +148,20 @@ class _Module:
     """One parsed module: its string constants, functions and imports."""
 
     def __init__(self, path: pathlib.Path):
-        self.rel = path.relative_to(CORE.parent).as_posix()
-        self.name = ".".join(path.relative_to(CORE.parent).with_suffix("").parts)
-        self.tree = ast.parse(path.read_text(encoding="utf-8"))
+        self._parse(path.relative_to(CORE.parent).as_posix(),
+                    path.read_text(encoding="utf-8"))
+
+    @classmethod
+    def from_source(cls, rel: str, source: str) -> "_Module":
+        """A module that is not on disk: the walk's own tests feed it shapes."""
+        module = cls.__new__(cls)
+        module._parse(rel, textwrap.dedent(source))
+        return module
+
+    def _parse(self, rel: str, source: str) -> None:
+        self.rel = rel
+        self.name = rel[:-len(".py")].replace("/", ".")
+        self.tree = ast.parse(source)
         self.consts: dict = {}
         self.funcs: dict = {}
         self.imports: dict = {}
@@ -305,20 +341,86 @@ def _awaited_names(fn) -> set:
     return out
 
 
+def _carriers(fn) -> set:
+    """The names in `fn` that carry one of its parameters: the parameters
+    (bar `self`/`cls`, which carry the object and not the statement), and every
+    local assigned from an expression that names one, to a fixed point —
+    `rendered = numbered(sql.format(...))` carries `sql`."""
+    args = fn.args
+    carried = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)
+               if a.arg not in ("self", "cls")}
+    if args.vararg:
+        carried.add(args.vararg.arg)
+    assigns = [n for n in ast.walk(fn)
+               if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+               and n.value is not None]
+    while True:
+        more = set()
+        for n in assigns:
+            if not any(isinstance(x, ast.Name) and x.id in carried
+                       for x in ast.walk(n.value)):
+                continue
+            for target in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                more |= {x.id for x in ast.walk(target)
+                         if isinstance(x, ast.Name) and x.id not in carried}
+        if not more:
+            return carried
+        carried |= more
+
+
 def _executors(modules) -> set:
-    """Helpers that execute SQL they are handed (`_write_chunked(conn, sql,
-    rows)`): awaiting one is executing, although the text is the caller's."""
-    found = set()
+    """Helpers that execute SQL they are handed: awaiting one is executing,
+    although the text is the caller's. `_write_chunked(conn, sql, rows)` hands
+    it straight to asyncpg; `conn.execute(numbered(sql))` transforms it first;
+    `_users_run` hands it, rendered, to `execute`, which hands it to asyncpg.
+    So a helper counts when an awaited asyncpg call — or an awaited call to
+    another executor — takes as its statement an expression carrying one of
+    its own parameters, to a fixed point. By name, like `_awaited_names`."""
+    sites = []
     for m in modules.values():
         for name, fn in m.funcs.items():
-            params = {a.arg for a in fn.args.args}
+            carried = _carriers(fn)
+            callees = set()
             for n in ast.walk(fn):
                 if isinstance(n, ast.Await) and isinstance(n.value, ast.Call) \
-                        and isinstance(n.value.func, ast.Attribute) \
-                        and n.value.func.attr in _PG_EXECUTE and n.value.args \
-                        and isinstance(n.value.args[0], ast.Name) \
-                        and n.value.args[0].id in params:
-                    found.add(name)
+                        and n.value.args \
+                        and any(isinstance(x, ast.Name) and x.id in carried
+                                for x in ast.walk(n.value.args[0])):
+                    f = n.value.func
+                    callees.add(f.id if isinstance(f, ast.Name) else getattr(f, "attr", ""))
+            if callees:
+                sites.append((name, callees))
+    found: set = set()
+    while True:
+        more = {name for name, callees in sites
+                if name not in found and callees & (_PG_EXECUTE | found)}
+        if not more:
+            return found
+        found |= more
+
+
+def _copy_targets(module, fn, modules) -> set:
+    """What an awaited `copy_records_to_table`/`copy_to_table` writes. There
+    is no statement for the regex to read, so the target is its `schema_name`
+    and table: `bronze.x`/`app.x` when both resolve, nothing for a schema that
+    resolves to another one, and `{?}` for a schema the walk cannot read — or
+    none at all, where the search_path decides."""
+    found = set()
+    for n in ast.walk(fn):
+        if not (isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
+                and isinstance(n.value.func, ast.Attribute)
+                and n.value.func.attr in _PG_COPY_IN):
+            continue
+        call = n.value
+        keywords = {k.arg: k.value for k in call.keywords if k.arg}
+        table_node = call.args[0] if call.args else keywords.get("table_name")
+        table = module.value(table_node, modules) if table_node is not None else None
+        schema_node = keywords.get("schema_name")
+        schema = module.value(schema_node, modules) if schema_node is not None else None
+        if schema is None:
+            found.add("{?}")
+        elif schema in ("bronze", "app"):
+            found.add(f"{schema}.{table}" if table else "{?}")
     return found
 
 
@@ -328,7 +430,7 @@ def _pg_write_targets(module, fn, modules, executors=frozenset()) -> set:
     helper that executes the SQL it is handed."""
     if not _awaited_names(fn) & (_PG_EXECUTE | set(executors)):
         return set()
-    found = set()
+    found = _copy_targets(module, fn, modules)
     for text in module.texts(fn, modules):
         for m in _WRITE_SQL.finditer(text):
             target = m.group(1)
@@ -459,6 +561,14 @@ class _Walk:
                 found[key] = targets
         return found
 
+    def routed(self, key) -> bool:
+        """Its only Postgres calls are to a store helper that routes by a
+        switch of its own (`_ROUTED_BY_SWITCH`)."""
+        helpers = {name for _rel, name in _ROUTED_BY_SWITCH}
+        _module, fn = self.fns[key]
+        reached = _awaited_names(fn) & (_PG_EXECUTE | self.executors)
+        return bool(reached) and reached <= helpers
+
     def covered(self, key, seen=None) -> bool:
         """It asks, or it is reached only from functions that do."""
         seen = set() if seen is None else seen
@@ -488,7 +598,7 @@ class TestEveryPostgresWriterAsksTheRegistry:
         uncovered = sorted(
             key for key in walk.writers()
             if key[0] not in chains and key not in _DESTINATION
-            and not walk.covered(key))
+            and not walk.routed(key) and not walk.covered(key))
         assert not uncovered, (
             "writes bronze.*/app.* in Postgres without asking who owns the "
             f"table, and not only from a function that asks: {uncovered}")
@@ -544,6 +654,20 @@ class TestEveryPostgresWriterAsksTheRegistry:
                 _called_names(fn)
             assert switch in names, f"{key} names {switch} as its reason and never reads it"
 
+    def test_the_routed_helpers_are_exactly_what_the_walk_finds(self, walk):
+        """Each routes by the switch it is listed under, is an executor the
+        walk finds, and still carries a writer — so neither a helper that
+        stopped reading its switch nor a stale entry keeps an exemption."""
+        writers = walk.writers()
+        for key, switch in _ROUTED_BY_SWITCH.items():
+            _module, fn = walk.fns[key]
+            names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | \
+                _called_names(fn)
+            assert switch in names, f"{key} is listed under {switch} and never reads it"
+            assert key[1] in walk.executors, f"{key} no longer executes what it is handed"
+            assert any(key[1] in _awaited_names(walk.fns[w][1]) and walk.routed(w)
+                       for w in writers), f"nothing writes through {key}"
+
     def test_the_exempt_modules_are_the_registered_chains(self, walk):
         """The chain writers are the destination the registry routes to, and
         are exempt for being registered — found here, so a chain that stopped
@@ -595,6 +719,102 @@ class TestEveryPostgresWriterAsksTheRegistry:
             assert key in walk.consulting, key
             assert walk.reaches_pool(key), key
             assert not walk.calls[key] & _OWNER_READS, key
+
+
+def _targets_of(source: str, name: str) -> set:
+    """What the walk says `name` writes, in a module made of `source` alone."""
+    module = _Module.from_source("core/_walk_probe.py", source)
+    modules = {module.name: module}
+    module.load_consts(modules)
+    return _pg_write_targets(module, module.funcs[name], modules, _executors(modules))
+
+
+class TestTheWalkSeesWhatTheReviewFound:
+    """The DN-22b review appended each of these to `core/pg_buyers.py` and the
+    walk passed them: a helper that transforms the statement it is handed
+    before executing it — `numbered()` is this codebase's own idiom — and a
+    COPY, which carries no statement at all. Fed here as shapes, with the
+    direct literal the walk always saw as the control."""
+
+    _NUMBERED = """
+        async def _exec_numbered(sql, params):
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(numbered(sql), *params)
+
+        async def rename_buyer(buyer_id, name):
+            await _exec_numbered(
+                "UPDATE bronze.buyers SET full_name = ? WHERE id = ?", [name, buyer_id])
+
+        async def read_buyer(buyer_id):
+            await _exec_numbered("SELECT full_name FROM bronze.buyers WHERE id = ?", [buyer_id])
+    """
+
+    def test_the_control_a_direct_literal(self):
+        assert _targets_of("""
+            async def rename_buyer(buyer_id, name):
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE bronze.buyers SET full_name = $1 WHERE id = $2", name, buyer_id)
+        """, "rename_buyer") == {"bronze.buyers"}
+
+    def test_a_helper_that_transforms_the_statement_executes_it(self):
+        assert _targets_of(self._NUMBERED, "rename_buyer") == {"bronze.buyers"}
+
+    def test_a_read_through_the_same_helper_is_not_a_write(self):
+        assert _targets_of(self._NUMBERED, "read_buyer") == set()
+
+    def test_a_statement_handed_on_through_two_helpers(self):
+        """`_users_run`'s shape: rendered into a local, handed to a helper that
+        hands it to asyncpg. The target is a hole the helper fills, so it
+        counts as unknown — which is what makes the store's writers visible
+        and `_ROUTED_BY_SWITCH` necessary."""
+        assert _targets_of("""
+            async def execute(sql, params):
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(sql, *params)
+
+            async def _run(self, sql, params):
+                rendered = numbered(sql.format(users=TABLE))
+                await execute(rendered, params)
+
+            async def approve(self, user_id):
+                await self._run("UPDATE {users} SET status = 'approved' "
+                                "WHERE user_id = ?", [user_id])
+        """, "approve") == {"{?}"}
+
+    def test_self_alone_does_not_make_a_helper_an_executor(self):
+        """`self` carries the object, not a statement: a method reading its own
+        fixed query is not handed anything."""
+        module = _Module.from_source("core/_walk_probe.py", """
+            async def count(self):
+                async with self.pool.acquire() as conn:
+                    await conn.fetchval(self.COUNT_SQL)
+        """)
+        assert "count" not in _executors({module.name: module})
+
+    @pytest.mark.parametrize("call,expected", [
+        ('conn.copy_records_to_table("buyers", schema_name="bronze", records=rows)',
+         {"bronze.buyers"}),
+        ('conn.copy_to_table("orders", source=path, schema_name="bronze")',
+         {"bronze.orders"}),
+        ('conn.copy_records_to_table(table_name="gender", schema_name=APP, records=rows)',
+         {"app.gender"}),
+        ('conn.copy_records_to_table(table, schema_name=schema, records=rows)', {"{?}"}),
+        ('conn.copy_records_to_table("buyers", records=rows)', {"{?}"}),
+        ('conn.copy_records_to_table("orders", schema_name="silver", records=rows)', set()),
+    ])
+    def test_a_copy_is_read_by_its_schema(self, call, expected):
+        assert _targets_of(f"""
+            APP = "app"
+
+            async def ship(rows, table, schema, path):
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    await {call}
+        """, "ship") == expected
 
 
 _OWNER_READS = {"order_tables_stood_down_or_owned", "tables_stood_down_or_owned",
