@@ -7,6 +7,7 @@ it is switched on. The same properties against a real Postgres are in
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import pathlib
 from contextlib import asynccontextmanager
@@ -304,3 +305,70 @@ class TestPreflight:
 
         assert (pg_inventory_write.PREFLIGHT_VERDICT_WITHIN.total_seconds()
                 == canary.DQ_MAX_AGE_S[pg_inventory_write.OPERATIONAL_LAYER])
+
+
+# ─── /api/health publishes it ────────────────────────────────────────────────
+
+@pytest.fixture
+def health(monkeypatch):
+    """The health module with an empty preflight cache and a preflight that
+    counts its calls."""
+    from web.routes.api import health as module
+
+    calls = []
+
+    async def fake(*a, **kw):
+        calls.append(1)
+        return {"ok": False, "reasons": ["app.stock_movements was last copied 70 min ago (limit 50)"]}
+
+    module._preflight_cache.update(data=None, expires_at=0)
+    monkeypatch.setattr(pg_inventory_write, "preflight", fake)
+    monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
+    yield module, calls
+    module._preflight_cache.update(data=None, expires_at=0)
+
+
+class TestHealthPublishesThePreflight:
+    @pytest.mark.asyncio
+    async def test_it_sits_under_chain_1s_entry_and_nowhere_else(self, health):
+        module, _ = health
+        block = await module._write_chains_block()
+        assert block["pg_inventory_write"]["preflight"]["ok"] is False
+        assert "preflight" not in block["pg_expenses_write"]
+        # The local half is untouched: the canary still reads `error` and `mismatch` there.
+        assert block["pg_inventory_write"]["mode"] == "duckdb"
+        assert block["pg_inventory_write"]["mismatch"] is False
+
+    @pytest.mark.asyncio
+    async def test_it_is_asked_once_a_minute_not_once_a_probe(self, health):
+        module, calls = health
+        await module._write_chains_block()
+        await module._write_chains_block()
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_postgres_that_does_not_answer_is_an_answer(self, health, monkeypatch):
+        module, _ = health
+
+        async def hangs(*a, **kw):
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(pg_inventory_write, "preflight", hangs)
+        monkeypatch.setattr(module, "_PREFLIGHT_TIMEOUT_S", 0.05)
+        preflight = (await module._write_chains_block())["pg_inventory_write"]["preflight"]
+        assert preflight["ok"] is False and "did not answer" in preflight["reasons"][0]
+
+    def test_the_endpoint_returns_it(self, health):
+        from fastapi.testclient import TestClient
+
+        from web.main import app
+        from web.ratelimit import limiter
+
+        limiter.reset()
+        try:
+            body = TestClient(app).get("/api/health").json()
+        finally:
+            limiter.reset()
+        preflight = body["write_chains"]["pg_inventory_write"]["preflight"]
+        assert preflight == {"ok": False, "reasons": [
+            "app.stock_movements was last copied 70 min ago (limit 50)"]}

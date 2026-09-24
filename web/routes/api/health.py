@@ -104,6 +104,53 @@ def _read_fallback_mode() -> dict:
     }
 
 
+# Chain 1's answer to "may it be switched to Postgres now?" (DN-24), on the same
+# TTL as the watermarks. Its own cache, because it is the one part of the
+# `write_chains` block that reads Postgres: the rest is local state and must
+# keep answering while Postgres cannot.
+_preflight_cache: dict = {"data": None, "expires_at": 0}
+_preflight_cache_lock = asyncio.Lock()
+
+# /api/health must answer; a Postgres that neither answers nor refuses would
+# otherwise hold it for the pool's connect timeout.
+_PREFLIGHT_TIMEOUT_S = 5
+
+
+async def _inventory_preflight() -> dict:
+    """`pg_inventory_write.preflight()`, cached. Never raises: a Postgres that
+    does not answer in time is an answer of its own, `ok: false`."""
+    from core import pg_inventory_write
+
+    now = time.time()
+    async with _preflight_cache_lock:
+        if _preflight_cache["data"] is not None and now < _preflight_cache["expires_at"]:
+            return _preflight_cache["data"]
+        try:
+            data = await asyncio.wait_for(
+                pg_inventory_write.preflight(), _PREFLIGHT_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            data = {"ok": False, "reasons": [
+                f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
+        _preflight_cache["data"] = data
+        _preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
+        return data
+
+
+async def _write_chains_block() -> dict:
+    """The `write_chains` block: every chain's local state, and under chain 1's
+    entry its `preflight` — the three questions asked before
+    `KS_WRITE_INVENTORY` is switched on. `ok` is null once the chain already
+    writes Postgres. Not judged by the canary: it is read by the person about
+    to flip the chain, and nothing is wrong while nobody is."""
+    from core import pg_inventory_write
+
+    block = _write_chains()
+    entry = block.get(pg_inventory_write.CHAIN)
+    if isinstance(entry, dict):
+        entry["preflight"] = await _inventory_preflight()
+    return block
+
+
 def _derivation_mode() -> dict:
     """KS_PG_DERIVE as this process understood it at start. Local state, no I/O."""
     from core import pg_derivation
@@ -323,7 +370,7 @@ async def health_check(request: Request):
         "mirrors": mirrors,
         "alerting": alerting,
         "derivation": await _derivation_block(),
-        "write_chains": _write_chains(),
+        "write_chains": await _write_chains_block(),
         "read_fallbacks": _read_fallbacks(),
         "read_fallback_mode": _read_fallback_mode(),
     }
