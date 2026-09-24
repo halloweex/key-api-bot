@@ -485,6 +485,34 @@ class TestTwoParsesSerialise:
         assert set(await _committed_rows(pool)) == set(IDS)
 
     @pytest.mark.asyncio
+    async def test_a_full_parse_that_waited_counts_the_table_it_replaces(self, committed):
+        """The shrink guard compares against the table this parse replaces, so
+        the count comes after the key. Counted before the wait, it would judge a
+        table another process has since replaced: here that refuses a
+        replacement the table as it stands admits. (TRUNCATE's ACCESS
+        EXCLUSIVE used to catch this by accident, and DELETE takes none.)"""
+        pool = committed
+        await parse.parse_full()
+        other = await _held_by_another_session(pool)
+        try:
+            task = asyncio.create_task(parse.parse_full())
+            await asyncio.sleep(0.5)
+            assert not task.done(), "the parse did not wait for the advisory lock"
+
+            # What another process's forced full parse leaves behind.
+            gone = list(IDS[1:-1])
+            await other.execute("DELETE FROM bronze.orders WHERE id = ANY($1::int[])", gone)
+            await other.execute(f"DELETE FROM {UTM_TABLE} WHERE order_id = ANY($1::int[])", gone)
+            standing = await other.fetchval(parse.COUNT_SQL)
+            await other.execute("SELECT pg_advisory_unlock($1)", parse.ADVISORY_LOCK_KEY)
+            result = await asyncio.wait_for(task, timeout=30)
+        finally:
+            await other.close()
+
+        assert "refused" not in result, result
+        assert result["replaced"] == standing
+
+    @pytest.mark.asyncio
     async def test_two_concurrent_full_parses_serialise(self, committed):
         """One through `parse_full`, one as another process runs it — with a
         `PG_LAYER_LOCK` of its own, which is what `_parse_full_locked` is from
