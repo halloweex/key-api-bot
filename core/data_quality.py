@@ -1896,6 +1896,13 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "The status table was empty when the snapshot was taken; check the rebuild ran first"),
     ("chain_watermark_stale",
      "The sync, not the warehouse: see the sync block in /api/health, then the KeyCRM errors in the web log"),
+    # Chain 6a's dictionary. KeyCRM serves it only to the full sync, so that is
+    # the lever for both; the second also needs the writer that skipped the
+    # shared parse found first, or the sync writes the key straight back.
+    ("chain_dictionary_empty",
+     "Run a full sync — the only path KeyCRM serves expense types to; until then /expenses shows every cost as Other"),
+    ("chain_name_unresolved",
+     "Find the write that skipped core.landing_rows.expense_type_rows, then run a full sync to rewrite the names"),
     ("chain_invariants_unwatched",
      "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),

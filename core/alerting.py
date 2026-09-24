@@ -245,6 +245,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "chain_snapshot_rows_short": _c(
         "the days since hold a full snapshot again; the short ones stay short"),
     "chain_watermark_stale": _c("the chain's sync completes again"),
+    "chain_dictionary_empty": _c("a full sync lands the dictionary again"),
+    "chain_name_unresolved": _c(
+        "a full sync rewrites the names through the shared parse"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 

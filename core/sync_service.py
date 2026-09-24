@@ -64,6 +64,20 @@ def _get_max_updated_at(orders: list) -> Optional[datetime]:
     return max_updated
 
 
+def _expense_types_off_duckdb() -> bool:
+    """Whether chain 6a's writes do NOT go to DuckDB: to Postgres, or nowhere
+    anybody can name because `KS_WRITE_EXPENSE_TYPES` is not understood.
+
+    Read from `core.write_chains.chain_modes()` — the answer the writer, the
+    sync key, the shipper and the comparison all read — and never raises, so
+    `full_sync` can ask it inside an `except` without raising a second time.
+    """
+    from core import pg_expense_types_write
+    from core.write_chains import chain_modes
+
+    return chain_modes()[pg_expense_types_write.CHAIN]["mode"] != "duckdb"
+
+
 class SyncService:
     """
     Service for syncing KeyCRM data to DuckDB.
@@ -671,8 +685,28 @@ class SyncService:
             # never raises, so a Postgres fault cannot stop a sync.
             await mirror_categories(categories)
 
-            stats["expense_types"] = await self.store.upsert_expense_types(expense_types)
-            await self.store.set_last_sync_time("expense_types")
+            try:
+                stats["expense_types"] = await self.store.upsert_expense_types(expense_types)
+                await self.store.set_last_sync_time("expense_types")
+            except Exception as exc:
+                # Chain 6a (DN-26). Under `KS_WRITE_EXPENSE_TYPES=postgres`
+                # both statements above go to Postgres and raise when it
+                # fails; a flag nobody can read raises too. Either way it is
+                # this chain's fault and it stops this chain only (DN-01): the
+                # watermark stays where it was, so the freshness check sees a
+                # dictionary that did not land, and products and orders still
+                # sync. Aborting here would cost a week of orders for 27 names
+                # — and on a boot with an empty DuckDB, the whole history.
+                # With the chain on DuckDB nothing changes: the raise goes out
+                # exactly as it always has.
+                if not _expense_types_off_duckdb():
+                    raise
+                stats["expense_types_error"] = f"{type(exc).__name__}: {exc}"
+                logger.error(
+                    "Full sync: the expense-type dictionary was not stored (%s); "
+                    "its watermark stays where it was and the sync carries on",
+                    stats["expense_types_error"], exc_info=True,
+                )
             # Not mirrored from here. KeyCRM serves this dictionary only to the
             # weekly full sync, so a payload-fed mirror would leave Postgres
             # empty for up to a week — and `/expenses` renders the breakdown by
@@ -680,6 +714,8 @@ class SyncService:
             # freshness detail. It rides the hourly `replicate_operational`
             # instead, out of DuckDB, which holds it every minute of that week.
             # `bronze.offer_stocks` sits in that family for the same reason.
+            # Under chain 6a the write above IS the Postgres write, and the
+            # hourly copy stands down for it (`core/pg_expense_types_write.py`).
 
             stats["products"] = await self.store.upsert_products(products)
             await self.store.set_last_sync_time("products")

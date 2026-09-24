@@ -308,7 +308,8 @@ class TestAChainWithNoInvariants:
         missing = [chain_name(c) for c in WRITE_CHAINS
                    if chain_name(c) not in readers]
         assert not missing, f"no chain invariants for {missing}"
-        assert set(readers.values()) <= {"expenses", "inventory", "goals"}
+        assert set(readers.values()) <= {"expenses", "inventory", "goals",
+                                         "expense_types"}
         # And each names a field `Facts` actually carries — a reader whose
         # group the verdict never looks at is read and then judged by nothing.
         import dataclasses
@@ -327,7 +328,8 @@ class TestChain7aGoals:
     @pytest.fixture
     def flagged(self, monkeypatch):
         monkeypatch.setenv("KS_WRITE_GOALS", "postgres")
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY"):
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY",
+                    "KS_WRITE_EXPENSE_TYPES"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
 
@@ -342,6 +344,7 @@ class TestChain7aGoals:
         assert facts.watched == ("pg_goals_write",) and facts.whole is None
         assert isinstance(facts.goals, inv.Goals)
         assert facts.expenses is None and facts.inventory is None
+        assert facts.expense_types is None
         read = "\n".join(conn.sql)
         assert "FROM app.revenue_goals" in read
         for other in ("manual_expenses", "stock_movements", "chain_watermarks"):

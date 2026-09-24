@@ -28,7 +28,8 @@ import pytest_asyncio
 
 from bot import canary as canary_module
 from core import (
-    chain_latch, pg_expenses_write, pg_goals_write, pg_inventory_write, write_chains,
+    chain_latch, pg_expense_types_write, pg_expenses_write, pg_goals_write,
+    pg_inventory_write, write_chains,
 )
 
 CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
@@ -38,8 +39,8 @@ CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
 def flags(monkeypatch):
     """No chain's variable set, and nothing latched — the conftest fixture has
     already pointed the marker directory at this test's own tmp_path."""
-    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
-        monkeypatch.delenv(env, raising=False)
+    for chain in write_chains.WRITE_CHAINS:
+        monkeypatch.delenv(chain.WRITE_ENV, raising=False)
     return monkeypatch
 
 
@@ -154,7 +155,7 @@ class TestTheMarker:
 
 
 class TestTheOneAnswerEveryConsumerReads:
-    @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS)
+    @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_latched_outranks_the_flag(self, flags, chain):
         assert chain.writes_postgres() is False
         chain_latch.latch(chain.CHAIN)
@@ -163,7 +164,7 @@ class TestTheOneAnswerEveryConsumerReads:
         assert chain.writes_postgres() is True
         assert chain.env_writes_postgres() is False, "the variable is still readable"
 
-    @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS)
+    @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_latched_outranks_a_value_nobody_can_read(self, flags, chain):
         """A typo must not route a latched chain back to DuckDB either — it is
         the same second writer, arrived at by accident instead of by decision."""
@@ -386,6 +387,7 @@ class TestEveryWriterLatchesFirst:
         # precisely so that this walk sees it — a module-level constant would
         # have left the three guards below passing over an empty set.
         assert set(_writers(pg_goals_write)) == {"set_goal"}
+        assert set(_writers(pg_expense_types_write)) == {"upsert_expense_types"}
 
     def test_every_registered_chain_has_a_writer_the_walk_can_see(self):
         """The guards below are parametrised over `WRITE_CHAINS`; a chain whose
@@ -393,7 +395,7 @@ class TestEveryWriterLatchesFirst:
         for chain in write_chains.WRITE_CHAINS:
             assert _writers(chain), f"{chain.__name__}: the walk found no writer"
 
-    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS)
+    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_each_one_calls_the_latch_before_it_touches_postgres(self, module):
         for name, node in _writers(module).items():
             latches = [n.lineno for n in ast.walk(node)
@@ -406,7 +408,7 @@ class TestEveryWriterLatchesFirst:
             assert not touches or min(latches) < min(touches), (
                 f"{module.__name__}.{name} reaches Postgres before taking the latch")
 
-    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS)
+    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_and_none_of_them_latches_before_the_connection(self, module):
         """The window between the two calls is the whole point.
 
@@ -430,7 +432,7 @@ class TestEveryWriterLatchesFirst:
                 f"{module.__name__}.{name} latches before the connection is in "
                 "hand, so a write that never reaches Postgres latches for ever")
 
-    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS)
+    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_each_one_claims_the_owner_rows_too(self, module):
         """The audit copy, inside the writing transaction: a write that rolls
         back must not claim what it did not write."""
