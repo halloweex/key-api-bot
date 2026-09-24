@@ -199,14 +199,18 @@ class TestTheChainLock:
 # ─── preflight() against the real schema ─────────────────────────────────────
 
 # Above anything the rest of the suite writes, so "the latest mirror_landing
-# run" is ours.
-RUN_ID = 9_000_000_001
+# run" is ours. The one before it is yesterday's, and exists so that "latest"
+# is a choice the preflight has to make rather than the only row there is.
+PREVIOUS_RUN_ID = 9_000_000_001
+RUN_ID = PREVIOUS_RUN_ID + 1
 JOURNAL = "app.data_quality_runs"
 
 
 async def _clean_journal(conn):
-    await conn.execute("DELETE FROM app.data_quality_issues WHERE run_id >= $1", RUN_ID)
-    await conn.execute("DELETE FROM app.data_quality_runs WHERE run_id >= $1", RUN_ID)
+    await conn.execute(
+        "DELETE FROM app.data_quality_issues WHERE run_id >= $1", PREVIOUS_RUN_ID)
+    await conn.execute(
+        "DELETE FROM app.data_quality_runs WHERE run_id >= $1", PREVIOUS_RUN_ID)
     await conn.execute(
         "DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
         [*pg_inventory_write.CHAIN_TABLES, JOURNAL])
@@ -217,7 +221,8 @@ async def ready(monkeypatch):
     """Everything the flip needs, as production would hold it on flip day:
     the six tables and the journal copied ten minutes ago, and this morning's
     comparison clean for chain 1 — with one finding elsewhere, which must not
-    count."""
+    count. Yesterday's run failed in chain 1's own comparison and filed a lost
+    movement; it is superseded, and must not count either."""
     monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
     p = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     async with p.acquire() as conn:
@@ -227,6 +232,17 @@ async def ready(monkeypatch):
             "failures_since_ok, last_rows) VALUES ($1, now() - interval '10 minutes', "
             "now() - interval '10 minutes', 0, 1)",
             [(t,) for t in (*pg_inventory_write.CHAIN_TABLES, JOURNAL)])
+        await conn.execute(
+            "INSERT INTO app.data_quality_runs (run_id, started_at, ended_at, as_of, "
+            "window_start, window_end, layer, status, error_message) VALUES ($1, "
+            "now() - interval '26 hours', now() - interval '26 hours', now(), "
+            "current_date - 1, current_date - 1, 'mirror_landing', 'FAILED', $2)",
+            PREVIOUS_RUN_ID,
+            "1 check(s) raised — reconcile_operational: ConnectionResetError: reset")
+        await conn.execute(
+            "INSERT INTO app.data_quality_issues (run_id, check_name, table_name, severity, "
+            "count) VALUES ($1, 'mirror_rows_lost', 'app.stock_movements', 'CRITICAL', 1)",
+            PREVIOUS_RUN_ID)
         await conn.execute(
             "INSERT INTO app.data_quality_runs (run_id, started_at, ended_at, as_of, "
             "window_start, window_end, layer, status) VALUES ($1, now() - interval '2 hours', "
@@ -273,12 +289,18 @@ class TestPreflightOnTheRealSchema:
 
     @pytest.mark.asyncio
     async def test_a_copy_older_than_50_minutes_is_not_ok(self, ready):
+        """On the database's clock alone. `last_ok_at` is Postgres' `now()`,
+        and the preflight's default `now` is this process's: a container
+        clock a few hundred milliseconds ahead of the laptop's floors 51 min
+        to 50 (Docker Desktop, seen once). The limit is minutes; the test
+        was measuring the skew."""
         async with ready.acquire() as conn:
             await conn.execute(
                 "UPDATE meta.mirror_state SET last_ok_at = now() - interval '51 minutes' "
                 "WHERE table_name = 'app.inventory_sku_history'")
-        (reason,) = (await pg_inventory_write.preflight(ready))["reasons"]
-        assert reason.startswith("app.inventory_sku_history was last copied 51 min ago")
+            db_now = await conn.fetchval("SELECT now()")
+        (reason,) = (await pg_inventory_write.preflight(ready, now=db_now))["reasons"]
+        assert reason == "app.inventory_sku_history was last copied 51 min ago (limit 50)"
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(not READONLY_DSN, reason=PROVISIONED)
