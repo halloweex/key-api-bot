@@ -477,6 +477,19 @@ class TestTheReadFlagComesFirst:
         assert state["mode"] == "postgres" and state["mismatch"] is False
         assert "KS_READ_EXPENSES" in state["unmet_precondition"]
 
+    @pytest.mark.parametrize("write", [None, "duckdb"])
+    def test_latched_against_its_flag_it_is_still_asked(self, flags, write):
+        """The flag set back after the latch (DN-06's `mismatch`) does not
+        stop the writes going to Postgres, so it must not stop the question
+        whether anything reads them either."""
+        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
+        if write:
+            flags.setenv(chain.WRITE_ENV, write)
+        flags.delenv("KS_READ_EXPENSES", raising=False)
+        state = write_chains.chain_modes()[chain.CHAIN]
+        assert state["mode"] == "postgres" and state["mismatch"] is True
+        assert "KS_READ_EXPENSES" in state["unmet_precondition"]
+
     def test_with_the_write_flag_off_it_is_not_even_asked(self, flags):
         flags.delenv("KS_READ_EXPENSES", raising=False)
         assert write_chains.chain_modes()[chain.CHAIN]["unmet_precondition"] is None
