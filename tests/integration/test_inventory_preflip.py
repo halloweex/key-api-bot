@@ -77,7 +77,13 @@ class TestTheChainLock:
         """The stock step and the 01:00 job arriving together. A pause between
         the DELETE and the INSERT makes the overlap certain rather than lucky:
         without the lock the second rebuild's DELETE sees none of the first's
-        new rows, and its INSERT then dies on `offer_id`."""
+        new rows, and its INSERT then dies on `offer_id`.
+
+        One rebuild first, because production's owner rows exist from the first
+        write on. On a chain that has never written, the two `claim` INSERTs
+        meet on the same new owner key and the second waits for the first to
+        commit — which serialises them by accident and hides the race."""
+        assert await pg_inventory_write.rebuild_sku_inventory_status() == 3
         body = pg_inventory_write.sku_status_rebuild_select
         monkeypatch.setattr(
             pg_inventory_write, "sku_status_rebuild_select",
