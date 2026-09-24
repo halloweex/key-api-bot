@@ -36,8 +36,10 @@ CLI-скрипт сносит `silver_order_utm` целиком и ре-парс
 
 1. **Bronze** — сырой `manager_comment` в таблице `orders`.
 2. **Silver** — `silver_order_utm` (схема: core/duckdb_store.py:774): регэксом
-   парсятся UTM-пары и пиксели (`_parse_utm_from_comment`, traffic.py:14), затем
-   `_classify_traffic` (traffic.py:43) выводит `traffic_type` + `platform`.
+   парсятся UTM-пары и пиксели (`parse_utm_from_comment`, core/utm_classify.py),
+   затем `classify_traffic` (там же) выводит `traffic_type` + `platform`. С DN-15
+   оба живут отдельным модулем; у миксина остались те же имена
+   (`_parse_utm_from_comment`, `_classify_traffic`) на те же функции.
    Обновление инкрементальное (только новые/изменённые заказы), батчами по 1000
    с отпусканием блокировки БД между батчами.
 3. **Gold** — `gold_daily_traffic` (duckdb_store.py:804): дневная агрегация по ключу
@@ -50,7 +52,7 @@ CLI-скрипт сносит `silver_order_utm` целиком и ре-парс
 Обе таблицы обновляются в хвосте каждого warehouse-рефреша
 (duckdb_store.py:2227), ошибки — non-critical warning.
 
-## Классификация (`_classify_traffic`, traffic.py:43)
+## Классификация (`classify_traffic`, core/utm_classify.py)
 
 Шесть типов с приоритетом «явные UTM > куки/пиксели» (кука `_fbc` живёт 90 дней
 и не доказывает текущую сессию):

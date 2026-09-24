@@ -136,16 +136,19 @@ class TestTrafficPlatformsAreNamed:
         import pathlib
         import re
 
-        src = pathlib.Path("core/repositories/traffic.py").read_text()
-        tree = ast.parse(src)
+        # The classifier moved out of the mixin into its own module (DN-15);
+        # the SQL fallback for an order with no row did not, so the two
+        # halves are read from the two files that hold them.
+        classifier = ast.parse(pathlib.Path("core/utm_classify.py").read_text())
+        tree = ast.parse(pathlib.Path("core/repositories/traffic.py").read_text())
 
         fn = next(
-            (n for n in ast.walk(tree)
+            (n for n in ast.walk(classifier)
              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-             and n.name == "_classify_traffic"),
+             and n.name == "classify_traffic"),
             None,
         )
-        assert fn is not None, "_classify_traffic has moved or been renamed"
+        assert fn is not None, "classify_traffic has moved or been renamed"
 
         found = set()
         for node in ast.walk(fn):

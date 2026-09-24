@@ -1,0 +1,849 @@
+"""The reclassify dry run: what it computes, and that it writes nothing (DN-15).
+
+`scripts/utm_reclassify_dryrun.py` runs against production to answer OD-06, so
+the property that matters most is the one a docstring cannot prove: that it
+changes nothing. These tests hold it from four sides —
+
+- the environment names it reads, and the statements it can send, by walking
+  its tree (it never names `KS_PG_DSN`, and it has no `execute`);
+- the transaction it declares, and the refusal of a login that could write,
+  against a recording connection;
+- a whole run in a fresh interpreter under an audit hook, which fails on any
+  file opened for writing other than the snapshot, any filesystem change, any
+  network connection and any command, and on DuckDB or the application's pool
+  being loaded at all — the two writers the hook itself cannot see;
+- the server's own word, `tests/integration/test_utm_reclassify_dryrun_pg.py`,
+  where a write inside the read is refused and one that got through is rolled
+  back by the transaction-id check.
+
+The diff itself is tested on hand-built orders with a stand-in parser, so a
+test here says what the arithmetic does and not what today's rules are; the
+rules are `test_utm_classify_golden.py`'s business.
+"""
+from __future__ import annotations
+
+import ast
+import csv
+import gzip
+import hashlib
+import json
+import re
+from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from scripts import utm_reclassify_dryrun as script
+from scripts.utm_reclassify_dryrun import (
+    CAUSES,
+    Order,
+    UTM_VERDICT_COLUMNS,
+    diff_verdicts,
+    fallback_verdict,
+    report_window,
+    shown_verdict,
+)
+from tests.write_audit import run_main_audited
+
+REPO = Path(__file__).resolve().parents[2]
+SCRIPT = REPO / "scripts" / "utm_reclassify_dryrun.py"
+NOW = datetime(2026, 9, 23, 8, 0, tzinfo=timezone.utc)
+WINDOW = (date(2026, 6, 29), date(2026, 9, 20))
+NULL_ROW = (None,) * len(UTM_VERDICT_COLUMNS)
+
+# What the audit hook cannot see, so what a run may not even load. DuckDB opens
+# and writes its file from C++ without raising a single audit event, so a
+# DuckDB write would leave the event list empty; `core.pg` is the application's
+# pool and the one reader of `KS_PG_DSN`, whose server is the very one the
+# read-only login reaches, so its connection would look like the script's own.
+# A module never imported can do neither.
+UNSEEN_WRITERS = ("duckdb", "core.duckdb_store", "core.pg")
+# The application's read-write DSN, handed to every audited run pointing at a
+# port nothing listens on: reading it and connecting shows up as a connection
+# there, which none of these runs may make.
+POISONED_PG_DSN = "postgresql://ks_app:poison@127.0.0.1:9/poison"
+
+
+def verdict_row(traffic_type, platform, campaign=None):
+    """A stored or reparsed row carrying only what these tests look at."""
+    row = [None] * len(UTM_VERDICT_COLUMNS)
+    row[UTM_VERDICT_COLUMNS.index("utm_campaign")] = campaign
+    row[UTM_VERDICT_COLUMNS.index("traffic_type")] = traffic_type
+    row[UTM_VERDICT_COLUMNS.index("platform")] = platform
+    return tuple(row)
+
+
+def order(order_id, *, comment="c", stored=None, source_id=4, updated=None,
+          parsed=None, day=date(2026, 9, 1), total="100.00", sales_type="retail",
+          counted=True):
+    stamp = NOW - timedelta(days=30)
+    return Order(
+        order_id=order_id, source_id=source_id, comment=comment,
+        updated_at=updated or stamp, stored=stored, parsed_at=parsed or stamp,
+        order_date=day, grand_total=Decimal(total), sales_type=sales_type,
+        counted=counted,
+    )
+
+
+# ─── the window ───────────────────────────────────────────────────────────────
+
+class TestTheWindow:
+    @pytest.mark.parametrize("today", [date(2026, 9, 21), date(2026, 9, 23),
+                                       date(2026, 9, 26)])
+    def test_twelve_complete_weeks_before_today(self, today):
+        start, end = report_window(today)
+        assert (start, end) == WINDOW
+        assert start.weekday() == 0 and end.weekday() == 6
+        assert (end - start).days + 1 == 12 * 7
+
+    def test_sunday_is_not_yet_a_complete_week(self):
+        """The Monday message's own rule: a week is complete once its Sunday
+        has ended, so on that Sunday it is the week before that counts."""
+        assert report_window(date(2026, 9, 20)) == (date(2026, 6, 22), date(2026, 9, 13))
+
+
+# ─── the fallback is the tab's ────────────────────────────────────────────────
+
+class TestTheFallbackIsTheTabs:
+    """`fallback_verdict` is a Python spelling of two SQL expressions on the
+    mixin. Held to them by evaluating the SQL, not by reading it."""
+
+    @staticmethod
+    def _sql(source_id, traffic_type=None, platform=None):
+        import duckdb
+
+        from core.repositories.traffic import TrafficMixin
+
+        row = duckdb.connect().execute(
+            f"SELECT {TrafficMixin._TRAFFIC_TYPE_EXPR}, {TrafficMixin._PLATFORM_EXPR} "
+            "FROM (SELECT CAST(? AS VARCHAR) AS traffic_type, "
+            "             CAST(? AS VARCHAR) AS platform) u, "
+            "     (SELECT CAST(? AS INTEGER) AS source_id) s",
+            [traffic_type, platform, source_id],
+        ).fetchone()
+        return tuple(row)
+
+    @pytest.mark.parametrize("source_id", [1, 2, 3, 4, 5, None])
+    def test_no_row_is_placed_where_the_tab_places_it(self, source_id):
+        assert fallback_verdict(source_id) == self._sql(source_id)
+        assert shown_verdict(None, source_id) == self._sql(source_id)
+        assert shown_verdict(NULL_ROW, source_id) == self._sql(source_id)
+
+    @pytest.mark.parametrize("traffic_type, platform", [
+        ("paid_confirmed", None), (None, "facebook"), ("organic", "email"),
+    ])
+    @pytest.mark.parametrize("source_id", [1, 4])
+    def test_each_column_falls_back_on_its_own(self, source_id, traffic_type, platform):
+        assert shown_verdict(verdict_row(traffic_type, platform), source_id) \
+            == self._sql(source_id, traffic_type, platform)
+
+
+# ─── the diff ─────────────────────────────────────────────────────────────────
+
+def _fake_parse(table):
+    return lambda comment: table[comment]
+
+
+class TestTheDiff:
+    def test_an_unchanged_verdict_is_not_a_transition(self):
+        row = verdict_row("paid_confirmed", "facebook", "spring")
+        report = diff_verdicts([order(1, comment="a", stored=row)], WINDOW,
+                               reclassify=_fake_parse({"a": row}))
+        assert report.transitions == [] and sum(report.rewrites.values()) == 0
+
+    def test_a_rule_change_is_filed_with_its_money(self):
+        old = verdict_row("pixel_only", "facebook")
+        new = verdict_row("pixel_only", "unattributed")
+        orders = [
+            order(1, comment="p", stored=old, total="250.50"),
+            order(2, comment="p", stored=old, total="100.00", sales_type="b2b"),
+            order(3, comment="p", stored=old, day=date(2026, 6, 28)),   # before the window
+            order(4, comment="p", stored=old, counted=False),           # a return
+        ]
+        report = diff_verdicts(orders, WINDOW, reclassify=_fake_parse({"p": new}))
+
+        (t,) = report.transitions
+        assert (t.cause, t.before, t.after) == (
+            "rule_change", ("pixel_only", "facebook"), ("pixel_only", "unattributed"))
+        assert t.orders == 4
+        assert t.window_orders == {"retail": 1, "all": 2}
+        assert t.window_revenue == {"retail": Decimal("250.50"), "all": Decimal("350.50")}
+        assert report.rewrites["rule_change"] == 4
+        assert report.column_changes == {"platform": 4}
+
+    def test_the_window_holds_its_first_and_last_day_and_nothing_either_side(self):
+        """A Monday and a Sunday are both inside "12 complete weeks"; the
+        Sunday before and the Monday after are not. Off by one at either end
+        and the hryvnia no longer match the Monday reports they are read
+        beside."""
+        start, end = WINDOW
+        old = verdict_row("pixel_only", "facebook")
+        new = verdict_row("pixel_only", "unattributed")
+        orders = [order(i, comment="p", stored=old, day=day, total=str(10 ** i))
+                  for i, day in enumerate([start - timedelta(days=1), start, end,
+                                           end + timedelta(days=1)], start=1)]
+        report = diff_verdicts(orders, WINDOW, reclassify=_fake_parse({"p": new}))
+        (t,) = report.transitions
+        assert t.orders == 4
+        assert t.window_orders == {"retail": 2, "all": 2}
+        assert t.window_revenue["all"] == Decimal(100 + 1000)
+
+    def test_a_row_changed_since_it_was_parsed_is_pending_not_a_rule_change(self):
+        """The next tick reparses it whatever anybody decides, so it must not
+        swell the number OD-06 is about."""
+        parsed = NOW - timedelta(days=3)
+        old = verdict_row("paid_confirmed", "facebook")
+        new = verdict_row("paid_confirmed", "tiktok")
+        orders = [
+            order(1, comment="x", stored=old, parsed=parsed, updated=parsed + timedelta(seconds=1)),
+            order(2, comment="x", stored=old, parsed=parsed, updated=parsed),
+        ]
+        report = diff_verdicts(orders, WINDOW, reclassify=_fake_parse({"x": new}))
+        assert report.rewrites == {"pending": 1, "rule_change": 1}
+        assert [t.cause for t in report.transitions] == ["rule_change", "pending"]
+
+    def test_a_comment_with_no_row_is_unparsed_and_starts_from_the_fallback(self):
+        new = verdict_row("paid_confirmed", "google")
+        report = diff_verdicts([order(1, comment="g", source_id=1)], WINDOW,
+                               reclassify=_fake_parse({"g": new}))
+        (t,) = report.transitions
+        assert (t.cause, t.before, t.after) == (
+            "unparsed", ("organic", "instagram"), ("paid_confirmed", "google"))
+
+    @pytest.mark.parametrize("comment", [None, ""])
+    def test_a_row_whose_comment_is_gone_is_orphaned(self, comment):
+        """The reclassify DELETEs it and the parse never puts it back, because
+        the parse selects only non-empty comments."""
+        old = verdict_row("paid_confirmed", "facebook")
+        report = diff_verdicts([order(1, comment=comment, stored=old, source_id=2)],
+                               WINDOW, reclassify=_fake_parse({}))
+        (t,) = report.transitions
+        assert (t.cause, t.before, t.after) == (
+            "orphaned", ("paid_confirmed", "facebook"), ("organic", "telegram"))
+        assert report.column_changes == {"traffic_type": 1, "platform": 1}
+
+    def test_a_rewrite_that_moves_no_verdict_is_counted_but_not_listed(self):
+        old = verdict_row("paid_confirmed", "facebook", "spring")
+        new = verdict_row("paid_confirmed", "facebook", "autumn")
+        report = diff_verdicts([order(1, comment="c", stored=old)], WINDOW,
+                               reclassify=_fake_parse({"c": new}))
+        assert report.rewrites == {"rule_change": 1}
+        assert report.verdict_moves == {}
+        assert report.transitions == []
+        assert report.column_changes == {"utm_campaign": 1}
+
+    def test_a_null_row_and_no_data_are_the_same_answer(self):
+        """A comment with no tracking data is stored as NULLs; reparsed, it is
+        NULLs again, and the tab shows the fallback both times."""
+        report = diff_verdicts([order(1, comment="n", stored=NULL_ROW, source_id=1)],
+                               WINDOW, reclassify=_fake_parse({"n": NULL_ROW}))
+        assert report.transitions == [] and sum(report.rewrites.values()) == 0
+
+    def test_the_platform_table_covers_every_counted_order(self):
+        """Including those the reclassify does not touch, or "facebook: 600 →
+        540" would read as the whole chart when it is only the part that moves."""
+        old = verdict_row("pixel_only", "facebook")
+        new = verdict_row("pixel_only", "unattributed")
+        orders = [
+            order(1, comment="p", stored=old, total="10.00"),
+            order(2, comment=None, source_id=1, total="5.00"),              # fallback only
+            order(3, comment="p", stored=old, total="7.00", sales_type="internal"),
+        ]
+        report = diff_verdicts(orders, WINDOW, reclassify=_fake_parse({"p": new}))
+        assert report.platforms["retail"] == {
+            "facebook": [1, Decimal("10.00"), 0, Decimal("0")],
+            "unattributed": [0, Decimal("0"), 1, Decimal("10.00")],
+            "instagram": [1, Decimal("5.00"), 1, Decimal("5.00")],
+        }
+        assert report.platforms["all"]["facebook"] == [2, Decimal("17.00"), 0, Decimal("0")]
+        assert report.traffic_types["retail"]["organic"] == [1, Decimal("5.00"), 1, Decimal("5.00")]
+
+    def test_google_moving_between_paid_and_organic_moves_the_tab_s_two_slices(self):
+        """/traffic has no "google" slice: it shows `google_ads` and
+        `google_organic`, by traffic type. Named by the classifier's
+        `google`, the table read Δ 0 for a reclassify that moves ₴500 from
+        one slice the owner looks at to the other."""
+        report = diff_verdicts(
+            [order(1, comment="g", stored=verdict_row("paid_confirmed", "google"),
+                   total="500.00")],
+            WINDOW, reclassify=_fake_parse({"g": verdict_row("organic", "google")}))
+        assert report.platforms["retail"] == {
+            "google_ads": [1, Decimal("500.00"), 0, Decimal("0")],
+            "google_organic": [0, Decimal("0"), 1, Decimal("500.00")],
+        }
+        # The transition keeps the stored pair, which already says both.
+        (t,) = report.transitions
+        assert (t.before, t.after) == (("paid_confirmed", "google"), ("organic", "google"))
+
+    @pytest.mark.asyncio
+    async def test_the_now_columns_are_what_the_tab_shows_for_the_same_rows(self, tmp_path):
+        """The tab's own `get_traffic_analytics` over a DuckDB store, and the
+        diff over the same orders with nothing reclassified: every platform
+        and traffic type, with its orders and hryvnia, must agree. That holds
+        the Google split, the source fallback and the NULL row at once, on
+        both sides — either one naming a platform differently fails here.
+        Imported here and not at the top: the audited runs import this module,
+        and may not load DuckDB."""
+        from core.duckdb_store import DuckDBStore
+
+        rows = [  # order_id, source_id, stored verdict or None, total
+            (1, 4, verdict_row("paid_confirmed", "google"), "100.00"),
+            (2, 4, verdict_row("paid_likely", "google"), "200.00"),
+            (3, 4, verdict_row("organic", "google"), "400.00"),
+            (4, 4, verdict_row("unknown", "google"), "800.00"),
+            (5, 4, verdict_row("paid_confirmed", "facebook"), "1600.00"),
+            (6, 1, None, "3200.00"),        # no row: Instagram's fallback
+            (7, 4, None, "6400.00"),        # no row: unattributed
+            (8, 2, NULL_ROW, "12800.00"),   # a row of NULLs: Telegram's fallback
+        ]
+        day = date(2026, 9, 1)
+        store = DuckDBStore(db_path=tmp_path / "tab.duckdb")
+        await store.connect()
+        try:
+            async with store.connection() as conn:
+                for order_id, source_id, stored, total in rows:
+                    conn.execute(
+                        "INSERT INTO silver_orders (id, source_id, status_id, grand_total, "
+                        "ordered_at, buyer_id, manager_id, order_date, is_return, "
+                        "sales_type, is_active_source, source_name, is_new_customer, "
+                        "buyer_first_order_date, promocode) VALUES (?, ?, 12, ?, NULL, "
+                        "NULL, NULL, ?, FALSE, 'retail', TRUE, 'x', FALSE, NULL, NULL)",
+                        [order_id, source_id, float(total), day])
+                    if stored is not None:
+                        conn.execute(
+                            "INSERT INTO silver_order_utm (order_id, traffic_type, "
+                            "platform, parsed_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                            [order_id, stored[script.VERDICT_TYPE],
+                             stored[script.VERDICT_PLATFORM]])
+            tab = await store.get_traffic_analytics(
+                start_date=WINDOW[0], end_date=WINDOW[1], sales_type="retail")
+        finally:
+            await store.close()
+
+        orders = [order(order_id, comment=str(order_id) if stored else None,
+                        stored=stored, source_id=source_id, day=day, total=total)
+                  for order_id, source_id, stored, total in rows]
+        unchanged = {str(o.order_id): o.stored for o in orders if o.stored}
+        report = diff_verdicts(orders, WINDOW, reclassify=_fake_parse(unchanged))
+        assert report.transitions == []
+
+        def now(table):
+            return {name: {"orders": v[0], "revenue": float(v[1])}
+                    for name, v in table.items() if v[0]}
+
+        assert now(report.platforms["retail"]) == tab["by_platform"]
+        assert now(report.traffic_types["retail"]) == tab["by_traffic_type"]
+        assert {"google_ads", "google_organic"} <= set(tab["by_platform"])
+
+    def test_causes_come_out_in_order_and_largest_first(self):
+        a = verdict_row("organic", "instagram")
+        b = verdict_row("organic", "tiktok")
+        c = verdict_row("organic", "google")
+        orders = [order(1, comment="c", stored=a), order(2, comment="b", stored=a),
+                  order(3, comment="b", stored=a), order(4, comment="c")]
+        report = diff_verdicts(orders, WINDOW, reclassify=_fake_parse({"b": b, "c": c}))
+        assert [(t.cause, t.after[1], t.orders) for t in report.transitions] == [
+            ("rule_change", "tiktok", 2), ("rule_change", "google", 1),
+            ("unparsed", "google", 1)]
+        assert list(CAUSES) == ["rule_change", "orphaned", "pending", "unparsed"]
+
+    def test_the_default_parser_is_the_parse(self):
+        """Without a stand-in the diff runs `utm_columns` — the row the DuckDB
+        parse writes — so the dry run cannot drift from the thing it predicts."""
+        import inspect
+
+        default = inspect.signature(diff_verdicts).parameters["reclassify"].default
+        from core.utm_classify import utm_columns
+        assert default is utm_columns
+
+
+# ─── a recording connection ──────────────────────────────────────────────────
+
+class FakeRecord(dict):
+    """What asyncpg hands back, as far as the script uses it: lookup by name."""
+
+
+def fake_records():
+    """Four orders, one of each cause, and one that moves nothing."""
+    stamp = NOW - timedelta(days=30)
+    empty = {c: None for c in UTM_VERDICT_COLUMNS}
+
+    def rec(order_id, comment, stored=None, **extra):
+        values = dict(empty)
+        if stored:
+            values.update(stored)
+        base = dict(
+            id=order_id, source_id=4, manager_comment=comment, updated_at=stamp,
+            has_row=stored is not None, parsed_at=stamp if stored else None,
+            order_date=date(2026, 9, 1), grand_total=Decimal("100.00"),
+            sales_type="retail", counted=True,
+        )
+        base.update(values)
+        base.update(extra)
+        return FakeRecord(base)
+
+    return [
+        rec(1, "_fbp: fb.1.2", {"fbp": "fb.1.2", "traffic_type": "pixel_only",
+                                "platform": "facebook"}),
+        rec(2, "UTM: utm_source: fbads", {"utm_source": "fbads",
+                                          "traffic_type": "paid_confirmed",
+                                          "platform": "facebook"}),
+        rec(3, "UTM: utm_source: ig", None),
+        rec(4, "", {"utm_source": "fbads", "traffic_type": "paid_confirmed",
+                    "platform": "facebook"}),
+    ]
+
+
+def snapshot_csv(n_rows):
+    lines = ["order_id,platform"] + [f"{i},facebook" for i in range(1, n_rows + 1)]
+    return ("\n".join(lines) + "\n").encode()
+
+
+class FakeConn:
+    """Answers the script's reads and records what it was asked."""
+
+    def __init__(self, records=None, *, utm_rows=3, silver_rows=None, csv_rows=None,
+                 xid=None, privileges=None, members=None, known=True, copy_error=None):
+        self.records = fake_records() if records is None else records
+        self.utm_rows = utm_rows
+        self.silver_rows = len(self.records) if silver_rows is None else silver_rows
+        self.csv_rows = utm_rows if csv_rows is None else csv_rows
+        self.xid = xid
+        # What the login holds, and what each role it can SET ROLE to holds.
+        self.roles = {"ks_readonly": privileges or {}, **(members or {})}
+        self.known = known
+        self.copy_error = copy_error
+        self.statements = []
+        self.transactions = []
+        self.closed = False
+
+    def _log(self, sql):
+        self.statements.append(sql)
+
+    async def fetchrow(self, sql, *args):
+        self._log(sql)
+        assert sql == script.ROLE_SQL, sql
+        held = self.roles[args[0]]
+        return FakeRecord(**{k: held.get(k, False)
+                             for k in ("superuser", "createrole", "createdb", "db_write")})
+
+    async def fetch(self, sql, *args):
+        self._log(sql)
+        if sql == script.ORDERS_SQL:
+            return self.records
+        if sql == script.ROLES_SQL:
+            assert args == ("ks_readonly",), args
+            return [FakeRecord(name=n) for n in self.roles] if self.known else []
+        held = self.roles[args[0]] if args else {}
+        if sql == script.WRITABLE_RELATIONS_SQL:
+            return [FakeRecord(name=n, is_sequence=False) for n in held.get("tables", [])] \
+                + [FakeRecord(name=n, is_sequence=True) for n in held.get("sequences", [])]
+        if sql == script.CREATABLE_SCHEMAS_SQL:
+            return [FakeRecord(name=n) for n in held.get("schemas", [])]
+        raise AssertionError(f"unexpected fetch: {sql}")
+
+    async def fetchval(self, sql, *args):
+        self._log(sql)
+        answers = {
+            script.LOCK_SQL: None,
+            script.NOW_SQL: NOW,
+            "SELECT current_user": "ks_readonly",
+            script.SILVER_ROWS_SQL: self.silver_rows,
+            script.UTM_ROWS_SQL: self.utm_rows,
+            script.ORPHAN_ROWS_SQL: 0,
+            script.XID_SQL: self.xid,
+        }
+        assert sql in answers, f"unexpected fetchval: {sql}"
+        return answers[sql]
+
+    async def copy_from_query(self, sql, *, output, format, header):
+        self._log(sql)
+        assert (format, header) == ("csv", True)
+        data = snapshot_csv(self.csv_rows)
+        await output(data[: len(data) // 2])
+        if self.copy_error:
+            raise self.copy_error
+        await output(data[len(data) // 2:])
+
+    def transaction(self, **options):
+        self.transactions.append(options)
+
+        # The boundary goes into the statement log, so a test can say what
+        # was asked inside the transaction and not merely what came last.
+        @asynccontextmanager
+        async def _tx():
+            self.statements.append("BEGIN")
+            try:
+                yield
+            except BaseException:
+                self.statements.append("ROLLBACK")
+                raise
+            self.statements.append("COMMIT")
+
+        return _tx()
+
+    async def close(self):
+        self.closed = True
+
+
+def _args(**overrides):
+    base = dict(dsn=None, snapshot=None, today=date(2026, 9, 23), json=False)
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _run_main(monkeypatch, conn, argv):
+    async def fake_connect(args):
+        return conn
+
+    monkeypatch.setattr(script, "connect", fake_connect)
+    return script.main(argv)
+
+
+# ─── nothing is written ───────────────────────────────────────────────────────
+
+def _tree():
+    return ast.parse(SCRIPT.read_text(encoding="utf-8"))
+
+
+def _module_constants(tree):
+    return {
+        t.id: node.value.value
+        for node in tree.body if isinstance(node, ast.Assign)
+        for t in node.targets
+        if isinstance(t, ast.Name) and isinstance(node.value, ast.Constant)
+    }
+
+
+class TestNothingIsWritten:
+    def test_it_reads_only_the_read_only_names_from_the_environment(self):
+        """Walked, not grepped: the docstring names `KS_PG_DSN` to say it is
+        never read, and a text search cannot tell the two apart. Every access
+        to `os.environ` must be a `.get` of a name that resolves here."""
+        tree = _tree()
+        constants = _module_constants(tree)
+        names, environ, read_by_get = set(), [], set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "environ":
+                environ.append(node)
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("get", "getenv")):
+                target = node.func.value
+                is_env = (isinstance(target, ast.Attribute) and target.attr == "environ") \
+                    or (isinstance(target, ast.Name) and target.id == "os"
+                        and node.func.attr == "getenv")
+                if not is_env:
+                    continue
+                arg = node.args[0]
+                names.add(constants.get(arg.id) if isinstance(arg, ast.Name) else arg.value)
+                read_by_get.add(id(target))
+        stray = [n.lineno for n in environ if id(n) not in read_by_get]
+        assert stray == [], f"os.environ used other than by .get() at lines {stray}"
+        assert names == {"KS_PG_READONLY_DSN", "KS_READONLY_PASSWORD"}
+
+    def test_it_has_no_way_to_execute_a_statement(self):
+        """The connection methods it calls are the four that read and the two
+        that frame a read. No `execute`, `executemany` or `copy_to_table`, and
+        every statement is a module constant ending `_SQL` or a SELECT
+        literal — so the list below is the whole of what it can send."""
+        allowed = {"fetch", "fetchval", "fetchrow", "copy_from_query",
+                   "transaction", "close"}
+        tree = _tree()
+        used, sent = set(), []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "conn"):
+                used.add(node.func.attr)
+                if node.args:
+                    sent.append(node.args[0])
+        assert used <= allowed, sorted(used - allowed)
+        for arg in sent:
+            if isinstance(arg, ast.Name):
+                assert arg.id.endswith("_SQL"), arg.id
+            else:
+                assert isinstance(arg, ast.Constant) and arg.value.startswith("SELECT"), \
+                    ast.unparse(arg)
+
+    def test_every_statement_it_holds_is_a_read(self):
+        verbs = ("insert", "update", "delete", "truncate", "alter", "create",
+                 "drop", "grant", "revoke", "merge", "lock", "nextval", "setval",
+                 "set_config", "vacuum", "cluster", "reindex", "comment", "call",
+                 "do", "copy")
+        statements = {n: getattr(script, n) for n in dir(script) if n.endswith("_SQL")}
+        assert len(statements) >= 8
+        for name, sql in statements.items():
+            code = sql.strip().lower()
+            if name == "LOCK_SQL":
+                # The one statement that is not a SELECT, and it is held to
+                # its whole text: a table list and the weakest mode there is.
+                assert re.fullmatch(
+                    r"lock table [a-z_]+\.[a-z_]+(, [a-z_]+\.[a-z_]+)* in access share mode",
+                    code), sql
+                continue
+            assert code.startswith("select"), name
+            words = set(re.findall(r"[a-z_]+", re.sub(r"'[^']*'", "''", code)))
+            assert not words & set(verbs), (name, sorted(words & set(verbs)))
+
+    @pytest.mark.asyncio
+    async def test_the_read_is_one_declared_read_only_transaction(self, tmp_path):
+        conn = FakeConn()
+        state = await script.read_state(conn, tmp_path / "s.csv.gz")
+        assert conn.transactions == [{"isolation": "repeatable_read", "readonly": True}]
+        # The LOCK before anything that reads. LOCK sets no snapshot, so it
+        # waits out a Silver tick's TRUNCATE and the snapshot is fixed after
+        # it; one statement later and the snapshot predates the TRUNCATE and
+        # reads the table empty (the real-PG test shows both).
+        assert conn.statements[:3] == ["BEGIN", script.LOCK_SQL, script.NOW_SQL]
+        # The transaction-id question is the last thing asked inside it —
+        # before COMMIT, where a raise still rolls the write back. Asked after,
+        # it would find no id in a fresh transaction and bless what committed.
+        assert conn.statements[-2:] == [script.XID_SQL, "COMMIT"]
+        assert script.SESSION["default_transaction_read_only"] == "on"
+        assert state.snapshot is not None and state.snapshot.rows == 3
+
+    def test_the_lock_covers_every_table_any_statement_reads(self):
+        """Derived from the statements, not listed beside them: a read of a
+        table the LOCK does not name is a read a TRUNCATE can empty. Walks
+        every `_SQL` constant, so a new read cannot be left out by not being
+        thought of."""
+        ours = r"\b(?:bronze|silver|gold|meta|app)\.[a-z_]+\b"
+        named = set()
+        for name in dir(script):
+            if name.endswith("_SQL") and name != "LOCK_SQL":
+                named |= set(re.findall(ours, getattr(script, name)))
+        assert named == set(script.READ_TABLES), named ^ set(script.READ_TABLES)
+        assert re.findall(ours, script.LOCK_SQL) == list(script.READ_TABLES)
+
+    @pytest.mark.asyncio
+    async def test_a_transaction_that_was_given_an_id_fails_and_keeps_no_snapshot(
+            self, tmp_path):
+        """What the server's answer means: an id is assigned on the first
+        write. The run fails, and a snapshot from it is not left looking good."""
+        path = tmp_path / "s.csv.gz"
+        with pytest.raises(script.WroteSomething):
+            await script.read_state(FakeConn(xid="7331"), path)
+        assert not path.exists()
+
+    def test_a_whole_run_writes_only_the_snapshot_and_reaches_nothing(self, tmp_path):
+        """The script's `main()` in a fresh interpreter under an audit hook,
+        its connection a recording fake: one file opened for writing, the
+        snapshot, and not one network connection, filesystem change or
+        command."""
+        path = tmp_path / "order_utm.csv.gz"
+        setup = (
+            "from tests.unit.test_utm_reclassify_dryrun import FakeConn\n"
+            "async def _connect(args):\n"
+            "    return FakeConn()\n"
+            "script.connect = _connect\n"
+        )
+        env = {"KS_PG_DSN": POISONED_PG_DSN}
+        run = run_main_audited(
+            "scripts.utm_reclassify_dryrun",
+            ["--today", "2026-09-23", "--snapshot", str(path)],
+            setup=setup, env=env, cwd=tmp_path)
+        assert run.code == 0, run.stderr
+        assert run.writes == [str(path)]
+        assert run.mutations == [] and run.connects == [] and run.commands == []
+        assert path.exists() and "rule_change" in run.stdout
+        assert not set(UNSEEN_WRITERS) & set(run.modules), \
+            sorted(set(UNSEEN_WRITERS) & set(run.modules))
+
+        bare = run_main_audited(
+            "scripts.utm_reclassify_dryrun", ["--today", "2026-09-23", "--json"],
+            setup=setup, env=env, cwd=tmp_path)
+        assert bare.code == 0, bare.stderr
+        assert bare.events == []
+        assert not set(UNSEEN_WRITERS) & set(bare.modules)
+        assert json.loads(bare.stdout)["wrote_nothing"] is True
+
+
+# ─── the role ─────────────────────────────────────────────────────────────────
+
+class TestTheRole:
+    @pytest.mark.asyncio
+    async def test_each_kind_of_write_privilege_is_named(self):
+        found = await script.write_privileges(FakeConn(privileges={
+            "superuser": True, "createrole": True, "createdb": True,
+            "db_write": True, "schemas": ["bronze"],
+            "tables": ["silver.order_utm"], "sequences": ["app.stock_movements_id_seq"]}))
+        assert found == [
+            "ks_readonly is a superuser",
+            "CREATEROLE",
+            "CREATEDB",
+            "CREATE or TEMPORARY on the database",
+            "CREATE on schema bronze",
+            "INSERT/UPDATE/DELETE/TRUNCATE on silver.order_utm",
+            "USAGE/UPDATE on sequence app.stock_movements_id_seq",
+        ]
+        assert await script.write_privileges(FakeConn()) == []
+
+    def test_every_relation_kind_a_write_can_pass_through_is_asked_about(self):
+        """Tables and partitioned tables, views (an auto-updatable one writes
+        its base table), materialized views, foreign tables — and sequences,
+        whose `nextval` no ROLLBACK undoes. The real-PG test grants each kind
+        but the foreign table for real and requires it named; that one needs
+        a wrapper only a superuser can install, so the list is held whole
+        here, read out of the statement."""
+        match = re.search(r"c\.relkind IN \(([^)]*)\)", script.WRITABLE_RELATIONS_SQL)
+        assert match, "the relation kinds are no longer a list in the statement"
+        assert set(re.findall(r"'(\w)'", match.group(1))) == {"r", "p", "v", "m", "f", "S"}
+
+    @pytest.mark.asyncio
+    async def test_a_role_it_can_become_is_asked_the_same_questions(self):
+        """A NOINHERIT member of a writer holds nothing itself, and everything
+        one `SET ROLE` later — so what the login can become is refused as if
+        it were the login, naming the role it came through."""
+        conn = FakeConn(members={"ks_app": {"tables": ["bronze.orders"]},
+                                 "pg_read_all_data": {}})
+        assert await script.write_privileges(conn) == [
+            "INSERT/UPDATE/DELETE/TRUNCATE on bronze.orders "
+            "(through ks_app, which ks_readonly can SET ROLE to)"]
+
+    @pytest.mark.asyncio
+    async def test_a_login_the_catalogue_does_not_know_is_not_read_only(self):
+        """Every role is a member of itself, so no answer at all is not "holds
+        nothing" — it is nothing checked, and it is refused."""
+        assert await script.write_privileges(FakeConn(known=False)) == [
+            "role ks_readonly is not in pg_roles"]
+
+    def test_a_login_that_can_write_is_refused_before_a_row_is_read(
+            self, monkeypatch, tmp_path, capsys):
+        conn = FakeConn(privileges={"tables": ["bronze.orders"]})
+        path = tmp_path / "s.csv.gz"
+        code = _run_main(monkeypatch, conn, ["--snapshot", str(path)])
+        assert code == 2
+        assert "bronze.orders" in capsys.readouterr().err
+        assert script.ORDERS_SQL not in conn.statements
+        assert conn.transactions == [] and conn.closed
+        assert not path.exists()
+
+    def test_no_login_named_is_a_refusal(self, monkeypatch, capsys):
+        monkeypatch.delenv(script.DSN_ENV, raising=False)
+        monkeypatch.delenv(script.PASSWORD_ENV, raising=False)
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://ks_app:x@127.0.0.1:1/ks")
+        assert script.main([]) == 2
+        assert "no read-only login" in capsys.readouterr().err
+
+
+# ─── the snapshot ─────────────────────────────────────────────────────────────
+
+class TestTheSnapshot:
+    def test_an_existing_file_is_refused_before_connecting(self, monkeypatch, tmp_path):
+        path = tmp_path / "earlier.csv.gz"
+        path.write_bytes(b"the only record of last month's verdicts")
+        conn = FakeConn()
+        assert _run_main(monkeypatch, conn, ["--snapshot", str(path)]) == 2
+        assert conn.statements == []
+        assert path.read_bytes() == b"the only record of last month's verdicts"
+
+    def test_a_missing_directory_is_refused(self, monkeypatch, tmp_path):
+        conn = FakeConn()
+        assert _run_main(monkeypatch, conn,
+                         ["--snapshot", str(tmp_path / "nope" / "s.csv.gz")]) == 2
+        assert conn.statements == []
+
+    @pytest.mark.asyncio
+    async def test_a_file_that_appears_meanwhile_is_neither_overwritten_nor_removed(
+            self, tmp_path):
+        """The pre-check and the open are two moments; exclusive create is what
+        holds between them, and the cleanup must not delete what it did not
+        create."""
+        path = tmp_path / "s.csv.gz"
+        path.write_bytes(b"somebody else's")
+        with pytest.raises(FileExistsError):
+            await script.write_snapshot(FakeConn(), path, 3)
+        assert path.read_bytes() == b"somebody else's"
+
+    @pytest.mark.asyncio
+    async def test_a_count_that_disagrees_removes_the_file(self, tmp_path):
+        path = tmp_path / "s.csv.gz"
+        with pytest.raises(script.SnapshotMismatch):
+            await script.write_snapshot(FakeConn(csv_rows=2), path, 3)
+        assert not path.exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("empty", [{"utm_rows": 0}, {"silver_rows": 0}])
+    async def test_a_silver_table_read_as_empty_fails_the_run(self, tmp_path, empty):
+        """What a TRUNCATE read through an older snapshot looks like — or a
+        Silver never built. Reported, it would be every verdict "unparsed",
+        or no order in the 12 weeks, and a snapshot "checked" against the
+        same empty table. So the run fails, and before the snapshot."""
+        conn = FakeConn(**empty)
+        path = tmp_path / "s.csv.gz"
+        with pytest.raises(script.EmptySilver):
+            await script.read_state(conn, path)
+        assert not path.exists()
+        assert script.SNAPSHOT_SQL not in conn.statements
+        assert conn.statements[-1] == "ROLLBACK"
+
+    @pytest.mark.asyncio
+    async def test_empty_is_only_a_failure_beside_a_bronze_that_is_not(self, tmp_path):
+        """No orders at all is an empty report, not a broken read; and a
+        table of comment-less orders has nothing for the UTM table to hold."""
+        state = await script.read_state(FakeConn(records=[], utm_rows=0, silver_rows=0))
+        assert state.orders == [] and state.utm_rows == 0
+        bare = [r for r in fake_records() if r["manager_comment"] == ""]
+        state = await script.read_state(FakeConn(records=bare, utm_rows=0))
+        assert len(state.orders) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_copy_that_fails_halfway_removes_the_file(self, tmp_path):
+        path = tmp_path / "s.csv.gz"
+        with pytest.raises(ConnectionResetError):
+            await script.read_state(FakeConn(copy_error=ConnectionResetError("gone")), path)
+        assert not path.exists()
+
+    @pytest.mark.asyncio
+    async def test_the_same_rows_give_the_same_bytes(self, tmp_path):
+        """No name and no time in the gzip header, so a sha256 identifies the
+        table's contents rather than the moment of the copy."""
+        one = await script.write_snapshot(FakeConn(), tmp_path / "a.csv.gz", 3)
+        two = await script.write_snapshot(FakeConn(), tmp_path / "b.csv.gz", 3)
+        assert one.sha256 == two.sha256
+        # Read from the header itself, because two copies made within the same
+        # second would agree even with a clock in it (RFC 1952: bytes 4-7 are
+        # MTIME; FLG bit 3 says a file name follows).
+        header = (tmp_path / "a.csv.gz").read_bytes()[:10]
+        assert header[4:8] == b"\x00\x00\x00\x00" and not header[3] & 0x08
+        assert one.sha256 == hashlib.sha256((tmp_path / "a.csv.gz").read_bytes()).hexdigest()
+        with gzip.open(tmp_path / "a.csv.gz", "rt", newline="") as text:
+            assert list(csv.reader(text))[0] == ["order_id", "platform"]
+
+    def test_the_printed_line_is_what_sha256sum_reads(self, monkeypatch, tmp_path, capsys):
+        path = tmp_path / "s.csv.gz"
+        assert _run_main(monkeypatch, FakeConn(), ["--today", "2026-09-23",
+                                                   "--snapshot", str(path)]) == 0
+        last = capsys.readouterr().out.rstrip().splitlines()[-1]
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert last == f"{digest}  {path.name}"
+
+
+# ─── the report ───────────────────────────────────────────────────────────────
+
+class TestTheReport:
+    def test_the_four_fake_orders_land_where_they_should(self, monkeypatch, capsys):
+        assert _run_main(monkeypatch, FakeConn(), ["--today", "2026-09-23", "--json"]) == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["rewrites"] == {"rule_change": 1, "orphaned": 1, "pending": 0,
+                                   "unparsed": 1}
+        assert out["window"] == ["2026-06-29", "2026-09-20"]
+        moves = {(t["cause"], tuple(t["before"]), tuple(t["after"])) for t in out["transitions"]}
+        assert moves == {
+            ("rule_change", ("pixel_only", "facebook"), ("pixel_only", "unattributed")),
+            ("orphaned", ("paid_confirmed", "facebook"), ("unknown", "unattributed")),
+            ("unparsed", ("unknown", "unattributed"), ("organic", "instagram")),
+        }
+        assert out["platforms"]["retail"]["facebook"] == {
+            "orders_now": 3, "revenue_now": "300.00",
+            "orders_after": 1, "revenue_after": "100.00"}
+
+    def test_the_text_report_names_every_cause(self, monkeypatch, capsys):
+        assert _run_main(monkeypatch, FakeConn(), ["--today", "2026-09-23"]) == 0
+        text = capsys.readouterr().out
+        for cause in CAUSES:
+            assert cause in text
+        assert "nothing was written" in text
