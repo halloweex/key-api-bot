@@ -113,6 +113,46 @@ class TestTheFlag:
         assert pg_goals_read.available() is False
 
 
+# Every read that asks the flag. `get_daily_revenue_for_dates([])` is not here:
+# it returns before asking any engine, so there is nothing for a typo to stop.
+TYPO_CALLS = (
+    ("get_goals", (), {}),
+    ("get_smart_goals", (), {}),
+    ("get_historical_revenue", ("weekly",), {}),
+    ("get_daily_revenue_for_dates", ([date.today()],), {}),
+    ("get_predictions", (date.today() - timedelta(days=7), date.today()), {}),
+    # The smart goal's ML signal, and the method `/api/goals/forecast` returns
+    # as it stands — the pair the DN-12 review found swallowing the refusal.
+    ("_get_ml_forecast_total", (2026, 10), {}),
+    ("generate_smart_goals", (2026, 10), {}),
+)
+
+
+class TestATypoStopsEveryRead:
+    """`enabled()` raising is a contract only while no caller swallows it.
+
+    `_get_ml_forecast_total` did: it read through `_goals_run` inside an
+    `except Exception`, so the ValueError became a missing ML signal, logged at
+    DEBUG, and `generate_smart_goals` answered with a different goal — the
+    blend re-weighted over what was left, the method switched from
+    `ml_forecast` to `yoy_growth` — and a 200."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name,args,kwargs", TYPO_CALLS,
+                             ids=[c[0] for c in TYPO_CALLS])
+    async def test_it_raises(self, tmp_path, monkeypatch, name, args, kwargs):
+        monkeypatch.setenv("KS_READ_GOALS", "postgress")
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        store = DuckDBStore(db_path=tmp_path / f"typo-{name}.duckdb")
+        await store.connect()
+        try:
+            with pytest.raises(ValueError, match="KS_READ_GOALS"):
+                await asyncio.wait_for(
+                    getattr(store, name)(*args, **kwargs), TIMEOUT_S)
+        finally:
+            await store.close()
+
+
 class TestTheBoundary:
     """What must *not* be routed, and why — the load-bearing part here."""
 

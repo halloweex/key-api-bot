@@ -831,9 +831,17 @@ class GoalsMixin:
         own connection. It used to take that connection as an argument and read
         DuckDB Gold on it, which after step 13 would have been a frozen Gold.
         """
+        from core import pg_goals_read
+
         first_day = date(target_year, target_month, 1)
         last_day = date(target_year, target_month, calendar.monthrange(target_year, target_month)[1])
         today = datetime.now(DEFAULT_TZ).date()
+
+        # Asked here, outside the `try`, and only for its refusal: an unknown
+        # `KS_READ_GOALS` raises, and every other goal read lets that stop it.
+        # Inside the `try` the refusal became a missing signal, and
+        # `/api/goals/forecast` answered 200 with a different goal.
+        pg_goals_read.enabled()
 
         try:
             # Get actual revenue for past days of the month
@@ -856,8 +864,15 @@ class GoalsMixin:
                 return 0.0  # No predictions available
 
             return actual_revenue + predicted_revenue
-        except Exception:
-            logger.debug("ML predictions unavailable for %d-%02d", target_year, target_month)
+        except Exception as exc:  # noqa: BLE001
+            # What reaches here is a read that failed on the engine that
+            # finally answered — the goal is then computed without this signal,
+            # so it is said at WARNING, not DEBUG. When DN-20b makes a fallback
+            # raise, that exception has to pass through this handler, not end
+            # in it: DN-20a's walk covers it, as a handler around `_goals_run`.
+            logger.warning(
+                "goals: ML forecast signal for %d-%02d unavailable, left out of "
+                "the blend: %s", target_year, target_month, exc)
             return 0.0
 
     def _get_dynamic_growth_cap(

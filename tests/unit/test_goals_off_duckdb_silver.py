@@ -27,13 +27,17 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import logging
+import statistics
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from core.duckdb_constants import (
     B2B_MANAGER_ID,
@@ -42,6 +46,7 @@ from core.duckdb_constants import (
     RETAIL_MANAGER_IDS,
 )
 from core.duckdb_store import DuckDBStore
+from core.models import OrderStatus
 
 REPO = Path(__file__).resolve().parents[2]
 GOALS = REPO / "core" / "repositories" / "goals.py"
@@ -429,6 +434,200 @@ class TestAnEmptyHistoryLeavesTheStoredRateAlone:
         assert result["sample_size"] >= 1
         assert stored[0] == pytest.approx(float(result["overall_yoy"]), abs=1e-4)
         assert stored[0] != self.STORED
+
+
+# ─── The forecast signal ────────────────────────────────────────────────────
+#
+# Signal 3 of a smart goal: Gold for the days of the month already gone, plus
+# the stored predictions from today to the month's end. The two-engine test
+# proves both engines agree; this proves what they agree *on* — the bounds are
+# computed in Python, so a date moved by one day moves both engines together.
+
+FORECAST_TODAY = date(2025, 3, 15)
+
+
+class _FrozenClock(datetime):
+    """`datetime` with `now()` pinned to midday in Kyiv on FORECAST_TODAY."""
+
+    @classmethod
+    def now(cls, tz=None):
+        moment = datetime.combine(FORECAST_TODAY, time(12, 0), tzinfo=KYIV)
+        return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+
+# (id, grand_total, day, manager_id) — all source 1, none a return.
+FORECAST_ORDERS = [
+    (1, 7000.0, date(2025, 2, 28), None),            # last month
+    (2, 1000.0, date(2025, 3, 1), None),             # the first
+    (3, 300.0, date(2025, 3, 5), B2B_MANAGER_ID),    # b2b: inside 'all' only
+    (4, 200.0, date(2025, 3, 14), None),             # yesterday: the actual half's last day
+    (5, 5000.0, date(2025, 3, 15), None),            # today: the predicted half's
+]
+FORECAST_PREDICTIONS = [  # (prediction_date, sales_type, predicted_revenue)
+    (date(2025, 3, 10), "retail", 40_000.0),   # already happened — Gold answers for it
+    (date(2025, 3, 15), "retail", 100_000.0),  # today
+    (date(2025, 3, 31), "retail", 20_000.0),   # the month's last day
+    (date(2025, 4, 1), "retail", 9_000.0),     # next month
+    (date(2025, 3, 20), "b2b", 12_345.0),
+    (date(2025, 3, 20), "all", 50_000.0),
+]
+EXPECTED_SIGNAL = {
+    "retail": 1000.0 + 200.0 + 100_000.0 + 20_000.0,
+    "all": 1000.0 + 300.0 + 200.0 + 50_000.0,
+}
+
+
+async def _seed_forecast(store) -> None:
+    async with store.connection() as conn:
+        conn.executemany(
+            "INSERT INTO orders (id, source_id, status_id, grand_total, "
+            "ordered_at, buyer_id, manager_id) VALUES (?, 1, 1, ?, ?, 1, ?)",
+            [(oid, total, _kyiv_noon(day), mgr)
+             for oid, total, day, mgr in FORECAST_ORDERS])
+        conn.executemany(
+            "INSERT INTO revenue_predictions (prediction_date, sales_type, "
+            "predicted_revenue, model_mae, model_mape, model_wape) "
+            "VALUES (?, ?, ?, 1, 1, 1)", FORECAST_PREDICTIONS)
+    await store.refresh_warehouse_layers(trigger="manual")
+    async with store.connection() as conn:
+        gold = conn.execute(
+            "SELECT COALESCE(SUM(revenue), 0) FROM gold_daily_revenue "
+            "WHERE date BETWEEN '2025-03-01' AND '2025-03-31'").fetchone()[0]
+    assert float(gold) == 6500.0, "Gold was not built from the seed — nothing is measured"
+
+
+class TestTheForecastSignal:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sales_type", sorted(EXPECTED_SIGNAL))
+    async def test_gold_through_yesterday_plus_predictions_from_today(
+        self, store, monkeypatch, sales_type,
+    ):
+        """Today's order belongs to the predicted half and the 10th's
+        prediction to the actual one — each counted once, in its own half."""
+        monkeypatch.delenv("KS_READ_GOALS", raising=False)
+        await _seed_forecast(store)
+        with patch("core.repositories.goals.datetime", _FrozenClock):
+            got = await store._get_ml_forecast_total(
+                FORECAST_TODAY.year, FORECAST_TODAY.month, sales_type)
+        assert got == pytest.approx(EXPECTED_SIGNAL[sales_type], abs=0.005)
+
+    @pytest.mark.asyncio
+    async def test_a_read_that_fails_is_left_out_and_said_at_warning(
+        self, store, monkeypatch, caplog,
+    ):
+        """The goal is then computed from the other two signals. At DEBUG
+        nothing said so; that is a different goal nobody was told about."""
+        monkeypatch.delenv("KS_READ_GOALS", raising=False)
+        caplog.set_level(logging.DEBUG, logger="core.repositories.goals")
+        with patch.object(type(store), "_goals_run",
+                          new=AsyncMock(side_effect=RuntimeError("duckdb is gone"))):
+            got = await store._get_ml_forecast_total(2025, 3, "retail")
+        assert got == 0.0
+        warned = [r for r in caplog.records
+                  if r.name == "core.repositories.goals"
+                  and r.levelno == logging.WARNING]
+        assert warned and "duckdb is gone" in warned[0].getMessage()
+
+
+# ─── What the smart goal narrows to, in written-out numbers ─────────────────
+#
+# `TestTheCalculatorsAnswerWhatTheyAnsweredBefore` compares the old filter with
+# the new one by patching the predicate, and `TestCompactionShape` compares a
+# store with itself before and after — so a site that stops calling the
+# predicate at all loses its filter on both sides and passes both (DN-12
+# review, mutations x1, x2 and cap). These expect numbers computed here, in
+# Python, from the rows as `_history_rows` wrote them.
+
+RETURN_STATUSES = frozenset(int(s) for s in OrderStatus.return_statuses())
+
+
+def _history_sales_type(source_id, manager_id):
+    """The fixture's rows, typed by how they were written, not by the CASE."""
+    if source_id == EXHIBITION_SOURCE_ID:
+        return "exhibition"
+    return "b2b" if manager_id == B2B_MANAGER_ID else "retail"
+
+
+def _monthly_history(sales_type):
+    """`{(year, month): (revenue, days with orders)}`, returns left out;
+    `None` is every sales type — what a read that lost its filter sees."""
+    revenue, days = defaultdict(Decimal), defaultdict(set)
+    for _oid, src, status, total, when, mgr in _history_rows():
+        if status in RETURN_STATUSES:
+            continue
+        if sales_type is not None and _history_sales_type(src, mgr) != sales_type:
+            continue
+        day = when.date()   # `when` is Kyiv-aware, so this is the Kyiv date
+        revenue[(day.year, day.month)] += Decimal(str(total))
+        days[(day.year, day.month)].add(day)
+    return {k: (float(revenue[k]), len(days[k])) for k in revenue}
+
+
+def _expected_last_year(sales_type, year, month):
+    return _monthly_history(sales_type).get((year - 1, month), (0.0, 0))[0]
+
+
+def _expected_recent_average(sales_type):
+    """The last three complete months with 25 days of orders or more. The
+    fixture ends in 2025, so every month of it is complete."""
+    history = _monthly_history(sales_type)
+    months = sorted((k for k, (_r, n) in history.items() if n >= 25),
+                    reverse=True)[:3]
+    return sum(history[k][0] for k in months) / len(months)
+
+
+def _expected_cap(sales_type, month):
+    """avg + 1.5 * sample stddev of consecutive-year YoY over years with 25
+    days of orders in `month`, clamped to [0.10, 0.50]; 0.35 with no pair."""
+    by_year = {y: r for (y, m), (r, n) in _monthly_history(sales_type).items()
+               if m == month and n >= 25}
+    rates = [(by_year[y] - by_year[y - 1]) / by_year[y - 1]
+             for y in sorted(by_year) if by_year.get(y - 1)]
+    if not rates:
+        return 0.35
+    spread = statistics.stdev(rates) if len(rates) > 1 else 0.0
+    return max(0.10, min(0.50, statistics.mean(rates) + 1.5 * spread))
+
+
+class TestTheSmartGoalNarrowsToItsOwnSalesType:
+    TARGET = (2026, 10)
+
+    def test_the_fixture_tells_a_narrowed_read_from_one_that_is_not(self):
+        """Otherwise the numbers below would agree with a read that lost its
+        filter, and prove nothing."""
+        year, month = self.TARGET
+        for sales_type in ("retail", "b2b"):
+            assert _expected_last_year(sales_type, year, month) \
+                != _expected_last_year(None, year, month)
+            assert _expected_recent_average(sales_type) \
+                != _expected_recent_average(None)
+        assert _expected_cap("retail", month) != _expected_cap(None, month)
+        assert 0.10 < _expected_cap("retail", month) < 0.50, (
+            "a clamped cap cannot show a filter being lost")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sales_type", ["retail", "b2b"])
+    async def test_last_year_the_recent_months_and_the_cap(self, store, sales_type):
+        await _seed_history(store)
+        monthly = (await _smart(store, sales_type))["monthly"]
+        year, month = self.TARGET
+        assert monthly["lastYearRevenue"] == pytest.approx(
+            _expected_last_year(sales_type, year, month), abs=0.005)
+        assert monthly["recent3MonthAvg"] == pytest.approx(
+            _expected_recent_average(sales_type), abs=0.005)
+        assert monthly["growthCap"] == pytest.approx(
+            _expected_cap(sales_type, month), abs=1e-4)
+
+    @pytest.mark.asyncio
+    async def test_the_cap_for_every_month(self, store):
+        """December has three years in the fixture and so two pairs — the one
+        month where the standard deviation is not zero."""
+        await _seed_history(store)
+        async with store.connection() as conn:
+            caps = [store._get_dynamic_growth_cap(conn, m, "retail")
+                    for m in range(1, 13)]
+        assert caps == pytest.approx(
+            [_expected_cap("retail", m) for m in range(1, 13)], rel=1e-9)
 
 
 # ─── The tripwire ───────────────────────────────────────────────────────────
