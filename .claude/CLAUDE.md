@@ -2713,11 +2713,17 @@ copy. DN-27's rule, generic in the registry. Chain 8 carries the same
 assumption unenforced: it is live, so enforcing it is its own change.
 Rollback is `scripts/chain_copy_back.py expense_types` once latched.
 
-**The latch waits for a connection.** 6a latches inside `pool.acquire()`, not
-between `_pool()` and it: an acquire that times out during the Sunday sync
-must not move the chain with nothing written. Chains 1, 8 and 7a still latch
-before the acquire; `tests/unit/test_chain_latch.py` names them in a strict
-xfail ledger that can only shrink, and holds every other chain to the rule.
+**The latch waits for a connection.** Every chain latches inside
+`pool.acquire()`, not between `_pool()` and it: an acquire that times out
+during the Sunday sync, or finds the pool closed, must not move the chain with
+nothing written. 6a was written that way; chains 1, 8 and 7a latched before the
+acquire until 2026-09-25 and were moved, chain 8 while live — only *when* its
+latch is taken changed. `tests/unit/test_chain_latch.py` holds every
+registered chain to it by parsing the writers, and
+`tests/integration/test_latch_waits_for_a_connection.py` proves it per writer
+against a live pool: a closed pool or a timed-out acquire leaves no marker and
+no owner row, and a first write takes the marker and claims its owner rows in
+the transaction that writes the row.
 
 ### Every other shipper asks too, and a walk finds them (DN-22b)
 
