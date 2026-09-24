@@ -644,3 +644,151 @@ class TestTheSignalMissed:
         runs = await _runs(pool)
         (issue,) = await _missed(pool)
         assert issue.sample_ids == (runs[-1]["id"],)
+
+
+# ─── DN-19: under KS_UTM_PARSE=postgres the UTM parse is the last step ────────
+
+UTM_COMMENT = "UTM: utm_source: fbads; utm_medium: cpc; utm_campaign: spring"
+
+
+def _commented(oid, *, comment=UTM_COMMENT, days_ago=2):
+    return _order(oid, days_ago=days_ago)._replace(manager_comment=comment)
+
+
+@pytest_asyncio.fixture
+async def utm_postgres(own, monkeypatch):
+    """`own`, plus KS_UTM_PARSE=postgres. The table and its watermark row are
+    shared with every other suite on this server, so what was there before is
+    put back: rows this run added are removed, and the watermark row restored
+    as it stood."""
+    from core import pg_utm_parse
+    from core.pg_order_utm import UTM_TABLE
+
+    pool, _s, _a = own
+    before_mode = (pg_utm_parse._mode, pg_utm_parse._mode_error)
+    monkeypatch.setenv(pg_utm_parse.ENV, "postgres")
+    assert pg_utm_parse.configure_mode() == "postgres"
+    async with pool.acquire() as conn:
+        kept = {r["order_id"] for r in await conn.fetch(f"SELECT order_id FROM {UTM_TABLE}")}
+        watermark = await conn.fetchrow(
+            "SELECT * FROM meta.mirror_state WHERE table_name = $1", UTM_TABLE)
+        await conn.execute(f"DELETE FROM {UTM_TABLE} WHERE order_id = ANY($1::int[])",
+                           list(IDS))
+    try:
+        yield own
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f"DELETE FROM {UTM_TABLE} WHERE NOT (order_id = ANY($1::int[]))"
+                " OR order_id = ANY($2::int[])", sorted(kept - set(IDS)), list(IDS))
+            await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = $1",
+                               UTM_TABLE)
+            if watermark is not None:
+                columns = list(watermark.keys())
+                await conn.execute(
+                    f"INSERT INTO meta.mirror_state ({', '.join(columns)}) VALUES "
+                    f"({', '.join(f'${i}' for i in range(1, len(columns) + 1))})",
+                    *watermark.values())
+        pg_utm_parse._mode, pg_utm_parse._mode_error = before_mode
+
+
+async def _utm_row(pool, oid):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT utm_campaign, traffic_type, platform, parsed_at"
+            " FROM silver.order_utm WHERE order_id = $1", oid)
+
+
+async def _utm_watermark(pool):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT last_ok_at, failures_since_ok, last_error FROM meta.mirror_state"
+            " WHERE table_name = 'silver.order_utm'")
+
+
+def _no_ship():
+    """A ship that fails the test if anything reaches it."""
+    return patch("core.pg_order_utm.ship_order_utm",
+                 new=AsyncMock(side_effect=AssertionError("shipped under postgres")))
+
+
+class TestTheUtmParseIsTheLastStep:
+    @pytest.mark.asyncio
+    async def test_a_mirrored_order_with_a_utm_comment_has_its_row_in_the_same_run(
+        self, utm_postgres,
+    ):
+        from core.pg_landing import write_orders
+
+        pool, scheduler, raise_alert = utm_postgres
+        order = _commented(IDS[0])
+        await write_orders([order], [], replace_products=False)
+
+        with _no_ship():
+            result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "success", result
+        assert result["order_utm"]["parsed"] >= 1
+        row = await _utm_row(pool, IDS[0])
+        assert row is not None, "the order's verdict did not land in the run"
+        assert (row["utm_campaign"], row["traffic_type"], row["platform"]) == (
+            "spring", "paid_confirmed", "facebook")
+        assert row["parsed_at"] == order.updated_at
+        stamp = await _utm_watermark(pool)
+        assert stamp["last_ok_at"] is not None and stamp["failures_since_ok"] == 0
+        assert raise_alert.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_a_gold_fault_does_not_stop_it(self, utm_postgres):
+        """After step 9 this is the only classifier; a Gold fault must not
+        file new orders as organic for its whole length."""
+        from core.pg_landing import write_orders
+
+        pool, scheduler, _a = utm_postgres
+        await write_orders([_commented(IDS[1])], [], replace_products=False)
+
+        with _no_ship(), patch("core.pg_gold.rebuild_gold",
+                               new=AsyncMock(side_effect=RuntimeError("gold boom"))):
+            result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "error" and result["stage"] == "gold.daily_revenue"
+        assert (await _runs(pool))[-1]["error"].startswith("gold.daily_revenue")
+        assert result["order_utm"]["parsed"] >= 1
+        assert (await _utm_row(pool, IDS[1])) is not None
+
+    @pytest.mark.asyncio
+    async def test_the_refresh_door_parses_a_new_order_without_a_derivation(
+        self, utm_postgres,
+    ):
+        """`POST /api/traffic/refresh`'s half in Postgres: the incremental,
+        under the layer lock, reading `bronze.orders` — the DuckDB store is
+        not read at all."""
+        from core.pg_landing import write_orders
+        from core.pg_utm_parse import reparse_router
+
+        pool, _s, _a = utm_postgres
+        await write_orders([_commented(IDS[2])], [], replace_products=False)
+
+        with _no_ship():
+            result = await reparse_router(store=None)
+
+        assert result["parsed"] >= 1, result
+        assert (await _utm_row(pool, IDS[2]))["utm_campaign"] == "spring"
+
+    @pytest.mark.asyncio
+    async def test_under_duckdb_the_derivation_parses_nothing(self, own):
+        """The default, byte for byte: the derivation's result carries no parse
+        and no verdict appears; the table stays the tick's copy."""
+        from core import pg_utm_parse
+        from core.pg_landing import write_orders
+
+        pool, scheduler, _a = own
+        assert not pg_utm_parse.parses_in_postgres()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM silver.order_utm WHERE order_id = ANY($1::int[])", list(IDS))
+        await write_orders([_commented(IDS[0])], [], replace_products=False)
+
+        result = await scheduler._run_pg_derivation()
+
+        assert result["status"] == "success" and "order_utm" not in result
+        assert await _utm_row(pool, IDS[0]) is None
