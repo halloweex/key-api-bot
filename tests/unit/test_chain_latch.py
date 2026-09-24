@@ -284,8 +284,9 @@ class TestAWriteThatNeverReachesPostgres:
 
     Production on the day DN-06 was written: `KS_WRITE_EXPENSES=postgres`
     since 2026-09-17 08:33 UTC with `app.manual_expenses` at zero rows, so the
-    flag could still be flipped back freely. A Postgres restart, an exhausted
-    pool or a `SchemaVersionError` from `web` coming up ahead of `migrate`,
+    flag could still be flipped back freely. A Postgres restart, a wait on a
+    full pool that ended without a connection, or a `SchemaVersionError` from
+    `web` coming up ahead of `migrate`,
     plus one submitted expense form in that window, used to spend that — on a
     chain that had written nothing, for ever, with no copy-back built yet.
     """
@@ -332,18 +333,21 @@ class TestAWriteThatNeverReachesPostgres:
         """The pool is in hand and the revision passed; `acquire` is what fails.
 
         Chain 6a writes inside the Sunday full sync, whose other steps hold the
-        pool's five connections, so a timed-out acquire is ordinary there. The
-        latch used to be taken between `_pool()` and `acquire()` and this
+        pool's five connections, so its acquire waits there — `get_pool` sets
+        no acquire timeout — and a Postgres restart during that wait ends it in
+        a reconnect that is refused. The latch used to be taken between
+        `_pool()` and `acquire()`, on disk through the whole wait, and this
         latched the chain with nothing written (review of DN-26)."""
 
-        class _Exhausted:
+        class _Refused:
             """asyncpg's shape: `acquire()` returns a context whose entry is
-            what waits for a connection, and times out."""
+            what waits for a connection, and where the reconnect it makes for
+            a dead one is refused."""
 
             def acquire(self):
                 class _Ctx:
                     async def __aenter__(self_inner):
-                        raise asyncio.TimeoutError("no connection within the timeout")
+                        raise ConnectionRefusedError("the reconnect after a restart")
 
                     async def __aexit__(self_inner, *exc):
                         return False
@@ -351,9 +355,9 @@ class TestAWriteThatNeverReachesPostgres:
 
         flags.setenv("KS_WRITE_EXPENSE_TYPES", "postgres")
         flags.setenv("KS_READ_EXPENSES", "postgres")      # its precondition
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=_Exhausted())), \
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=_Refused())), \
                 patch("core.pg.require_revision", new=AsyncMock()):
-            with pytest.raises(asyncio.TimeoutError):
+            with pytest.raises(ConnectionRefusedError):
                 await store.upsert_expense_types([{"id": 1, "name": "Delivery"}])
 
         assert not chain_latch.latched("pg_expense_types_write"), (

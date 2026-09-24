@@ -221,8 +221,9 @@ def _latch() -> str:
 
     Raises if the marker cannot be written, and the write is then not
     attempted. **Called after the connection is in hand, never before it** —
-    inside `pool.acquire()`, not merely after `_pool()`, since the acquire
-    fails on its own. `core/pg_expenses_write.py._latch` has the reasoning:
+    inside `pool.acquire()`, not merely after `_pool()`, since a wait for a
+    connection can end without one (a refused reconnect after a restart, a
+    cancellation). `core/pg_expenses_write.py._latch` has the reasoning:
     the latch is permanent, so taking it for a write that never reaches
     Postgres spends a rollback that is still available.
     """
@@ -267,8 +268,8 @@ async def set_goal(
 
     pool = await _pool()
     async with pool.acquire() as conn:
-        # Inside the acquire, not before it: a pool with no connection to give
-        # is a write that never reached Postgres (`_latch`).
+        # Inside the acquire, not before it: an acquire that ends without a
+        # connection is a write that never reached Postgres (`_latch`).
         stamp = _latch()
         # The owner row and the goal land together or neither does, so a claim
         # can never outlive the write that earned it.
