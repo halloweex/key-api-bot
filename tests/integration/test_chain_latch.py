@@ -725,3 +725,118 @@ class TestWhatTheOrderStandDownTellsAHuman:
             assert row["status_id"] == 20 and row["mirrored_at"] > before, row
         if state in ("no_chain", "marker_present"):
             assert "order_owner_row_without_marker" not in page
+
+
+class TestTheLandingTablesOnAnOwnerRowAlone:
+    """DN-22b against the real `meta.chain_watermarks`: the buyers and the
+    order-level expenses, on an image older than the chain that owns them. No
+    module here declares either table, so only the owner rows can say they
+    moved — and the paths that hold a pool must read them, write nothing, and
+    the comparisons must page rather than call it a decision. The control
+    first, on the same database: without the rows the same calls ship."""
+
+    BUYER_ID = 990_201
+    EXPENSE_ID = 990_202
+    BUYERS = ("bronze.buyers", "bronze.buyer_contacts")
+    EXPENSES = "bronze.expenses"
+
+    async def _reset(self, pool):
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM bronze.buyer_contacts")
+            await conn.execute("DELETE FROM bronze.buyers")
+            await conn.execute("DELETE FROM bronze.expenses")
+            await conn.execute(
+                "DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                [*self.BUYERS, self.EXPENSES])
+
+    @pytest_asyncio.fixture
+    async def landed(self, stores):
+        """DuckDB holds one buyer with a contact and one expense; Postgres
+        holds neither, and no chain here declares either table."""
+        from core import write_chains
+
+        store, pool, env = stores
+        await self._reset(pool)
+        tables = {*self.BUYERS, self.EXPENSES}
+        env.setattr(write_chains, "WRITE_CHAINS", tuple(
+            c for c in write_chains.WRITE_CHAINS if not tables & set(c.CHAIN_TABLES)))
+        async with store.connection() as conn:
+            conn.execute("INSERT INTO buyers (id, full_name) VALUES (?, 'Anna')",
+                         [self.BUYER_ID])
+            conn.execute("INSERT INTO buyer_contacts (buyer_id, contact_type, value, "
+                         "is_primary) VALUES (?, 'phone', '+380500000201', TRUE)",
+                         [self.BUYER_ID])
+            conn.execute("INSERT INTO expenses (id, order_id, expense_type_id, amount) "
+                         "VALUES (?, 1, 1, 100.00)", [self.EXPENSE_ID])
+        yield store, pool
+        await self._reset(pool)
+
+    @staticmethod
+    async def _own(pool, *tables):
+        async with pool.acquire() as conn:
+            for table in tables:
+                await conn.execute(
+                    "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                    "VALUES ($1, $2, now())",
+                    chain_latch.owner_key(table), "2026-09-21T08:00:00+00:00")
+
+    @staticmethod
+    async def _count(pool, sql, *args):
+        async with pool.acquire() as conn:
+            return await conn.fetchval(sql, *args)
+
+    @pytest.mark.asyncio
+    async def test_the_control_ships_both(self, landed):
+        from core.pg_buyers import hourly_ids_diff
+        from core.pg_expense_backfill import hourly_expenses_ids_diff
+
+        store, pool = landed
+        assert (await hourly_ids_diff(store))["shipped"] >= 1
+        assert (await hourly_expenses_ids_diff(store))["shipped"] >= 1
+        assert await self._count(
+            pool, "SELECT count(*) FROM bronze.buyers WHERE id = $1", self.BUYER_ID) == 1
+        assert await self._count(
+            pool, "SELECT count(*) FROM bronze.expenses WHERE id = $1", self.EXPENSE_ID) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_owner_rows_hold_them_and_postgres_gains_nothing(self, landed):
+        from core.pg_buyers import BUYER_UNIT, backfill_buyers, hourly_ids_diff
+        from core.pg_expense_backfill import (
+            EXPENSES_UNIT, backfill_expenses, hourly_expenses_ids_diff,
+        )
+        from core.pg_landing import tables_stood_down, tables_stood_down_or_owned
+
+        store, pool = landed
+        # One row per unit, and for the buyers the half that is not named.
+        await self._own(pool, "bronze.buyer_contacts", self.EXPENSES)
+        assert tables_stood_down(BUYER_UNIT) == frozenset()
+        assert await tables_stood_down_or_owned(pool, BUYER_UNIT) == frozenset(self.BUYERS)
+        assert await tables_stood_down_or_owned(pool, EXPENSES_UNIT) == {self.EXPENSES}
+
+        assert await hourly_ids_diff(store) == {"stood_down": sorted(self.BUYERS)}
+        assert await hourly_expenses_ids_diff(store) == {"stood_down": [self.EXPENSES]}
+        with pytest.raises(RuntimeError, match="write chain"):
+            await backfill_buyers(store)
+        with pytest.raises(RuntimeError, match="write chain"):
+            await backfill_expenses(store)
+
+        assert await self._count(pool, "SELECT count(*) FROM bronze.buyers") == 0
+        assert await self._count(pool, "SELECT count(*) FROM bronze.buyer_contacts") == 0
+        assert await self._count(pool, "SELECT count(*) FROM bronze.expenses") == 0
+        assert await self._count(
+            pool, "SELECT count(*) FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+            [*self.BUYERS, self.EXPENSES]) == 0
+
+    @pytest.mark.asyncio
+    async def test_the_comparisons_page_on_them_and_read_neither_table(self, landed):
+        from core.mirror_reconciliation import reconcile_buyers, reconcile_expenses
+
+        store, pool = landed
+        await self._own(pool, "bronze.buyers", self.EXPENSES)
+        buyers = await reconcile_buyers(store)
+        expenses = await reconcile_expenses(store)
+        assert [(i.check_name, i.table_name, i.severity.value) for i in buyers] == [
+            ("owner_row_without_marker", "bronze.buyer_contacts, bronze.buyers", "CRITICAL")]
+        assert [(i.check_name, i.table_name, i.severity.value) for i in expenses] == [
+            ("owner_row_without_marker", self.EXPENSES, "CRITICAL")]
+        assert "no chain in this build declares them" in buyers[0].description
