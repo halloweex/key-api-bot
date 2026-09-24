@@ -1178,13 +1178,17 @@ class TestTheJournalRead:
 
     @pytest.mark.asyncio
     async def test_a_malformed_value_inside_the_day_blinds_this_group_alone(self, journal):
+        """Its savepoint takes the failed cast with it: the recompute, read
+        after it in the same snapshot, still looks."""
         from core.pg_warehouse_dq import Unwatched, read_facts
 
         async with journal.acquire() as conn:
             await _journalled(conn, hours_ago=2, water="not a time")
         facts = await read_facts(pool=journal)
         assert isinstance(facts.derivation_signal, Unwatched)
-        assert not isinstance(facts.silver_arc, Unwatched)
+        assert "timestamp" in facts.derivation_signal.reason
+        for group in ("silver_arc", "attribution", "line_items", "silver_row_values"):
+            assert not isinstance(getattr(facts, group), Unwatched), group
         assert "pg_derivation_signal_unwatched" in _judge(facts)
 
 
