@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.245
+
+- DN-20a: CLAUDE.md records the fallback counter, the mode that never stops web, and the walk
+- DN-20a: the unknown-mode startup test reads the error back from /api/health
+- DN-20a: the walk that finds every fallback to DuckDB, and the tests behind it
+- DN-20a: every read that falls back to DuckDB is counted in one place
+
+
 ## 3.0.244
 
 - DN-22a: the order backfill route refuses a switched-off mirror itself
