@@ -1269,7 +1269,9 @@ Cap what rebounds; only delete what stays deleted.
   add one.
 - **The alert says what the machine already tried**, and still never triggers
   a repair. `machine_attempts_note()` reads the two ids-diff heal ledgers
-  (24 h window) and is *passed into* `format_alert_message`, which stays pure.
+  (24 h window) and is *passed into* `format_alert_message`, which stays pure
+  but for one mode cached at boot: `KS_UTM_PARSE` picks which lever line the
+  `pg_order_utm_*` findings carry (`REMEDIATION_UTM_PARSED_IN_POSTGRES`).
 - **Mirror freshness**: `/api/health` publishes `mirrors` — `last_ok_at` age,
   `failures_since_ok` and a boolean `failing` for `bronze.orders`. The error
   *text* is deliberately not published; this endpoint is public and the text
@@ -2252,7 +2254,12 @@ DuckDB не останавливается нигде, поэтому откат
 тик отгрузит копию, которая всё это время была актуальной. Неизвестное
 значение или `postgres` без `own` работает как `duckdb`, публикует ошибку в
 `utm_parse` и будит канарейку `utm_parse_mode_invalid` — web не падает, он
-единственный синкер. Тест обходит `core/`, `web/`, `scripts/`, `bot/` и
+единственный синкер. Рычаги находок `pg_order_utm_*` следуют режиму: при
+`postgres` строка «→» — вотермарка `silver.order_utm`, затем
+`POST /api/traffic/refresh` или `/api/warehouse/refresh` (деривация кончается
+тем же разбором), а копию комментария в DuckDB она не предлагает — этот
+разбор DuckDB не читает. При `duckdb` и строка, и описания прежние байт в
+байт. Тест обходит `core/`, `web/`, `scripts/`, `bot/` и
 `deploy/` до неподвижной точки и читает каждое имя через `import … as`,
 которым его связали: ни одна функция вне `core/pg_order_utm.py` не доходит до
 отгрузки иначе как из ветки `duckdb` проверки `parses_in_postgres()`. Чего
