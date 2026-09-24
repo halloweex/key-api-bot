@@ -11,7 +11,8 @@ Features:
 """
 import asyncio
 import contextlib
-from datetime import datetime, timedelta
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
 
@@ -38,6 +39,87 @@ from bot.config import DEFAULT_TIMEZONE
 logger = get_logger(__name__)
 
 DEFAULT_TZ = ZoneInfo(DEFAULT_TIMEZONE)
+
+# ─── Chain 1's half of the tick, once Postgres writes it (DN-24) ─────────────
+#
+# Under KS_WRITE_INVENTORY=postgres the offers and stocks steps write Postgres,
+# and `core.pg_inventory_write` raises by design: it is the only write, and a
+# failure swallowed there is a movement lost with a success reported. But the
+# tick only ever caught KeyCRM errors, so a Postgres error in these steps left
+# `incremental_sync` altogether — the job marked failed, the adaptive backoff
+# not updated. And a missing TEMPORARY grant fails the status rebuild on every
+# attempt, so the same error would have ended every tick for as long as the
+# grant stayed missing.
+#
+# So on that path a failure is recorded (`InventoryStepState`, published on
+# /api/health), `last_sync_stocks` is left where it was — it now moves only
+# once the upsert, the rebuild and both snapshots have committed, so the next
+# attempt redoes the whole step — and the tick carries on. A failed offers step
+# skips the stocks step: stocks read the offer→product map, and a stock
+# written ahead of its offer records its movements with no product.
+#
+# The attempt after a failure waits `INVENTORY_RETRY_AFTER_S`. With the
+# watermark held, the next tick would otherwise fetch every stock from KeyCRM
+# again — a minute later, and every minute the fault lasts — on the quota the
+# order sync shares.
+#
+# The DuckDB path is untouched, including a failure escaping it.
+INVENTORY_RETRY_AFTER_S = 600
+
+# The offers and stocks steps' cadence, as the DuckDB path spells it.
+INVENTORY_STEP_EVERY_S = 3600
+
+
+def _inventory_writes_postgres() -> bool:
+    """Whether chain 1's half of the tick takes the Postgres path.
+
+    A `KS_WRITE_INVENTORY` nobody understands is not Postgres: it takes the
+    path it always took, where the chain's own watermark read raises on it
+    (DN-01) — a typo in that variable must still stop that chain loudly.
+    """
+    from core.pg_inventory_write import writes_postgres
+
+    try:
+        return writes_postgres()
+    except RuntimeError:
+        return False
+
+
+class InventoryStepState:
+    """What chain 1's half of the tick last did on the Postgres path.
+
+    Published on /api/health as `write_chains.pg_inventory_write.sync_step`.
+    The error is its class, never its text: that endpoint is public and the
+    text is a driver's message.
+    """
+
+    def __init__(self) -> None:
+        self.failures_since_ok = 0
+        self.last_ok_at: Optional[datetime] = None
+        self.last_failure_at: Optional[datetime] = None
+        self.last_failed_step: Optional[str] = None
+        self.last_error: Optional[str] = None
+
+    def succeeded(self) -> None:
+        self.failures_since_ok = 0
+        self.last_ok_at = datetime.now(timezone.utc)
+
+    def failed(self, step: str, exc: BaseException) -> None:
+        self.failures_since_ok += 1
+        self.last_failure_at = datetime.now(timezone.utc)
+        self.last_failed_step = step
+        self.last_error = type(exc).__name__
+
+    def published(self, retry_in_s: Optional[int]) -> Dict[str, Any]:
+        return {
+            "failures_since_ok": self.failures_since_ok,
+            "last_ok_at": self.last_ok_at.isoformat() if self.last_ok_at else None,
+            "last_failure_at": (self.last_failure_at.isoformat()
+                                if self.last_failure_at else None),
+            "last_failed_step": self.last_failed_step,
+            "last_error": self.last_error,
+            "retry_in_s": retry_in_s,
+        }
 
 
 def _get_max_updated_at(orders: list) -> Optional[datetime]:
@@ -108,6 +190,11 @@ class SyncService:
         self._last_sync_time: Optional[datetime] = None
         self._last_orders_found = 0
         self._current_backoff_seconds = self.BACKOFF_BASE_SECONDS
+
+        # Chain 1 on the Postgres path (DN-24): what it last did, and when it
+        # may try again after a failure (a `time.monotonic()` instant).
+        self.inventory_step = InventoryStepState()
+        self._inventory_retry_at = 0.0
 
     def _is_off_hours(self) -> bool:
         """Check if current time is during off-hours (low activity period)."""
@@ -402,25 +489,94 @@ class SyncService:
         Returns:
             Number of stocks synced
         """
+        count = await self._upsert_stocks_from_keycrm()
+        if count is None:
+            return 0
+        await self.store.set_last_sync_time("stocks")
+
+        logger.info(f"Synced {count} offer stocks from KeyCRM")
+        return count
+
+    async def _upsert_stocks_from_keycrm(self) -> Optional[int]:
+        """Fetch every stock and upsert it; None when KeyCRM failed (logged).
+
+        No watermark: `sync_stocks` moves it straight after, and the Postgres
+        path of the tick only once the rebuild and the snapshots have
+        committed too (DN-24). A store error propagates.
+        """
         logger.info("Syncing offer stocks...")
         try:
             client = await get_async_client()
             stocks = await client.fetch_all_stocks()
 
-            count = await self.store.upsert_stocks(stocks)
-            await self.store.set_last_sync_time("stocks")
-
-            logger.info(f"Synced {count} offer stocks from KeyCRM")
-            return count
+            return await self.store.upsert_stocks(stocks)
         except KeyCRMConnectionError as e:
             logger.warning(f"Stock sync connection error (will retry): {e}")
-            return 0
+            return None
         except KeyCRMAPIError as e:
             logger.error(f"Stock sync API error: {e}")
-            return 0
+            return None
         except KeyCRMError as e:
             logger.error(f"Stock sync error: {e}")
-            return 0
+            return None
+
+    def _inventory_retry_in(self) -> Optional[int]:
+        remaining = self._inventory_retry_at - time.monotonic()
+        return int(remaining) + 1 if remaining > 0 else None
+
+    def inventory_step_health(self) -> Dict[str, Any]:
+        """The `sync_step` entry of chain 1 on /api/health."""
+        return self.inventory_step.published(self._inventory_retry_in())
+
+    async def _inventory_step_postgres(self, stats: Dict[str, Any]) -> None:
+        """Offers then stocks, while chain 1 writes Postgres. Never raises.
+
+        The same four writes and one event as the DuckDB path, in the same
+        order, with two differences that are the point of it (DN-24): a
+        failure anywhere — the watermark reads included, since under this
+        path they are Postgres reads too — is recorded and ends the step, not
+        the tick; and `last_sync_stocks` moves last, so a rebuild or a
+        snapshot that failed is retried whole rather than an hour later.
+        """
+        if self._inventory_retry_in() is not None:
+            return
+
+        def due(last: Optional[datetime]) -> bool:
+            return (not last or (datetime.now(DEFAULT_TZ) - last).total_seconds()
+                    > INVENTORY_STEP_EVERY_S)
+
+        step, ran, stocked = "offers", False, False
+        try:
+            if due(await self.store.get_last_sync_time("offers")):
+                ran = True
+                stats["offers"] = await self.sync_offers()
+
+            step = "stocks"
+            if due(await self.store.get_last_sync_time("stocks")):
+                ran = stocked = True
+                count = await self._upsert_stocks_from_keycrm()
+                stats["stocks"] = count or 0
+                await self.store.refresh_sku_inventory_status()
+                await self.store.record_sku_inventory_snapshot()
+                await self.store.record_inventory_snapshot()
+                # Not when KeyCRM failed: the fetch is what is retried then,
+                # as on the DuckDB path.
+                if count is not None:
+                    await self.store.set_last_sync_time("stocks")
+                    logger.info(f"Synced {count} offer stocks from KeyCRM")
+        except Exception as exc:  # noqa: BLE001 — recorded, published, retried
+            self.inventory_step.failed(step, exc)
+            self._inventory_retry_at = time.monotonic() + INVENTORY_RETRY_AFTER_S
+            logger.error(
+                "Inventory %s step failed on Postgres; last_sync_%s not moved, "
+                "next attempt in %ss: %s", step, step, INVENTORY_RETRY_AFTER_S,
+                exc, exc_info=True)
+            return
+
+        if ran:
+            self.inventory_step.succeeded()
+        if stocked:
+            await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
 
     async def sync_to_meilisearch(self) -> Dict[str, int]:
         """
@@ -912,27 +1068,32 @@ class SyncService:
             if not last_buyers_sync or (datetime.now(DEFAULT_TZ) - last_buyers_sync).total_seconds() > 3600:
                 stats["buyers"] = await self.sync_missing_buyers()
 
-            # Sync offers hourly (needed for proper stock-to-product linking)
-            last_offers_sync = await self.store.get_last_sync_time("offers")
-            if not last_offers_sync or (datetime.now(DEFAULT_TZ) - last_offers_sync).total_seconds() > 3600:
-                stats["offers"] = await self.sync_offers()
+            if _inventory_writes_postgres():
+                # Chain 1 writes Postgres: a failure there is recorded and the
+                # tick goes on (DN-24). See `INVENTORY_RETRY_AFTER_S`.
+                await self._inventory_step_postgres(stats)
+            else:
+                # Sync offers hourly (needed for proper stock-to-product linking)
+                last_offers_sync = await self.store.get_last_sync_time("offers")
+                if not last_offers_sync or (datetime.now(DEFAULT_TZ) - last_offers_sync).total_seconds() > 3600:
+                    stats["offers"] = await self.sync_offers()
 
-            # Sync stocks hourly (same frequency as products)
-            last_stocks_sync = await self.store.get_last_sync_time("stocks")
-            if not last_stocks_sync or (datetime.now(DEFAULT_TZ) - last_stocks_sync).total_seconds() > 3600:
-                stats["stocks"] = await self.sync_stocks()
+                # Sync stocks hourly (same frequency as products)
+                last_stocks_sync = await self.store.get_last_sync_time("stocks")
+                if not last_stocks_sync or (datetime.now(DEFAULT_TZ) - last_stocks_sync).total_seconds() > 3600:
+                    stats["stocks"] = await self.sync_stocks()
 
-                # Refresh Layer 1: sku_inventory_status (denormalized current state)
-                await self.store.refresh_sku_inventory_status()
+                    # Refresh Layer 1: sku_inventory_status (denormalized current state)
+                    await self.store.refresh_sku_inventory_status()
 
-                # Record Layer 2: daily per-SKU snapshot
-                await self.store.record_sku_inventory_snapshot()
+                    # Record Layer 2: daily per-SKU snapshot
+                    await self.store.record_sku_inventory_snapshot()
 
-                # Legacy: Record aggregated inventory snapshot
-                await self.store.record_inventory_snapshot()
+                    # Legacy: Record aggregated inventory snapshot
+                    await self.store.record_inventory_snapshot()
 
-                # Emit inventory updated event
-                await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
+                    # Emit inventory updated event
+                    await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
 
             # Silver reads only `orders`, but Gold joins products and categories,
             # THE CATALOGUE NO LONGER HAS TO ASK FOR ITSELF

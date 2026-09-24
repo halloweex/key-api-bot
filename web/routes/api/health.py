@@ -136,18 +136,36 @@ async def _inventory_preflight() -> dict:
         return data
 
 
+async def _inventory_sync_step() -> "dict | None":
+    """What chain 1's half of the sync tick last did on the Postgres path
+    (DN-24): consecutive failures, the step and error class of the last one,
+    and when the next attempt is allowed. Local state, no I/O. Null when the
+    sync service cannot be had, never an empty object."""
+    try:
+        from core.sync_service import get_sync_service
+
+        return (await get_sync_service()).inventory_step_health()
+    except Exception as e:
+        logger.debug(f"Inventory sync step unavailable: {e}")
+        return None
+
+
 async def _write_chains_block() -> dict:
     """The `write_chains` block: every chain's local state, and under chain 1's
     entry its `preflight` — the three questions asked before
-    `KS_WRITE_INVENTORY` is switched on. `ok` is null once the chain already
-    writes Postgres. Not judged by the canary: it is read by the person about
-    to flip the chain, and nothing is wrong while nobody is."""
+    `KS_WRITE_INVENTORY` is switched on, `ok` null once the chain already
+    writes Postgres — and its `sync_step`, where a Postgres failure of the
+    offers or stocks step is recorded instead of ending the tick. Neither is
+    judged by the canary: the preflight is read by the person about to flip
+    the chain, and a stock step that keeps failing stops `last_sync_stocks`,
+    which the integrity job's chain invariants already watch."""
     from core import pg_inventory_write
 
     block = _write_chains()
     entry = block.get(pg_inventory_write.CHAIN)
     if isinstance(entry, dict):
         entry["preflight"] = await _inventory_preflight()
+        entry["sync_step"] = await _inventory_sync_step()
     return block
 
 
