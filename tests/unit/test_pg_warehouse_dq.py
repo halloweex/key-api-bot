@@ -16,8 +16,8 @@ import pytest
 from core import pg_warehouse_dq as twins
 from core.data_quality import IntegrityIssue, Severity
 from core.pg_warehouse_dq import (
-    Attribution, DerivationJournal, Facts, JournalRun, LineItems, RowValues, SilverArc,
-    Unwatched, Watermark,
+    Attribution, DerivationJournal, Facts, JournalRun, LineItems, OrderLanding, RowValues,
+    SilverArc, Unwatched, Watermark,
 )
 
 WM = Watermark(today=date(2026, 9, 17), in_flight=2, backfilled=True,
@@ -151,7 +151,8 @@ class TestLineItems:
 
 def _facts(**groups):
     base = dict(silver_arc=ARC_CLEAN, attribution=ATT_OK, line_items=LI_NONE,
-                derivation_signal=JOURNAL_QUIET, silver_row_values=RV_CLEAN)
+                derivation_signal=JOURNAL_QUIET, order_landing=OrderLanding(),
+                silver_row_values=RV_CLEAN)
     base.update(groups)
     return Facts(whole=None, watermark=WM, **base)
 
@@ -737,3 +738,306 @@ class TestThePairingIsWired:
                  and isinstance(n.func, ast.Name) and n.func.id == "check_internal_integrity"]
         (scan,) = scans
         assert "pairing_out" in {k.arg for k in scan.keywords}
+
+
+# ─── DN-23: the order-landing twins ───────────────────────────────────────────
+
+LANDING_LOOKED = twins.DUCKDB_BARE_CHECKS | {"status_group_agreement"}
+WM_STILL = Watermark(today=date(2026, 9, 24), in_flight=0, backfilled=True,
+                     landing_age_s=120, landing_failures=0)
+
+
+def _landing(ol, *, duck=(), looked=frozenset(), wm=WM_STILL, held=None):
+    return twins._order_landing_check(ol, wm, duckdb_issues=list(duck),
+                                      duckdb_looked=frozenset(looked), held_out=held)
+
+
+class TestTheLandingTwinsStandingIn:
+    """DuckDB did not look: each twin files what DuckDB's check would have,
+    under its own `pg_` name and DuckDB's severity."""
+
+    def test_clean_files_nothing(self):
+        assert _landing(OrderLanding()) == []
+        assert _landing(OrderLanding(), looked=LANDING_LOOKED) == []
+
+    def test_an_order_without_line_items_warns_and_leaves_the_in_flight_out(self):
+        (issue,) = _landing(OrderLanding(without_items=3, without_items_in_flight=2,
+                                         without_items_amount=900.0,
+                                         without_items_sample=(7, 5, 3)))
+        assert (issue.check_name, issue.severity, issue.count, issue.sample_ids) == (
+            "pg_orders_without_line_items", Severity.WARN, 3, (7, 5, 3))
+        assert "900.00" in issue.description and "2 more" in issue.description
+
+    def test_orders_only_in_flight_are_not_filed(self):
+        """Inside the settle grace a header may be ahead of its line items."""
+        assert _landing(OrderLanding(without_items_in_flight=4)) == []
+
+    def test_a_line_item_with_no_order_is_critical_and_samples_the_orders(self):
+        (issue,) = _landing(OrderLanding(orphan_items=5, orphan_sample=(42, 41)))
+        assert (issue.check_name, issue.severity, issue.count, issue.sample_ids) == (
+            "pg_fk_orphan_order_products_order_id", Severity.CRITICAL, 5, (42, 41))
+
+    def test_an_order_with_no_date_is_critical(self):
+        (issue,) = _landing(OrderLanding(null_ordered_at=1, null_ordered_at_sample=(9,)))
+        assert (issue.check_name, issue.severity, issue.sample_ids) == (
+            "pg_not_null_orders_ordered_at", Severity.CRITICAL, (9,))
+
+    def test_a_status_keycrm_added_is_named(self):
+        """The new-KeyCRM-status detector: status 20 went unnoticed a month."""
+        (issue,) = _landing(OrderLanding(unknown_status=3, unknown_status_values=(25, 977),
+                                         unknown_status_sample=(8, 6, 4)))
+        assert (issue.check_name, issue.severity, issue.count, issue.sample_ids) == (
+            "pg_value_domain_orders_status_id", Severity.WARN, 3, (8, 6, 4))
+        assert "Unknown values seen: 25, 977" in issue.description
+
+    def test_a_source_nobody_registered_is_named(self):
+        (issue,) = _landing(OrderLanding(unknown_source=2, unknown_source_values=(6,)))
+        assert (issue.check_name, issue.severity, issue.count) == (
+            "pg_value_domain_orders_source_id", Severity.WARN, 2)
+        assert "Unknown values seen: 6" in issue.description
+
+    def test_the_group_and_the_list_disagreeing_both_ways(self):
+        (issue,) = _landing(OrderLanding(status_groups=((20, 6, 3, 300.0), (19, 4, 1, 50.0))))
+        assert (issue.check_name, issue.severity, issue.count, issue.sample_ids) == (
+            "pg_status_group_vs_return_list", Severity.WARN, 4, (20, 19))
+        assert "status 20 is KeyCRM group 6 but our list says revenue" in issue.description
+        assert "status 19 is KeyCRM group 4 but our list says excluded" in issue.description
+
+    def test_each_twin_stands_in_for_its_own_guard_only(self):
+        """DuckDB's status-group guard raised and the scan finished: that twin
+        stands in, the five bare ones compare."""
+        ol = OrderLanding(orphan_items=1, status_groups=((20, 6, 1, 10.0),))
+        duck = [_duck("fk_orphan_order_products_order_id", 1, Severity.CRITICAL)]
+        issues = _landing(ol, duck=duck, looked=twins.DUCKDB_BARE_CHECKS)
+        assert _names(issues) == ["pg_status_group_vs_return_list"]
+
+
+class TestTheLandingTwinsComparing:
+    """DuckDB looked: the twins file nothing of their own, and say when the
+    engines count differently by more than the orders in flight."""
+
+    def test_agreeing_files_nothing(self):
+        ol = OrderLanding(without_items=3, without_items_in_flight=1, orphan_items=2,
+                          unknown_status=1, status_groups=((20, 6, 2, 1.0),))
+        duck = [_duck("orders_without_line_items", 4), _duck("value_domain_orders_status_id", 1),
+                _duck("fk_orphan_order_products_order_id", 2, Severity.CRITICAL),
+                _duck("status_group_vs_return_list", 2)]
+        assert _landing(ol, duck=duck, looked=LANDING_LOOKED) == []
+
+    def test_orders_in_flight_count_as_duckdb_counts_them(self):
+        """DuckDB's check has no grace: its 4 is Postgres' 3 settled and 1 in
+        flight, not a difference of one."""
+        ol = OrderLanding(without_items=3, without_items_in_flight=1)
+        assert _landing(ol, duck=[_duck("orders_without_line_items", 4)],
+                        looked=LANDING_LOOKED) == []
+        (issue,) = _landing(ol, duck=[_duck("orders_without_line_items", 3)],
+                            looked=LANDING_LOOKED)
+        assert issue.check_name == "pg_order_landing_disagree"
+
+    def test_a_difference_beyond_in_flight_names_the_check_and_both_counts(self):
+        ol = OrderLanding(unknown_status=3, orphan_items=1)
+        wm = Watermark(**{**WM_STILL.__dict__, "in_flight": 1})
+        (issue,) = _landing(ol, duck=[], looked=LANDING_LOOKED, wm=wm)
+        assert (issue.check_name, issue.severity, issue.count) == (
+            "pg_order_landing_disagree", Severity.WARN, 1)
+        assert "value_domain_orders_status_id: Postgres 3, DuckDB 0" in issue.description
+        assert "fk_orphan" not in issue.description          # 1 against 0, inside 1 in flight
+
+    def test_a_standing_postgres_critical_holds_its_condition(self):
+        """DuckDB's name carries it this run, so a `pg_` page delivered while
+        DuckDB could not look is held rather than announced resolved. A WARN
+        standing beside it is not held: it was never delivered."""
+        held = []
+        ol = OrderLanding(orphan_items=2, without_items=3, unknown_status=1)
+        issues = _landing(ol, duck=[_duck("fk_orphan_order_products_order_id", 2,
+                                          Severity.CRITICAL),
+                                    _duck("orders_without_line_items", 3),
+                                    _duck("value_domain_orders_status_id", 1)],
+                          looked=LANDING_LOOKED, held=held)
+        assert issues == [] and held == ["pg_fk_orphan_order_products_order_id"]
+
+    def test_a_critical_only_postgres_holds_is_held_beside_the_disagreement(self):
+        """DuckDB clean, Postgres holding orders with no date: the engines
+        disagree, and the rows still stand in Postgres."""
+        held = []
+        (issue,) = _landing(OrderLanding(null_ordered_at=2), looked=LANDING_LOOKED, held=held)
+        assert issue.check_name == "pg_order_landing_disagree"
+        assert held == ["pg_not_null_orders_ordered_at"]
+
+    def test_the_hold_reaches_the_run(self):
+        held = []
+        facts = _facts(order_landing=OrderLanding(null_ordered_at=1))
+        twins.check_pg_warehouse(facts, duckdb_issues=[_duck("not_null_orders_ordered_at", 1)],
+                                 duckdb_looked=LANDING_LOOKED, held_out=held)
+        assert held == ["pg_not_null_orders_ordered_at"]
+        held = []
+        twins.check_pg_warehouse(_facts(), duckdb_looked=LANDING_LOOKED, held_out=held)
+        assert held == []
+
+
+class TestTheLandingBlindness:
+    def test_one_blind_landing_group_names_itself_and_holds_every_twin(self):
+        held = []
+        issues = twins.check_pg_warehouse(
+            _facts(order_landing=Unwatched("the 20 s hold budget was spent")), held_out=held)
+        assert _names(issues) == ["pg_order_landing_unwatched"]
+        assert sorted(held) == sorted(twins.GUARD_CONDITIONS["order_landing"])
+        assert "pg_order_landing_disagree" in held
+
+    def test_every_twin_is_a_condition_of_the_group(self):
+        assert set(twins.GUARD_CONDITIONS["order_landing"]) == {
+            t for _g, _d, t in twins.LANDING_TWINS} | {"pg_order_landing_disagree"}
+
+    def test_it_is_read_before_the_recompute(self):
+        """A budget the recompute spends must not blind the landing twins."""
+        assert twins.GROUPS.index("order_landing") < twins.GROUPS.index("silver_row_values")
+
+
+class TestTheLandingRead:
+    def _conn(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        row = {"n": 0, "in_flight": 0, "amount": 0, "sample": None, "null_ordered_at": 0,
+               "null_sample": None, "unknown_status": 0, "status_values": None,
+               "status_sample": None, "unknown_source": 0, "source_values": None,
+               "source_sample": None}
+        return MagicMock(fetchrow=AsyncMock(return_value=row), fetch=AsyncMock(return_value=[]))
+
+    def test_the_thresholds_are_duckdbs_own_bound_as_parameters(self):
+        """Read from where DuckDB reads them, so changing one there changes it
+        here — not copied into the SQL."""
+        import asyncio
+        from decimal import Decimal
+
+        from core.data_quality import (KNOWN_SOURCE_IDS, KNOWN_STATUS_IDS,
+                                       _orders_without_line_items_check)
+        from core.models import LOST_STATUS_GROUP_ID, OrderStatus
+
+        conn = self._conn()
+        facts = asyncio.run(twins._read_order_landing(conn, WM, 20))
+        assert facts == OrderLanding()
+        calls = {c.args[0]: c.args[1:] for c in conn.fetchrow.await_args_list}
+        min_total = inspect.signature(_orders_without_line_items_check).parameters["min_total"]
+        assert calls[twins._WITHOUT_ITEMS_SQL] == (Decimal(str(min_total.default)), 20)
+        assert calls[twins._ORPHAN_ITEMS_SQL] == ()
+        assert calls[twins._HEADERS_SQL] == (sorted(KNOWN_STATUS_IDS), sorted(KNOWN_SOURCE_IDS))
+        (group_call,) = conn.fetch.await_args_list
+        assert group_call.args == (twins._STATUS_GROUP_SQL, LOST_STATUS_GROUP_ID,
+                                   sorted(int(s) for s in OrderStatus.return_statuses()))
+
+    def test_history_not_backfilled_is_blindness_and_reads_nothing(self):
+        import asyncio
+
+        conn = self._conn()
+        wm = Watermark(**{**WM.__dict__, "backfilled": False})
+        facts = asyncio.run(twins._read_order_landing(conn, wm, 20))
+        assert isinstance(facts, Unwatched) and "backfilled" in facts.reason
+        assert conn.fetchrow.await_count == 0 and conn.fetch.await_count == 0
+
+
+class TestTheBareChecks:
+    """Which DuckDB checks the scan finishing proves looked, derived from
+    `check_internal_integrity` itself — a check moved inside `guarded`, or one
+    renamed, fails here rather than being compared against a DuckDB that never
+    looked."""
+
+    _NAMES = {"_fk_orphan_check": "fk_orphan_{0}_{1}",
+              "_null_constraint_check": "not_null_{0}_{1}",
+              "_value_domain_check": "value_domain_{0}_{1}"}
+
+    def _bare_emitted(self):
+        from core import data_quality as dq
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(dq.check_internal_integrity)))
+        inside_guarded = set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "guarded":
+                inside_guarded |= {id(m) for m in ast.walk(n)}
+        emitted = set()
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)) or id(n) in inside_guarded:
+                continue
+            args = [a.value for a in n.args[1:] if isinstance(a, ast.Constant)]
+            if n.func.id in self._NAMES:
+                emitted.add(self._NAMES[n.func.id].format(*args))
+            elif n.func.id == "_orders_without_line_items_check":
+                src = ast.parse(textwrap.dedent(inspect.getsource(dq._orders_without_line_items_check)))
+                emitted |= {k.value.value for k in ast.walk(src)
+                            if isinstance(k, ast.keyword) and k.arg == "check_name"}
+        return emitted
+
+    def test_every_bare_check_is_emitted_outside_guarded(self):
+        assert twins.DUCKDB_BARE_CHECKS <= self._bare_emitted()
+
+    def test_the_guards_are_the_bare_checks_and_one_guarded_name(self):
+        from core.data_quality import GUARDED_CHECK_CONDITIONS
+
+        guards = {g for g, _d, _t in twins.LANDING_TWINS}
+        assert guards - twins.DUCKDB_BARE_CHECKS == {"status_group_agreement"}
+        assert not twins.DUCKDB_BARE_CHECKS & set(GUARDED_CHECK_CONDITIONS)
+        for guard, name, _twin in twins.LANDING_TWINS:
+            if guard in GUARDED_CHECK_CONDITIONS:
+                assert name in GUARDED_CHECK_CONDITIONS[guard]
+            else:
+                assert name == guard
+
+    def test_each_twin_is_duckdbs_name_prefixed(self):
+        """One name per finding across engines, told apart by the prefix."""
+        for _g, name, twin in twins.LANDING_TWINS:
+            assert twin == f"pg_{name}"
+
+    def test_the_job_adds_them_whenever_the_scan_finished(self):
+        from core.scheduler import BackgroundScheduler
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(BackgroundScheduler._run_dq_integrity)))
+        (assign,) = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "duckdb_looked"
+                             for t in n.targets)]
+        text = ast.unparse(assign.value)
+        assert "pg_warehouse_dq.DUCKDB_BARE_CHECKS" in text and "error_message" in text
+
+
+class TestTheLandingPairing:
+    def test_both_engines_and_the_standalone_verdict(self):
+        ol = OrderLanding(without_items=3, without_items_in_flight=1, orphan_items=2,
+                          status_groups=((20, 6, 2, 1.0),))
+        duck = [_duck("orders_without_line_items", 4),
+                _duck("fk_orphan_order_products_order_id", 2, Severity.CRITICAL)]
+        looked = DUCK_LOOKED | twins.DUCKDB_BARE_CHECKS      # status_group_agreement raised
+        record = _pairing(_facts(order_landing=ol), duckdb_issues=duck, duckdb_looked=looked)
+        d, p, alone = record["duckdb"], record["postgres"], record["standalone"]
+        assert record["version"] == twins.PAIRING_VERSION == 2
+        assert (d["orders_without_line_items"], p["orders_without_line_items"]) == (4, 4)
+        assert (d["fk_orphan_order_products_order_id"],
+                p["fk_orphan_order_products_order_id"]) == (2, 2)
+        assert (d["not_null_orders_ordered_at"], p["not_null_orders_ordered_at"]) == (0, 0)
+        assert (d["status_group_vs_return_list"], p["status_group_vs_return_list"]) == (None, 2)
+        assert alone["pg_orders_without_line_items"] == 3          # the in-flight one left out
+        assert alone["pg_fk_orphan_order_products_order_id"] == 2
+        assert alone["pg_status_group_vs_return_list"] == 2
+        assert "pg_order_landing_disagree" not in alone
+        assert set(twins.DUCKDB_BARE_CHECKS) <= set(d["looked"])
+
+    def test_a_blind_landing_group_is_none_with_its_reason(self):
+        record = _pairing(_facts(order_landing=Unwatched("timeout")),
+                          duckdb_looked=DUCK_LOOKED | twins.DUCKDB_BARE_CHECKS)
+        p = record["postgres"]
+        assert p["orders_without_line_items"] is None and p["unwatched"] == {
+            "order_landing": "timeout"}
+        assert record["duckdb"]["orders_without_line_items"] == 0
+        assert record["standalone"] == {"pg_order_landing_unwatched": 1}
+
+
+class TestTheLandingLevers:
+    def test_every_landing_condition_has_a_lever_and_a_human_name(self):
+        from core.data_quality import DEFAULT_REMEDIATION, HUMAN_CHECK_NAMES, remediation_for
+
+        names = set(twins.GUARD_CONDITIONS["order_landing"]) | {
+            twins.UNWATCHED_NAMES["order_landing"]}
+        for name in names:
+            assert remediation_for([name]) != [DEFAULT_REMEDIATION], name
+            assert name in HUMAN_CHECK_NAMES, name
+        # Its own line, never the DuckDB check's: the lever names the copy it read.
+        (pg,) = remediation_for(["pg_fk_orphan_order_products_order_id"])
+        (duck,) = remediation_for(["fk_orphan_order_products_order_id"])
+        assert pg != duck and "bronze.orders" in pg

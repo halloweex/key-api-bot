@@ -99,6 +99,33 @@ detector the design asked for and nobody built.
   have no record at all when it starts. Pure over facts already read: the
   shadow evaluation costs no read.
 
+DN-23 adds the sixth group, **`order_landing`**: Postgres twins of the DuckDB
+checks that read landing itself — `orders_without_line_items`, the orphan line
+items, `ordered_at` NULL, the status and source domains, and KeyCRM's status
+group against the return list. Once chains 3, 4 and 6 move the writes, DuckDB's
+`orders` and `order_products` freeze and those checks go green on frozen data;
+with them goes the one detector of a status KeyCRM added (status 20 went
+unnoticed for a month).
+
+- **Over `bronze.*`, in the same snapshot and budget**, read before the
+  recompute so a budget spent there cannot blind them. Gated on the backfill,
+  like the line items: before it every count below DuckDB's is history not yet
+  carried, not a finding.
+- **Compare while DuckDB looks, stand in when it does not** — the line-item
+  rule. Five of DuckDB's six run bare in `check_internal_integrity`
+  (`DUCKDB_BARE_CHECKS`): a raise there fails the scan, so the scan finishing
+  is their looking. A difference beyond the orders in flight is
+  `pg_order_landing_disagree`. A CRITICAL twin whose rows still stand while
+  it compares holds its `pg_` condition: a page it delivered on a run DuckDB
+  could not look is not announced resolved while Postgres still holds them.
+- **In flight is the header's absolute grace.** An order whose header was
+  mirrored inside the settle grace is not yet an order without line items;
+  it is counted apart and never filed. The other five have no grace: a header
+  and its line items land in one transaction (`pg_landing.write_orders`), and
+  a domain or a NULL is wrong the moment it lands.
+- **DuckDB's own thresholds**: `min_total` from its signature, the known ids
+  and the return list from where DuckDB reads them, bound as parameters.
+
 Still deferred, with the owner's decision it needs: making blindness news in
 every digest (OD-05).
 """
@@ -134,6 +161,11 @@ _VALID = ("off", "on")
 # Production held 47,756. The spec asked for this on the gate stack, and that
 # measurement was not taken — this change had no access to it; every run logs
 # the recompute's own time beside this number instead.
+#
+# DN-23's landing read shares it too, measured the same way (one CPU, nine
+# runs, 0.1% of orders with no line items): 0.05–0.07 s over 48,000 orders and
+# 144,000 line items, 0.12 s over 96,000 and 288,000 — four statements, each
+# one pass or an index probe per row.
 LOCK_WAIT_S = 120
 HOLD_BUDGET_S = 20
 STATEMENT_TIMEOUT = "15s"
@@ -151,9 +183,10 @@ WEBSITE_SOURCE_ID = 4
 # a morning, so a miss must stand in every run for a day to be read at all.
 SIGNAL_LOOKBACK_H = 24
 
-# The pairing record's shape. Bumped when a key changes meaning, so a soak
-# reading a week of records can tell which rows it may compare.
-PAIRING_VERSION = 1
+# The pairing record's shape. Bumped when a key changes meaning or joins, so a
+# soak reading a week of records can tell which rows it may compare. 2: the
+# order-landing twins (DN-23), and `duckdb.looked` naming DuckDB's bare checks.
+PAIRING_VERSION = 2
 
 
 def flag() -> Tuple[bool, Optional[str]]:
@@ -281,8 +314,39 @@ class DerivationJournal:
     runs: Tuple[JournalRun, ...]
 
 
+@dataclass(frozen=True)
+class OrderLanding:
+    """What `bronze.orders` and `bronze.order_products` say about themselves:
+    the facts DN-23's twins of DuckDB's landing checks judge.
+
+    `without_items` are orders billed at least DuckDB's `min_total` with no
+    line item, whose header was mirrored before the settle grace;
+    `without_items_in_flight` the same inside it, counted apart and never
+    filed. `orphan_items` counts line items, `orphan_sample` the orders they
+    name. The domains carry the unknown values themselves and a sample of the
+    orders holding them. `status_groups` is one `(status_id, status_group_id,
+    orders, amount)` per pair where KeyCRM's group and the return list
+    disagree, largest amount first.
+    """
+    without_items: int = 0
+    without_items_in_flight: int = 0
+    without_items_amount: float = 0.0
+    without_items_sample: Tuple[int, ...] = ()
+    orphan_items: int = 0
+    orphan_sample: Tuple[int, ...] = ()
+    null_ordered_at: int = 0
+    null_ordered_at_sample: Tuple[int, ...] = ()
+    unknown_status: int = 0
+    unknown_status_values: Tuple[int, ...] = ()
+    unknown_status_sample: Tuple[int, ...] = ()
+    unknown_source: int = 0
+    unknown_source_values: Tuple[int, ...] = ()
+    unknown_source_sample: Tuple[int, ...] = ()
+    status_groups: Tuple[Tuple[int, int, int, float], ...] = ()
+
+
 Group = Union[SilverArc, Attribution, LineItems, RowValues, DerivationJournal,
-              Unwatched, None]
+              OrderLanding, Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -293,6 +357,7 @@ class Facts:
     attribution: Group = None
     line_items: Group = None
     derivation_signal: Group = None
+    order_landing: Group = None
     silver_row_values: Group = None
 
     @classmethod
@@ -304,7 +369,38 @@ class Facts:
 # enough to spend the hold budget, and a budget spent on it should blind it
 # alone rather than the cheap groups queued behind it.
 GROUPS = ("silver_arc", "attribution", "line_items", "derivation_signal",
-          "silver_row_values")
+          "order_landing", "silver_row_values")
+
+# The order-landing twins (DN-23), one per DuckDB finding they pair with:
+# `(DuckDB's guard, DuckDB's finding, the twin's condition)`. The guard decides
+# whether the twin compares (DuckDB looked) or stands in (it did not).
+# `status_group_agreement` is the name `check_internal_integrity` guards its
+# check under; the other five run bare there, so their guard is the finding's
+# own name, and the scan finishing is their looking.
+LANDING_TWINS: Tuple[Tuple[str, str, str], ...] = (
+    ("orders_without_line_items", "orders_without_line_items",
+     "pg_orders_without_line_items"),
+    ("fk_orphan_order_products_order_id", "fk_orphan_order_products_order_id",
+     "pg_fk_orphan_order_products_order_id"),
+    ("not_null_orders_ordered_at", "not_null_orders_ordered_at",
+     "pg_not_null_orders_ordered_at"),
+    ("value_domain_orders_status_id", "value_domain_orders_status_id",
+     "pg_value_domain_orders_status_id"),
+    ("value_domain_orders_source_id", "value_domain_orders_source_id",
+     "pg_value_domain_orders_source_id"),
+    ("status_group_agreement", "status_group_vs_return_list",
+     "pg_status_group_vs_return_list"),
+)
+
+# The DuckDB checks above that `check_internal_integrity` runs bare, outside
+# `guarded`: the integrity job adds them to `duckdb_looked` whenever the scan
+# finished, since a raise from any of them would have failed it. A test
+# derives each from its call site.
+DUCKDB_BARE_CHECKS: FrozenSet[str] = frozenset({
+    "orders_without_line_items", "fk_orphan_order_products_order_id",
+    "not_null_orders_ordered_at", "value_domain_orders_status_id",
+    "value_domain_orders_source_id",
+})
 
 # Each guard and the conditions its twin emits — `data_quality.GUARDED_CHECK_CONDITIONS`'
 # shape, for the same use: what a blind run must hold rather than resolve.
@@ -314,6 +410,8 @@ GUARD_CONDITIONS: Dict[str, Tuple[str, ...]] = {
     "line_items": ("pg_headline_vs_line_items", "pg_goods_shipped_without_sale",
                    "pg_line_items_disagree"),
     "derivation_signal": ("pg_signal_missed",),
+    "order_landing": tuple(twin for _g, _d, twin in LANDING_TWINS) + (
+        "pg_order_landing_disagree",),
     "silver_row_values": ("pg_silver_row_values",),
 }
 UNWATCHED_NAMES: Dict[str, str] = {
@@ -321,6 +419,7 @@ UNWATCHED_NAMES: Dict[str, str] = {
     "attribution": "pg_attribution_coverage_unwatched",
     "line_items": "pg_line_items_unwatched",
     "derivation_signal": "pg_derivation_signal_unwatched",
+    "order_landing": "pg_order_landing_unwatched",
     "silver_row_values": "pg_silver_row_values_unwatched",
 }
 WHOLE_UNWATCHED = "pg_warehouse_unwatched"
@@ -395,6 +494,67 @@ JOIN li ON li.order_id = s.id
 WHERE NOT s.is_return AND s.is_active_source
   AND s.grand_total = 0 AND li.amount > 0
 GROUP BY 1
+"""
+
+# ── DN-23: landing itself. Each is DuckDB's statement over `orders` and
+# `order_products`, read over `bronze.*`, with DuckDB's thresholds bound as
+# parameters rather than copied.
+
+# Orders billed at least $1 (`_orders_without_line_items_check`'s `min_total`)
+# with no line item, split by whether the header was mirrored inside the settle
+# grace ($2, minutes). The sample leads with the largest, as DuckDB's does.
+_WITHOUT_ITEMS_SQL = """
+WITH bare AS (
+    SELECT o.id, o.grand_total,
+           o.mirrored_at >= now() - make_interval(mins => $2) AS in_flight
+    FROM bronze.orders o
+    WHERE o.grand_total >= $1::numeric
+      AND NOT EXISTS (SELECT 1 FROM bronze.order_products p WHERE p.order_id = o.id)
+)
+SELECT count(*) FILTER (WHERE NOT in_flight) AS n,
+       count(*) FILTER (WHERE in_flight) AS in_flight,
+       COALESCE(SUM(grand_total) FILTER (WHERE NOT in_flight), 0) AS amount,
+       (array_agg(id ORDER BY grand_total DESC, id DESC) FILTER (WHERE NOT in_flight))[1:10] AS sample
+FROM bare
+"""
+
+# Line items naming an order bronze holds no header for. Counted per line item
+# and sampled by the order they name, as `_fk_orphan_check` counts and samples.
+_ORPHAN_ITEMS_SQL = """
+SELECT count(*) AS n,
+       (array_agg(DISTINCT p.order_id ORDER BY p.order_id DESC))[1:10] AS sample
+FROM bronze.order_products p
+WHERE NOT EXISTS (SELECT 1 FROM bronze.orders o WHERE o.id = p.order_id)
+"""
+
+# One pass over the headers for the NULL and both domains. $1 the known status
+# ids, $2 the known source ids. `source_id` and `status_id` are NOT NULL here
+# (revision 0003), so DuckDB's NULL checks on them have no twin to need.
+_HEADERS_SQL = """
+SELECT count(*) FILTER (WHERE ordered_at IS NULL) AS null_ordered_at,
+       (array_agg(id ORDER BY id DESC) FILTER (WHERE ordered_at IS NULL))[1:10] AS null_sample,
+       count(*) FILTER (WHERE status_id <> ALL($1::int[])) AS unknown_status,
+       array_agg(DISTINCT status_id ORDER BY status_id)
+           FILTER (WHERE status_id <> ALL($1::int[])) AS status_values,
+       (array_agg(id ORDER BY id DESC) FILTER (WHERE status_id <> ALL($1::int[])))[1:10] AS status_sample,
+       count(*) FILTER (WHERE source_id <> ALL($2::int[])) AS unknown_source,
+       array_agg(DISTINCT source_id ORDER BY source_id)
+           FILTER (WHERE source_id <> ALL($2::int[])) AS source_values,
+       (array_agg(id ORDER BY id DESC) FILTER (WHERE source_id <> ALL($2::int[])))[1:10] AS source_sample
+FROM bronze.orders
+"""
+
+# KeyCRM's own group against the return list, per (status, group) pair that
+# disagrees. $1 the lost/cancel group, $2 the listed return statuses. A NULL
+# group is a row synced before the column existed and is not compared.
+_STATUS_GROUP_SQL = """
+SELECT status_id, status_group_id, count(*) AS n,
+       COALESCE(SUM(grand_total), 0) AS amount
+FROM bronze.orders
+WHERE status_group_id IS NOT NULL
+  AND (status_group_id = $1) <> (status_id = ANY($2::int[]))
+GROUP BY status_id, status_group_id
+ORDER BY amount DESC, status_id, status_group_id
 """
 
 
@@ -620,6 +780,45 @@ async def _read_journal(conn) -> DerivationJournal:
         for r in rows))
 
 
+async def _read_order_landing(conn, watermark: Watermark, grace: int) -> Union[OrderLanding, Unwatched]:
+    """DN-23's facts. Gated on the backfill, like the line items: before it
+    bronze holds a delta, and every count set beside DuckDB's would differ by
+    history not yet carried rather than by anything wrong.
+
+    Every threshold is DuckDB's own, read from where DuckDB reads it and bound
+    as a parameter: `min_total` from `_orders_without_line_items_check`'s
+    signature, the known ids from `data_quality`, the return list and the
+    lost/cancel group from `core.models`."""
+    import inspect
+    from decimal import Decimal
+
+    from core.data_quality import (
+        KNOWN_SOURCE_IDS, KNOWN_STATUS_IDS, _orders_without_line_items_check,
+    )
+    from core.models import LOST_STATUS_GROUP_ID, OrderStatus
+
+    if not watermark.backfilled:
+        return Unwatched("bronze.orders history is not backfilled (meta.mirror_state.backfilled_at)")
+    min_total = inspect.signature(_orders_without_line_items_check).parameters["min_total"].default
+    w = await conn.fetchrow(_WITHOUT_ITEMS_SQL, Decimal(str(min_total)), grace)
+    o = await conn.fetchrow(_ORPHAN_ITEMS_SQL)
+    h = await conn.fetchrow(_HEADERS_SQL, sorted(KNOWN_STATUS_IDS), sorted(KNOWN_SOURCE_IDS))
+    groups = await conn.fetch(_STATUS_GROUP_SQL, LOST_STATUS_GROUP_ID,
+                              sorted(int(s) for s in OrderStatus.return_statuses()))
+    return OrderLanding(
+        without_items=int(w["n"]), without_items_in_flight=int(w["in_flight"]),
+        without_items_amount=float(w["amount"]), without_items_sample=_ids(w["sample"]),
+        orphan_items=int(o["n"]), orphan_sample=_ids(o["sample"]),
+        null_ordered_at=int(h["null_ordered_at"]), null_ordered_at_sample=_ids(h["null_sample"]),
+        unknown_status=int(h["unknown_status"]), unknown_status_values=_ids(h["status_values"]),
+        unknown_status_sample=_ids(h["status_sample"]),
+        unknown_source=int(h["unknown_source"]), unknown_source_values=_ids(h["source_values"]),
+        unknown_source_sample=_ids(h["source_sample"]),
+        status_groups=tuple((int(r["status_id"]), int(r["status_group_id"]), int(r["n"]),
+                             float(r["amount"])) for r in groups),
+    )
+
+
 async def _read_row_values(conn, grace: int, page_after: int) -> RowValues:
     """The recompute. Not gated on the backfill, unlike attribution and line
     items: Silver is derived from whatever bronze holds, history or not, so a
@@ -721,6 +920,8 @@ async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
                         ("attribution", lambda c: _read_attribution(c, watermark)),
                         ("line_items", lambda c: _read_line_items(c, watermark)),
                         ("derivation_signal", _read_journal),
+                        ("order_landing",
+                         lambda c: _read_order_landing(c, watermark, grace)),
                         ("silver_row_values",
                          lambda c: _read_row_values(c, grace, page_after)),
                     )
@@ -1013,6 +1214,138 @@ def _line_items_check(li: LineItems, watermark: Watermark, *,
     return issues
 
 
+def landing_counts(ol: OrderLanding) -> Dict[str, int]:
+    """Postgres' count for each DuckDB finding the landing twins pair with,
+    keyed by DuckDB's name and counted as DuckDB counts it — every order, in
+    flight or not, because DuckDB's check has no grace. What the engines are
+    compared on, and what the pairing record carries."""
+    return {
+        "orders_without_line_items": ol.without_items + ol.without_items_in_flight,
+        "fk_orphan_order_products_order_id": ol.orphan_items,
+        "not_null_orders_ordered_at": ol.null_ordered_at,
+        "value_domain_orders_status_id": ol.unknown_status,
+        "value_domain_orders_source_id": ol.unknown_source,
+        "status_group_vs_return_list": sum(n for _s, _g, n, _a in ol.status_groups),
+    }
+
+
+def _landing_findings(ol: OrderLanding) -> Dict[str, Any]:
+    """What each landing twin files standing in for DuckDB, by condition; a
+    twin with nothing to report is absent. DuckDB's severities: a line item
+    with no order and an order with no date are CRITICAL there, the rest WARN.
+    Only the settled orders without line items are filed — those in flight are
+    named in the description and counted nowhere."""
+    from core.data_quality import KNOWN_SOURCE_IDS, KNOWN_STATUS_IDS, Severity
+    from core.models import OrderStatus
+
+    grace = silver_grace_minutes()
+    out: Dict[str, Any] = {}
+    if ol.without_items:
+        flight = (f" {ol.without_items_in_flight} more were mirrored in the last {grace} "
+                  "minutes and are in flight, not counted." if ol.without_items_in_flight else "")
+        out["pg_orders_without_line_items"] = _issue(
+            check_name="pg_orders_without_line_items", table_name="bronze.order_products",
+            severity=Severity.WARN, count=ol.without_items, sample_ids=ol.without_items_sample,
+            description=(f"In Postgres, {ol.without_items} order(s) worth "
+                         f"{ol.without_items_amount:,.2f} have no line items, their headers "
+                         f"mirrored {grace}+ minutes ago. Revenue counts them, product/brand/"
+                         "category breakdowns cannot." + flight))
+    if ol.orphan_items:
+        out["pg_fk_orphan_order_products_order_id"] = _issue(
+            check_name="pg_fk_orphan_order_products_order_id",
+            table_name="bronze.order_products", severity=Severity.CRITICAL,
+            count=ol.orphan_items, sample_ids=ol.orphan_sample,
+            description=(f"In Postgres, {ol.orphan_items} bronze.order_products row(s) name an "
+                         "order bronze.orders does not hold (the sample is those orders' ids). "
+                         "No grace applies: an order's header and line items land in one "
+                         "transaction."))
+    if ol.null_ordered_at:
+        out["pg_not_null_orders_ordered_at"] = _issue(
+            check_name="pg_not_null_orders_ordered_at", table_name="bronze.orders",
+            severity=Severity.CRITICAL, count=ol.null_ordered_at,
+            sample_ids=ol.null_ordered_at_sample,
+            description=(f"In Postgres, {ol.null_ordered_at} bronze.orders row(s) have no "
+                         "ordered_at. Every figure bound to a date leaves them out."))
+
+    def domain(column: str, known: FrozenSet[int], n: int, values: Tuple[int, ...]) -> str:
+        known_list = ", ".join(str(v) for v in sorted(known))
+        seen = ", ".join(str(v) for v in values)[:200]
+        return (f"In Postgres, {n} row(s) in bronze.orders have {column} not in known set "
+                f"{{{known_list}}}. Unknown values seen: {seen}")
+
+    if ol.unknown_status:
+        out["pg_value_domain_orders_status_id"] = _issue(
+            check_name="pg_value_domain_orders_status_id", table_name="bronze.orders",
+            severity=Severity.WARN, count=ol.unknown_status, sample_ids=ol.unknown_status_sample,
+            description=domain("status_id", KNOWN_STATUS_IDS, ol.unknown_status,
+                               ol.unknown_status_values)
+            + ". A status KeyCRM added counts toward revenue by its group, not by this list.")
+    if ol.unknown_source:
+        out["pg_value_domain_orders_source_id"] = _issue(
+            check_name="pg_value_domain_orders_source_id", table_name="bronze.orders",
+            severity=Severity.WARN, count=ol.unknown_source, sample_ids=ol.unknown_source_sample,
+            description=domain("source_id", KNOWN_SOURCE_IDS, ol.unknown_source,
+                               ol.unknown_source_values) + ".")
+    if ol.status_groups:
+        listed = {int(s) for s in OrderStatus.return_statuses()}
+        total = sum(n for _s, _g, n, _a in ol.status_groups)
+        amount = sum(a for _s, _g, _n, a in ol.status_groups)
+        detail = "; ".join(
+            f"status {s} is KeyCRM group {g} but our list says "
+            f"{'excluded' if s in listed else 'revenue'} ({n} orders, {a:,.2f})"
+            for s, g, n, a in ol.status_groups[:5])
+        out["pg_status_group_vs_return_list"] = _issue(
+            check_name="pg_status_group_vs_return_list", table_name="bronze.orders",
+            severity=Severity.WARN, count=total,
+            sample_ids=tuple(s for s, _g, _n, _a in ol.status_groups[:10]),
+            description=(f"In Postgres, {total} order(s) worth {amount:,.2f} are classified "
+                         "differently by KeyCRM's status group and by our status-id list. "
+                         f"{detail}. The group is the source's own answer; the list is our "
+                         "copy of it."))
+    return out
+
+
+def _order_landing_check(ol: OrderLanding, watermark: Watermark, *,
+                         duckdb_issues: Sequence, duckdb_looked: FrozenSet[str],
+                         held_out: Optional[List[str]] = None) -> list:
+    """The landing twins: per DuckDB guard, compare where it looked and stand
+    in where it did not — the line-item rule.
+
+    Comparing, a twin files nothing of its own, and the engines disagree when
+    their counts differ by more than the orders in flight. A twin that would
+    page standing alone goes to `held_out`: the rows are still there — DuckDB
+    files them under its own name this run, or the engines disagree — and a
+    `pg_` page delivered on a run DuckDB could not look must not be announced
+    resolved while Postgres still holds them. Only a CRITICAL is held, since
+    only a CRITICAL is ever delivered to be resolved.
+    """
+    from core.data_quality import Severity
+
+    duck: Dict[str, int] = {}
+    for issue in duckdb_issues:
+        duck[issue.check_name] = duck.get(issue.check_name, 0) + int(issue.count)
+    pg, alone = landing_counts(ol), _landing_findings(ol)
+    issues, differ = [], []
+    for guard, name, twin in LANDING_TWINS:
+        if guard not in duckdb_looked:
+            if twin in alone:
+                issues.append(alone[twin])
+            continue
+        if abs(pg[name] - duck.get(name, 0)) > watermark.in_flight:
+            differ.append(f"{name}: Postgres {pg[name]}, DuckDB {duck.get(name, 0)}")
+        if (twin in alone and alone[twin].severity == Severity.CRITICAL
+                and held_out is not None):
+            held_out.append(twin)
+    if differ:
+        issues.append(_issue(
+            check_name="pg_order_landing_disagree", table_name="bronze.orders",
+            severity=Severity.WARN, count=len(differ),
+            description=("The engines' landing checks count differently by more than the "
+                         f"{watermark.in_flight} order(s) still in flight: " + "; ".join(differ)
+                         + ". One store's orders or line items differ from the other's.")))
+    return issues
+
+
 def check_pg_warehouse(
     facts: Optional[Facts], *, duckdb_issues: Sequence = (),
     duckdb_looked: FrozenSet[str] = frozenset(),
@@ -1022,12 +1355,14 @@ def check_pg_warehouse(
     """The twins over pre-read facts. Pure; never raises.
 
     `duckdb_looked` are the DuckDB guard names that ran this scan (empty when
-    the DuckDB half failed). A twin whose raise is caught files its group's
-    unwatched finding, and its guard name goes to `raised_out`. `held_out`
-    receives the conditions of every group that could not look, and of the
-    row-values group when it looked but held rows it could not judge — only
-    those: the collapsed finding is one line, but a group read clean in the
-    same run still announces its recovery.
+    the DuckDB half failed), `DUCKDB_BARE_CHECKS` among them when it finished.
+    A twin whose raise is caught files its group's unwatched finding, and its
+    guard name goes to `raised_out`. `held_out` receives the conditions of
+    every group that could not look; of the row-values group when it looked
+    but held rows it could not judge; and of each landing twin that compared
+    while Postgres still holds what it would page on — only those: the collapsed
+    finding is one line, but a group read clean in the same run still
+    announces its recovery.
     """
     from core.data_quality import Severity
 
@@ -1060,6 +1395,7 @@ def check_pg_warehouse(
         (g, u), = blind.items()
         issues.append(_unwatched_issue(g, u.reason))
 
+    landing_held: List[str] = []
     judges = {
         "silver_arc": lambda: _silver_arc_check(facts.silver_arc),
         "attribution": lambda: _attribution_check(facts.attribution, facts.watermark),
@@ -1067,6 +1403,9 @@ def check_pg_warehouse(
             facts.line_items, facts.watermark,
             duckdb_issues=duckdb_issues, duckdb_looked=duckdb_looked),
         "derivation_signal": lambda: _signal_check(facts.derivation_signal),
+        "order_landing": lambda: _order_landing_check(
+            facts.order_landing, facts.watermark, duckdb_issues=duckdb_issues,
+            duckdb_looked=duckdb_looked, held_out=landing_held),
         "silver_row_values": lambda: _row_values_check(facts.silver_row_values),
     }
     for group, judge in judges.items():
@@ -1086,6 +1425,10 @@ def check_pg_warehouse(
         # for them is held rather than announced resolved after a restart.
         if group == "silver_row_values" and facts.silver_row_values.held:
             hold(group)
+        # Landing twins that compared while Postgres still holds their rows:
+        # DuckDB's name carries the finding this run, not a recovery of theirs.
+        if group == "order_landing" and held_out is not None:
+            held_out.extend(landing_held)
     return issues
 
 
@@ -1094,14 +1437,15 @@ def check_pg_warehouse(
 # What each engine measured, keyed by DuckDB's finding name so the two sides
 # read across: `(DuckDB's guard, DuckDB's finding)`. A DuckDB number is its
 # finding's count when the guard looked — nothing filed is 0 — and None when it
-# did not look, which is not the same as 0.
+# did not look, which is not the same as 0. The landing twins' (DN-23) follow,
+# their Postgres numbers counted as DuckDB counts them (`landing_counts`).
 _PAIRED_DUCKDB = (
     ("silver_arc", "silver_missing_rows"),
     ("silver_arc", "silver_orphan_rows"),
     ("silver_arc", "silver_row_values"),
     ("headline_vs_line_items", "headline_vs_line_items"),
     ("goods_shipped_without_sale", "goods_shipped_without_sale"),
-)
+) + tuple((guard, name) for guard, name, _twin in LANDING_TWINS)
 _DUCKDB_ATTRIBUTION_GUARD = "attribution_coverage"
 
 
@@ -1147,6 +1491,8 @@ def _pairing(facts: Optional[Facts], duckdb_issues: Sequence,
                 unwatched[group] = value.reason
         arc, li, rv, att = (facts.silver_arc, facts.line_items, facts.silver_row_values,
                             facts.attribution)
+        if isinstance(facts.order_landing, OrderLanding):
+            postgres.update(landing_counts(facts.order_landing))
         if isinstance(arc, SilverArc):
             postgres["silver_missing_rows"] = arc.missing
             postgres["silver_orphan_rows"] = arc.orphans
@@ -1178,15 +1524,19 @@ def pairing_record(
     """INFO `pg_twin_pairing`: both engines' numbers for one integrity run,
     as JSON in the description, for the soak to parse. Never raises.
 
-    - `duckdb` and `postgres` carry the arc counts, attribution coverage and
-      line-item counts each engine measured, under DuckDB's names. A DuckDB
-      guard that did not look is None, and a Postgres group that could not
-      look is None with its reason under `postgres.unwatched`.
+    - `duckdb` and `postgres` carry the arc counts, attribution coverage,
+      line-item counts and (since version 2) the six order-landing counts each
+      engine measured, under DuckDB's names. A DuckDB guard that did not look
+      is None, and a Postgres group that could not look is None with its
+      reason under `postgres.unwatched`.
     - `standalone` is what `check_pg_warehouse` files for these facts with
       `duckdb_looked` empty — names and counts. While DuckDB looks, the
-      line-item twins compare and file nothing of their own, so this is the
-      only record that `pg_headline_vs_line_items` and
-      `pg_goods_shipped_without_sale` would find what DuckDB finds.
+      line-item and landing twins compare and file nothing of their own, so
+      this is the only record that `pg_headline_vs_line_items`,
+      `pg_orders_without_line_items` and the rest would find what DuckDB
+      finds. Its `pg_orders_without_line_items` leaves the orders in flight
+      out, where `postgres.orders_without_line_items` counts them as DuckDB
+      does.
     - `in_flight` is the tolerance the soak compares counts within.
 
     One INFO row a run: it never pages, and a digest shows it as one line.

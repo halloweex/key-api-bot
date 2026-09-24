@@ -1887,7 +1887,10 @@ class BackgroundScheduler:
             # recompute of Silver from bronze (`pg_silver_row_values`) and
             # DN-14's reading of the derivation journal (`pg_signal_missed`)
             # are groups in the same read and budget; they compare Postgres
-            # with Postgres, so `duckdb_looked` does not reach them.
+            # with Postgres, so `duckdb_looked` does not reach them. DN-23's
+            # landing twins do compare, and five of the six DuckDB checks they
+            # pair with run bare in the scan: a raise there fails it, so the
+            # scan finishing is their looking (`DUCKDB_BARE_CHECKS`).
             from core import pg_warehouse_dq
             from core.data_quality import GUARDED_CHECK_CONDITIONS
 
@@ -1900,7 +1903,9 @@ class BackgroundScheduler:
                 pg_issues = [pg_warehouse_dq.flag_invalid_issue(pg_flag_error)]
             elif pg_on:
                 duckdb_looked = (frozenset() if error_message else
-                                 frozenset(GUARDED_CHECK_CONDITIONS) - frozenset(raised_checks))
+                                 (frozenset(GUARDED_CHECK_CONDITIONS)
+                                  | pg_warehouse_dq.DUCKDB_BARE_CHECKS)
+                                 - frozenset(raised_checks))
                 try:
                     pg_facts = await pg_warehouse_dq.read_facts()
                 except Exception as e:  # noqa: BLE001 — it promises not to; if it does, it is blindness
