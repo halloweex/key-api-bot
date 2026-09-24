@@ -52,7 +52,7 @@ MIGRATION = inspect.getsource(_rev.upgrade)
 DOWN = inspect.getsource(_rev.downgrade)
 
 DSN = os.getenv("KS_PG_DSN", "").strip()
-needs_pg = pytest.mark.skipif(not DSN, reason="KS_PG_DSN is not set")
+needs_pg = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
 
 # ─── parsing helpers: none of these may fall back to a substring search ──────
