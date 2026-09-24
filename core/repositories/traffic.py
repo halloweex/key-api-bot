@@ -11,6 +11,7 @@ from core.utm_classify import (
     tab_platform,
     utm_columns,
 )
+from core import read_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +52,7 @@ class TrafficMixin:
                 )
                 return (rows[0] if rows else None) if mode == "one" else rows
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "traffic: Postgres failed, falling back to DuckDB: %s",
-                    exc, exc_info=True,
-                )
+                read_fallback.fall_back("traffic", exc)
 
         # `_fetch_one`/`_fetch_all`, not a bare `conn.execute` under
         # `self.connection()`. They take the store lock themselves — so this

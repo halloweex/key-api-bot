@@ -520,6 +520,24 @@ def check_derivation_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
     return []
 
 
+def check_read_fallback_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `read_fallback_mode` block: a KS_READ_FALLBACK web did not
+    understand (DN-20a).
+
+    Warn, as for the derivation mode: web runs as `duckdb`, which is what it
+    did before the variable existed, so nothing is failing — but whoever set
+    it believes fallbacks are refused, and after step 13 that belief is the
+    difference between an error page and frozen numbers. It must not stop web
+    instead: web is the only process that syncs orders. An absent block is
+    not a failure; an older web publishes none.
+    """
+    block = (payload or {}).get("read_fallback_mode")
+    if isinstance(block, dict) and block.get("error"):
+        return [("read_fallback_mode_invalid",
+                 f"read fallback: {block['error']}")]
+    return []
+
+
 # ─── Orchestration ──────────────────────────────────────────────────────────
 
 async def run_canary(
@@ -616,6 +634,14 @@ async def run_canary(
         if derivation_failures and severity == "ok":
             severity = "warn"
 
+        # A KS_READ_FALLBACK web could not read. Warn, the derivation mode's
+        # reason: today's behaviour is running, and somebody believes it is not.
+        fallback_mode_failures = check_read_fallback_mode(payload)
+        for key, message in fallback_mode_failures:
+            fail(key, message)
+        if fallback_mode_failures and severity == "ok":
+            severity = "warn"
+
         # Derivation marks dropped and demonstrably not being healed. Warn:
         # every row landed, and what is owed is a rebuild.
         marks_failures = check_derivation_marks(payload)
@@ -686,6 +712,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Read meta.derivation_signal's last_error in meta.mirror_state, then meta.derivation_runs"),
     ("write_chain_flag_mismatch",
      "Set the named KS_WRITE_* back to postgres, or run scripts/chain_copy_back.py to hand the tables back"),
+    ("read_fallback_mode_invalid",
+     "Set KS_READ_FALLBACK to duckdb or off in .env, then recreate web"),
 )
 
 def _what_to_do(result: CanaryResult) -> Optional[str]:

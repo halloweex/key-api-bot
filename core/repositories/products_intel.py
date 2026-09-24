@@ -6,6 +6,7 @@ from datetime import date
 from typing import Optional, Dict, Any, List
 
 from core.duckdb_constants import line_window_where
+from core import read_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,7 @@ class ProductsIntelMixin:
                 )
                 return (rows[0] if rows else None) if mode == "one" else rows
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "products-intel: Postgres failed, falling back to DuckDB: %s",
-                    exc, exc_info=True,
-                )
+                read_fallback.fall_back("products_intel", exc)
 
         async with self.connection() as conn:
             cursor = conn.execute(render_tables(sql, DUCKDB), params)

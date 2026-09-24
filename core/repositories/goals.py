@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any
 
 from core.duckdb_constants import DEFAULT_TZ, _date_in_kyiv
 from core.models import OrderStatus
+from core import read_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -181,10 +182,7 @@ class GoalsMixin:
                 return await pg_goals_read.fetch(
                     render_tables(sql, POSTGRES), params)
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "goals: Postgres failed, falling back to DuckDB: %s",
-                    exc, exc_info=True,
-                )
+                read_fallback.fall_back("goals", exc)
 
         async with self.connection() as conn:
             return conn.execute(render_tables(sql, DUCKDB), params).fetchall()
@@ -874,12 +872,17 @@ class GoalsMixin:
                 return 0.0  # No predictions available
 
             return actual_revenue + predicted_revenue
+        except read_fallback.ReadUnavailable:
+            # A fallback refused (DN-20b, `KS_READ_FALLBACK=off`) is not a
+            # missing signal: it passes through, so the goal is not computed
+            # from two signals while the third reads a store nobody writes.
+            # Nothing raises it yet; DN-20a's walk requires the decision to be
+            # written here, as for every handler around a router.
+            raise
         except Exception as exc:  # noqa: BLE001
             # What reaches here is a read that failed on the engine that
             # finally answered — the goal is then computed without this signal,
-            # so it is said at WARNING, not DEBUG. When DN-20b makes a fallback
-            # raise, that exception has to pass through this handler, not end
-            # in it: DN-20a's walk covers it, as a handler around `_goals_run`.
+            # so it is said at WARNING, not DEBUG.
             logger.warning(
                 "goals: ML forecast signal for %d-%02d unavailable, left out of "
                 "the blend: %s", target_year, target_month, exc)

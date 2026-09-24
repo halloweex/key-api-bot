@@ -81,6 +81,29 @@ def _write_chains() -> dict:
     return chain_modes()
 
 
+def _read_fallbacks() -> dict:
+    """`{surface: {count, last_at}}` — every read this process answered from
+    DuckDB because the engine it was sent to failed (DN-20a). Local state, no
+    I/O, and no exception text: this endpoint is public, and the counts and a
+    timestamp are what a reader needs to go and look at the log."""
+    from core import read_fallback
+
+    return read_fallback.counts()
+
+
+def _read_fallback_mode() -> dict:
+    """KS_READ_FALLBACK as this process understood it at start, the error when
+    it was not understood, and every read switch naming an engine this process
+    has no address for. Local state, no I/O."""
+    from core import read_fallback
+
+    return {
+        "mode": read_fallback.mode(),
+        "error": read_fallback.mode_error(),
+        "misconfigured": read_fallback.misconfigured(),
+    }
+
+
 def _derivation_mode() -> dict:
     """KS_PG_DERIVE as this process understood it at start. Local state, no I/O."""
     from core import pg_derivation
@@ -301,6 +324,8 @@ async def health_check(request: Request):
         "alerting": alerting,
         "derivation": await _derivation_block(),
         "write_chains": _write_chains(),
+        "read_fallbacks": _read_fallbacks(),
+        "read_fallback_mode": _read_fallback_mode(),
     }
 
 

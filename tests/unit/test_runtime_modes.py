@@ -50,14 +50,15 @@ class TestConfigureModes:
         monkeypatch.setenv(pg_derivation.ENV, "own")
         first = configure_modes()
         second = configure_modes()
-        assert first == second == {pg_derivation.ENV: "own"}
+        assert first == second
+        assert first[pg_derivation.ENV] == "own"
         assert pg_derivation.owns() and pg_derivation.mode_error() is None
 
     def test_unset_is_piggyback(self, monkeypatch, restore_mode):
         monkeypatch.setenv(pg_derivation.ENV, "own")
         configure_modes()
         monkeypatch.delenv(pg_derivation.ENV)
-        assert configure_modes() == {pg_derivation.ENV: "piggyback"}
+        assert configure_modes()[pg_derivation.ENV] == "piggyback"
         assert not pg_derivation.owns()
 
     def test_it_reaches_every_cached_mode_in_core(self):

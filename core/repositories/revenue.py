@@ -9,6 +9,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from core.duckdb_constants import KNOWN_SALES_TYPES, UNKNOWN_BRAND, brand_where
 from core.models import OrderStatus
 from core.sql_dialect import TODAY_IN_KYIV
+from core import read_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -310,10 +311,7 @@ class RevenueMixin:
                     self._render_report(sql, POSTGRES), params,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "reports: Postgres failed, falling back to DuckDB: %s",
-                    exc, exc_info=True,
-                )
+                read_fallback.fall_back("reports", exc)
 
         async with self.connection() as conn:
             return conn.execute(
@@ -355,10 +353,7 @@ class RevenueMixin:
                     self._render_report(sql, POSTGRES, **extra), params,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "marketing: Postgres failed, falling back to DuckDB: %s",
-                    exc, exc_info=True,
-                )
+                read_fallback.fall_back("marketing", exc)
 
         async with self.connection() as conn:
             return conn.execute(
@@ -386,10 +381,7 @@ class RevenueMixin:
                     self._render_report(sql, POSTGRES), params,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "dashboard: Postgres failed, falling back to DuckDB: %s",
-                    exc, exc_info=True,
-                )
+                read_fallback.fall_back("dashboard", exc)
 
         async with self.connection() as conn:
             return conn.execute(
@@ -418,10 +410,7 @@ class RevenueMixin:
                     self._render_report(sql, POSTGRES), params,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "lookups: Postgres failed, falling back to DuckDB: %s",
-                    exc, exc_info=True,
-                )
+                read_fallback.fall_back("lookups", exc)
 
         async with self.connection() as conn:
             return conn.execute(
@@ -480,10 +469,7 @@ class RevenueMixin:
                 start_date, end_date, sales_type, source_id
             )
         except Exception as e:
-            logger.error(
-                "KS_READ_GOLD=postgres but the summary read failed, "
-                "falling back to DuckDB: %s", e,
-            )
+            read_fallback.fall_back("dashboard", e)
             return None
 
     @staticmethod
@@ -520,10 +506,7 @@ class RevenueMixin:
                 start_date, end_date, sales_type, source_id
             )
         except Exception as e:
-            logger.error(
-                "KS_READ_GOLD=postgres but the series read failed, "
-                "falling back to DuckDB: %s", e,
-            )
+            read_fallback.fall_back("dashboard", e)
             return None
 
     async def get_summary_stats(
@@ -886,7 +869,7 @@ class RevenueMixin:
         """
         return lines_sql, params, returns_sql, ret_params
 
-    async def _pg_silver(self, sql: str, params: list):
+    async def _pg_silver(self, sql: str, params: list, *, surface: str = "dashboard"):
         """One Silver-grain query from Postgres, or None to let DuckDB answer.
 
         None on the flag being off, on no DSN, and on any failure — the
@@ -894,6 +877,10 @@ class RevenueMixin:
         same way. Rendered here, never by the caller: a caller that picks the
         fragment from the flag renders the Postgres shape into the DuckDB
         fallback, which is how `/marketing` was broken for an hour.
+
+        `surface` names the page a failure is counted against
+        (`core.read_fallback`): the dashboard's summary and trend by default,
+        the managers screen for `get_manager_sales_365d`.
         """
         from core import pg_silver_read
         from core.sql_dialect import POSTGRES, render_tables
@@ -903,10 +890,7 @@ class RevenueMixin:
         try:
             return await pg_silver_read.fetch(render_tables(sql, POSTGRES), params)
         except Exception as e:
-            logger.error(
-                "KS_READ_SILVER=postgres but the read failed, "
-                "falling back to DuckDB: %s", e,
-            )
+            read_fallback.fall_back(surface, e)
             return None
 
     def _build_silver_orders_revenue_query(
@@ -1033,7 +1017,7 @@ class RevenueMixin:
         """
         from core.sql_dialect import DUCKDB, render_tables
 
-        rows = await self._pg_silver(_MANAGER_SALES_365D_SQL, [])
+        rows = await self._pg_silver(_MANAGER_SALES_365D_SQL, [], surface="managers")
         if rows is not None:
             return rows
         async with self.connection() as conn:

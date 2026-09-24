@@ -6,6 +6,7 @@ from datetime import date
 from typing import Dict, List, Any
 
 from core.duckdb_constants import line_window_where
+from core import read_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +45,7 @@ class MarginMixin:
                 )
                 return (rows[0] if rows else None) if mode == "one" else rows
             except Exception as exc:  # noqa: BLE001
-                logger.error(
-                    "margin: Postgres failed, falling back to DuckDB: %s",
-                    exc, exc_info=True,
-                )
+                read_fallback.fall_back("margin", exc)
 
         async with self.connection() as conn:
             cursor = conn.execute(render_tables(sql, DUCKDB), params)
