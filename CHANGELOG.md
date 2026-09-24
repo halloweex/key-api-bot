@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.246
+
+- Gates take one host lock before they touch a store
+
+
 ## 3.0.245
 
 - DN-20a: CLAUDE.md records the fallback counter, the mode that never stops web, and the walk
