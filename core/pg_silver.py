@@ -48,20 +48,35 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# When this process loaded the code that rebuilds Silver. The rule it runs —
-# `silver_select_sql`, `silver_pass2_sql`, `REVENUE_SOURCE_IDS`, the return
-# statuses, the manager constants — cannot change inside a process, so every
-# rebuild this process performs began after this moment and ran the code that
-# is running now, while a rebuild that began before it may have run other code.
-# The row-values twin (`pg_warehouse_dq`) dates every row's inputs no earlier
-# than this: after a deploy that changed the rule, stored Silver differs from
-# the recompute until this process rebuilds it, and that is a rebuild owed, not
-# a rebuild that failed. Found reviewing DN-13.
+# The Silver rule — `silver_select_sql`, `silver_pass2_sql`, `REVENUE_SOURCE_IDS`,
+# the return statuses, the manager constants — cannot change inside a process.
+# So a rebuild this process committed ran the rule the row-values twin
+# (`pg_warehouse_dq`) recomputes with, and a rebuild before it may have run the
+# previous process's. Two moments carry that, and neither dates a row:
+#
+# FIRST_REBUILT_AT is when this process's first Silver rebuild committed, by
+# Postgres' clock: the `now()` of that rebuild's transaction, which is the very
+# watermark it stamped. None until then. The twin counts a rebuild as covering
+# a row only when it began at or after this — so a deploy that changed the rule
+# is a rebuild owed rather than a rebuild at fault, and this process's first
+# rebuild, faulty or not, is judged at once rather than after its second.
+#
+# RULE_LOADED_AT is when this module was first imported — lazily, on the first
+# rebuild's or the first integrity read's call path, so no earlier than the
+# process started. It bounds how long the twin holds rows that only a previous
+# process's rebuild had: held for the repair window past it, then paged, so a
+# derivation that never runs again cannot hold them for ever.
+#
+# Found reviewing DN-13: dating every row no earlier than the import put each
+# of them in flight after every restart — a standing page read as resolved —
+# and, because the import falls on the first rebuild's own call path, made that
+# rebuild unable to cover anything.
 RULE_LOADED_AT = datetime.now(timezone.utc)
+FIRST_REBUILT_AT: Optional[datetime] = None
 
 # One process, several actors over the same Postgres layer: the scheduler's
 # rebuild tick (silver → gold → витрина), the витрина's own rebuild-and-check,
@@ -118,6 +133,7 @@ async def rebuild_silver(pool=None) -> Dict[str, Any]:
     rebuild that reports success while writing nothing is the worst available
     outcome.
     """
+    global FIRST_REBUILT_AT
     from core.pg import get_pool, require_revision
     from core.pg_landing import _WATERMARK_OK
 
@@ -135,6 +151,11 @@ async def rebuild_silver(pool=None) -> Dict[str, Any]:
             # tell "not rebuilt yet" from "rebuilt wrong" without a second
             # mechanism to learn.
             await conn.execute(_WATERMARK_OK, SILVER_TABLE, rows)
+            # The watermark's own value: `now()` is the transaction's start.
+            stamped = await conn.fetchval("SELECT now()")
+    # Only after the COMMIT: a rebuild that rolled back ran nothing.
+    if FIRST_REBUILT_AT is None:
+        FIRST_REBUILT_AT = stamped
 
     result = {
         "rows": int(rows),

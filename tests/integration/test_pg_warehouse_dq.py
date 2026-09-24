@@ -54,8 +54,14 @@ async def _silver(conn, oid, *, total=100, source=4, days_ago=2, sales_type="ret
 
 @pytest_asyncio.fixture
 async def pool(monkeypatch):
+    from core import pg_silver
+
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.delenv("KS_PG_SILVER_INTERVAL_S", raising=False)
+    # A process that has not rebuilt Silver yet, and put back afterwards: the
+    # real `rebuild_silver` sets this once per process, and a test that runs
+    # it must not decide the next test's verdict.
+    monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)
     p = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
     await _clean(p)
     async with p.acquire() as conn:
@@ -329,10 +335,13 @@ async def rv(pool, monkeypatch):
     from core import pg_silver
     from core.pg_silver import rebuild_silver
 
-    # The process loaded the Silver rule four hours ago — before anything the
-    # tests date — so the rule's load time decides nothing unless a test moves it.
-    monkeypatch.setattr(pg_silver, "RULE_LOADED_AT",
-                        datetime.now(timezone.utc) - timedelta(hours=4))
+    # A process that loaded the Silver rule and first rebuilt under it four
+    # hours ago — before anything the tests date — so every rebuild they date
+    # ran this rule, and neither moment decides anything unless a test moves
+    # it. The rule-change and first-rebuild tests model a fresh process.
+    four_hours_ago = datetime.now(timezone.utc) - timedelta(hours=4)
+    monkeypatch.setattr(pg_silver, "RULE_LOADED_AT", four_hours_ago)
+    monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", four_hours_ago)
 
     async def reset():
         async with pool.acquire() as conn:
@@ -585,39 +594,145 @@ class TestTheRowValues:
         assert "no rebuild is coming" not in issue.description
 
     @pytest.mark.asyncio
-    async def test_a_rule_changed_by_a_deploy_is_owed_a_rebuild_not_blamed_on_one(self, rv, monkeypatch):
+    async def test_a_rule_changed_by_a_deploy_is_held_until_this_process_rebuilds(self, rv, monkeypatch):
         """Silver was rebuilt two hours ago by the code before a deploy, and the
         deploy dropped Instagram from the revenue sources. Every row the new
         rule moves differs from the recompute, nothing moved in bronze, and the
-        rebuild that would "cover" them ran the old rule — so they are owed this
-        process's first rebuild, not a fault in it. Found reviewing DN-13: they
-        read as covered CRITICAL, "another would repeat it"."""
+        rebuild whose snapshot held them ran the old rule: not a fault in it,
+        and not in flight either — held. Found reviewing DN-13 twice: judged
+        as covered they read "another would repeat it", and dated by the
+        rule's load they cleared every standing page after a restart."""
         from core import duckdb_store, pg_silver
         from core.data_quality import Severity
+        from core.pg_warehouse_dq import check_pg_warehouse, read_facts
 
         monkeypatch.setattr(duckdb_store, "REVENUE_SOURCE_IDS",
                             tuple(s for s in duckdb_store.REVENUE_SOURCE_IDS if s != 1))
+        monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)   # a fresh process
         now = datetime.now(timezone.utc)
 
-        # Loaded two minutes ago: inside the settle grace, in flight, not filed.
-        monkeypatch.setattr(pg_silver, "RULE_LOADED_AT", now - timedelta(minutes=2))
-        values, judged = await self._read(rv)
-        assert (values.reported, values.in_flight) == (0, 7)       # every Instagram row
-        assert "pg_silver_row_values" not in judged
+        # Loaded two minutes ago, and half an hour ago: held both times — an
+        # INFO that pages nobody, and the condition held rather than cleared.
+        for minutes in (2, 30):
+            monkeypatch.setattr(pg_silver, "RULE_LOADED_AT", now - timedelta(minutes=minutes))
+            facts = await read_facts(pool=rv)
+            values, held = facts.silver_row_values, []
+            assert (values.held, values.reported, values.in_flight) == (7, 0, 0), minutes
+            (issue,) = [i for i in check_pg_warehouse(facts, held_out=held)
+                        if i.check_name == "pg_silver_row_values"]
+            assert issue.severity == Severity.INFO and issue.count == 7
+            assert "may have run another one" in issue.description
+            assert held == ["pg_silver_row_values"]
 
-        # Half an hour and still no rebuild: WARN, saying what dated them.
-        monkeypatch.setattr(pg_silver, "RULE_LOADED_AT", now - timedelta(minutes=30))
+        # Past the repair window after the load, and still no rebuild of its
+        # own: this process's derivation never ran. CRITICAL, saying so.
+        monkeypatch.setattr(pg_silver, "RULE_LOADED_AT", now - timedelta(minutes=100))
         values, judged = await self._read(rv)
-        assert (values.reported, values.covered, values.dated_by_rule) == (7, 0, 7)
+        assert (values.overdue, values.covered, values.abandoned, values.held) == (7, 0, 0, 0)
         issue = judged["pg_silver_row_values"]
-        assert issue.severity == Severity.WARN
-        assert "loading the Silver rule" in issue.description
+        assert issue.severity == Severity.CRITICAL
+        assert "no rebuild has run under that rule since" in issue.description
+        assert "another would repeat it" not in issue.description
 
         # This process's first rebuild runs the new rule, and nothing is left.
         await pg_silver.rebuild_silver(rv)
         values, judged = await self._read(rv)
-        assert (values.reported, values.in_flight) == (0, 0)
+        assert (values.reported, values.held, values.in_flight) == (0, 0, 0)
         assert "pg_silver_row_values" not in judged
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("quiet_min", [0, 90])
+    async def test_this_processs_first_rebuild_covers_what_it_read(self, rv, monkeypatch, quiet_min):
+        """Production's order: `core.pg_silver` is first imported on the first
+        rebuild's own call path, so the rule loads a fraction of a second
+        before that rebuild begins. The rebuild is faulty (pass 2 ignores the
+        source) and piggyback writes no journal; then `quiet_min` minutes pass
+        with no other rebuild. It is covered — a rebuild at fault, whose lever
+        is not another rebuild — at once and after a quiet night alike. Found
+        reviewing DN-13: dated by the import it read as in flight, then as
+        "no rebuild is coming on its own"."""
+        from core import pg_silver
+        from core.data_quality import Severity
+
+        x = RULE_IDS[0]
+        async with rv.acquire() as conn:
+            await conn.execute("DELETE FROM meta.derivation_runs")
+            await _landed(conn, x, source=3, buyer=97301, days_ago=6)   # first, inactive source
+        real = pg_silver.pass2_sql
+        monkeypatch.setattr(pg_silver, "pass2_sql",
+                            lambda: real().replace("AND s.is_active_source", "", 1))
+        monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)
+        monkeypatch.setattr(pg_silver, "RULE_LOADED_AT", datetime.now(timezone.utc))
+        await pg_silver.rebuild_silver(rv)                               # the first rebuild
+        async with rv.acquire() as conn:
+            assert pg_silver.FIRST_REBUILT_AT == await conn.fetchval(
+                "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = 'silver.orders'")
+        if quiet_min:
+            # The quiet night: the watermark the rebuild stamped moved back, and
+            # both in-process moments with it by the same amount.
+            async with rv.acquire() as conn:
+                await _rebuilt(conn, minutes_ago=quiet_min)
+                stamped = await conn.fetchval(
+                    "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = 'silver.orders'")
+            monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", stamped)
+            monkeypatch.setattr(pg_silver, "RULE_LOADED_AT",
+                                pg_silver.RULE_LOADED_AT - timedelta(minutes=quiet_min))
+
+        values, judged = await self._read(rv)
+        assert (values.reported, values.covered, values.abandoned) == (1, 1, 0)
+        assert (values.held, values.overdue, values.in_flight) == (0, 0, 0)
+        issue = judged["pg_silver_row_values"]
+        assert issue.severity == Severity.CRITICAL and issue.sample_ids == (x,)
+        assert "another would repeat it" in issue.description
+        assert "no rebuild is coming" not in issue.description
+        assert "Silver rule" not in issue.description
+
+    @pytest.mark.asyncio
+    async def test_a_rebuild_that_rolled_back_is_not_this_processs_first(self, rv, monkeypatch):
+        """The stamp is set after the COMMIT: a rebuild that raised ran
+        nothing, and the rows its snapshot would have held stay held."""
+        from core import pg_silver
+
+        monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)
+        monkeypatch.setattr(pg_silver, "pass2_sql", lambda: "SELECT no_such_column FROM silver.orders")
+        with pytest.raises(asyncpg.PostgresError):
+            await pg_silver.rebuild_silver(rv)
+        assert pg_silver.FIRST_REBUILT_AT is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("loaded_min", [30, 100])
+    async def test_a_row_a_later_rebuild_of_this_process_had_is_covered_and_nothing_else(
+        self, rv, monkeypatch, loaded_min,
+    ):
+        """Loaded `loaded_min` minutes ago; this process's first rebuild, ten
+        minutes ago, was faulty. The row is covered — not also held, and not
+        also overdue for want of a rebuild that did run. Found reviewing DN-13:
+        the count of rule-dated rows once lost its `NOT covered` to no test."""
+        from core import pg_silver
+        from core.data_quality import Severity
+
+        x = RULE_IDS[0]
+        async with rv.acquire() as conn:
+            await conn.execute("DELETE FROM meta.derivation_runs")
+            await _landed(conn, x, source=3, buyer=97301, days_ago=6)
+        real = pg_silver.pass2_sql
+        monkeypatch.setattr(pg_silver, "pass2_sql",
+                            lambda: real().replace("AND s.is_active_source", "", 1))
+        monkeypatch.setattr(pg_silver, "RULE_LOADED_AT",
+                            datetime.now(timezone.utc) - timedelta(minutes=loaded_min))
+        monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)
+        await pg_silver.rebuild_silver(rv)
+        async with rv.acquire() as conn:
+            await _rebuilt(conn, minutes_ago=10)
+            stamped = await conn.fetchval(
+                "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = 'silver.orders'")
+        monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", stamped)
+
+        values, judged = await self._read(rv)
+        assert (values.covered, values.held, values.overdue, values.reported) == (1, 0, 0, 1)
+        issue = judged["pg_silver_row_values"]
+        assert issue.severity == Severity.CRITICAL
+        assert "Silver rule" not in issue.description
 
     @pytest.mark.asyncio
     async def test_a_flipped_is_new_customer_is_caught(self, rv):
@@ -726,7 +841,7 @@ class TestTheRowValues:
         monkeypatch.setattr(pg_warehouse_dq, "HOLD_BUDGET_S", 2)
         monkeypatch.setattr(pg_warehouse_dq, "_row_values_sql", lambda: (
             "SELECT pg_sleep(10), $1::int, $2::int, $3::interval, $4::text, $5::text,"
-            " $6::timestamptz"))
+            " $6::timestamptz, $7::timestamptz"))
         facts = await asyncio.wait_for(pg_warehouse_dq.read_facts(pool=rv), timeout=30)
         assert isinstance(facts.silver_row_values, pg_warehouse_dq.Unwatched)
         assert "hold budget" in facts.silver_row_values.reason
@@ -911,6 +1026,66 @@ class TestTheJobEndToEnd:
         assert "pg_silver_row_values" in sent.await_args.kwargs["conditions"]
         unverified = scheduler._resolve_dq_layer.await_args.kwargs["unverified"]
         assert "pg_silver_row_values" not in unverified                 # it looked
+
+    @pytest_asyncio.fixture
+    async def resolving_job(self, pool, tmp_path, monkeypatch):
+        """`job`, with the real `_resolve_dq_layer`: what reaches the Gate as
+        still firing is what a test asserts on, captured at `resolve_group`."""
+        from core.duckdb_store import DuckDBStore
+        from core.scheduler import BackgroundScheduler
+
+        store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
+        await store.connect()
+        scheduler = BackgroundScheduler()
+        sent = AsyncMock(return_value=True)
+        monkeypatch.setattr(scheduler, "_send_dq_alert_throttled", sent)
+        with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)):
+            yield scheduler, store, sent
+        await store.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", ["covered", "abandoned"])
+    async def test_a_restart_neither_resolves_nor_quiets_a_standing_row_values_page(
+        self, rv, resolving_job, monkeypatch, case,
+    ):
+        """A covered CRITICAL (Silver's is_new_customer wrong under a rebuild
+        two hours ago) and an abandoned one (bronze changed 100 minutes ago, no
+        rebuild since), each read again by a process that loaded the rule five
+        minutes ago and has not rebuilt yet. Neither may reach the Gate as
+        cleared; the abandoned one still pages, since nothing about it depends
+        on which process looks. Found reviewing DN-13: dated by the rule's
+        load both read as in flight, and a delivered page was announced
+        resolved after every deploy."""
+        from core import pg_silver
+
+        scheduler, _store, sent = resolving_job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        async with rv.acquire() as conn:
+            if case == "covered":
+                await conn.execute("UPDATE silver.orders SET is_new_customer = NOT is_new_customer"
+                                   " WHERE id = $1", ROW_IDS[1])
+            else:
+                await _touch(conn, ROW_IDS[0], minutes_ago=100, grand_total=150)
+
+        async def run():
+            resolve = AsyncMock(return_value=0)
+            sent.reset_mock()
+            with patch("core.alerting.resolve_group", resolve):
+                await scheduler._run_dq_integrity()
+            (call,) = resolve.await_args_list
+            assert call.args == ("dq:integrity",)
+            paged = [c.kwargs["conditions"] for c in sent.await_args_list]
+            return paged, call.kwargs["still_firing"]
+
+        paged, still = await run()                     # this process, rebuilding for hours
+        assert paged == [["pg_silver_row_values"]] and "pg_silver_row_values" in still
+
+        monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)            # the deploy
+        monkeypatch.setattr(pg_silver, "RULE_LOADED_AT",
+                            datetime.now(timezone.utc) - timedelta(minutes=5))
+        paged, still = await run()
+        assert "pg_silver_row_values" in still, case
+        assert paged == ([] if case == "covered" else [["pg_silver_row_values"]])
 
     @pytest.mark.asyncio
     async def test_off_a_stale_postgres_silver_row_is_not_read(self, rv, job, monkeypatch):

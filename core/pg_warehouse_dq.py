@@ -53,18 +53,26 @@ it is the check that has to keep working once DuckDB stops deriving.
   alone: `bronze.orders.mirrored_at`; the classification's `mirrored_at` when
   `sales_type` is what moved; and, when a pass-2 column moved, the latest
   change to any order the buyer has or had — a first order cancelled today
-  makes a months-old second order the buyer's first. Never earlier than this
-  process loaded the Silver rule: the rule is an input too, and a rebuild run
-  by the code before a deploy cannot cover a change of rule.
+  makes a months-old second order the buyer's first. Only data dates a row:
+  the grace stays absolute across a restart.
 - **Covered is CRITICAL, whatever its age.** A change made before the last
   Silver rebuild began is in that rebuild's snapshot, so a row still wrong
-  after it is a rebuild that does not produce what bronze holds. The rebuild
-  is dated by Silver's own watermark as well as the journal, because under
-  piggyback the watermark is the only record a rebuild leaves.
-- **Not covered is the missing twin's windows**: in flight (not filed) inside
-  the settle grace, WARN inside the repair window, CRITICAL past it — the
-  absolute bound, so a derivation that stopped leaves rows paging rather than
-  in flight for ever.
+  after it is a rebuild that does not produce what bronze holds — provided
+  that rebuild ran the rule this process runs, i.e. began at or after this
+  process's first committed rebuild (`pg_silver.FIRST_REBUILT_AT`). The
+  rebuild is dated by Silver's own watermark as well as the journal, because
+  under piggyback the watermark is the only record a rebuild leaves.
+- **In a snapshot whose rule is not known, a row is held.** Until this process
+  has rebuilt, the last rebuild ran the previous process's code, and a deploy
+  that changed the rule looks exactly like a rebuild at fault. Such rows are
+  neither a verdict nor a recovery: an INFO says what they are and the
+  condition is held, so a page standing for them stays standing. Past the
+  repair window after this process loaded the rule with still no rebuild of
+  its own, they are CRITICAL.
+- **Not in the snapshot is the missing twin's windows**: in flight (not filed)
+  inside the settle grace, WARN inside the repair window, CRITICAL past it —
+  the absolute bound, so a derivation that stopped leaves rows paging rather
+  than in flight for ever.
 - **Last in the snapshot.** It reads the whole of Silver and bronze, so a hold
   budget it spends blinds it alone and the three cheap groups keep their
   verdicts.
@@ -194,13 +202,15 @@ class LineItems:
 class RowValues:
     """Silver rows whose stored values a recompute from bronze does not produce.
 
-    `reported` is `covered` + `abandoned` + the rows inside the repair window;
-    `in_flight` are the ones still inside the settle grace, counted apart and
-    never filed. `dated_by_rule` are reported rows no rebuild covered whose
-    latest input is this process loading the Silver rule (`rule_loaded_at`)
-    rather than anything in bronze. `compared` and `elapsed_ms` are the
-    recompute's size and cost, kept so the hold budget can be judged against
-    the real thing.
+    `reported` is `covered` + `abandoned` + `overdue` + the rows inside the
+    repair window; `in_flight` are the ones still inside the settle grace,
+    counted apart and never filed. `held` and `overdue` are rows the last
+    rebuild's snapshot held, when that rebuild began before this process's
+    first (`first_rebuilt_at`, None while there is none) and so may have run
+    another rule: `held` while this process has had the rule
+    (`rule_loaded_at`) for less than the repair window, `overdue` past it.
+    `compared` and `elapsed_ms` are the recompute's size and cost, kept so the
+    hold budget can be judged against the real thing.
     """
     reported: int
     covered: int
@@ -212,7 +222,9 @@ class RowValues:
     rebuilt_at: Optional[datetime]
     compared: int
     elapsed_ms: int
-    dated_by_rule: int = 0
+    held: int = 0
+    overdue: int = 0
+    first_rebuilt_at: Optional[datetime] = None
     rule_loaded_at: Optional[datetime] = None
 
 
@@ -334,9 +346,11 @@ def _row_values_sql() -> str:
     $1 the settle grace and $2 the repair window, in minutes; $3 the margin a
     change must clear to count as inside a rebuild's snapshot; $4 the
     derivation's layer; $5 Silver's row in `meta.mirror_state`; $6 when this
-    process loaded the Silver rule (`pg_silver.RULE_LOADED_AT`). Rendered per
-    call rather than at import: every import in this module is lazy, and this
-    one would otherwise pull the DuckDB store in with it.
+    process's first Silver rebuild committed (`pg_silver.FIRST_REBUILT_AT`,
+    NULL before it); $7 when this process loaded the Silver rule
+    (`pg_silver.RULE_LOADED_AT`). Rendered per call rather than at import:
+    every import in this module is lazy, and this one would otherwise pull the
+    DuckDB store in with it.
 
     **When Silver was last rebuilt** (`rebuilt_at`) is the later of two
     stamps. `rebuild_silver` writes Silver's watermark with `now()` inside its
@@ -348,6 +362,12 @@ def _row_values_sql() -> str:
     an error over a Silver that was rebuilt. The journal's last error-free
     `started_at` is the other stamp, the one the spec named; it precedes its
     own run's watermark, so where both exist the watermark decides.
+
+    **Whether that rebuild ran this process's rule** (`rule_ran`) is
+    `rebuilt_at >= $6`, with no margin: $6 is the watermark of this process's
+    first rebuild, the same value by the same clock, and the rule cannot
+    change inside a process. Before it the answer is no — the last rebuild ran
+    the previous process's code, which a deploy may have changed.
 
     **When a row's inputs last changed** (`changed_at`) is the latest of:
 
@@ -362,17 +382,18 @@ def _row_values_sql() -> str:
       Silver still gives them, so an order moved to another buyer is a recent
       change for the buyer it left — bronze alone no longer says it was theirs.
       (The moved order itself needs no such help: its own stamp is recent.)
-    - the moment this process loaded the Silver rule, for every row. The rule
-      is an input as much as bronze is: a deploy that changes it — the rendered
-      text, `REVENUE_SOURCE_IDS`, the return statuses — makes stored Silver
-      differ from the recompute on rows nobody touched, and a rebuild that
-      began before this process existed ran the old code, so it cannot cover
-      them. They are in flight until this process's first rebuild — the first
-      derivation under own, the first DuckDB dirty tick under piggyback — and
-      page on the usual windows if it never comes. The cost, stated: a row that
-      was already wrong is dated no earlier than the restart too, so a deploy
-      holds its verdict until that first rebuild, and it is WARN rather than
-      CRITICAL if the settle grace passes first.
+
+    The rule is not among them. Dating rows by it put every differing row in
+    flight after each restart — a standing page read as resolved, an abandoned
+    row too — and the grace stops being absolute the moment a restart can move
+    it.
+
+    **The verdict.** A row whose inputs the last rebuild's snapshot held
+    (`in_snapshot`) is *covered* when that rebuild ran this rule — CRITICAL,
+    another rebuild would repeat it — and otherwise *held* while this process
+    has had the rule for less than the repair window, *overdue* past it. A row
+    the snapshot did not hold takes the absolute windows on `changed_at`: in
+    flight, then waiting, then *abandoned*.
     """
     from core.data_quality import _SILVER_ROW_COLUMNS, _silver_row_differs
     from core.duckdb_store import silver_recompute_ctes
@@ -384,17 +405,23 @@ def _row_values_sql() -> str:
         f"({_silver_row_differs(c, t)}) AS d_{c}" for c, t in _SILVER_ROW_COLUMNS)
     any_differs = " OR ".join(f"c.d_{c}" for c in columns)
     per_column = ",\n       ".join(
-        f"count(*) FILTER (WHERE reported AND d_{c}) AS n_{c}" for c in columns)
+        f"count(*) FILTER (WHERE (reported OR held) AND d_{c}) AS n_{c}" for c in columns)
     orders, silver = POSTGRES.orders, POSTGRES.silver_orders
     return f"""
 WITH {silver_recompute_ctes(POSTGRES)},
-inputs AS (
+stamps AS (
     SELECT GREATEST((SELECT max(mirrored_at) FROM {MANAGERS_TABLE}),
                     (SELECT max(mirrored_at) FROM {CLASSIFICATIONS_TABLE})) AS classified_at,
            GREATEST((SELECT max(started_at) FROM meta.derivation_runs
                       WHERE layer = $4 AND error IS NULL),
                     (SELECT last_ok_at FROM meta.mirror_state
                       WHERE table_name = $5)) AS rebuilt_at
+),
+inputs AS (
+    SELECT s.*,
+           COALESCE(s.rebuilt_at >= $6::timestamptz, FALSE) AS rule_ran,
+           COALESCE($7::timestamptz < now() - make_interval(mins => $2), TRUE) AS rule_overdue
+    FROM stamps s
 ),
 buyer_clock AS (
     SELECT buyer_id, max(mirrored_at) AS changed_at
@@ -419,36 +446,44 @@ stale AS (
            GREATEST(c.mirrored_at,
                     CASE WHEN c.d_sales_type THEN i.classified_at END,
                     CASE WHEN c.d_is_new_customer OR c.d_buyer_first_order_date
-                         THEN c.buyer_changed_at END,
-                    $6::timestamptz) AS changed_at,
-           i.rebuilt_at
+                         THEN c.buyer_changed_at END) AS changed_at,
+           i.rebuilt_at, i.rule_ran, i.rule_overdue
     FROM compared c CROSS JOIN inputs i
     WHERE {any_differs}
 ),
 judged AS (
     SELECT st.*,
            (st.rebuilt_at IS NOT NULL
-            AND st.changed_at < st.rebuilt_at - $3::interval) AS covered,
-           st.changed_at < now() - make_interval(mins => $2) AS abandoned,
+            AND st.changed_at < st.rebuilt_at - $3::interval) AS in_snapshot,
+           st.changed_at < now() - make_interval(mins => $2) AS past_repair,
            st.changed_at < now() - make_interval(mins => $1) AS settled
     FROM stale st
 ),
 marked AS (
-    SELECT j.*, (j.covered OR j.settled) AS reported FROM judged j
+    SELECT j.*,
+           (j.in_snapshot AND j.rule_ran) AS covered,
+           (j.in_snapshot AND NOT j.rule_ran AND NOT j.rule_overdue) AS held,
+           (j.in_snapshot AND NOT j.rule_ran AND j.rule_overdue) AS overdue,
+           (NOT j.in_snapshot AND j.past_repair) AS abandoned,
+           (NOT j.in_snapshot AND j.settled) AS waited
+    FROM judged j
+),
+verdicts AS (
+    SELECT m.*, (m.covered OR m.overdue OR m.waited) AS reported FROM marked m
 )
 SELECT (SELECT count(*) FROM compared) AS compared,
        (SELECT rebuilt_at FROM inputs) AS rebuilt_at,
        count(*) FILTER (WHERE reported) AS reported,
        count(*) FILTER (WHERE covered) AS covered,
-       count(*) FILTER (WHERE abandoned AND NOT covered) AS abandoned,
-       count(*) FILTER (WHERE NOT reported) AS in_flight,
-       count(*) FILTER (WHERE reported AND NOT covered
-                          AND changed_at = $6::timestamptz) AS dated_by_rule,
+       count(*) FILTER (WHERE abandoned) AS abandoned,
+       count(*) FILTER (WHERE overdue) AS overdue,
+       count(*) FILTER (WHERE held) AS held,
+       count(*) FILTER (WHERE NOT reported AND NOT held) AS in_flight,
        EXTRACT(EPOCH FROM now() - MIN(changed_at) FILTER (WHERE reported))::int AS oldest_age_s,
-       (array_agg(id ORDER BY (covered OR abandoned) DESC, id DESC)
-            FILTER (WHERE reported))[1:10] AS sample,
+       (array_agg(id ORDER BY (covered OR abandoned OR overdue) DESC, reported DESC, id DESC)
+            FILTER (WHERE reported OR held))[1:10] AS sample,
        {per_column}
-FROM marked
+FROM verdicts
 """
 
 
@@ -507,13 +542,15 @@ async def _read_row_values(conn, grace: int, page_after: int) -> RowValues:
 
     # The margin is DROPPED_MARK_MARGIN, for its two reasons: a writer outside
     # `_heavy_job_lock` commits a round trip after the instant its rows are
-    # stamped with, and the journal's `started_at` and the rule's load time
-    # come from the web container's clock where `mirrored_at` and the watermark
-    # come from Postgres'.
-    loaded_at = pg_silver.RULE_LOADED_AT
+    # stamped with, and the journal's `started_at` comes from the web
+    # container's clock where `mirrored_at` and the watermark come from
+    # Postgres'. It does not apply to the first rebuild's stamp, which is
+    # Postgres' own and the watermark's exact value.
+    first_rebuilt_at, loaded_at = pg_silver.FIRST_REBUILT_AT, pg_silver.RULE_LOADED_AT
     started = time.monotonic()
     row = await conn.fetchrow(_row_values_sql(), grace, page_after,
-                              DROPPED_MARK_MARGIN, LAYER, pg_silver.SILVER_TABLE, loaded_at)
+                              DROPPED_MARK_MARGIN, LAYER, pg_silver.SILVER_TABLE,
+                              first_rebuilt_at, loaded_at)
     elapsed_ms = int((time.monotonic() - started) * 1000)
     columns = tuple(sorted(
         ((c, int(row[f"n_{c}"])) for c, _ in _SILVER_ROW_COLUMNS if row[f"n_{c}"]),
@@ -524,7 +561,8 @@ async def _read_row_values(conn, grace: int, page_after: int) -> RowValues:
         columns=columns, sample=_ids(row["sample"]),
         oldest_age_s=row["oldest_age_s"], rebuilt_at=row["rebuilt_at"],
         compared=int(row["compared"]), elapsed_ms=elapsed_ms,
-        dated_by_rule=int(row["dated_by_rule"]), rule_loaded_at=loaded_at)
+        held=int(row["held"]), overdue=int(row["overdue"]),
+        first_rebuilt_at=first_rebuilt_at, rule_loaded_at=loaded_at)
     # INFO on every run: the cost is what decides whether this group can keep
     # sharing the snapshot's hold budget, and a number nobody logged is a
     # number nobody can compare with HOLD_BUDGET_S when Silver has grown.
@@ -688,26 +726,32 @@ def _silver_arc_check(arc: SilverArc) -> list:
 
 
 def _row_values_check(rv: RowValues) -> list:
-    """One finding, CRITICAL when any row is covered or abandoned.
+    """One finding: CRITICAL when any row is covered, abandoned or overdue, WARN
+    when rows wait inside the repair window, INFO when rows are only held.
 
     Covered and abandoned are told apart in the words because their levers
     differ: an abandoned row is a derivation that stopped, and a rebuild fixes
     it; a covered row is a rebuild that ran and still did not produce what
-    bronze holds, and another rebuild would only repeat it.
+    bronze holds, and another rebuild would only repeat it. A held row is
+    neither, yet — the rebuild that had it ran before this process, so whether
+    it is at fault or a rebuild is owed waits for this process's first — and
+    `check_pg_warehouse` holds the condition for it rather than clearing it.
     """
     from core.data_quality import Severity
 
-    if not rv.reported:
+    total = rv.reported + rv.held
+    if not total:
         return []
     grace, page_after = silver_grace_minutes(), page_after_minutes()
-    critical = rv.covered + rv.abandoned
+    critical = rv.covered + rv.abandoned + rv.overdue
     waiting = rv.reported - critical
     columns = ", ".join(f"{c} ({n})" for c, n in rv.columns[:5]) or "none named"
     oldest = "" if rv.oldest_age_s is None else f" The oldest changed {rv.oldest_age_s // 60} min ago."
-    parts = [f"{rv.reported} silver.orders row(s) hold values a recompute from "
+    since = "?" if rv.rebuilt_at is None else rv.rebuilt_at.isoformat(timespec="seconds")
+    loaded = "?" if rv.rule_loaded_at is None else rv.rule_loaded_at.isoformat(timespec="seconds")
+    parts = [f"{total} silver.orders row(s) hold values a recompute from "
              f"bronze.orders does not produce. Columns: {columns}.{oldest}"]
     if rv.covered:
-        since = "?" if rv.rebuilt_at is None else rv.rebuilt_at.isoformat(timespec="seconds")
         parts.append(f"{rv.covered} changed before the last Silver rebuild began "
                      f"({since}), so its snapshot held them: the rebuild is not producing "
                      "what bronze holds, and another would repeat it.")
@@ -715,25 +759,32 @@ def _row_values_check(rv: RowValues) -> list:
         parts.append(f"{rv.abandoned} changed more than {page_after} minutes ago with no "
                      "Silver rebuild begun since — past the heartbeat and the floor, so "
                      "no rebuild is coming on its own.")
+    if rv.overdue:
+        parts.append(f"{rv.overdue} changed before the last Silver rebuild began ({since}), "
+                     "but it ran before this process loaded the Silver rule "
+                     f"({loaded}), more than {page_after} minutes ago, and no rebuild has "
+                     "run under that rule since — past the heartbeat and the floor, so "
+                     "none is coming on its own.")
     if waiting:
         parts.append(f"{waiting} changed {grace}+ minutes ago and are inside the "
                      f"{page_after}-minute repair window: under own the next mark or the "
                      "hourly heartbeat rebuilds them, under piggyback the next DuckDB "
                      "dirty tick.")
-    if rv.dated_by_rule:
-        loaded = ("?" if rv.rule_loaded_at is None
-                  else rv.rule_loaded_at.isoformat(timespec="seconds"))
-        parts.append(f"{rv.dated_by_rule} of the uncovered rows have nothing in bronze newer "
-                     f"than this process loading the Silver rule ({loaded}), and no rebuild "
-                     "has begun since: a deploy that changed the rule looks exactly like "
-                     "this until the first rebuild under it.")
+    if rv.held:
+        parts.append(f"{rv.held} changed before the last Silver rebuild began ({since}), "
+                     "but it ran before this process loaded the Silver rule "
+                     f"({loaded}) and may have run another one: whether that rebuild is at "
+                     "fault or one is owed is not known until this process's first. Held — "
+                     "not judged, and a page standing for them stays standing.")
     if rv.in_flight:
         parts.append(f"{rv.in_flight} more changed in the last {grace} minutes and are "
                      "in flight, not counted.")
+    severity = (Severity.CRITICAL if critical
+                else Severity.WARN if rv.reported else Severity.INFO)
     return [_issue(
         check_name="pg_silver_row_values", table_name="silver.orders",
-        severity=Severity.CRITICAL if critical else Severity.WARN,
-        count=rv.reported, sample_ids=rv.sample, description=" ".join(parts))]
+        severity=severity, count=total, sample_ids=rv.sample,
+        description=" ".join(parts))]
 
 
 def _attribution_check(att: Attribution, watermark: Watermark) -> list:
@@ -826,9 +877,10 @@ def check_pg_warehouse(
     `duckdb_looked` are the DuckDB guard names that ran this scan (empty when
     the DuckDB half failed). A twin whose raise is caught files its group's
     unwatched finding, and its guard name goes to `raised_out`. `held_out`
-    receives the conditions of every group that could not look — only those:
-    the collapsed finding is one line, but a group read clean in the same run
-    still announces its recovery.
+    receives the conditions of every group that could not look, and of the
+    row-values group when it looked but held rows it could not judge — only
+    those: the collapsed finding is one line, but a group read clean in the
+    same run still announces its recovery.
     """
     from core.data_quality import Severity
 
@@ -880,6 +932,12 @@ def check_pg_warehouse(
                 raised_out.append(group)
             hold(group)
             issues.append(_unwatched_issue(group, f"the check raised {type(exc).__name__}: {exc}"))
+            continue
+        # Rows a previous process's rebuild had, and no rebuild of this one
+        # since: the group looked, but could not judge them, so a page standing
+        # for them is held rather than announced resolved after a restart.
+        if group == "silver_row_values" and facts.silver_row_values.held:
+            hold(group)
     return issues
 
 

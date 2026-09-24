@@ -197,17 +197,50 @@ class TestTheRowValues:
         (issue,) = twins._row_values_check(_rv(reported=1, in_flight=4))
         assert issue.count == 1 and "4 more" in issue.description
 
-    def test_rows_dated_by_the_rules_load_say_so(self):
-        """After a deploy that changed the Silver rule, the rows it moved have
-        nothing newer in bronze than the process loading it. The words say so,
-        so a reader does not go looking for a change in the data."""
-        loaded = datetime(2026, 9, 17, 6, 20, tzinfo=timezone.utc)
+    LOADED = datetime(2026, 9, 17, 7, 20, tzinfo=timezone.utc)
+
+    def test_rows_only_a_previous_processs_rebuild_had_are_held_as_info(self):
+        """After a restart, until this process has rebuilt, a row the last
+        rebuild's snapshot held may be that rebuild's fault or a rule the deploy
+        changed. The finding says so and pages nobody; the condition is held."""
+        loaded = self.LOADED.isoformat(timespec="seconds")
         (issue,) = twins._row_values_check(_rv(
-            reported=3, dated_by_rule=3, rule_loaded_at=loaded, columns=(("is_active_source", 3),)))
-        assert issue.severity == Severity.WARN
-        assert f"loading the Silver rule ({loaded.isoformat(timespec='seconds')})" in issue.description
+            held=3, rule_loaded_at=self.LOADED, columns=(("is_active_source", 3),),
+            sample=(9, 8, 7)))
+        assert (issue.severity, issue.count, issue.sample_ids) == (Severity.INFO, 3, (9, 8, 7))
+        assert f"loaded the Silver rule ({loaded})" in issue.description
+        assert "Held" in issue.description
+        assert "another would repeat it" not in issue.description
         (plain,) = twins._row_values_check(_rv(reported=3, columns=(("grand_total", 3),)))
         assert "Silver rule" not in plain.description
+
+    def test_held_rows_hold_the_condition_and_nothing_else_does(self):
+        """The group looked, so it is not blind — but a page standing for rows
+        it could not judge must not be announced resolved."""
+        held = []
+        (issue,) = twins.check_pg_warehouse(_facts(silver_row_values=_rv(held=2)), held_out=held)
+        assert issue.check_name == "pg_silver_row_values" and held == ["pg_silver_row_values"]
+        for rv in (RV_CLEAN, _rv(reported=1, covered=1), _rv(reported=1), _rv(in_flight=4)):
+            held = []
+            twins.check_pg_warehouse(_facts(silver_row_values=rv), held_out=held)
+            assert held == [], rv
+
+    def test_held_rows_beside_waiting_ones_ride_a_warning(self):
+        (issue,) = twins._row_values_check(_rv(reported=1, held=2, rule_loaded_at=self.LOADED))
+        assert (issue.severity, issue.count) == (Severity.WARN, 3)
+        assert "repair window" in issue.description and "Held" in issue.description
+
+    def test_overdue_rows_are_critical_and_say_no_rebuild_ran_under_the_rule(self):
+        """Held past the repair window after the rule loaded, with still no
+        rebuild of this process's own: a derivation that never ran again.
+        Neither a rebuild at fault nor 'no rebuild since' — one did run, under
+        the code before."""
+        (issue,) = twins._row_values_check(_rv(
+            reported=2, overdue=2, rule_loaded_at=self.LOADED))
+        assert issue.severity == Severity.CRITICAL
+        assert "no rebuild has run under that rule since" in issue.description
+        assert "another would repeat it" not in issue.description
+        assert "no Silver rebuild begun since" not in issue.description
 
     def test_a_budget_spent_on_the_recompute_blinds_it_alone(self):
         held = []
@@ -256,22 +289,28 @@ class TestTheRowValuesSql:
         layer, and the row `rebuild_silver` stamps — the only record a
         piggyback rebuild leaves."""
         import asyncio
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         from core.data_quality import _SILVER_ROW_COLUMNS
         from core.pg_derivation import DROPPED_MARK_MARGIN, LAYER
-        from core.pg_silver import RULE_LOADED_AT, SILVER_TABLE
+        from core import pg_silver
+        from core.pg_silver import SILVER_TABLE
 
         row = {"reported": 0, "covered": 0, "abandoned": 0, "in_flight": 0, "sample": None,
-               "oldest_age_s": None, "rebuilt_at": None, "compared": 0, "dated_by_rule": 0,
-               **{f"n_{c}": 0 for c, _ in _SILVER_ROW_COLUMNS}}
-        conn = MagicMock(fetchrow=AsyncMock(return_value=row))
-        facts = asyncio.run(twins._read_row_values(conn, 20, 80))
-        sql, *args = conn.fetchrow.await_args.args
-        assert "error IS NULL" in sql and "layer = $4" in sql
-        assert "FROM meta.mirror_state" in sql and "table_name = $5" in sql
-        assert args == [20, 80, DROPPED_MARK_MARGIN, LAYER, SILVER_TABLE, RULE_LOADED_AT]
-        assert facts.rule_loaded_at == RULE_LOADED_AT
+               "oldest_age_s": None, "rebuilt_at": None, "compared": 0, "held": 0,
+               "overdue": 0, **{f"n_{c}": 0 for c, _ in _SILVER_ROW_COLUMNS}}
+        first = datetime(2026, 9, 17, 7, 21, tzinfo=timezone.utc)
+        for rebuilt in (None, first):
+            conn = MagicMock(fetchrow=AsyncMock(return_value=row))
+            with patch.object(pg_silver, "FIRST_REBUILT_AT", rebuilt):
+                facts = asyncio.run(twins._read_row_values(conn, 20, 80))
+            sql, *args = conn.fetchrow.await_args.args
+            assert "error IS NULL" in sql and "layer = $4" in sql
+            assert "FROM meta.mirror_state" in sql and "table_name = $5" in sql
+            assert args == [20, 80, DROPPED_MARK_MARGIN, LAYER, SILVER_TABLE,
+                            rebuilt, pg_silver.RULE_LOADED_AT]
+            assert (facts.first_rebuilt_at, facts.rule_loaded_at) == (
+                rebuilt, pg_silver.RULE_LOADED_AT)
 
     def test_the_snapshot_runs_without_jit(self):
         """JIT compilation never paid for itself on the recompute, and past
