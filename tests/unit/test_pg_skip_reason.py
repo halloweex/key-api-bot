@@ -25,10 +25,33 @@ PHRASE = "needs a live PostgreSQL"
 POSTGRES_WORDS = ("KS_PG_DSN", "PostgreSQL", "Postgres")
 
 
-def _text(node) -> str:
-    """Every string constant inside `node`, joined — f-strings included."""
-    return " ".join(n.value for n in ast.walk(node)
-                    if isinstance(n, ast.Constant) and isinstance(n.value, str))
+def _text(node, consts=None) -> str:
+    """Every string inside `node`, joined — f-string parts included, and the
+    value of any module-level string constant it names. A reason is often
+    built as `f"{PROVISIONED}: ..."` with the phrase living in the constant
+    (test_utm_reclassify_dryrun_pg.py does exactly that); reading only the
+    literal parts reported a skip CI counts as one it cannot see."""
+    consts = consts or {}
+    parts = []
+    for n in ast.walk(node):
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            parts.append(n.value)
+        elif isinstance(n, ast.Name) and n.id in consts:
+            parts.append(consts[n.id])
+    return " ".join(parts)
+
+
+def _module_strings(tree) -> dict:
+    """Top-level `NAME = "..."` assignments, the parenthesised multi-line
+    literal included (Python joins it into one constant)."""
+    out = {}
+    for stmt in tree.body:
+        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)):
+            out[stmt.targets[0].id] = stmt.value.value
+    return out
 
 
 def _names(node) -> set:
@@ -58,12 +81,13 @@ def postgres_skips_with_the_wrong_words(root: Path = ROOT / "tests"):
     bad = []
     for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        consts = _module_strings(tree)
         for call in ast.walk(tree):
             if not isinstance(call, ast.Call):
                 continue
             if _is(call, "mark.skipif", "skipif"):
                 reason = next((k.value for k in call.keywords if k.arg == "reason"), None)
-                words = _text(reason) if reason is not None else ""
+                words = _text(reason, consts) if reason is not None else ""
                 condition = call.args[0] if call.args else None
                 # The DSN read through a name (`not DSN`) or a literal
                 # (`not os.getenv("KS_PG_DSN")` — the ClickHouse test's shape,
@@ -73,7 +97,7 @@ def postgres_skips_with_the_wrong_words(root: Path = ROOT / "tests"):
                     or "PG_DSN" in _text(condition))
                 about_pg = reads_dsn or _names_postgres(words)
             elif _is(call, "pytest.skip"):
-                words = _text(call)
+                words = _text(call, consts)
                 about_pg = _names_postgres(words)
             else:
                 continue
@@ -124,3 +148,21 @@ def test_the_canonical_spelling_passes(tmp_path):
         'other = pytest.mark.skipif(not os.getenv("KS_CH_URL"), reason="needs ClickHouse")\n',
         encoding="utf-8")
     assert postgres_skips_with_the_wrong_words(tmp_path) == []
+
+
+def test_a_reason_built_from_a_module_constant_is_read_whole(tmp_path):
+    """`f"{PROVISIONED}: ..."` carries the phrase in the constant. Found the
+    first time this walker ran over main after DN-15 landed."""
+    (tmp_path / "test_x.py").write_text(
+        'import os, pytest\n'
+        'DSN = os.getenv("KS_PG_DSN")\n'
+        'PROVISIONED = ("needs a live PostgreSQL provisioned "\n'
+        '               "as CI provisions it")\n'
+        'BLIND = "no database here"\n'
+        'a = pytest.mark.skipif(not DSN, reason=f"{PROVISIONED}: a role")\n'
+        'b = pytest.mark.skipif(not DSN, reason=PROVISIONED)\n'
+        'c = pytest.mark.skipif(not DSN, reason=f"{BLIND}: a role")\n',
+        encoding="utf-8")
+    found = postgres_skips_with_the_wrong_words(tmp_path)
+    assert [loc.rsplit(":", 1)[1] for loc, _ in found] == ["8"]
+
