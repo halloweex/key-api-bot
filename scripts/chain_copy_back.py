@@ -107,7 +107,7 @@ def _parse(argv=None) -> argparse.Namespace:
     )
     parser.add_argument(
         "chain",
-        help="the chain: 'expenses' or 'inventory' (or its module name)",
+        help="the chain: 'expenses', 'inventory' or 'goals' (or its module name)",
     )
     parser.add_argument(
         "--execute", action="store_true",

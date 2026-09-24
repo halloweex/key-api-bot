@@ -68,6 +68,18 @@ Inventory (chain 1):
   means stock changes nobody records one by one, so this watches the same two
   keys at 90 minutes (`WATERMARK_MAX_AGE_MIN` has the arithmetic).
 
+Goals (chain 7a, DN-25):
+
+* **`updated_at` and `is_custom`.** `app.revenue_goals` has no default on
+  either — revision 0017 built it to receive DuckDB's values — so the writer
+  supplies both, and a NULL is a writer that stopped. Each one costs
+  something specific: `updated_at` is the clock the copy-back's handover
+  orders two versions of a goal by, so a NULL leaves it nothing to order with;
+  and `get_smart_goals` keeps a stored goal only `if is_custom`, so a NULL
+  there silently replaces the number a human typed with the suggestion. No
+  allocator and no watermark: the table is keyed on `period_type` and has no
+  sync behind it.
+
 WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
 
 A chain is watched when `core.write_chains.chain_modes()` says its writes go to
@@ -239,6 +251,11 @@ class Expenses:
 
 
 @dataclass(frozen=True)
+class Goals:
+    nulls: Nulls
+
+
+@dataclass(frozen=True)
 class Inventory:
     allocator: Allocator
     nulls: Nulls
@@ -258,7 +275,7 @@ class Inventory:
     window_end: Optional[date] = None
 
 
-Group = Union[Expenses, Inventory, Unwatched, None]
+Group = Union[Expenses, Inventory, Goals, Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -275,6 +292,7 @@ class Facts:
     now: Optional[datetime] = None
     expenses: Group = None
     inventory: Group = None
+    goals: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
@@ -354,10 +372,11 @@ def _reader_groups() -> Dict[str, str]:
     member of `WRITE_CHAINS` missing from this mapping, so the gap shows in CI
     before it shows at 01:00.
     """
-    from core import pg_expenses_write, pg_inventory_write
+    from core import pg_expenses_write, pg_goals_write, pg_inventory_write
 
     return {pg_expenses_write.CHAIN: "expenses",
-            pg_inventory_write.CHAIN: "inventory"}
+            pg_inventory_write.CHAIN: "inventory",
+            pg_goals_write.CHAIN: "goals"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -371,6 +390,20 @@ SELECT (SELECT last_value FROM {sequence})            AS last_value,
 _EXPENSE_NULLS_SQL = """
 SELECT count(*) FILTER (WHERE created_at IS NULL) AS created_at
 FROM app.manual_expenses
+"""
+
+# Over the whole table, for `_MOVEMENT_NULLS_SQL`'s reason below: three rows
+# at most, every one of them a number somebody typed. NOT measured on
+# production, unlike the movements: DuckDB defaults both columns and its
+# `set_goal` passes both, so a NULL the replication carried across would have
+# had to be inserted by hand. If one exists, this reports it the moment the
+# flag goes on — the chain is watched from the flag, before its first write —
+# which is the right time to learn it, and why the flip checks this layer
+# first.
+_GOAL_NULLS_SQL = """
+SELECT count(*) FILTER (WHERE updated_at IS NULL) AS updated_at,
+       count(*) FILTER (WHERE is_custom IS NULL)  AS is_custom
+FROM app.revenue_goals
 """
 
 # Over the whole table and not only the rows since the handover, because a row
@@ -501,6 +534,14 @@ async def _read_expenses(conn) -> Expenses:
         allocator=allocator,
         nulls=Nulls(table="app.manual_expenses",
                     counts={"created_at": int(row["created_at"])}))
+
+
+async def _read_goals(conn) -> Goals:
+    row = await conn.fetchrow(_GOAL_NULLS_SQL)
+    return Goals(nulls=Nulls(
+        table="app.revenue_goals",
+        counts={"updated_at": int(row["updated_at"]),
+                "is_custom": int(row["is_custom"])}))
 
 
 async def _read_inventory(conn, latched_at: Optional[datetime],
@@ -641,6 +682,7 @@ async def read_facts(*, pool=None) -> Facts:
                 reader_of = {
                     "expenses": _read_expenses,
                     "inventory": lambda c: _read_inventory(c, since, today),
+                    "goals": _read_goals,
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -675,6 +717,7 @@ async def read_facts(*, pool=None) -> Facts:
     return Facts(watched=names, whole=None, now=now,
                  expenses=groups.get("expenses"),
                  inventory=groups.get("inventory"),
+                 goals=groups.get("goals"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
                  unread=unread)
 
@@ -894,7 +937,7 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     against. It cannot be told apart from a chain that is fine, so it is
     reported rather than assumed harmless.
     """
-    from core import pg_expenses_write, pg_inventory_write
+    from core import pg_expenses_write, pg_goals_write, pg_inventory_write
 
     if facts is None:
         watched = tuple(sorted(watched_chains()))
@@ -929,6 +972,12 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
             issues += _initial_burst_issues(inv)
             issues += _first_seen_issues(inv)
             issues += _snapshot_issues(inv)
+
+    if isinstance(facts.goals, Unwatched):
+        issues.append(unwatched_issue(facts.goals.reason,
+                                      (pg_goals_write.CHAIN,)))
+    elif isinstance(facts.goals, Goals):
+        issues += _null_issues(facts.goals.nulls, pg_goals_write.CHAIN)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(

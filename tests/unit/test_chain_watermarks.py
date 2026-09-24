@@ -31,7 +31,7 @@ ENTITIES = ("orders", "products", "buyers", "offers", "stocks",
 
 @pytest.fixture
 def flags(monkeypatch):
-    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES"):
+    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
         monkeypatch.delenv(env, raising=False)
     return monkeypatch
 

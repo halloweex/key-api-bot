@@ -49,9 +49,11 @@ class TestEveryWriteChainIsRegistered:
             f"registered but not declaring: {sorted(registered - found)}")
 
     def test_the_walk_is_not_vacuous(self):
-        """Both chains that exist today are found, so an empty walk cannot pass."""
+        """Every chain that exists today is found, so an empty walk cannot pass
+        — chain 7a (DN-25) included, which is the one this walk must see for
+        the registry above to be proven rather than assumed."""
         found = {p.stem for p in CORE.glob("*.py") if _declares_a_write_chain(p)}
-        assert {"pg_inventory_write", "pg_expenses_write"} <= found
+        assert {"pg_inventory_write", "pg_expenses_write", "pg_goals_write"} <= found
 
 
 class TestTheShipperAndTheComparisonAskOneAnswer:
@@ -72,7 +74,7 @@ class TestTheShipperAndTheComparisonAskOneAnswer:
 
 @pytest.fixture
 def flags(monkeypatch):
-    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES"):
+    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
         monkeypatch.delenv(env, raising=False)
     return monkeypatch
 
@@ -1103,3 +1105,37 @@ class TestEveryOrderShipperAsksFirst:
         missing = [(rel, name) for rel, name, called in holding
                    if "order_tables_stood_down_or_owned" not in called]
         assert not missing, f"holds a pool but reads only the local latch: {missing}"
+
+
+class TestChain7aGoals:
+    """DN-25: `app.revenue_goals` joins the registry behind `KS_WRITE_GOALS`,
+    off by default — so the default stands down exactly what it did before."""
+
+    def test_off_by_default_stands_nothing_down(self, flags):
+        from core.pg_goals_write import writes_postgres
+        from core.write_chains import stood_down_sync_keys, stood_down_tables
+        assert writes_postgres() is False
+        assert stood_down_tables() == frozenset()
+        assert stood_down_sync_keys() == frozenset()
+
+    def test_only_the_goals_table_when_only_chain_7a_is_on(self, flags):
+        from core.write_chains import stood_down_sync_keys, stood_down_tables
+        flags.setenv("KS_WRITE_GOALS", "postgres")
+        assert stood_down_tables() == frozenset({"app.revenue_goals"})
+        # No `last_sync_*` key: goals are typed, never synced.
+        assert stood_down_sync_keys() == frozenset()
+
+    def test_an_unknown_value_raises_in_the_writer_and_stands_down_the_table(self, flags):
+        from core.pg_goals_write import writes_postgres
+        from core.write_chains import stood_down_tables_checked
+        flags.setenv("KS_WRITE_GOALS", "postgre")
+        with pytest.raises(RuntimeError, match="KS_WRITE_GOALS"):
+            writes_postgres()
+        tables, errors = stood_down_tables_checked()
+        assert tables == frozenset({"app.revenue_goals"})
+        assert list(errors) == ["pg_goals_write"]
+
+    def test_the_goals_table_is_one_the_shipper_actually_replaces(self):
+        from core.pg_goals_write import CHAIN_TABLES
+        from core.pg_operational import _FULL_REPLACE
+        assert set(CHAIN_TABLES) <= {pg for pg, _d, _c, _o in _FULL_REPLACE}

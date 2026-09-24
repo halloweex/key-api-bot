@@ -1322,6 +1322,24 @@ async def release_chain(pool, chain: ModuleType) -> bool:
     return True
 
 
+# What an operator reads at +2 min, per chain, in `deploy/stage4_soak.sh`. A
+# chain with no soak check of its own — chain 7a (DN-25) today — is told where
+# the same evidence lives rather than sent to a check about another chain's
+# tables: the hourly copy stamps `meta.mirror_state` for every table it
+# writes, which is what E1 and I1 read.
+_SOAK_AFTER_RELEASE = {
+    "KS_WRITE_EXPENSES": "run deploy/stage4_soak.sh and read E1 (expenses "
+                         "copy stood down) and E2",
+    "KS_WRITE_INVENTORY": "run deploy/stage4_soak.sh and read I1 (inventory "
+                          "copy stood down), I2 and I3",
+}
+_SOAK_WITHOUT_A_CHECK = (
+    "read meta.mirror_state for this chain's tables — deploy/stage4_soak.sh "
+    "has no check of its own for it yet — and see failures_since_ok at 0 and "
+    "last_ok_at moved by the next replicate_operational"
+)
+
+
 def _runbook(chain: ModuleType, *, executed: bool, released: bool = False) -> List[str]:
     """What the operator does next, in the order it has to happen.
 
@@ -1330,9 +1348,7 @@ def _runbook(chain: ModuleType, *, executed: bool, released: bool = False) -> Li
     has to be taken by whoever can watch the soak checks afterwards.
     """
     name = chain.WRITE_ENV
-    soak = ("E1 (expenses copy stood down) and E2"
-            if name == "KS_WRITE_EXPENSES"
-            else "I1 (inventory copy stood down), I2 and I3")
+    soak = _SOAK_AFTER_RELEASE.get(name, _SOAK_WITHOUT_A_CHECK)
     if not executed:
         return [
             "This was a dry run. Nothing was written and nothing released.",
@@ -1368,7 +1384,7 @@ def _runbook(chain: ModuleType, *, executed: bool, released: bool = False) -> Li
         "longer latched, so this variable decides again — and the next write "
         "re-latches the chain if it still says postgres.",
         "2. docker compose up -d web bot",
-        f"3. At +2 min run deploy/stage4_soak.sh and read {soak}: the hourly "
+        f"3. At +2 min {soak}: the hourly "
         "copy must be shipping this chain's tables again, and its watermarks "
         "must be moving.",
         "4. The `owner:` rows and the local marker are gone. /api/health's "

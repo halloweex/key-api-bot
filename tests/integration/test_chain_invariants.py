@@ -47,7 +47,7 @@ def _kyiv_day(stamp: datetime) -> date:
 
 async def _clean(pool):
     async with pool.acquire() as conn:
-        for table in ("app.manual_expenses", "app.stock_movements",
+        for table in ("app.manual_expenses", "app.revenue_goals", "app.stock_movements",
                       "app.inventory_sku_history", "app.inventory_history",
                       "app.sku_inventory_status", "bronze.offer_stocks",
                       "bronze.offers", "meta.chain_watermarks"):
@@ -121,6 +121,14 @@ async def _seed_healthy(conn, latched_at: datetime, today: date) -> None:
         "SELECT setval('app.manual_expenses_id_seq', "
         "COALESCE((SELECT MAX(id) FROM app.manual_expenses), 0) + 1, false)")
 
+    # Chain 7a: the three goals, each with the two columns its writer supplies.
+    await conn.executemany(
+        "INSERT INTO app.revenue_goals (period_type, goal_amount, is_custom, "
+        " calculated_goal, growth_factor, updated_at) "
+        "VALUES ($1, $2, $3, $2, 1.10, now())",
+        [("daily", 60000, False), ("weekly", 350000, True),
+         ("monthly", 1500000, True)])
+
     fresh = datetime.now(timezone.utc).isoformat()
     await conn.executemany(
         "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
@@ -130,10 +138,10 @@ async def _seed_healthy(conn, latched_at: datetime, today: date) -> None:
 
 @pytest_asyncio.fixture
 async def latched(monkeypatch):
-    """Both chains latched, a healthy Postgres behind them, and `get_pool`
+    """Every chain latched, a healthy Postgres behind them, and `get_pool`
     pointed at it — the state the invariants exist for."""
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES"):
+    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
         monkeypatch.delenv(env, raising=False)
 
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
@@ -145,7 +153,7 @@ async def latched(monkeypatch):
     # The marker carries the stamp, and `chain_latch.latch` would use *now*;
     # these invariants are all dated from the handover, so the fixture writes
     # the marker itself, exactly as the module reads it back.
-    for chain in ("pg_expenses_write", "pg_inventory_write"):
+    for chain in ("pg_expenses_write", "pg_inventory_write", "pg_goals_write"):
         chain_latch.MARKER_DIR.mkdir(parents=True, exist_ok=True)
         (chain_latch.MARKER_DIR / chain).write_text(
             f'{{"chain": "{chain}", "latched_at": "{latched_at.isoformat()}"}}',
@@ -336,6 +344,26 @@ class TestOneMutationEach:
                  if i.check_name == inv.COLUMN_NULL]
         assert len(found) == 1 and found[0].table_name == "app.manual_expenses"
         assert "created_at in 1 row(s)" in found[0].description
+
+    @pytest.mark.asyncio
+    async def test_a_null_goal_clock_or_custom_flag_names_the_column(self, latched):
+        """Chain 7a (DN-25). `updated_at` is the copy-back's clock and
+        `is_custom` decides whether `get_smart_goals` keeps a typed goal; the
+        Postgres table defaults neither."""
+        pool, _, _ = latched
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE app.revenue_goals SET updated_at = NULL "
+                "WHERE period_type = 'monthly'")
+            await conn.execute(
+                "UPDATE app.revenue_goals SET is_custom = NULL "
+                "WHERE period_type = 'weekly'")
+        found = [i for i in await _findings(names_only=False)
+                 if i.check_name == inv.COLUMN_NULL]
+        assert len(found) == 1 and found[0].table_name == "app.revenue_goals"
+        assert "updated_at in 1 row(s)" in found[0].description
+        assert "is_custom in 1 row(s)" in found[0].description
+        assert "pg_goals_write" in found[0].description
 
     @pytest.mark.asyncio
     async def test_a_null_recorded_at_and_source_are_one_finding(self, latched):

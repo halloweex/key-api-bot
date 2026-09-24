@@ -388,18 +388,29 @@ class GoalsMixin:
         suggestions = await self.calculate_suggested_goals()
         calculated = suggestions[period_type]["suggested"]
 
-        async with self.connection() as conn:
-            now = datetime.now(DEFAULT_TZ)
-            conn.execute("""
-                INSERT INTO revenue_goals (period_type, goal_amount, is_custom, calculated_goal, growth_factor, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (period_type) DO UPDATE SET
-                    goal_amount = excluded.goal_amount,
-                    is_custom = excluded.is_custom,
-                    calculated_goal = excluded.calculated_goal,
-                    growth_factor = excluded.growth_factor,
-                    updated_at = excluded.updated_at
-            """, [period_type, amount, is_custom, calculated, growth_factor, now])
+        # Chain 7a: `KS_WRITE_GOALS` decides which store holds the number a
+        # human typed. Routed here and not in the route, because
+        # `reset_goal_to_auto` writes through this method too. See
+        # `core/pg_goals_write.py`.
+        from core import pg_goals_write
+
+        if pg_goals_write.writes_postgres():
+            await pg_goals_write.set_goal(
+                period_type, amount, is_custom, calculated, growth_factor,
+                datetime.now(DEFAULT_TZ))
+        else:
+            async with self.connection() as conn:
+                now = datetime.now(DEFAULT_TZ)
+                conn.execute("""
+                    INSERT INTO revenue_goals (period_type, goal_amount, is_custom, calculated_goal, growth_factor, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (period_type) DO UPDATE SET
+                        goal_amount = excluded.goal_amount,
+                        is_custom = excluded.is_custom,
+                        calculated_goal = excluded.calculated_goal,
+                        growth_factor = excluded.growth_factor,
+                        updated_at = excluded.updated_at
+                """, [period_type, amount, is_custom, calculated, growth_factor, now])
 
         return {
             "periodType": period_type,

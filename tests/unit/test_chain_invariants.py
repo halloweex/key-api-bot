@@ -53,7 +53,7 @@ class TestNothingIsReadWhileNothingHasMoved:
 
     @pytest.mark.asyncio
     async def test_no_chain_watched_means_no_query_and_no_pool(self, monkeypatch):
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY"):
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         get_pool = AsyncMock(side_effect=AssertionError("asked for a pool"))
         with patch("core.pg.get_pool", new=get_pool):
@@ -140,6 +140,8 @@ class _Recorder:
             max_id = next((n for table, n in self.max_ids.items() if table in sql),
                           None)
             return {"last_value": 1, "is_called": False, "max_id": max_id}
+        if "revenue_goals" in sql:
+            return {"updated_at": 0, "is_custom": 0}
         if "recorded_at" in sql:
             return {"recorded_at": 0, "source": 0}
         if "created_at" in sql:
@@ -272,7 +274,7 @@ class TestAChainWithNoInvariants:
         fake.env_writes_postgres = lambda: True
         monkeypatch.setattr(write_chains, "WRITE_CHAINS",
                             write_chains.WRITE_CHAINS + (fake,))
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY"):
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
         return "pg_orders_write"
@@ -296,7 +298,68 @@ class TestAChainWithNoInvariants:
         missing = [chain_name(c) for c in WRITE_CHAINS
                    if chain_name(c) not in readers]
         assert not missing, f"no chain invariants for {missing}"
-        assert set(readers.values()) <= {"expenses", "inventory"}
+        assert set(readers.values()) <= {"expenses", "inventory", "goals"}
+        # And each names a field `Facts` actually carries — a reader whose
+        # group the verdict never looks at is read and then judged by nothing.
+        import dataclasses
+
+        fields = {f.name for f in dataclasses.fields(inv.Facts)}
+        assert set(readers.values()) <= fields, set(readers.values()) - fields
+
+
+class TestChain7aGoals:
+    """DN-25. `app.revenue_goals` has no allocator and no sync watermark; what
+    is true of it on its own is that its writer supplies the two columns
+    Postgres does not default — `updated_at`, the copy-back's clock, and
+    `is_custom`, without which `get_smart_goals` drops a typed goal for the
+    suggestion."""
+
+    @pytest.fixture
+    def flagged(self, monkeypatch):
+        monkeypatch.setenv("KS_WRITE_GOALS", "postgres")
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY"):
+            monkeypatch.delenv(env, raising=False)
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
+
+    def test_the_flag_alone_makes_it_watched(self, flagged):
+        assert inv.watched_chains() == {"pg_goals_write": None}
+
+    @pytest.mark.asyncio
+    async def test_it_reads_the_goals_table_and_nothing_else(self, flagged):
+        conn = _Recorder()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(conn))
+        assert facts.watched == ("pg_goals_write",) and facts.whole is None
+        assert isinstance(facts.goals, inv.Goals)
+        assert facts.expenses is None and facts.inventory is None
+        read = "\n".join(conn.sql)
+        assert "FROM app.revenue_goals" in read
+        for other in ("manual_expenses", "stock_movements", "chain_watermarks"):
+            assert other not in read, other
+        assert inv.check_chain_invariants(facts) == []
+
+    def test_a_null_either_column_names_it(self):
+        from core.data_quality import Severity
+
+        facts = inv.Facts(
+            watched=("pg_goals_write",), now=UTC_NOW,
+            goals=inv.Goals(nulls=inv.Nulls(
+                "app.revenue_goals", {"updated_at": 1, "is_custom": 2})))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert issue.check_name == inv.COLUMN_NULL
+        assert issue.table_name == "app.revenue_goals"
+        assert issue.severity is Severity.CRITICAL and issue.count == 3
+        assert "updated_at in 1 row(s)" in issue.description
+        assert "is_custom in 2 row(s)" in issue.description
+        assert "pg_goals_write" in issue.description
+
+    def test_an_unreadable_goals_table_is_blindness_not_silence(self):
+        facts = inv.Facts(watched=("pg_goals_write",), now=UTC_NOW,
+                          goals=inv.Unwatched("relation does not exist"))
+        issues = inv.check_chain_invariants(facts)
+        assert [i.check_name for i in issues] == [inv.UNWATCHED]
+        assert "pg_goals_write" in issues[0].description
+        assert inv.unverified_conditions(issues) == sorted(inv.CONDITIONS)
 
 
 class TestWhoIsWatched:

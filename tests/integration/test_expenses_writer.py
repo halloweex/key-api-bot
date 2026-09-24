@@ -219,7 +219,7 @@ class TestAFlagNotUnderstoodStandsDownOnlyItsChain:
         from core.duckdb_store import DuckDBStore
 
         monkeypatch.setenv("KS_PG_DSN", DSN)
-        for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES"):
+        for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         store = DuckDBStore(db_path=tmp_path / "typo.duckdb")
         await store.connect()
