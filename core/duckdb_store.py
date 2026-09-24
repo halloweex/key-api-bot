@@ -3127,8 +3127,49 @@ class DuckDBStore(
         await replicate_managers(self)
         return written
 
+    # How many buyers one DuckDB transaction carries. The whole batch used to be
+    # one transaction, and `sync-all-buyers` hands over every buyer KeyCRM has:
+    # measured on DuckDB 1.5.5 under the production 4 GB limit, 6 500 buyers
+    # commit in 22 s and 8 000 or more run out of memory — production holds
+    # about 20 000. Nothing else is lost by the split: each buyer's row and
+    # contacts are still written together, which is the only unit that must
+    # be atomic.
+    BUYER_WRITE_PORTION = 1000
+
     async def upsert_buyers(self, buyers: List["Buyer"]) -> int:
-        """Insert or update buyers from KeyCRM API.
+        """Write buyers to DuckDB in portions, mirroring each portion to Postgres.
+
+        THE MIRROR LIVES HERE NOW, AND ONLY HERE. It used to be a separate line
+        at one caller, `sync_missing_buyers`, so the other caller — the admin
+        `sync-all-buyers` — wrote DuckDB alone: a buyer it changed stayed
+        different in Postgres for good, and the daily comparison filed a
+        CRITICAL for it every morning with nothing able to repair it. With the
+        call inside the method every writer mirrors, and a test walks the tree
+        to keep it the only call site.
+
+        Each portion is committed, THEN mirrored, outside the store lock — the
+        mirror is a network round trip, and every other DuckDB reader waits
+        behind that lock. The mirror never raises; a failure lands in
+        meta.mirror_state where the comparison reads it, and the hourly ids-diff
+        ships what it missed.
+
+        Returns:
+            Number of buyers upserted
+        """
+        from core.pg_buyers import mirror_buyers
+
+        written = 0
+        for start in range(0, len(buyers or []), self.BUYER_WRITE_PORTION):
+            portion = buyers[start:start + self.BUYER_WRITE_PORTION]
+            written += await self._upsert_buyer_portion(portion)
+            await mirror_buyers(portion)
+            # Let the minute sync and the warehouse tick take the lock between
+            # portions of a long run.
+            await asyncio.sleep(0)
+        return written
+
+    async def _upsert_buyer_portion(self, buyers: List["Buyer"]) -> int:
+        """One transaction of buyers and their contacts, in DuckDB only.
 
         The rows come from `core.landing_rows.parse_buyers` — the same reading
         the Postgres mirror is handed — and are built BEFORE the transaction

@@ -1,5 +1,6 @@
 """Admin operations: DuckDB management, warehouse, cache, jobs, sync, events."""
 import asyncio
+import contextlib
 import logging
 
 from datetime import date
@@ -508,6 +509,38 @@ async def purge_orders(
 
 # ─── Buyer Sync ────────────────────────────────────────────────────────────────
 
+# How long a buyer route waits for the heavy-job lock before answering 409. The
+# minute sync holds it for seconds; a full sync or a resync holds it for
+# minutes, and an admin is better told "busy, try again" than kept on a request
+# that times out in the proxy first.
+HEAVY_LOCK_WAIT_S = 60
+
+
+@contextlib.asynccontextmanager
+async def _heavy_lock_or_409(what: str):
+    """The scheduler's heavy-job lock, waited for boundedly, or a 409.
+
+    The buyer routes write the same tables as the minute sync, and a write
+    interleaving with it is how the stores came to disagree before. `wait_for`
+    over `acquire` cannot leak the lock: asyncio.Lock only marks itself taken
+    after the waiter returns normally, so a timeout leaves it free.
+    """
+    from core.scheduler import get_scheduler
+
+    lock = get_scheduler()._heavy_job_lock
+    try:
+        await asyncio.wait_for(lock.acquire(), HEAVY_LOCK_WAIT_S)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{what}: a heavy job holds the warehouse; try again in a minute",
+        )
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 @router.post("/duckdb/sync-buyers")
 @limiter.limit("120/minute")
 async def sync_buyers(
@@ -517,11 +550,12 @@ async def sync_buyers(
     """Manually sync missing buyers from KeyCRM. (Admin enforced at router level.)"""
     from core.sync_service import get_sync_service
 
-    try:
-        sync_service = await get_sync_service()
-        count = await sync_service.sync_missing_buyers(limit=limit)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Buyer sync failed: {str(e)}")
+    async with _heavy_lock_or_409("Buyer sync"):
+        try:
+            sync_service = await get_sync_service()
+            count = await sync_service.sync_missing_buyers(limit=limit)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Buyer sync failed: {str(e)}")
 
     # The step never raises any more — it records a failure and returns 0 — so
     # "0 synced" and "failed" would read the same here without this. The class
@@ -542,34 +576,66 @@ async def sync_buyers(
 @router.post("/duckdb/sync-all-buyers")
 @limiter.limit("1/hour")
 async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)):
-    """Sync ALL buyers from KeyCRM (including those without orders). Requires admin."""
+    """Sync ALL buyers from KeyCRM (including those without orders). Requires admin.
+
+    DO NOT RUN THIS IN PRODUCTION TO SEE WHETHER IT WORKS. It is the only path
+    that fetches buyers with `include=loyalty,shipping`, so it fills city and
+    region for every buyer — which moves `customer_profile.city` and the SMS
+    audience's city filter. That is a decision, not a test.
+
+    Three things changed for chain 4's preparation, each because the old shape
+    could not complete or could not agree:
+
+    - The ~460 KeyCRM pages are fetched OUTSIDE any lock. They take minutes,
+      and holding the heavy-job lock through them stopped the minute sync.
+    - The write goes in portions of `DuckDBStore.BUYER_WRITE_PORTION`, each
+      under the heavy-job lock, released between them. One transaction of
+      twenty thousand buyers runs DuckDB out of memory (measured at 8 000).
+    - Every portion is mirrored to Postgres, because `upsert_buyers` mirrors
+      now. This route used to write DuckDB alone, and each buyer it changed
+      stayed a daily CRITICAL in the comparison that nothing could repair.
+
+    A 409 part-way leaves the portions already written in place — each is a
+    complete, mirrored upsert — and a rerun writes them again harmlessly.
+    """
     from core.keycrm import KeyCRMClient
 
+    store = await get_store()
+    portion = store.BUYER_WRITE_PORTION
     try:
-        store = await get_store()
-
         async with store.connection() as conn:
             before_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
 
         async with KeyCRMClient() as client:
             buyers = await client.fetch_all_buyers()
-
-        if buyers:
-            await store.upsert_buyers(buyers)
-
-        async with store.connection() as conn:
-            after_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
-
-        return {
-            "status": "success",
-            "message": "Synced all buyers from KeyCRM",
-            "buyers_fetched": len(buyers),
-            "before_count": before_count,
-            "after_count": after_count,
-            "new_buyers": after_count - before_count,
-        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Full buyer sync failed: {str(e)}")
+
+    written = 0
+    for start in range(0, len(buyers or []), portion):
+        async with _heavy_lock_or_409(
+                f"Full buyer sync stopped after {written} of {len(buyers)} buyers"):
+            try:
+                written += await store.upsert_buyers(buyers[start:start + portion])
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Full buyer sync failed after {written} of "
+                           f"{len(buyers)} buyers: {type(e).__name__}",
+                )
+
+    async with store.connection() as conn:
+        after_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+
+    return {
+        "status": "success",
+        "message": "Synced all buyers from KeyCRM",
+        "buyers_fetched": len(buyers or []),
+        "buyers_written": written,
+        "before_count": before_count,
+        "after_count": after_count,
+        "new_buyers": after_count - before_count,
+    }
 
 
 @router.get("/buyers/stats")

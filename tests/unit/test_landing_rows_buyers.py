@@ -179,18 +179,19 @@ def _sql_in(func, table):
 
 
 class TestTheDuckDBWriterFollowsTheContract:
-    """The DuckDB writer passes each row POSITIONALLY. Reordering `BuyerRow`
+    """The DuckDB writer — `_upsert_buyer_portion`, one transaction of the
+    portions `upsert_buyers` splits a batch into — passes each row POSITIONALLY. Reordering `BuyerRow`
     would shift every value into its neighbour's column without an error — a
     birthday in `note`, a phone in `email`. This is the only thing that says so."""
 
     def test_the_buyers_insert_lists_the_contract_in_order(self):
         from core.duckdb_store import DuckDBStore
-        assert _sql_in(DuckDBStore.upsert_buyers, "buyers") == \
+        assert _sql_in(DuckDBStore._upsert_buyer_portion, "buyers") == \
             [*BUYER_COLUMNS, "synced_at"]
 
     def test_the_contacts_insert_lists_the_contract_in_order(self):
         from core.duckdb_store import DuckDBStore
-        assert _sql_in(DuckDBStore.upsert_buyers, "buyer_contacts") == \
+        assert _sql_in(DuckDBStore._upsert_buyer_portion, "buyer_contacts") == \
             list(CONTACT_COLUMNS)
 
     def test_the_contract_has_one_home(self):
