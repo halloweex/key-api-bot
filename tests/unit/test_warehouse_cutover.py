@@ -215,6 +215,17 @@ class TestTheEvaluator:
                 "cohorts_clickhouse", "ch_url", "goals_bridge"} <= set(KEYS)
         assert {f"reader:{name}" for name in wc.WAREHOUSE_READERS} <= set(KEYS)
         assert "reader:KS_READ_TRAFFIC" in KEYS   # the UTM reader
+        # And the review's: no page open under a check the switch retires.
+        assert "retired_conditions_clear" in KEYS
+
+    def test_with_nothing_met_it_names_exactly_the_published_list(self):
+        """Both directions at once: an item the evaluator checks but the
+        published list leaves out is one nobody reading the list would know
+        to do, and the reverse is a list item nothing checks."""
+        unmet = wc.evaluate_preconditions({"KS_MIRROR_LANDING": "0"}, wc.Facts(
+            revision_error="x", bridge_owners=None, bridge_error="x",
+            open_retired=None, open_retired_error="x"))
+        assert [u.key for u in unmet] == KEYS
 
     def test_it_reads_values_as_the_modules_do(self):
         env = {**MET_ENV, "KS_PG_DERIVE": " OWN ", "KS_READ_GOLD": "Postgres"}
