@@ -298,6 +298,33 @@ class TestTheDerivationsLastStep:
             "the parse must use the derivation's pool")
         assert alert.await_count == 0
 
+    def test_the_parse_takes_the_layer_lock_after_the_derivation_let_it_go(
+            self, utm_postgres):
+        """The derivation holds `PG_LAYER_LOCK`, and its last step takes it
+        again through the real `parse_incremental_locked`. `asyncio.Lock` is
+        not reentrant: called inside the derivation's `async with`, the parse
+        would wait out `LOCK_WAIT_S` on its own caller and record a failure on
+        every run. The module docstring once said the derivation holds the
+        lock for the parse; this is what makes that sentence impossible to
+        follow quietly."""
+        from core import pg_silver
+        from core.scheduler import BackgroundScheduler
+
+        held = []
+
+        async def parse(pool=None):
+            held.append(pg_silver.PG_LAYER_LOCK.locked())
+            return {"parsed": 1, "rows": 9}
+
+        with patch("core.pg_silver.PG_LAYER_LOCK", asyncio.Lock()), \
+             patch.object(pg_utm_parse, "LOCK_WAIT_S", 0.05), \
+             patch.object(pg_utm_parse, "parse_incremental", parse), \
+             patch.object(BackgroundScheduler, "_pg_derivation_alert", AsyncMock()):
+            result, mocks = _derive(utm_postgres)
+        assert held == [True], "the parse ran without the lock, or never took it"
+        assert result["order_utm"] == {"parsed": 1, "rows": 9}
+        assert mocks["record_failure"].await_count == 0
+
     def test_a_gold_fault_does_not_stop_the_parse(self, utm_postgres):
         """After step 9 this parse is the only classifier. Inside the
         derivation's try a persistent Gold fault would have stopped it too,

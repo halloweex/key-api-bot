@@ -12,8 +12,9 @@ with the same `COALESCE(new, stored)`.
 **Wired behind `KS_UTM_PARSE`** (DN-19; default `duckdb`, which is today's
 behaviour byte for byte). Under `duckdb` nothing here runs and
 `ship_order_utm` stays the only writer of the table. Under `postgres` — which
-needs `KS_PG_DERIVE=own` — the derivation's last step is `parse_incremental`
-and the DuckDB tick stops shipping. The two never both write the table in one
+needs `KS_PG_DERIVE=own` — the derivation's last step is
+`parse_incremental_locked`, run once the derivation has let `PG_LAYER_LOCK`
+go, and the DuckDB tick stops shipping. The two never both write the table in one
 process: the choice is one cached mode, read before anything writes, and both
 the tick and the four re-parse doors ask it — the doors through
 `reparse_router`, which is the one place a re-parse that went round the tick
@@ -43,19 +44,32 @@ TWO SHAPES
 
 WHAT SERIALISES THEM
 
-`PG_LAYER_LOCK` is per process, and the full parse takes it — bounded, because
-three of its future callers are HTTP handlers. A full parse can also be run
-from a `docker exec` CLI, which is a process of its own, so both shapes take
-`pg_advisory_xact_lock(ADVISORY_LOCK_KEY)` inside their write transaction and
-read `bronze.orders` only once they hold it. Two parses therefore never
-interleave anywhere, and the second always reads what the first committed.
-`parse_incremental` does not take `PG_LAYER_LOCK` itself: its caller, the
-derivation, already holds it, and `asyncio.Lock` is not reentrant.
+`PG_LAYER_LOCK` is per process, and every parse in production runs under it,
+waited for at most `LOCK_WAIT_S`: doors behind HTTP handlers wait on it, and
+the ClickHouse shippers hold it across network I/O. `parse_full` takes it
+itself. `parse_incremental` does not — `parse_incremental_locked` takes it and
+then calls it, and that wrapper is what every caller uses: the derivation's
+last step and the two doors that only add. The derivation's step runs *after*
+`_derive_and_journal_pg_layers` has released the lock, not inside it.
+`asyncio.Lock` is not reentrant, so neither lock-taking shape may be called
+by code already holding it: moved inside the derivation's
+`async with PG_LAYER_LOCK`, the parse would wait `LOCK_WAIT_S` on its own
+caller, then record a failure, on every run. `parse_incremental` on its own
+assumes its caller holds the lock or needs no ordering against another
+in-process writer of the table.
+
+A full parse can also be run from a `docker exec` CLI, which is a process of
+its own, so both shapes take `pg_advisory_xact_lock(ADVISORY_LOCK_KEY)` inside
+their write transaction and read `bronze.orders` only once they hold it. Two
+parses therefore never interleave anywhere, and the second always reads what
+the first committed.
 
 Every wait for a lock inside Postgres is bounded by `lock_timeout`, rendered
-in milliseconds: under DN-19 the incremental waits while the derivation holds
-`PG_LAYER_LOCK`, so an unbounded wait on a key a stuck CLI or an idle psql
-holds would hang the derivation and, behind it, the sync.
+in milliseconds. A parse waits on the advisory key while it holds
+`PG_LAYER_LOCK` and, as the derivation's last step, the scheduler's
+`_heavy_job_lock` too, which every orders writer takes. An unbounded wait on a
+key a stuck CLI or an idle psql holds would therefore hang the derivation and,
+behind it, the sync.
 
 WHY THE FULL PARSE DELETES AND NEVER TRUNCATES
 
@@ -124,7 +138,7 @@ them:
 - under `duckdb`, `ship_after_reparse(store, force=force)`, as before;
 - under `postgres`, the parse itself — `parse_full` for the two doors that
   DELETE and re-parse everything (the reclassify and the CLI),
-  `parse_incremental` under `PG_LAYER_LOCK` for the two that only add.
+  `parse_incremental_locked` for the two that only add.
 
 `force` reaches `parse_full` from the CLI's flag and from nowhere else, as it
 reached the ship. The router never raises: the DuckDB half has already
@@ -212,7 +226,7 @@ def parses_in_postgres() -> bool:
 # another module happened to pick would serialise two unrelated jobs.
 ADVISORY_LOCK_KEY = 118142646187117
 
-# How long the full parse waits for `PG_LAYER_LOCK`, in this process.
+# How long either parse waits for `PG_LAYER_LOCK`, in this process.
 # `core/pg_order_utm.py`'s number, for its reason: a normal wait is one Silver
 # tick, so this fires only on a genuine hang.
 LOCK_WAIT_S = 120
