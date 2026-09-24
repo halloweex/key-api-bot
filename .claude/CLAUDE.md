@@ -2303,12 +2303,26 @@ and after the first Sunday compaction empty ones, behind a page that looks as
 if it works. So every such site calls `core.read_fallback.fall_back(surface,
 exc)`: one uniform ERROR line carrying that phrase, and a per-surface counter
 `/api/health` publishes as `read_fallbacks {surface: {count, last_at}}` — no
-exception text, the endpoint is public. **Nothing a read returns changed.**
+exception text, the endpoint is public. **Under the default, nothing a read
+returns changed.**
 
 `KS_READ_FALLBACK` (`duckdb` default | `off`) is read in `configure_modes()`,
-before the boot sync. `off` is validated and published but **not enforced**:
-refusing is DN-20b (HTTP, a 503 naming the surface) and DN-20c (reports,
-assistant, training, sync), which raise `ReadUnavailable` from `fall_back`. An
+before the boot sync. **Under `off`, `fall_back` raises `ReadUnavailable`**
+(DN-20b) instead of letting its caller read DuckDB, and one exception handler
+in `web/main.py` answers it, from any route, with a 503 carrying `surface` —
+the cause stays in the log. One raise, so it refuses every router an HTTP
+route reaches, the filter bar's lookups included, not only the tabs the plan
+named. A refusal is not a fallback: counted apart, logged without the phrase
+the soak greps for, published as `read_fallback_mode.refused` under `off`
+alone, so `read_fallbacks` stays empty there and the block keeps its shape
+under `duckdb`. `off` refuses a *failure*, never a switch left at `duckdb` —
+except the cohorts, which have no Postgres body: under `off` a live
+ClickHouse answers them or nobody does (`no_engine`). The trend's forecast
+overlay, which already degrades to "no forecast" on any failure, drops under
+a refusal and the chart answers. The non-HTTP consumers (the weekly reports,
+the assistant, training, the sync) are DN-20c; until it lands a refusal
+reaching one of them is an exception like any other, so **`off` is not set
+before DN-20c ships**. An
 unknown value **runs as `duckdb` and never raises** — web is the only syncer,
 so a crash loop over how a read degrades would stop order intake (OD-09); it
 publishes `read_fallback_mode.error` and the canary warns
