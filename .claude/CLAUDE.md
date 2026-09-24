@@ -2580,7 +2580,11 @@ NULL count, and a Postgres it cannot read is `chain_invariants_unwatched`
 ### Chain 1 before its flip (DN-24)
 
 Three things that would bite the day `KS_WRITE_INVENTORY=postgres` is set,
-closed while it is still off. None of them runs under today's flags.
+closed while it is still off. The lock and the Postgres step path do not run
+under today's flags. The preflight does, by design, since its question is
+asked before the flip: every `/api/health` cache miss (once a minute) reads
+Postgres — the revision check, then four reads on one web-pool connection —
+bounded at 5 s, and publishes the answer.
 
 - **One rebuild at a time.** The stock step holds the scheduler's heavy lock;
   the 01:00 `inventory_snapshot` job, its boot catch-up and

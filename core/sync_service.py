@@ -48,8 +48,10 @@ DEFAULT_TZ = ZoneInfo(DEFAULT_TIMEZONE)
 # tick only ever caught KeyCRM errors, so a Postgres error in these steps left
 # `incremental_sync` altogether — the job marked failed, the adaptive backoff
 # not updated. And a missing TEMPORARY grant fails the status rebuild on every
-# attempt, so the same error would have ended every tick for as long as the
-# grant stayed missing.
+# attempt, so the same error would have ended one tick an hour for as long as
+# the grant stayed missing: `last_sync_stocks` was stamped before the rebuild,
+# so the step was not due again for an hour, and each hour the rebuild failed
+# and both snapshots after it were skipped.
 #
 # So on that path a failure is recorded (`InventoryStepState`, published on
 # /api/health), `last_sync_stocks` is left where it was — it now moves only
