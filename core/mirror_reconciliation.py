@@ -464,6 +464,13 @@ async def fetch_pg_rows(pool, spec: MirroredTable) -> Dict[Any, Tuple[Any, ...]]
 # in which the main copy could be broken with nobody told. The ClickHouse rows
 # are NOT here; that store is optional and its daily window of silence was
 # accepted and written down when step 4 shipped.
+#
+# Deliberately NOT stood down when a write chain owns the order tables
+# (DN-22b, settling DN-22a's review): the chain's writer ships through
+# `pg_landing.write_orders`, the only writer of `bronze.orders` there may be,
+# so the watermark keeps moving under the chain and an 8-hour silence still
+# means orders stopped landing. `tests/unit/test_write_chains.py` pins both
+# halves — one writer, and this watch not asking the registry.
 WATCHED_MIRRORS: Tuple[str, ...] = ("bronze.orders",)
 
 
@@ -3997,6 +4004,13 @@ async def reconcile_order_versions(
     like everything else here — and more absolutely than anything else here,
     because a "repair" would mean inventing the history the table exists to be
     the only record of.
+
+    **It does not stand down when a write chain owns the order tables**
+    (DN-22b). The stand-down stops the sync's mirror, not the capture: the
+    chain's writer ships through `write_orders`, which captures in the same
+    transaction, so a day with no version is still a broken writer — and this
+    is the one liveness check on the one table nothing can rebuild, at the
+    moment its writer changes hands.
     """
     from core import pg_landing
     from core.pg import get_pool, require_revision

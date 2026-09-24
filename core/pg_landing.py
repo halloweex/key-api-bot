@@ -556,6 +556,16 @@ async def write_orders(
     defaults to the sync's `'change'`, so every caller that existed before
     OD-20 writes exactly what it wrote before; `core/pg_backfill.py` passes
     `'backfill'` for the two `manager_comment` repairs.
+
+    **The one writer of the order tables, a write chain's included** (DN-22b).
+    Chain 3's writer ships through here rather than beside it: this is where
+    the version is captured in the row's own transaction, and where the
+    `bronze.orders` watermark moves that the canary's `mirror_stale` and the
+    archive's `order_versions_stalled` read — both keep their meaning under the
+    chain only because it does. That writer should also record its failures
+    with `_record_failure`, as `mirror_orders` does, or `mirror_failing`
+    loses its fast signal. `tests/unit/test_write_chains.py` walks for a
+    second writer.
     """
     from core.pg import get_pool
 

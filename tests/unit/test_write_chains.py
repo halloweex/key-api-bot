@@ -1668,6 +1668,71 @@ class TestTheAdminBackfill:
         assert pool.only_asked_who_owns()
 
 
+class TestTheOrderWatchesOutliveTheStandDown:
+    """The 23.09 question (DN-22a's review), settled in DN-22b: when a chain
+    owns the order tables, the stand-down cuts the sync's mirror off from
+    `write_orders` — and `write_orders` is the only thing that moves the
+    `bronze.orders` watermark the canary pages on (`mirror_stale`, 8 h) and
+    the only thing that writes `app.order_versions`, whose liveness check
+    files `order_versions_stalled` (CRITICAL). Either the two watches learn to
+    read the stand-down, or the chain's writer keeps feeding both.
+
+    The writer keeps feeding both. The chain-3 writer ships through
+    `write_orders`, because nothing else may write the order tables or the
+    archive: the capture must land in the transaction that writes the row
+    (`core/pg_order_versions.py`), and a second writer of `bronze.orders`
+    beside it is exactly what `order_versions_missing` already reports as
+    "something is writing bronze.orders without going through write_orders".
+    So the watermark keeps moving and the archive keeps being written under
+    the chain, and both watches keep meaning what they say. Teaching them the
+    stand-down instead would blind the one liveness check on the one table
+    nothing can rebuild, at the moment its writer changes hands.
+
+    Pinned here, from the walk: the order tables and the archive each have
+    one writer — a chain module included, which the registry walk would
+    otherwise excuse as a destination."""
+
+    ORDER_TABLES = {ORDERS, LINES}
+    ARCHIVE = "app.order_versions"
+
+    def _writers_of(self, walk, tables) -> set:
+        return {key for key, targets in walk.writers().items()
+                if targets & set(tables)}
+
+    def test_the_order_tables_have_one_writer(self, walk):
+        assert self._writers_of(walk, self.ORDER_TABLES) == {
+            ("core/pg_landing.py", "write_orders")}
+
+    def test_the_archive_is_written_only_inside_it(self, walk):
+        capture = ("core/pg_order_versions.py", "capture_versions")
+        assert self._writers_of(walk, {self.ARCHIVE}) == {capture}
+        assert walk.callers.get(capture) == {("core/pg_landing.py", "write_orders")}
+
+    @pytest.mark.asyncio
+    async def test_it_moves_the_watched_watermark_and_writes_the_archive(self, pool):
+        """What a writer going through it keeps feeding: the watermark row the
+        canary reads and a version for an order it has not seen."""
+        from core.landing_rows import landed_orders
+        from core.mirror_reconciliation import WATCHED_MIRRORS
+        from core.pg_landing import write_orders
+        from core.pg_order_versions import TABLE
+
+        orders, products = landed_orders([_order(1)])
+        await write_orders(orders, products, replace_products=True)
+        assert ORDERS in WATCHED_MIRRORS
+        assert any("INSERT INTO meta.mirror_state" in s for s in pool.sql)
+        assert pool.wrote(TABLE)
+
+    def test_the_watches_do_not_ask_the_registry(self, walk):
+        """So a change that teaches them the stand-down is a change of this
+        decision, made here and not in passing."""
+        for key in (("core/mirror_reconciliation.py", "fetch_mirror_freshness"),
+                    ("core/mirror_reconciliation.py", "reconcile_order_versions"),
+                    ("web/routes/api/health.py", "_mirror_freshness")):
+            assert key in walk.fns, key
+            assert key not in walk.consulting, key
+
+
 class TestEveryOrderShipperAsksFirst:
     """Walked, not listed. A function that ships DuckDB's orders to Postgres —
     it calls `write_orders` or `mirror_orders` — must ask
