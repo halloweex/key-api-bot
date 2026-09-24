@@ -725,3 +725,328 @@ class TestWhatTheOrderStandDownTellsAHuman:
             assert row["status_id"] == 20 and row["mirrored_at"] > before, row
         if state in ("no_chain", "marker_present"):
             assert "order_owner_row_without_marker" not in page
+
+
+class TestTheLandingTablesOnAnOwnerRowAlone:
+    """DN-22b against the real `meta.chain_watermarks`: the buyers and the
+    order-level expenses, on an image older than the chain that owns them. No
+    module here declares either table, so only the owner rows can say they
+    moved — and the paths that hold a pool must read them, write nothing, and
+    the comparisons must page rather than call it a decision. The control
+    first, on the same database: without the rows the same calls ship."""
+
+    BUYER_ID = 990_201
+    EXPENSE_ID = 990_202
+    BUYERS = ("bronze.buyers", "bronze.buyer_contacts")
+    EXPENSES = "bronze.expenses"
+
+    async def _reset(self, pool):
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM bronze.buyer_contacts")
+            await conn.execute("DELETE FROM bronze.buyers")
+            await conn.execute("DELETE FROM bronze.expenses")
+            await conn.execute(
+                "DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                [*self.BUYERS, self.EXPENSES])
+
+    @pytest_asyncio.fixture
+    async def landed(self, stores):
+        """DuckDB holds one buyer with a contact and one expense; Postgres
+        holds neither, and no chain here declares either table."""
+        from core import write_chains
+
+        store, pool, env = stores
+        await self._reset(pool)
+        tables = {*self.BUYERS, self.EXPENSES}
+        env.setattr(write_chains, "WRITE_CHAINS", tuple(
+            c for c in write_chains.WRITE_CHAINS if not tables & set(c.CHAIN_TABLES)))
+        async with store.connection() as conn:
+            conn.execute("INSERT INTO buyers (id, full_name) VALUES (?, 'Anna')",
+                         [self.BUYER_ID])
+            conn.execute("INSERT INTO buyer_contacts (buyer_id, contact_type, value, "
+                         "is_primary) VALUES (?, 'phone', '+380500000201', TRUE)",
+                         [self.BUYER_ID])
+            conn.execute("INSERT INTO expenses (id, order_id, expense_type_id, amount) "
+                         "VALUES (?, 1, 1, 100.00)", [self.EXPENSE_ID])
+        yield store, pool
+        await self._reset(pool)
+
+    @staticmethod
+    async def _own(pool, *tables):
+        async with pool.acquire() as conn:
+            for table in tables:
+                await conn.execute(
+                    "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                    "VALUES ($1, $2, now())",
+                    chain_latch.owner_key(table), "2026-09-21T08:00:00+00:00")
+
+    @staticmethod
+    async def _count(pool, sql, *args):
+        async with pool.acquire() as conn:
+            return await conn.fetchval(sql, *args)
+
+    @pytest.mark.asyncio
+    async def test_the_control_ships_both(self, landed):
+        from core.pg_buyers import hourly_ids_diff
+        from core.pg_expense_backfill import hourly_expenses_ids_diff
+
+        store, pool = landed
+        assert (await hourly_ids_diff(store))["shipped"] >= 1
+        assert (await hourly_expenses_ids_diff(store))["shipped"] >= 1
+        assert await self._count(
+            pool, "SELECT count(*) FROM bronze.buyers WHERE id = $1", self.BUYER_ID) == 1
+        assert await self._count(
+            pool, "SELECT count(*) FROM bronze.expenses WHERE id = $1", self.EXPENSE_ID) == 1
+
+    @pytest.mark.asyncio
+    async def test_the_owner_rows_hold_them_and_postgres_gains_nothing(self, landed):
+        from core.pg_buyers import BUYER_UNIT, backfill_buyers, hourly_ids_diff
+        from core.pg_expense_backfill import (
+            EXPENSES_UNIT, backfill_expenses, hourly_expenses_ids_diff,
+        )
+        from core.pg_landing import tables_stood_down, tables_stood_down_or_owned
+
+        store, pool = landed
+        # One row per unit, and for the buyers the half that is not named.
+        await self._own(pool, "bronze.buyer_contacts", self.EXPENSES)
+        assert tables_stood_down(BUYER_UNIT) == frozenset()
+        assert await tables_stood_down_or_owned(pool, BUYER_UNIT) == frozenset(self.BUYERS)
+        assert await tables_stood_down_or_owned(pool, EXPENSES_UNIT) == {self.EXPENSES}
+
+        assert await hourly_ids_diff(store) == {"stood_down": sorted(self.BUYERS)}
+        assert await hourly_expenses_ids_diff(store) == {"stood_down": [self.EXPENSES]}
+        with pytest.raises(RuntimeError, match="write chain"):
+            await backfill_buyers(store)
+        with pytest.raises(RuntimeError, match="write chain"):
+            await backfill_expenses(store)
+
+        assert await self._count(pool, "SELECT count(*) FROM bronze.buyers") == 0
+        assert await self._count(pool, "SELECT count(*) FROM bronze.buyer_contacts") == 0
+        assert await self._count(pool, "SELECT count(*) FROM bronze.expenses") == 0
+        assert await self._count(
+            pool, "SELECT count(*) FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+            [*self.BUYERS, self.EXPENSES]) == 0
+
+    @pytest.mark.asyncio
+    async def test_the_comparisons_read_neither_table_and_say_what_the_sync_does(
+            self, landed):
+        """The expenses' per-tick mirror still ships on the local answer, so
+        that is a page; the buyers mirror reads the owner rows too (the
+        DN-22b review) and has stopped, so each buyers table is an INFO that
+        points at the latch's own finding."""
+        from core.mirror_reconciliation import reconcile_buyers, reconcile_expenses
+
+        store, pool = landed
+        await self._own(pool, "bronze.buyers", self.EXPENSES)
+        buyers = await reconcile_buyers(store)
+        expenses = await reconcile_expenses(store)
+        assert sorted((i.check_name, i.table_name, i.severity.value) for i in buyers) == [
+            ("mirror_stood_down", "bronze.buyer_contacts", "INFO"),
+            ("mirror_stood_down", "bronze.buyers", "INFO")]
+        assert [(i.check_name, i.table_name, i.severity.value) for i in expenses] == [
+            ("owner_row_without_marker", self.EXPENSES, "CRITICAL")]
+        assert "no chain in this build declares them" in expenses[0].description
+        assert all("chain_owner_unregistered" in i.description for i in buyers)
+
+    @pytest.mark.asyncio
+    async def test_the_buyers_mirror_stands_down_on_them_too(self, landed):
+        """The sync's own shipper of the buyers: nothing lands, no watermark
+        moves. The control is the same batch without the row."""
+        from core.models import Buyer
+        from core.pg_buyers import mirror_buyers
+
+        store, pool = landed
+        batch = [Buyer(id=self.BUYER_ID, full_name="Anna", phones=["+380500000201"])]
+        await self._own(pool, "bronze.buyer_contacts")
+        out = await mirror_buyers(batch)
+        assert out["stood_down"] == sorted(self.BUYERS), out
+        assert await self._count(pool, "SELECT count(*) FROM bronze.buyers") == 0
+        assert await self._count(
+            pool, "SELECT count(*) FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+            list(self.BUYERS)) == 0
+
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM meta.chain_watermarks")
+        assert (await mirror_buyers(batch)) == {"rows": 1}
+        assert await self._count(
+            pool, "SELECT count(*) FROM bronze.buyers WHERE id = $1", self.BUYER_ID) == 1
+
+
+class TestTheClassificationOnAnOwnerRowAlone:
+    """The DN-22b review, reproduced here first: a chain owns the manager
+    classification in Postgres, its marker is lost (flag `duckdb`, no file),
+    and a human has reclassified manager 4 there — an interval DuckDB never
+    saw. `replicate_managers` asked the local answer alone, and its full
+    replace deleted the interval the first time it ran; the 07:30 page came
+    after. It reads the owner rows now, before DuckDB. The control on the same
+    database shows the replace is real."""
+
+    TABLES = ("bronze.managers", "app.manager_classifications")
+
+    @pytest_asyncio.fixture
+    async def reclassified(self, stores):
+        import types
+
+        from core import write_chains
+        from core.pg_replication import replicate_managers
+
+        store, pool, env = stores
+        fake = types.ModuleType("core.pg_managers_write")
+        fake.WRITE_ENV = "KS_WRITE_MANAGERS"
+        fake.CHAIN_TABLES = self.TABLES
+        fake.env_writes_postgres = lambda: False          # flag at duckdb
+        env.setattr(write_chains, "WRITE_CHAINS", write_chains.WRITE_CHAINS + (fake,))
+        async with store.connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO managers (id, name, is_retail) "
+                         "VALUES (4, 'M', TRUE)")
+            conn.execute("DELETE FROM manager_classifications")
+            conn.execute("INSERT INTO manager_classifications (manager_id, is_retail, "
+                         "valid_from) VALUES (4, TRUE, DATE '1970-01-01')")
+        assert (await replicate_managers(store))["ok"]    # Postgres as DuckDB has it
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE app.manager_classifications "
+                               "SET valid_to = DATE '2026-09-22' WHERE manager_id = 4")
+            await conn.execute(
+                "INSERT INTO app.manager_classifications "
+                "(manager_id, is_retail, valid_from, set_by, note) "
+                "VALUES (4, FALSE, DATE '2026-09-22', 1, 'human, via the chain')")
+        yield store, pool
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.manager_classifications")
+            await conn.execute("DELETE FROM bronze.managers")
+            await conn.execute(
+                "DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                list(self.TABLES))
+
+    @staticmethod
+    async def _intervals(pool):
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT is_retail, valid_from, note FROM app.manager_classifications "
+                "WHERE manager_id = 4 ORDER BY valid_from")
+        return [(r["is_retail"], r["valid_from"].isoformat(), r["note"]) for r in rows]
+
+    @pytest.mark.asyncio
+    async def test_the_control_replaces_the_human_interval(self, reclassified):
+        from core.pg_replication import replicate_managers
+
+        store, pool = reclassified
+        assert (await replicate_managers(store))["ok"]
+        assert await self._intervals(pool) == [(True, "1970-01-01", None)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("named", TABLES)
+    async def test_the_owner_row_keeps_it(self, reclassified, named):
+        from core.pg_replication import replicate_managers
+
+        store, pool = reclassified
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                "VALUES ($1, '2026-09-21T08:00:00+00:00', now())",
+                chain_latch.owner_key(named))
+            before = await conn.fetchval(
+                "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = $1",
+                "app.manager_classifications")
+
+        out = await replicate_managers(store)
+
+        assert out["ok"] is False and out["error"] is None, out
+        assert out["stood_down"] == sorted(self.TABLES), out
+        assert await self._intervals(pool) == [
+            (True, "1970-01-01", None), (False, "2026-09-22", "human, via the chain")], (
+            "the classification copy deleted an interval only Postgres held")
+        async with pool.acquire() as conn:
+            after = await conn.fetchval(
+                "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = $1",
+                "app.manager_classifications")
+        assert after == before
+
+
+class TestAnOwnerRowNoChainHereDeclares:
+    """The DN-22b review, against the real `meta.chain_watermarks`: an image
+    older than chain 4, owner rows for its three tables, and a verdict a human
+    overrode in Postgres that DuckDB never saw. The buyers' own paths stood
+    down on the rows; the hourly full replace did not, and put DuckDB's
+    verdict back within the hour — after which the two copies agreed and the
+    comparison had nothing to say. The control first, on the same database."""
+
+    BUYER_ID = 990_301
+    TABLES = ("bronze.buyers", "bronze.buyer_contacts", "app.buyer_gender")
+
+    @pytest_asyncio.fixture
+    async def overridden(self, stores):
+        """DuckDB says 'f' by name; Postgres holds a human's 'm'. No chain in
+        this build declares any of the three tables."""
+        from core import write_chains
+
+        store, pool, env = stores
+        env.setattr(write_chains, "WRITE_CHAINS", tuple(
+            c for c in write_chains.WRITE_CHAINS
+            if not set(self.TABLES) & set(c.CHAIN_TABLES)))
+        async with store.connection() as conn:
+            conn.execute("INSERT INTO buyers (id, full_name) VALUES (?, 'Anna')",
+                         [self.BUYER_ID])
+            conn.execute(
+                "INSERT INTO buyer_gender (buyer_id, gender, method, confidence, "
+                "decided_from, rules_version, override_by_human, decided_at) VALUES "
+                "(?, 'f', 'name', 'high', 'first_name', 1, FALSE, now())",
+                [self.BUYER_ID])
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.buyer_gender")
+            await conn.execute(
+                "INSERT INTO app.buyer_gender (buyer_id, gender, method, confidence, "
+                "decided_from, rules_version, override_by_human, decided_at) VALUES "
+                "($1, 'm', 'human', 'certain', 'first_name', 1, TRUE, now())",
+                self.BUYER_ID)
+        yield store, pool
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.buyer_gender")
+
+    async def _verdict(self, pool):
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT gender, method, override_by_human FROM app.buyer_gender "
+                "WHERE buyer_id = $1", self.BUYER_ID)
+        return dict(row) if row else None
+
+    @pytest.mark.asyncio
+    async def test_the_control_replaces_the_override(self, overridden):
+        from core.pg_operational import replicate_operational
+
+        store, pool = overridden
+        result = await replicate_operational(store)
+        assert "error" not in result, result
+        assert await self._verdict(pool) == {
+            "gender": "f", "method": "name", "override_by_human": False}
+
+    @pytest.mark.asyncio
+    async def test_the_owner_rows_keep_it_and_the_comparison_pages(self, overridden):
+        from core.mirror_reconciliation import reconcile_operational
+        from core.pg_buyers import hourly_ids_diff
+        from core.pg_operational import replicate_operational
+
+        store, pool = overridden
+        stamp = "2026-09-21T08:00:00+00:00"
+        async with pool.acquire() as conn:
+            for table in self.TABLES:
+                await conn.execute(
+                    "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                    "VALUES ($1, $2, now())", chain_latch.owner_key(table), stamp)
+
+        # The buyers' own path, as before this fix — the two now agree.
+        assert "stood_down" in await hourly_ids_diff(store)
+        result = await replicate_operational(store)
+
+        assert "error" not in result, result
+        assert await self._verdict(pool) == {
+            "gender": "m", "method": "human", "override_by_human": True}, (
+            "the hourly copy replaced a verdict only Postgres held")
+        assert "app.buyer_gender" in result["stood_down"]
+        assert result["chain_owner_unregistered"] == {"app.buyer_gender": stamp}
+
+        issues = await reconcile_operational(store)
+        (page,) = [i for i in issues if i.check_name == "chain_owner_unregistered"]
+        assert page.severity.value == "CRITICAL"
+        assert page.table_name == ", ".join(sorted(self.TABLES))
+        assert [i for i in issues if i.table_name == "app.buyer_gender"] == []

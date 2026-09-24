@@ -1868,14 +1868,20 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "POST /api/mirror/backfill/<orders|expenses> for the table named, "
      "then wait for 07:30"),
     # The generic `mirror_` line would send the reader to a re-ship the stand
-    # down exists to prevent. Filed on the local answer only — the marker or
-    # the flag — where the sync's mirror has stopped too.
+    # down exists to prevent. Filed wherever the sync's shipper has stopped
+    # too: on the local answer, and on the owner rows alone for the buyers and
+    # the classification, whose latch fault is paged under its own name.
     ("mirror_stood_down",
-     "Not a defect: a write chain owns the order tables. Never backfill them from DuckDB"),
+     "Not a defect: a write chain owns the table. Never backfill it from DuckDB"),
     # The owner rows alone: the sync's mirror has NOT stopped, and every tick
     # writes DuckDB's copy over the chain's rows. Two roads, one line each.
     ("order_owner_row_without_marker",
      "Sync overwrites chain-owned orders each tick: restore data/write-chain-owners "
+     "(or redeploy the chain's build), else scripts/chain_copy_back.py"),
+    # The same, for the catalogue and the order-level expenses (DN-22b), whose
+    # per-tick mirror asks the local answer alone.
+    ("owner_row_without_marker",
+     "Sync overwrites chain-owned rows each run: restore data/write-chain-owners "
      "(or redeploy the chain's build), else scripts/chain_copy_back.py"),
     ("ch_", "Wait for the hourly ch_sync; stuck — check KS_CH_URL and the grant"),
     ("ch_history_", "Lost in PG and CH at once is unrepairable — a human decides"),
@@ -1895,6 +1901,8 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Compare data/write-chain-owners/<chain> with the owner: rows in meta.chain_watermarks; scripts/chain_copy_back.py is the only release"),
     ("chain_shipper_overwrote",
      "Do not re-run the shipper: it replaced rows only Postgres held. Read meta.mirror_state.last_ok_at, then restore from the nightly dump"),
+    ("chain_owner_unregistered",
+     "Redeploy a build that declares the chain, or run scripts/chain_copy_back.py from one; never re-ship these tables from DuckDB"),
     ("sync_watermarks_unwatched",
      "The integrity job must pre-read meta.chain_watermarks, or the chain's flag goes back"),
     # The standing watch on a chain's own tables (DN-07). Nothing here is
@@ -2010,11 +2018,13 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "write_chain_flag_invalid": "a write chain's flag is not understood",
     "chain_latch_disagrees": "the two copies of a chain's latch disagree",
     "chain_shipper_overwrote": "the hourly copy overwrote a table it no longer owns",
+    "chain_owner_unregistered": "a write chain owns tables this build does not know",
     "integrity_check_raised": "integrity checks crashed",
     "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",
     "mirror_stood_down": "copy not compared: a write chain owns it",
     "order_owner_row_without_marker": "the sync is overwriting order tables a write chain owns",
+    "owner_row_without_marker": "the sync is overwriting tables a write chain owns",
     "mirror_failing": "mirror failing",
     "orders_without_line_items": "orders without line items",
     "headline_vs_line_items": "order total ≠ line items",

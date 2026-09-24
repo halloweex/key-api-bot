@@ -36,6 +36,9 @@ from typing import Any, Dict, Sequence
 logger = logging.getLogger(__name__)
 
 EXPENSES_TABLE = "bronze.expenses"
+# Shipped alone — by `pg_landing.mirror_expenses` and by this backfill — so it
+# changes hands alone (`pg_landing.tables_stood_down`).
+EXPENSES_UNIT = (EXPENSES_TABLE,)
 
 # Smaller than the orders backfill's 2 000 because the whole table is 15 020
 # rows: a chunk that size would make the loop a formality and the progress log
@@ -89,14 +92,31 @@ async def backfill_expenses(
     The DuckDB reads and the Postgres round trips are in separate blocks —
     every reader waits behind the store lock, so awaiting the network while
     holding it would stall the dashboard for the length of the copy.
+
+    Refuses, the same loud way, once a write chain owns `bronze.expenses`
+    (DN-22b; it is chain 3's, beside the orders): "missing from Postgres" stops
+    meaning "lost by the mirror" the moment another writer fills the table.
+    The local answer before Postgres is asked anything, the owner rows after
+    `require_revision()`.
     """
     from core.landing_rows import EXPENSE_COLUMNS
     from core.pg import get_pool, require_revision
-    from core.pg_landing import _statement, _WATERMARK_OK
+    from core.pg_landing import (
+        _statement, _WATERMARK_OK, tables_stood_down, tables_stood_down_or_owned,
+    )
 
     started = time.monotonic()
-    pool = pool or await get_pool()
-    await require_revision()
+    moved = tables_stood_down(EXPENSES_UNIT)
+    if not moved:
+        pool = pool or await get_pool()
+        await require_revision()
+        moved = await tables_stood_down_or_owned(pool, EXPENSES_UNIT)
+    if moved:
+        raise RuntimeError(
+            f"{', '.join(sorted(moved))} is written by a write chain, not "
+            "shipped out of DuckDB; refusing to backfill over rows only "
+            "Postgres holds."
+        )
 
     have = await _postgres_ids(pool)
     async with store.connection() as conn:
@@ -162,15 +182,27 @@ async def hourly_expenses_ids_diff(store) -> Dict[str, Any]:
 
     Cheap enough to belong on an hourly job: two id scans over 15,020 and
     ~15,000 rows, and on the ordinary tick the difference is empty.
+
+    Stands down quietly once a write chain owns `bronze.expenses` (DN-22b),
+    before it reads it — `hourly_orders_ids_diff`'s arrangement: the backfill
+    would refuse anyway, but as a raise, and this job would log that as an
+    ERROR every hour for a state that is a decision, not a fault.
     """
     from core import pg_landing
 
     if not pg_landing.enabled():
         return {"skipped": "KS_PG_DSN is not set"}
     try:
-        from core.pg import get_pool
+        from core.pg import get_pool, require_revision
 
-        pool = await get_pool()
+        moved = pg_landing.tables_stood_down(EXPENSES_UNIT)
+        if not moved:
+            pool = await get_pool()
+            await require_revision()
+            moved = await pg_landing.tables_stood_down_or_owned(pool, EXPENSES_UNIT)
+        if moved:
+            return {"stood_down": sorted(moved)}
+
         async with pool.acquire() as conn:
             had_history = await conn.fetchval(
                 "SELECT backfilled_at IS NOT NULL FROM meta.mirror_state "

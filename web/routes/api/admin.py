@@ -234,8 +234,44 @@ async def backfill_mirror_expenses(
     Foreground, unlike the orders backfill: 15,020 narrow rows is seconds
     rather than minutes, so a detached task would only make the result harder
     to read.
+
+    409 once a write chain owns `bronze.expenses` (DN-22b), asked here before
+    anything starts, as the orders route asks: the local answer first, then
+    the owner rows after `require_revision()`. The backfill refuses that state
+    itself, but as a raise, which this route used to turn into a 500 reading
+    "Backfill failed" — about a run that must not happen, not one that broke.
+    An owner read that fails is a 503: nothing can be verified.
     """
-    from core.pg_expense_backfill import backfill_expenses
+    from core.pg_expense_backfill import EXPENSES_UNIT, backfill_expenses
+    from core.pg_landing import tables_stood_down, tables_stood_down_or_owned
+
+    moved = tables_stood_down(EXPENSES_UNIT)
+    if not moved:
+        from core.pg import get_pool, require_revision
+
+        try:
+            pool = await get_pool()
+            await require_revision()
+            moved = await tables_stood_down_or_owned(pool, EXPENSES_UNIT)
+        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
+            logger.error("Expense backfill: cannot read who owns "
+                         "bronze.expenses: %s: %s", type(e).__name__, e)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Cannot tell whether a write chain owns bronze.expenses, "
+                    f"so nothing was started: {type(e).__name__}: {e}"
+                ),
+            ) from e
+    if moved:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{', '.join(sorted(moved))} is written by a write chain, not "
+                "shipped out of DuckDB; a backfill would overwrite rows only "
+                "Postgres holds."
+            ),
+        )
 
     store = await get_store()
     try:
@@ -733,10 +769,12 @@ async def set_manager_retail_status(
     from core.pg_replication import replicate_managers
 
     replica = await replicate_managers(store)
-    if replica and replica.get("ok") is False:
+    if replica and replica.get("error"):
         # The classification is stored and the warehouse marked dirty; only
         # the Postgres copy is behind, until the next manager sync. Said in
-        # the response rather than discovered in the 09:00 digest.
+        # the response rather than discovered in the 09:00 digest. A copy
+        # that was skipped — the mirror off, or a write chain owning the
+        # tables (DN-22b) — did not fail, and its reason is in `replica`.
         logger.warning("Manager %s classified, but the Postgres replica failed: %s",
                        manager_id, replica.get("error"))
 

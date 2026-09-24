@@ -750,7 +750,21 @@ async def replicate_operational(
             owners = await chain_latch.read_owners(pool)
             marker_lost = {name: at for name, at in chain_latch.claimed_chains(owners).items()
                            if not chain_latch.latched(name)}
-            stood_down = stood_down | chain_latch.claimed_tables(owners)
+            # An owner row counts as itself as well as through its chain
+            # (`owned_tables`): on an image older than the chain no chain here
+            # declares the table, and the replace below would put DuckDB's
+            # frozen copy over what the chain wrote — `app.buyer_gender`'s
+            # human overrides, reproduced in the DN-22b review. Not stamped on
+            # the watermark: the chain, not this job, is what writes these
+            # tables, and a count only a later shipment could clear would
+            # outlive the rollback. The daily comparison pages it instead
+            # (`chain_owner_unregistered`).
+            unregistered = {
+                table: at
+                for table, at in chain_latch.unregistered_owned_tables(owners).items()
+                if table in _tables_to_ship(frozenset())
+            }
+            stood_down = stood_down | chain_latch.owned_tables(owners)
             # Narrowed again, so that a failure from here on is stamped only on
             # tables this run was really going to write — never on one Postgres
             # owns, whose watermark describes a copy that is standing down.
@@ -849,6 +863,12 @@ async def replicate_operational(
                 result["chain_flag_mismatch"] = mismatches
             if marker_lost:
                 result["chain_marker_lost"] = marker_lost
+            if unregistered:
+                result["chain_owner_unregistered"] = unregistered
+                logger.warning(
+                    "Operational history: owner rows name %s, which no chain in "
+                    "this build declares; not copied out of DuckDB",
+                    ", ".join(sorted(unregistered)))
             # One stamp per table per reason, so a chain that is both latched
             # and misspelt says both things rather than the first one found. The
             # flag error is written LAST and so is the one `last_error` keeps:

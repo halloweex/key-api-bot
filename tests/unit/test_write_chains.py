@@ -1,8 +1,11 @@
 """Which tables have changed hands — one answer, found by walking, not listed.
 
-Stage 4 moves writes chain by chain. When a chain writes Postgres, the hourly
-shipper and the daily comparison must both stop touching its tables, and must
-stop together. Both ask `core.write_chains.stood_down_tables()`.
+Stage 4 moves writes chain by chain. When a chain writes Postgres, everything
+that ships its tables out of DuckDB and everything that compares them must stop
+touching them, and must stop together. All of them ask the registry
+(`core.write_chains`), and since DN-22b a walk finds every function that writes
+`bronze.*` or `app.*` in Postgres, and every comparison of those tables, and
+fails on one that does not ask.
 
 The guard below walks `core/` rather than trusting `WRITE_CHAINS`: a guard that
 names its subjects guards only the ones somebody remembered (the mirror-spec
@@ -16,6 +19,7 @@ from __future__ import annotations
 import ast
 import inspect
 import pathlib
+import re
 import textwrap
 
 import pytest
@@ -57,8 +61,629 @@ class TestEveryWriteChainIsRegistered:
                 "pg_expense_types_write"} <= found
 
 
-class TestTheShipperAndTheComparisonAskOneAnswer:
-    def test_both_sites_call_the_registry_and_neither_spells_a_chain(self):
+# ─── Every path that writes bronze.* or app.* asks who owns it (DN-22b) ──────
+#
+# Walked, not listed. This used to name its two subjects — the hourly shipper
+# and the daily comparison of the operational tables — and so guarded exactly
+# those two while the catalogue, the expenses, the buyers and the manager
+# classification shipped past the registry. The walk finds every function in
+# core/, web/ and scripts/ that executes a Postgres write naming a `bronze.` or
+# `app.` table, or one whose target it cannot read (`INSERT INTO {table}`: a
+# guard that could not resolve a name must not read it as "not ours"). Each
+# must ask the registry itself, or be reached only from functions that do —
+# `write_orders`, `pg_buyers._write` and `write_managers` are such primitives,
+# and it is their callers that ask. What is exempt is the destination side,
+# each entry with its reason, and the list must be exactly what the walk finds.
+#
+# Two shapes the walk used to miss, found by the DN-22b review, are read now: a
+# helper that transforms the SQL it is handed before executing it
+# (`conn.execute(numbered(sql))`, or handing it on to another such helper —
+# `_users_run` → `execute(rendered)`), whose caller's literal names the target;
+# and `copy_records_to_table`/`copy_to_table`, which carry no SQL at all and
+# are read by their `schema_name` — an unresolved or absent one counts.
+
+_WALKED = ("core", "web", "scripts")
+_WRITE_SQL = re.compile(
+    r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+"
+    r"(?:ONLY\s+)?(bronze\.\w+|app\.\w+|\{[^}]*\})",
+    re.IGNORECASE)
+# An awaited call on one of these is asyncpg; DuckDB's are synchronous.
+_PG_EXECUTE = {"execute", "executemany", "copy_records_to_table", "copy_to_table",
+               "fetch", "fetchval", "fetchrow"}
+# The two that write rows without a statement the regex could read.
+_PG_COPY_IN = {"copy_records_to_table", "copy_to_table"}
+
+# The destination side: code that writes Postgres because Postgres is where
+# that table's writer lives, not because it ships a copy out of DuckDB. Each
+# value is the reason and, where the reason is a switch the function checks,
+# the name the function must evaluate for the reason to be true of it.
+# The registered write chains — the destination the registry routes to — are
+# exempt by being registered, not by being listed here.
+_DESTINATION = {
+    ("core/alert_actions.py", "request"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
+    ("core/alert_actions.py", "complete"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
+    ("core/alert_archive.py", "_write_fired"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
+    ("core/alert_archive.py", "_write_resolved"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
+    ("core/alert_archive.py", "_write_escalated"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
+    ("core/ch_history.py", "ship_history"): (
+        "writes ClickHouse's history.*, not Postgres", None),
+    ("core/pg_silver.py", "rebuild_silver"): (
+        "derives silver.orders inside Postgres; its UPDATE's target is the "
+        "dialect's Silver table, which the walk cannot read", "SILVER_TABLE"),
+    ("core/pg_vitrina.py", "rebuild_customer_profile"): (
+        "derived inside Postgres from Postgres's own Silver", None),
+    ("core/pg_vitrina.py", "reconcile_customer_profile"): (
+        "derived inside Postgres from Postgres's own Silver", None),
+    ("core/pg_sms.py", "replicate_sms"): (
+        "moved by its own switch before the registry existed", "sms_store_is_postgres"),
+    ("core/pg_dashboard_users.py", "replicate_dashboard_users"): (
+        "moved by its own switch before the registry existed", "user_store_is_postgres"),
+    ("core/pg_bot_state.py", "replicate_bot_state"): (
+        "moved by its own switch before the registry existed", "ENGINE_ENV"),
+    ("core/chain_transfer.py", "copy_back"): (
+        "DN-08's copy-back writes DuckDB out of Postgres; its one Postgres write "
+        "is `release_chain`'s delete of meta.chain_watermarks — the walk reads "
+        "`_write_duckdb`'s DuckDB statements as its own", None),
+}
+
+# The store helpers that route every statement handed to them by a switch of
+# their own, and so are where the Postgres half of a moved store is written —
+# the destination side, like the replicators above. A writer whose only
+# Postgres calls are to one of these is exempt through it: `{helper: switch}`,
+# and the test checks the helper evaluates the switch and still routes a
+# writer. This is what the walk saw once `_users_run` stopped being invisible.
+_ROUTED_BY_SWITCH = {
+    ("core/repositories/customers.py", "_sms_run"): "sms_store_is_postgres",
+    ("core/repositories/users.py", "_users_run"): "user_store_is_postgres",
+    ("core/repositories/users.py", "_perms_run"): "user_store_is_postgres",
+}
+
+
+class _Module:
+    """One parsed module: its string constants, functions and imports."""
+
+    def __init__(self, path: pathlib.Path):
+        self._parse(path.relative_to(CORE.parent).as_posix(),
+                    path.read_text(encoding="utf-8"))
+
+    @classmethod
+    def from_source(cls, rel: str, source: str) -> "_Module":
+        """A module that is not on disk: the walk's own tests feed it shapes."""
+        module = cls.__new__(cls)
+        module._parse(rel, textwrap.dedent(source))
+        return module
+
+    def _parse(self, rel: str, source: str) -> None:
+        self.rel = rel
+        self.name = rel[:-len(".py")].replace("/", ".")
+        self.tree = ast.parse(source)
+        self.consts: dict = {}
+        self.funcs: dict = {}
+        self.imports: dict = {}
+        self.module_aliases: dict = {}
+        for node in ast.walk(self.tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.funcs.setdefault(node.name, node)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for a in node.names:
+                    self.imports[a.asname or a.name] = (node.module, a.name)
+                    self.module_aliases[a.asname or a.name] = f"{node.module}.{a.name}"
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    self.module_aliases[a.asname or a.name] = a.name
+
+    def load_consts(self, modules) -> None:
+        """Module-level strings, rendered in order, f-strings with the names
+        they interpolate; a constant imported from a walked module too, and a
+        constant built by calling a helper of this module."""
+        for node in self.tree.body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if node.value is None:
+                continue
+            text = self.render(node.value, modules)
+            if text is None and isinstance(node.value, ast.Call) \
+                    and isinstance(node.value.func, ast.Name) \
+                    and node.value.func.id in self.funcs:
+                text = " ".join(self.texts(self.funcs[node.value.func.id], modules))
+            if text is None:
+                continue
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    self.consts[t.id] = text
+
+    def const(self, name, modules, bindings=None):
+        """A name's string value: an argument bound at the call being
+        inlined, a constant of this module, or one it imports."""
+        if bindings and name in bindings:
+            return bindings[name]
+        if name in self.consts:
+            return self.consts[name]
+        if name in self.imports:
+            src, attr = self.imports[name]
+            other = modules.get(src)
+            if other is not None and other is not self:
+                return other.consts.get(attr)
+        return None
+
+    def value(self, node, modules, bindings=None):
+        """A call argument as a string, when the walk can know it."""
+        if isinstance(node, ast.Name):
+            return self.const(node.id, modules, bindings)
+        return self.render(node, modules, bindings)
+
+    def render(self, node, modules, bindings=None):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            parts = []
+            for v in node.values:
+                if isinstance(v, ast.Constant):
+                    parts.append(str(v.value))
+                elif isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name) \
+                        and self.const(v.value.id, modules, bindings) is not None:
+                    parts.append(self.const(v.value.id, modules, bindings))
+                else:
+                    parts.append("{?}")
+            return "".join(parts)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self.render(node.left, modules, bindings)
+            right = self.render(node.right, modules, bindings)
+            if left is not None and right is not None:
+                return left + right
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "format":
+            # `_UPSERT.format(table=table, ...)`: the template with every
+            # keyword the walk can know filled in; the rest stay `{...}`.
+            template = self.value(node.func.value, modules, bindings)
+            if template is None:
+                return None
+            for kw in node.keywords:
+                known = self.value(kw.value, modules, bindings) if kw.arg else None
+                if known is not None:
+                    template = template.replace("{" + kw.arg + "}", known)
+            return template
+        return None
+
+    def texts(self, fn, modules, seen=None, bindings=None):
+        """Every SQL-ish string `fn` can execute: its own literals and
+        f-strings, the constants it names, and — transitively — what the
+        synchronous helpers it calls return (`_statement`, `_insert`,
+        `silver_pass2_sql`), rendered with the arguments this call passes
+        them where the walk can know those."""
+        seen = set() if seen is None else seen
+        mark = (self.name, fn.name, tuple(sorted((bindings or {}).items())))
+        if mark in seen:
+            return []
+        seen.add(mark)
+        doc = ast.get_docstring(fn)
+        # A template read through `.format` is rendered filled in, never raw.
+        formatted = {id(n.func.value) for n in ast.walk(fn)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and n.func.attr == "format"}
+        out = []
+        for node in ast.walk(fn):
+            if id(node) in formatted:
+                continue
+            text = self.render(node, modules, bindings)
+            if text and text != doc:
+                out.append(text)
+            if isinstance(node, ast.Name):
+                text = self.const(node.id, modules, bindings)
+                if text:
+                    out.append(text)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                target = _resolve(self, node.func.id, modules)
+                if target and isinstance(target[1], ast.FunctionDef):
+                    callee_module, callee = target
+                    params = [a.arg for a in callee.args.args]
+                    bound = {}
+                    for name, arg in zip(params, node.args):
+                        known = self.value(arg, modules, bindings)
+                        if known is not None:
+                            bound[name] = known
+                    for kw in node.keywords:
+                        known = self.value(kw.value, modules, bindings) if kw.arg else None
+                        if known is not None:
+                            bound[kw.arg] = known
+                    out += callee_module.texts(callee, modules, seen, bound)
+        return out
+
+
+def _resolve(module, name, modules):
+    """`(module, function)` for a name called in `module`, or None."""
+    if name in module.funcs:
+        return module, module.funcs[name]
+    if name in module.imports:
+        src, attr = module.imports[name]
+        other = modules.get(src)
+        if other is not None and attr in other.funcs:
+            return other, other.funcs[attr]
+    return None
+
+
+def _walk_modules() -> dict:
+    root = CORE.parent
+    modules = {}
+    for folder in _WALKED:
+        for path in sorted((root / folder).rglob("*.py")):
+            m = _Module(path)
+            modules[m.name] = m
+    for m in modules.values():
+        m.load_consts(modules)
+    return modules
+
+
+def _called_names(fn) -> set:
+    names = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                names.add(node.func.attr)
+    return names
+
+
+def _awaited_names(fn) -> set:
+    """What `fn` awaits a call to, by name."""
+    out = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Await) and isinstance(n.value, ast.Call):
+            f = n.value.func
+            out.add(f.id if isinstance(f, ast.Name) else getattr(f, "attr", ""))
+    return out
+
+
+def _carriers(fn) -> set:
+    """The names in `fn` that carry one of its parameters: the parameters
+    (bar `self`/`cls`, which carry the object and not the statement), and every
+    local assigned from an expression that names one, to a fixed point —
+    `rendered = numbered(sql.format(...))` carries `sql`."""
+    args = fn.args
+    carried = {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)
+               if a.arg not in ("self", "cls")}
+    if args.vararg:
+        carried.add(args.vararg.arg)
+    assigns = [n for n in ast.walk(fn)
+               if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+               and n.value is not None]
+    while True:
+        more = set()
+        for n in assigns:
+            if not any(isinstance(x, ast.Name) and x.id in carried
+                       for x in ast.walk(n.value)):
+                continue
+            for target in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                more |= {x.id for x in ast.walk(target)
+                         if isinstance(x, ast.Name) and x.id not in carried}
+        if not more:
+            return carried
+        carried |= more
+
+
+def _executors(modules) -> set:
+    """Helpers that execute SQL they are handed: awaiting one is executing,
+    although the text is the caller's. `_write_chunked(conn, sql, rows)` hands
+    it straight to asyncpg; `conn.execute(numbered(sql))` transforms it first;
+    `_users_run` hands it, rendered, to `execute`, which hands it to asyncpg.
+    So a helper counts when an awaited asyncpg call — or an awaited call to
+    another executor — takes as its statement an expression carrying one of
+    its own parameters, to a fixed point. By name, like `_awaited_names`."""
+    sites = []
+    for m in modules.values():
+        for name, fn in m.funcs.items():
+            carried = _carriers(fn)
+            callees = set()
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Await) and isinstance(n.value, ast.Call) \
+                        and n.value.args \
+                        and any(isinstance(x, ast.Name) and x.id in carried
+                                for x in ast.walk(n.value.args[0])):
+                    f = n.value.func
+                    callees.add(f.id if isinstance(f, ast.Name) else getattr(f, "attr", ""))
+            if callees:
+                sites.append((name, callees))
+    found: set = set()
+    while True:
+        more = {name for name, callees in sites
+                if name not in found and callees & (_PG_EXECUTE | found)}
+        if not more:
+            return found
+        found |= more
+
+
+def _copy_targets(module, fn, modules) -> set:
+    """What an awaited `copy_records_to_table`/`copy_to_table` writes. There
+    is no statement for the regex to read, so the target is its `schema_name`
+    and table: `bronze.x`/`app.x` when both resolve, nothing for a schema that
+    resolves to another one, and `{?}` for a schema the walk cannot read — or
+    none at all, where the search_path decides."""
+    found = set()
+    for n in ast.walk(fn):
+        if not (isinstance(n, ast.Await) and isinstance(n.value, ast.Call)
+                and isinstance(n.value.func, ast.Attribute)
+                and n.value.func.attr in _PG_COPY_IN):
+            continue
+        call = n.value
+        keywords = {k.arg: k.value for k in call.keywords if k.arg}
+        table_node = call.args[0] if call.args else keywords.get("table_name")
+        table = module.value(table_node, modules) if table_node is not None else None
+        schema_node = keywords.get("schema_name")
+        schema = module.value(schema_node, modules) if schema_node is not None else None
+        if schema is None:
+            found.add("{?}")
+        elif schema in ("bronze", "app"):
+            found.add(f"{schema}.{table}" if table else "{?}")
+    return found
+
+
+def _pg_write_targets(module, fn, modules, executors=frozenset()) -> set:
+    """The `bronze.`/`app.` tables `fn` writes in Postgres, `{?}` for one it
+    names only at run time. Empty unless `fn` awaits an asyncpg call, or a
+    helper that executes the SQL it is handed."""
+    if not _awaited_names(fn) & (_PG_EXECUTE | set(executors)):
+        return set()
+    found = _copy_targets(module, fn, modules)
+    for text in module.texts(fn, modules):
+        for m in _WRITE_SQL.finditer(text):
+            target = m.group(1)
+            found.add(target if not target.startswith("{") else "{?}")
+    return found
+
+
+class _Walk:
+    """The whole tree, once per test session."""
+
+    def __init__(self):
+        self.modules = _walk_modules()
+        self.fns = {(m.rel, name): (m, fn)
+                    for m in self.modules.values() for name, fn in m.funcs.items()}
+        self.calls = {key: _called_names(fn) for key, (_m, fn) in self.fns.items()}
+        self.callers = self._callers()
+        self.callees = self._callees()
+        self.consulting = self._consulting()
+        self.executors = _executors(self.modules)
+        self._pool_memo: dict = {}
+
+    def _callers(self) -> dict:
+        """`{(rel, name): {(rel, name) of each caller}}`, by resolved name:
+        a plain call through this module or its imports, `alias.f()` through
+        a module alias, and any other `x.f()` to every function called `f`
+        (a method, or a name the walk cannot place) — more callers, never fewer."""
+        by_name: dict = {}
+        for key in self.fns:
+            by_name.setdefault(key[1], []).append(key)
+        callers: dict = {}
+        for key, (module, fn) in self.fns.items():
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                targets = []
+                if isinstance(node.func, ast.Name):
+                    hit = _resolve(module, node.func.id, self.modules)
+                    if hit:
+                        targets = [(hit[0].rel, hit[1].name)]
+                elif isinstance(node.func, ast.Attribute):
+                    base = node.func.value
+                    alias = module.module_aliases.get(base.id) if isinstance(base, ast.Name) else None
+                    other = self.modules.get(alias) if alias else None
+                    if other is not None and node.func.attr in other.funcs:
+                        targets = [(other.rel, node.func.attr)]
+                    else:
+                        targets = by_name.get(node.func.attr, [])
+                for target in targets:
+                    callers.setdefault(target, set()).add(key)
+        return callers
+
+    def _callees(self) -> dict:
+        """`{(rel, name): {(rel, name) it calls}}`, resolved calls only: a
+        plain name through this module or its imports, `alias.f()` through a
+        module alias, `self.f()` within the module. The narrow half of
+        `_callers` on purpose — a function wrongly counted as reaching the
+        pool would be held to reading owner rows for a pool it never takes."""
+        out: dict = {}
+        for key, (module, fn) in self.fns.items():
+            found = set()
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Name):
+                    hit = _resolve(module, node.func.id, self.modules)
+                    if hit:
+                        found.add((hit[0].rel, hit[1].name))
+                elif isinstance(node.func, ast.Attribute) \
+                        and isinstance(node.func.value, ast.Name):
+                    base = node.func.value.id
+                    alias = module.module_aliases.get(base)
+                    other = self.modules.get(alias) if alias else None
+                    if other is not None and node.func.attr in other.funcs:
+                        found.add((other.rel, node.func.attr))
+                    elif base == "self" and node.func.attr in module.funcs:
+                        found.add((module.rel, node.func.attr))
+            out[key] = found
+        return out
+
+    def reaches_pool(self, key, seen=frozenset()) -> bool:
+        """It takes the Postgres pool itself or through a function it calls —
+        `replicate_managers` takes it inside `write_managers`, and a walk that
+        looked only at the asker's own body let it read the local answer
+        alone (the DN-22b review)."""
+        if key in self._pool_memo:
+            return self._pool_memo[key]
+        if "get_pool" in self.calls[key]:
+            found = True
+        elif key in seen:
+            return False
+        else:
+            found = any(self.reaches_pool(c, seen | {key})
+                        for c in self.callees.get(key, ()) if c in self.fns)
+        if not seen:
+            self._pool_memo[key] = found
+        return found
+
+    def question_names(self) -> set:
+        """The names that ask which tables have changed hands:
+        `core.write_chains`' `stood_down_*` questions about tables, and every
+        helper that answers the same question by asking one of them — named
+        for it (`*stood_down*`), so a wrapper such as
+        `pg_landing.tables_stood_down` counts and a caller that merely reaches
+        a shipper that asks does not."""
+        roots = {key for key in self.fns if key[0] == "core/write_chains.py"
+                 and key[1].startswith("stood_down") and "sync_keys" not in key[1]}
+        names = {key[1] for key in roots}
+        while True:
+            more = {key[1] for key, called in self.calls.items()
+                    if "stood_down" in key[1] and key[1] not in names
+                    and called & names}
+            if not more:
+                return names
+            names |= more
+
+    def _consulting(self) -> set:
+        """Every function that asks one of those questions itself."""
+        names = self.question_names()
+        return {key for key, called in self.calls.items() if called & names}
+
+    def writers(self) -> dict:
+        """`{(rel, name): targets}` for every Postgres writer of our tables,
+        and every caller of the two primitives the plan names."""
+        found = {}
+        for key, (module, fn) in self.fns.items():
+            targets = _pg_write_targets(module, fn, self.modules, self.executors)
+            if targets:
+                found[key] = targets
+        return found
+
+    def routed(self, key) -> bool:
+        """Its only Postgres calls are to a store helper that routes by a
+        switch of its own (`_ROUTED_BY_SWITCH`)."""
+        helpers = {name for _rel, name in _ROUTED_BY_SWITCH}
+        _module, fn = self.fns[key]
+        reached = _awaited_names(fn) & (_PG_EXECUTE | self.executors)
+        return bool(reached) and reached <= helpers
+
+    def covered(self, key, seen=None) -> bool:
+        """It asks, or it is reached only from functions that do."""
+        seen = set() if seen is None else seen
+        if key in self.consulting:
+            return True
+        if key in seen:
+            return False
+        seen = seen | {key}
+        callers = self.callers.get(key, set())
+        return bool(callers) and all(self.covered(c, seen) for c in callers)
+
+
+@pytest.fixture(scope="module")
+def walk():
+    return _Walk()
+
+
+def _chain_modules() -> set:
+    from core.write_chains import WRITE_CHAINS
+
+    return {c.__name__.replace(".", "/") + ".py" for c in WRITE_CHAINS}
+
+
+class TestEveryPostgresWriterAsksTheRegistry:
+    def test_each_one_asks_or_is_reached_only_by_askers(self, walk):
+        chains = _chain_modules()
+        uncovered = sorted(
+            key for key in walk.writers()
+            if key[0] not in chains and key not in _DESTINATION
+            and not walk.routed(key) and not walk.covered(key))
+        assert not uncovered, (
+            "writes bronze.*/app.* in Postgres without asking who owns the "
+            f"table, and not only from a function that asks: {uncovered}")
+
+    def test_the_callers_of_the_named_primitives_ask(self, walk):
+        """The plan names `pg_buyers._write` and `write_managers`: every
+        function that calls either asks, directly or through its callers."""
+        for primitive in (("core/pg_buyers.py", "_write"),
+                          ("core/pg_replication.py", "write_managers")):
+            callers = walk.callers.get(primitive, set())
+            assert callers, f"nothing calls {primitive} — the walk is not looking"
+            assert all(walk.covered(c) for c in callers), (primitive, callers)
+
+    def test_the_walk_is_not_vacuous(self, walk):
+        """A walk that found nothing, or stopped resolving what it found,
+        would pass the test above. The sites every chain 3–6 table ships
+        through, and at least as many writers as there were on the day this
+        was written."""
+        writers = walk.writers()
+        assert {
+            ("core/pg_landing.py", "_write"),
+            ("core/pg_landing.py", "write_orders"),
+            ("core/pg_buyers.py", "_write"),
+            ("core/pg_replication.py", "write_managers"),
+            ("core/pg_expense_backfill.py", "backfill_expenses"),
+            ("core/pg_operational.py", "replicate_operational"),
+            ("core/pg_order_versions.py", "capture_versions"),
+        } <= set(writers), sorted(writers)
+        assert len(writers) >= 27, sorted(writers)
+        assert {
+            ("core/pg_landing.py", "_mirror"),
+            ("core/pg_buyers.py", "mirror_buyers"),
+            ("core/pg_buyers.py", "backfill_buyers"),
+            ("core/pg_buyers.py", "hourly_ids_diff"),
+            ("core/pg_replication.py", "replicate_managers"),
+            ("core/pg_expense_backfill.py", "backfill_expenses"),
+            ("core/pg_expense_backfill.py", "hourly_expenses_ids_diff"),
+            ("core/duckdb_store.py", "upsert_orders"),
+            ("web/routes/api/admin.py", "backfill_mirror_expenses"),
+        } <= walk.consulting
+
+    def test_the_exemptions_are_exactly_what_the_walk_finds(self, walk):
+        """No stale entry — an exemption for a function that no longer writes
+        is where the next writer would hide — and a switch named as the reason
+        is one the function actually evaluates."""
+        writers = walk.writers()
+        assert set(_DESTINATION) <= set(writers), set(_DESTINATION) - set(writers)
+        for key, (_reason, switch) in _DESTINATION.items():
+            if switch is None:
+                continue
+            _module, fn = walk.fns[key]
+            names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | \
+                _called_names(fn)
+            assert switch in names, f"{key} names {switch} as its reason and never reads it"
+
+    def test_the_routed_helpers_are_exactly_what_the_walk_finds(self, walk):
+        """Each routes by the switch it is listed under, is an executor the
+        walk finds, and still carries a writer — so neither a helper that
+        stopped reading its switch nor a stale entry keeps an exemption."""
+        writers = walk.writers()
+        for key, switch in _ROUTED_BY_SWITCH.items():
+            _module, fn = walk.fns[key]
+            names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | \
+                _called_names(fn)
+            assert switch in names, f"{key} is listed under {switch} and never reads it"
+            assert key[1] in walk.executors, f"{key} no longer executes what it is handed"
+            assert any(key[1] in _awaited_names(walk.fns[w][1]) and walk.routed(w)
+                       for w in writers), f"nothing writes through {key}"
+        # And nothing else is excused by them: a writer that also calls
+        # asyncpg itself, or any other executor, is not routed.
+        assert {w[0] for w in writers if walk.routed(w)} == {
+            "core/repositories/customers.py", "core/repositories/users.py"}
+
+    def test_the_exempt_modules_are_the_registered_chains(self, walk):
+        """The chain writers are the destination the registry routes to, and
+        are exempt for being registered — found here, so a chain that stopped
+        writing Postgres would not keep an exemption it no longer needs."""
+        chains = _chain_modules()
+        writing = {key[0] for key in walk.writers()}
+        assert chains <= writing, chains - writing
+
+    def test_the_operational_pair_asks_the_checked_form(self):
+        """Since DN-01 the hourly shipper and the daily comparison of the
+        operational tables ask the form that hands a flag typo out to be
+        reported; the other paths ask the narrow one, which logs it."""
         from core import mirror_reconciliation, pg_operational
 
         for fn in (pg_operational.replicate_operational,
@@ -66,11 +691,295 @@ class TestTheShipperAndTheComparisonAskOneAnswer:
             tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
             calls = {n.func.id for n in ast.walk(tree)
                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-            # The checked form since DN-01: it never raises on a flag typo and
-            # hands the error out to be recorded and reported.
             assert "stood_down_tables_checked" in calls, fn.__name__
-            assert "writes_postgres" not in calls, (
-                f"{fn.__name__} asks a single chain again — the rule would have two homes")
+
+    def test_no_asker_spells_a_chain(self, walk):
+        """The rule has one home: nothing that ships or compares asks a single
+        chain's `writes_postgres` in place of the registry."""
+        chains = _chain_modules()
+        spelled = sorted(
+            key for key in walk.consulting
+            if key[0] not in chains and key[0] != "core/write_chains.py"
+            and walk.calls[key] & {"writes_postgres", "env_writes_postgres"})
+        assert not spelled, spelled
+
+    def test_one_that_takes_the_pool_reads_the_owner_rows_too(self, walk):
+        """DN-06: anything already holding a Postgres connection stands down
+        on either copy of the latch. Walked over every asker that takes the
+        pool — itself or through what it calls, which is how
+        `replicate_managers` holds it — and only the per-tick mirrors named
+        below keep the local answer alone."""
+        holding = [key for key in walk.consulting if walk.reaches_pool(key)]
+        assert len(holding) >= 19, holding
+        missing = sorted(key for key in holding
+                         if not walk.calls[key] & _OWNER_READS
+                         and key not in _PER_TICK_MIRRORS)
+        assert not missing, f"holds a pool but reads only the local latch: {missing}"
+
+    def test_the_per_tick_exemptions_are_exactly_what_the_walk_finds(self, walk):
+        """Each exempt mirror asks, reaches the pool and reads no owner row —
+        so a stale entry, or one that started reading them, fails here."""
+        for key in _PER_TICK_MIRRORS:
+            assert key in walk.consulting, key
+            assert walk.reaches_pool(key), key
+            assert not walk.calls[key] & _OWNER_READS, key
+
+
+def _targets_of(source: str, name: str) -> set:
+    """What the walk says `name` writes, in a module made of `source` alone."""
+    module = _Module.from_source("core/_walk_probe.py", source)
+    modules = {module.name: module}
+    module.load_consts(modules)
+    return _pg_write_targets(module, module.funcs[name], modules, _executors(modules))
+
+
+class TestTheWalkSeesWhatTheReviewFound:
+    """The DN-22b review appended each of these to `core/pg_buyers.py` and the
+    walk passed them: a helper that transforms the statement it is handed
+    before executing it — `numbered()` is this codebase's own idiom — and a
+    COPY, which carries no statement at all. Fed here as shapes, with the
+    direct literal the walk always saw as the control."""
+
+    _NUMBERED = """
+        async def _exec_numbered(sql, params):
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(numbered(sql), *params)
+
+        async def rename_buyer(buyer_id, name):
+            await _exec_numbered(
+                "UPDATE bronze.buyers SET full_name = ? WHERE id = ?", [name, buyer_id])
+
+        async def read_buyer(buyer_id):
+            await _exec_numbered("SELECT full_name FROM bronze.buyers WHERE id = ?", [buyer_id])
+    """
+
+    def test_the_control_a_direct_literal(self):
+        assert _targets_of("""
+            async def rename_buyer(buyer_id, name):
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE bronze.buyers SET full_name = $1 WHERE id = $2", name, buyer_id)
+        """, "rename_buyer") == {"bronze.buyers"}
+
+    def test_a_helper_that_transforms_the_statement_executes_it(self):
+        assert _targets_of(self._NUMBERED, "rename_buyer") == {"bronze.buyers"}
+
+    def test_a_read_through_the_same_helper_is_not_a_write(self):
+        assert _targets_of(self._NUMBERED, "read_buyer") == set()
+
+    def test_a_statement_handed_on_through_two_helpers(self):
+        """`_users_run`'s shape: rendered into a local, handed to a helper that
+        hands it to asyncpg. The target is a hole the helper fills, so it
+        counts as unknown — which is what makes the store's writers visible
+        and `_ROUTED_BY_SWITCH` necessary. The inner helper is not called
+        `execute` here, so only the fixed point can reach it."""
+        assert _targets_of("""
+            async def _send(sql, params):
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(sql, *params)
+
+            async def _run(self, sql, params):
+                rendered = numbered(sql.format(users=TABLE))
+                await _send(rendered, params)
+
+            async def approve(self, user_id):
+                await self._run("UPDATE {users} SET status = 'approved' "
+                                "WHERE user_id = ?", [user_id])
+        """, "approve") == {"{?}"}
+
+    def test_self_alone_does_not_make_a_helper_an_executor(self):
+        """`self` carries the object, not a statement: a method reading its own
+        fixed query is not handed anything."""
+        module = _Module.from_source("core/_walk_probe.py", """
+            async def count(self):
+                async with self.pool.acquire() as conn:
+                    await conn.fetchval(self.COUNT_SQL)
+        """)
+        assert "count" not in _executors({module.name: module})
+
+    @pytest.mark.parametrize("call,expected", [
+        ('conn.copy_records_to_table("buyers", schema_name="bronze", records=rows)',
+         {"bronze.buyers"}),
+        ('conn.copy_to_table("orders", source=path, schema_name="bronze")',
+         {"bronze.orders"}),
+        ('conn.copy_records_to_table(table_name="gender", schema_name=APP, records=rows)',
+         {"app.gender"}),
+        ('conn.copy_records_to_table(table, schema_name=schema, records=rows)', {"{?}"}),
+        ('conn.copy_records_to_table("buyers", records=rows)', {"{?}"}),
+        ('conn.copy_records_to_table("orders", schema_name="silver", records=rows)', set()),
+    ])
+    def test_a_copy_is_read_by_its_schema(self, call, expected):
+        assert _targets_of(f"""
+            APP = "app"
+
+            async def ship(rows, table, schema, path):
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    await {call}
+        """, "ship") == expected
+
+
+_OWNER_READS = {"order_tables_stood_down_or_owned", "tables_stood_down_or_owned",
+                "read_owners"}
+# The sync's per-tick mirrors, which keep the local answer alone: the write
+# path, once a minute, where a Postgres read is the one `writes_postgres()`
+# exists to avoid (DN-22a). The daily comparisons page the state they cannot
+# see — `order_owner_row_without_marker`, `owner_row_without_marker`.
+_PER_TICK_MIRRORS = {
+    ("core/pg_landing.py", "_mirror"):
+        "the catalogue and expense mirror, every sync tick",
+    ("core/duckdb_store.py", "upsert_orders"):
+        "the orders mirror, every sync tick",
+}
+
+
+_SPEC_TYPES = {"MirroredTable", "BucketedTable"}
+# Reading a spec's Postgres copy, or comparing the two: what makes a function
+# a comparison rather than a reader of DuckDB's side.
+_PG_COMPARE = {"fetch_pg_rows", "pg_fingerprints", "_read_pg_bucket",
+               "compare_table", "compare_bucket"}
+
+
+def _spec_tables(modules) -> dict:
+    """`{(module name, binding): {pg_table, ...}}` for every module-level spec,
+    tuple of specs, and spec-building function in the walked tree."""
+    found: dict = {}
+    for m in modules.values():
+        def tables_in(node):
+            out = set()
+            for n in ast.walk(node):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                        and n.func.id in _SPEC_TYPES:
+                    for kw in n.keywords:
+                        if kw.arg == "pg_table":
+                            value = m.value(kw.value, modules)
+                            if value:
+                                out.add(value)
+                elif isinstance(n, ast.Name) and (m.name, n.id) in found:
+                    out |= found[(m.name, n.id)]
+            return out
+
+        for node in m.tree.body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                tables = tables_in(node.value)
+                for t in targets:
+                    if isinstance(t, ast.Name) and tables:
+                        found[(m.name, t.id)] = tables
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                tables = {v for n in ast.walk(node) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Name) and n.func.id in _SPEC_TYPES
+                          for kw in n.keywords if kw.arg == "pg_table"
+                          for v in [m.value(kw.value, modules)] if v}
+                if tables:
+                    found[(m.name, node.name)] = tables
+    return found
+
+
+def _comparisons(walk) -> dict:
+    """`{(rel, name): tables}` for every function that compares a spec naming
+    a `bronze.`/`app.` table against its Postgres copy."""
+    specs = _spec_tables(walk.modules)
+    out = {}
+    for key, (m, fn) in walk.fns.items():
+        if not walk.calls[key] & _PG_COMPARE:
+            continue
+        tables = set()
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Name):
+                if (m.name, n.id) in specs:
+                    tables |= specs[(m.name, n.id)]
+                elif n.id in m.imports:
+                    src, attr = m.imports[n.id]
+                    tables |= specs.get((src, attr), set())
+        ours = {t for t in tables if t.startswith(("bronze.", "app."))}
+        if ours:
+            out[key] = ours
+    return out
+
+
+# Comparisons of tables whose writer moved by a switch of its own before the
+# registry existed: each stands down on that switch, which it must evaluate.
+_OWN_SWITCH_COMPARISONS = {
+    ("core/mirror_reconciliation.py", "reconcile_bot_state"): "ENGINE_ENV",
+    ("core/mirror_reconciliation.py", "reconcile_sms"): "sms_store_is_postgres",
+    ("core/mirror_reconciliation.py", "reconcile_dashboard_users"): "user_store_is_postgres",
+}
+
+
+def _evaluates(walk, key, name) -> bool:
+    _module, fn = walk.fns[key]
+    return name in ({n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+                    | _called_names(fn))
+
+
+class TestEveryComparisonAsksTheRegistry:
+    """The other half of the rule: a comparison that went on comparing a
+    table its shipper stopped feeding would file every row the chain writes
+    as a discrepancy the check itself created. Found by what a function does
+    — reads a spec's Postgres copy — and which tables its specs name."""
+
+    def test_each_one_asks(self, walk):
+        missing = sorted(key for key in _comparisons(walk)
+                         if key not in walk.consulting
+                         and key not in _OWN_SWITCH_COMPARISONS)
+        assert not missing, f"compares bronze.*/app.* without asking: {missing}"
+
+    def test_the_walk_is_not_vacuous(self, walk):
+        found = _comparisons(walk)
+        assert {("core/mirror_reconciliation.py", name) for name in (
+            "reconcile_mirror", "reconcile_orders", "reconcile_expenses",
+            "reconcile_buyers", "reconcile_operational",
+        )} <= set(found), sorted(found)
+        assert {"bronze.products", "bronze.managers", "bronze.buyers",
+                "bronze.expenses", "bronze.orders"} <= set().union(*found.values())
+
+    def test_the_own_switch_exemptions_are_found_and_read_their_switch(self, walk):
+        found = _comparisons(walk)
+        for key, switch in _OWN_SWITCH_COMPARISONS.items():
+            assert key in found, f"stale exemption: {key}"
+            assert _evaluates(walk, key, switch), f"{key} never reads {switch}"
+
+
+class TestTheShippingUnitsAreTheWritersOwn:
+    """A shipper stands a unit down whole because it writes the unit in one
+    transaction. The units are derived here from what each writer writes, and
+    `pg_landing.shipping_units()` must be exactly those — so a writer that
+    starts writing a second table in the same transaction becomes a unit the
+    stand-down knows about, or this fails."""
+
+    def _derived(self, walk) -> set:
+        chains = _chain_modules()
+        units = set()
+        for key, targets in walk.writers().items():
+            if key[0] in chains or key in _DESTINATION:
+                continue
+            concrete = frozenset(t for t in targets if not t.startswith("{"))
+            if len(concrete) > 1:
+                units.add(concrete)
+        return units
+
+    def test_the_declared_units_are_the_derived_ones(self, walk):
+        from core.pg_landing import shipping_units
+
+        derived = self._derived(walk)
+        assert len(derived) >= 3, derived
+        assert {frozenset(u) for u in shipping_units()} == derived
+
+    def test_no_registered_chain_splits_a_unit(self):
+        """DN-22a's order rule, for every unit: whoever takes one table of a
+        unit takes the rest of it."""
+        from core.pg_landing import shipping_units
+        from core.write_chains import WRITE_CHAINS, chain_name
+
+        split = [(chain_name(c), unit) for c in WRITE_CHAINS
+                 for unit in shipping_units()
+                 if set(unit) & set(c.CHAIN_TABLES)
+                 and not set(unit) <= set(c.CHAIN_TABLES)]
+        assert split == []
 
 
 @pytest.fixture
@@ -929,32 +1838,37 @@ class TestWhatTheStandDownTellsAHuman:
         assert "a human, not a job" in spec.clears
 
 
+def _admin_client(flags):
+    """A TestClient signed in as a hardcoded admin."""
+    import time as _time
+
+    from fastapi.testclient import TestClient
+
+    from core.permissions import ADMIN_USER_IDS
+    from web.main import app
+    from web.routes.api._deps import limiter
+    from web.routes.auth import (
+        SESSION_COOKIE, create_session_data, session_serializer,
+    )
+
+    limiter.reset()
+    admin_id = sorted(ADMIN_USER_IDS)[0]
+
+    async def _resolve(session):
+        return {"user_id": admin_id, "role": "admin"}
+
+    flags.setattr("web.routes.auth._resolve_session", _resolve)
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data(
+        {"id": str(admin_id), "first_name": "T", "last_name": "U",
+         "username": "t", "auth_date": str(int(_time.time()))}, role="admin",
+    )))
+    return client
+
+
 class TestTheAdminBackfill:
     def _client(self, flags):
-        import time as _time
-
-        from fastapi.testclient import TestClient
-
-        from core.permissions import ADMIN_USER_IDS
-        from web.main import app
-        from web.routes.api._deps import limiter
-        from web.routes.auth import (
-            SESSION_COOKIE, create_session_data, session_serializer,
-        )
-
-        limiter.reset()
-        admin_id = sorted(ADMIN_USER_IDS)[0]
-
-        async def _resolve(session):
-            return {"user_id": admin_id, "role": "admin"}
-
-        flags.setattr("web.routes.auth._resolve_session", _resolve)
-        client = TestClient(app)
-        client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data(
-            {"id": str(admin_id), "first_name": "T", "last_name": "U",
-             "username": "t", "auth_date": str(int(_time.time()))}, role="admin",
-        )))
-        return client
+        return _admin_client(flags)
 
     @pytest.fixture
     def backfill(self, flags):
@@ -1051,6 +1965,71 @@ class TestTheAdminBackfill:
         assert pool.only_asked_who_owns()
 
 
+class TestTheOrderWatchesOutliveTheStandDown:
+    """The 23.09 question (DN-22a's review), settled in DN-22b: when a chain
+    owns the order tables, the stand-down cuts the sync's mirror off from
+    `write_orders` — and `write_orders` is the only thing that moves the
+    `bronze.orders` watermark the canary pages on (`mirror_stale`, 8 h) and
+    the only thing that writes `app.order_versions`, whose liveness check
+    files `order_versions_stalled` (CRITICAL). Either the two watches learn to
+    read the stand-down, or the chain's writer keeps feeding both.
+
+    The writer keeps feeding both. The chain-3 writer ships through
+    `write_orders`, because nothing else may write the order tables or the
+    archive: the capture must land in the transaction that writes the row
+    (`core/pg_order_versions.py`), and a second writer of `bronze.orders`
+    beside it is exactly what `order_versions_missing` already reports as
+    "something is writing bronze.orders without going through write_orders".
+    So the watermark keeps moving and the archive keeps being written under
+    the chain, and both watches keep meaning what they say. Teaching them the
+    stand-down instead would blind the one liveness check on the one table
+    nothing can rebuild, at the moment its writer changes hands.
+
+    Pinned here, from the walk: the order tables and the archive each have
+    one writer — a chain module included, which the registry walk would
+    otherwise excuse as a destination."""
+
+    ORDER_TABLES = {ORDERS, LINES}
+    ARCHIVE = "app.order_versions"
+
+    def _writers_of(self, walk, tables) -> set:
+        return {key for key, targets in walk.writers().items()
+                if targets & set(tables)}
+
+    def test_the_order_tables_have_one_writer(self, walk):
+        assert self._writers_of(walk, self.ORDER_TABLES) == {
+            ("core/pg_landing.py", "write_orders")}
+
+    def test_the_archive_is_written_only_inside_it(self, walk):
+        capture = ("core/pg_order_versions.py", "capture_versions")
+        assert self._writers_of(walk, {self.ARCHIVE}) == {capture}
+        assert walk.callers.get(capture) == {("core/pg_landing.py", "write_orders")}
+
+    @pytest.mark.asyncio
+    async def test_it_moves_the_watched_watermark_and_writes_the_archive(self, pool):
+        """What a writer going through it keeps feeding: the watermark row the
+        canary reads and a version for an order it has not seen."""
+        from core.landing_rows import landed_orders
+        from core.mirror_reconciliation import WATCHED_MIRRORS
+        from core.pg_landing import write_orders
+        from core.pg_order_versions import TABLE
+
+        orders, products = landed_orders([_order(1)])
+        await write_orders(orders, products, replace_products=True)
+        assert ORDERS in WATCHED_MIRRORS
+        assert any("INSERT INTO meta.mirror_state" in s for s in pool.sql)
+        assert pool.wrote(TABLE)
+
+    def test_the_watches_do_not_ask_the_registry(self, walk):
+        """So a change that teaches them the stand-down is a change of this
+        decision, made here and not in passing."""
+        for key in (("core/mirror_reconciliation.py", "fetch_mirror_freshness"),
+                    ("core/mirror_reconciliation.py", "reconcile_order_versions"),
+                    ("web/routes/api/health.py", "_mirror_freshness")):
+            assert key in walk.fns, key
+            assert key not in walk.consulting, key
+
+
 class TestEveryOrderShipperAsksFirst:
     """Walked, not listed. A function that ships DuckDB's orders to Postgres —
     it calls `write_orders` or `mirror_orders` — must ask
@@ -1141,3 +2120,866 @@ class TestChain7aGoals:
         from core.pg_goals_write import CHAIN_TABLES
         from core.pg_operational import _FULL_REPLACE
         assert set(CHAIN_TABLES) <= {pg for pg, _d, _c, _o in _FULL_REPLACE}
+
+
+# ─── DN-22b: every other path that ships into bronze.* and app.* asks too ────
+#
+# The plan's fake chain: one table from each of chains 3–6 that is not an order
+# table. Three of the four are one half of a shipping unit — the buyers without
+# their contacts, the managers without their classifications — so every test
+# that sees a path stand down on it also sees the unit rule hold. Each
+# "ships nothing" has its control beside it, on the same recorder.
+
+BUYERS = "bronze.buyers"
+CONTACTS = "bronze.buyer_contacts"
+MANAGERS = "bronze.managers"
+CLASSIFICATIONS = "app.manager_classifications"
+EXPENSES = "bronze.expenses"
+PRODUCTS = "bronze.products"
+CATEGORIES = "bronze.categories"
+LANDING = (BUYERS, MANAGERS, EXPENSES, PRODUCTS)
+
+
+@pytest.fixture
+def landing_chain(flags):
+    """Register a fake chain owning `tables`; its flag is `env()`."""
+    import types
+
+    from core import write_chains
+
+    def register(tables=LANDING, env=lambda: True):
+        fake = types.ModuleType("core.pg_landing_write")
+        fake.WRITE_ENV = "KS_WRITE_LANDING"
+        fake.CHAIN_TABLES = tuple(tables)
+        fake.env_writes_postgres = env
+        flags.setattr(write_chains, "WRITE_CHAINS",
+                      write_chains.WRITE_CHAINS + (fake,))
+        return fake
+
+    return register
+
+
+def _no_landing_chain(flags) -> None:
+    """No chain in this build declares any table of the plan's fake chain —
+    made so, `_rolled_back`'s reason."""
+    from core import write_chains
+
+    units = {BUYERS, CONTACTS, MANAGERS, CLASSIFICATIONS, EXPENSES, PRODUCTS}
+    flags.setattr(write_chains, "WRITE_CHAINS", tuple(
+        c for c in write_chains.WRITE_CHAINS if not units & set(c.CHAIN_TABLES)))
+
+
+async def _landing_store(tmp_path):
+    """A DuckDB holding two buyers with a contact, one expense and a manager
+    with a classification — enough for every backfill to find a row to ship."""
+    from core.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(db_path=tmp_path / "dn22b.duckdb")
+    await store.connect()
+    async with store.connection() as conn:
+        conn.execute("INSERT INTO buyers (id, full_name) VALUES (1, 'Anna'), (2, 'Olha')")
+        conn.execute("INSERT INTO buyer_contacts (buyer_id, contact_type, value, "
+                     "is_primary) VALUES (1, 'phone', '+380500000001', TRUE)")
+        conn.execute("INSERT INTO expenses (id, order_id, expense_type_id, amount) "
+                     "VALUES (9, 1, 1, 100.00)")
+        conn.execute("INSERT OR REPLACE INTO managers (id, name, is_retail) "
+                     "VALUES (4, 'Manager', TRUE)")
+        conn.execute("INSERT OR REPLACE INTO manager_classifications "
+                     "(manager_id, is_retail, valid_from) VALUES (4, TRUE, DATE '1970-01-01')")
+    return store
+
+
+def _buyers():
+    from core.models import Buyer
+
+    return [Buyer(id=1, full_name="Anna", phones=["+380500000001"])]
+
+
+_EXPENSE_ORDERS = [{"id": 1, "expenses": [
+    {"id": 9, "expense_type_id": 1, "amount": "100.00", "description": "delivery",
+     "status": "paid", "payment_date": None, "created_at": WHEN}]}]
+
+
+async def _ship(path, store):
+    """Run one sync-side shipper the way its caller does."""
+    from core import pg_buyers, pg_landing, pg_replication
+
+    if path == "mirror_products":
+        return await pg_landing.mirror_products([{"id": 100, "name": "Serum"}])
+    if path == "mirror_categories":
+        return await pg_landing.mirror_categories([{"id": 7, "name": "Care"}])
+    if path == "mirror_expenses":
+        return await pg_landing.mirror_expenses(_EXPENSE_ORDERS)
+    if path == "mirror_buyers":
+        return await pg_buyers.mirror_buyers(_buyers())
+    if path == "replicate_managers":
+        return await pg_replication.replicate_managers(store)
+    raise AssertionError(path)
+
+
+# What each sync-side shipper writes, for the controls.
+_SHIPS = {
+    "mirror_products": PRODUCTS,
+    "mirror_expenses": EXPENSES,
+    "mirror_buyers": BUYERS,
+    "replicate_managers": MANAGERS,
+}
+
+
+def _skip_reason(out) -> str:
+    return out.skipped if hasattr(out, "skipped") else out.get("skipped")
+
+
+class TestTheSyncShippersStandDown:
+    """The per-tick mirrors and the classification copy: skipped with a
+    reason, and Postgres not asked anything — the write path's local answer."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_SHIPS))
+    async def test_without_a_chain_the_recorder_sees_the_write(
+            self, pool, tmp_path, path):
+        """The control. A recorder that could not see these writes would pass
+        every test below."""
+        store = await _landing_store(tmp_path)
+        await _ship(path, store)
+        assert pool.wrote(_SHIPS[path]), pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_SHIPS))
+    async def test_with_the_chain_it_reports_stood_down_and_writes_nothing(
+            self, pool, landing_chain, path):
+        landing_chain()
+        out = await _ship(path, _NoStore())
+        assert _skip_reason(out).startswith("stood down: a write chain owns "), out
+        assert pool.sql == []
+        _never_reached_postgres(pool)
+
+    @pytest.mark.asyncio
+    async def test_a_table_no_chain_declares_still_ships(self, pool, landing_chain):
+        """The question is asked per table, not as an off switch: the
+        categories are not the chain's, and they still go."""
+        landing_chain()
+        out = await _ship("mirror_categories", None)
+        assert out.ok and pool.wrote(CATEGORIES), pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path,half", [
+        ("mirror_buyers", CONTACTS), ("replicate_managers", CLASSIFICATIONS),
+    ])
+    async def test_either_half_of_a_unit_stands_the_unit_down(
+            self, pool, landing_chain, path, half):
+        """The other half of each unit: `_write` and `write_managers` write
+        both tables in one transaction, so a chain on either stops both."""
+        landing_chain(tables=(half,))
+        out = await _ship(path, _NoStore())
+        assert _skip_reason(out) == f"stood down: a write chain owns {half}", out
+        assert pool.sql == []
+
+    @pytest.mark.asyncio
+    async def test_a_flag_typo_stands_it_down_too(self, pool, landing_chain):
+        """A value no chain understands stands its tables down — the shipper
+        must not guess which store the rows belong to."""
+        def typo():
+            raise RuntimeError("KS_WRITE_LANDING='postgre' is not understood")
+
+        landing_chain(env=typo)
+        out = await _ship("mirror_products", None)
+        assert out.skipped.startswith("stood down"), out
+        assert pool.sql == []
+
+    @pytest.mark.asyncio
+    async def test_the_sync_writes_duckdb_and_ships_only_what_is_not_owned(
+            self, pool, landing_chain, tmp_path):
+        """`SyncService._upsert_orders_with_expenses`, the site that ships the
+        expenses every tick: DuckDB gets them, Postgres gets the orders — no
+        chain declares those here — and not the expenses."""
+        from core.sync_service import SyncService
+
+        landing_chain(tables=(EXPENSES,))
+        store = await _store(tmp_path)
+        order = dict(_order(1), expenses=_EXPENSE_ORDERS[0]["expenses"])
+        await SyncService(store)._upsert_orders_with_expenses([order])
+
+        async with store.connection() as conn:
+            assert conn.execute("SELECT count(*) FROM expenses").fetchone()[0] == 1
+        assert pool.wrote(ORDERS), pool.sql
+        assert not pool.wrote(EXPENSES), pool.sql
+
+
+# The two sync shippers that read the owner rows as well as the local answer
+# (the DN-22b review): the unit each one writes in one transaction.
+_OWNER_AWARE = {
+    "mirror_buyers": (BUYERS, CONTACTS),
+    "replicate_managers": (MANAGERS, CLASSIFICATIONS),
+}
+
+
+class TestTheBuyersAndClassificationCopiesReadTheOwnerRows:
+    """`replicate_managers` asked the local answer alone, so a lost marker let
+    its full replace delete every interval a human set in Postgres the first
+    time it ran — reproduced on PostgreSQL 17.2 — and the 07:30 page came
+    after the damage. `mirror_buyers` had the same shape. Both now read the
+    owner rows once the local answer is empty, before DuckDB is read."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_OWNER_AWARE))
+    @pytest.mark.parametrize("half", [0, 1])
+    @pytest.mark.parametrize("road", ["marker_lost", "rolled_back"])
+    async def test_the_owner_row_alone_stands_the_unit_down(
+            self, flags, pool, landing_chain, path, half, road):
+        from core.pg_landing import stood_down_reason
+
+        unit = _OWNER_AWARE[path]
+        if road == "marker_lost":
+            landing_chain(tables=unit, env=lambda: False)
+        else:
+            _no_landing_chain(flags)
+        pool.owner_rows = {unit[half]: "2026-09-20T08:00:00+00:00"}
+
+        out = await _ship(path, _NoStore())
+
+        assert _skip_reason(out) == stood_down_reason(unit), out
+        assert out["stood_down"] == sorted(unit), out
+        assert pool.only_asked_who_owns(), pool.sql
+        from core import pg
+        pg.require_revision.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_OWNER_AWARE))
+    async def test_an_unreadable_owner_row_ships_nothing_and_says_so(
+            self, pool, landing_chain, tmp_path, path):
+        """Not an absent owner row: the copy fails closed, as any other
+        Postgres failure here does — counted, never shipped on the strength of
+        a read that did not happen."""
+        landing_chain(tables=_OWNER_AWARE[path], env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        out = await _ship(path, await _landing_store(tmp_path))
+
+        assert "unreadable" in out["error"], out
+        assert not any(pool.wrote(t) for t in _OWNER_AWARE[path]), pool.sql
+        assert [s for s in pool.sql if "failures_since_ok + 1" in s], (
+            "the failure left no trace in the watermark")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_OWNER_AWARE))
+    async def test_a_schema_behind_the_code_fails_before_the_owner_read(
+            self, pool, tmp_path, path):
+        """`require_revision()` first: the owner row is present here, so a
+        path that read it first would report a stand-down off an old schema."""
+        from core import pg
+
+        pg.require_revision.side_effect = pg.SchemaVersionError(
+            "database at 0031, code wants 0033")
+        pool.owner_rows = {_OWNER_AWARE[path][0]: "2026-09-20T08:00:00+00:00"}
+        out = await _ship(path, await _landing_store(tmp_path))
+
+        assert out["error"].startswith("SchemaVersionError"), out
+        assert not [s for s in pool.sql if "meta.chain_watermarks" in s], pool.sql
+        assert not any(pool.wrote(t) for t in _OWNER_AWARE[path]), pool.sql
+
+    @pytest.mark.asyncio
+    async def test_an_empty_buyer_batch_asks_postgres_nothing(self, pool):
+        """The owner read is paid for a batch to ship, not for every tick."""
+        from core.pg_buyers import mirror_buyers
+
+        assert await mirror_buyers([]) == {"rows": 0}
+        _never_reached_postgres(pool)
+
+
+# The backfills and the hourly diffs, which hold a pool and so read the owner
+# rows too: (the call, what it ships, how it says it stood down).
+_POOLED = {
+    "backfill_buyers": BUYERS,
+    "hourly_ids_diff": BUYERS,
+    "backfill_expenses": EXPENSES,
+    "hourly_expenses_ids_diff": EXPENSES,
+}
+
+
+async def _run_pooled(path, store):
+    from core import pg_buyers, pg_expense_backfill
+
+    return await {
+        "backfill_buyers": pg_buyers.backfill_buyers,
+        "hourly_ids_diff": pg_buyers.hourly_ids_diff,
+        "backfill_expenses": pg_expense_backfill.backfill_expenses,
+        "hourly_expenses_ids_diff": pg_expense_backfill.hourly_expenses_ids_diff,
+    }[path](store)
+
+
+# The unit each pooled path ships, for what its stand-down may name.
+_UNIT_OF = {BUYERS: {BUYERS, CONTACTS}, EXPENSES: {EXPENSES}}
+
+
+async def _expect_stood_down(path, store, caplog):
+    """A backfill refuses loudly; its hourly diff stands down quietly, naming
+    the table it ships and nothing outside that table's unit."""
+    table = _POOLED[path]
+    if path.startswith("hourly"):
+        with caplog.at_level("ERROR"):
+            out = await _run_pooled(path, store)
+        assert set(out) == {"stood_down"}, out
+        assert table in out["stood_down"], out
+        assert set(out["stood_down"]) <= _UNIT_OF[table], out
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+        return out
+    with pytest.raises(RuntimeError, match=f"{table}.* is written by a write chain"):
+        await _run_pooled(path, store)
+    return None
+
+
+class TestTheBackfillsAndTheHourlyDiffs:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_without_a_chain_it_writes(self, pool, tmp_path, path):
+        """The control: each ships DuckDB's row into the recorder. Postgres
+        holds nothing there, so everything DuckDB has is missing."""
+        store = await _landing_store(tmp_path)
+        out = await _run_pooled(path, store)
+        assert "error" not in out, out
+        assert pool.wrote(_POOLED[path]), pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_the_chain_stands_it_down_before_postgres(
+            self, pool, landing_chain, tmp_path, path, caplog):
+        landing_chain()
+        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        _never_reached_postgres(pool)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_the_owner_row_stands_it_down_when_the_marker_is_lost(
+            self, pool, landing_chain, tmp_path, path, caplog):
+        """Flag at duckdb, no marker: only the owner row in Postgres says the
+        table moved, and a path holding a pool reads it — DN-06's rule."""
+        landing_chain(env=lambda: False)
+        pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
+        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        assert pool.only_asked_who_owns(), pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_an_owner_row_no_chain_here_declares_still_holds(
+            self, flags, pool, tmp_path, path, caplog):
+        """An image older than the chain: the owner row is read as itself."""
+        _no_landing_chain(flags)
+        pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
+        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        assert pool.only_asked_who_owns(), pool.sql
+
+    @pytest.mark.asyncio
+    async def test_the_buyers_owner_row_holds_their_contacts_too(
+            self, flags, pool, tmp_path):
+        """An owner row for either half of the unit holds the whole unit."""
+        from core.pg_buyers import hourly_ids_diff
+
+        _no_landing_chain(flags)
+        pool.owner_rows = {CONTACTS: "2026-09-20T08:00:00+00:00"}
+        out = await hourly_ids_diff(await _landing_store(tmp_path))
+        assert out == {"stood_down": [CONTACTS, BUYERS]}, out
+        assert pool.only_asked_who_owns()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_an_unreadable_owner_row_ships_nothing(
+            self, pool, landing_chain, tmp_path, path):
+        """Not an absent owner row: the backfill raises it, the hourly diff
+        returns it as its error, and neither ships on the strength of it."""
+        landing_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        store = await _landing_store(tmp_path)
+        if path.startswith("hourly"):
+            out = await _run_pooled(path, store)
+            assert "unreadable" in out["error"], out
+        else:
+            with pytest.raises(RuntimeError, match="unreadable"):
+                await _run_pooled(path, store)
+        assert pool.only_asked_who_owns(), pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_POOLED))
+    async def test_a_schema_behind_the_code_breaks_before_the_owner_read(
+            self, pool, tmp_path, path):
+        """`require_revision()` first, so an old schema is a
+        `SchemaVersionError` and never a stand-down read off it — the owner
+        row is present here, so a path that read it first would stand down."""
+        from core import pg
+
+        pg.require_revision.side_effect = pg.SchemaVersionError(
+            "database at 0031, code wants 0033")
+        pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
+        store = await _landing_store(tmp_path)
+        if path.startswith("hourly"):
+            out = await _run_pooled(path, store)
+            assert out.get("error", "").startswith("SchemaVersionError"), out
+        else:
+            with pytest.raises(pg.SchemaVersionError):
+                await _run_pooled(path, store)
+        pg.require_revision.assert_awaited()
+        assert pool.sql == [] and pool.acquired == 0, pool.sql
+
+
+class TestTheAdminExpenseBackfill:
+    """`POST /api/mirror/backfill/expenses`: 409 before anything starts, the
+    orders route's arrangement. It used to hand the backfill's refusal back as
+    a 500 "Backfill failed"."""
+
+    @pytest.fixture
+    def backfill(self, flags):
+        from unittest.mock import AsyncMock
+
+        run = AsyncMock(return_value={"complete": True})
+        flags.setattr("core.pg_expense_backfill.backfill_expenses", run)
+        flags.setattr("web.routes.api.admin.get_store", AsyncMock(return_value=object()))
+        return run
+
+    def _post(self, flags):
+        return _admin_client(flags).post("/api/mirror/backfill/expenses")
+
+    REFUSAL = f"{EXPENSES} is written by a write chain, not shipped out of DuckDB"
+
+    def test_409_on_the_chain_and_postgres_is_not_asked(
+            self, flags, pool, landing_chain, backfill):
+        landing_chain()
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert res.json()["detail"].startswith(self.REFUSAL)
+        backfill.assert_not_called()
+        _never_reached_postgres(pool)
+
+    def test_409_on_the_owner_row_when_the_marker_is_lost(
+            self, flags, pool, landing_chain, backfill):
+        landing_chain(env=lambda: False)
+        pool.owner_rows = {EXPENSES: "2026-09-20T08:00:00+00:00"}
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert res.json()["detail"].startswith(self.REFUSAL)
+        backfill.assert_not_called()
+        assert pool.only_asked_who_owns()
+
+    def test_an_unreadable_owner_row_is_a_503(
+            self, flags, pool, landing_chain, backfill):
+        landing_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        res = self._post(flags)
+        assert res.status_code == 503, res.json()
+        assert "unreadable" in res.json()["detail"]
+        backfill.assert_not_called()
+
+    def test_a_schema_behind_the_code_is_a_503_before_the_owner_read(
+            self, flags, pool, backfill):
+        from core import pg
+
+        pg.require_revision.side_effect = pg.SchemaVersionError(
+            "database at 0031, code wants 0033")
+        pool.owner_rows = {EXPENSES: "2026-09-20T08:00:00+00:00"}
+        res = self._post(flags)
+        assert res.status_code == 503, res.json()
+        assert "SchemaVersionError" in res.json()["detail"]
+        assert pool.sql == [] and pool.acquired == 0
+        backfill.assert_not_called()
+
+    def test_without_a_chain_it_runs(self, flags, pool, backfill):
+        res = self._post(flags)
+        assert res.status_code == 200, res.json()
+        backfill.assert_awaited_once()
+        assert pool.only_asked_who_owns()
+
+
+# ─── DN-22b: the daily comparisons stand down with their shippers ───────────
+
+_COMPARED = {
+    # comparison: (the tables it stands down on the plan's fake chain,
+    #              the shipper whose claim its finding makes)
+    "reconcile_mirror": ((PRODUCTS, MANAGERS, CLASSIFICATIONS), "mirror_products"),
+    "reconcile_expenses": ((EXPENSES,), "mirror_expenses"),
+    "reconcile_buyers": ((BUYERS, CONTACTS), "mirror_buyers"),
+}
+
+
+# The tables whose sync shipper asks the local answer alone — `_mirror`, the
+# per-tick catalogue and expense mirror. The buyers mirror and the
+# classification copy read the owner rows too since the DN-22b review.
+_SHIPPED_ON_THE_LOCAL_ANSWER = {PRODUCTS, CATEGORIES, EXPENSES}
+
+
+async def _compare(name, store):
+    """Run one comparison the way the 07:30 job does. `reconcile_mirror` is
+    handed a DuckDB side holding the categories alone: a stood-down table it
+    went on to compare would fail on the missing key, not pass."""
+    from core import mirror_reconciliation as mr
+
+    if name == "reconcile_mirror":
+        if store is None:
+            dk_side = {CATEGORIES: ({}, {})}
+        else:
+            async with store.connection() as conn:
+                dk_side = mr.read_duckdb_side(conn)
+        return await mr.reconcile_mirror(dk_side)
+    return await getattr(mr, name)(store if store is not None else _NoStore())
+
+
+def _read_a_table(pool, tables) -> list:
+    """The statements that named one of `tables` — reads and writes alike."""
+    return [s for s in pool.sql if any(t in s for t in tables)]
+
+
+class TestTheComparisonsStandDown:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    async def test_without_a_chain_they_compare(self, pool, tmp_path, name):
+        """The control: each reads its tables in Postgres and files no
+        stand-down of either kind."""
+        store = await _landing_store(tmp_path)
+        issues = await _compare(name, store)
+        tables = _COMPARED[name][0]
+        assert _read_a_table(pool, tables), pool.sql
+        assert not {"mirror_stood_down", "owner_row_without_marker"} & {
+            i.check_name for i in issues}, issues
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    async def test_on_the_local_answer_info_per_table_and_no_read(
+            self, pool, landing_chain, name):
+        from core.data_quality import Severity
+
+        landing_chain()
+        issues = await _compare(name, None)
+        tables = _COMPARED[name][0]
+        stood = [(i.check_name, i.table_name, i.severity) for i in issues
+                 if i.check_name == "mirror_stood_down"]
+        assert stood == [("mirror_stood_down", t, Severity.INFO) for t in tables]
+        assert "owner_row_without_marker" not in {i.check_name for i in issues}
+        assert _read_a_table(pool, tables) == [], pool.sql
+        if name != "reconcile_mirror":
+            _never_reached_postgres(pool)
+
+    @pytest.mark.asyncio
+    async def test_a_catalogue_wholly_stood_down_costs_neither_store_anything(
+            self, pool, landing_chain):
+        """With every table of the landing comparison held on the local
+        answer, nothing is left to compare, and Postgres is not asked at all —
+        not the pool, not the revision, not the owner rows. The categories are
+        compared in the test above, so only this one can see the order."""
+        from core.mirror_reconciliation import MIRRORED_TABLES, reconcile_mirror
+
+        landing_chain(tables=LANDING + (CATEGORIES, CONTACTS, CLASSIFICATIONS))
+        issues = await reconcile_mirror({})
+        assert sorted(i.table_name for i in issues) == sorted(
+            s.pg_table for s in MIRRORED_TABLES)
+        assert {i.check_name for i in issues} == {"mirror_stood_down"}
+        _never_reached_postgres(pool)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    @pytest.mark.parametrize("road", ["marker_lost", "rolled_back"])
+    async def test_on_the_owner_rows_alone_what_each_shipper_earns_and_no_read(
+            self, flags, pool, landing_chain, name, road):
+        """A CRITICAL for the tables whose sync shipper asks the local answer
+        alone and is still writing over the chain's rows; an INFO per table
+        for the buyers and the classification, whose shippers read the owner
+        rows too and have stopped (the DN-22b review) — the latch itself is
+        `chain_latch_disagrees`' or `chain_owner_unregistered`'s page."""
+        from core.data_quality import Severity
+
+        tables = _COMPARED[name][0]
+        if road == "marker_lost":
+            landing_chain(env=lambda: False)
+            # One owner row holds the chain's every table (`claimed_tables`).
+            pool.owner_rows = {tables[0]: "2026-09-20T08:00:00+00:00"}
+        else:
+            _no_landing_chain(flags)
+            # No chain to expand a row through: each row holds its own unit,
+            # so the catalogue's two units need a row each.
+            pool.owner_rows = {t: "2026-09-20T08:00:00+00:00" for t in tables}
+        issues = await _compare(name, None)
+
+        still = sorted(t for t in tables if t in _SHIPPED_ON_THE_LOCAL_ANSWER)
+        stopped = sorted(t for t in tables if t not in _SHIPPED_ON_THE_LOCAL_ANSWER)
+        pages = [i for i in issues if i.check_name == "owner_row_without_marker"]
+        if still:
+            (page,) = pages
+            assert page.severity is Severity.CRITICAL
+            assert page.table_name == ", ".join(still)
+            assert page.count == len(still)
+            if road == "marker_lost":
+                assert "the marker is missing" in page.description
+            else:
+                assert "no chain in this build declares them" in page.description
+        else:
+            assert pages == [], pages
+        infos = [i for i in issues if i.check_name == "mirror_stood_down"]
+        assert sorted(i.table_name for i in infos) == stopped
+        for info in infos:
+            assert info.severity is Severity.INFO
+            assert "reads the owner rows too" in info.description
+            assert "chain_owner_unregistered" in info.description
+        assert _read_a_table(pool, tables) == [], pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    async def test_a_schema_behind_the_code_breaks_before_the_owner_read(
+            self, pool, name):
+        from core import pg
+
+        pg.require_revision.side_effect = pg.SchemaVersionError(
+            "database at 0031, code wants 0033")
+        pool.owner_rows = {_COMPARED[name][0][0]: "2026-09-20T08:00:00+00:00"}
+        with pytest.raises(pg.SchemaVersionError):
+            await _compare(name, None)
+        assert pool.sql == [] and pool.acquired == 0, pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    async def test_an_unreadable_owner_row_is_the_comparisons_error(
+            self, pool, landing_chain, name):
+        """Raised, so the 07:30 job records the check as failed rather than
+        comparing — `reconcile_operational`'s contract for the same read."""
+        landing_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        with pytest.raises(RuntimeError, match="unreadable"):
+            await _compare(name, None)
+        assert pool.only_asked_who_owns(), pool.sql
+
+
+class TestTheLandingFindingSaysWhetherTheSyncStillShips:
+    """`TestTheStandDownFindingSaysWhetherTheSyncStillShips`, for DN-22b: the
+    claim each finding makes about the sync's shipper is checked against what
+    that shipper then does with the same recorder."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    @pytest.mark.parametrize("state", ["flagged", "marker_lost", "rolled_back"])
+    async def test_the_claim_is_what_the_shipper_does(
+            self, flags, pool, landing_chain, tmp_path, name, state):
+        tables, shipper = _COMPARED[name]
+        if state == "flagged":
+            landing_chain()
+        else:
+            if state == "marker_lost":
+                landing_chain(env=lambda: False)
+            else:
+                _no_landing_chain(flags)
+            pool.owner_rows = {t: "2026-09-20T08:00:00+00:00" for t in tables}
+        issues = [i for i in await _compare(name, None)
+                  if i.check_name in {"mirror_stood_down", "owner_row_without_marker"}]
+        assert issues, "no stand-down filed — nothing to check the claim of"
+        for text in {i.description for i in issues}:
+            stopped = "the sync no longer ships DuckDB's copy" in text
+            shipping = "the sync is still shipping" in text
+            assert stopped != shipping, f"says neither or both: {text}"
+
+        # Every sync shipper of the tables the findings cover — the catalogue
+        # comparison covers two, which since the DN-22b review can earn
+        # different claims — each checked against the finding naming its table.
+        store = await _landing_store(tmp_path)
+        shippers = {"reconcile_mirror": (("mirror_products", PRODUCTS),
+                                         ("replicate_managers", MANAGERS))}.get(
+            name, ((shipper, tables[0]),))
+        for path, table in shippers:
+            (issue,) = [i for i in issues if table in i.table_name.split(", ")]
+            shipping = "the sync is still shipping" in issue.description
+            pool.sql.clear()
+            await _ship(path, store)
+            assert pool.wrote(table) == shipping, (path, issue.description, pool.sql)
+            assert pool.wrote(table) == (issue.severity.value == "CRITICAL")
+
+
+class TestWhatTheLandingStandDownTellsAHuman:
+    """Persisted as the 07:30 job persists it, read back as the digest and a
+    page read it: the label and the lever, never the description."""
+
+    @pytest.mark.asyncio
+    async def test_on_the_local_answer_it_stays_info(
+            self, pool, landing_chain, tmp_path):
+        from core.mirror_reconciliation import reconcile_buyers
+
+        landing_chain()
+        store = await _landing_store(tmp_path)
+        run, rows = await _persisted(store, await reconcile_buyers(store))
+        assert sorted((r["check_name"], r["table_name"], r["severity"])
+                      for r in rows) == [
+            ("mirror_stood_down", CONTACTS, "INFO"),
+            ("mirror_stood_down", BUYERS, "INFO"),
+        ]
+        assert run["status"] == "PASS" and run["critical_count"] == 0, run
+
+    @pytest.mark.asyncio
+    async def test_on_the_owner_rows_alone_it_pages_and_never_says_not_a_defect(
+            self, pool, landing_chain, tmp_path):
+        from core.mirror_reconciliation import reconcile_expenses
+
+        landing_chain(env=lambda: False)
+        pool.owner_rows = {EXPENSES: "2026-09-20T08:00:00+00:00"}
+        store = await _landing_store(tmp_path)
+        run, rows = await _persisted(store, await reconcile_expenses(store))
+
+        assert [(r["check_name"], r["table_name"], r["severity"]) for r in rows] == [
+            ("owner_row_without_marker", EXPENSES, "CRITICAL")]
+        assert run["status"] == "CRITICAL", run
+        read = _what_a_human_reads(run, rows)
+        assert "not a defect" not in read.lower(), read
+        assert "the sync is overwriting tables a write chain owns" in read
+        (lever,) = [line for line in read.splitlines() if line.startswith("→ ")]
+        assert "scripts/chain_copy_back.py" in lever
+        assert "data/write-chain-owners" in lever
+
+    def test_the_registry_says_it_does_not_clear_by_itself(self):
+        from core.alerting import REGISTRY, Kind
+
+        spec = REGISTRY["owner_row_without_marker"]
+        assert spec.kind is Kind.CONDITION
+        assert "a human, not a job" in spec.clears
+
+    def test_the_local_lever_is_not_about_orders_alone(self):
+        """`mirror_stood_down` is filed for any table now; its lever must not
+        tell the reader of a buyers finding about the order tables."""
+        from core.data_quality import remediation_for
+
+        (lever,) = remediation_for(["mirror_stood_down"])
+        assert "order" not in lever.lower(), lever
+        assert "never backfill" in lever.lower()
+
+
+# ─── An owner row no chain here declares holds the operational copy too ──────
+#
+# The DN-22b review: `replicate_operational` and `reconcile_operational`
+# expanded the owner rows through the registered chains alone, while the
+# landing paths read each row as itself. On an image older than chain 4 the
+# buyers' hourly diff stood down on `owner:bronze.buyers` and the hourly full
+# replace, in the same hour, put DuckDB's `app.buyer_gender` over the verdicts
+# the chain had written — a human override included — after which the two
+# copies agreed and the comparison had nothing to say. Both now stand down on
+# `chain_latch.owned_tables`, and the comparison says why.
+
+GENDER = "app.buyer_gender"
+STAMP = "2026-09-20T08:00:00+00:00"
+
+
+def _no_chain_declares(flags, *tables) -> None:
+    """No chain in this build declares `tables` — made so, `_rolled_back`'s
+    reason: once chain 4 is registered for real these tests keep meaning an
+    image older than it."""
+    from core import write_chains
+
+    flags.setattr(write_chains, "WRITE_CHAINS", tuple(
+        c for c in write_chains.WRITE_CHAINS if not set(tables) & set(c.CHAIN_TABLES)))
+
+
+@pytest.fixture
+def dsn(flags):
+    """`replicate_operational` asks `configured()` before anything else; the
+    recorder stands behind whatever the variable names."""
+    flags.setenv("KS_PG_DSN", "postgresql://recorded/ks")
+
+
+def _touched(pool, table) -> list:
+    """The statements that replaced or appended to `table`."""
+    return [s for s in pool.sql
+            if table in s and ("DELETE FROM" in s or "INSERT INTO" in s)]
+
+
+class TestAnUnregisteredOwnerRowHoldsTheOperationalCopy:
+    @pytest.mark.asyncio
+    async def test_the_control_replaces_the_table(self, flags, dsn, pool, tmp_path):
+        """Without the row the hourly copy replaces `app.buyer_gender` — a
+        recorder that could not see that would pass the test below."""
+        from core.pg_operational import replicate_operational
+
+        _no_chain_declares(flags, GENDER)
+        result = await replicate_operational(await _landing_store(tmp_path))
+        assert "error" not in result, result
+        assert _touched(pool, GENDER), pool.sql
+        assert "chain_owner_unregistered" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_owner_row_alone_holds_it_and_nothing_else(
+            self, flags, dsn, pool, tmp_path):
+        from core.pg_operational import replicate_operational
+
+        _no_chain_declares(flags, GENDER)
+        pool.owner_rows = {GENDER: STAMP}
+        result = await replicate_operational(await _landing_store(tmp_path))
+
+        assert "error" not in result, result
+        assert _touched(pool, GENDER) == [], pool.sql
+        assert GENDER in result["stood_down"] and GENDER not in result["replaced"]
+        assert result["chain_owner_unregistered"] == {GENDER: STAMP}
+        # Per table, not an off switch: every other table still ships.
+        assert _touched(pool, "app.revenue_goals"), pool.sql
+        # And not stamped: the chain writes this table, not this job, and a
+        # failure count only a later shipment could clear would outlive the
+        # rollback it describes.
+        assert not [s for s in pool.sql if "failures_since_ok + 1" in s], pool.sql
+
+    @pytest.mark.asyncio
+    async def test_an_owner_row_for_a_table_it_never_ships_is_not_reported(
+            self, flags, dsn, pool, tmp_path):
+        """`bronze.buyers` is not an operational table: held down or not, this
+        job has nothing to say about it."""
+        from core.pg_operational import replicate_operational
+
+        _no_chain_declares(flags, BUYERS)
+        pool.owner_rows = {BUYERS: STAMP}
+        result = await replicate_operational(await _landing_store(tmp_path))
+        assert "error" not in result, result
+        assert "chain_owner_unregistered" not in result
+        assert _touched(pool, GENDER), pool.sql
+
+
+class TestTheComparisonSaysWhyItStoodDown:
+    @pytest.mark.asyncio
+    async def test_the_owner_row_alone_is_critical_and_the_table_is_not_read(
+            self, flags, pool, tmp_path):
+        from core.data_quality import Severity
+        from core.mirror_reconciliation import reconcile_operational
+
+        _no_chain_declares(flags, GENDER, BUYERS, CONTACTS)
+        pool.owner_rows = {GENDER: STAMP, BUYERS: STAMP, CONTACTS: STAMP}
+        issues = await reconcile_operational(await _landing_store(tmp_path))
+
+        (page,) = [i for i in issues if i.check_name == "chain_owner_unregistered"]
+        assert page.severity is Severity.CRITICAL
+        assert page.table_name == ", ".join(sorted((GENDER, BUYERS, CONTACTS)))
+        assert page.count == 3
+        assert STAMP in page.description
+        assert "scripts/chain_copy_back.py" in page.description
+        assert [i for i in issues if i.table_name == GENDER] == []
+        assert _read_a_table(pool, [GENDER]) == [], pool.sql
+
+    @pytest.mark.asyncio
+    async def test_the_control_compares_it_and_files_nothing_about_owners(
+            self, flags, pool, tmp_path):
+        from core.mirror_reconciliation import reconcile_operational
+
+        _no_chain_declares(flags, GENDER)
+        issues = await reconcile_operational(await _landing_store(tmp_path))
+        assert "chain_owner_unregistered" not in {i.check_name for i in issues}
+        assert _read_a_table(pool, [GENDER]), pool.sql
+
+    @pytest.mark.asyncio
+    async def test_a_registered_chain_is_not_reported_as_unregistered(
+            self, pool, landing_chain, tmp_path):
+        """A chain this build declares is `chain_latch_disagrees`' business,
+        not this finding's — one fact, one page."""
+        from core.mirror_reconciliation import reconcile_operational
+
+        landing_chain(tables=(GENDER,), env=lambda: False)
+        pool.owner_rows = {GENDER: STAMP}
+        issues = await reconcile_operational(await _landing_store(tmp_path))
+        names = {i.check_name for i in issues}
+        assert "chain_owner_unregistered" not in names
+        assert "chain_latch_disagrees" in names
+
+    def test_what_a_human_reads_names_the_lever(self):
+        from core.alerting import REGISTRY, Kind
+        from core.data_quality import human_check_name, remediation_for
+
+        (lever,) = remediation_for(["chain_owner_unregistered"])
+        assert "scripts/chain_copy_back.py" in lever and len(lever) <= 150
+        assert "never re-ship" in lever.lower()
+        assert "does not know" in human_check_name("chain_owner_unregistered")
+        spec = REGISTRY["chain_owner_unregistered"]
+        assert spec.kind is Kind.CONDITION
+        assert "a human, not a job" in spec.clears

@@ -464,6 +464,13 @@ async def fetch_pg_rows(pool, spec: MirroredTable) -> Dict[Any, Tuple[Any, ...]]
 # in which the main copy could be broken with nobody told. The ClickHouse rows
 # are NOT here; that store is optional and its daily window of silence was
 # accepted and written down when step 4 shipped.
+#
+# Deliberately NOT stood down when a write chain owns the order tables
+# (DN-22b, settling DN-22a's review): the chain's writer ships through
+# `pg_landing.write_orders`, the only writer of `bronze.orders` there may be,
+# so the watermark keeps moving under the chain and an 8-hour silence still
+# means orders stopped landing. `tests/unit/test_write_chains.py` pins both
+# halves — one writer, and this watch not asking the registry.
 WATCHED_MIRRORS: Tuple[str, ...] = ("bronze.orders",)
 
 
@@ -940,11 +947,30 @@ async def reconcile_mirror(
             ),
         )]
 
+    # A write chain that owns one of these tables stands its unit down here,
+    # as it stands down the shipper that feeds them (DN-22b): the catalogue
+    # mirror or the classification copy stops shipping DuckDB's rows, so every
+    # row the chain writes would read as lost from DuckDB — findings the check
+    # itself created. The local answer before Postgres is asked anything; the
+    # owner rows once the pool is in hand, after `require_revision()`, where a
+    # stand-down seen on them alone is a CRITICAL, not a decision.
+    from core import chain_latch
+
+    issues, held = _landing_stood_down([s.pg_table for s in specs])
+    specs = tuple(s for s in specs if s.pg_table not in held)
+    if not specs:
+        return issues
+
     pool = await get_pool()
     await require_revision()
+    found, held = _landing_stood_down(
+        [s.pg_table for s in specs], await chain_latch.read_owners(pool))
+    issues += found
+    specs = tuple(s for s in specs if s.pg_table not in held)
+    if not specs:
+        return issues
     watermarks = await fetch_watermarks(pool)
 
-    issues: List[IntegrityIssue] = []
     for spec in specs:
         dk_rows, dk_synced = dk_side[spec.pg_table]
         pg_rows = await fetch_pg_rows(pool, spec)
@@ -1486,6 +1512,129 @@ def _owner_rows_only_description(tables: str, order_tables: set) -> str:
         "ids-diff, the comment ship and this comparison stand down on the "
         "owner row, and only the sync's mirror does not."
     )
+
+
+def _landing_stood_down(
+    tables: Sequence[str], owners: Optional[Mapping[str, str]] = None,
+) -> Tuple[List[IntegrityIssue], FrozenSet[str]]:
+    """The findings for the tables among `tables` a write chain holds, and the
+    tables not to compare (DN-22b). Nothing and nothing when none is held.
+
+    `_orders_stood_down`'s two answers for every other landing and replicated
+    table — the catalogue, the order-level expenses, the buyers, the manager
+    classification — asked per unit (`pg_landing.unit_of`), because the
+    shipper stands a unit down whole: whoever takes the buyers takes their
+    contacts, and a comparison that went on comparing the contacts would file
+    every change the chain makes to them as a loss.
+
+    **On the local answer, `mirror_stood_down` (INFO), one per table.** The
+    shipper asks the same answer and has stopped: a decision, with nothing
+    left writing DuckDB's copy over the chain's rows.
+
+    **With `owners` given and the owner rows alone naming a unit, it depends
+    on the unit's sync shipper** (`pg_landing.sync_reads_the_owner_rows`):
+
+    - one that reads the owner rows too — the buyers mirror, the
+      classification copy — has stopped: `mirror_stood_down` (INFO) per
+      table, saying so. The latch is still wrong, but that is one fact about
+      a chain and it has its own page: `chain_latch_disagrees` for a chain
+      this build declares, `chain_owner_unregistered` for one it does not,
+      both filed by `reconcile_operational` on the same layer;
+    - one that asks the local answer alone — the catalogue and expense
+      mirrors — writes DuckDB's copy over the chain's rows each time it runs:
+      `owner_row_without_marker` (CRITICAL), one for all of them — damage,
+      not a decision, and a page and the digest print the label and lever,
+      never this text.
+    """
+    from core import chain_latch, pg_landing
+    from core.write_chains import WRITE_CHAINS
+
+    wanted = set(tables)
+    units = []
+    for table in tables:
+        unit = pg_landing.unit_of(table)
+        if unit not in units:
+            units.append(unit)
+
+    issues: List[IntegrityIssue] = []
+    held: set = set()
+    owned_only: List[str] = []
+    for unit in units:
+        if owners is not None and not pg_landing.tables_stood_down(unit) \
+                and pg_landing.owned_among(owners, unit) \
+                and pg_landing.sync_reads_the_owner_rows(unit):
+            held |= set(unit)
+            owned = ", ".join(sorted(set(unit) & chain_latch.owned_tables(owners)))
+            for table in unit:
+                if table not in wanted:
+                    continue
+                issues.append(IntegrityIssue(
+                    check_name="mirror_stood_down",
+                    table_name=table,
+                    severity=Severity.INFO,
+                    count=1,
+                    description=(
+                        f"Not compared: an owner row in Postgres says a write "
+                        f"chain owns {owned}, and the sync no longer ships "
+                        f"DuckDB's copy of {table} — its shipper reads the "
+                        "owner rows too, and ownership passes for "
+                        f"{', '.join(unit)} as a unit. This process's own "
+                        "answer still says DuckDB writes it; why is "
+                        "chain_latch_disagrees' or chain_owner_unregistered's "
+                        "finding, not this one's."
+                    ),
+                ))
+            continue
+        local = pg_landing.tables_stood_down(unit)
+        if local:
+            held |= set(unit)
+            declared = ", ".join(sorted(local))
+            for table in unit:
+                if table not in wanted:
+                    continue
+                issues.append(IntegrityIssue(
+                    check_name="mirror_stood_down",
+                    table_name=table,
+                    severity=Severity.INFO,
+                    count=1,
+                    description=(
+                        f"Not compared: {declared} is written by a write "
+                        f"chain, so the sync no longer ships DuckDB's copy of "
+                        f"{table} — ownership passes for "
+                        f"{', '.join(unit)} as a unit. A difference here "
+                        "would be the chain's own writes, not a loss."
+                    ),
+                ))
+        elif owners is not None and pg_landing.owned_among(owners, unit):
+            held |= set(unit)
+            owned_only += [t for t in unit if t in wanted]
+
+    if owned_only:
+        named = ", ".join(sorted(owned_only))
+        if any(set(owned_only) & set(c.CHAIN_TABLES) for c in WRITE_CHAINS):
+            why = ("the marker is missing; the sync is still shipping — restore "
+                   "data/write-chain-owners or run scripts/chain_copy_back.py")
+        else:
+            why = ("no chain in this build declares them (an image older than "
+                   "the chain?); the sync is still shipping — redeploy a build "
+                   "that declares the chain, or run scripts/chain_copy_back.py "
+                   "from one")
+        issues.append(IntegrityIssue(
+            check_name="owner_row_without_marker",
+            table_name=named,
+            severity=Severity.CRITICAL,
+            count=len(owned_only),
+            description=(
+                f"An owner row in Postgres says a write chain owns {named}, but "
+                f"this process's own answer says DuckDB still writes them: "
+                f"{why}. Until then each sync that ships these tables writes "
+                "DuckDB's copy over the chain's rows. Not compared: the "
+                "backfills, the hourly diffs, the buyers and classification "
+                "copies and this comparison stand down on the owner row; the "
+                "per-tick mirror of these tables does not."
+            ),
+        ))
+    return issues, frozenset(held)
 
 
 async def reconcile_orders(
@@ -3111,15 +3260,27 @@ async def reconcile_expenses(
     carried is the defect. `synced_column` tells them apart the way it does for
     the catalogue.
     """
-    from core import pg_landing
+    from core import chain_latch, pg_landing
     from core.pg import get_pool, require_revision
 
     if not pg_landing.enabled():
         return []
 
+    # Stood down with its shipper once a write chain owns the table (DN-22b):
+    # the local answer before either store is read, the owner rows after
+    # `require_revision()` and before the watermarks — `reconcile_mirror`'s
+    # arrangement, and the same two findings.
+    tables = [EXPENSES_TABLE.pg_table]
+    issues, held = _landing_stood_down(tables)
+    if held:
+        return issues
+
     now = now or datetime.now(timezone.utc)
     pool = await get_pool()
     await require_revision()
+    issues, held = _landing_stood_down(tables, await chain_latch.read_owners(pool))
+    if held:
+        return issues
     watermarks = await fetch_watermarks(pool)
     watermark = watermarks.get(EXPENSES_TABLE.pg_table)
 
@@ -3201,6 +3362,14 @@ def _chain_latch_findings(
     a shipment that predates the handover, which is why the owner row stores
     the moment ownership passed and never moves it forward.
 
+    **`chain_owner_unregistered`.** An owner row naming a table no chain in
+    this build declares: the build is older than the chain (a rollback, a
+    pinned `sha-*`), or the chain left `WRITE_CHAINS` without being copied
+    back. The two findings above walk the registered chains and so cannot see
+    it, and the hourly copy and the landing paths stand down on it
+    (`chain_latch.owned_tables`) — which makes this the one place it is said.
+    One finding for all of them, like the landing's owner-row page.
+
     Takes the owner rows the caller has already read rather than reading them
     itself: the same query decides which tables this run may compare at all,
     and two reads could disagree about that within one run.
@@ -3268,6 +3437,26 @@ def _chain_latch_findings(
                     "handover is gone. Do not re-run the shipper."
                 ),
             ))
+
+    unregistered = chain_latch.unregistered_owned_tables(owners)
+    if unregistered:
+        named = ", ".join(sorted(unregistered))
+        issues.append(IntegrityIssue(
+            check_name="chain_owner_unregistered",
+            table_name=named,
+            severity=Severity.CRITICAL,
+            count=len(unregistered),
+            description=(
+                f"Owner rows in Postgres say a write chain owns {named} since "
+                f"{min(unregistered.values())}, and no chain in this build "
+                "declares them — an image older than the chain, or a chain "
+                "dropped from WRITE_CHAINS without its copy-back. The hourly "
+                "copy and this comparison stand down on them, but this build "
+                "has no writer for them in Postgres, so whatever it writes goes "
+                "to DuckDB alone. Redeploy a build that declares the chain, or "
+                "run scripts/chain_copy_back.py from one."
+            ),
+        ))
     return issues
 
 
@@ -3347,7 +3536,12 @@ async def reconcile_operational(
     # standing reason that the two must not disagree about which tables have
     # changed hands.
     owners = await chain_latch.read_owners(pool)
-    stood_down = stood_down | chain_latch.claimed_tables(owners)
+    # Each owner row as itself too (`owned_tables`), the shipper's union: on an
+    # image older than the chain nothing here declares the table, and the
+    # comparison would either file every chain-written row as a discrepancy or
+    # — once the shipper had overwritten them — report two agreeing copies.
+    # `chain_owner_unregistered` below says which tables and why.
+    stood_down = stood_down | chain_latch.owned_tables(owners)
 
     whole = tuple(s for s in OPERATIONAL_TABLES if s.pg_table not in stood_down)
 
@@ -3878,6 +4072,13 @@ async def reconcile_order_versions(
     like everything else here — and more absolutely than anything else here,
     because a "repair" would mean inventing the history the table exists to be
     the only record of.
+
+    **It does not stand down when a write chain owns the order tables**
+    (DN-22b). The stand-down stops the sync's mirror, not the capture: the
+    chain's writer ships through `write_orders`, which captures in the same
+    transaction, so a day with no version is still a broken writer — and this
+    is the one liveness check on the one table nothing can rebuild, at the
+    moment its writer changes hands.
     """
     from core import pg_landing
     from core.pg import get_pool, require_revision
@@ -4077,16 +4278,27 @@ async def reconcile_buyers(
     mirror looks exactly like a lost one. One `mirror_backfill_pending`
     instead of twenty thousand CRITICALs.
     """
-    from core import pg_landing
+    from core import chain_latch, pg_landing
     from core.pg import get_pool, require_revision
-    from core.pg_buyers import BUYERS_STATE, CONTACT_COLUMNS
+    from core.pg_buyers import BUYER_UNIT, BUYERS_STATE, CONTACT_COLUMNS
 
     if not pg_landing.enabled():
         return []
 
+    # Stood down with `mirror_buyers` once a write chain owns the buyers or
+    # their contacts (DN-22b), both together — `reconcile_mirror`'s
+    # arrangement: the local answer before either store is read, the owner
+    # rows after `require_revision()`.
+    issues, held = _landing_stood_down(BUYER_UNIT)
+    if held:
+        return issues
+
     now = now or datetime.now(timezone.utc)
     pool = await get_pool()
     await require_revision()
+    issues, held = _landing_stood_down(BUYER_UNIT, await chain_latch.read_owners(pool))
+    if held:
+        return issues
     watermarks = await fetch_watermarks(pool)
 
     buyers_spec = _buyers_spec()

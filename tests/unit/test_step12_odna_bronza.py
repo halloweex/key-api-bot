@@ -195,6 +195,8 @@ class TestTheHourlyIdsDiff:
 
         monkeypatch.setattr(pg_landing, "enabled", lambda: True)
         monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=self._pool(True)))
+        # DN-22b: the diff checks the revision before it reads the owner rows.
+        monkeypatch.setattr(pg, "require_revision", AsyncMock())
         ran = AsyncMock(return_value={"shipped": 0, "missing_was": 0})
         monkeypatch.setattr(pg_buyers, "backfill_buyers", ran)
 
@@ -210,6 +212,8 @@ class TestTheHourlyIdsDiff:
 
         monkeypatch.setattr(pg_landing, "enabled", lambda: True)
         monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=self._pool(None)))
+        # DN-22b: the diff checks the revision before it reads the owner rows.
+        monkeypatch.setattr(pg, "require_revision", AsyncMock())
         monkeypatch.setattr(
             pg_buyers, "backfill_buyers",
             AsyncMock(return_value={"shipped": 20060, "missing_was": 20060}),
@@ -217,6 +221,9 @@ class TestTheHourlyIdsDiff:
         pg_buyers.last_heal.clear()
 
         await pg_buyers.hourly_ids_diff(store=object())
+        # The fill ran: an empty `last_heal` is only a verdict if it did —
+        # an error path leaves it empty too.
+        pg_buyers.backfill_buyers.assert_awaited_once()
         assert not pg_buyers.last_heal  # первый налив — не «лечение»
 
     @pytest.mark.asyncio
@@ -227,6 +234,8 @@ class TestTheHourlyIdsDiff:
 
         monkeypatch.setattr(pg_landing, "enabled", lambda: True)
         monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=self._pool(True)))
+        # DN-22b: the diff checks the revision before it reads the owner rows.
+        monkeypatch.setattr(pg, "require_revision", AsyncMock())
         monkeypatch.setattr(
             pg_buyers, "backfill_buyers",
             AsyncMock(return_value={"shipped": 3, "missing_was": 3}),
