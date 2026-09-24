@@ -2735,8 +2735,11 @@ or `mirror_failing` loses its fast signal.
 
 Production today stands nothing down: no chain declares any of these tables
 and no owner row names one, so the per-tick shippers read no variable and no
-file. What does run is one owner read (after a revision check) per run of each
-hourly diff, each daily comparison and the expenses route.
+file. What does run is an owner read after a revision check — in each hourly
+diff and again in the backfill it calls, in each of the three daily
+comparisons, and in the expenses route — and none of them finds a row that
+names these tables. The retail-status route now warns only on a replica that
+failed, not on one that was skipped.
 
 ## TODO: Full DuckDB Resync Solution
 
