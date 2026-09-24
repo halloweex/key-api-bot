@@ -1,8 +1,11 @@
 """Which tables have changed hands — one answer, found by walking, not listed.
 
-Stage 4 moves writes chain by chain. When a chain writes Postgres, the hourly
-shipper and the daily comparison must both stop touching its tables, and must
-stop together. Both ask `core.write_chains.stood_down_tables()`.
+Stage 4 moves writes chain by chain. When a chain writes Postgres, everything
+that ships its tables out of DuckDB and everything that compares them must stop
+touching them, and must stop together. All of them ask the registry
+(`core.write_chains`), and since DN-22b a walk finds every function that writes
+`bronze.*` or `app.*` in Postgres, and every comparison of those tables, and
+fails on one that does not ask.
 
 The guard below walks `core/` rather than trusting `WRITE_CHAINS`: a guard that
 names its subjects guards only the ones somebody remembered (the mirror-spec
@@ -16,6 +19,7 @@ from __future__ import annotations
 import ast
 import inspect
 import pathlib
+import re
 import textwrap
 
 import pytest
@@ -57,8 +61,453 @@ class TestEveryWriteChainIsRegistered:
                 "pg_expense_types_write"} <= found
 
 
-class TestTheShipperAndTheComparisonAskOneAnswer:
-    def test_both_sites_call_the_registry_and_neither_spells_a_chain(self):
+# ─── Every path that writes bronze.* or app.* asks who owns it (DN-22b) ──────
+#
+# Walked, not listed. This used to name its two subjects — the hourly shipper
+# and the daily comparison of the operational tables — and so guarded exactly
+# those two while the catalogue, the expenses, the buyers and the manager
+# classification shipped past the registry. The walk finds every function in
+# core/, web/ and scripts/ that executes a Postgres write naming a `bronze.` or
+# `app.` table, or one whose target it cannot read (`INSERT INTO {table}`: a
+# guard that could not resolve a name must not read it as "not ours"). Each
+# must ask the registry itself, or be reached only from functions that do —
+# `write_orders`, `pg_buyers._write` and `write_managers` are such primitives,
+# and it is their callers that ask. What is exempt is the destination side,
+# each entry with its reason, and the list must be exactly what the walk finds.
+
+_WALKED = ("core", "web", "scripts")
+_WRITE_SQL = re.compile(
+    r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?)\s+"
+    r"(?:ONLY\s+)?(bronze\.\w+|app\.\w+|\{[^}]*\})",
+    re.IGNORECASE)
+# An awaited call on one of these is asyncpg; DuckDB's are synchronous.
+_PG_EXECUTE = {"execute", "executemany", "copy_records_to_table",
+               "fetch", "fetchval", "fetchrow"}
+
+# The destination side: code that writes Postgres because Postgres is where
+# that table's writer lives, not because it ships a copy out of DuckDB. Each
+# value is the reason and, where the reason is a switch the function checks,
+# the name the function must evaluate for the reason to be true of it.
+# The registered write chains — the destination the registry routes to — are
+# exempt by being registered, not by being listed here.
+_DESTINATION = {
+    ("core/alert_actions.py", "request"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
+    ("core/alert_actions.py", "complete"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
+    ("core/alert_archive.py", "_write_fired"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
+    ("core/alert_archive.py", "_write_resolved"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
+    ("core/alert_archive.py", "_write_escalated"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
+    ("core/ch_history.py", "ship_history"): (
+        "writes ClickHouse's history.*, not Postgres", None),
+    ("core/pg_silver.py", "rebuild_silver"): (
+        "derives silver.orders inside Postgres; its UPDATE's target is the "
+        "dialect's Silver table, which the walk cannot read", "SILVER_TABLE"),
+    ("core/pg_vitrina.py", "rebuild_customer_profile"): (
+        "derived inside Postgres from Postgres's own Silver", None),
+    ("core/pg_vitrina.py", "reconcile_customer_profile"): (
+        "derived inside Postgres from Postgres's own Silver", None),
+    ("core/pg_sms.py", "replicate_sms"): (
+        "moved by its own switch before the registry existed", "sms_store_is_postgres"),
+    ("core/pg_dashboard_users.py", "replicate_dashboard_users"): (
+        "moved by its own switch before the registry existed", "user_store_is_postgres"),
+    ("core/pg_bot_state.py", "replicate_bot_state"): (
+        "moved by its own switch before the registry existed", "ENGINE_ENV"),
+}
+
+
+class _Module:
+    """One parsed module: its string constants, functions and imports."""
+
+    def __init__(self, path: pathlib.Path):
+        self.rel = path.relative_to(CORE.parent).as_posix()
+        self.name = ".".join(path.relative_to(CORE.parent).with_suffix("").parts)
+        self.tree = ast.parse(path.read_text(encoding="utf-8"))
+        self.consts: dict = {}
+        self.funcs: dict = {}
+        self.imports: dict = {}
+        self.module_aliases: dict = {}
+        for node in ast.walk(self.tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.funcs.setdefault(node.name, node)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for a in node.names:
+                    self.imports[a.asname or a.name] = (node.module, a.name)
+                    self.module_aliases[a.asname or a.name] = f"{node.module}.{a.name}"
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    self.module_aliases[a.asname or a.name] = a.name
+
+    def load_consts(self, modules) -> None:
+        """Module-level strings, rendered in order, f-strings with the names
+        they interpolate; a constant imported from a walked module too, and a
+        constant built by calling a helper of this module."""
+        for node in self.tree.body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if node.value is None:
+                continue
+            text = self.render(node.value, modules)
+            if text is None and isinstance(node.value, ast.Call) \
+                    and isinstance(node.value.func, ast.Name) \
+                    and node.value.func.id in self.funcs:
+                text = " ".join(self.texts(self.funcs[node.value.func.id], modules))
+            if text is None:
+                continue
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    self.consts[t.id] = text
+
+    def const(self, name, modules, bindings=None):
+        """A name's string value: an argument bound at the call being
+        inlined, a constant of this module, or one it imports."""
+        if bindings and name in bindings:
+            return bindings[name]
+        if name in self.consts:
+            return self.consts[name]
+        if name in self.imports:
+            src, attr = self.imports[name]
+            other = modules.get(src)
+            if other is not None and other is not self:
+                return other.consts.get(attr)
+        return None
+
+    def value(self, node, modules, bindings=None):
+        """A call argument as a string, when the walk can know it."""
+        if isinstance(node, ast.Name):
+            return self.const(node.id, modules, bindings)
+        return self.render(node, modules, bindings)
+
+    def render(self, node, modules, bindings=None):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            parts = []
+            for v in node.values:
+                if isinstance(v, ast.Constant):
+                    parts.append(str(v.value))
+                elif isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name) \
+                        and self.const(v.value.id, modules, bindings) is not None:
+                    parts.append(self.const(v.value.id, modules, bindings))
+                else:
+                    parts.append("{?}")
+            return "".join(parts)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left = self.render(node.left, modules, bindings)
+            right = self.render(node.right, modules, bindings)
+            if left is not None and right is not None:
+                return left + right
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "format":
+            # `_UPSERT.format(table=table, ...)`: the template with every
+            # keyword the walk can know filled in; the rest stay `{...}`.
+            template = self.value(node.func.value, modules, bindings)
+            if template is None:
+                return None
+            for kw in node.keywords:
+                known = self.value(kw.value, modules, bindings) if kw.arg else None
+                if known is not None:
+                    template = template.replace("{" + kw.arg + "}", known)
+            return template
+        return None
+
+    def texts(self, fn, modules, seen=None, bindings=None):
+        """Every SQL-ish string `fn` can execute: its own literals and
+        f-strings, the constants it names, and — transitively — what the
+        synchronous helpers it calls return (`_statement`, `_insert`,
+        `silver_pass2_sql`), rendered with the arguments this call passes
+        them where the walk can know those."""
+        seen = set() if seen is None else seen
+        mark = (self.name, fn.name, tuple(sorted((bindings or {}).items())))
+        if mark in seen:
+            return []
+        seen.add(mark)
+        doc = ast.get_docstring(fn)
+        # A template read through `.format` is rendered filled in, never raw.
+        formatted = {id(n.func.value) for n in ast.walk(fn)
+                     if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                     and n.func.attr == "format"}
+        out = []
+        for node in ast.walk(fn):
+            if id(node) in formatted:
+                continue
+            text = self.render(node, modules, bindings)
+            if text and text != doc:
+                out.append(text)
+            if isinstance(node, ast.Name):
+                text = self.const(node.id, modules, bindings)
+                if text:
+                    out.append(text)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                target = _resolve(self, node.func.id, modules)
+                if target and isinstance(target[1], ast.FunctionDef):
+                    callee_module, callee = target
+                    params = [a.arg for a in callee.args.args]
+                    bound = {}
+                    for name, arg in zip(params, node.args):
+                        known = self.value(arg, modules, bindings)
+                        if known is not None:
+                            bound[name] = known
+                    for kw in node.keywords:
+                        known = self.value(kw.value, modules, bindings) if kw.arg else None
+                        if known is not None:
+                            bound[kw.arg] = known
+                    out += callee_module.texts(callee, modules, seen, bound)
+        return out
+
+
+def _resolve(module, name, modules):
+    """`(module, function)` for a name called in `module`, or None."""
+    if name in module.funcs:
+        return module, module.funcs[name]
+    if name in module.imports:
+        src, attr = module.imports[name]
+        other = modules.get(src)
+        if other is not None and attr in other.funcs:
+            return other, other.funcs[attr]
+    return None
+
+
+def _walk_modules() -> dict:
+    root = CORE.parent
+    modules = {}
+    for folder in _WALKED:
+        for path in sorted((root / folder).rglob("*.py")):
+            m = _Module(path)
+            modules[m.name] = m
+    for m in modules.values():
+        m.load_consts(modules)
+    return modules
+
+
+def _called_names(fn) -> set:
+    names = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                names.add(node.func.attr)
+    return names
+
+
+def _awaited_names(fn) -> set:
+    """What `fn` awaits a call to, by name."""
+    out = set()
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Await) and isinstance(n.value, ast.Call):
+            f = n.value.func
+            out.add(f.id if isinstance(f, ast.Name) else getattr(f, "attr", ""))
+    return out
+
+
+def _executors(modules) -> set:
+    """Helpers that execute SQL they are handed (`_write_chunked(conn, sql,
+    rows)`): awaiting one is executing, although the text is the caller's."""
+    found = set()
+    for m in modules.values():
+        for name, fn in m.funcs.items():
+            params = {a.arg for a in fn.args.args}
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Await) and isinstance(n.value, ast.Call) \
+                        and isinstance(n.value.func, ast.Attribute) \
+                        and n.value.func.attr in _PG_EXECUTE and n.value.args \
+                        and isinstance(n.value.args[0], ast.Name) \
+                        and n.value.args[0].id in params:
+                    found.add(name)
+    return found
+
+
+def _pg_write_targets(module, fn, modules, executors=frozenset()) -> set:
+    """The `bronze.`/`app.` tables `fn` writes in Postgres, `{?}` for one it
+    names only at run time. Empty unless `fn` awaits an asyncpg call, or a
+    helper that executes the SQL it is handed."""
+    if not _awaited_names(fn) & (_PG_EXECUTE | set(executors)):
+        return set()
+    found = set()
+    for text in module.texts(fn, modules):
+        for m in _WRITE_SQL.finditer(text):
+            target = m.group(1)
+            found.add(target if not target.startswith("{") else "{?}")
+    return found
+
+
+class _Walk:
+    """The whole tree, once per test session."""
+
+    def __init__(self):
+        self.modules = _walk_modules()
+        self.fns = {(m.rel, name): (m, fn)
+                    for m in self.modules.values() for name, fn in m.funcs.items()}
+        self.calls = {key: _called_names(fn) for key, (_m, fn) in self.fns.items()}
+        self.callers = self._callers()
+        self.consulting = self._consulting()
+        self.executors = _executors(self.modules)
+
+    def _callers(self) -> dict:
+        """`{(rel, name): {(rel, name) of each caller}}`, by resolved name:
+        a plain call through this module or its imports, `alias.f()` through
+        a module alias, and any other `x.f()` to every function called `f`
+        (a method, or a name the walk cannot place) — more callers, never fewer."""
+        by_name: dict = {}
+        for key in self.fns:
+            by_name.setdefault(key[1], []).append(key)
+        callers: dict = {}
+        for key, (module, fn) in self.fns.items():
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                targets = []
+                if isinstance(node.func, ast.Name):
+                    hit = _resolve(module, node.func.id, self.modules)
+                    if hit:
+                        targets = [(hit[0].rel, hit[1].name)]
+                elif isinstance(node.func, ast.Attribute):
+                    base = node.func.value
+                    alias = module.module_aliases.get(base.id) if isinstance(base, ast.Name) else None
+                    other = self.modules.get(alias) if alias else None
+                    if other is not None and node.func.attr in other.funcs:
+                        targets = [(other.rel, node.func.attr)]
+                    else:
+                        targets = by_name.get(node.func.attr, [])
+                for target in targets:
+                    callers.setdefault(target, set()).add(key)
+        return callers
+
+    def question_names(self) -> set:
+        """The names that ask which tables have changed hands:
+        `core.write_chains`' `stood_down_*` questions about tables, and every
+        helper that answers the same question by asking one of them — named
+        for it (`*stood_down*`), so a wrapper such as
+        `pg_landing.tables_stood_down` counts and a caller that merely reaches
+        a shipper that asks does not."""
+        roots = {key for key in self.fns if key[0] == "core/write_chains.py"
+                 and key[1].startswith("stood_down") and "sync_keys" not in key[1]}
+        names = {key[1] for key in roots}
+        while True:
+            more = {key[1] for key, called in self.calls.items()
+                    if "stood_down" in key[1] and key[1] not in names
+                    and called & names}
+            if not more:
+                return names
+            names |= more
+
+    def _consulting(self) -> set:
+        """Every function that asks one of those questions itself."""
+        names = self.question_names()
+        return {key for key, called in self.calls.items() if called & names}
+
+    def writers(self) -> dict:
+        """`{(rel, name): targets}` for every Postgres writer of our tables,
+        and every caller of the two primitives the plan names."""
+        found = {}
+        for key, (module, fn) in self.fns.items():
+            targets = _pg_write_targets(module, fn, self.modules, self.executors)
+            if targets:
+                found[key] = targets
+        return found
+
+    def covered(self, key, seen=None) -> bool:
+        """It asks, or it is reached only from functions that do."""
+        seen = set() if seen is None else seen
+        if key in self.consulting:
+            return True
+        if key in seen:
+            return False
+        seen = seen | {key}
+        callers = self.callers.get(key, set())
+        return bool(callers) and all(self.covered(c, seen) for c in callers)
+
+
+@pytest.fixture(scope="module")
+def walk():
+    return _Walk()
+
+
+def _chain_modules() -> set:
+    from core.write_chains import WRITE_CHAINS
+
+    return {c.__name__.replace(".", "/") + ".py" for c in WRITE_CHAINS}
+
+
+class TestEveryPostgresWriterAsksTheRegistry:
+    def test_each_one_asks_or_is_reached_only_by_askers(self, walk):
+        chains = _chain_modules()
+        uncovered = sorted(
+            key for key in walk.writers()
+            if key[0] not in chains and key not in _DESTINATION
+            and not walk.covered(key))
+        assert not uncovered, (
+            "writes bronze.*/app.* in Postgres without asking who owns the "
+            f"table, and not only from a function that asks: {uncovered}")
+
+    def test_the_callers_of_the_named_primitives_ask(self, walk):
+        """The plan names `pg_buyers._write` and `write_managers`: every
+        function that calls either asks, directly or through its callers."""
+        for primitive in (("core/pg_buyers.py", "_write"),
+                          ("core/pg_replication.py", "write_managers")):
+            callers = walk.callers.get(primitive, set())
+            assert callers, f"nothing calls {primitive} — the walk is not looking"
+            assert all(walk.covered(c) for c in callers), (primitive, callers)
+
+    def test_the_walk_is_not_vacuous(self, walk):
+        """A walk that found nothing, or stopped resolving what it found,
+        would pass the test above. The sites every chain 3–6 table ships
+        through, and at least as many writers as there were on the day this
+        was written."""
+        writers = walk.writers()
+        assert {
+            ("core/pg_landing.py", "_write"),
+            ("core/pg_landing.py", "write_orders"),
+            ("core/pg_buyers.py", "_write"),
+            ("core/pg_replication.py", "write_managers"),
+            ("core/pg_expense_backfill.py", "backfill_expenses"),
+            ("core/pg_operational.py", "replicate_operational"),
+            ("core/pg_order_versions.py", "capture_versions"),
+        } <= set(writers), sorted(writers)
+        assert len(writers) >= 27, sorted(writers)
+        assert {
+            ("core/pg_landing.py", "_mirror"),
+            ("core/pg_buyers.py", "mirror_buyers"),
+            ("core/pg_buyers.py", "backfill_buyers"),
+            ("core/pg_buyers.py", "hourly_ids_diff"),
+            ("core/pg_replication.py", "replicate_managers"),
+            ("core/pg_expense_backfill.py", "backfill_expenses"),
+            ("core/pg_expense_backfill.py", "hourly_expenses_ids_diff"),
+            ("core/duckdb_store.py", "upsert_orders"),
+            ("web/routes/api/admin.py", "backfill_mirror_expenses"),
+        } <= walk.consulting
+
+    def test_the_exemptions_are_exactly_what_the_walk_finds(self, walk):
+        """No stale entry — an exemption for a function that no longer writes
+        is where the next writer would hide — and a switch named as the reason
+        is one the function actually evaluates."""
+        writers = walk.writers()
+        assert set(_DESTINATION) <= set(writers), set(_DESTINATION) - set(writers)
+        for key, (_reason, switch) in _DESTINATION.items():
+            if switch is None:
+                continue
+            _module, fn = walk.fns[key]
+            names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)} | \
+                _called_names(fn)
+            assert switch in names, f"{key} names {switch} as its reason and never reads it"
+
+    def test_the_exempt_modules_are_the_registered_chains(self, walk):
+        """The chain writers are the destination the registry routes to, and
+        are exempt for being registered — found here, so a chain that stopped
+        writing Postgres would not keep an exemption it no longer needs."""
+        chains = _chain_modules()
+        writing = {key[0] for key in walk.writers()}
+        assert chains <= writing, chains - writing
+
+    def test_the_operational_pair_asks_the_checked_form(self):
+        """Since DN-01 the hourly shipper and the daily comparison of the
+        operational tables ask the form that hands a flag typo out to be
+        reported; the other paths ask the narrow one, which logs it."""
         from core import mirror_reconciliation, pg_operational
 
         for fn in (pg_operational.replicate_operational,
@@ -66,11 +515,174 @@ class TestTheShipperAndTheComparisonAskOneAnswer:
             tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
             calls = {n.func.id for n in ast.walk(tree)
                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-            # The checked form since DN-01: it never raises on a flag typo and
-            # hands the error out to be recorded and reported.
             assert "stood_down_tables_checked" in calls, fn.__name__
-            assert "writes_postgres" not in calls, (
-                f"{fn.__name__} asks a single chain again — the rule would have two homes")
+
+    def test_no_asker_spells_a_chain(self, walk):
+        """The rule has one home: nothing that ships or compares asks a single
+        chain's `writes_postgres` in place of the registry."""
+        chains = _chain_modules()
+        spelled = sorted(
+            key for key in walk.consulting
+            if key[0] not in chains and key[0] != "core/write_chains.py"
+            and walk.calls[key] & {"writes_postgres", "env_writes_postgres"})
+        assert not spelled, spelled
+
+    def test_one_that_takes_the_pool_reads_the_owner_rows_too(self, walk):
+        """DN-06: anything already holding a Postgres connection stands down
+        on either copy of the latch. Walked over every asker — the sync's
+        shippers take no pool before they ask, and so are not held to it."""
+        owner_reads = {"order_tables_stood_down_or_owned",
+                       "tables_stood_down_or_owned", "read_owners"}
+        holding = [key for key in walk.consulting if "get_pool" in walk.calls[key]]
+        assert len(holding) >= 10, holding
+        missing = sorted(key for key in holding if not walk.calls[key] & owner_reads)
+        assert not missing, f"holds a pool but reads only the local latch: {missing}"
+
+
+_SPEC_TYPES = {"MirroredTable", "BucketedTable"}
+# Reading a spec's Postgres copy, or comparing the two: what makes a function
+# a comparison rather than a reader of DuckDB's side.
+_PG_COMPARE = {"fetch_pg_rows", "pg_fingerprints", "_read_pg_bucket",
+               "compare_table", "compare_bucket"}
+
+
+def _spec_tables(modules) -> dict:
+    """`{(module name, binding): {pg_table, ...}}` for every module-level spec,
+    tuple of specs, and spec-building function in the walked tree."""
+    found: dict = {}
+    for m in modules.values():
+        def tables_in(node):
+            out = set()
+            for n in ast.walk(node):
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) \
+                        and n.func.id in _SPEC_TYPES:
+                    for kw in n.keywords:
+                        if kw.arg == "pg_table":
+                            value = m.value(kw.value, modules)
+                            if value:
+                                out.add(value)
+                elif isinstance(n, ast.Name) and (m.name, n.id) in found:
+                    out |= found[(m.name, n.id)]
+            return out
+
+        for node in m.tree.body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                tables = tables_in(node.value)
+                for t in targets:
+                    if isinstance(t, ast.Name) and tables:
+                        found[(m.name, t.id)] = tables
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                tables = {v for n in ast.walk(node) if isinstance(n, ast.Call)
+                          and isinstance(n.func, ast.Name) and n.func.id in _SPEC_TYPES
+                          for kw in n.keywords if kw.arg == "pg_table"
+                          for v in [m.value(kw.value, modules)] if v}
+                if tables:
+                    found[(m.name, node.name)] = tables
+    return found
+
+
+def _comparisons(walk) -> dict:
+    """`{(rel, name): tables}` for every function that compares a spec naming
+    a `bronze.`/`app.` table against its Postgres copy."""
+    specs = _spec_tables(walk.modules)
+    out = {}
+    for key, (m, fn) in walk.fns.items():
+        if not walk.calls[key] & _PG_COMPARE:
+            continue
+        tables = set()
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Name):
+                if (m.name, n.id) in specs:
+                    tables |= specs[(m.name, n.id)]
+                elif n.id in m.imports:
+                    src, attr = m.imports[n.id]
+                    tables |= specs.get((src, attr), set())
+        ours = {t for t in tables if t.startswith(("bronze.", "app."))}
+        if ours:
+            out[key] = ours
+    return out
+
+
+# Comparisons of tables whose writer moved by a switch of its own before the
+# registry existed: each stands down on that switch, which it must evaluate.
+_OWN_SWITCH_COMPARISONS = {
+    ("core/mirror_reconciliation.py", "reconcile_bot_state"): "ENGINE_ENV",
+    ("core/mirror_reconciliation.py", "reconcile_sms"): "sms_store_is_postgres",
+    ("core/mirror_reconciliation.py", "reconcile_dashboard_users"): "user_store_is_postgres",
+}
+
+
+def _evaluates(walk, key, name) -> bool:
+    _module, fn = walk.fns[key]
+    return name in ({n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+                    | _called_names(fn))
+
+
+class TestEveryComparisonAsksTheRegistry:
+    """The other half of the rule: a comparison that went on comparing a
+    table its shipper stopped feeding would file every row the chain writes
+    as a discrepancy the check itself created. Found by what a function does
+    — reads a spec's Postgres copy — and which tables its specs name."""
+
+    def test_each_one_asks(self, walk):
+        missing = sorted(key for key in _comparisons(walk)
+                         if key not in walk.consulting
+                         and key not in _OWN_SWITCH_COMPARISONS)
+        assert not missing, f"compares bronze.*/app.* without asking: {missing}"
+
+    def test_the_walk_is_not_vacuous(self, walk):
+        found = _comparisons(walk)
+        assert {("core/mirror_reconciliation.py", name) for name in (
+            "reconcile_mirror", "reconcile_orders", "reconcile_expenses",
+            "reconcile_buyers", "reconcile_operational",
+        )} <= set(found), sorted(found)
+        assert {"bronze.products", "bronze.managers", "bronze.buyers",
+                "bronze.expenses", "bronze.orders"} <= set().union(*found.values())
+
+    def test_the_own_switch_exemptions_are_found_and_read_their_switch(self, walk):
+        found = _comparisons(walk)
+        for key, switch in _OWN_SWITCH_COMPARISONS.items():
+            assert key in found, f"stale exemption: {key}"
+            assert _evaluates(walk, key, switch), f"{key} never reads {switch}"
+
+
+class TestTheShippingUnitsAreTheWritersOwn:
+    """A shipper stands a unit down whole because it writes the unit in one
+    transaction. The units are derived here from what each writer writes, and
+    `pg_landing.shipping_units()` must be exactly those — so a writer that
+    starts writing a second table in the same transaction becomes a unit the
+    stand-down knows about, or this fails."""
+
+    def _derived(self, walk) -> set:
+        chains = _chain_modules()
+        units = set()
+        for key, targets in walk.writers().items():
+            if key[0] in chains or key in _DESTINATION:
+                continue
+            concrete = frozenset(t for t in targets if not t.startswith("{"))
+            if len(concrete) > 1:
+                units.add(concrete)
+        return units
+
+    def test_the_declared_units_are_the_derived_ones(self, walk):
+        from core.pg_landing import shipping_units
+
+        derived = self._derived(walk)
+        assert len(derived) >= 3, derived
+        assert {frozenset(u) for u in shipping_units()} == derived
+
+    def test_no_registered_chain_splits_a_unit(self):
+        """DN-22a's order rule, for every unit: whoever takes one table of a
+        unit takes the rest of it."""
+        from core.pg_landing import shipping_units
+        from core.write_chains import WRITE_CHAINS, chain_name
+
+        split = [(chain_name(c), unit) for c in WRITE_CHAINS
+                 for unit in shipping_units()
+                 if set(unit) & set(c.CHAIN_TABLES)
+                 and not set(unit) <= set(c.CHAIN_TABLES)]
+        assert split == []
 
 
 @pytest.fixture
