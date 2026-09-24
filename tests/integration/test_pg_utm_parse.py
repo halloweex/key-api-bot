@@ -328,8 +328,8 @@ class TestTheFullParse:
     @pytest.mark.asyncio
     async def test_a_refusal_is_kept_by_the_log_not_by_the_watermark(self, conn, caplog):
         """The watermark row is the incremental's liveness stamp, so the next
-        successful incremental — every derivation tick under DN-19 — clears
-        a refusal written there. What keeps it is the return value and the
+        successful incremental — the next derivation under DN-19, up to the
+        60-minute heartbeat away — clears a refusal written there. What keeps it is the return value and the
         ERROR log. This pins both halves of `parse_full`'s account of where a
         refusal lives: if the watermark starts keeping it, the docstring
         changes with the test."""
@@ -564,7 +564,7 @@ class TestLockWaitsAreBounded:
         other = await _held_by_another_session(pool)
         try:
             started = time.monotonic()
-            with patch("core.pg_utm_parse.LOCK_WAIT_S", 0.5):
+            with patch("core.pg_utm_parse.PG_LOCK_WAIT_S", 0.5):
                 with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
                     await asyncio.wait_for(run(), timeout=15)
             waited = time.monotonic() - started
@@ -577,6 +577,26 @@ class TestLockWaitsAreBounded:
             wm = await watermark(c)
         assert wm["failures_since_ok"] == 1
         assert "LockNotAvailableError" in wm["last_error"]
+
+
+    @pytest.mark.asyncio
+    async def test_on_the_production_pool_shape_the_lock_names_itself(self, committed):
+        """Production's pool carries `command_timeout` (`KS_PG_TIMEOUT`). With
+        the in-Postgres bound below it, Postgres ends the wait and the
+        watermark names the lock; above it, asyncpg would cancel first and
+        record a bare `TimeoutError`."""
+        other = await _held_by_another_session(committed)
+        prod_shaped = await asyncpg.create_pool(DSN, min_size=1, max_size=2, command_timeout=2)
+        try:
+            with patch("core.pg_utm_parse.PG_LOCK_WAIT_S", 0.5):
+                with pytest.raises(asyncpg.exceptions.LockNotAvailableError):
+                    await asyncio.wait_for(parse.parse_incremental(prod_shaped), timeout=15)
+        finally:
+            await prod_shaped.close()
+            await other.close()
+        async with committed.acquire() as c:
+            wm = await watermark(c)
+        assert "LockNotAvailableError" in wm["last_error"], wm["last_error"]
 
 
 class TestTheIncrementalIsOneTransaction:

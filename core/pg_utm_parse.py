@@ -103,15 +103,20 @@ logger = logging.getLogger(__name__)
 # another module happened to pick would serialise two unrelated jobs.
 ADVISORY_LOCK_KEY = 118142646187117
 
-# How long either shape waits for a lock before giving up — `PG_LAYER_LOCK` for
-# the full parse, and inside Postgres (`lock_timeout`) the advisory lock and any
-# row lock the writes meet. `core/pg_order_utm.py`'s number, for its reason: a
-# normal wait is one Silver tick, so this fires only on a genuine hang. On the
-# production pool a wait inside Postgres ends sooner: its `command_timeout`
-# (`KS_PG_TIMEOUT`, 30 s) cancels any one statement first, and the watermark
-# then reads a bare `TimeoutError`. `lock_timeout` is the bound that holds
-# whatever pool the caller passes.
+# How long the full parse waits for `PG_LAYER_LOCK`, in this process.
+# `core/pg_order_utm.py`'s number, for its reason: a normal wait is one Silver
+# tick, so this fires only on a genuine hang.
 LOCK_WAIT_S = 120
+
+# How long a wait inside Postgres may last (`lock_timeout`): the advisory lock
+# and any row lock the writes meet. Kept below the production pool's
+# `command_timeout` (`KS_PG_TIMEOUT`, 30 s, core/pg.py) on purpose. Above it,
+# asyncpg cancels the statement first and the watermark records a bare
+# `TimeoutError` — naming no lock, no key and no lever — which is what every
+# failed tick would have said while a stuck CLI or an idle psql held the key.
+# Below it, Postgres ends the wait itself and the watermark reads
+# `LockNotAvailableError: canceling statement due to lock timeout`.
+PG_LOCK_WAIT_S = 20
 
 # The share of the table's current rows a full parse must yield to replace it,
 # as a whole percentage so the comparison is integer arithmetic and 90 of 100
@@ -228,7 +233,7 @@ async def _lock(conn) -> None:
     `SET LOCAL`, so the bound ends with the transaction and never leaks into a
     pooled connection's next user.
     """
-    await conn.execute(f"SET LOCAL lock_timeout = '{lock_timeout_setting(LOCK_WAIT_S)}'")
+    await conn.execute(f"SET LOCAL lock_timeout = '{lock_timeout_setting(PG_LOCK_WAIT_S)}'")
     await conn.execute("SELECT pg_advisory_xact_lock($1)", ADVISORY_LOCK_KEY)
 
 
@@ -290,13 +295,16 @@ async def parse_full(pool=None, *, force: bool = False) -> Dict[str, Any]:
     its previous verdicts is the correct state.
 
     Where a refusal, or a failure, stays on record: in what this returns or
-    raises to its caller, and in the ERROR log. It is also written into the
+    raises to its caller, and — for a refusal — in the ERROR log. It is also written into the
     watermark, but `silver.order_utm`'s row there is the incremental's liveness
     stamp, and the next successful incremental resets `failures_since_ok` and
-    clears `last_error` — on every derivation tick once DN-19 wires it, so
-    within minutes, and before the 07:30 `mirror_failing` or the canary looks.
-    That is right for the row, which says whether the parser is alive, and it
-    means the watermark is not where a turned-away reclassify is kept.
+    clears `last_error`. Under `KS_PG_DERIVE=own` that is the next derivation,
+    which a reclassify does not trigger, so it can be up to the 60-minute
+    heartbeat away: the canary or the 07:30 check may or may not see the
+    refusal in between. That is right for the row, which says whether the
+    parser is alive, and it means the watermark is not where a turned-away
+    reclassify is kept. A raised failure reaches a log only through the
+    caller; this module logs refusals, not exceptions.
 
     Takes `PG_LAYER_LOCK` itself, so it must never be called by code already
     holding it: `asyncio.Lock` is not reentrant, and the call would wait out

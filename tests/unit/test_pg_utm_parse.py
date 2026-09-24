@@ -75,3 +75,17 @@ class TestTheLockBound:
         seconds would render any bound under one second as exactly that — an
         unbounded wait wearing a bound's name."""
         assert parse.lock_timeout_setting(seconds) == literal
+
+
+def test_the_postgres_bound_sits_below_the_production_statement_timeout():
+    """Above `KS_PG_TIMEOUT`'s default, asyncpg cancels the advisory wait first
+    and the watermark records a bare `TimeoutError` that names no lock. The
+    default is read from core/pg.py itself, so the two cannot drift apart."""
+    import re
+    from pathlib import Path
+
+    from core import pg_utm_parse
+
+    src = (Path(__file__).resolve().parents[2] / "core" / "pg.py").read_text()
+    (default,) = re.findall(r'os\.getenv\("KS_PG_TIMEOUT",\s*"([0-9.]+)"\)', src)
+    assert pg_utm_parse.PG_LOCK_WAIT_S < float(default)
