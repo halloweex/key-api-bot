@@ -1881,7 +1881,10 @@ class BackgroundScheduler:
             # DuckDB ones, behind KS_DQ_PG_WAREHOUSE. Outside the DuckDB lock and
             # after the DuckDB half whatever it did — their facts are read here
             # and judged purely, so a DuckDB fault cannot discard a Postgres
-            # finding. `core/pg_warehouse_dq.py` has the design.
+            # finding. `core/pg_warehouse_dq.py` has the design. Step 8b's
+            # recompute of Silver from bronze (`pg_silver_row_values`) is a
+            # fourth group in the same read and budget; it compares Postgres
+            # with Postgres, so `duckdb_looked` does not reach it.
             from core import pg_warehouse_dq
             from core.data_quality import GUARDED_CHECK_CONDITIONS
 

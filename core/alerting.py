@@ -254,6 +254,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_silver_arc_unwatched": _c("the twin reads Postgres Silver again"),
     "pg_attribution_coverage_unwatched": _c("the twin can tell a quiet week from a stopped mirror"),
     "pg_line_items_unwatched": _c("the twin reads Postgres line items again"),
+    # Step 8b: the recompute of Postgres Silver from bronze.
+    "pg_silver_row_values": _c("a Postgres derivation recomputes the values"),
+    "pg_silver_row_values_unwatched": _c("the twin recomputes Postgres Silver again"),
     "pg_warehouse_unwatched": _c("the twins read their snapshot again"),
     "pg_warehouse_dq_flag_invalid": _c("web restarts with a valid KS_DQ_PG_WAREHOUSE"),
     # Every order the UTM parser reads has a current verdict in Postgres
