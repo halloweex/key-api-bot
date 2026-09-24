@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.244
+
+- DN-22a: the order backfill route refuses a switched-off mirror itself
+- DN-22a: a stand-down seen on the owner rows alone pages as a fault
+- DN-22a: the owner-row finding stops naming the table the comparison must not
+- DN-22a: the rolled-back build is made in the test, not assumed of this one
+- DN-22a: the rolled-back owner row, read out of a real meta.chain_watermarks
+- DN-22a: the admin order backfill asks the owner rows before it starts
+- DN-22a: the stand-down finding says the sync still ships when it does
+- DN-22a: an owner row counts even when no chain in this build declares it
+- DN-22a: pin that each order path checks the revision before the owner read
+- DN-22a: the local stand-down tests prove Postgres was never asked at all
+- DN-22a: either order table stands both down because ownership passes as a unit
+- DN-22a: the order paths holding a pool stand down on the owner rows too
+- DN-22a: the order write path asks the chain registry before it ships
+
+
 ## 3.0.243
 
 - DN-14: say what the first-tick exclusion costs, and which mark moved
