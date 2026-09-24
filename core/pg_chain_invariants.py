@@ -827,7 +827,7 @@ def _null_issues(nulls: Nulls, chain: str,
                  "watched from its flag, before its first write, so the NULL "
                  "has been present since before the handover, carried across "
                  "by the replication out of DuckDB. Correct the row before "
-                 "the chain's first write rather than the writer.")
+                 "the chain's first write.")
     else:
         cause = f" — so {chain} is not supplying one."
     if nulls.table == "app.stock_movements" and "recorded_at" in offenders:
