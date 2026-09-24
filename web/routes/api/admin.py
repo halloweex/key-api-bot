@@ -134,14 +134,23 @@ async def backfill_mirror_orders(
     refused. An owner read that fails is a 503, never "started": nothing can
     be verified, and the run it would start would fail the same read in the
     background.
+
+    And 409 with the mirror switched off, before any of that and without
+    asking Postgres anything: `backfill_orders` refuses a run with
+    `KS_MIRROR_LANDING` off, so the background form answered "started" to a
+    run that then raised into the web log, and the foreground form a 500.
     """
     from core.pg_backfill import backfill_orders
     from core.pg_landing import (
         enabled, order_tables_stood_down, order_tables_stood_down_or_owned,
     )
 
+    if not enabled():
+        raise HTTPException(
+            status_code=409, detail="KS_MIRROR_LANDING is off; nothing was started")
+
     moved = order_tables_stood_down()
-    if not moved and enabled():
+    if not moved:
         from core.pg import get_pool, require_revision
 
         try:

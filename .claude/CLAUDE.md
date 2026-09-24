@@ -2566,6 +2566,9 @@ table and no owner row names one.
 `POST /api/mirror/backfill/orders` asks the owner rows too, before anything
 starts: a lost marker is a 409, not a "started" whose refusal lands in the web
 log, and an owner read that fails — `SchemaVersionError` included — is a 503.
+With `KS_MIRROR_LANDING` off it answers 409 before any of that, asking
+Postgres nothing: the backfill refuses a switched-off mirror, and the route
+used to say "started" (or 500 in the foreground) to the run it refused.
 
 ## TODO: Full DuckDB Resync Solution
 

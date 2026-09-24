@@ -1017,13 +1017,27 @@ class TestTheAdminBackfill:
         assert pool.sql == [] and pool.acquired == 0
         backfill.assert_not_called()
 
-    def test_with_the_mirror_off_it_asks_postgres_nothing(self, flags, pool, backfill):
-        """The backfill refuses a switched-off mirror for its own reason; the
-        route adds no Postgres read in front of that refusal."""
+    @pytest.mark.parametrize("background", ["true", "false"])
+    @pytest.mark.parametrize("chain", ["none", "flagged"])
+    def test_with_the_mirror_off_it_refuses_and_asks_postgres_nothing(
+            self, flags, pool, order_chain, backfill, background, chain):
+        """`backfill_orders` refuses a switched-off mirror, so the route says
+        so first: a 409, never "started" in the background (the refusal was
+        a line in the web log) nor a 500 in the foreground. First means
+        before the latch checks: with a chain flagged onto the order tables
+        the answer is still the mirror's, and no Postgres read stands in
+        front of it either way."""
         from core.pg_landing import MIRROR_ENV
 
         flags.setenv(MIRROR_ENV, "0")
-        self._post(flags, "false")
+        if chain == "flagged":
+            order_chain()                       # the local answer names both
+            pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
+        res = self._post(flags, background)
+        assert res.status_code == 409, res.json()
+        assert res.json() == {"detail": "KS_MIRROR_LANDING is off; nothing was started"}
+        assert res.json().get("status") != "started"
+        backfill.assert_not_called()
         _never_reached_postgres(pool)
 
     def test_without_a_chain_it_runs(self, flags, pool, backfill):
