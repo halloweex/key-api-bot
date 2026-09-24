@@ -2124,6 +2124,16 @@ class BackgroundScheduler:
                 # a campaign renamed to another name of the same length moves
                 # no number and no length. Revision 0018.
                 await check("reconcile_order_utm", lambda: reconcile_order_utm(store))
+                # And whether every order the parser reads has a current
+                # verdict at all (DN-16). The comparison above cannot see an
+                # order both copies lack, and has nothing to compare once the
+                # parse moves into Postgres; this reads Postgres alone, so it
+                # outlives it. Report-only, like the rest of the layer.
+                from core.mirror_reconciliation import reconcile_order_utm_completeness
+                await check(
+                    "reconcile_order_utm_completeness",
+                    lambda: reconcile_order_utm_completeness(),
+                )
                 # And the order-level expenses — landing, like the catalogue,
                 # but delta-shipped like orders, so gated on `backfilled_at`
                 # and read whole rather than fingerprinted (revision 0020).
