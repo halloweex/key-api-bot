@@ -190,7 +190,19 @@ class TestTheIncrementalParse:
     @pytest.mark.asyncio
     async def test_zero_rows_still_stamp_the_watermark(self, conn):
         """A quiet night is not a dead parser. The watermark measures that the
-        parse ran, so the ~90-minute canary limit does not page every night."""
+        parse ran, so the ~90-minute canary limit does not page every night.
+
+        From nothing first: inside this test's one transaction `now()` does
+        not move, so a stamp that merely survived from an earlier run would
+        look exactly like a new one. A first run with nothing to parse has no
+        earlier stamp to hide behind."""
+        assert await watermark(conn) is None
+        assert (await parse.parse_incremental())["parsed"] == 0
+        empty = await watermark(conn)
+        assert empty is not None, "a zero-row run left no watermark"
+        assert empty["last_ok_at"] is not None and empty["failures_since_ok"] == 0
+        assert empty["last_rows"] == 0
+
         await order(conn, 107)
         await parse.parse_incremental()
         first = await watermark(conn)
