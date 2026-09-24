@@ -106,7 +106,11 @@ ADVISORY_LOCK_KEY = 118142646187117
 # How long either shape waits for a lock before giving up — `PG_LAYER_LOCK` for
 # the full parse, and inside Postgres (`lock_timeout`) the advisory lock and any
 # row lock the writes meet. `core/pg_order_utm.py`'s number, for its reason: a
-# normal wait is one Silver tick, so this fires only on a genuine hang.
+# normal wait is one Silver tick, so this fires only on a genuine hang. On the
+# production pool a wait inside Postgres ends sooner: its `command_timeout`
+# (`KS_PG_TIMEOUT`, 30 s) cancels any one statement first, and the watermark
+# then reads a bare `TimeoutError`. `lock_timeout` is the bound that holds
+# whatever pool the caller passes.
 LOCK_WAIT_S = 120
 
 # The share of the table's current rows a full parse must yield to replace it,
