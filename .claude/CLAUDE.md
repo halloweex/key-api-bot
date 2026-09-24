@@ -2557,6 +2557,9 @@ answer the sync's mirror has stopped too; on the owner rows alone it has not,
 so the finding says the marker is missing and the sync mirror is still
 shipping, and names `data/write-chain-owners` and `scripts/chain_copy_back.py`
 (or, with no chain declared in this build, a redeploy of one that does).
+`POST /api/mirror/backfill/orders` asks the owner rows too, before anything
+starts: a lost marker is a 409, not a "started" whose refusal lands in the web
+log, and an owner read that fails — `SchemaVersionError` included — is a 503.
 
 ## TODO: Full DuckDB Resync Solution
 

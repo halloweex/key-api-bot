@@ -125,11 +125,39 @@ async def backfill_mirror_orders(
     409 once a write chain owns either order table (DN-22a). Answered here,
     before anything starts, because the background form would otherwise say
     "started" and leave the refusal in a log line nobody reads.
+
+    On either copy of the latch, as the backfill itself asks: the local
+    answer first, then — with the mirror on, so the backfill would go on to
+    read Postgres anyway — the owner rows, after `require_revision()`. A lost
+    marker leaves only the owner rows to say the tables moved, and asking
+    just the local answer here answered "started" to a run the backfill then
+    refused. An owner read that fails is a 503, never "started": nothing can
+    be verified, and the run it would start would fail the same read in the
+    background.
     """
     from core.pg_backfill import backfill_orders
-    from core.pg_landing import order_tables_stood_down
+    from core.pg_landing import (
+        enabled, order_tables_stood_down, order_tables_stood_down_or_owned,
+    )
 
     moved = order_tables_stood_down()
+    if not moved and enabled():
+        from core.pg import get_pool, require_revision
+
+        try:
+            pool = await get_pool()
+            await require_revision()
+            moved = await order_tables_stood_down_or_owned(pool)
+        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
+            logger.error("Mirror backfill: cannot read who owns the order "
+                         "tables: %s: %s", type(e).__name__, e)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Cannot tell whether a write chain owns the order tables, "
+                    f"so nothing was started: {type(e).__name__}: {e}"
+                ),
+            ) from e
     if moved:
         raise HTTPException(
             status_code=409,

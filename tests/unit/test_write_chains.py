@@ -800,19 +800,76 @@ class TestTheAdminBackfill:
         flags.setattr("web.routes.api.admin.get_store", AsyncMock(return_value=object()))
         return run
 
-    @pytest.mark.parametrize("background", ["true", "false"])
-    def test_409_before_anything_starts(self, flags, order_chain, backfill, background):
-        order_chain()
-        res = self._client(flags).post(
+    REFUSAL = (f"{LINES}, {ORDERS} is written by a write chain, not shipped out "
+               "of DuckDB")
+
+    def _post(self, flags, background):
+        return self._client(flags).post(
             f"/api/mirror/backfill/orders?background={background}")
+
+    @pytest.mark.parametrize("background", ["true", "false"])
+    def test_409_before_anything_starts(
+            self, flags, pool, order_chain, backfill, background):
+        order_chain()
+        res = self._post(flags, background)
         assert res.status_code == 409
-        assert "write chain" in res.json()["detail"]
+        assert res.json()["detail"].startswith(self.REFUSAL)
+        backfill.assert_not_called()
+        _never_reached_postgres(pool)
+
+    @pytest.mark.parametrize("background", ["true", "false"])
+    def test_409_on_the_owner_rows_when_the_marker_is_lost(
+            self, flags, pool, order_chain, backfill, background):
+        """Flag at duckdb, no marker, an owner row in Postgres: the local
+        answer is empty, and "started" here was the backfill refusing into a
+        log line nobody reads (or a 500 in the foreground)."""
+        order_chain(env=lambda: False)
+        pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
+        res = self._post(flags, background)
+        assert res.status_code == 409, res.json()
+        assert res.json()["detail"].startswith(self.REFUSAL)
+        backfill.assert_not_called()
+        assert pool.only_asked_who_owns()
+
+    @pytest.mark.parametrize("background", ["true", "false"])
+    def test_an_unreadable_owner_row_is_a_503_never_started(
+            self, flags, pool, order_chain, backfill, background):
+        order_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        res = self._post(flags, background)
+        assert res.status_code == 503, res.json()
+        assert res.json().get("status") != "started"
+        assert "unreadable" in res.json()["detail"]
         backfill.assert_not_called()
 
-    def test_without_a_chain_it_runs(self, flags, backfill):
-        res = self._client(flags).post("/api/mirror/backfill/orders?background=false")
+    @pytest.mark.parametrize("background", ["true", "false"])
+    def test_a_schema_behind_the_code_is_a_503_before_the_owner_read(
+            self, flags, pool, backfill, background):
+        from core import pg
+
+        pg.require_revision.side_effect = pg.SchemaVersionError(
+            "database at 0031, code wants 0033")
+        pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
+        res = self._post(flags, background)
+        assert res.status_code == 503, res.json()
+        assert "SchemaVersionError" in res.json()["detail"]
+        assert pool.sql == [] and pool.acquired == 0
+        backfill.assert_not_called()
+
+    def test_with_the_mirror_off_it_asks_postgres_nothing(self, flags, pool, backfill):
+        """The backfill refuses a switched-off mirror for its own reason; the
+        route adds no Postgres read in front of that refusal."""
+        from core.pg_landing import MIRROR_ENV
+
+        flags.setenv(MIRROR_ENV, "0")
+        self._post(flags, "false")
+        _never_reached_postgres(pool)
+
+    def test_without_a_chain_it_runs(self, flags, pool, backfill):
+        res = self._post(flags, "false")
         assert res.status_code == 200
         backfill.assert_awaited_once()
+        assert pool.only_asked_who_owns()
 
 
 class TestEveryOrderShipperAsksFirst:
