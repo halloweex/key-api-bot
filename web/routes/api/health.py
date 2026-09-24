@@ -104,6 +104,71 @@ def _read_fallback_mode() -> dict:
     }
 
 
+# Chain 1's answer to "may it be switched to Postgres now?" (DN-24), on the same
+# TTL as the watermarks. Its own cache, because it is the one part of the
+# `write_chains` block that reads Postgres: the rest is local state and must
+# keep answering while Postgres cannot.
+_preflight_cache: dict = {"data": None, "expires_at": 0}
+_preflight_cache_lock = asyncio.Lock()
+
+# /api/health must answer; a Postgres that neither answers nor refuses would
+# otherwise hold it for the pool's connect timeout.
+_PREFLIGHT_TIMEOUT_S = 5
+
+
+async def _inventory_preflight() -> dict:
+    """`pg_inventory_write.preflight()`, cached. Never raises: a Postgres that
+    does not answer in time is an answer of its own, `ok: false`."""
+    from core import pg_inventory_write
+
+    now = time.time()
+    async with _preflight_cache_lock:
+        if _preflight_cache["data"] is not None and now < _preflight_cache["expires_at"]:
+            return _preflight_cache["data"]
+        try:
+            data = await asyncio.wait_for(
+                pg_inventory_write.preflight(), _PREFLIGHT_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            data = {"ok": False, "reasons": [
+                f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
+        _preflight_cache["data"] = data
+        _preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
+        return data
+
+
+async def _inventory_sync_step() -> "dict | None":
+    """What chain 1's half of the sync tick last did on the Postgres path
+    (DN-24): consecutive failures, the step and error class of the last one,
+    and when the next attempt is allowed. Local state, no I/O. Null when the
+    sync service cannot be had, never an empty object."""
+    try:
+        from core.sync_service import get_sync_service
+
+        return (await get_sync_service()).inventory_step_health()
+    except Exception as e:
+        logger.debug(f"Inventory sync step unavailable: {e}")
+        return None
+
+
+async def _write_chains_block() -> dict:
+    """The `write_chains` block: every chain's local state, and under chain 1's
+    entry its `preflight` — the three questions asked before
+    `KS_WRITE_INVENTORY` is switched on, `ok` null once the chain already
+    writes Postgres — and its `sync_step`, where a Postgres failure of the
+    offers or stocks step is recorded instead of ending the tick. Neither is
+    judged by the canary: the preflight is read by the person about to flip
+    the chain, and a stock step that keeps failing stops `last_sync_stocks`,
+    which the integrity job's chain invariants already watch."""
+    from core import pg_inventory_write
+
+    block = _write_chains()
+    entry = block.get(pg_inventory_write.CHAIN)
+    if isinstance(entry, dict):
+        entry["preflight"] = await _inventory_preflight()
+        entry["sync_step"] = await _inventory_sync_step()
+    return block
+
+
 def _derivation_mode() -> dict:
     """KS_PG_DERIVE as this process understood it at start. Local state, no I/O."""
     from core import pg_derivation
@@ -323,7 +388,7 @@ async def health_check(request: Request):
         "mirrors": mirrors,
         "alerting": alerting,
         "derivation": await _derivation_block(),
-        "write_chains": _write_chains(),
+        "write_chains": await _write_chains_block(),
         "read_fallbacks": _read_fallbacks(),
         "read_fallback_mode": _read_fallback_mode(),
     }

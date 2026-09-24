@@ -208,6 +208,12 @@ def _window_days() -> int:
 # At 90, a KeyCRM outage or a web recreate has to outlast ~22 minutes of
 # retries before a sample can call the chain stalled.
 #
+# Since DN-24 the Postgres path stamps `last_sync_stocks` only after the
+# rebuild and both snapshots have committed too, and a failed attempt waits
+# `core.sync_service.INVENTORY_RETRY_AFTER_S` (10 min) before the next. One
+# failure still lands inside 90 (60 + 10 + the tick); a second in a row is a
+# fault that has lasted past the retry, which is what this is for.
+#
 # Not two hours, and not "two consecutive stale runs". The integrity runs are
 # six hours apart and a WARN reaches a human at the 09:00 digest, which reads
 # the 07:00 run; a stall makes that morning's digest only if its watermark last

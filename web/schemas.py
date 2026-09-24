@@ -117,7 +117,13 @@ class HealthResponse(BaseModel):
             "a chain's own condition for moving that does not hold (chain 6a: "
             "KS_READ_EXPENSES=postgres) — an unlatched chain then writes duckdb "
             "whatever its variable says, and a latched one writes Postgres "
-            "while its readers read DuckDB."
+            "while its readers read DuckDB. Chain 1's entry also "
+            "carries `preflight` (DN-24): `ok` and the `reasons` it may not "
+            "be switched to Postgres yet, null once it already is, with "
+            "`notes` that do not block it; and "
+            "`sync_step`: consecutive Postgres failures of its offers or "
+            "stocks step, the last one's step and error class, and when the "
+            "next attempt is allowed."
         ),
     )
     derivation: Optional[Dict[str, Any]] = Field(
