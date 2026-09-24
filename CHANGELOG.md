@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.249
+
+- Gates install the migration tools at the lock's versions
+- DN-24 review: two sentences that said more than was true
+- DN-24 review: a failed mirror_landing run blocks the flip only when chain 1 went uncompared
+- DN-24 review: the preflight's real-schema tests pin "latest" and one clock
+- DN-24 review: the snapshot race test forces the overlap it describes
+- DN-24: the health schema names sync_step beside preflight
+- DN-24: say in CLAUDE.md what chain 1 now does before its flip
+- DN-24: on the Postgres path a chain-1 step failure is recorded, not the tick's end
+- DN-24: /api/health publishes chain 1's preflight under its own entry
+- DN-24: preflight() asks the three pre-flip questions of chain 1 at once
+- DN-24: the concurrent-rebuild test starts from a chain that has written
+- DN-24: every chain-1 rebuild and snapshot takes the chain's advisory lock
+- DN-22b review: say what now reads the owner rows, and what the walk sees
+- DN-22b review: the walk's own guards see the fixed point and what the routing excuses
+- DN-22b review: the walk reads a transformed statement and a COPY
+- DN-22b review: the classification copy and the buyers mirror read the owner rows too
+- DN-22b review: an owner row no chain here declares holds the operational copy too
+- DN-22b: CLAUDE.md counts the new owner reads exactly
+- DN-22b: a wholly stood-down catalogue comparison asks Postgres nothing
+- DN-22b: the landing stand-down against a real meta.chain_watermarks
+- DN-22b: say in CLAUDE.md what now asks the registry, and what the walk sees
+- DN-22b: the order watches outlive the stand-down; chain 3 writes through write_orders
+- DN-22b: every Postgres writer of bronze.* and app.* is walked, not listed
+- DN-22b: the catalogue, expense and buyer comparisons stand down with their shippers
+- DN-22b: the landing shippers, backfills and hourly diffs ask the registry
+- DN-26 on DN-25: chain 7a joins the latch-before-acquire ledger
+- DN-26 review: a latched chain whose flag was set back is still asked about its readers
+- DN-26 review: without KS_READ_EXPENSES=postgres, chain 6a stays on DuckDB and says why
+- DN-26 review: pin that chain 1's absent watermark is never judged by DuckDB's copy
+- DN-26 review: a mid-week flip does not read as a dictionary never synced
+- DN-26 review: chain 6a latches once the pool has handed over a connection
+- DN-26: say in CLAUDE.md what chain 6a does, and what to turn on before it
+- DN-26: the unresolved-name test differs from the prefix only at LIKE's wildcard
+- DN-26: chain 6a against a real Postgres — full sync, hourly replace, names, copy-back
+- DN-26: chain 6a, the expense-type dictionary, writes Postgres behind KS_WRITE_EXPENSE_TYPES (off)
+
+
 ## 3.0.248
 
 
