@@ -31,6 +31,7 @@ class ProductsIntelMixin:
         from core import pg_products_intel_read
 
         params = list(params or [])
+        read_fallback.no_address("products_intel", pg_products_intel_read)
         if pg_products_intel_read.enabled() and pg_products_intel_read.available():
             try:
                 rows = await pg_products_intel_read.fetch(

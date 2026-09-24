@@ -187,6 +187,7 @@ class GoalsMixin:
         params = list(params or [])
         if pg_goals_write.reads_the_chain(sql):
             return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
+        read_fallback.no_address("goals", pg_goals_read)
         if pg_goals_read.enabled() and pg_goals_read.available():
             try:
                 return await pg_goals_read.fetch(

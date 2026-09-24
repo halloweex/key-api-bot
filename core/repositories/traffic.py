@@ -45,6 +45,7 @@ class TrafficMixin:
         from core import pg_traffic_read
 
         params = list(params or [])
+        read_fallback.no_address("traffic", pg_traffic_read)
         if pg_traffic_read.enabled() and pg_traffic_read.available():
             try:
                 rows = await pg_traffic_read.fetch(

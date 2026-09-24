@@ -43,6 +43,7 @@ class ExpensesMixin:
         # query that starts reading `{expenses}` tomorrow is gated the moment
         # it does.
         needs_history = "{expenses}" in sql
+        read_fallback.no_address("expenses", pg_expenses_read)
         if (pg_expenses_read.enabled() and pg_expenses_read.available()
                 and (not needs_history or await pg_expenses_read.backfilled())):
             try:

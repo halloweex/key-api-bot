@@ -76,6 +76,7 @@ class InventoryMixin:
         """
         from core import pg_inventory_read
 
+        read_fallback.no_address("inventory", pg_inventory_read)
         if pg_inventory_read.enabled() and pg_inventory_read.available():
             try:
                 return await pg_inventory_read.fetch_many(

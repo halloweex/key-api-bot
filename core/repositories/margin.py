@@ -38,6 +38,7 @@ class MarginMixin:
         from core import pg_margin_read
 
         params = list(params or [])
+        read_fallback.no_address("margin", pg_margin_read)
         if pg_margin_read.enabled() and pg_margin_read.available():
             try:
                 rows = await pg_margin_read.fetch(

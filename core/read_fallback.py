@@ -33,11 +33,13 @@ that produces it (`read_fallback_mode.refused` on `/api/health`, under `off`
 alone). `read_fallbacks` keeps meaning "answered from DuckDB", and under `off`
 it stays empty.
 
-One place raises, so every consumer of a router refuses at once. The HTTP
-routes answer 503 here. The non-HTTP consumers (the weekly reports, the
-assistant, training, the sync) are DN-20c, which gives each its own named
-answer; until then a refusal that reaches one of them is an exception like
-any other, and nothing ships `off` before DN-20c does. Cohorts go one step
+One place raises, so every consumer of a router refuses at once — and a
+gate whose switch names an engine with no address refuses through
+`no_address`, below, for the same reason. The HTTP routes answer 503 here.
+The non-HTTP consumers (the weekly reports, the assistant, training, the
+sync) are DN-20c, which gives each its own named answer; until then a
+refusal that reaches one of them is an exception like any other, and nothing
+ships `off` before DN-20c does. Cohorts go one step
 further, because they have no Postgres body: under `off` they are answered
 by a live ClickHouse or not at all (`no_engine`), whatever `KS_READ_COHORTS`
 says.
@@ -65,7 +67,19 @@ DuckDB on every request without a single exception to count. That is a
 configuration, not a failure, so it is found once, at the same moment the
 mode is read, and published beside it (`misconfigured`) — every
 `KS_READ_*=postgres` without `KS_PG_DSN`, and every `KS_READ_*=clickhouse`
-without `KS_CH_URL`. Nothing raises there either.
+without `KS_CH_URL`. Under `duckdb` nothing raises there.
+
+Under `off` it is refused, per request, like a failure (`no_address`): a lost
+DSN line is the most ordinary way for a whole dashboard to go back to DuckDB,
+and after step 13 it would serve frozen numbers behind pages that all look as
+if they work — exactly what `off` exists to prevent. Every gate asks it
+before it lets DuckDB answer, with the switch it just consulted, and the walk
+in `tests/unit/test_read_fallback_sites.py` requires that of every
+`enabled() and available()` gate it finds. The rule is the one
+`misconfigured` publishes, read from the same table (`_NEEDS`), so a switch
+that is published as misconfigured is exactly a switch that is refused.
+Chosen over having the canary page `misconfigured` under `off`: a page would
+still have served DuckDB until somebody read it.
 """
 from __future__ import annotations
 
@@ -73,7 +87,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timezone
-from typing import Dict, List, NoReturn, Optional
+from typing import Any, Dict, List, NoReturn, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -105,8 +119,8 @@ _refused: Dict[str, Dict[str, object]] = {}
 class ReadUnavailable(Exception):
     """A read that would have been answered by DuckDB, refused instead.
 
-    Raised by `fall_back` and `no_engine` under `KS_READ_FALLBACK=off`, and
-    by nothing else. `web/main.py` maps it to a 503 carrying `surface`, so a
+    Raised by `fall_back`, `no_address` and `no_engine` under
+    `KS_READ_FALLBACK=off`, and by nothing else. `web/main.py` maps it to a 503 carrying `surface`, so a
     handler between a route and a router must let it through — the walk in
     `tests/unit/test_read_fallback_sites.py` requires every handler around a
     router to say so, and `GoalsMixin._get_ml_forecast_total` is the one
@@ -118,16 +132,27 @@ class ReadUnavailable(Exception):
         self.surface = surface
 
 
+def _unaddressed(name: str) -> Optional[str]:
+    """`"NAME=engine without ADDRESS"` when the read switch `name` names an
+    engine this process has no address for, else None. The one rule, shared
+    by what is published (`misconfigured`) and what is refused
+    (`no_address`)."""
+    value = os.getenv(name, "").strip().lower()
+    needed = _NEEDS.get(value)
+    if needed and not os.getenv(needed, "").strip():
+        return f"{name}={value} without {needed}"
+    return None
+
+
 def _misconfigured_reads() -> List[str]:
     """Every read switch naming an engine this process has no address for."""
     found = []
     for name in sorted(os.environ):
         if not name.startswith(READ_FLAG_PREFIX) or name == ENV:
             continue
-        value = os.environ[name].strip().lower()
-        needed = _NEEDS.get(value)
-        if needed and not os.getenv(needed, "").strip():
-            found.append(f"{name}={value} without {needed}")
+        line = _unaddressed(name)
+        if line:
+            found.append(line)
     return found
 
 
@@ -161,8 +186,10 @@ def configure_mode() -> str:
     for line in misconfigured:
         if line not in _misconfigured:
             logger.error(
-                "%s — every read behind it is served from DuckDB. Set the "
-                "address or unset the flag.", line)
+                "%s — every read behind it is %s. Set the address or unset "
+                "the flag.", line,
+                "refused (KS_READ_FALLBACK=off)" if _mode == OFF
+                else "served from DuckDB")
     _misconfigured = misconfigured
     return _mode
 
@@ -203,7 +230,8 @@ def _refuse(surface: str, why: str, exc: Optional[BaseException]) -> NoReturn:
     count = _tally(_refused, surface)
     logger.error(
         "read refused: %s — %s, and %s=off forbids answering from DuckDB "
-        "(%d refused since start): %s", surface, why, ENV, count, exc,
+        "(%d refused since start)%s", surface, why, ENV, count,
+        f": {exc}" if exc is not None else "",
         exc_info=exc if isinstance(exc, BaseException) else None,
     )
     raise ReadUnavailable(surface) from exc
@@ -242,6 +270,27 @@ def no_engine(surface: str, why: str) -> None:
     """
     if refusing():
         _refuse(surface, why, None)
+
+
+def no_address(surface: str, switch: Any) -> None:
+    """Under `off`, refuse `surface` when `switch` names an engine this
+    process has no address for — `KS_READ_TRAFFIC=postgres` without
+    `KS_PG_DSN` — because the gate beside the call is about to let DuckDB
+    answer instead (DN-20b).
+
+    `switch` is the read-switch module the gate consults, and its `ENV` is
+    what is read, per request, as the gate reads it. Under `duckdb` it does
+    nothing at all, not even read the environment: that state is a
+    configuration, published once at start under `misconfigured`, and the
+    page keeps answering from DuckDB exactly as it always has. A switch that
+    names DuckDB, or names nothing, is a routing decision under either mode
+    and is never refused here.
+    """
+    if not refusing():
+        return
+    line = _unaddressed(switch.ENV)
+    if line:
+        _refuse(surface, line, None)
 
 
 def counts() -> Dict[str, Dict[str, object]]:

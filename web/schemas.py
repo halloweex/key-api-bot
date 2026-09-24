@@ -153,10 +153,11 @@ class HealthResponse(BaseModel):
             "route answers 503 naming the surface (DN-20b) — and `error` "
             "names a value that was not understood and ran as duckdb; judged "
             "by the canary. `misconfigured` lists every KS_READ_* naming an "
-            "engine without its address (KS_PG_DSN, KS_CH_URL): each of those "
-            "reads is served by DuckDB with nothing failing to count. Under "
-            "off only, `refused` is `{surface: {count, last_at}}` for the "
-            "reads refused since the process started."
+            "engine without its address (KS_PG_DSN, KS_CH_URL): under duckdb "
+            "each of those reads is served by DuckDB with nothing failing to "
+            "count, and under off each is refused. Under off only, `refused` "
+            "is `{surface: {count, last_at}}` for the reads refused since the "
+            "process started."
         ),
     )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(

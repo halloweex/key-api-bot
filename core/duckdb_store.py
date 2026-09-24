@@ -3250,7 +3250,11 @@ class DuckDBStore(
                 LIMIT ?
             """
         # No fallback — `core/pg_buyer_sync_read.py` says why, and where a
-        # failure is contained instead.
+        # failure is contained instead. The switch with no address is the one
+        # silent route to DuckDB left, and under KS_READ_FALLBACK=off it is
+        # refused like a failure, and contained in the same place.
+        from core import read_fallback
+        read_fallback.no_address("buyer_sync", pg_buyer_sync_read)
         if pg_buyer_sync_read.enabled() and pg_buyer_sync_read.available():
             rows = await pg_buyer_sync_read.fetch(render_tables(sql, POSTGRES), [limit])
             return [row[0] for row in rows]

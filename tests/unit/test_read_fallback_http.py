@@ -18,6 +18,11 @@ What is proved here, through the real app and a Postgres pool that raises:
 - the trend's forecast overlay, whose reads already degrade to "no forecast",
   drops under a refusal while the chart answers — no DuckDB number reaches
   the page, and the refusal is counted;
+- a switch naming Postgres with no `KS_PG_DSN` at all is refused under `off`
+  exactly like a failed read, for every one of those routes — the gate is
+  simply false there, and a lost DSN line would otherwise put the whole
+  dashboard back on DuckDB with nothing failing — and under `duckdb` it
+  still answers what DuckDB answers, counting nothing;
 - cohorts under `off` are answered by a live ClickHouse or not at all: a
   switch naming no configured ClickHouse is refused too, and a live one
   answers 200;
@@ -230,16 +235,69 @@ class TestOffRefuses:
         assert read_fallback.refusals()["goals"]["count"] >= 1
         assert read_fallback.counts() == {}
 
+    @pytest.mark.parametrize("dsn", [True, False], ids=["dsn", "no_dsn"])
     def test_a_switch_left_at_duckdb_is_not_a_fallback(
-        self, admin_client, stores, monkeypatch,
+        self, dsn, admin_client, stores, monkeypatch,
     ):
         """`off` refuses a fallback, not DuckDB as the engine a switch names:
         a Postgres-backed tab whose switch says `duckdb` is a routing
-        decision, published nowhere and refused nowhere. The cohorts are the
-        exception, below."""
+        decision, published nowhere and refused nowhere — with a DSN or
+        without one. The cohorts are the exception, below."""
+        if not dsn:
+            monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setenv("KS_READ_TRAFFIC", "duckdb")
         _mode(monkeypatch, "off")
         response = admin_client.get("/api/traffic/analytics", params=WINDOW)
         assert response.status_code == 200
+        assert read_fallback.refusals() == {}
+
+
+# ─── A switch with no address: refused under off, unchanged under duckdb ───
+
+@pytest.fixture
+def no_dsn(stores, monkeypatch):
+    """`stores`, and then no `KS_PG_DSN` at all: every Postgres switch below
+    names an engine this process cannot reach, and nothing will fail."""
+    monkeypatch.delenv("KS_PG_DSN", raising=False)
+    return stores
+
+
+class TestNoAddress:
+    @pytest.mark.parametrize("case", CASES, ids=repr)
+    def test_under_off_it_is_a_503_naming_the_surface(
+        self, case, admin_client, no_dsn, monkeypatch, caplog,
+    ):
+        _switches(monkeypatch, case.env)
+        _mode(monkeypatch, "off")
+        (switch, value), = case.env.items()
+        assert read_fallback.misconfigured() == [
+            f"{switch}={value} without KS_PG_DSN"]
+
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            response = admin_client.get(case.path, params=case.params)
+
+        assert response.status_code == 503, response.text
+        assert response.json()["surface"] == case.surface
+        assert read_fallback.counts() == {}
+        assert read_fallback.refusals()[case.surface]["count"] >= 1
+        assert f"{switch}=postgres without KS_PG_DSN" in caplog.text
+        assert "falling back to DuckDB" not in caplog.text
+
+    @pytest.mark.parametrize("case", CASES, ids=repr)
+    def test_under_duckdb_it_answers_what_duckdb_answers(
+        self, case, admin_client, no_dsn, monkeypatch,
+    ):
+        """The default is untouched: published once as misconfigured, served
+        from DuckDB per request, nothing counted and nothing refused."""
+        _mode(monkeypatch, "duckdb")
+        direct = admin_client.get(case.path, params=case.params)
+        assert direct.status_code == 200, direct.text
+
+        _switches(monkeypatch, case.env)
+        unaddressed = admin_client.get(case.path, params=case.params)
+        assert unaddressed.status_code == 200, unaddressed.text
+        assert unaddressed.json() == direct.json()
+        assert read_fallback.counts() == {}
         assert read_fallback.refusals() == {}
 
 

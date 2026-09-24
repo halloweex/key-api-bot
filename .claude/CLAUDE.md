@@ -2317,7 +2317,15 @@ the soak greps for, published as `read_fallback_mode.refused` under `off`
 alone, so `read_fallbacks` stays empty there and the block keeps its shape
 under `duckdb`. `off` refuses a *failure*, never a switch left at `duckdb` —
 except the cohorts, which have no Postgres body: under `off` a live
-ClickHouse answers them or nobody does (`no_engine`). The trend's forecast
+ClickHouse answers them or nobody does (`no_engine`). A switch naming an
+engine this process has **no address** for (`KS_READ_TRAFFIC=postgres`
+without `KS_PG_DSN`) counts as a failure there: the gate is simply false and
+DuckDB answers with nothing to count, so every `enabled() and available()`
+gate first calls `no_address(surface, switch)`, which refuses under `off` and
+does nothing under `duckdb`. A lost DSN line is then a 503 on every tab, not
+frozen numbers behind all of them. Chosen over having the canary page
+`misconfigured` under `off`, which would have kept serving DuckDB until
+somebody read the page. The trend's forecast
 overlay, which already degrades to "no forecast" on any failure, drops under
 a refusal and the chart answers. The non-HTTP consumers (the weekly reports,
 the assistant, training, the sync) are DN-20c; until it lands a refusal
@@ -2329,7 +2337,8 @@ publishes `read_fallback_mode.error` and the canary warns
 `read_fallback_mode_invalid`. The same call lists, under
 `read_fallback_mode.misconfigured`, every `KS_READ_*=postgres` without
 `KS_PG_DSN` and `=clickhouse` without `KS_CH_URL` — found by prefix in the
-environment, not listed: those reads serve DuckDB with nothing failing to count.
+environment, not listed: under `duckdb` those reads serve DuckDB with nothing
+failing to count, and under `off` exactly those are refused, by the same rule.
 
 `tests/unit/test_read_fallback_sites.py` walks `core/` and `web/` for the
 shapes, never a list of routers: a "falling back to DuckDB" log; an
@@ -2339,7 +2348,10 @@ shapes, never a list of routers: a "falling back to DuckDB" log; an
 False and `_pg_gold_summary` returns None and it is the caller that then reads
 DuckDB. Each must call `fall_back`, re-raise, or say in the same `try` what
 `ReadUnavailable` means — `_get_ml_forecast_total` lets it through, so a
-refusal is never turned into a goal computed without its signal.
+refusal is never turned into a goal computed without its signal. And every
+gate's function must call `no_address` with the switch the gate consults (or
+`no_engine`); the two Gold readers gained `pg_gold_read.available()` so they
+take the gate's shape and the walk sees them.
 
 ### A write flag is no longer a rollback
 
