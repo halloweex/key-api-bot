@@ -84,12 +84,13 @@ detector the design asked for and nobody built.
   it had seen (`requested_seen`) and how far bronze had got
   (`pg_derivation.HIGH_WATER`). Two consecutive error-free runs where bronze
   moved on and the mark did not are an orders write that raised no mark: the
-  rows were rebuilt by the later run, so nothing is lost, but only because the
-  heartbeat came — the thing that makes a broken mark path invisible to every
-  other check. WARN, over the last day of runs, because the digest reads one
-  integrity run a day. A run journalled as `first_tick` is not judged: before
-  DN-05b a boot sync wrote with no mark by design, and that run is what
-  covered it. Postgres against its own journal, not against DuckDB.
+  rows were rebuilt by the later run, so nothing is lost — on a quiet night
+  that run is the heartbeat, an hour late, which is exactly what makes a
+  broken mark path invisible to every other check. WARN, over the last day of
+  runs, because the digest reads one integrity run a day. A run journalled as
+  `first_tick` is not judged: before DN-05b a boot sync wrote with no mark by
+  design, and that run is what covered it. Postgres against its own journal,
+  not against DuckDB.
 - **`pg_twin_pairing`**, one INFO finding per run whose description is JSON:
   both engines' arc, attribution and line-item numbers side by side, and what
   `check_pg_warehouse` would file for the same facts standing alone
@@ -882,9 +883,12 @@ def signal_missed_pairs(journal: DerivationJournal) -> List[Tuple[JournalRun, Jo
 
     Not judged: a run whose trigger is `first_tick`. Before DN-05b a process
     configured its modes after the boot sync, so that sync's writes carried no
-    mark by design and this run is what rebuilt them; after DN-05b the
-    exclusion reaches only processes started before it. A `signal` run needs no
-    exclusion — `due` says `signal` only when `requested` passed `built`, which
+    mark by design and this run is what rebuilt them. Since DN-05b a boot sync
+    that wrote anything marked it, so a process's first run is `signal` and is
+    judged; the exclusion now matters for journal rows of processes started
+    before it. Its cost: an unmarked write landing just before a first-tick
+    run is never judged — every write after that run is. A `signal` run needs
+    no exclusion — `due` says `signal` only when `requested` passed `built`, which
     the previous run left at its own `requested_seen`, so its mark has moved by
     construction. Nor is a pair either of whose runs has no high-water mark or
     no `requested_seen`: a run journalled before DN-14 says nothing either way.

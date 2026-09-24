@@ -418,11 +418,11 @@ _ADDITIVE = ("revenue", "orders_count", "returns_count", "returns_revenue")
 # `validate` records `max(bronze.orders.mirrored_at)` beside the Bronze count,
 # from the same snapshot, so every journal row says how far bronze had got as
 # well as how many marks it had seen (`requested_seen`). Two consecutive runs
-# whose mark moved on while the count of marks did not are a bronze write that
-# raised no mark: `pg_warehouse_dq`'s `pg_signal_missed` judges exactly that,
-# on a code path the marks do not share. The heartbeat rebuilds such rows
-# within the hour, so nothing is lost — what the detector sees is the signal
-# failing, which the heartbeat otherwise hides for good.
+# where the high-water mark moved on and `requested_seen` did not are a bronze
+# write that raised no derivation mark: `pg_warehouse_dq`'s `pg_signal_missed`
+# judges exactly that, on a code path the marks do not share. The heartbeat
+# rebuilds such rows within the hour, so nothing is lost — what the detector
+# sees is the signal failing, which the heartbeat otherwise hides for good.
 #
 # Read at validation, not with `requested_seen` at the run's start, for the
 # row count's reason: every orders writer holds `_heavy_job_lock` and so does
