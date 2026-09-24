@@ -2329,10 +2329,18 @@ somebody read the page. The trend's forecast
 overlay, which already degrades to "no forecast" on any failure, drops under
 a refusal and the chart answers; the forecast's own endpoint,
 `/api/revenue/forecast`, is not an overlay and answers 503 — it used to read
-an outage as "Forecast not available yet", a model nobody had trained. The non-HTTP consumers (the weekly reports,
-the assistant, training, the sync) are DN-20c; until it lands a refusal
-reaching one of them is an exception like any other, so **`off` is not set
-before DN-20c ships**. An
+an outage as "Forecast not available yet", a model nobody had trained. Everything else a refusal can reach is DN-20c's:
+the sync and its search index, training, the Monday goals job
+(`seasonality_calc`, which writes `seasonal_indices` before the read that
+refuses, so it must defer whole rather than half-write), the two weekly
+reports, the boot sync and the assistant. **That list is derived, not
+remembered** — `tests/unit/test_read_fallback_consumers.py` walks up from
+every `fall_back`/`no_address`/`no_engine` to the entry points nothing in the
+repository calls, and pins the ones no swept route answers (`NON_HTTP_CONSUMERS`,
+plus the five writing routes the sweep does not run); a new consumer fails it
+until somebody decides what it answers. A remembered list had missed the
+goals job. Until DN-20c lands a refusal reaching one of them is an exception
+like any other, so **`off` is not set before DN-20c ships**. An
 unknown value **runs as `duckdb` and never raises** — web is the only syncer,
 so a crash loop over how a read degrades would stop order intake (OD-09); it
 publishes `read_fallback_mode.error` and the canary warns

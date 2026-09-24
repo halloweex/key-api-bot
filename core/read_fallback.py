@@ -36,10 +36,15 @@ it stays empty.
 One place raises, so every consumer of a router refuses at once — and a
 gate whose switch names an engine with no address refuses through
 `no_address`, below, for the same reason. The HTTP routes answer 503 here.
-The non-HTTP consumers (the weekly reports, the assistant, training, the
-sync) are DN-20c, which gives each its own named answer; until then a
-refusal that reaches one of them is an exception like any other, and nothing
-ships `off` before DN-20c does. Cohorts go one step
+Everything else that can receive a refusal is DN-20c's, which gives each its
+own named answer: the sync and its search index, training, the Monday goals
+job (which writes `seasonal_indices` before the read that refuses), the two
+weekly reports, the boot sync and the assistant. That list is derived, not
+remembered — `tests/unit/test_read_fallback_consumers.py` walks up from every
+refusal to the entry points that can receive one and pins them as
+`NON_HTTP_CONSUMERS`. Until DN-20c lands, a refusal that reaches one of them
+is an exception like any other, and nothing ships `off` before it does.
+Cohorts go one step
 further, because they have no Postgres body: under `off` they are answered
 by a live ClickHouse or not at all (`no_engine`), whatever `KS_READ_COHORTS`
 says.
