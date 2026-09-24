@@ -288,6 +288,35 @@ class TestPreflightOnTheRealSchema:
         assert f"{check} on {table}" in reason
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("error_message, ok", [
+        pytest.param("1 check(s) raised — reconcile_sms: ConnectionResetError: "
+                     "reset by peer", True, id="another-store"),
+        pytest.param("2 check(s) raised — reconcile_operational: OSError: refused "
+                     "| reconcile_sms: ConnectionResetError: reset by peer", False,
+                     id="chain-1s-own-comparison"),
+    ])
+    async def test_a_failed_run_blocks_only_when_chain_1_went_uncompared(
+            self, ready, error_message, ok):
+        """This morning's run failed. When the check that raised is another
+        store's, chain 1's six tables were compared and came back clean, and
+        the run failing is a note; when it is `reconcile_operational`, they
+        were not compared at all."""
+        async with ready.acquire() as conn:
+            await conn.execute(
+                "UPDATE app.data_quality_runs SET status = 'FAILED', error_message = $2 "
+                "WHERE run_id = $1", RUN_ID, error_message)
+        result = await pg_inventory_write.preflight(ready)
+        assert result["ok"] is ok
+        assert result["operational_run"]["run_id"] == RUN_ID
+        assert result["operational_run"]["failed"] is True
+        if ok:
+            (note,) = result["notes"]
+            assert "failed in reconcile_sms" in note
+        else:
+            (reason,) = result["reasons"]
+            assert f"run ({RUN_ID}) failed in reconcile_operational" in reason
+
+    @pytest.mark.asyncio
     async def test_a_copy_older_than_50_minutes_is_not_ok(self, ready):
         """On the database's clock alone. `last_ok_at` is Postgres' `now()`,
         and the preflight's default `now` is this process's: a container

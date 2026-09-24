@@ -2595,10 +2595,15 @@ closed while it is still off. None of them runs under today's flags.
   not: the writing role lacks TEMPORARY (every status rebuild would raise), one
   of the six tables was not copied within 50 min or its copy is failing, or
   the latest `mirror_landing` run — read from a journal copy under 75 min old
-  — is over the canary's 30 h, failed, or filed anything against the six
-  tables or the chain. `ok` is null once the chain writes Postgres. It is not
-  a substitute for `chain_copy_back.py --handover`, which is still the gate:
-  read the preflight first, then stop web and ask the handover.
+  — is over the canary's 30 h, filed anything against the six tables or the
+  chain, or failed before comparing them: `reconcile_operational` itself
+  raised, an exception fell between checks (`setup`), or the error is not in
+  the job's format. Any other check raising — SMS, ClickHouse — leaves chain
+  1's comparison complete, so it is a `note`, not a reason; the run still
+  counts as failed everywhere else. `ok` is null once the chain writes
+  Postgres. It is not a substitute for `chain_copy_back.py --handover`, which
+  is still the gate: read the preflight first, then stop web and ask the
+  handover.
 - **A step failure is not the tick's end.** On the Postgres path the offers
   and stocks steps run in `SyncService._inventory_step_postgres`, which never
   raises: a failure (the watermark reads included — they are Postgres reads

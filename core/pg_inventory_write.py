@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import (
     Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
@@ -535,12 +536,62 @@ JOURNAL_COPY = "app.data_quality_runs"
 OPERATIONAL_LAYER = "mirror_landing"
 PREFLIGHT_VERDICT_WITHIN = timedelta(hours=30)
 
+# Which failures of that run leave chain 1 uncompared. The run holds every
+# comparison of the layer, each in its own try, and when any raises
+# `_run_dq_mirror_landing` sets `error_message` — after every other check has
+# compared and filed — to
+#
+#     "<n> check(s) raised — <check>: <Class>: <text> | <check>: ..."
+#
+# with `setup` as the check for an exception between checks, which skips every
+# check after it. So a failed run is not an uncompared chain: only its own
+# comparison raising, or `setup`, is. `tests/unit/test_inventory_preflip.py`
+# drives the real job, so a renamed check or a reworded message fails there.
+OPERATIONAL_CHECK = "reconcile_operational"
+_RAISED_HEAD = re.compile(r"(\d+) check\(s\) raised — ")
+# The trailing space is looked at, not taken: an exception's text ending in
+# "x: Y:" would otherwise eat the space of the " | " that starts the next entry.
+_RAISED_ENTRY = re.compile(r"(?:^| \| )([a-z_]+): [A-Za-z_]\w*:(?= |$)")
+
 # How many open findings the published answer names. The rest are counted.
 _PREFLIGHT_NAMED = 5
 
 
 def _minutes(delta: timedelta) -> int:
     return int(delta.total_seconds() // 60)
+
+
+def _raised_checks(error_message: str) -> Optional[List[str]]:
+    """The checks a failed `mirror_landing` run names as raised, in order, or
+    None when its message is not in the job's format.
+
+    It can only err towards blocking. An exception's own text holding
+    " | name: Class:" adds a name that did not raise; a real entry cannot go
+    missing, because the job itself starts each one after "— " or " | ". A
+    message naming fewer entries than its count is not trusted at all.
+    """
+    head = _RAISED_HEAD.match(error_message)
+    if head is None:
+        return None
+    names = [m.group(1) for m in _RAISED_ENTRY.finditer(error_message[head.end():])]
+    if len(names) < int(head.group(1)):
+        return None
+    return list(dict.fromkeys(names))
+
+
+def _uncompared_reason(run_id: int, raised: Optional[List[str]]) -> Optional[str]:
+    """Why a failed run leaves chain 1 uncompared, or None when it does not."""
+    run = f"the latest {OPERATIONAL_LAYER} run ({run_id})"
+    if raised is None:
+        return (f"{run} failed, and its error does not say which check raised, "
+                "so chain 1's tables may not have been compared")
+    if OPERATIONAL_CHECK in raised:
+        return (f"{run} failed in {OPERATIONAL_CHECK}, so chain 1's tables "
+                "were not compared")
+    if "setup" in raised:
+        return (f"{run} failed between its checks, so chain 1's tables may not "
+                "have been compared")
+    return None
 
 
 async def preflight(
@@ -556,8 +607,9 @@ async def preflight(
     * each of the six tables was copied by `replicate_operational` within
       `PREFLIGHT_REPLICATED_WITHIN`, with no failure since;
     * the latest `mirror_landing` run — from a journal copy that is itself
-      fresh — is recent, did not fail, and filed nothing against the six
-      tables or the chain.
+      fresh — is recent, compared chain 1 (it may have failed elsewhere: a
+      check that raised in another store is a `note`, not a reason), and
+      filed nothing against the six tables or the chain.
 
     `ok` is None once the chain already writes Postgres: this is the question
     before the flip, and afterwards the copy it asks about stands down by
@@ -580,9 +632,11 @@ async def preflight(
 
     now = now or datetime.now(timezone.utc)
     reasons: List[str] = []
+    notes: List[str] = []
     out: Dict[str, Any] = {
         "ok": False, "temporary": None, "replicated": {},
         "journal_copy_age_s": None, "operational_run": None, "reasons": reasons,
+        "notes": notes,
     }
     try:
         if pool is None:
@@ -662,10 +716,14 @@ async def preflight(
         reasons.append(f"no {OPERATIONAL_LAYER} run in the quality journal")
     else:
         age = now - run["started_at"]
+        failed = run["error_message"] is not None
+        # Check names only: the text after them is a driver's message.
+        raised = _raised_checks(run["error_message"]) if failed else []
         out["operational_run"] = {
             "run_id": int(run["run_id"]),
             "age_s": int(age.total_seconds()),
-            "failed": run["error_message"] is not None,
+            "failed": failed,
+            "raised": raised,
             "findings": len(findings),
         }
         if age >= PREFLIGHT_VERDICT_WITHIN:
@@ -673,10 +731,15 @@ async def preflight(
                 f"the latest {OPERATIONAL_LAYER} run ({run['run_id']}) is "
                 f"{int(age.total_seconds() // 3600)} h old (limit "
                 f"{int(PREFLIGHT_VERDICT_WITHIN.total_seconds() // 3600)})")
-        if run["error_message"] is not None:
-            reasons.append(
-                f"the latest {OPERATIONAL_LAYER} run ({run['run_id']}) failed and "
-                "compared nothing")
+        if failed:
+            reason = _uncompared_reason(run["run_id"], raised)
+            if reason is not None:
+                reasons.append(reason)
+            else:
+                notes.append(
+                    f"the latest {OPERATIONAL_LAYER} run ({run['run_id']}) failed "
+                    f"in {', '.join(raised)}; chain 1's own comparison "
+                    f"({OPERATIONAL_CHECK}) completed, so that does not count here")
         if findings:
             named = ", ".join(f"{f['check_name']} on {f['table_name']}"
                               for f in findings[:_PREFLIGHT_NAMED])

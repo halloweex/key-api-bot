@@ -10,6 +10,7 @@ import ast
 import asyncio
 import inspect
 import pathlib
+import textwrap
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -185,7 +186,9 @@ class TestPreflight:
         assert result["temporary"] is True
         assert set(result["replicated"]) == set(pg_inventory_write.CHAIN_TABLES)
         assert result["operational_run"] == {
-            "run_id": 700, "age_s": 9000, "failed": False, "findings": 0}
+            "run_id": 700, "age_s": 9000, "failed": False, "raised": [],
+            "findings": 0}
+        assert result["notes"] == []
 
     @pytest.mark.asyncio
     async def test_no_temporary_privilege_is_not_ok_and_says_the_grant(self, flag_off):
@@ -247,13 +250,16 @@ class TestPreflight:
         assert "30 h old (limit 30)" in result["reasons"][0]
 
     @pytest.mark.asyncio
-    async def test_a_failed_run_compared_nothing(self, flag_off):
+    async def test_a_failure_it_cannot_read_counts_as_uncompared(self, flag_off):
+        """Not in the job's "<n> check(s) raised — ..." shape, so nothing says
+        chain 1's comparison ran: blocked, and says so rather than guessing."""
         run = {"run_id": 701, "started_at": NOW - timedelta(hours=1),
                "error_message": "SchemaVersionError: revision mismatch"}
         result = await _ask(_facts(run=run))
         assert result["ok"] is False and result["operational_run"]["failed"] is True
+        assert result["operational_run"]["raised"] is None
         (reason,) = result["reasons"]
-        assert "failed and compared nothing" in reason
+        assert "does not say which check raised" in reason
         assert "SchemaVersionError" not in reason       # the journal's text stays in the journal
 
     @pytest.mark.asyncio
@@ -310,6 +316,105 @@ class TestPreflight:
 
         assert (pg_inventory_write.PREFLIGHT_VERDICT_WITHIN.total_seconds()
                 == canary.DQ_MAX_AGE_S[pg_inventory_write.OPERATIONAL_LAYER])
+
+
+# ─── which failure of the mirror_landing run leaves chain 1 uncompared ──────
+
+def _failed_run(error_message):
+    return {"run_id": 702, "started_at": NOW - timedelta(hours=2),
+            "error_message": error_message}
+
+
+async def _job_error_message(outcomes):
+    """The `error_message` the real `_run_dq_mirror_landing` persists when the
+    named checks raise: the producer itself, not a copy of its format, so a
+    renamed check or a reworded message fails here."""
+    from tests.unit.test_mirror_landing_isolation import _run
+
+    persisted, _, _ = await _run(outcomes)
+    return persisted["error_message"]
+
+
+class TestWhichFailureCounts:
+    @pytest.mark.asyncio
+    async def test_another_store_raising_does_not_block_and_is_noted(self, flag_off):
+        """SMS reset by its peer at 07:30, after chain 1's tables were compared
+        and came back clean. The run is failed for the watchdog; it is not an
+        uncompared chain, and the note says which check it was."""
+        message = await _job_error_message(
+            {"reconcile_sms": ConnectionResetError("reset by peer")})
+        result = await _ask(_facts(run=_failed_run(message)))
+        assert result["reasons"] == [] and result["ok"] is True
+        assert result["operational_run"]["failed"] is True
+        assert result["operational_run"]["raised"] == ["reconcile_sms"]
+        (note,) = result["notes"]
+        assert "failed in reconcile_sms" in note and "(reconcile_operational) completed" in note
+        assert "reset by peer" not in note and "ConnectionResetError" not in note
+
+    @pytest.mark.asyncio
+    async def test_chain_1s_own_comparison_raising_blocks(self, flag_off):
+        message = await _job_error_message({
+            "reconcile_operational": OSError("connection refused"),
+            "reconcile_sms": ConnectionResetError("reset by peer"),
+        })
+        result = await _ask(_facts(run=_failed_run(message)))
+        assert result["ok"] is False and result["notes"] == []
+        (reason,) = result["reasons"]
+        assert reason == ("the latest mirror_landing run (702) failed in "
+                          "reconcile_operational, so chain 1's tables were not compared")
+
+    @pytest.mark.asyncio
+    async def test_an_entry_behind_text_that_ends_like_an_entry_is_still_read(self, flag_off):
+        """Gold's exception text ends in " | step: Failed:", which reads as an
+        entry of its own. Had that match taken the space after it, the real
+        separator in front of `reconcile_operational` would be one space short,
+        its entry unread, and the count still satisfied by the fake one: a pass
+        for a chain that was never compared."""
+        message = await _job_error_message({
+            "reconcile_gold": RuntimeError("upstream | step: Failed:"),
+            "reconcile_operational": OSError("connection refused"),
+        })
+        result = await _ask(_facts(run=_failed_run(message)))
+        assert result["ok"] is False
+        assert "failed in reconcile_operational" in result["reasons"][0]
+
+    @pytest.mark.asyncio
+    async def test_a_failure_between_checks_blocks(self, flag_off):
+        """`setup`: an import between two checks raised and skipped every check
+        after it, chain 1's possibly among them. The job writes it only from a
+        failed import, so the message is written here in its format and the
+        prefix is pinned in the job below."""
+        message = "1 check(s) raised — setup: ImportError: cannot import name"
+        result = await _ask(_facts(run=_failed_run(message)))
+        assert result["ok"] is False
+        (reason,) = result["reasons"]
+        assert "failed between its checks" in reason
+
+    def test_the_job_calls_a_failure_between_checks_setup(self):
+        """The one entry the job writes outside `check()`. Parsed, not grepped:
+        its comments name `setup` as readily as the code does."""
+        from core.scheduler import BackgroundScheduler
+
+        tree = ast.parse(textwrap.dedent(
+            inspect.getsource(BackgroundScheduler._run_dq_mirror_landing)))
+        prefixes = {
+            node.args[0].values[0].value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "append"
+            and getattr(node.func.value, "id", "") == "raised"
+            and node.args and isinstance(node.args[0], ast.JoinedStr)
+            and isinstance(node.args[0].values[0], ast.Constant)
+        }
+        assert prefixes == {"setup: "}
+
+    @pytest.mark.asyncio
+    async def test_a_message_naming_fewer_entries_than_it_counts_is_not_trusted(
+            self, flag_off):
+        message = "2 check(s) raised — reconcile_sms: ConnectionResetError: reset"
+        result = await _ask(_facts(run=_failed_run(message)))
+        assert result["ok"] is False and result["operational_run"]["raised"] is None
+        assert "does not say which check raised" in result["reasons"][0]
 
 
 # ─── /api/health publishes it ────────────────────────────────────────────────
