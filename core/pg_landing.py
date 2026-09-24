@@ -263,6 +263,24 @@ async def tables_stood_down_or_owned(pool, unit: Sequence[str]) -> FrozenSet[str
     return tables_stood_down(unit) | owned_among(owners, unit)
 
 
+def shipping_units() -> tuple:
+    """Every unit of more than one table, one per writer that writes them in
+    one transaction. `tests/unit/test_write_chains.py` derives the same list
+    from the writers themselves and fails when the two disagree."""
+    from core.pg_buyers import BUYER_UNIT
+    from core.pg_replication import MANAGER_UNIT
+
+    return (ORDER_UNIT, BUYER_UNIT, MANAGER_UNIT)
+
+
+def unit_of(table: str) -> tuple:
+    """The unit `table` changes hands with — itself, when it ships alone."""
+    for unit in shipping_units():
+        if table in unit:
+            return tuple(unit)
+    return (table,)
+
+
 def stood_down_reason(moved) -> str:
     """The one sentence every stood-down path reports, so a log, a job result
     and a route's 409 say the same thing about the same state."""

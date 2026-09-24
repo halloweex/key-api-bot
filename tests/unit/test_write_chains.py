@@ -1531,3 +1531,219 @@ class TestTheAdminExpenseBackfill:
         assert res.status_code == 200, res.json()
         backfill.assert_awaited_once()
         assert pool.only_asked_who_owns()
+
+
+# ─── DN-22b: the daily comparisons stand down with their shippers ───────────
+
+_COMPARED = {
+    # comparison: (the tables it stands down on the plan's fake chain,
+    #              the shipper whose claim its finding makes)
+    "reconcile_mirror": ((PRODUCTS, MANAGERS, CLASSIFICATIONS), "mirror_products"),
+    "reconcile_expenses": ((EXPENSES,), "mirror_expenses"),
+    "reconcile_buyers": ((BUYERS, CONTACTS), "mirror_buyers"),
+}
+
+
+async def _compare(name, store):
+    """Run one comparison the way the 07:30 job does. `reconcile_mirror` is
+    handed a DuckDB side holding the categories alone: a stood-down table it
+    went on to compare would fail on the missing key, not pass."""
+    from core import mirror_reconciliation as mr
+
+    if name == "reconcile_mirror":
+        if store is None:
+            dk_side = {CATEGORIES: ({}, {})}
+        else:
+            async with store.connection() as conn:
+                dk_side = mr.read_duckdb_side(conn)
+        return await mr.reconcile_mirror(dk_side)
+    return await getattr(mr, name)(store if store is not None else _NoStore())
+
+
+def _read_a_table(pool, tables) -> list:
+    """The statements that named one of `tables` — reads and writes alike."""
+    return [s for s in pool.sql if any(t in s for t in tables)]
+
+
+class TestTheComparisonsStandDown:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    async def test_without_a_chain_they_compare(self, pool, tmp_path, name):
+        """The control: each reads its tables in Postgres and files no
+        stand-down of either kind."""
+        store = await _landing_store(tmp_path)
+        issues = await _compare(name, store)
+        tables = _COMPARED[name][0]
+        assert _read_a_table(pool, tables), pool.sql
+        assert not {"mirror_stood_down", "owner_row_without_marker"} & {
+            i.check_name for i in issues}, issues
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    async def test_on_the_local_answer_info_per_table_and_no_read(
+            self, pool, landing_chain, name):
+        from core.data_quality import Severity
+
+        landing_chain()
+        issues = await _compare(name, None)
+        tables = _COMPARED[name][0]
+        stood = [(i.check_name, i.table_name, i.severity) for i in issues
+                 if i.check_name == "mirror_stood_down"]
+        assert stood == [("mirror_stood_down", t, Severity.INFO) for t in tables]
+        assert "owner_row_without_marker" not in {i.check_name for i in issues}
+        assert _read_a_table(pool, tables) == [], pool.sql
+        if name != "reconcile_mirror":
+            _never_reached_postgres(pool)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    @pytest.mark.parametrize("road", ["marker_lost", "rolled_back"])
+    async def test_on_the_owner_rows_alone_one_critical_and_no_read(
+            self, flags, pool, landing_chain, name, road):
+        from core.data_quality import Severity
+
+        tables = _COMPARED[name][0]
+        if road == "marker_lost":
+            landing_chain(env=lambda: False)
+            # One owner row holds the chain's every table (`claimed_tables`).
+            pool.owner_rows = {tables[0]: "2026-09-20T08:00:00+00:00"}
+        else:
+            _no_landing_chain(flags)
+            # No chain to expand a row through: each row holds its own unit,
+            # so the catalogue's two units need a row each.
+            pool.owner_rows = {t: "2026-09-20T08:00:00+00:00" for t in tables}
+        issues = await _compare(name, None)
+
+        (page,) = [i for i in issues if i.check_name == "owner_row_without_marker"]
+        assert page.severity is Severity.CRITICAL
+        assert page.table_name == ", ".join(sorted(tables))
+        assert page.count == len(tables)
+        assert "mirror_stood_down" not in {i.check_name for i in issues}
+        assert _read_a_table(pool, tables) == [], pool.sql
+        if road == "marker_lost":
+            assert "the marker is missing" in page.description
+        else:
+            assert "no chain in this build declares them" in page.description
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    async def test_a_schema_behind_the_code_breaks_before_the_owner_read(
+            self, pool, name):
+        from core import pg
+
+        pg.require_revision.side_effect = pg.SchemaVersionError(
+            "database at 0031, code wants 0033")
+        pool.owner_rows = {_COMPARED[name][0][0]: "2026-09-20T08:00:00+00:00"}
+        with pytest.raises(pg.SchemaVersionError):
+            await _compare(name, None)
+        assert pool.sql == [] and pool.acquired == 0, pool.sql
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    async def test_an_unreadable_owner_row_is_the_comparisons_error(
+            self, pool, landing_chain, name):
+        """Raised, so the 07:30 job records the check as failed rather than
+        comparing — `reconcile_operational`'s contract for the same read."""
+        landing_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        with pytest.raises(RuntimeError, match="unreadable"):
+            await _compare(name, None)
+        assert pool.only_asked_who_owns(), pool.sql
+
+
+class TestTheLandingFindingSaysWhetherTheSyncStillShips:
+    """`TestTheStandDownFindingSaysWhetherTheSyncStillShips`, for DN-22b: the
+    claim each finding makes about the sync's shipper is checked against what
+    that shipper then does with the same recorder."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(_COMPARED))
+    @pytest.mark.parametrize("state", ["flagged", "marker_lost", "rolled_back"])
+    async def test_the_claim_is_what_the_shipper_does(
+            self, flags, pool, landing_chain, tmp_path, name, state):
+        tables, shipper = _COMPARED[name]
+        if state == "flagged":
+            landing_chain()
+        else:
+            if state == "marker_lost":
+                landing_chain(env=lambda: False)
+            else:
+                _no_landing_chain(flags)
+            pool.owner_rows = {t: "2026-09-20T08:00:00+00:00" for t in tables}
+        issues = [i for i in await _compare(name, None)
+                  if i.check_name in {"mirror_stood_down", "owner_row_without_marker"}]
+        assert issues, "no stand-down filed — nothing to check the claim of"
+        for text in {i.description for i in issues}:
+            stopped = "the sync no longer ships DuckDB's copy" in text
+            shipping = "the sync is still shipping" in text
+            assert stopped != shipping, f"says neither or both: {text}"
+        text = issues[0].description
+        shipping = "the sync is still shipping" in text
+
+        # Every sync shipper of the tables the finding covers — the catalogue
+        # comparison covers two, and the claim is made about both.
+        store = await _landing_store(tmp_path)
+        shippers = {"reconcile_mirror": (("mirror_products", PRODUCTS),
+                                         ("replicate_managers", MANAGERS))}.get(
+            name, ((shipper, tables[0]),))
+        for path, table in shippers:
+            pool.sql.clear()
+            await _ship(path, store)
+            assert pool.wrote(table) == shipping, (path, text, pool.sql)
+            assert pool.wrote(table) == (issues[0].severity.value == "CRITICAL")
+
+
+class TestWhatTheLandingStandDownTellsAHuman:
+    """Persisted as the 07:30 job persists it, read back as the digest and a
+    page read it: the label and the lever, never the description."""
+
+    @pytest.mark.asyncio
+    async def test_on_the_local_answer_it_stays_info(
+            self, pool, landing_chain, tmp_path):
+        from core.mirror_reconciliation import reconcile_buyers
+
+        landing_chain()
+        store = await _landing_store(tmp_path)
+        run, rows = await _persisted(store, await reconcile_buyers(store))
+        assert sorted((r["check_name"], r["table_name"], r["severity"])
+                      for r in rows) == [
+            ("mirror_stood_down", CONTACTS, "INFO"),
+            ("mirror_stood_down", BUYERS, "INFO"),
+        ]
+        assert run["status"] == "PASS" and run["critical_count"] == 0, run
+
+    @pytest.mark.asyncio
+    async def test_on_the_owner_rows_alone_it_pages_and_never_says_not_a_defect(
+            self, pool, landing_chain, tmp_path):
+        from core.mirror_reconciliation import reconcile_expenses
+
+        landing_chain(env=lambda: False)
+        pool.owner_rows = {EXPENSES: "2026-09-20T08:00:00+00:00"}
+        store = await _landing_store(tmp_path)
+        run, rows = await _persisted(store, await reconcile_expenses(store))
+
+        assert [(r["check_name"], r["table_name"], r["severity"]) for r in rows] == [
+            ("owner_row_without_marker", EXPENSES, "CRITICAL")]
+        assert run["status"] == "CRITICAL", run
+        read = _what_a_human_reads(run, rows)
+        assert "not a defect" not in read.lower(), read
+        assert "the sync is overwriting tables a write chain owns" in read
+        (lever,) = [line for line in read.splitlines() if line.startswith("→ ")]
+        assert "scripts/chain_copy_back.py" in lever
+        assert "data/write-chain-owners" in lever
+
+    def test_the_registry_says_it_does_not_clear_by_itself(self):
+        from core.alerting import REGISTRY, Kind
+
+        spec = REGISTRY["owner_row_without_marker"]
+        assert spec.kind is Kind.CONDITION
+        assert "a human, not a job" in spec.clears
+
+    def test_the_local_lever_is_not_about_orders_alone(self):
+        """`mirror_stood_down` is filed for any table now; its lever must not
+        tell the reader of a buyers finding about the order tables."""
+        from core.data_quality import remediation_for
+
+        (lever,) = remediation_for(["mirror_stood_down"])
+        assert "order" not in lever.lower(), lever
+        assert "never backfill" in lever.lower()
