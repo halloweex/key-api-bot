@@ -503,16 +503,21 @@ class TestTheOrderTablesOnAnOwnerRowAlone:
     ORDER_ID = 990_001
 
     @pytest.mark.asyncio
-    async def test_the_backfill_refuses_and_postgres_gains_no_order(self, stores):
+    async def test_the_backfill_refuses_and_postgres_gains_no_order(
+            self, stores, monkeypatch):
+        from core import write_chains
         from core.pg_backfill import backfill_orders
         from core.pg_landing import (
             ORDER_PRODUCTS_TABLE, ORDERS_TABLE, order_tables_stood_down_or_owned,
         )
-        from core.write_chains import WRITE_CHAINS
 
         store, pool, _env = stores
         orders = {ORDERS_TABLE, ORDER_PRODUCTS_TABLE}
-        assert not [c for c in WRITE_CHAINS if orders & set(c.CHAIN_TABLES)]
+        # The rolled-back build, made rather than assumed: once the orders
+        # chain is registered for real this must still be a registry that
+        # declares no order table, or the row is read through `claimed_tables`.
+        monkeypatch.setattr(write_chains, "WRITE_CHAINS", tuple(
+            c for c in write_chains.WRITE_CHAINS if not orders & set(c.CHAIN_TABLES)))
 
         when = "2026-09-20T12:00:00+00:00"
         with patch("core.pg_landing.mirror_orders", new=AsyncMock()):

@@ -251,6 +251,19 @@ def order_chain(flags):
     return register
 
 
+def _rolled_back(flags) -> None:
+    """An image rolled back to a build older than the orders chain: no chain
+    registered here declares an order table. Made so rather than assumed, so
+    the case keeps meaning this once the orders chain is registered for real —
+    a precondition on this build's registry would fail those tests then, and a
+    test with none would quietly pass through `claimed_tables` instead."""
+    from core import write_chains
+
+    flags.setattr(write_chains, "WRITE_CHAINS", tuple(
+        c for c in write_chains.WRITE_CHAINS
+        if not {ORDERS, LINES} & set(c.CHAIN_TABLES)))
+
+
 async def _store(tmp_path, ids=()):
     """A DuckDB holding `ids`, written with the mirror patched out."""
     from unittest.mock import AsyncMock, patch
@@ -568,7 +581,7 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("row", [ORDERS, LINES])
     async def test_an_owner_row_no_registered_chain_declares_still_holds_both(
-            self, pool, row):
+            self, flags, pool, row):
         """An image rolled back to a build older than the orders chain: the
         owner row names a table no chain here declares, so `claimed_tables`
         alone would drop it and hand the tables back to DuckDB. Either order
@@ -576,20 +589,20 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
         from core.pg_landing import (
             order_tables_stood_down, order_tables_stood_down_or_owned,
         )
-        from core.write_chains import WRITE_CHAINS
 
-        assert not [c for c in WRITE_CHAINS if {ORDERS, LINES} & set(c.CHAIN_TABLES)], (
-            "the case needs a build in which no chain declares an order table")
+        _rolled_back(flags)
         pool.owner_rows = {row: "2026-09-20T08:00:00+00:00"}
         assert order_tables_stood_down() == frozenset()
         assert await order_tables_stood_down_or_owned(pool) == frozenset({ORDERS, LINES})
         assert pool.only_asked_who_owns()
 
     @pytest.mark.asyncio
-    async def test_after_a_rollback_the_backfill_still_refuses(self, pool, tmp_path):
+    async def test_after_a_rollback_the_backfill_still_refuses(
+            self, flags, pool, tmp_path):
         """The same case through a path: nothing shipped over the chain's rows."""
         from core.pg_backfill import backfill_orders
 
+        _rolled_back(flags)
         pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
         store = await _store(tmp_path, [1, 2])
         with pytest.raises(RuntimeError, match="write chain"):
@@ -737,7 +750,7 @@ class TestTheStandDownFindingSaysWhetherTheSyncStillShips:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("state", ["flagged", "marker_lost", "rolled_back"])
     async def test_the_claim_is_what_the_sync_mirror_does(
-            self, pool, order_chain, tmp_path, state):
+            self, flags, pool, order_chain, tmp_path, state):
         from core.mirror_reconciliation import reconcile_orders
 
         if state == "flagged":
@@ -745,6 +758,8 @@ class TestTheStandDownFindingSaysWhetherTheSyncStillShips:
         else:
             if state == "marker_lost":
                 order_chain(env=lambda: False)  # declared, flag duckdb, no marker
+            else:
+                _rolled_back(flags)             # nothing here declares them
             pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
         text = self._claim(await reconcile_orders(_NoStore()))
 
