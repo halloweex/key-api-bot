@@ -66,7 +66,8 @@ async def pool(monkeypatch):
             " VALUES ('bronze.orders', now(), now(), 0, now())"
             " ON CONFLICT (table_name) DO UPDATE SET last_attempted_at = now(), last_ok_at = now(),"
             " failures_since_ok = 0, backfilled_at = now(), last_error = NULL")
-        # Silver's watermark frozen three hours ago: the twin must not care.
+        # Silver's watermark frozen three hours ago: the arc twin must not care.
+        # (The row-values twin reads it as the last rebuild; `rv` moves it.)
         await conn.execute(
             "INSERT INTO meta.mirror_state (table_name, last_attempted_at, last_ok_at, failures_since_ok)"
             " VALUES ('silver.orders', now() - interval '3 hours', now() - interval '3 hours', 0)"
@@ -312,6 +313,17 @@ async def _journal(conn, *, minutes_ago=0, error=None, layer="warehouse"):
     return started
 
 
+async def _rebuilt(conn, *, minutes_ago):
+    """Date Silver's last rebuild `minutes_ago` by Postgres' clock: the
+    watermark `rebuild_silver` would have stamped then. A test that runs the
+    real rebuild and then moves the clock uses this, since the rebuild stamps
+    the moment it actually ran."""
+    await conn.execute(
+        "UPDATE meta.mirror_state SET last_attempted_at = now() - make_interval(secs => $1),"
+        " last_ok_at = now() - make_interval(secs => $1) WHERE table_name = 'silver.orders'",
+        float(minutes_ago * 60))
+
+
 @pytest_asyncio.fixture
 async def rv(pool):
     from core.pg_silver import rebuild_silver
@@ -342,6 +354,7 @@ async def rv(pool):
         await _landed(conn, g)
     await rebuild_silver(pool)
     async with pool.acquire() as conn:
+        await _rebuilt(conn, minutes_ago=120)
         await _journal(conn, minutes_ago=120)
     yield pool
     await reset()
@@ -349,8 +362,9 @@ async def rv(pool):
 
 class TestTheRowValues:
     """Step 8b against a real Postgres: bronze landed three hours ago, Silver
-    rebuilt by the real `rebuild_silver`, and one error-free derivation two
-    hours ago — then a row broken in exactly one way per test.
+    rebuilt by the real `rebuild_silver`, dated two hours ago in its watermark
+    and by one error-free derivation — then a row broken in exactly one way
+    per test.
 
     `meta.derivation_runs` and the one test manager are this class's to empty,
     the way `test_pg_own_derivation` empties the journal."""
@@ -506,6 +520,8 @@ class TestTheRowValues:
 
     @pytest.mark.asyncio
     async def test_a_failed_derivation_covers_nothing(self, rv):
+        """Failed before Silver committed: the journal says error and the
+        watermark did not move, so nothing was rebuilt."""
         from core.data_quality import Severity
 
         async with rv.acquire() as conn:
@@ -515,6 +531,35 @@ class TestTheRowValues:
         values, judged = await self._read(rv)
         assert values.covered == 0
         assert judged["pg_silver_row_values"].severity == Severity.WARN
+
+    @pytest.mark.asyncio
+    async def test_under_piggyback_a_faulty_rebuild_is_covered_by_its_watermark(self, rv, monkeypatch):
+        """`KS_PG_DERIVE=piggyback`, production's mode, writes no journal row:
+        `_rebuild_pg_layers` calls `rebuild_silver` on DuckDB's tick, and
+        Silver's watermark is all a rebuild leaves. One that ran seconds ago
+        and still wrote the wrong value is covered — a fault in the rebuild —
+        and never "no rebuild is coming", whose lever would only run it again.
+        Found reviewing DN-13: dated by the journal alone, this read as
+        abandoned."""
+        from core import pg_silver
+        from core.data_quality import Severity
+
+        x = RULE_IDS[0]
+        async with rv.acquire() as conn:
+            await conn.execute("DELETE FROM meta.derivation_runs")
+            await _landed(conn, x, source=3, buyer=97301, days_ago=6)   # first, inactive source
+        real = pg_silver.pass2_sql
+        monkeypatch.setattr(pg_silver, "pass2_sql",
+                            lambda: real().replace("AND s.is_active_source", "", 1))
+        await pg_silver.rebuild_silver(rv)                               # the piggyback rebuild
+
+        values, judged = await self._read(rv)
+        assert (values.reported, values.covered, values.abandoned) == (1, 1, 0)
+        assert values.columns == (("is_new_customer", 1),)
+        issue = judged["pg_silver_row_values"]
+        assert issue.severity == Severity.CRITICAL and issue.sample_ids == (x,)
+        assert "another would repeat it" in issue.description
+        assert "no rebuild is coming" not in issue.description
 
     @pytest.mark.asyncio
     async def test_a_flipped_is_new_customer_is_caught(self, rv):
@@ -582,7 +627,7 @@ class TestTheRowValues:
 
         monkeypatch.setattr(pg_warehouse_dq, "HOLD_BUDGET_S", 2)
         monkeypatch.setattr(pg_warehouse_dq, "_row_values_sql", lambda: (
-            "SELECT pg_sleep(10), $1::int, $2::int, $3::interval, $4::text"))
+            "SELECT pg_sleep(10), $1::int, $2::int, $3::interval, $4::text, $5::text"))
         facts = await asyncio.wait_for(pg_warehouse_dq.read_facts(pool=rv), timeout=30)
         assert isinstance(facts.silver_row_values, pg_warehouse_dq.Unwatched)
         assert "hold budget" in facts.silver_row_values.reason

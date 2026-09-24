@@ -238,13 +238,17 @@ class TestTheRowValuesSql:
         for column in compared:
             assert f"AS d_{column}" in sql and f"AS n_{column}" in sql
 
-    def test_the_journal_is_read_for_error_free_runs_of_the_warehouse_layer(self):
-        """The layer is a bind parameter, and it is the derivation's own."""
+    def test_the_rebuild_is_dated_by_the_journal_and_silvers_own_watermark(self):
+        """The layer and the watermark's row are bind parameters, and both are
+        the rebuild's own: the journal for error-free runs of the warehouse
+        layer, and the row `rebuild_silver` stamps — the only record a
+        piggyback rebuild leaves."""
         import asyncio
         from unittest.mock import AsyncMock, MagicMock
 
         from core.data_quality import _SILVER_ROW_COLUMNS
         from core.pg_derivation import DROPPED_MARK_MARGIN, LAYER
+        from core.pg_silver import SILVER_TABLE
 
         row = {"reported": 0, "covered": 0, "abandoned": 0, "in_flight": 0, "sample": None,
                "oldest_age_s": None, "rebuilt_at": None, "compared": 0,
@@ -253,7 +257,8 @@ class TestTheRowValuesSql:
         asyncio.run(twins._read_row_values(conn, 20, 80))
         sql, *args = conn.fetchrow.await_args.args
         assert "error IS NULL" in sql and "layer = $4" in sql
-        assert args == [20, 80, DROPPED_MARK_MARGIN, LAYER]
+        assert "FROM meta.mirror_state" in sql and "table_name = $5" in sql
+        assert args == [20, 80, DROPPED_MARK_MARGIN, LAYER, SILVER_TABLE]
 
     def test_the_snapshot_runs_without_jit(self):
         """JIT compilation never paid for itself on the recompute, and past

@@ -55,8 +55,10 @@ it is the check that has to keep working once DuckDB stops deriving.
   change to any order the buyer has or had — a first order cancelled today
   makes a months-old second order the buyer's first.
 - **Covered is CRITICAL, whatever its age.** A change made before the last
-  error-free derivation began is in that rebuild's snapshot, so a row still
-  wrong after it is a rebuild that does not produce what bronze holds.
+  Silver rebuild began is in that rebuild's snapshot, so a row still wrong
+  after it is a rebuild that does not produce what bronze holds. The rebuild
+  is dated by Silver's own watermark as well as the journal, because under
+  piggyback the watermark is the only record a rebuild leaves.
 - **Not covered is the missing twin's windows**: in flight (not filed) inside
   the settle grace, WARN inside the repair window, CRITICAL past it — the
   absolute bound, so a derivation that stopped leaves rows paging rather than
@@ -316,10 +318,21 @@ def _row_values_sql() -> str:
     """Silver recomputed from bronze, compared row by row, judged in SQL.
 
     $1 the settle grace and $2 the repair window, in minutes; $3 the margin a
-    change must clear to count as inside a derivation's snapshot; $4 the
-    derivation's layer. Rendered per call rather than at import: every import
-    in this module is lazy, and this one would otherwise pull the DuckDB store
-    in with it.
+    change must clear to count as inside a rebuild's snapshot; $4 the
+    derivation's layer; $5 Silver's row in `meta.mirror_state`. Rendered per
+    call rather than at import: every import in this module is lazy, and this
+    one would otherwise pull the DuckDB store in with it.
+
+    **When Silver was last rebuilt** (`rebuilt_at`) is the later of two
+    stamps. `rebuild_silver` writes Silver's watermark with `now()` inside its
+    own transaction, so the stamp is that transaction's start: before pass 1
+    takes its snapshot, and committed with the rows or not at all. That is the
+    one record of a rebuild under **both** modes — `KS_PG_DERIVE=piggyback`,
+    production's, rebuilds on DuckDB's tick and writes no journal row, and an
+    own-mode run whose Gold or profile failed after Silver committed journals
+    an error over a Silver that was rebuilt. The journal's last error-free
+    `started_at` is the other stamp, the one the spec named; it precedes its
+    own run's watermark, so where both exist the watermark decides.
 
     **When a row's inputs last changed** (`changed_at`) is the latest of:
 
@@ -352,8 +365,10 @@ WITH {silver_recompute_ctes(POSTGRES)},
 inputs AS (
     SELECT GREATEST((SELECT max(mirrored_at) FROM {MANAGERS_TABLE}),
                     (SELECT max(mirrored_at) FROM {CLASSIFICATIONS_TABLE})) AS classified_at,
-           (SELECT max(started_at) FROM meta.derivation_runs
-             WHERE layer = $4 AND error IS NULL) AS rebuilt_at
+           GREATEST((SELECT max(started_at) FROM meta.derivation_runs
+                      WHERE layer = $4 AND error IS NULL),
+                    (SELECT last_ok_at FROM meta.mirror_state
+                      WHERE table_name = $5)) AS rebuilt_at
 ),
 buyer_clock AS (
     SELECT buyer_id, max(mirrored_at) AS changed_at
@@ -459,14 +474,15 @@ async def _read_row_values(conn, grace: int, page_after: int) -> RowValues:
     partial bronze still has a Silver that must match it."""
     from core.data_quality import _SILVER_ROW_COLUMNS
     from core.pg_derivation import DROPPED_MARK_MARGIN, LAYER
+    from core.pg_silver import SILVER_TABLE
 
-    # The margin is DROPPED_MARK_MARGIN, for its two reasons: a derivation's
-    # `started_at` comes from the web container's clock and `mirrored_at` from
-    # Postgres', and a writer outside `_heavy_job_lock` commits a round trip
-    # after the instant its rows are stamped with.
+    # The margin is DROPPED_MARK_MARGIN, for its two reasons: a writer outside
+    # `_heavy_job_lock` commits a round trip after the instant its rows are
+    # stamped with, and a journal's `started_at` comes from the web container's
+    # clock where `mirrored_at` and the watermark come from Postgres'.
     started = time.monotonic()
     row = await conn.fetchrow(_row_values_sql(), grace, page_after,
-                              DROPPED_MARK_MARGIN, LAYER)
+                              DROPPED_MARK_MARGIN, LAYER, SILVER_TABLE)
     elapsed_ms = int((time.monotonic() - started) * 1000)
     columns = tuple(sorted(
         ((c, int(row[f"n_{c}"])) for c, _ in _SILVER_ROW_COLUMNS if row[f"n_{c}"]),
@@ -659,13 +675,13 @@ def _row_values_check(rv: RowValues) -> list:
              f"bronze.orders does not produce. Columns: {columns}.{oldest}"]
     if rv.covered:
         since = "?" if rv.rebuilt_at is None else rv.rebuilt_at.isoformat(timespec="seconds")
-        parts.append(f"{rv.covered} changed before the last error-free derivation began "
+        parts.append(f"{rv.covered} changed before the last Silver rebuild began "
                      f"({since}), so its snapshot held them: the rebuild is not producing "
                      "what bronze holds, and another would repeat it.")
     if rv.abandoned:
         parts.append(f"{rv.abandoned} changed more than {page_after} minutes ago with no "
-                     "error-free derivation begun since — past the heartbeat and the "
-                     "floor, so no rebuild is coming on its own.")
+                     "Silver rebuild begun since — past the heartbeat and the floor, so "
+                     "no rebuild is coming on its own.")
     if waiting:
         parts.append(f"{waiting} changed {grace}+ minutes ago and are inside the "
                      f"{page_after}-minute repair window: under own the next mark or the "
