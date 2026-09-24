@@ -2648,9 +2648,19 @@ revision, the landing mirror on, every Silver/Gold/UTM read switch on
 `postgres` (a test reads every string in `core/`, `web/` and `bot/` for a
 `KS_READ_*` or `KS_*_STORE` name, so a new one has to be put on the list or
 excluded by name — `KS_SMS_STORE` is read inline and the first walk missed
-it), cohorts on ClickHouse with `KS_CH_URL`, and no write chain owning a
-table the goals bridge reads (DN-12). `preconditions_met: true` is a checklist
-done, not a switch thrown.
+it), cohorts on ClickHouse with `KS_CH_URL`, no write chain owning a table
+the goals bridge reads (DN-12), and **no delivered page open under a condition
+only a stood-down check reports** (`retired_conditions_clear`). A stood-down
+check is not a raised one, so the integrity job does not hold its conditions,
+and the first run after the switch would announce such a page "✅ Resolved"
+with no check looking. Holding them instead would keep it open for as long as
+Postgres derives, since nothing re-examines a retired check; so the switch
+waits while the DuckDB check can still clear it. It reads the Alert Gate's
+delivered map — what `resolve_group` announces from — not `app.alert_series`,
+which can miss a delivered page (its fired row is fire-and-forget).
+`preconditions_met: true` is a checklist done, not a switch thrown. An
+exception reading any fact is published by its class alone and logged whole:
+a driver's text names the database user, host and port.
 
 ### The order write path asks the registry too (DN-22a)
 
