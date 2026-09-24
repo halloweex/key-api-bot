@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.241
+
+- DN-12: say what the forecast signal's fallback does, and correct three texts
+- DN-12: a typo in KS_READ_GOALS stops the smart goal's ML signal too
+- DN-12: say what a frozen Silver did to the calculators, exactly
+- DN-12: pin the summary fallback's per-source returns by sales_type
+- DN-12: two-engine test for the smart goal's forecast signal
+- DN-12: goal calculators stop reading DuckDB Silver and Gold (a bridge)
+
+
 ## 3.0.240
 
 - DN-15: CLAUDE.md records the lock before the snapshot and the tab's Google names
