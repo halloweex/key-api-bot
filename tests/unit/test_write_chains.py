@@ -566,6 +566,37 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
         assert await order_tables_stood_down_or_owned(pool) == frozenset()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("row", [ORDERS, LINES])
+    async def test_an_owner_row_no_registered_chain_declares_still_holds_both(
+            self, pool, row):
+        """An image rolled back to a build older than the orders chain: the
+        owner row names a table no chain here declares, so `claimed_tables`
+        alone would drop it and hand the tables back to DuckDB. Either order
+        table owned holds both, the unit rule with no chain left to say it."""
+        from core.pg_landing import (
+            order_tables_stood_down, order_tables_stood_down_or_owned,
+        )
+        from core.write_chains import WRITE_CHAINS
+
+        assert not [c for c in WRITE_CHAINS if {ORDERS, LINES} & set(c.CHAIN_TABLES)], (
+            "the case needs a build in which no chain declares an order table")
+        pool.owner_rows = {row: "2026-09-20T08:00:00+00:00"}
+        assert order_tables_stood_down() == frozenset()
+        assert await order_tables_stood_down_or_owned(pool) == frozenset({ORDERS, LINES})
+        assert pool.only_asked_who_owns()
+
+    @pytest.mark.asyncio
+    async def test_after_a_rollback_the_backfill_still_refuses(self, pool, tmp_path):
+        """The same case through a path: nothing shipped over the chain's rows."""
+        from core.pg_backfill import backfill_orders
+
+        pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
+        store = await _store(tmp_path, [1, 2])
+        with pytest.raises(RuntimeError, match="write chain"):
+            await backfill_orders(store)
+        assert pool.only_asked_who_owns()
+
+    @pytest.mark.asyncio
     async def test_the_local_answer_is_still_part_of_it(self, pool, order_chain):
         from core.pg_landing import order_tables_stood_down_or_owned
 

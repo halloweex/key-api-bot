@@ -345,12 +345,22 @@ async def order_tables_stood_down_or_owned(pool) -> FrozenSet[str]:
     row that could not be read is not an owner row that is absent, and
     answering "nothing owned" on a read error would hand the tables back to
     DuckDB at the one moment nothing can be verified.
+
+    **An owner row counts whether or not this build knows its chain.**
+    `claimed_tables` expands an owner row through the registered chains, and
+    only through them: after an image rollback to a build older than the
+    orders chain, `owner:bronze.orders` names a chain nobody here declares and
+    would be ignored — the lost-marker case again, arrived at by another road.
+    So an owner row naming an order table is read as itself too, and either
+    order table owned stands both down, the unit rule above held where no
+    chain is left to say it.
     """
     from core import chain_latch
 
-    owned = chain_latch.claimed_tables(await chain_latch.read_owners(pool))
-    return order_tables_stood_down() | (
-        owned & {ORDERS_TABLE, ORDER_PRODUCTS_TABLE})
+    order_tables = frozenset({ORDERS_TABLE, ORDER_PRODUCTS_TABLE})
+    owners = await chain_latch.read_owners(pool)
+    owned = (chain_latch.claimed_tables(owners) | set(owners)) & order_tables
+    return order_tables_stood_down() | (order_tables if owned else frozenset())
 
 
 # Every column except `manager_comment`, which has the COALESCE above.

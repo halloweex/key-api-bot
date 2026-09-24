@@ -2547,6 +2547,11 @@ make the chain's rows look like DuckDB's again. It is asked after
 `require_revision()` and a read that fails raises into each path's own
 handling, as in `replicate_operational`. Only the sync's per-tick mirror stays
 on the local answer — the write path, where that read is the one to avoid.
+An owner row naming an order table counts even when no chain in this build
+declares it: after an image rollback to a build older than the orders chain,
+`claimed_tables` alone would drop `owner:bronze.orders` and hand the tables
+back to DuckDB, so the helper reads the row as itself too, and either order
+table owned stands both down.
 
 ## TODO: Full DuckDB Resync Solution
 
