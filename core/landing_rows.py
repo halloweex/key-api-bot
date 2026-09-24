@@ -586,16 +586,23 @@ CONTACT_COLUMNS = ContactRow._fields
 # it is the one spelling a nameless buyer has in either store.
 UNKNOWN_NAME = "Unknown"
 
-# DuckDB 1.5.5's date grammar, as far as it matters here, measured against its
-# own CAST: an optional run of whitespace, a year of one to four digits, one
-# separator out of - / \ or space used twice, a month and a day of one or two
-# digits, and then anything at all that does not start with another digit —
-# `1990-01-05T10:00`, `1990-01-05 garbage` and `1990-1-5-` are all 5 January
-# 1990, while `1990-01-051` is refused, which is also why a day-first
-# `05-01-1990` never reads as the year 5.
-_DATE_HEAD = re.compile(r"(\d{1,4})([-/\\ ])(\d{1,2})\2(\d{1,2})(?!\d)")
-# The one tail that changes the meaning: DuckDB reads it as Before Christ.
-_BC_TAIL = re.compile(r"\s*\(BC\)")
+# DuckDB 1.5.5's date grammar, as far as a birthday can reach it, measured
+# against its own CAST in the test process (80 shapes, zero differences):
+#
+# - leading whitespace is DuckDB's six ASCII characters, not str.isspace's
+#   Unicode set — a no-break space in front is refused;
+# - a year of one or more ASCII digits, leading zeros allowed; one separator out
+#   of - / \ or space, used twice; a month and a day of one or two digits;
+# - after the day, anything that does not start with another digit — so
+#   `1990-01-05T10:00`, `1990-01-05 garbage` and `1990-1-5-` are 5 January 1990,
+#   `1990-01-051` is refused, and a day-first `05-01-1990` never reads as year 5;
+# - one ASCII whitespace then `(BC)`, in any case, makes it Before Christ, which
+#   Python cannot hold; `(BC)` with no space, or two spaces, is just garbage;
+# - `epoch` alone is 1970-01-01.
+# ASCII digits only: `\d` would read an Arabic-Indic numeral DuckDB refuses.
+_DUCKDB_SPACE = " \t\n\v\f\r"
+_DATE_HEAD = re.compile(r"([0-9]+)([-/\\ ])([0-9]{1,2})\2([0-9]{1,2})(?![0-9])")
+_BC_TAIL = re.compile(r"[ \t\n\v\f\r]\(BC\)", re.IGNORECASE)
 
 
 def _clean(value: Any) -> Any:
@@ -612,11 +619,17 @@ def _clean(value: Any) -> Any:
 def _as_date(value: Any) -> Optional[date]:
     """A birthday as a date, or None when it cannot be one.
 
-    Everything DuckDB's CAST accepts becomes the date DuckDB would have made —
+    Every string DuckDB's CAST accepts becomes the date DuckDB would have made —
     except a date DuckDB can hold and Python cannot (a year of 0, a BC year,
     a year past 9999), which becomes None: asyncpg could not have written it
     either. Everything DuckDB refuses becomes None instead of an exception, so
     one unreadable birthday costs that birthday and nothing else.
+
+    One difference is deliberate: a LEADING run of NULs is skipped, where DuckDB
+    refuses it — the rule that strips NUL from every text value, applied where
+    it cannot change a date. A NUL after the day stays, and is DuckDB's
+    trailing garbage like any other character; stripping it there would glue
+    the digit behind it onto the day.
     """
     if value is None:
         return None
@@ -624,13 +637,17 @@ def _as_date(value: Any) -> Optional[date]:
         return value.date()
     if isinstance(value, date):
         return value
-    text = _clean(str(value)).lstrip()
+    text = str(value).lstrip(_DUCKDB_SPACE)
+    if text.startswith("\x00"):
+        text = text.lstrip(_DUCKDB_SPACE + "\x00")
+    if text[:5].lower() == "epoch" and not text[5:].strip(_DUCKDB_SPACE):
+        return date(1970, 1, 1)
     head = _DATE_HEAD.match(text)
     if head is None or _BC_TAIL.match(text, head.end()):
         return None
     try:
         return date(int(head.group(1)), int(head.group(3)), int(head.group(4)))
-    except ValueError:  # 1990-02-30, month 13, year 0
+    except ValueError:  # 1990-02-30, month 13, year 0, year past 9999
         return None
 
 
@@ -658,14 +675,35 @@ def _as_ts(value: Any) -> Optional[datetime]:
 def _name(value: Any) -> str:
     """A name, or `UNKNOWN_NAME` when there is nothing but whitespace.
 
-    `Buyer.from_api` already turns a missing or empty name into it; a name of
-    spaces, or of NULs alone, slipped past. It matters beyond tidiness: the
-    buyer selection treats an empty name as "not synced yet" and fetches it
-    again every hour, and the copy-back refuses a blank name outright."""
+    `Buyer.from_api` already turns a missing or empty name into it. Two shapes
+    slipped past, for different reasons. A name of NULs alone becomes '' once
+    `_clean` strips them, and '' LOOPS: the buyer selection matches
+    `full_name = ''` and fetches that buyer again every hour, forever. A name of
+    spaces never matched (`'   ' = ''` is false in both engines) and never
+    looped; it goes to the placeholder with the empty one by the owner's
+    decision 4, so a stored name is either a name or the one placeholder.
+    """
     cleaned = _clean(value)
     if cleaned is None or not str(cleaned).strip():
         return UNKNOWN_NAME
     return cleaned
+
+
+def _contact(value: Any) -> Optional[str]:
+    """A phone or email as text, or None when it is not one.
+
+    KeyCRM documents these as arrays of strings. If an element ever arrives as
+    an object or a list, the dict that collapses duplicates cannot hash it and
+    the whole portion would fail before its transaction — where the old DuckDB
+    writer bound it as a parameter and DuckDB coerced it to text. So it is
+    skipped like an empty string. A number is kept as its digits, which is what
+    DuckDB's coercion made of it.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        value = str(value)
+    return _clean(value) if isinstance(value, str) else None
 
 
 def buyer_row(buyer: Any) -> BuyerRow:
@@ -675,8 +713,8 @@ def buyer_row(buyer: Any) -> BuyerRow:
         full_name=_name(buyer.full_name),
         birthday=_as_date(buyer.birthday),
         note=_clean(buyer.note),
-        phone=_clean(buyer.phone),
-        email=_clean(buyer.email),
+        phone=_contact(buyer.phone),
+        email=_contact(buyer.email),
         manager_id=buyer.manager_id,
         company_id=buyer.company_id,
         company_name=_clean(buyer.company_name),
@@ -703,7 +741,7 @@ def contact_rows(buyer: Any) -> List[ContactRow]:
     rows: Dict[Tuple[Any, str, str], bool] = {}
     for kind, values in (("phone", buyer.phones), ("email", buyer.emails)):
         for i, value in enumerate(values or []):
-            value = _clean(value)
+            value = _contact(value)
             if value:
                 rows.setdefault((buyer.id, kind, value), i == 0)
     return [ContactRow(b, k, v, p) for (b, k, v), p in rows.items()]

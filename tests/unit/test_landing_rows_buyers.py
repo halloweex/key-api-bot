@@ -61,14 +61,25 @@ DATE_CASES = [
     "05-01-1990", "05/01/1990", "5-1-1990", "19900105", "1990-001-05",
     "1990-01-051", "1990-01/05", "+1990-01-05", "-1990-01-05", "0000-01-01",
     "12345-01-01", "1990-01-05 (BC)",
+    # Found by PR-1's review, each disagreeing with the first parser: the BC
+    # tail in any case and after exactly one ASCII space; `epoch`; leading
+    # zeros in the year; a NUL AFTER the day; Unicode spaces and digits DuckDB
+    # does not count as either.
+    "1990-01-05 (bc)", "1990-01-05 (Bc)", "1990-01-05(BC)", "1990-01-05  (BC)",
+    "1990-01-05\t(BC)", "1990-01-05\n(bc)", "1990-01-05\v(BC)", "1990-01-05\f(BC)",
+    "1990-01-05\r(BC)", "1990-01-05 (bc)x",
+    "epoch", "EPOCH", " epoch", "epoch ", "epochx",
+    "01990-01-05", "001990-01-05", "0000000001990-01-05",
+    "1990-01-05\x001", "1990-01-05\u0661", "\u0661990-01-05", "1990-0\u0661-05",
+    "\u00a01990-01-05", "1990-01-05\u00a0(BC)", "\u20031990-01-05",
 ]
 
 # Where the parser disagrees with DuckDB on purpose, and why. Anything else
 # disagreeing fails.
 INTENDED = {
-    # A NUL is stripped from every text value before it is read, so the date
-    # behind it is read too; DuckDB refuses the leading NUL. No production
-    # birthday carries one; the rule is uniform rather than special-cased.
+    # A LEADING run of NULs is skipped, where DuckDB refuses it — the rule that
+    # strips NUL from every text value, applied only where it cannot change a
+    # date. No production birthday carries one.
     "\x001990-01-05": date(1990, 1, 5),
 }
 
@@ -147,6 +158,19 @@ class TestContactsAsTheyHaveAlwaysBeenWritten:
         buyer = _Buyer(phones=["", "p", "p"], phone="")
         assert contact_rows(buyer) == [ContactRow(1, "phone", "p", False)]
         assert buyer_row(buyer).phone == ""
+
+    def test_an_object_or_list_among_the_phones_is_skipped_not_raised(self):
+        """KeyCRM documents strings. An object used to reach DuckDB as a bound
+        parameter and be coerced to text; in the dict that collapses duplicates
+        it cannot even be hashed, and the whole portion would fail."""
+        buyer = _Buyer(phones=["p", {"v": "q"}, ["a"]], phone={"v": "q"})
+        assert contact_rows(buyer) == [ContactRow(1, "phone", "p", True)]
+        assert buyer_row(buyer).phone is None     # Postgres would refuse a dict
+        assert parse_buyers([buyer]).rows[0].id == 1
+
+    def test_a_number_is_kept_as_its_digits(self):
+        rows = contact_rows(_Buyer(phones=[380501112233]))
+        assert rows == [ContactRow(1, "phone", "380501112233", True)]
 
     def test_nul_in_a_contact_is_stripped_and_an_all_nul_one_skipped(self):
         rows = contact_rows(_Buyer(phones=["+38\x0050", "\x00"], emails=["a@b.ua"]))

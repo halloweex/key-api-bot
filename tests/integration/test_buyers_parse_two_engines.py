@@ -13,8 +13,9 @@ Every buyer in it used to break something:
   sync tick retried it every minute, taking offers and stocks with it;
 * a NUL in the note — DuckDB stored it, Postgres refuses the statement, so the
   mirror failed for that buyer forever;
-* a name of spaces — neither store refused it, but the selection treats a blank
-  name as "not synced yet" and fetched it again every hour.
+* a name of spaces — neither store refused it and the selection never matched
+  it (`'   ' = ''` is false in both engines); it becomes 'Unknown' with the
+  empty and NUL-only names, which are the ones that would loop.
 
 Ids are taken from far above production's range and removed afterwards, so the
 test shares the CI database without touching anybody else's rows.
