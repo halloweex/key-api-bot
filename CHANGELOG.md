@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.240
+
+- DN-15: CLAUDE.md records the lock before the snapshot and the tab's Google names
+- DN-15: the dry run names Google as the tab does
+- DN-15: the 12-week predicates are tested on real rows
+- DN-15: every write privilege the dry run's door refuses is held by a test
+- DN-15: the dry run locks its tables before it fixes its snapshot
+- DN-15: CLAUDE.md records the dry run on the 31.08 copy and the widened door
+- DN-15: the dry-run test's docstring names the unseen-writer check
+- DN-15: the unit test holds the transaction-id check inside the transaction
+- DN-15: the 12-week window is held at both ends
+- DN-15: pin the membership walk against a real catalogue
+- DN-15: the dry run's read-only proof covers what the audit hook cannot see
+- DN-15: the UTM parser in its own module, and a read-only reclassify dry run
+
+
 ## 3.0.239
 
 - Let CI see the preview's Postgres test if it ever stops running
