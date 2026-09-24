@@ -202,6 +202,20 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "mirror_buckets_disagree": _c("the fingerprinted buckets agree again"),
     "mirror_disabled": _c("KS_PG_DSN is configured"),
     "mirror_failing": _c("failures_since_ok back to zero"),
+    # INFO, never a page: the order comparison stood down because this
+    # process's own answer — the marker, or the flag — says a write chain owns
+    # an order table (DN-22a), and the sync's mirror stopped on the same
+    # answer. A decision somebody took, not a fault. Filed on that answer only.
+    "mirror_stood_down": _c(
+        "the chain hands the order tables back to DuckDB, or its flag returns "
+        "to duckdb before it ever latched"),
+    # The same stand-down seen on the owner rows alone — a lost marker, or an
+    # image older than the orders chain — and that is a fault, not a decision:
+    # the sync's mirror asks only the local answer, so it is still writing
+    # DuckDB's copy over the chain's rows every tick. Never clears by itself.
+    "order_owner_row_without_marker": _c(
+        "the marker is back, or scripts/chain_copy_back.py releases the owner "
+        "rows — a human, not a job"),
     # The ownership latch's two copies, compared daily (DN-06). Neither clears
     # by itself: one is a human putting the missing copy back, the other is a
     # shipment that has already overwritten rows and cannot be un-shipped.

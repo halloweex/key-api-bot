@@ -1061,7 +1061,8 @@ class BackgroundScheduler:
             # nothing on a schedule — the next tick skips the order as
             # unchanged and only a human-run backfill re-issued the write.
             # Each chunk runs under the heavy-job lock so it cannot straddle a
-            # sync's write-and-mirror; the diff itself does not.
+            # sync's write-and-mirror; the diff itself does not. Stands down on
+            # its own once a write chain owns an order table (DN-22a).
             from core.pg_backfill import hourly_orders_ids_diff
 
             result["orders_backfill"] = await hourly_orders_ids_diff(

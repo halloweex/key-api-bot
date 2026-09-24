@@ -2944,8 +2944,26 @@ class DuckDBStore(
         # Outside the `connection()` block deliberately: awaiting a network
         # round-trip while holding a lock the whole application shares is how a
         # sync becomes a stall. `mirror_orders` never raises.
+        #
+        # Not at all once a write chain owns either order table (DN-22a): its
+        # writer puts rows in Postgres that DuckDB never sees, and shipping
+        # this store's copy over them would overwrite them — and archive each
+        # overwrite in `app.order_versions` as a transition that never
+        # happened. Asked here, before `write_orders`, and never inside its
+        # transaction, where the capture's all-or-nothing contract lives. With
+        # no chain declaring an order table — every day so far — the answer is
+        # empty without reading a variable or a file.
         if updated_ids:
-            from core.pg_landing import mirror_orders
+            from core.pg_landing import mirror_orders, order_tables_stood_down
+
+            moved = order_tables_stood_down()
+            if moved:
+                logger.info(
+                    "mirror: %s stood down (a write chain owns it); %d written "
+                    "order(s) not shipped out of DuckDB",
+                    ", ".join(sorted(moved)), len(updated_ids),
+                )
+                return result
 
             written_ids = set(updated_ids)
             # Duplicates collapse keeping the last, the same rule the DataFrame

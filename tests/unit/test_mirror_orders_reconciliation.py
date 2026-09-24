@@ -252,8 +252,11 @@ class TestTheBackfillGate:
                 if int(r[at]) // BUCKET_SIZE == bucket
             }
 
+        # No owner rows: nothing here has handed an order table to a write
+        # chain (DN-22a), and the pool is an opaque stand-in.
         with patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
              patch("core.pg.require_revision", new=AsyncMock()), \
+             patch("core.chain_latch.read_owners", new=AsyncMock(return_value={})), \
              patch("core.mirror_reconciliation.fetch_watermarks",
                    new=AsyncMock(return_value=watermarks)), \
              patch("core.mirror_reconciliation.pg_fingerprints", new=_fp), \

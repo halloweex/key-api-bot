@@ -38,7 +38,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 # At module level, unlike the other `core.pg_*` imports here, because
 # `write_orders` names one of its constants in a default argument. Safe: that
@@ -285,6 +285,84 @@ async def mirror_expenses(orders_with_expenses: List[Dict[str, Any]]) -> MirrorO
 ORDERS_TABLE = "bronze.orders"
 ORDER_PRODUCTS_TABLE = "bronze.order_products"
 
+
+def order_tables_stood_down() -> FrozenSet[str]:
+    """Which of the two order tables a write chain has taken. Never raises.
+
+    Every path that ships orders out of DuckDB asks this first (DN-22a): the
+    sync's mirror in `DuckDBStore.upsert_orders`, the ids-diff and header-only
+    repair in `core/pg_backfill.py`, the hourly diff, the admin backfill, and
+    the daily bucket comparison. None of them asked before, so a chain that
+    registered `bronze.orders` would have had DuckDB overwriting the rows its
+    new writer put there — and, worse, `write_orders` archiving each overwrite
+    in `app.order_versions` as a change that never happened, in the one table
+    nothing can delete from.
+
+    **Either table stands both down, because ownership of the order tables
+    passes as a unit.** A chain that takes over the headers takes their line
+    items with it, so a chain declaring either table declares both — a
+    registry invariant `tests/unit/test_write_chains.py` walks `WRITE_CHAINS`
+    for. Standing both down on either is that invariant held defensively, and
+    not a property of the shipping: the two tables do ship apart, since
+    `write_orders(replace_products=False)` ships headers alone every day, from
+    the 05:15 status refresh and from `ship_orders_by_id`.
+
+    Asked BEFORE `write_orders` and never inside it. The capture's contract is
+    that the version and the row it describes land together or neither does
+    (`core/pg_order_versions.py`), and a refusal raised from inside that
+    transaction would be the mirror's to swallow — the rows lost to Postgres
+    over a question that could have been asked outside it.
+    """
+    from core.write_chains import stood_down_among
+
+    return stood_down_among((ORDERS_TABLE, ORDER_PRODUCTS_TABLE))
+
+
+async def order_tables_stood_down_or_owned(pool) -> FrozenSet[str]:
+    """`order_tables_stood_down()`, and what the owner rows in Postgres say.
+
+    For the order paths that already hold a pool: the ids-diff and its
+    header-only repair, the hourly diff, the comment ship and the bucket
+    comparison. The local answer reads the markers, and the markers live on a
+    bind mount — an older `./data` snapshot or a rebuilt data directory loses
+    them while Postgres keeps the owner rows and the rows they were taken for.
+    The flag then routes to DuckDB again, the local answer says nothing has
+    changed hands, and a backfill ships DuckDB's copy over rows only Postgres
+    holds, archiving every overwrite as an order change. DN-06's rule
+    (`chain_latch.claimed_chains`): anything already holding a Postgres
+    connection stands down on either copy — the union `replicate_operational`
+    and `reconcile_operational` already take, out of the same query.
+
+    The sync's mirror in `DuckDBStore.upsert_orders` keeps the local answer
+    alone. That is the write path, once a minute, and a Postgres read there is
+    the one `writes_postgres()` exists to avoid.
+
+    Asked after `require_revision()`, as those two ask it: the owner rows live
+    in `meta.chain_watermarks` (revision 0032), so a database behind the code
+    breaks as `SchemaVersionError` rather than as a missing table. It raises
+    whatever `read_owners` raises, and every caller lets it through to its own
+    failure handling, which is also what those two do with this read: an owner
+    row that could not be read is not an owner row that is absent, and
+    answering "nothing owned" on a read error would hand the tables back to
+    DuckDB at the one moment nothing can be verified.
+
+    **An owner row counts whether or not this build knows its chain.**
+    `claimed_tables` expands an owner row through the registered chains, and
+    only through them: after an image rollback to a build older than the
+    orders chain, `owner:bronze.orders` names a chain nobody here declares and
+    would be ignored — the lost-marker case again, arrived at by another road.
+    So an owner row naming an order table is read as itself too, and either
+    order table owned stands both down, the unit rule above held where no
+    chain is left to say it.
+    """
+    from core import chain_latch
+
+    order_tables = frozenset({ORDERS_TABLE, ORDER_PRODUCTS_TABLE})
+    owners = await chain_latch.read_owners(pool)
+    owned = (chain_latch.claimed_tables(owners) | set(owners)) & order_tables
+    return order_tables_stood_down() | (order_tables if owned else frozenset())
+
+
 # Every column except `manager_comment`, which has the COALESCE above.
 _ORDER_UPSERT = """
 INSERT INTO bronze.orders
@@ -460,6 +538,10 @@ async def mirror_orders(
     them through `core.landing_rows` and — more importantly — has already
     decided which ones it wrote. The mirror ships that decision rather than
     making its own, so the two stores cannot disagree about what a sync did.
+
+    It does not ask `order_tables_stood_down()`; its one caller does, before
+    calling it, and `tests/unit/test_write_chains.py` walks for any new caller
+    that does not.
     """
     tables = [ORDERS_TABLE] + ([ORDER_PRODUCTS_TABLE] if replace_products else [])
     counts = {ORDERS_TABLE: len(orders), ORDER_PRODUCTS_TABLE: len(products)}

@@ -490,3 +490,238 @@ class TestTheShipperOverwroteDetector:
 
         issues = await reconcile_operational(store)
         assert [i for i in issues if i.check_name == "chain_shipper_overwrote"] == []
+
+
+class TestTheOrderTablesOnAnOwnerRowAlone:
+    """DN-22a against the real `meta.chain_watermarks`. An image rolled back to
+    a build older than the orders chain keeps the chain's owner row and forgets
+    the chain: no module here declares an order table, so `claimed_tables`
+    cannot expand the row, and only the row itself can say the tables moved.
+    The recorder in the unit tests hands back keys it made up; this reads the
+    ones `read_owners` actually strips out of the table."""
+
+    ORDER_ID = 990_001
+
+    @pytest.mark.asyncio
+    async def test_the_backfill_refuses_and_postgres_gains_no_order(
+            self, stores, monkeypatch):
+        from core import write_chains
+        from core.pg_backfill import backfill_orders
+        from core.pg_landing import (
+            ORDER_PRODUCTS_TABLE, ORDERS_TABLE, order_tables_stood_down_or_owned,
+        )
+
+        store, pool, _env = stores
+        orders = {ORDERS_TABLE, ORDER_PRODUCTS_TABLE}
+        # The rolled-back build, made rather than assumed: once the orders
+        # chain is registered for real this must still be a registry that
+        # declares no order table, or the row is read through `claimed_tables`.
+        monkeypatch.setattr(write_chains, "WRITE_CHAINS", tuple(
+            c for c in write_chains.WRITE_CHAINS if not orders & set(c.CHAIN_TABLES)))
+
+        when = "2026-09-20T12:00:00+00:00"
+        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
+            await store.upsert_orders([{
+                "id": self.ORDER_ID, "source_id": 1, "status_id": 12,
+                "status_group_id": 4, "grand_total": "100.00",
+                "ordered_at": when, "created_at": when, "updated_at": when,
+                "buyer": {"id": 5001}, "manager": {"id": 4},
+                "manager_comment": None, "promocode": None,
+                "products": [{"name": "Товар", "quantity": 1, "price_sold": "100.00",
+                              "offer": {"product_id": 701}}],
+            }])
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                "VALUES ($1, $2, now())", chain_latch.owner_key(ORDERS_TABLE), when)
+            versions = await conn.fetchval("SELECT count(*) FROM app.order_versions")
+
+        assert await order_tables_stood_down_or_owned(pool) == frozenset(orders)
+        with pytest.raises(RuntimeError, match="write chain"):
+            await backfill_orders(store)
+
+        async with pool.acquire() as conn:
+            assert await conn.fetchval(
+                "SELECT count(*) FROM bronze.orders WHERE id = $1", self.ORDER_ID) == 0
+            assert await conn.fetchval("SELECT count(*) FROM app.order_versions") == versions
+
+
+class TestWhatTheOrderStandDownTellsAHuman:
+    """DN-22a's review, against a real `meta.chain_watermarks` and a real
+    comparison. With only the owner rows standing the order tables down, the
+    finding stayed INFO, and its label, its lever and its registry entry all
+    said "not a defect" while the sync's per-tick mirror — which asks only the
+    local answer — went on writing DuckDB's copy over the chain's rows. A page
+    and the digest print the label and the lever, never the description.
+
+    Every state starts from the same clean comparison: one order in DuckDB,
+    shipped by the real mirror, the backfill finished, and nothing to find.
+    The findings are persisted into the DuckDB journal the way the 07:30 job
+    persists them and judged from the rows read back."""
+
+    ORDER_ID = 990_101
+    ORDERS_CHAIN = "pg_orders_write"
+
+    async def _reset(self, pool):
+        async with pool.acquire() as conn:
+            # The whole tables: the comparison is of the whole tables, and a
+            # row another test left behind would be a finding in every state.
+            await conn.execute("DELETE FROM bronze.order_products")
+            await conn.execute("DELETE FROM bronze.orders")
+            await conn.execute(
+                "DELETE FROM app.order_versions WHERE order_id = $1", self.ORDER_ID)
+            await conn.execute(
+                "DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                ["bronze.orders", "bronze.order_products"])
+
+    @pytest_asyncio.fixture
+    async def compared(self, stores):
+        """A clean, live comparison in the state production is in today."""
+        from core.mirror_reconciliation import reconcile_orders
+        from core.pg_backfill import backfill_orders
+
+        store, pool, env = stores
+        env.delenv("KS_WRITE_ORDERS", raising=False)
+        await self._reset(pool)
+        when = "2026-09-20T12:00:00+00:00"
+        await store.upsert_orders([{
+            "id": self.ORDER_ID, "source_id": 1, "status_id": 12,
+            "status_group_id": 4, "grand_total": "100.00",
+            "ordered_at": when, "created_at": when, "updated_at": when,
+            "buyer": {"id": 5101}, "manager": {"id": 4},
+            "manager_comment": None, "promocode": None,
+            "products": [{"name": "Товар", "quantity": 1, "price_sold": "100.00",
+                          "offer": {"product_id": 701}}],
+        }])
+        await backfill_orders(store)                   # stamps backfilled_at
+        async with pool.acquire() as conn:
+            assert await conn.fetchval(
+                "SELECT count(*) FROM bronze.orders WHERE id = $1", self.ORDER_ID) == 1
+        assert await reconcile_orders(store) == [], "the baseline is not clean"
+        yield store, pool, env
+        await self._reset(pool)
+
+    def _declare_orders_chain(self, env, flag_postgres: bool) -> None:
+        import types
+
+        from core import write_chains
+
+        fake = types.ModuleType(f"core.{self.ORDERS_CHAIN}")
+        fake.WRITE_ENV = "KS_WRITE_ORDERS"
+        fake.CHAIN_TABLES = ("bronze.orders", "bronze.order_products")
+        fake.env_writes_postgres = lambda: flag_postgres
+        env.setattr(write_chains, "WRITE_CHAINS", write_chains.WRITE_CHAINS + (fake,))
+
+    @staticmethod
+    async def _owner_row(pool) -> None:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                "VALUES ($1, $2, now())",
+                chain_latch.owner_key("bronze.orders"), "2026-09-21T08:00:00+00:00")
+
+    @staticmethod
+    async def _persisted(store, issues):
+        from core.data_quality import fetch_latest_run, fetch_run_issues, persist_run
+        from core.mirror_reconciliation import MIRROR_LAYER
+
+        now = datetime.now(timezone.utc)
+        async with store.connection() as conn:
+            run_id = persist_run(
+                conn, started_at=now, ended_at=now, as_of=now,
+                window_start=now.date(), window_end=now.date(),
+                layer=MIRROR_LAYER, issues=issues, discrepancies=[],
+            )
+            return fetch_latest_run(conn, MIRROR_LAYER), fetch_run_issues(conn, run_id)
+
+    @staticmethod
+    def _page(run, rows) -> str:
+        """What reaches a phone: the page when the run is CRITICAL, and the
+        digest's line per finding — label and lever, never the description."""
+        from core.data_quality import (
+            IntegrityIssue, Severity, format_alert_message, human_check_name,
+        )
+        from core.mirror_reconciliation import MIRROR_LAYER
+
+        issues = [IntegrityIssue(
+            check_name=r["check_name"], table_name=r["table_name"],
+            severity=Severity(r["severity"]), count=r["count"],
+            description=r["description"]) for r in rows]
+        lines = [f"• {human_check_name(r['check_name'])}: {r['count']}" for r in rows]
+        if run["status"] == "CRITICAL":
+            lines.insert(0, format_alert_message(
+                MIRROR_LAYER, Severity.CRITICAL, issues, []))
+        return "\n".join(lines)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", [
+        "no_chain", "marker_present", "marker_lost", "rolled_back"])
+    async def test_the_persisted_verdict(self, compared, state):
+        from core import write_chains
+        from core.mirror_reconciliation import reconcile_orders
+        from core.pg_landing import order_tables_stood_down
+
+        store, pool, env = compared
+        if state == "marker_present":
+            # Flag back at duckdb, both copies of the latch agree.
+            self._declare_orders_chain(env, flag_postgres=False)
+            chain_latch.latch(self.ORDERS_CHAIN)
+            await self._owner_row(pool)
+            assert order_tables_stood_down(), "the marker must route the writes"
+        elif state == "marker_lost":
+            self._declare_orders_chain(env, flag_postgres=False)
+            await self._owner_row(pool)
+        elif state == "rolled_back":
+            env.setattr(write_chains, "WRITE_CHAINS", tuple(
+                c for c in write_chains.WRITE_CHAINS
+                if not {"bronze.orders", "bronze.order_products"} & set(c.CHAIN_TABLES)))
+            await self._owner_row(pool)
+        if state in ("marker_lost", "rolled_back"):
+            assert not chain_latch.latched(self.ORDERS_CHAIN)
+            assert order_tables_stood_down() == frozenset()
+
+        run, rows = await self._persisted(store, await reconcile_orders(store))
+        found = sorted((r["check_name"], r["table_name"], r["severity"], r["count"])
+                       for r in rows)
+        page = self._page(run, rows)
+
+        if state == "no_chain":
+            # Production today: the comparison ran clean and nothing is filed.
+            assert found == [] and run["status"] == "PASS", (found, run)
+        elif state == "marker_present":
+            assert found == [
+                ("mirror_stood_down", "bronze.order_products", "INFO", 1),
+                ("mirror_stood_down", "bronze.orders", "INFO", 1),
+            ]
+            assert run["status"] == "PASS" and run["critical_count"] == 0, run
+        else:
+            assert found == [(
+                "order_owner_row_without_marker",
+                "bronze.order_products, bronze.orders", "CRITICAL", 2)]
+            assert run["status"] == "CRITICAL" and run["critical_count"] == 1, run
+            assert "not a defect" not in page.lower(), page
+            assert "the sync is overwriting order tables a write chain owns" in page
+            (lever,) = [ln for ln in page.splitlines() if ln.startswith("→ ")]
+            assert "scripts/chain_copy_back.py" in lever, lever
+            # And the claim is true of this database: the sync's mirror is
+            # still shipping — the next tick wrote the order over again.
+            async with pool.acquire() as conn:
+                before = await conn.fetchval(
+                    "SELECT mirrored_at FROM bronze.orders WHERE id = $1", self.ORDER_ID)
+            later = "2026-09-22T12:00:00+00:00"
+            await store.upsert_orders([{
+                "id": self.ORDER_ID, "source_id": 1, "status_id": 20,
+                "status_group_id": 4, "grand_total": "100.00",
+                "ordered_at": later, "created_at": later, "updated_at": later,
+                "buyer": {"id": 5101}, "manager": {"id": 4},
+                "manager_comment": None, "promocode": None,
+                "products": [{"name": "Товар", "quantity": 1, "price_sold": "100.00",
+                              "offer": {"product_id": 701}}],
+            }])
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT status_id, mirrored_at FROM bronze.orders WHERE id = $1",
+                    self.ORDER_ID)
+            assert row["status_id"] == 20 and row["mirrored_at"] > before, row
+        if state in ("no_chain", "marker_present"):
+            assert "order_owner_row_without_marker" not in page

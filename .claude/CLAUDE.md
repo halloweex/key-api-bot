@@ -2518,6 +2518,58 @@ NULL count, and a Postgres it cannot read is `chain_invariants_unwatched`
 (WARN). Measured 2026-09-18, before chain 1's flip: 0 of 56 277
 `stock_movements` rows carry a NULL `recorded_at` or `source`.
 
+### The order write path asks the registry too (DN-22a)
+
+Until DN-22a nothing that ships orders out of DuckDB asked who owns the order
+tables, so registering a chain for `bronze.orders` would have had the sync's
+mirror overwrite the chain's rows and archive each overwrite in
+`app.order_versions` as a change that never happened. Now every such path asks
+`core.pg_landing.order_tables_stood_down()` **before** `write_orders`, never
+inside its transaction: the sync's mirror in `upsert_orders` skips, the ids-diff
+and header-only repair refuse, the hourly diff returns `stood_down`, the
+comment ship reports `skipped`, `POST /api/mirror/backfill/orders` answers 409,
+and the bucket comparison files `mirror_stood_down` (INFO). Either table stands
+both down, because ownership of the order tables passes as a unit: a chain that
+declares one declares both, which `tests/unit/test_write_chains.py` walks the
+registry for. It is not that they cannot ship apart — the 05:15 refresh and the
+comment ship send headers alone every day. The question is asked only of
+chains that declare an order table (`write_chains.stood_down_among`) — none do
+today, so it reads no variable and no file, and nothing changed in production.
+`tests/unit/test_write_chains.py` walks `core/`, `web/` and `scripts/` for any
+caller of `write_orders` or `mirror_orders` that does not ask.
+
+The paths that already hold a pool — the ids-diff and its repair, the hourly
+diff, the comment ship and the bucket comparison — then ask
+`order_tables_stood_down_or_owned(pool)` too, which adds the `owner:` rows in
+`meta.chain_watermarks`: DN-06's rule that anything holding a Postgres
+connection stands down on either copy of the latch, so a lost marker cannot
+make the chain's rows look like DuckDB's again. It is asked after
+`require_revision()` and a read that fails raises into each path's own
+handling, as in `replicate_operational`. Only the sync's per-tick mirror stays
+on the local answer — the write path, where that read is the one to avoid.
+An owner row naming an order table counts even when no chain in this build
+declares it: after an image rollback to a build older than the orders chain,
+`claimed_tables` alone would drop `owner:bronze.orders` and hand the tables
+back to DuckDB, so the helper reads the row as itself too, and either order
+table owned stands both down. The comparison files a different check for
+each answer, because the two are not the same state. On the local answer the
+sync's mirror has stopped too, and `mirror_stood_down` stays INFO — a decision
+somebody took. On the owner rows alone it has not — the per-tick mirror asks
+only the local answer — so every tick writes DuckDB's copy over the chain's
+rows, and that is `order_owner_row_without_marker`, **CRITICAL**, whose lever
+names `data/write-chain-owners` and `scripts/chain_copy_back.py` (or, with no
+chain declared in this build, a redeploy of one that does). It was the same
+INFO once, and a page or the digest prints only the check's label and lever,
+never its description: all three said "not a defect" about the one state
+here that is. Production today files neither: no chain declares an order
+table and no owner row names one.
+`POST /api/mirror/backfill/orders` asks the owner rows too, before anything
+starts: a lost marker is a 409, not a "started" whose refusal lands in the web
+log, and an owner read that fails — `SchemaVersionError` included — is a 503.
+With `KS_MIRROR_LANDING` off it answers 409 before any of that, asking
+Postgres nothing: the backfill refuses a switched-off mirror, and the route
+used to say "started" (or 500 in the foreground) to the run it refused.
+
 ## TODO: Full DuckDB Resync Solution
 
 ### Overview
