@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.247
+
+- DN-25 review: the pre-handover NULL finding ends on its lever
+- DN-25 review: the writer's test module says what it now pins
+- DN-25 review: pin that chain 8's latch stamp reaches its NULL verdict
+- DN-25 review: a NULL finding says what can have put the NULL there
+- DN-25 review: pin what the goals upsert stores, and which NULL count is which
+- DN-23: the same rows counted alike by both engines, and a healthy landing silent
+- DN-18: the in-Postgres lock bound sits below the pool's statement timeout
+- DN-25 review: input Postgres would refuse never takes the latch
+- DN-23: real-Postgres tests for the landing twins, and the soak reads them
+- DN-18 review: say which bound ends the advisory wait on the production pool
+- DN-25 review: the goal reads follow the chain, and never fall back
+- DN-23: Postgres twins of the order-landing integrity checks
+- DN-18 review: a full parse that waited counts the table it replaces
+- DN-25: say where the goals write now lives, and what its flip presupposes
+- DN-18 review: a lock bound that cannot become none, one transaction pinned, DELETE not TRUNCATE
+- DN-25: pin that the goals writer stores the caller's clock
+- DN-18: parse_full says it must not be called under PG_LAYER_LOCK
+- DN-25: revenue_goals writer behind KS_WRITE_GOALS (chain 7a, off)
+- DN-18: a zero-row parse is proved to stamp from nothing; the pure guard is unit-tested
+- DN-18: parse silver.order_utm inside Postgres, from bronze.orders (not wired)
+
+
 ## 3.0.246
 
 - Gates take one host lock before they touch a store
