@@ -2166,6 +2166,16 @@ class BackgroundScheduler:
                 # see `check` — the layer still has one age and the run is still
                 # failed, but the checks below still run and still page.)
                 await check("reconcile_gold", lambda: reconcile_gold(store))
+                # And, while Postgres alone derives the warehouse, the roll-up
+                # question asked of Postgres by itself (DN-28): `reconcile_gold`
+                # leaves it out on the same predicate, so it is asked once and
+                # needs no DuckDB read. Never true in this build — the switch
+                # is DN-29 — so production runs exactly the checks above.
+                from core import warehouse_cutover
+
+                if warehouse_cutover.writes_postgres():
+                    from core.mirror_reconciliation import pg_gold_internal_check
+                    await check("pg_gold_internal_check", lambda: pg_gold_internal_check())
                 # And the five tables that are neither landing nor computed —
                 # the ones with no source to be rebuilt from. Last because they
                 # are the least likely to be wrong and the most expensive to

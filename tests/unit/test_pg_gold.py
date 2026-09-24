@@ -526,6 +526,121 @@ class TestTheRollUpIsCheckedAgainstItsOwnFineRows:
         assert issues == []
 
 
+# ── the roll-up check, standing alone (DN-28) ────────────────────────────────
+
+
+class _Pool:
+    """`fetch` returning Gold rows as asyncpg would, keyed by column name."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.sql = []
+
+    async def fetch(self, sql, *args):
+        self.sql.append(sql)
+        return self.rows
+
+
+def _gold_row(source_id, **measures):
+    row = {c: Decimal(0) for c in _GOLD_ROLLUP_MEASURES}
+    row.update({k: Decimal(str(v)) for k, v in measures.items()})
+    return {"date": DAY, "sales_type": "retail", "source_id": source_id, **row}
+
+
+class TestTheRollUpCheckStandsAlone:
+    """Step 13 retires `reconcile_gold`, which was the only road to the one
+    check that sees sources 3 and 5. `pg_gold_internal_check` asks it of
+    Postgres alone; `compare_gold` leaves it out when that runs."""
+
+    def _check(self, rows):
+        from core.mirror_reconciliation import pg_gold_internal_check
+
+        pool = _Pool(rows)
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
+             patch("core.pg.require_revision", new=AsyncMock()) as revision:
+            import asyncio
+
+            issues = asyncio.run(pg_gold_internal_check())
+        revision.assert_awaited_once()
+        return issues, pool
+
+    def test_it_finds_an_injected_roll_up_mismatch(self):
+        issues, pool = self._check([
+            _gold_row(None, revenue=100, orders_count=2),
+            _gold_row(1, revenue=60, orders_count=1),
+            _gold_row(5, revenue=30, orders_count=1),
+        ])
+        (issue,) = issues
+        assert (issue.check_name, issue.severity.name, issue.count) == (
+            "gold_rollup_mismatch", "CRITICAL", 1)
+        assert "revenue" in issue.description and DAY in issue.description
+        assert all("gold.daily_revenue" in sql for sql in pool.sql)
+
+    def test_fine_rows_that_add_up_are_silent(self):
+        issues, _ = self._check([
+            _gold_row(None, revenue=100, orders_count=2),
+            _gold_row(1, revenue=70, orders_count=1),
+            _gold_row(5, revenue=30, orders_count=1),
+        ])
+        assert issues == []
+
+    def test_it_reads_no_duckdb(self):
+        """Nothing in it may reach the store: after step 13 its Gold is frozen,
+        and after a compaction empty."""
+        import ast
+        import inspect
+        import textwrap
+
+        from core.mirror_reconciliation import pg_gold_internal_check
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(pg_gold_internal_check)))
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
+            n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        assert not names & {"store", "connection", "fetch_duckdb_gold", "get_store"}
+
+    def test_compare_gold_can_leave_it_out(self):
+        rollup = {(DAY, "retail"): _cell(revenue=100)}
+        fine = {(DAY, "retail", 1): _cell(revenue=60)}
+        assert "gold_rollup_mismatch" in _names(compare_gold({}, {}, rollup, fine))
+        assert "gold_rollup_mismatch" not in _names(
+            compare_gold({}, {}, rollup, fine, rollup_internal=False))
+
+    @pytest.mark.parametrize("writer, asked_inside", [("duckdb", True), ("postgres", False)])
+    def test_reconcile_gold_leaves_it_out_exactly_when_it_stands_alone(
+        self, monkeypatch, writer, asked_inside,
+    ):
+        """Once a run, never twice and never not at all: `reconcile_gold`
+        asks it while DuckDB derives, the standalone check while Postgres
+        does, on the one predicate."""
+        import asyncio
+        from contextlib import asynccontextmanager
+        from unittest.mock import MagicMock
+
+        from core import mirror_reconciliation as mr, warehouse_cutover
+
+        monkeypatch.setattr(warehouse_cutover, "_mode", writer)
+        rollup = {(DAY, "retail"): _cell(revenue=100)}
+        fine = {(DAY, "retail", 1): _cell(revenue=60)}
+        dk = {(DAY, "retail"): _dk_row(revenue=100, instagram_revenue=60)}
+
+        @asynccontextmanager
+        async def _conn():
+            yield MagicMock()
+
+        store = MagicMock()
+        store.connection = _conn
+        ok = {"last_ok_at": datetime.now(timezone.utc), "failures_since_ok": 0}
+        with patch("core.pg_landing.enabled", return_value=True), \
+             patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
+             patch("core.pg.require_revision", new=AsyncMock()), \
+             patch.object(mr, "fetch_watermarks", AsyncMock(return_value={GOLD_PG_TABLE: ok})), \
+             patch.object(mr, "_watermark_findings", return_value=([], ok["last_ok_at"])), \
+             patch.object(mr, "fetch_duckdb_gold", return_value=(dk, {})), \
+             patch.object(mr, "fetch_pg_gold", AsyncMock(return_value=(rollup, fine))):
+            issues = asyncio.run(mr.reconcile_gold(store))
+        assert ("gold_rollup_mismatch" in _names(issues)) is asked_inside
+
+
 # ── the hook ─────────────────────────────────────────────────────────────────
 
 

@@ -34,7 +34,7 @@ CHECKS_BY_MODULE = {
     "core.mirror_reconciliation": [
         "reconcile_mirror", "reconcile_orders", "reconcile_silver",
         "reconcile_order_utm", "reconcile_order_utm_completeness",
-        "reconcile_expenses", "reconcile_gold",
+        "reconcile_expenses", "reconcile_gold", "pg_gold_internal_check",
         "reconcile_operational", "reconcile_bot_state",
         "reconcile_order_versions", "reconcile_buyers", "reconcile_sms",
         "reconcile_dashboard_users",
@@ -67,9 +67,11 @@ def check_order() -> list:
 
 
 class TestEveryCheckIsIsolated:
-    def test_all_sixteen_run_through_check_and_each_exactly_once(self):
+    def test_all_seventeen_run_through_check_and_each_exactly_once(self):
+        """Sixteen every run, and `pg_gold_internal_check` only while Postgres
+        alone derives the warehouse (DN-28) — see the class below."""
         assert sorted(check_order()) == sorted(ALL_CHECKS)
-        assert len(check_order()) == len(set(check_order())) == 16
+        assert len(check_order()) == len(set(check_order())) == 17
 
 
 def _critical(name):
@@ -215,3 +217,52 @@ class TestTheUtmCompletenessCheckRunsAsProductionRunsIt:
         assert persisted["error_message"] is None
         assert paged == [["pg_order_utm_missing"]]
         mocks["reconcile_order_utm_completeness"].assert_awaited_once_with()
+
+
+class TestTheGoldRollUpStandsAloneUnderPostgres:
+    """DN-28: `gold_rollup_mismatch` is asked of Postgres by itself while
+    Postgres alone derives, and `reconcile_gold` leaves it out on the same
+    predicate. In this build the predicate is never true, so production runs
+    exactly the sixteen it ran before."""
+
+    @pytest.mark.asyncio
+    async def test_while_duckdb_derives_it_is_not_asked(self, monkeypatch):
+        from core import warehouse_cutover
+
+        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
+        mocks = {}
+        await _run({}, mocks=mocks)
+        mocks["pg_gold_internal_check"].assert_not_awaited()
+        mocks["reconcile_gold"].assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_under_postgres_it_is_asked_once_and_its_finding_pages(
+        self, monkeypatch,
+    ):
+        from core import warehouse_cutover
+
+        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
+        mocks = {}
+        mismatch = IntegrityIssue(
+            check_name="gold_rollup_mismatch", table_name="gold.daily_revenue",
+            severity=Severity.CRITICAL, count=1, description="fine rows do not add up",
+        )
+        persisted, paged, _ = await _run(
+            {"pg_gold_internal_check": [mismatch]}, mocks=mocks)
+        mocks["pg_gold_internal_check"].assert_awaited_once_with()
+        assert [i.check_name for i in persisted["issues"]] == ["gold_rollup_mismatch"]
+        assert paged == [["gold_rollup_mismatch"]]
+
+    @pytest.mark.asyncio
+    async def test_it_raising_fails_the_run_like_any_other_check(self, monkeypatch):
+        from core import warehouse_cutover
+
+        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
+        persisted, _, resolved = await _run(
+            {"pg_gold_internal_check": RuntimeError("gold.daily_revenue is gone")})
+        assert "pg_gold_internal_check: RuntimeError" in persisted["error_message"]
+        assert resolved == []
+
+    def test_it_sits_right_after_reconcile_gold(self):
+        order = check_order()
+        assert order.index("pg_gold_internal_check") == order.index("reconcile_gold") + 1

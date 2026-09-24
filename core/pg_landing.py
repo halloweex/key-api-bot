@@ -55,8 +55,17 @@ logger = logging.getLogger(__name__)
 MIRROR_ENV = "KS_MIRROR_LANDING"
 
 
+def mirror_on(value: Optional[str]) -> bool:
+    """Whether a `KS_MIRROR_LANDING` value turns the mirror on; unset is on.
+
+    Separate from `enabled()` so a caller judging an environment it was handed
+    — the step-13 precondition evaluator, `core/warehouse_cutover.py` — reads
+    the variable exactly as the mirror does rather than by a second rule."""
+    return ("1" if value is None else value).strip().lower() not in {"0", "false", "no", ""}
+
+
 def enabled() -> bool:
-    return os.getenv(MIRROR_ENV, "1").strip().lower() not in {"0", "false", "no", ""}
+    return mirror_on(os.getenv(MIRROR_ENV))
 
 
 @dataclass
