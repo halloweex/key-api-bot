@@ -161,6 +161,11 @@ _VALID = ("off", "on")
 # Production held 47,756. The spec asked for this on the gate stack, and that
 # measurement was not taken — this change had no access to it; every run logs
 # the recompute's own time beside this number instead.
+#
+# DN-23's landing read shares it too, measured the same way (one CPU, nine
+# runs, 0.1% of orders with no line items): 0.05–0.07 s over 48,000 orders and
+# 144,000 line items, 0.12 s over 96,000 and 288,000 — four statements, each
+# one pass or an index probe per row.
 LOCK_WAIT_S = 120
 HOLD_BUDGET_S = 20
 STATEMENT_TIMEOUT = "15s"

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
@@ -1573,3 +1574,203 @@ class TestTheLandingThroughTheJob:
         assert "pg_status_group_vs_return_list" in issues
         assert "status_group_vs_return_list" not in (
             issues.get("pg_order_landing_disagree", {}).get("description") or "")
+
+
+# ─── DN-23: the same rows, both engines ───────────────────────────────────────
+#
+# In production DuckDB looks, so the landing twins compare, and a difference
+# beyond the orders in flight is `pg_order_landing_disagree` — a WARN in every
+# digest. The stores are the same rows (Reconciliation A holds them to zero), so
+# what could make them disagree on a healthy day is the two engines counting the
+# same rows differently: a threshold, a NULL, an item counted per order. These
+# write one list of rows into both and compare the counts, the defects included
+# so no count is a vacuous 0 = 0.
+
+# The shapes production's landing holds on an ordinary day, each healthy:
+# `items` are the line items' prices, `product` their product id.
+HEALTHY_LANDING = (
+    dict(total=1250, status=12, group=5, items=(500, 450, 300), product=11),  # completed
+    dict(total=890, status=20, group=4, source=4, items=(890,)),       # at the branch: revenue
+    dict(total=410, status=24, group=4, source=2, items=(410,)),       # collected for pickup
+    dict(total=660, status=19, group=6, items=(330, 330)),             # cancelled, and listed
+    dict(total=275, status=22, group=None, items=(275,)),              # synced before the group
+    dict(total=1900, status=12, group=None, source=3, items=(1900,)),  # Opencart, deprecated
+    dict(total=3200, status=12, group=5, source=5, items=(1600, 1600)),  # the exhibition
+    dict(total=0, status=12, group=5, items=(450, 120), product=12),   # shipped to a blogger
+    dict(total=0, status=19, group=6, items=()),                       # emptied, then cancelled
+    dict(total=5400, status=12, group=5, items=(540,) * 10, product=13),  # a large basket
+    dict(total=350, status=1, group=1, source=4, items=(350,), minutes_ago=2),  # just arrived
+)
+# One of each defect the six count, and the edges of their predicates.
+DEFECT_LANDING = (
+    dict(total=0.01, items=()),                   # a kopiyka and nothing sold: the threshold
+    dict(total=5000, items=(), minutes_ago=5),    # no items and in flight: DuckDB has no grace
+    dict(total=100, dated=False),                 # no date
+    dict(total=100, status=977, group=4),         # a status KeyCRM added
+    dict(total=100, status=978, group=6),         # added and lost: domain and group both see it
+    dict(total=100, source=96),                   # a source nobody registered
+    dict(total=300, status=20, group=6),          # the group and the list part company
+    dict(total=50, status=19, group=4),
+    dict(total=80, status=23, group=None),        # a NULL group is not compared
+)
+ORPHAN_ITEMS = 3                                  # line items naming an order nobody holds
+
+
+def _landing_rows(shapes, first):
+    """`(orders, products, minutes_ago)` for `shapes`, ids from LANDING[first]."""
+    at = datetime.now(timezone.utc) - timedelta(days=3)
+    orders, products = [], []
+    for n, s in enumerate(shapes):
+        oid = LANDING[first + n]
+        items = s.get("items", (s["total"],))
+        orders.append(((oid, s.get("source", 1), s.get("status", 12), s.get("group", 5),
+                        Decimal(str(s["total"])), at if s.get("dated", True) else None, at, at),
+                       s.get("minutes_ago", 120)))
+        products += [(oid * 1000 + p, oid, s.get("product"), "dn23", 1, Decimal(str(price)))
+                     for p, price in enumerate(items, start=1)]
+    return orders, products
+
+
+_BRONZE_ORDER = ("INSERT INTO bronze.orders (id, source_id, status_id, status_group_id,"
+                 " grand_total, ordered_at, created_at, updated_at, mirrored_at)"
+                 " VALUES ($1,$2,$3,$4,$5,$6,$7,$8, now() - make_interval(mins => $9))")
+_BRONZE_ITEM = ("INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity,"
+                " price_sold) VALUES ($1,$2,$3,$4,$5,$6)")
+_DUCK_ORDER = ("INSERT INTO orders (id, source_id, status_id, status_group_id, grand_total,"
+               " ordered_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)")
+_DUCK_ITEM = ("INSERT INTO order_products (id, order_id, product_id, name, quantity, price_sold)"
+              " VALUES (?,?,?,?,?,?)")
+
+
+async def _land_in_bronze(pool, orders, products):
+    async with pool.acquire() as conn:
+        for row, minutes_ago in orders:
+            await conn.execute(_BRONZE_ORDER, *row, minutes_ago)
+        for row in products:
+            await conn.execute(_BRONZE_ITEM, *row)
+
+
+async def _land_in_duckdb(store, orders, products):
+    async with store.connection() as conn:
+        for row, _minutes_ago in orders:
+            conn.execute(_DUCK_ORDER, list(row))
+        for row in products:
+            conn.execute(_DUCK_ITEM, list(row))
+
+
+async def _copy_bronze_to_duckdb(pool, store):
+    """DuckDB made to hold exactly what bronze holds — the state the mirror
+    keeps and Reconciliation A holds to zero — whatever other tests left."""
+    async with pool.acquire() as conn:
+        orders = await conn.fetch(
+            "SELECT id, source_id, status_id, status_group_id, grand_total, ordered_at,"
+            " created_at, updated_at FROM bronze.orders")
+        products = await conn.fetch(
+            "SELECT id, order_id, product_id, name, quantity, price_sold"
+            " FROM bronze.order_products")
+    await _land_in_duckdb(store, [(tuple(r), None) for r in orders],
+                          [tuple(r) for r in products])
+
+
+def _duckdb_landing_counts(issues):
+    from core.pg_warehouse_dq import LANDING_TWINS
+
+    counts = {name: 0 for _g, name, _t in LANDING_TWINS}
+    for issue in issues:
+        if issue.check_name in counts:
+            counts[issue.check_name] += int(issue.count)
+    return counts
+
+
+@pytest_asyncio.fixture
+async def duck(tmp_path):
+    from core.duckdb_store import DuckDBStore
+
+    store = DuckDBStore(db_path=tmp_path / "landing.duckdb")
+    await store.connect()
+    yield store
+    await store.close()
+
+
+class TestTheEnginesCountAlike:
+    @pytest.mark.asyncio
+    async def test_the_same_rows_give_every_check_the_same_count(self, landing, duck):
+        """DuckDB's six checks over its tables and the twins over bronze, the
+        same rows in each: equal, check by check, and none of them 0."""
+        from core.data_quality import check_internal_integrity
+        from core.pg_warehouse_dq import landing_counts
+
+        orders, products = _landing_rows(HEALTHY_LANDING + DEFECT_LANDING, 0)
+        orphan = LANDING[len(orders)]
+        products += [(orphan * 1000 + p, orphan, None, "dn23", 1, Decimal("10"))
+                     for p in range(1, ORPHAN_ITEMS + 1)]
+
+        before = await _landing_facts(landing)
+        await _land_in_bronze(landing, orders, products)
+        after = await _landing_facts(landing)
+        b, a = landing_counts(before.order_landing), landing_counts(after.order_landing)
+        postgres = {k: a[k] - b[k] for k in a}
+
+        await _land_in_duckdb(duck, orders, products)
+        async with duck.connection() as conn:
+            duckdb = _duckdb_landing_counts(check_internal_integrity(conn))
+
+        assert postgres == duckdb
+        assert duckdb == {
+            "orders_without_line_items": 2, "fk_orphan_order_products_order_id": ORPHAN_ITEMS,
+            "not_null_orders_ordered_at": 1, "value_domain_orders_status_id": 2,
+            "value_domain_orders_source_id": 1, "status_group_vs_return_list": 3}
+
+    @pytest.mark.asyncio
+    async def test_the_healthy_shapes_count_nothing_in_either(self, landing, duck):
+        from core.data_quality import check_internal_integrity
+        from core.pg_warehouse_dq import landing_counts
+
+        orders, products = _landing_rows(HEALTHY_LANDING, 0)
+        before = await _landing_facts(landing)
+        await _land_in_bronze(landing, orders, products)
+        after = await _landing_facts(landing)
+        assert landing_counts(after.order_landing) == landing_counts(before.order_landing)
+        assert after.order_landing.without_items == before.order_landing.without_items
+
+        await _land_in_duckdb(duck, orders, products)
+        async with duck.connection() as conn:
+            assert set(_duckdb_landing_counts(check_internal_integrity(conn)).values()) == {0}
+
+
+class TestAHealthyLandingThroughTheJob:
+    """Production's state, which the flag is already on over: DuckDB and bronze
+    hold the same rows, of every healthy shape. The twins compare and must say
+    nothing — no disagreement, no finding of their own, no condition held."""
+
+    job = TestTheJobEndToEnd.job
+    _issues = TestTheJobEndToEnd._issues
+
+    @pytest.mark.asyncio
+    async def test_the_twins_are_silent(self, landing, job, monkeypatch):
+        import json
+
+        from core import pg_warehouse_dq
+
+        scheduler, store, _sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        await _land_in_bronze(landing, *_landing_rows(HEALTHY_LANDING, 0))
+        await _copy_bronze_to_duckdb(landing, store)
+
+        result = await scheduler._run_dq_integrity()
+
+        issues = await self._issues(store, result["run_id"])
+        landing_conditions = set(pg_warehouse_dq.GUARD_CONDITIONS["order_landing"]) | {
+            pg_warehouse_dq.UNWATCHED_NAMES["order_landing"]}
+        assert not landing_conditions & set(issues), sorted(landing_conditions & set(issues))
+        record = json.loads(issues["pg_twin_pairing"]["description"])
+        for _guard, name, _twin in pg_warehouse_dq.LANDING_TWINS:
+            assert record["duckdb"][name] is not None, name            # both looked
+            assert record["duckdb"][name] == record["postgres"][name], name
+        # Held only where DuckDB files the same rows under its own name — rows
+        # another test left in the shared bronze, never these.
+        unverified = set(scheduler._resolve_dq_layer.await_args.kwargs["unverified"])
+        for _guard, name, twin in pg_warehouse_dq.LANDING_TWINS:
+            if twin in unverified:
+                assert name in issues, twin
+        assert "pg_order_landing_disagree" not in unverified
