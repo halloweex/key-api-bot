@@ -1235,3 +1235,48 @@ class TestTheJobUnderTheStandDown:
         assert persisted["pg_line_items_disagree"]["count"] == 2
         assert {"headline_vs_line_items", "goods_shipped_without_sale"} <= set(
             record["duckdb"]["looked"])
+
+    # The five DuckDB checks the switch stands down, by the function the scan
+    # calls for each guard name.
+    STOOD_DOWN_FUNCTIONS = {
+        "silver_arc": "_silver_arc_check",
+        "attribution_coverage": "_attribution_coverage_check",
+        "gold_cell_values": "_gold_cell_values_check",
+        "headline_vs_line_items": "_headline_vs_line_items_check",
+        "goods_shipped_without_sale": "_goods_shipped_without_sale_check",
+    }
+
+    def _frozen(self, monkeypatch):
+        """Each stood-down check replaced by one that raises, as a check over a
+        frozen or compacted table may; returns the names that were called."""
+        from core import data_quality as dq
+
+        called = []
+        for guard, fn in self.STOOD_DOWN_FUNCTIONS.items():
+            def boom(*_a, _guard=guard, **_k):
+                called.append(_guard)
+                raise RuntimeError(f"{_guard}: silver_orders is frozen")
+            monkeypatch.setattr(dq, fn, boom)
+        return called
+
+    def test_the_job_hands_the_stand_down_to_the_scan(self, job, monkeypatch):
+        """The job reads the stand-down once and gives the scan that answer:
+        under postgres not one of the five runs, so none is named as raised —
+        which a job that asked the scan to run them would file every run."""
+        from core import warehouse_cutover as wc
+
+        assert set(self.STOOD_DOWN_FUNCTIONS) == wc.STOOD_DOWN_WHEN_POSTGRES
+        monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
+        called = self._frozen(monkeypatch)
+        persisted, _record = self._run(*job)
+        assert called == []
+        assert "integrity_check_raised" not in persisted
+
+    def test_while_duckdb_derives_the_job_runs_all_five(self, job, monkeypatch):
+        from core import warehouse_cutover as wc
+
+        monkeypatch.setattr(wc, "_mode", wc.DUCKDB)
+        called = self._frozen(monkeypatch)
+        persisted, _record = self._run(*job)
+        assert sorted(called) == sorted(self.STOOD_DOWN_FUNCTIONS)
+        assert persisted["integrity_check_raised"]["count"] == 5
