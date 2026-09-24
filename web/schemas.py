@@ -164,6 +164,15 @@ class HealthResponse(BaseModel):
             "is served by DuckDB with nothing failing to count."
         ),
     )
+    warehouse_writer_mode: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "KS_WRITE_WAREHOUSE as understood at start (DN-28): `value` as "
+            "read, `mode` as run — duckdb in this build whatever the value, "
+            "the switch being DN-29 — and `error` naming a value that was not "
+            "understood and ran as duckdb; judged by the canary."
+        ),
+    )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(
         None,
         description=(

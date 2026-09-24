@@ -10,8 +10,10 @@ that changes what production does:
   before web's boot sync — a mode cached at scheduler start misses everything
   the boot does (DN-05b), and on an empty DuckDB the boot runs a full rebuild.
   `duckdb` is the default. An unknown value runs as `duckdb` and publishes the
-  error, `KS_PG_DERIVE`'s rule and OD-09's recommendation: web is the only
-  syncer, so refusing to start over this variable would stop order intake.
+  error — on `/api/health` under `warehouse_writer_mode`, where the canary
+  warns `warehouse_mode_invalid` — `KS_PG_DERIVE`'s rule and OD-09's
+  recommendation: web is the only syncer, so refusing to start over this
+  variable would stop order intake.
   `postgres` is understood and published, and **still runs as `duckdb`**: the
   switch is not in this build (`SWITCH_BUILT`), and a value that stood the
   DuckDB checks down while DuckDB went on deriving would be half a switch.

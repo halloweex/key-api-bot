@@ -2626,7 +2626,9 @@ DuckDB stops: `duckdb` (default) or `postgres`. It is read in
 it**: `postgres` is published and still runs as `duckdb`, because the switch
 itself — no DuckDB refresh, no dirty marks — is DN-29, and half of it would
 stand DuckDB's checks down while DuckDB went on deriving. An unknown value runs
-as `duckdb` and publishes the error; it never raises, since web is the only
+as `duckdb` and publishes the error on `/api/health` (`warehouse_writer_mode`),
+where the canary warns `warehouse_mode_invalid` — a typo costs nothing in this
+build, and the day it would is the flip; it never raises, since web is the only
 syncer.
 
 What the switch will need is in place and idle. `stood_down_duckdb_checks()`

@@ -169,6 +169,19 @@ async def _write_chains_block() -> dict:
     return block
 
 
+def _warehouse_writer_mode() -> dict:
+    """KS_WRITE_WAREHOUSE as this process understood it at start (DN-28): the
+    value as read, the mode it runs, and the error when the value was not
+    understood and ran as duckdb. Local state, no I/O, and nothing but the
+    variable's own value in the error. Judged by the canary: in this build the
+    variable switches nothing, so a typo costs nothing today — the day it
+    would is the DN-29 flip, and that is not the day to learn of it."""
+    from core import warehouse_cutover
+
+    return {"mode": warehouse_cutover.mode(), "value": warehouse_cutover.value(),
+            "error": warehouse_cutover.mode_error()}
+
+
 def _derivation_mode() -> dict:
     """KS_PG_DERIVE as this process understood it at start. Local state, no I/O."""
     from core import pg_derivation
@@ -391,6 +404,7 @@ async def health_check(request: Request):
         "write_chains": await _write_chains_block(),
         "read_fallbacks": _read_fallbacks(),
         "read_fallback_mode": _read_fallback_mode(),
+        "warehouse_writer_mode": _warehouse_writer_mode(),
     }
 
 

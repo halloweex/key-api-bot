@@ -565,6 +565,24 @@ def check_read_fallback_mode(payload: Optional[dict]) -> "list[tuple[str, str]]"
     return []
 
 
+def check_warehouse_writer_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `warehouse_writer_mode` block: a KS_WRITE_WAREHOUSE web did
+    not understand (DN-28).
+
+    Warn, the read-fallback mode's reason: web runs as `duckdb`, so nothing is
+    failing. In this build nothing is failing whatever the value — the switch
+    is DN-29 — which is exactly why it is judged now: the first time a typo
+    would matter is the flip, and a canary that says nothing then leaves
+    whoever set `postgress` believing DuckDB has stopped. An absent block is
+    not a failure; an older web publishes none.
+    """
+    block = (payload or {}).get("warehouse_writer_mode")
+    if isinstance(block, dict) and block.get("error"):
+        return [("warehouse_mode_invalid",
+                 f"warehouse writer: {block['error']}")]
+    return []
+
+
 # ─── Orchestration ──────────────────────────────────────────────────────────
 
 async def run_canary(
@@ -669,6 +687,14 @@ async def run_canary(
         if fallback_mode_failures and severity == "ok":
             severity = "warn"
 
+        # A KS_WRITE_WAREHOUSE web could not read. Warn, for the same reason:
+        # duckdb is running, and somebody believes something else is.
+        warehouse_mode_failures = check_warehouse_writer_mode(payload)
+        for key, message in warehouse_mode_failures:
+            fail(key, message)
+        if warehouse_mode_failures and severity == "ok":
+            severity = "warn"
+
         # Derivation marks dropped and demonstrably not being healed. Warn:
         # every row landed, and what is owed is a rebuild.
         marks_failures = check_derivation_marks(payload)
@@ -749,6 +775,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Set the named KS_WRITE_* back to postgres, or run scripts/chain_copy_back.py to hand the tables back"),
     ("read_fallback_mode_invalid",
      "Set KS_READ_FALLBACK to duckdb or off in .env, then recreate web"),
+    ("warehouse_mode_invalid",
+     "Set KS_WRITE_WAREHOUSE to duckdb or postgres in .env, then recreate web"),
     ("write_chain_precondition_unmet",
      "Set the read flag the message names to postgres, then docker compose up -d web"),
 )

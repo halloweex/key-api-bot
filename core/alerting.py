@@ -109,6 +109,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_READ_FALLBACK set to a value web did not understand (ran as duckdb,
     # DN-20a). Not a stop: web is the only syncer.
     "read_fallback_mode_invalid": _c("web restarts with a valid KS_READ_FALLBACK"),
+    # KS_WRITE_WAREHOUSE set to a value web did not understand (ran as duckdb,
+    # DN-28). Not a stop: web is the only syncer.
+    "warehouse_mode_invalid": _c("web restarts with a valid KS_WRITE_WAREHOUSE"),
     # Derivation marks dropped and demonstrably not being healed: the latest
     # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
     "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),

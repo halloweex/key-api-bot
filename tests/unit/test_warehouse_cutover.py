@@ -94,6 +94,89 @@ class TestTheMode:
         assert fresh.value() == "nope" and fresh.mode_error()
 
 
+# ─── Where a typo is seen ────────────────────────────────────────────────────
+
+
+class TestAnUnknownValueIsSeen:
+    """Published on `/api/health` and judged by the canary, as KS_PG_DERIVE
+    and KS_READ_FALLBACK are. The review found it only in a log line and on
+    the admin status page, which nothing watches: in this build a typo costs
+    nothing, and the first time it would is the DN-29 flip."""
+
+    def test_health_publishes_the_value_the_mode_and_the_error(self, fresh, monkeypatch):
+        from web.routes.api.health import _warehouse_writer_mode
+
+        monkeypatch.setenv(wc.ENV, "postgress")
+        fresh.configure_mode()
+        block = _warehouse_writer_mode()
+        assert (block["mode"], block["value"]) == ("duckdb", "postgress")
+        assert "KS_WRITE_WAREHOUSE='postgress'" in block["error"]
+
+    def test_the_public_endpoint_carries_it_through_its_response_model(
+        self, fresh, monkeypatch,
+    ):
+        """Through the app: `/api/health` declares a response model, and a key
+        the model does not name is dropped on the way out without a word."""
+        from fastapi.testclient import TestClient
+
+        from web.main import app
+        from web.ratelimit import limiter
+
+        monkeypatch.setenv(wc.ENV, "postgress")
+        fresh.configure_mode()
+        limiter.reset()
+        try:
+            body = TestClient(app).get("/api/health").json()
+        finally:
+            limiter.reset()
+        block = body["warehouse_writer_mode"]
+        assert (block["mode"], block["value"]) == ("duckdb", "postgress")
+        assert "KS_WRITE_WAREHOUSE='postgress'" in block["error"]
+
+    def test_the_canary_warns_on_an_error_and_is_quiet_otherwise(self):
+        from bot.canary import check_warehouse_writer_mode
+
+        block = {"mode": "duckdb", "value": "postgress",
+                 "error": "KS_WRITE_WAREHOUSE='postgress' is not one of ('duckdb', 'postgres')"}
+        assert [k for k, _ in check_warehouse_writer_mode(
+            {"warehouse_writer_mode": block})] == ["warehouse_mode_invalid"]
+        assert check_warehouse_writer_mode({}) == []
+        # `postgres` is understood — published, not acted on, not a failure.
+        assert check_warehouse_writer_mode({"warehouse_writer_mode": {
+            "mode": "duckdb", "value": "postgres", "error": None}}) == []
+
+    @pytest.mark.asyncio
+    async def test_the_wiring_warns_and_names_its_lever(self):
+        from datetime import datetime, timedelta, timezone
+
+        import httpx
+
+        from bot import canary
+        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
+
+        payload = _healthy_payload()
+        payload["warehouse_writer_mode"] = {
+            "mode": "duckdb", "value": "postgress",
+            "error": "KS_WRITE_WAREHOUSE='postgress' is not one of ('duckdb', 'postgres')"}
+
+        def handler(request):
+            return httpx.Response(200, json=payload)
+
+        future = datetime.now(timezone.utc) + timedelta(days=60)
+        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+        async with _mock_transport(handler) as client:
+            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
+                result = await canary.run_canary(DASHBOARD, client=client)
+        assert result.severity == "warn"
+        assert result.failure_keys == ["warehouse_mode_invalid"]
+        assert "KS_WRITE_WAREHOUSE" in canary._what_to_do(result)
+
+    def test_it_is_a_registered_condition(self):
+        from core.alerting import Kind, spec_for
+
+        assert spec_for("warehouse_mode_invalid").kind is Kind.CONDITION
+
+
 # ─── What stands down ────────────────────────────────────────────────────────
 
 
