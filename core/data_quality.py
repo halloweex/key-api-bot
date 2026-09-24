@@ -1913,7 +1913,7 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # rebuild already covered means the rebuild is not producing what bronze
     # holds, and rebuilding again would only repeat it.
     ("pg_silver_row_values",
-     "Postgres Silver kept old values: POST /api/warehouse/refresh; if the finding says a rebuild already covered them, compare silver.orders with bronze.orders for the ids first"),
+     "Silver kept old values: POST /api/warehouse/refresh. If a rebuild already covered them, compare silver.orders with bronze.orders for those ids"),
     ("pg_silver_row_values_unwatched",
      "The Silver recompute did not finish: read the reason; a spent hold budget means it outgrew HOLD_BUDGET_S"),
     ("status_group_vs_return_list", "The source's status group wins over the legacy list"),
