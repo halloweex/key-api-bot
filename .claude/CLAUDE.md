@@ -2355,6 +2355,18 @@ gate's function must call `no_address` with the switch the gate consults (or
 `no_engine`); the two Gold readers gained `pg_gold_read.available()` so they
 take the gate's shape and the walk sees them.
 
+That the refusal then *reaches* the 503 is proved by running it, not listing
+it: `tests/unit/test_read_fallback_http.py` sweeps **every GET route under
+`/api/` read off the app** — every switch on, once with an engine that fails
+and once with no address — and fails on any request that left a refusal
+counted without answering 503 naming it. Only `/api/chat/stream` is skipped,
+and for the network. A service wrapping a router in `except Exception:
+return {}` was invisible to the static walk and to a hand-kept list of
+thirteen routes; the sweep finds it by the route. The static half checks
+every module `web/` imports: a handler that names `ReadUnavailable` must end
+in a bare `raise` or `raise <its name>` — `raise HTTPException(500)` turns a
+503 naming the surface into a 500 naming nothing.
+
 ### A write flag is no longer a rollback
 
 Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`

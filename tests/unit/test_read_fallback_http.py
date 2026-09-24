@@ -411,21 +411,209 @@ class TestCohorts:
             "under duckdb, DuckDB as the named engine is not a refusal")
 
 
+# ─── Every GET route: a refusal is a 503 naming its surface ────────────────
+
+# The routes the sweep does not call, each for a reason about the network and
+# never about what the route reads. Which routes are swept is read off the app.
+NETWORK_ROUTES = {
+    "/api/chat/stream": (
+        "streams a conversation with the Anthropic API for as long as it "
+        "lasts; what the assistant makes of a refusal is DN-20c's"),
+}
+
+# Example values for required parameters a route validates itself, where a
+# generic value would end the request with a 400 before anything is read.
+# Values, not subjects: a parameter missing here still gets one by its type.
+EXAMPLE_VALUES = {"period_type": "monthly", "abc_class": "A", "type": "summary"}
+
+
+def _example(param) -> object:
+    if param.name in EXAMPLE_VALUES:
+        return EXAMPLE_VALUES[param.name]
+    info = param.field_info
+    if info.annotation is int:
+        floor = [m.ge for m in getattr(info, "metadata", ()) if hasattr(m, "ge")]
+        return floor[0] if floor else 1
+    return "ab1"
+
+
+def _request_for(endpoint) -> tuple:
+    """The path with every path parameter filled, and every required query
+    parameter, by name where the route validates it and by type otherwise."""
+    dependant = endpoint.route.dependant
+    path = endpoint.path
+    for param in dependant.path_params:
+        path = path.replace("{" + param.name + "}", str(_example(param)))
+    params = {q.name: _example(q) for q in dependant.query_params if q.required}
+    return path, params
+
+
+def swept_routes(app) -> List:
+    from tests.routes_helper import iter_endpoints
+
+    return sorted(
+        (e for e in iter_endpoints(app)
+         if "GET" in e.methods and e.path.startswith("/api/")
+         and e.path not in NETWORK_ROUTES),
+        key=lambda e: e.path)
+
+
+@pytest.fixture
+def sweep_client(admin_client):
+    """`admin_client`, answering a server error as a 500 rather than raising
+    it into the test — a route whose engine fails with no fallback (the
+    forecast's training input) answers 500, and that is not this sweep's
+    question."""
+    from fastapi.testclient import TestClient
+
+    from web.main import app
+
+    client = TestClient(app, raise_server_exceptions=False)
+    client.cookies.update(admin_client.cookies)
+    return client
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Nothing in the sweep leaves the process: the app is called in-process
+    and the stores are mocked, so a socket opened is somebody's KeyCRM, CH
+    or Meilisearch client — refused at once instead of waiting on a timeout."""
+    import socket
+
+    def refuse(*args, **kwargs):
+        raise OSError("the network is off in this test")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket.socket, "connect_ex", refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+
+
+def _every_switch_on(monkeypatch) -> None:
+    """Every read switch the fallback walk finds, set to the engine it names."""
+    import importlib
+
+    from tests.unit.test_read_fallback_sites import read_switch_modules
+
+    for name in read_switch_modules():
+        module = importlib.import_module(f"core.{name}")
+        monkeypatch.setenv(module.ENV,
+                           "clickhouse" if name.startswith("ch_") else "postgres")
+
+
+class TestEveryRoute:
+    """Every GET route under /api, read off the app rather than listed: under
+    `off`, any request that leaves a refusal counted answered 503 naming a
+    surface it refused. A handler anywhere between a route and a router that
+    turns the refusal into an answer — `except Exception: return {}` in a
+    service — is found here whether or not anybody thought to list the
+    route. The two ways a gate refuses are swept apart: an engine that fails,
+    and a switch with no address."""
+
+    @pytest.mark.parametrize("state", ["engine_fails", "no_address"])
+    def test_a_refusal_is_a_503_naming_its_surface(
+        self, state, sweep_client, stores, no_network, monkeypatch,
+    ):
+        from core import ch_cohorts
+        from web.main import app
+        from web.ratelimit import limiter
+
+        _every_switch_on(monkeypatch)
+        if state == "engine_fails":
+            monkeypatch.setenv("KS_CH_URL", "http://nowhere.invalid:8123")
+            monkeypatch.setattr(ch_cohorts, "fetch",
+                                AsyncMock(side_effect=OSError("clickhouse down")))
+        else:
+            monkeypatch.delenv("KS_PG_DSN", raising=False)
+            monkeypatch.delenv("KS_CH_URL", raising=False)
+        _mode(monkeypatch, "off")
+
+        routes = swept_routes(app)
+        refused_routes, violations = [], []
+        for endpoint in routes:
+            read_fallback.reset_counts()
+            limiter.reset()
+            path, params = _request_for(endpoint)
+            response = sweep_client.get(path, params=params)
+            refused = read_fallback.refusals()
+            assert read_fallback.counts() == {}, (
+                f"{endpoint.path}: a fallback counted under off")
+            if not refused:
+                continue
+            refused_routes.append(endpoint.path)
+            try:
+                surface = response.json().get("surface")
+            except Exception:  # noqa: BLE001 — a CSV, an HTML page
+                surface = None
+            if response.status_code != 503 or surface not in refused:
+                violations.append(
+                    f"{endpoint.path} answered {response.status_code} "
+                    f"(surface={surface!r}) with {sorted(refused)} refused")
+
+        assert not violations, (
+            "a refusal that did not reach the 503 handler: " + "; ".join(violations))
+        # Non-vacuity: the sweep reached the routers. Sixty-odd of the
+        # ninety-eight GET routes refused when it was written.
+        assert len(routes) >= 90, len(routes)
+        assert len(refused_routes) >= 55, refused_routes
+
+    def test_the_sweep_is_read_off_the_app(self):
+        """Every GET route but the named network ones — and a route added
+        tomorrow is swept the day it is registered."""
+        from tests.routes_helper import iter_endpoints
+        from web.main import app
+
+        every = {e.path for e in iter_endpoints(app)
+                 if "GET" in e.methods and e.path.startswith("/api/")}
+        assert {e.path for e in swept_routes(app)} == every - set(NETWORK_ROUTES)
+        assert set(NETWORK_ROUTES) <= every, "a named network route no longer exists"
+
+
 # ─── No HTTP path swallows a refusal ───────────────────────────────────────
 
-# Where a route's read runs: the routers, the Postgres readers, and web/. The
-# non-HTTP consumers (the reports, the assistant, training, the sync) are
-# DN-20c's and may turn a refusal into their own named answer.
-HTTP_SCOPE = ("core/repositories", "web")
+def _module_file(dotted: str) -> Optional[pathlib.Path]:
+    rel = dotted.replace(".", "/")
+    for candidate in (REPO / f"{rel}.py", REPO / rel / "__init__.py"):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
-def _http_files() -> List[pathlib.Path]:
-    files = []
-    for top in HTTP_SCOPE:
-        files.extend(p for p in sorted((REPO / top).rglob("*.py"))
-                     if "frontend" not in p.parts)
-    files.extend(sorted((REPO / "core").glob("pg_*read*.py")))
-    return files
+def _imported_modules(path: pathlib.Path) -> set:
+    """Every repository module `path` imports, at the top or inside a
+    function — most imports here are local, to dodge cycles."""
+    # A module's package is its directory, for `x.py` and `__init__.py` alike.
+    package = list(path.relative_to(REPO).parent.parts)
+    found = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = package[:len(package) - (node.level - 1)] if node.level else []
+            module = ".".join(base + ([node.module] if node.module else []))
+            if not module:
+                continue
+            found.add(module)
+            found.update(f"{module}.{alias.name}" for alias in node.names)
+    return found
+
+
+def http_files() -> List[pathlib.Path]:
+    """Every repository module reachable by import from `web/` — the code an
+    HTTP route can run. Computed, not listed: `core/prediction_service.py`
+    and `core/duckdb_store.py` are on HTTP paths without being routers."""
+    seen = set()
+    queue = [p for p in sorted((REPO / "web").rglob("*.py"))
+             if "frontend" not in p.parts and "node_modules" not in p.parts]
+    while queue:
+        path = queue.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        for dotted in _imported_modules(path):
+            target = _module_file(dotted)
+            if target is not None and target not in seen:
+                queue.append(target)
+    return sorted(seen)
 
 
 def _names_read_unavailable(handler: ast.ExceptHandler) -> bool:
@@ -437,37 +625,64 @@ def _names_read_unavailable(handler: ast.ExceptHandler) -> bool:
         for n in ast.walk(handler.type))
 
 
+def _lets_it_through(handler: ast.ExceptHandler) -> bool:
+    """The handler ends in a bare `raise`, or `raise <the name it bound>` —
+    the refusal itself, not something raised in its place. `raise
+    HTTPException(500)` would turn the 503 naming the surface into a 500
+    naming nothing."""
+    if not handler.body or not isinstance(handler.body[-1], ast.Raise):
+        return False
+    last = handler.body[-1]
+    if last.exc is None:
+        return True
+    return (last.cause is None and isinstance(last.exc, ast.Name)
+            and handler.name is not None and last.exc.id == handler.name)
+
+
 def swallowing_handlers(source: str) -> List[int]:
     """Lines of every handler naming `ReadUnavailable` that can end without
-    raising. Pure, so it can be shown synthetic code."""
-    bad = []
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.ExceptHandler) and _names_read_unavailable(node):
-            if not node.body or not isinstance(node.body[-1], ast.Raise):
-                bad.append(node.lineno)
-    return bad
+    raising that refusal. Pure, so it can be shown synthetic code."""
+    return [node.lineno for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.ExceptHandler)
+            and _names_read_unavailable(node) and not _lets_it_through(node)]
 
 
 class TestNoHandlerSwallowsARefusal:
+    """The static half of the guard; `TestEveryRoute` is the half that runs.
+    This one sees a handler that *names* the refusal — anywhere an HTTP route
+    can reach, which is every module `web/` imports, transitively. A broad
+    `except Exception` that catches it without naming it is invisible here
+    and is what the sweep is for.
+
+    DN-20c will give the assistant a named "data unavailable" tool result,
+    which is a handler naming the refusal and returning — reachable from
+    `web/routes/chat.py`. When it lands, this rule learns that exception by
+    function, and nowhere else."""
+
     def test_every_handler_naming_it_raises(self):
         """A handler that names the refusal and does not raise it has turned
         a 503 into an answer — the DuckDB one, or a quiet partial one. The
         walk in `test_read_fallback_sites.py` accepts naming the refusal as
         a decision; on an HTTP path the only decision is to let it through."""
         bad = []
-        for path in _http_files():
+        for path in http_files():
             for line in swallowing_handlers(path.read_text(encoding="utf-8")):
                 bad.append(f"{path.relative_to(REPO).as_posix()}:{line}")
         assert not bad, "a refusal swallowed on an HTTP path: " + ", ".join(bad)
 
     def test_it_is_looking(self):
-        """Non-vacuity: the one handler that names it today is found, and it
-        is found raising."""
-        goals = (REPO / "core/repositories/goals.py").read_text(encoding="utf-8")
-        tree = ast.parse(goals)
-        assert any(isinstance(n, ast.ExceptHandler) and _names_read_unavailable(n)
-                   for n in ast.walk(tree))
-        assert REPO / "core/repositories/goals.py" in _http_files()
+        """Non-vacuity: the handlers that name it today are found, and found
+        raising; and the scope reaches past the routers into what the
+        routes call."""
+        files = http_files()
+        for rel in ("core/repositories/goals.py", "web/services/dashboard_service.py"):
+            tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))
+            assert any(isinstance(n, ast.ExceptHandler) and _names_read_unavailable(n)
+                       for n in ast.walk(tree)), rel
+            assert REPO / rel in files
+        for rel in ("core/prediction_service.py", "core/duckdb_store.py",
+                    "core/read_fallback.py", "core/pg_traffic_read.py"):
+            assert REPO / rel in files, rel
 
     def test_the_rule_bites(self):
         src = (
@@ -479,3 +694,22 @@ class TestNoHandlerSwallowsARefusal:
         )
         assert swallowing_handlers(src) == [4]
         assert swallowing_handlers(src.replace("return []", "raise")) == []
+
+    @pytest.mark.parametrize("ending,swallows", [
+        ("raise", False),
+        ("raise exc", False),
+        ("raise HTTPException(status_code=500)", True),
+        ("raise exc from None", True),
+        ("raise RuntimeError('x') from exc", True),
+        ("raise other", True),
+        ("log(exc)", True),
+    ])
+    def test_only_the_refusal_itself_may_be_raised(self, ending, swallows):
+        src = (
+            "async def f(self):\n"
+            "    try:\n"
+            "        return await self._traffic_run('x')\n"
+            "    except read_fallback.ReadUnavailable as exc:\n"
+            f"        {ending}\n"
+        )
+        assert (swallowing_handlers(src) == [4]) is swallows
