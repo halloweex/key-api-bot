@@ -18,14 +18,25 @@ POST wrote DuckDB, the page's GET reads Postgres under `KS_READ_GOALS`, and
 `calculated_goal` from Postgres while writing the row to DuckDB. Under
 `KS_WRITE_GOALS=postgres` the write lands where the page reads, at once.
 
-**The page must read Postgres too.** This chain moves the write, not the
-read: `get_goals`, `get_smart_goals` and the /marketing target line keep
-routing on `KS_READ_GOALS` and `KS_READ_MARKETING`, chain 8's arrangement for
-`KS_READ_EXPENSES`. Flipped with either of those at `duckdb`, a typed goal
-lands in the store that page does not read — the same hour of invisibility,
-now permanent. Both must read `postgres` before this flag does: a
-precondition of the flip, checked by whoever flips it, and not something a
-writer can enforce.
+AND THE READS OF THE TABLE FOLLOW IT
+
+Every read of `app.revenue_goals` — `get_goals`, `get_smart_goals`, the
+/marketing target line — goes to Postgres while this chain does, whatever
+`KS_READ_GOALS` or `KS_READ_MARKETING` say, and never falls back to DuckDB
+(`reads_the_chain` below). The first version left them on those two flags,
+chain 8's arrangement, and made "both at `postgres`" a precondition of the
+flip that only whoever flipped it could check. That precondition does not
+hold for long: putting a read flag back is the documented rollback of every
+read port, so one routine rollback of /goals or /marketing after the latch
+would have shown the pre-flip goal from DuckDB for good, with nothing
+reporting it. The flags still choose the engine for everything else those
+pages read — revenue history, Gold, the forecast — which DuckDB keeps
+current.
+
+No fallback, because after the flip DuckDB's copy is not an older answer to
+the same question but a frozen one: nothing writes it and the hourly replace
+no longer runs. A Postgres failure on these reads raises, so the page fails
+where it can be seen instead of showing a goal nobody typed last.
 
 THE ONE WRITER EVERY CALLER GOES THROUGH
 
@@ -89,6 +100,11 @@ CHAIN_TABLES: Tuple[str, ...] = ("app.revenue_goals",)
 # widens the table's domain.
 PERIOD_TYPES: Tuple[str, ...] = ("daily", "weekly", "monthly")
 
+# The hole every shared statement that reads this chain's table carries —
+# `core.sql_dialect.render_tables` fills it with `revenue_goals` or
+# `app.revenue_goals`. `reads_the_chain` recognises a goal read by it.
+TABLE_HOLE = "{revenue_goals}"
+
 
 def env_writes_postgres() -> bool:
     """What `KS_WRITE_GOALS` alone says.
@@ -117,6 +133,38 @@ def writes_postgres() -> bool:
     if chain_latch.latched(CHAIN):
         return True
     return env_writes_postgres()
+
+
+def reads_postgres() -> bool:
+    """Whether a read of this chain's table must ask Postgres, whatever the
+    page's own read flag says — `writes_postgres()` applied to reads.
+
+    One difference, and only for a flag nobody can read on a chain that has
+    never written here: the writer then refuses in both stores and the hourly
+    replace stands down, so neither copy moves, and the page's own flag
+    chooses between them as it did before this chain existed. Raising here
+    instead would take the page down over a variable about writes; the typo
+    is published by `core.write_chains.chain_modes()` and paged by the
+    canary. A latched chain never reaches the question.
+    """
+    if chain_latch.latched(CHAIN):
+        return True
+    try:
+        return env_writes_postgres()
+    except RuntimeError:
+        return False
+
+
+def reads_the_chain(sql: str) -> bool:
+    """Whether this statement reads the chain's table while the chain owns it.
+
+    Decided from the body, `_expenses_run`'s arrangement for `{expenses}`: a
+    router asks this of every statement it is handed, so a query that starts
+    reading `{revenue_goals}` tomorrow follows the chain the day it does,
+    through whichever router carries it. `tests/unit/test_goals_reads_follow_chain.py`
+    walks `core/` for every such statement and fails if its router does not ask.
+    """
+    return TABLE_HOLE in sql and reads_postgres()
 
 
 def _latch() -> str:

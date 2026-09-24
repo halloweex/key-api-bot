@@ -23,9 +23,11 @@ both sides, 986 dates, zero disagreeing, pinned by a test — so the query reads
 `silver.order_lines` instead, which both engines have.
 
 **The goal.** `revenue_goals` is three rows a human typed, and revision 0017
-puts them here as an hourly read replica; the goals API still writes DuckDB.
-An hour of lag on a target line drawn over a calendar month is a display lag,
-not the security hole the same lag would have been on the user list.
+puts them here as an hourly read replica; the goals API writes DuckDB by
+default. An hour of lag on a target line drawn over a calendar month is a
+display lag, not the security hole the same lag would have been on the user
+list. Under chain 7a (`KS_WRITE_GOALS`) the goals API writes Postgres instead,
+and this read follows the chain rather than this flag — see below.
 
 WHY THIS FALLS BACK
 
@@ -33,6 +35,11 @@ Nothing diverges: the tab writes nothing, and every table it reads is one
 Postgres receives or derives from what DuckDB holds. A fault costs the engine
 rather than the page — `core/pg_inventory_read.py`'s answer, and the opposite
 of `/sms`, where after its switch the two stores genuinely differ.
+
+One table stops being that at chain 7a's flip: DuckDB's `revenue_goals` is
+then written by nothing, so the target line goes to Postgres while the chain
+writes there and does not fall back (`RevenueMixin._marketing_run`,
+`core/pg_goals_write.py`).
 
 WHY ITS OWN FLAG AND NOT `KS_READ_REPORTS`
 

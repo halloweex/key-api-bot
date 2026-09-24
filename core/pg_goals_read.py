@@ -50,10 +50,19 @@ now. Invisible for twenty-one hours out of twenty-four, which is why it is
 written down rather than left to a differential test that runs under one
 timezone.
 
-WHY THIS FALLS BACK
+WHY THIS FALLS BACK, AND WHERE IT MUST NOT
 
-Nothing diverges: these read derived layers and write nothing. A fault costs
-the engine rather than the page — `core/pg_gold_read.py`'s answer.
+Revenue history and Gold diverge nowhere: they are derived layers DuckDB keeps
+current, so a fault costs the engine rather than the page —
+`core/pg_gold_read.py`'s answer.
+
+`app.revenue_goals` is not one of them once chain 7a writes Postgres. From the
+flip, DuckDB's `revenue_goals` stops changing — nothing writes it and the
+hourly replace stands down — so a fallback there would not show an older
+answer to the same question but the goal as it stood before the flip. Those
+reads therefore go to Postgres while the chain does, whatever this flag says,
+and raise instead of falling back (`GoalsMixin._goals_run`,
+`core/pg_goals_write.py`).
 """
 from __future__ import annotations
 

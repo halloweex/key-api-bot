@@ -172,15 +172,21 @@ class GoalsMixin:
         `app.revenue_goals` is an hourly read replica. Reading it from Postgres
         is safe; writing there through this router would land in a copy. The
         write moves only as chain 7a (`KS_WRITE_GOALS`, `set_goal` below),
-        which stands the replica down for that table, and it presupposes this
-        flag at `postgres` — otherwise the page reads the store the goal was
-        not written to.
+        which stands the replica down for that table.
+
+        So a statement reading `{revenue_goals}` goes where the chain writes,
+        whatever this flag says, and does not fall back: once the chain writes
+        Postgres, DuckDB's copy is frozen, and a fallback would show the goal
+        from before the flip as if it were current. `core/pg_goals_write.py`
+        has the reasoning; every other statement here keeps the flag.
         """
         from core.sql_dialect import DUCKDB, POSTGRES, render_tables
 
-        from core import pg_goals_read
+        from core import pg_goals_read, pg_goals_write
 
         params = list(params or [])
+        if pg_goals_write.reads_the_chain(sql):
+            return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
         if pg_goals_read.enabled() and pg_goals_read.available():
             try:
                 return await pg_goals_read.fetch(

@@ -2486,13 +2486,20 @@ statement. `executemany` runs once per row in DuckDB's client: about eight
 minutes for the history alone with no memory limit, and under the store's own
 4 GB — what the one-off container gets — `OutOfMemoryException` in 17 s.
 
-**Chain 7a moves the write, not the read.** `KS_WRITE_GOALS=postgres` routes
-`set_goal` — and `reset_goal_to_auto` through it — to `core/pg_goals_write.py`,
-but `get_goals`, `get_smart_goals` and the /marketing target line still read
-on `KS_READ_GOALS` and `KS_READ_MARKETING`, chain 8's arrangement. Flip it only
-with both at `postgres`, or a typed goal lands in the store the page does not
-read. `scripts/chain_copy_back.py goals` is its way back; there is no sequence
-and no sync key to carry.
+**Chain 7a moves the write, and the reads of its table follow it.**
+`KS_WRITE_GOALS=postgres` routes `set_goal` — and `reset_goal_to_auto` through
+it — to `core/pg_goals_write.py`. Every statement reading `{revenue_goals}` —
+`get_goals`, `get_smart_goals`, the /marketing target line — then goes to
+Postgres whatever `KS_READ_GOALS` or `KS_READ_MARKETING` say, and a Postgres
+error there raises instead of falling back. The first version left those reads
+on the two flags and called "both at `postgres`" a precondition of the flip.
+It could not stay one: putting a read flag back is every read port's rollback,
+and after the latch that would have shown the pre-flip goal out of a DuckDB
+nothing writes, for good and in silence. The flags still choose the engine for
+the rest of those pages. `tests/unit/test_goals_reads_follow_chain.py` walks
+`core/` and `web/` for every goal statement and fails if its router does not
+ask. `scripts/chain_copy_back.py goals` is the chain's way back; there is no
+sequence and no sync key to carry.
 
 ### What the warehouse validation can and cannot see
 `validation_passed` covers: Bronze→Silver row counts, Silver→Gold revenue

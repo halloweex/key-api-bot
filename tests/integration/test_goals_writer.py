@@ -181,6 +181,117 @@ class TestUnderTheFlag:
         assert not chain_latch.latched(CHAIN)
 
 
+class TestTheReadsFollowTheChain:
+    """The review's first two findings, reproduced and closed. The goal a
+    human typed is read where the chain wrote it, whatever the page's own
+    read flag says — putting `KS_READ_GOALS` or `KS_READ_MARKETING` back is
+    every read port's documented rollback — and a Postgres failure on it
+    raises rather than showing the goal DuckDB held before the flip.
+
+    Each test starts from a goal DuckDB wrote and the hourly copy shipped, so
+    both stores hold the pre-flip value, and then types a different one under
+    the flag: an answer of the pre-flip value is a read of the frozen copy."""
+
+    PRE_FLIP = 1_000_000.0
+    TYPED = 2_500_000.0
+
+    async def _flip_after_a_shipped_goal(self, store, env):
+        from core.pg_operational import replicate_operational
+
+        await store.set_goal("monthly", self.PRE_FLIP)          # DuckDB
+        shipped = await replicate_operational(store)
+        assert shipped["replaced"][GOALS] == 1, shipped
+        env.setenv("KS_WRITE_GOALS", "postgres")
+        await store.set_goal("monthly", self.TYPED)             # Postgres
+        assert float((await _duck_goals(store))["monthly"][1]) == self.PRE_FLIP
+
+    @pytest.mark.asyncio
+    async def test_the_goals_page_reads_the_chain_with_its_flag_at_duckdb(self, stores):
+        store, _pool, env = stores
+        await self._flip_after_a_shipped_goal(store, env)
+        env.setenv("KS_READ_GOALS", "duckdb")                   # a read rollback
+
+        assert (await store.get_goals())["monthly"]["amount"] == self.TYPED
+        smart = await store.get_smart_goals()
+        assert smart["monthly"]["amount"] == self.TYPED
+        assert smart["monthly"]["isCustom"] is True
+
+    @pytest.mark.asyncio
+    async def test_the_marketing_target_line_reads_the_chain_with_its_flag_at_duckdb(
+        self, stores,
+    ):
+        store, _pool, env = stores
+        await self._flip_after_a_shipped_goal(store, env)
+        env.setenv("KS_READ_MARKETING", "duckdb")
+
+        report = await store.get_marketing_report(2026, 8)
+
+        assert report["general_sales"]["monthly_goal"] == self.TYPED
+
+    @pytest.mark.asyncio
+    async def test_the_flag_still_decides_while_the_chain_writes_duckdb(self, stores):
+        """The control: without the chain, a goal read goes where the page's
+        flag says. Otherwise the two tests above could pass on a router that
+        sent every goal read to Postgres."""
+        from core import pg_goals_read
+
+        store, pool, env = stores
+        await store.set_goal("monthly", self.PRE_FLIP)          # DuckDB only
+        env.setenv("KS_READ_GOALS", "duckdb")
+        with patch.object(pg_goals_read, "fetch",
+                          new=AsyncMock(side_effect=AssertionError("asked PG"))):
+            assert (await store.get_goals())["monthly"]["amount"] == self.PRE_FLIP
+        assert await _pg_goals(pool) == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("read_flag", ["postgres", "duckdb"])
+    async def test_a_postgres_failure_raises_rather_than_showing_the_frozen_goal(
+        self, stores, read_flag,
+    ):
+        from core import pg_goals_read, read_fallback
+
+        store, _pool, env = stores
+        await self._flip_after_a_shipped_goal(store, env)
+        env.setenv("KS_READ_GOALS", read_flag)
+        read_fallback.reset_counts()
+        real = pg_goals_read.fetch
+
+        async def goals_table_down(sql, params=()):
+            # Only the goal read fails. The revenue history keeps answering,
+            # so a fallback counted below could only be the goal's.
+            if "app.revenue_goals" in sql:
+                raise ConnectionError("pg down")
+            return await real(sql, params)
+
+        with patch.object(pg_goals_read, "fetch", new=goals_table_down):
+            with pytest.raises(ConnectionError, match="pg down"):
+                await store.get_goals()
+            with pytest.raises(ConnectionError, match="pg down"):
+                await store.get_smart_goals()
+        assert "goals" not in read_fallback.counts(), "it fell back to DuckDB"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("read_flag", ["postgres", "duckdb"])
+    async def test_the_target_line_raises_too(self, stores, read_flag):
+        from core import pg_marketing_read, read_fallback
+
+        store, _pool, env = stores
+        await self._flip_after_a_shipped_goal(store, env)
+        env.setenv("KS_READ_MARKETING", read_flag)
+        read_fallback.reset_counts()
+        real = pg_marketing_read.fetch
+
+        async def goals_table_down(sql, params=()):
+            if "app.revenue_goals" in sql:
+                raise ConnectionError("pg down")
+            return await real(sql, params)
+
+        with patch.object(pg_marketing_read, "fetch", new=goals_table_down):
+            with pytest.raises(ConnectionError, match="pg down"):
+                await store.get_marketing_report(2026, 8)
+        assert "marketing" not in read_fallback.counts(), "it fell back to DuckDB"
+
+
 class TestTheHourlyReplaceCannotRollItBack:
     """The most dangerous state for a write chain, proven end to end, and the
     control that gives the survival its meaning — `replicate_operational`
