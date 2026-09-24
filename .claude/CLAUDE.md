@@ -2551,7 +2551,12 @@ An owner row naming an order table counts even when no chain in this build
 declares it: after an image rollback to a build older than the orders chain,
 `claimed_tables` alone would drop `owner:bronze.orders` and hand the tables
 back to DuckDB, so the helper reads the row as itself too, and either order
-table owned stands both down.
+table owned stands both down. The comparison's `mirror_stood_down` text says
+which answer it was, because the two are not the same state: on the local
+answer the sync's mirror has stopped too; on the owner rows alone it has not,
+so the finding says the marker is missing and the sync mirror is still
+shipping, and names `data/write-chain-owners` and `scripts/chain_copy_back.py`
+(or, with no chain declared in this build, a redeploy of one that does).
 
 ## TODO: Full DuckDB Resync Solution
 

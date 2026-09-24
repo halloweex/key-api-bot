@@ -716,6 +716,54 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
         assert owned.sql == [] and owned.acquired == 0, owned.sql
 
 
+class TestTheStandDownFindingSaysWhetherTheSyncStillShips:
+    """The INFO finding is read by the one person who could act, so its claim
+    about the sync's mirror is parsed out of it and checked against what the
+    mirror then does with the same recorder. On the local answer the mirror
+    has stopped; on the owner rows alone it has not — it asks only the local
+    answer — and a finding saying it had would read as nothing to do."""
+
+    @staticmethod
+    def _claim(issues) -> str:
+        """The one description both order tables carry."""
+        assert [(i.check_name, i.table_name) for i in issues] == [
+            ("mirror_stood_down", ORDERS), ("mirror_stood_down", LINES)]
+        (text,) = {i.description for i in issues}
+        stopped = "no longer ships DuckDB's copy" in text
+        shipping = "the sync mirror is still shipping" in text
+        assert stopped != shipping, f"says neither or both: {text}"
+        return text
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["flagged", "marker_lost", "rolled_back"])
+    async def test_the_claim_is_what_the_sync_mirror_does(
+            self, pool, order_chain, tmp_path, state):
+        from core.mirror_reconciliation import reconcile_orders
+
+        if state == "flagged":
+            order_chain()                       # the local answer names both
+        else:
+            if state == "marker_lost":
+                order_chain(env=lambda: False)  # declared, flag duckdb, no marker
+            pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
+        text = self._claim(await reconcile_orders(_NoStore()))
+
+        pool.sql.clear()
+        store = await _store(tmp_path)
+        await store.upsert_orders([_order(9)])
+        assert pool.wrote(ORDERS) == ("the sync mirror is still shipping" in text), text
+
+        if state == "flagged":
+            assert "owner row" not in text
+        elif state == "marker_lost":
+            assert ("the marker is missing; the sync mirror is still shipping — "
+                    "restore data/write-chain-owners or run "
+                    "scripts/chain_copy_back.py") in text
+        else:
+            assert "the marker is missing" not in text
+            assert "no chain in this build declares the order tables" in text
+
+
 class TestTheAdminBackfill:
     def _client(self, flags):
         import time as _time

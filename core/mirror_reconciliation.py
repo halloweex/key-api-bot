@@ -1392,35 +1392,78 @@ def _divergence_findings(
 
 def _orders_stood_down(
     specs: Sequence[BucketedTable], moved: FrozenSet[str],
+    *, owner_rows_only: bool = False,
 ) -> Tuple[List[IntegrityIssue], Tuple[BucketedTable, ...]]:
     """The INFO findings for the order tables a write chain holds, and the
     specs left to compare. Nothing and every spec when `moved` is empty.
 
     One function for both of `reconcile_orders`' questions — the local answer
-    and the owner rows — so a stand-down found either way reads the same."""
+    and the owner rows — so a stand-down found either way has one check name.
+    What it says differs, because what is true differs. On the local answer
+    the sync's mirror has stopped too. On the owner rows alone
+    (`owner_rows_only`) it has not: the per-tick mirror in `upsert_orders`
+    asks only the local answer, which is empty, so it is still shipping
+    DuckDB's copy over the chain's rows — and a finding that said otherwise
+    would tell the one reader who could act that there is nothing to do."""
     from core import pg_landing
 
     specs = tuple(specs)
     if not moved:
         return [], specs
     order_tables = {pg_landing.ORDERS_TABLE, pg_landing.ORDER_PRODUCTS_TABLE}
+    tables = ", ".join(sorted(moved))
+    if owner_rows_only:
+        description = _owner_rows_only_description(tables, order_tables)
+    else:
+        description = (
+            f"Not compared: {tables} is written by a write chain, so the "
+            "orders mirror no longer ships DuckDB's copy of either order "
+            "table — ownership of the order tables passes as a unit. A "
+            "difference here would be the chain's own writes, not a loss."
+        )
     issues = [
         IntegrityIssue(
             check_name="mirror_stood_down",
             table_name=spec.pg_table,
             severity=Severity.INFO,
             count=1,
-            description=(
-                f"Not compared: {', '.join(sorted(moved))} is written by a "
-                "write chain, so the orders mirror no longer ships DuckDB's "
-                "copy of either order table — ownership of the order tables "
-                "passes as a unit. A difference here would be the chain's "
-                "own writes, not a loss."
-            ),
+            description=description,
         )
         for spec in specs if spec.pg_table in order_tables
     ]
     return issues, tuple(s for s in specs if s.pg_table not in order_tables)
+
+
+def _owner_rows_only_description(tables: str, order_tables: set) -> str:
+    """The stand-down that only the owner rows in Postgres could see.
+
+    Two roads lead here and they take different levers. A chain this build
+    declares, flagged `duckdb`, with no marker: the marker was lost, and
+    putting it back (or releasing the chain properly) is the way out. No
+    chain in this build declaring an order table at all: an image older than
+    the chain, where a restored marker names a chain nothing here reads."""
+    from core.write_chains import WRITE_CHAINS
+
+    if any(order_tables & set(c.CHAIN_TABLES) for c in WRITE_CHAINS):
+        why = (
+            "the marker is missing; the sync mirror is still shipping — "
+            "restore data/write-chain-owners or run scripts/chain_copy_back.py"
+        )
+    else:
+        why = (
+            "no chain in this build declares the order tables (an image older "
+            "than the chain?); the sync mirror is still shipping — redeploy a "
+            "build that declares the chain, or run scripts/chain_copy_back.py "
+            "from one"
+        )
+    return (
+        f"Not compared: an owner row in Postgres (meta.chain_watermarks) says "
+        f"a write chain owns {tables}, but this process's own answer says "
+        f"DuckDB still writes them: {why}. Until "
+        "then every sync tick writes DuckDB's copy over the chain's rows and "
+        "archives each overwrite in app.order_versions; the ids-diff, the "
+        "comment ship and this comparison stand down on the owner row."
+    )
 
 
 async def reconcile_orders(
@@ -1468,8 +1511,15 @@ async def reconcile_orders(
     # union, for its reason: a lost marker leaves the chain's rows in Postgres
     # and the comparison would file each one as lost from DuckDB. Before the
     # watermarks and the fingerprints, so this run too reads no order table.
+    # Here it is normally the owner rows alone that stand a table down — had
+    # the local answer named one, the first call would already have taken both
+    # order tables out of `specs` — and then the finding says the sync mirror
+    # is still shipping, because on the local answer alone it is. Asked again
+    # rather than assumed, so a chain that latched between the two questions
+    # is not reported as a lost marker.
+    moved = await pg_landing.order_tables_stood_down_or_owned(pool)
     found, specs = _orders_stood_down(
-        specs, await pg_landing.order_tables_stood_down_or_owned(pool))
+        specs, moved, owner_rows_only=not pg_landing.order_tables_stood_down())
     issues += found
     if not specs:
         return issues
