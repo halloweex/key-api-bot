@@ -92,10 +92,17 @@ _VALID = ("off", "on")
 # it — and how long this may then hold it, pool acquire included.
 #
 # The row-values recompute (step 8b) shares this budget rather than taking a
-# snapshot of its own, because it fits with room to spare: the whole snapshot,
-# recompute included, took 0.26 s over 48,000 orders and 0.55 s over 96,000
-# (medians of nine, postgres:17.2-alpine on a laptop; production held 47,756).
-# Every run logs the recompute's own time beside this number.
+# snapshot of its own, because it fits with room to spare. Measured for DN-13
+# on a production-shaped snapshot — three line items an order, UTM rows for
+# website orders, skewed buyers, the dead tuples of three 05:15-style
+# rewrites, Silver freshly rebuilt and not yet analysed — on
+# postgres:17.2-alpine with production's settings (shared_buffers 256MB,
+# work_mem 8MB, 512 MB) held to one CPU, on a laptop, two runs of nine: the
+# whole snapshot took 0.29–0.32 s (max 0.40) over 48,000 orders and 0.75 s
+# (max 0.89) over 96,000, the recompute 0.15–0.19 s and 0.40–0.44 s of it.
+# Production held 47,756. The spec asked for this on the gate stack, and that
+# measurement was not taken — this change had no access to it; every run logs
+# the recompute's own time beside this number instead.
 LOCK_WAIT_S = 120
 HOLD_BUDGET_S = 20
 STATEMENT_TIMEOUT = "15s"
@@ -567,13 +574,14 @@ async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
                     await conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
                     # No JIT. The row-values recompute is costed past
                     # jit_above_cost, and compiling it never paid for itself
-                    # (postgres:17.2-alpine, a fresh backend per run, measured
-                    # for DN-13): +0.12 s on a 0.21 s query over 48,000 orders
-                    # (cost ~147k), +0.10 s on 0.52 s over 96,000 (~447k). Past
-                    # jit_optimize/inline_above_cost (500k, which 96,000 orders
-                    # all but reach) it is +1.4 s and +0.9 s on the same two.
-                    # Time spent holding PG_LAYER_LOCK, to speed up a query that
-                    # runs four times a day.
+                    # (a fresh backend per run, on the snapshot LOCK_WAIT_S
+                    # describes): +0.11–0.12 s on a 0.17–0.20 s query over
+                    # 48,000 orders (cost 208k–471k — Silver's estimates move
+                    # until it is analysed), and past jit_optimize/
+                    # inline_above_cost (500k) +0.87–0.91 s on 0.36–0.46 s
+                    # over 96,000 (615k–1.36M). Time spent holding
+                    # PG_LAYER_LOCK, to speed up a query that runs four times
+                    # a day.
                     await conn.execute("SET LOCAL jit = off")
                     w = await conn.fetchrow(_WATERMARK_SQL, grace)
                     watermark = Watermark(

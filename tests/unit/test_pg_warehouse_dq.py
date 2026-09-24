@@ -275,7 +275,7 @@ class TestTheRowValuesSql:
 
     def test_the_snapshot_runs_without_jit(self):
         """JIT compilation never paid for itself on the recompute, and past
-        jit_optimize_above_cost it was ~1.4 s of a ~1.7 s read, all of it under
+        jit_optimize_above_cost it was ~0.9 s of a ~1.3 s read, all of it under
         PG_LAYER_LOCK. Parsed out of `read_facts`: the SET must be a statement
         the snapshot executes."""
         tree = ast.parse(textwrap.dedent(inspect.getsource(twins.read_facts)))
