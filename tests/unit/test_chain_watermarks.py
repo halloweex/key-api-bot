@@ -128,6 +128,25 @@ class TestTheFreshnessCheckFollowsTheWatermarks:
         assert "meta.chain_watermarks" in issues[0].description
 
     @pytest.mark.asyncio
+    async def test_not_even_a_fresh_frozen_copy_stands_in_for_chain_1(
+        self, flags, frozen_duckdb,
+    ):
+        """The test above cannot tell "never synced" from a frozen stamp judged
+        in its place: DuckDB's copy there is 60 h old, past the 48 h limit, so
+        either reading files `freshness_stocks`. Here DuckDB's stamp is fresh,
+        and chain 1 — which does not declare `CHAIN_WATERMARK_INHERITS_DUCKDB`
+        (chain 6a does) — must still be told Postgres has no key."""
+        store, now = frozen_duckdb
+        flags.setenv("KS_WRITE_INVENTORY", "postgres")
+        async with store.connection() as conn:
+            conn.execute("UPDATE sync_metadata SET value = ? WHERE key = 'last_sync_stocks'",
+                         [(now - timedelta(minutes=5)).isoformat()])
+            issues = _freshness_check(conn, now, chain_watermarks={
+                "last_sync_offers": (now - timedelta(minutes=20)).isoformat()})
+        assert _names(issues) == ["freshness_stocks"]
+        assert "never synced" in issues[0].description
+
+    @pytest.mark.asyncio
     async def test_called_without_them_it_says_it_is_not_watching(
         self, flags, frozen_duckdb,
     ):
