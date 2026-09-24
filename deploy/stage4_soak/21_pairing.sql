@@ -19,9 +19,11 @@
 --   `pg_attribution_coverage_website` are present exactly when their DuckDB
 --   names are. Counts are shown, not judged: they may differ by the orders
 --   still in flight, which the journal does not record;
--- - no `pg_line_items_disagree`. The twins' `pg_headline_vs_line_items` and
---   `pg_goods_shipped_without_sale` are ABSENT while DuckDB looked, by design,
---   so their absence proves nothing and is not asked about;
+-- - no `pg_line_items_disagree` and no `pg_order_landing_disagree`. The twins'
+--   `pg_headline_vs_line_items` and `pg_goods_shipped_without_sale`, and the
+--   order-landing twins (DN-23: `pg_orders_without_line_items`, the orphan,
+--   NULL, domain and status-group ones), are ABSENT while DuckDB looked, by
+--   design, so their absence proves nothing and is not asked about;
 -- - no `pg_*_unwatched` and no `pg_warehouse_dq_flag_invalid`: blindness is
 --   reported, never `[]`, and a blind twin paired with a quiet DuckDB would
 --   otherwise read as agreement.
@@ -91,6 +93,7 @@ problems AS (
     FROM runs r
     JOIN app.data_quality_issues i ON i.run_id = r.run_id
     WHERE i.check_name = 'pg_line_items_disagree'
+       OR i.check_name = 'pg_order_landing_disagree'
        OR i.check_name = 'pg_warehouse_dq_flag_invalid'
        OR (left(i.check_name, 3) = 'pg_' AND right(i.check_name, 10) = '_unwatched')
 ),

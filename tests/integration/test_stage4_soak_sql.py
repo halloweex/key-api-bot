@@ -570,6 +570,32 @@ class TestPairing:
         assert v == "FAIL" and "pg_line_items_disagree" in detail, detail
 
     @pytest.mark.asyncio
+    async def test_landing_twins_absent_while_duckdb_looked_passes(self, pool):
+        """DN-23: DuckDB's landing findings stand; the twins compared."""
+        async with scenario(pool) as conn:
+            await self._fresh_integrity_run(conn)
+            await dq_issue(conn, DQ_RUN_IDS[1], "orders_without_line_items", count=40)
+            await dq_issue(conn, DQ_RUN_IDS[1], "value_domain_orders_status_id")
+            v, detail = await verdict(conn, self.FILE, dq_pg_warehouse_on="1")
+        assert v == "PASS", detail
+
+    @pytest.mark.asyncio
+    async def test_order_landing_disagreeing_fails(self, pool):
+        async with scenario(pool) as conn:
+            await self._fresh_integrity_run(conn)
+            await dq_issue(conn, DQ_RUN_IDS[1], "pg_order_landing_disagree")
+            v, detail = await verdict(conn, self.FILE, dq_pg_warehouse_on="1")
+        assert v == "FAIL" and "pg_order_landing_disagree" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_order_landing_unwatched_fails(self, pool):
+        async with scenario(pool) as conn:
+            await self._fresh_integrity_run(conn)
+            await dq_issue(conn, DQ_RUN_IDS[1], "pg_order_landing_unwatched")
+            v, detail = await verdict(conn, self.FILE, dq_pg_warehouse_on="1")
+        assert v == "FAIL" and "pg_order_landing_unwatched" in detail, detail
+
+    @pytest.mark.asyncio
     async def test_a_duckdb_finding_without_its_twin_fails(self, pool):
         async with scenario(pool) as conn:
             await self._fresh_integrity_run(conn)

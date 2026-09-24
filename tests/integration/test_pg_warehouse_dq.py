@@ -1263,3 +1263,313 @@ class TestThePairingThroughTheJob:
         assert record["duckdb"]["looked"] == []
         assert record["duckdb"]["headline_vs_line_items"] is None
         assert record["postgres"]["headline_vs_line_items"] is not None
+
+
+# ─── DN-23: the order-landing twins over bronze.* ─────────────────────────────
+#
+# The database is shared with every other integration test, and these checks
+# read the whole of bronze. So each test reads the landing before and after
+# its own rows and asserts on the difference, exactly — a defect injected is
+# one more of its kind and nothing else moved, a clean row is nothing at all.
+
+LANDING = list(range(981001, 981060))
+
+
+@pytest_asyncio.fixture
+async def landing(pool):
+    async def clean():
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM bronze.order_products WHERE order_id = ANY($1::int[])",
+                               LANDING)
+            await conn.execute("DELETE FROM bronze.orders WHERE id = ANY($1::int[])", LANDING)
+
+    await clean()
+    yield pool
+    await clean()
+
+
+async def _order(conn, oid, *, total=100, status=1, group=None, source=1, dated=True,
+                 minutes_ago=120, items=1):
+    """One order as the mirror lands it: a header mirrored `minutes_ago`, and
+    `items` line items worth its total."""
+    at = datetime.now(timezone.utc) - timedelta(days=3)
+    await conn.execute(
+        "INSERT INTO bronze.orders (id, source_id, status_id, status_group_id, grand_total,"
+        " ordered_at, created_at, updated_at, mirrored_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$7,"
+        " now() - make_interval(mins => $8))",
+        oid, source, status, group, total, at if dated else None, at, minutes_ago)
+    for position in range(1, items + 1):
+        await conn.execute(
+            "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity, price_sold)"
+            " VALUES ($1, $2, NULL, 'dn23', 1, $3)", oid * 1000 + position, oid, total / items)
+
+
+async def _landing_facts(pool):
+    from core.pg_warehouse_dq import OrderLanding, read_facts
+
+    facts = await read_facts(pool=pool)
+    assert isinstance(facts.order_landing, OrderLanding), facts.order_landing
+    return facts
+
+
+def _delta(before, after):
+    from core.pg_warehouse_dq import landing_counts
+
+    b, a = landing_counts(before.order_landing), landing_counts(after.order_landing)
+    return {k: a[k] - b[k] for k in a if a[k] != b[k]}
+
+
+class TestTheLandingTwins:
+    @pytest.mark.asyncio
+    async def test_clean_orders_add_nothing(self, landing):
+        """Every shape a healthy landing holds: line items, a return in the
+        lost group and in the list, a status KeyCRM added and we registered
+        (24), the exhibition source (5), a zero-total shipment with no line
+        items, and a row synced before the group existed (NULL group, status
+        in the list)."""
+        before = await _landing_facts(landing)
+        async with landing.acquire() as conn:
+            await _order(conn, LANDING[0])
+            await _order(conn, LANDING[1], status=19, group=6, items=2)
+            await _order(conn, LANDING[2], status=24, group=2, source=5)
+            await _order(conn, LANDING[3], status=20, group=4, source=4)
+            await _order(conn, LANDING[4], total=0, items=0)
+            await _order(conn, LANDING[5], status=22, group=None)
+        after = await _landing_facts(landing)
+        assert after.order_landing == before.order_landing
+
+    @pytest.mark.asyncio
+    async def test_an_order_without_line_items_warns_and_the_one_in_flight_does_not(self, landing):
+        from core.data_quality import Severity
+
+        before = await _landing_facts(landing)
+        async with landing.acquire() as conn:
+            await _order(conn, LANDING[0], total=4321, items=0, minutes_ago=120)
+            await _order(conn, LANDING[1], total=50, items=0, minutes_ago=5)
+        after = await _landing_facts(landing)
+        ol = after.order_landing
+        assert ol.without_items - before.order_landing.without_items == 1
+        assert ol.without_items_in_flight - before.order_landing.without_items_in_flight == 1
+        assert _delta(before, after) == {"orders_without_line_items": 2}
+        issue = _judge(after)["pg_orders_without_line_items"]
+        assert issue.severity == Severity.WARN
+        assert LANDING[0] in issue.sample_ids and LANDING[1] not in issue.sample_ids
+
+    @pytest.mark.asyncio
+    async def test_a_line_item_with_no_order_is_critical(self, landing):
+        from core.data_quality import Severity
+
+        orphan = LANDING[10]
+        before = await _landing_facts(landing)
+        async with landing.acquire() as conn:
+            for position in (1, 2):
+                await conn.execute(
+                    "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity,"
+                    " price_sold) VALUES ($1, $2, NULL, 'dn23', 1, 10)",
+                    orphan * 1000 + position, orphan)
+        after = await _landing_facts(landing)
+        assert _delta(before, after) == {"fk_orphan_order_products_order_id": 2}
+        issue = _judge(after)["pg_fk_orphan_order_products_order_id"]
+        assert issue.severity == Severity.CRITICAL and orphan in issue.sample_ids
+
+    @pytest.mark.asyncio
+    async def test_an_order_with_no_date_is_critical(self, landing):
+        from core.data_quality import Severity
+
+        before = await _landing_facts(landing)
+        async with landing.acquire() as conn:
+            await _order(conn, LANDING[0], dated=False)
+        after = await _landing_facts(landing)
+        assert _delta(before, after) == {"not_null_orders_ordered_at": 1}
+        issue = _judge(after)["pg_not_null_orders_ordered_at"]
+        assert issue.severity == Severity.CRITICAL and LANDING[0] in issue.sample_ids
+
+    @pytest.mark.asyncio
+    async def test_a_status_keycrm_added_is_named(self, landing):
+        from core.data_quality import Severity
+
+        before = await _landing_facts(landing)
+        async with landing.acquire() as conn:
+            await _order(conn, LANDING[0], status=977, group=4)
+        after = await _landing_facts(landing)
+        assert _delta(before, after) == {"value_domain_orders_status_id": 1}
+        assert 977 in after.order_landing.unknown_status_values
+        issue = _judge(after)["pg_value_domain_orders_status_id"]
+        assert issue.severity == Severity.WARN and LANDING[0] in issue.sample_ids
+        assert "977" in issue.description
+
+    @pytest.mark.asyncio
+    async def test_a_source_nobody_registered_is_named(self, landing):
+        before = await _landing_facts(landing)
+        async with landing.acquire() as conn:
+            await _order(conn, LANDING[0], source=96)
+        after = await _landing_facts(landing)
+        assert _delta(before, after) == {"value_domain_orders_source_id": 1}
+        issue = _judge(after)["pg_value_domain_orders_source_id"]
+        assert LANDING[0] in issue.sample_ids and "96" in issue.description
+
+    @pytest.mark.asyncio
+    async def test_the_group_and_the_list_disagreeing_both_ways(self, landing):
+        """Status 20 in the lost group while the list calls it revenue, and 19
+        outside it while the list excludes it. A NULL group is not compared."""
+        before = await _landing_facts(landing)
+        async with landing.acquire() as conn:
+            await _order(conn, LANDING[0], status=20, group=6, total=300)
+            await _order(conn, LANDING[1], status=20, group=6, total=200)
+            await _order(conn, LANDING[2], status=19, group=4, total=50)
+            await _order(conn, LANDING[3], status=19, group=None)
+        after = await _landing_facts(landing)
+        assert _delta(before, after) == {"status_group_vs_return_list": 3}
+        pairs = {(s, g): n for s, g, n, _a in after.order_landing.status_groups}
+        old = {(s, g): n for s, g, n, _a in before.order_landing.status_groups}
+        assert pairs[(20, 6)] - old.get((20, 6), 0) == 2
+        assert pairs[(19, 4)] - old.get((19, 4), 0) == 1
+        issue = _judge(after)["pg_status_group_vs_return_list"]
+        assert {20, 19} <= set(issue.sample_ids)
+        assert "status 20 is KeyCRM group 6 but our list says revenue" in issue.description
+
+
+class TestTheLandingBlindness:
+    @pytest.mark.asyncio
+    async def test_a_broken_landing_query_blinds_that_group_alone(self, landing, monkeypatch):
+        from core import pg_warehouse_dq
+
+        monkeypatch.setattr(pg_warehouse_dq, "_ORPHAN_ITEMS_SQL",
+                            "SELECT no_such_column FROM bronze.order_products")
+        facts = await pg_warehouse_dq.read_facts(pool=landing)
+        assert isinstance(facts.order_landing, pg_warehouse_dq.Unwatched)
+        for group in ("silver_arc", "attribution", "line_items", "derivation_signal",
+                      "silver_row_values"):
+            assert not isinstance(getattr(facts, group), pg_warehouse_dq.Unwatched), group
+        held = []
+        issues = pg_warehouse_dq.check_pg_warehouse(facts, held_out=held)
+        names = {i.check_name for i in issues}
+        assert "pg_order_landing_unwatched" in names and "pg_warehouse_unwatched" not in names
+        assert set(held) == set(pg_warehouse_dq.GUARD_CONDITIONS["order_landing"])
+
+    @pytest.mark.asyncio
+    async def test_a_spent_budget_leaves_it_unwatched_and_the_groups_before_it_judged(
+        self, landing, monkeypatch,
+    ):
+        """Spent on the landing read itself, the recompute queued behind it is
+        blind too: two groups, one collapsed finding, and both groups' conditions
+        held — never `[]`."""
+        from core import pg_warehouse_dq
+
+        monkeypatch.setattr(pg_warehouse_dq, "HOLD_BUDGET_S", 2)
+        monkeypatch.setattr(pg_warehouse_dq, "_STATUS_GROUP_SQL",
+                            "SELECT pg_sleep(10), $1::int, $2::int[]")
+        facts = await asyncio.wait_for(pg_warehouse_dq.read_facts(pool=landing), timeout=30)
+        assert isinstance(facts.order_landing, pg_warehouse_dq.Unwatched)
+        assert "hold budget" in facts.order_landing.reason
+        for group in ("silver_arc", "attribution", "line_items", "derivation_signal"):
+            assert not isinstance(getattr(facts, group), pg_warehouse_dq.Unwatched), group
+        held = []
+        issues = pg_warehouse_dq.check_pg_warehouse(facts, held_out=held)
+        (blind,) = [i for i in issues if i.check_name == "pg_warehouse_unwatched"]
+        assert "order_landing" in blind.description
+        assert set(pg_warehouse_dq.GUARD_CONDITIONS["order_landing"]) <= set(held)
+
+    @pytest.mark.asyncio
+    async def test_history_not_backfilled_is_named_not_counted(self, landing):
+        from core.pg_warehouse_dq import Unwatched, read_facts
+
+        async with landing.acquire() as conn:
+            await _order(conn, LANDING[0], items=0)
+            await conn.execute("UPDATE meta.mirror_state SET backfilled_at = NULL"
+                               " WHERE table_name = 'bronze.orders'")
+        facts = await read_facts(pool=landing)
+        assert isinstance(facts.order_landing, Unwatched)
+        assert "backfilled" in facts.order_landing.reason
+
+
+class TestTheLandingThroughTheJob:
+    """The integrity job with the twins on, against an empty DuckDB: DuckDB
+    looks and finds nothing, so a Postgres defect is a disagreement, not a
+    second finding — and when DuckDB's half fails, the twin stands in and a
+    CRITICAL of its own pages."""
+
+    job = TestTheJobEndToEnd.job
+    _issues = TestTheJobEndToEnd._issues
+
+    async def _orphans(self, pool, n):
+        async with pool.acquire() as conn:
+            for position in range(1, n + 1):
+                await conn.execute(
+                    "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity,"
+                    " price_sold) VALUES ($1, $2, NULL, 'dn23', 1, 10)",
+                    LANDING[20] * 1000 + position, LANDING[20])
+
+    @pytest.mark.asyncio
+    async def test_duckdb_looking_the_twin_compares_and_holds_its_critical(
+        self, landing, job, monkeypatch,
+    ):
+        import json
+
+        scheduler, store, sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        in_flight = (await _landing_facts(landing)).watermark.in_flight
+        await self._orphans(landing, in_flight + 1)
+
+        result = await scheduler._run_dq_integrity()
+
+        issues = await self._issues(store, result["run_id"])
+        assert "pg_fk_orphan_order_products_order_id" not in issues      # compared, not filed
+        disagree = issues["pg_order_landing_disagree"]
+        assert disagree["severity"] == "WARN"
+        assert "fk_orphan_order_products_order_id: Postgres" in disagree["description"]
+        assert "pg_fk_orphan_order_products_order_id" not in [
+            c for call in sent.await_args_list for c in call.kwargs["conditions"]]
+        unverified = scheduler._resolve_dq_layer.await_args.kwargs["unverified"]
+        assert "pg_fk_orphan_order_products_order_id" in unverified       # the rows still stand
+        record = json.loads(issues["pg_twin_pairing"]["description"])
+        assert record["duckdb"]["fk_orphan_order_products_order_id"] == 0
+        assert record["postgres"]["fk_orphan_order_products_order_id"] >= in_flight + 1
+        assert record["standalone"]["pg_fk_orphan_order_products_order_id"] == (
+            record["postgres"]["fk_orphan_order_products_order_id"])
+        assert set(record["duckdb"]["looked"]) >= {
+            "orders_without_line_items", "fk_orphan_order_products_order_id",
+            "status_group_agreement"}
+
+    @pytest.mark.asyncio
+    async def test_duckdb_failing_the_twin_stands_in_and_pages(self, landing, job, monkeypatch):
+        scheduler, store, sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        await self._orphans(landing, 1)
+        resolve = AsyncMock(return_value=0)
+        with patch("core.data_quality.check_internal_integrity", side_effect=RuntimeError("duckdb")), \
+             patch("core.alerting.resolve_group", resolve):
+            result = await scheduler._run_dq_integrity()
+
+        issues = await self._issues(store, result["run_id"])
+        assert issues["pg_fk_orphan_order_products_order_id"]["severity"] == "CRITICAL"
+        assert "pg_order_landing_disagree" not in issues
+        assert "pg_fk_orphan_order_products_order_id" in sent.await_args.kwargs["conditions"]
+        (call,) = resolve.await_args_list
+        assert "pg_fk_orphan_order_products_order_id" in call.kwargs["still_firing"]
+
+    @pytest.mark.asyncio
+    async def test_a_status_group_guard_that_raised_is_stood_in_for_alone(
+        self, landing, job, monkeypatch,
+    ):
+        """DuckDB's status-group check raised and the scan finished: that twin
+        files its own finding, the bare ones still compare."""
+        from core import data_quality
+
+        scheduler, store, _sent = job
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        async with landing.acquire() as conn:
+            await _order(conn, LANDING[30], status=20, group=6)
+        real = data_quality.check_internal_integrity
+
+        def raising_status_group(conn, **kw):
+            out = real(conn, **kw)
+            kw["raised_out"].append("status_group_agreement")
+            return [i for i in out if i.check_name != "status_group_vs_return_list"]
+
+        with patch("core.data_quality.check_internal_integrity", side_effect=raising_status_group):
+            result = await scheduler._run_dq_integrity()
+        issues = await self._issues(store, result["run_id"])
+        assert "pg_status_group_vs_return_list" in issues
+        assert "status_group_vs_return_list" not in (
+            issues.get("pg_order_landing_disagree", {}).get("description") or "")
