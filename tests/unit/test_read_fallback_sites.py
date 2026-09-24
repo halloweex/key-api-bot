@@ -776,12 +776,12 @@ class TestThroughTheApp:
         assert health["read_fallback_mode"] == {
             "mode": "duckdb", "error": None, "misconfigured": []}
 
-    @pytest.mark.asyncio
-    async def test_an_unknown_value_starts_web_and_is_published(
-        self, fresh_read_fallback, monkeypatch,
+    def test_an_unknown_value_starts_web_and_is_published(
+        self, admin_client, fresh_read_fallback, monkeypatch,
     ):
         """The startup itself, with what it would do to the world stubbed:
-        a typo in KS_READ_FALLBACK must not be able to stop order intake."""
+        a typo in KS_READ_FALLBACK must not be able to stop order intake.
+        Then /api/health, which is where the canary reads it."""
         import web.main as main
 
         monkeypatch.setenv("KS_READ_FALLBACK", "offf")
@@ -799,11 +799,10 @@ class TestThroughTheApp:
         monkeypatch.setattr("core.prediction_service.get_prediction_service",
                             MagicMock(return_value=prediction))
 
-        await main.startup_event()
+        asyncio.run(main.startup_event())
+        main.init_and_sync.assert_awaited_once()  # it got past the modes
 
         assert fresh_read_fallback.mode() == "duckdb"
-        from web.routes.api.health import _read_fallback_mode
-
-        published = _read_fallback_mode()
+        published = admin_client.get("/api/health").json()["read_fallback_mode"]
         assert published["mode"] == "duckdb"
         assert "KS_READ_FALLBACK='offf'" in published["error"]
