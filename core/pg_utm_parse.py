@@ -256,6 +256,10 @@ async def parse_full(pool=None, *, force: bool = False) -> Dict[str, Any]:
     is wrong with Postgres, the input is what is wrong, and the table holding
     its previous verdicts is the correct state. It is still recorded in the
     watermark, so `failures_since_ok` says a full parse was turned away.
+
+    Takes `PG_LAYER_LOCK` itself, so it must never be called by code already
+    holding it: `asyncio.Lock` is not reentrant, and the call would wait out
+    `LOCK_WAIT_S` on itself and then fail.
     """
     from core.pg_landing import _record_failure
     from core.pg_silver import PG_LAYER_LOCK
