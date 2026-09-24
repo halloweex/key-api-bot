@@ -736,6 +736,12 @@ class AlertGate:
             self._dirty = True
             self._save(now, force=True)
 
+    def delivered_groups(self) -> "Dict[str, str | None]":
+        """`{condition_key: group}` for every condition whose fired notice was
+        delivered and whose clearing has not been announced — exactly what
+        `take_resolved` can take. A copy; reading it changes nothing."""
+        return {key: entry.get("group") for key, entry in self._delivered.items()}
+
     def take_resolved(
         self, group: str, still_firing: "Sequence[str]" = (),
         *, now: "float | None" = None, only_prefix: "str | None" = None,
@@ -775,6 +781,13 @@ _gate = AlertGate(state_path=_default_state_path())
 def reset_gate() -> None:
     """For tests and for a deliberate re-arm."""
     _gate.reset()
+
+
+def delivered_conditions() -> "Dict[str, str | None]":
+    """This process's delivered, not-yet-resolved conditions and the group
+    each was delivered under: what a `resolve_group` could announce. Local
+    state, no I/O."""
+    return _gate.delivered_groups()
 
 
 async def raise_alert(

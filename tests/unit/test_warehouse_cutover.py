@@ -180,6 +180,10 @@ def _breaking(key: str):
     elif key == "goals_bridge":
         facts = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
                          bridge_owners={"pg_managers_write": ("bronze.managers",)})
+    elif key == "retired_conditions_clear":
+        facts = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
+                         bridge_owners={},
+                         open_retired={"silver_missing_rows": "dq:integrity"})
     else:
         raise AssertionError(f"no way to break {key!r} — add one here")
     return env, facts
@@ -219,8 +223,9 @@ class TestTheEvaluator:
     def test_an_empty_environment_names_everything_it_can(self):
         unmet = wc.evaluate_preconditions({}, wc.Facts(
             revision_error="not asked: KS_PG_DSN is not set", bridge_owners={}))
-        assert [u.key for u in unmet] == [k for k in KEYS
-                                          if k not in ("mirror_landing", "goals_bridge")]
+        assert [u.key for u in unmet] == [
+            k for k in KEYS
+            if k not in ("mirror_landing", "goals_bridge", "retired_conditions_clear")]
 
     def test_a_detail_says_what_was_found_and_what_is_needed(self):
         env, facts = _breaking("utm_parse_postgres")
@@ -286,6 +291,104 @@ class TestEveryReadSwitchIsDecided:
     def test_the_sms_store_is_the_switch_the_sms_tab_reads(self):
         source = (REPO / "core" / "pg_sms.py").read_text(encoding="utf-8")
         assert '"KS_SMS_STORE"' in source
+
+
+# ─── A page under a retired check holds the switch ───────────────────────────
+
+
+class TestAPageUnderARetiredCheckHoldsTheSwitch:
+    """A stood-down check is not a raised one, so the first integrity run under
+    the switch holds none of its conditions and announces every page it had
+    delivered "✅ Resolved" — a recovery no check looked at. The switch waits
+    for there to be none (`retired_conditions_clear`) rather than holding them
+    for as long as Postgres derives."""
+
+    def test_they_are_the_stood_down_checks_conditions(self):
+        assert wc.retired_conditions() == {
+            "silver_missing_rows", "silver_orphan_rows", "silver_row_values",
+            "attribution_coverage_website", "gold_cell_values",
+            "headline_vs_line_items", "goods_shipped_without_sale"}
+
+    @staticmethod
+    def _still_firing(tmp_path, monkeypatch, mode):
+        """What the integrity job holds as firing, every stood-down check
+        raising if it is called at all — as one over a frozen table may."""
+        from core import data_quality as dq
+        from core.duckdb_store import DuckDBStore
+        from core.scheduler import BackgroundScheduler
+
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS",
+                    "KS_DQ_PG_WAREHOUSE"):
+            monkeypatch.delenv(env, raising=False)
+        monkeypatch.setattr(wc, "_mode", mode)
+        for fn in ("_silver_arc_check", "_attribution_coverage_check",
+                   "_gold_cell_values_check", "_headline_vs_line_items_check",
+                   "_goods_shipped_without_sale_check"):
+            monkeypatch.setattr(dq, fn, lambda *_a, **_k: (_ for _ in ()).throw(
+                RuntimeError("frozen")))
+        store = DuckDBStore(db_path=tmp_path / f"{mode}.duckdb")
+        asyncio.run(store.connect())
+        scheduler = BackgroundScheduler()
+        monkeypatch.setattr(scheduler, "_send_dq_alert_throttled",
+                            AsyncMock(return_value=True))
+        resolve = AsyncMock(return_value=0)
+        try:
+            with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
+                 patch("core.alerting.resolve_group", resolve):
+                asyncio.run(scheduler._run_dq_integrity())
+        finally:
+            asyncio.run(store.close())
+        (call,) = [c for c in resolve.await_args_list
+                   if c.args and c.args[0] == "dq:integrity"]
+        return set(call.kwargs["still_firing"])
+
+    def test_they_are_exactly_what_the_stand_down_stops_holding(self, tmp_path, monkeypatch):
+        """The review's reproduction as the definition: a raised check's
+        conditions are held, a stood-down one's are not, and the difference is
+        the set the precondition reads."""
+        held_when_raised = self._still_firing(tmp_path, monkeypatch, wc.DUCKDB)
+        held_when_stood_down = self._still_firing(tmp_path, monkeypatch, wc.POSTGRES)
+        assert held_when_raised - held_when_stood_down == wc.retired_conditions()
+
+    @staticmethod
+    def _unmet(**delivered):
+        from core.alerting import _gate
+
+        for key, group in delivered.items():
+            _gate.note_delivered_conditions([key], group)
+        facts = asyncio.run(wc.gather_facts({}))
+        return [u for u in wc.evaluate_preconditions(MET_ENV, facts)
+                if u.key == "retired_conditions_clear"]
+
+    def test_a_delivered_page_under_one_holds_it_and_is_named(self):
+        (u,) = self._unmet(silver_missing_rows="dq:integrity")
+        assert "silver_missing_rows (dq:integrity)" in u.detail
+
+    def test_whatever_group_delivered_it(self):
+        """`gold_cell_values` is also the mirror-landing Gold comparison's,
+        which DN-29 retires in the job itself."""
+        (u,) = self._unmet(gold_cell_values="dq:mirror_landing")
+        assert "gold_cell_values" in u.detail
+
+    def test_a_page_a_check_that_stays_up_owns_is_not_its_business(self):
+        assert self._unmet(inventory_snapshot_gaps="dq:integrity",
+                           pg_silver_missing_rows="dq:integrity") == []
+
+    def test_once_announced_resolved_it_holds_nothing(self):
+        from core.alerting import _gate
+
+        _gate.note_delivered_conditions(["silver_row_values"], "dq:integrity")
+        assert set(_gate.take_resolved("dq:integrity")) == {"silver_row_values"}
+        assert self._unmet() == []
+
+    def test_an_unreadable_gate_is_unmet_by_its_class(self):
+        with patch("core.alerting.delivered_conditions",
+                   side_effect=RuntimeError("state at /secret/path")):
+            facts = asyncio.run(wc.gather_facts({}))
+        assert facts.open_retired is None and facts.open_retired_error == "RuntimeError"
+        (u,) = [u for u in wc.evaluate_preconditions(MET_ENV, facts)
+                if u.key == "retired_conditions_clear"]
+        assert "RuntimeError" in u.detail and "/secret/path" not in u.detail
 
 
 # ─── The DN-12 tripwire, at run time ─────────────────────────────────────────

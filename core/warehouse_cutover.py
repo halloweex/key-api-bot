@@ -116,9 +116,13 @@ def writes_postgres() -> bool:
 # mirror-landing comparisons that set DuckDB's Silver and Gold against
 # Postgres', which DN-29 retires in the job itself.
 #
-# Stood down is not blind: the scan does not report these as raised, so a page
-# one of them delivered resolves once — `pg_warehouse_dq`'s rule for a flag
-# switched off. The twins open their own series under their `pg_` names.
+# Stood down is not raised: the scan does not report these through
+# `raised_out`, so on the first run under the stand-down a page one of them
+# delivered would be announced "✅ Resolved" with no check looking at it. The
+# switch therefore waits for there to be none — `retired_conditions_clear`
+# below — rather than holding them: nothing will ever re-examine a retired
+# check's condition, so a held page would stand open for as long as Postgres
+# derives. The twins open their own series under their `pg_` names.
 STOOD_DOWN_WHEN_POSTGRES: FrozenSet[str] = frozenset({
     "silver_arc",
     "attribution_coverage",
@@ -132,6 +136,53 @@ def stood_down_duckdb_checks() -> FrozenSet[str]:
     """The DuckDB integrity checks that do not run, and that the twins do not
     compare against, in this process. Empty unless Postgres alone derives."""
     return STOOD_DOWN_WHEN_POSTGRES if writes_postgres() else frozenset()
+
+
+# ─── What the stood-down checks leave behind ─────────────────────────────────
+#
+# `_resolve_dq_layer` holds a condition only when a check in the run raised or
+# said it was not watching; a stood-down check did neither, so every page it
+# delivered resolves on the first run after the switch — a recovery nobody
+# verified (the silent-green attack on PR 13, DUCKDB_EXIT_CHAIN2_DESIGN.md).
+# Two answers were open. Holding those conditions, as for a raised check, is
+# the worse one: nothing re-examines a retired check again, so the page would
+# stand open for as long as Postgres derives — in the digest's tail every
+# morning, escalated once — and could only resolve on a rollback. The switch
+# waits instead, while the DuckDB check still runs and can clear it, so the
+# last verdict a retired check gives is a verified one.
+#
+# Read from the Alert Gate's delivered map, not from `app.alert_series`: the
+# map is what `resolve_group` takes from and announces, so it is exact. The
+# ledger is a copy that can disagree both ways — its fired row is written
+# fire-and-forget, so a delivered page can be missing from it, which is the
+# case that matters; and a gate re-armed by `reset_gate` leaves a series
+# firing there that no resolve can close until it fires again — a clean check
+# never does — which would hold the switch for good over a page the stand-down
+# cannot announce.
+
+
+def retired_conditions() -> FrozenSet[str]:
+    """The conditions the stood-down checks report, from the table the
+    integrity job holds a raised check's conditions by — one source, so a
+    condition added to a stood-down check is covered here too."""
+    from core.data_quality import GUARDED_CHECK_CONDITIONS
+
+    return frozenset(condition for guard in STOOD_DOWN_WHEN_POSTGRES
+                     for condition in GUARDED_CHECK_CONDITIONS[guard])
+
+
+def open_retired_conditions() -> Dict[str, Optional[str]]:
+    """`{condition: group}` for every page under a retired condition that was
+    delivered and not yet announced resolved, in this process's Alert Gate —
+    the one `resolve_group` would announce from. Whatever group delivered it:
+    DN-29 retires the mirror-landing comparisons too, and `gold_cell_values` is
+    one of theirs. Local state, no I/O; raises only if the gate cannot be
+    read, which `gather_facts` reports as unmet."""
+    from core.alerting import delivered_conditions
+
+    retired = retired_conditions()
+    return {key: group for key, group in delivered_conditions().items()
+            if key in retired}
 
 
 # ─── The preconditions ───────────────────────────────────────────────────────
@@ -187,6 +238,8 @@ PRECONDITIONS: Tuple[Tuple[str, str], ...] = (
     ("ch_url", f"{CH_URL} set"),
     ("goals_bridge", "no write chain owns a table the goal calculators' "
                      "bridge reads from DuckDB (DN-12)"),
+    ("retired_conditions_clear", "no delivered page open under a condition "
+                                 "only a stood-down check re-examines"),
 )
 
 # How long the readiness waits for Postgres to say its revision. A status page
@@ -205,12 +258,15 @@ class Facts:
     """What the environment cannot say. `revision` is what Postgres answered,
     None with `revision_error` when it could not be asked or did not answer.
     `bridge_owners` is None with `bridge_error` when the registry could not be
-    read."""
+    read; `open_retired` likewise with `open_retired_error` when the Alert
+    Gate could not."""
     revision: Optional[str] = None
     revision_error: Optional[str] = None
     required_revision: Optional[str] = None
     bridge_owners: Optional[Mapping[str, Tuple[str, ...]]] = field(default_factory=dict)
     bridge_error: Optional[str] = None
+    open_retired: Optional[Mapping[str, Optional[str]]] = field(default_factory=dict)
+    open_retired_error: Optional[str] = None
 
 
 def _read(env: Mapping[str, str], name: str, default: str = "") -> str:
@@ -265,6 +321,17 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
         need("goals_bridge", not facts.bridge_owners,
              f"write chain(s) own tables the goal calculators still read from "
              f"DuckDB — {owned}. Port chain 7b first.")
+
+    if facts.open_retired is None:
+        need("retired_conditions_clear", False,
+             f"the Alert Gate could not be read: {facts.open_retired_error}")
+    else:
+        pages = ", ".join(f"{key} ({group or 'no group'})"
+                          for key, group in sorted(facts.open_retired.items()))
+        need("retired_conditions_clear", not facts.open_retired,
+             f"page(s) open under a check the switch stands down — {pages}. "
+             "The first run after it would announce them resolved with no check "
+             "looking; let the DuckDB checks clear them first.")
     return unmet
 
 
@@ -299,9 +366,19 @@ async def gather_facts(env: Optional[Mapping[str, str]] = None) -> Facts:
     except Exception as exc:  # noqa: BLE001 — reported as unmet, by why
         owners, bridge_error = None, f"{type(exc).__name__}: {exc}"
 
+    open_retired: Optional[Mapping[str, Optional[str]]]
+    open_retired_error = None
+    try:
+        open_retired = open_retired_conditions()
+    except Exception as exc:  # noqa: BLE001 — reported as unmet, by class
+        logger.error("cutover readiness: the Alert Gate could not be read: %s: %s",
+                     type(exc).__name__, exc)
+        open_retired, open_retired_error = None, type(exc).__name__
+
     return Facts(revision=revision, revision_error=revision_error,
                  required_revision=REQUIRED_REVISION,
-                 bridge_owners=owners, bridge_error=bridge_error)
+                 bridge_owners=owners, bridge_error=bridge_error,
+                 open_retired=open_retired, open_retired_error=open_retired_error)
 
 
 def status() -> Dict[str, Any]:

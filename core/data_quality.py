@@ -1504,8 +1504,12 @@ def check_internal_integrity(
     checks over Silver, Gold and UTM once Postgres alone derives them
     (`core.warehouse_cutover.stood_down_duckdb_checks()`, which is what None
     asks). A stood-down check is not a raised one: it files nothing, is not
-    named in `integrity_check_raised`, and its conditions resolve rather than
-    being held — the Postgres twins open their own. Empty in this build.
+    named in `integrity_check_raised`, and its conditions are not held — the
+    Postgres twins open their own. That would announce a delivered page of
+    theirs "✅ Resolved" with nobody looking, so the switch does not happen
+    while one is open (`retired_conditions_clear` in
+    `core.warehouse_cutover`, which says why holding them was the worse
+    answer). Empty in this build.
 
     Cheap by design: only DB scans, no external I/O. Suitable for running
     every few hours alongside the heavier reconciliation job.
