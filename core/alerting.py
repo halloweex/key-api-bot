@@ -279,6 +279,16 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # run, which nothing clears.
     "pg_signal_missed": _c("a day of derivation runs in which every orders write raised its mark"),
     "pg_derivation_signal_unwatched": _c("the twins read the derivation journal again"),
+    # DN-23: the twins of DuckDB's checks over landing itself, read over
+    # bronze.orders and bronze.order_products.
+    "pg_orders_without_line_items": _c("the orders' line items land in bronze.order_products"),
+    "pg_fk_orphan_order_products_order_id": _c("the parent orders land in bronze.orders"),
+    "pg_not_null_orders_ordered_at": _c("the rows carry an ordered_at again"),
+    "pg_value_domain_orders_status_id": _c("the unknown status ids are registered or gone"),
+    "pg_value_domain_orders_source_id": _c("the unknown source ids are registered or gone"),
+    "pg_status_group_vs_return_list": _c("the stored group and the legacy list agree in bronze"),
+    "pg_order_landing_disagree": _c("both engines count the same landing findings"),
+    "pg_order_landing_unwatched": _c("the twins read bronze.orders and its line items again"),
     "pg_twin_pairing": _EVENT,
     "pg_warehouse_unwatched": _c("the twins read their snapshot again"),
     "pg_warehouse_dq_flag_invalid": _c("web restarts with a valid KS_DQ_PG_WAREHOUSE"),
