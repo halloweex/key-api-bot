@@ -125,6 +125,23 @@ CHAIN_TABLES: Tuple[str, ...] = (
 # `meta.chain_watermarks` — revision 0032 says why not `app.sync_metadata`.
 CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_offers", "last_sync_stocks")
 
+# The transaction-scoped advisory lock every rebuild and snapshot of this chain
+# takes first (DN-24). 'ks' in the high half and the chain's number in the low,
+# so `pg_locks` shows it as classid 0x6B730000 (1802698752), objid 1.
+#
+# WHY A DATABASE LOCK, WHEN THE SCHEDULER ALREADY HAS ONE
+#
+# The stock step runs under the scheduler's `_heavy_job_lock`; the 01:00
+# `inventory_snapshot` job, its boot catch-up and `POST /api/inventory/snapshot`
+# do not. In DuckDB that never mattered, because the store's own lock admits
+# one writer. In Postgres two rebuilds can interleave: the second one's DELETE
+# cannot see the rows the first is inserting, so its own INSERT then collides
+# with them on `offer_id` and the whole rebuild raises. The snapshots have the
+# same shape one level down — both callers pass the "already taken today?"
+# guard before either has committed. Held for the transaction and released by
+# COMMIT or ROLLBACK, so a writer that dies cannot leave it behind.
+CHAIN_LOCK_KEY = 0x6B73_0000_0000_0001
+
 
 def env_writes_postgres() -> bool:
     """What `KS_WRITE_INVENTORY` alone says.
@@ -170,6 +187,16 @@ def _latch() -> str:
     written — the chain's whole pre-flip rehearsal spent on an error.
     """
     return chain_latch.latch(CHAIN, WRITE_ENV)
+
+
+async def _chain_lock(conn) -> None:
+    """Wait for any other rebuild or snapshot of this chain to commit.
+
+    The first statement of each transaction that takes it — before the owner
+    rows and before anything is read — so the second of two callers reads the
+    state the first one committed, rather than one it is about to replace.
+    """
+    await conn.execute("SELECT pg_advisory_xact_lock($1)", CHAIN_LOCK_KEY)
 
 
 def _insert(table: str, columns: Sequence[str]) -> str:
@@ -327,6 +354,11 @@ async def rebuild_sku_inventory_status() -> int:
     belongs to this transaction and cannot outlive it, so the "left behind by
     an interrupted call" case the DuckDB version guards against cannot arise
     here at all.
+
+    Serialised by `_chain_lock` (DN-24): the stock step and the 01:00 snapshot
+    job both call this, only one of them holds the scheduler's heavy lock, and
+    two rebuilds interleaved in Postgres end with the second one's INSERT
+    colliding with the first one's rows.
     """
     from core.pg import get_pool, require_revision
 
@@ -335,6 +367,7 @@ async def rebuild_sku_inventory_status() -> int:
     stamp = _latch()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await _chain_lock(conn)
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             try:
                 await conn.execute(
@@ -364,7 +397,10 @@ async def record_sku_inventory_snapshot(today: Optional[date] = None) -> bool:
 
     The guard and the insert are one transaction, unlike the DuckDB original
     where they are two autocommit statements — two ticks arriving together
-    there can both pass the guard. Postgres makes that free, so it is taken.
+    there can both pass the guard. One transaction is not enough on its own
+    under READ COMMITTED: both could still pass the guard before either had
+    committed, and the second would die on the primary key. `_chain_lock` is
+    what makes the second one wait and then find today already taken.
     """
     from core.pg import get_pool, require_revision
 
@@ -373,6 +409,7 @@ async def record_sku_inventory_snapshot(today: Optional[date] = None) -> bool:
     stamp = _latch()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await _chain_lock(conn)
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             day = today or await conn.fetchval(
                 "SELECT (now() AT TIME ZONE 'Europe/Kyiv')::date")
@@ -407,6 +444,7 @@ async def record_inventory_snapshot(
     stamp = _latch()
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await _chain_lock(conn)
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             day = today or await conn.fetchval(
                 "SELECT (now() AT TIME ZONE 'Europe/Kyiv')::date")
