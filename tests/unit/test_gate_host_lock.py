@@ -51,3 +51,18 @@ def test_every_gate_waits_for_the_lock_before_it_touches_a_store():
             f"{path.name}: cleanup runs before the lock, so it can remove another run's stores")
         assert first_run is not None and wait < first_run, (
             f"{path.name}: a store starts before the lock")
+
+
+def test_every_gate_installs_the_migration_tools_at_the_locks_versions():
+    """An unpinned `pip install alembic` pulled a SQLAlchemy that no longer
+    brings greenlet, and on 2026-09-25 every gate died at the migration with
+    the suite never started. Each gate's migrate step installs alembic under
+    the lock's constraints, with the extra that carries greenlet."""
+    for path, text in _gates():
+        code = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
+        installs = [l for l in code if "pip install" in l and "alembic" in l]
+        assert installs, f"{path.name}: no alembic install found"
+        for line in installs:
+            assert "-c /app/requirements-dev.lock" in line, f"{path.name}: {line.strip()}"
+            assert "sqlalchemy[asyncio]" in line, f"{path.name}: {line.strip()}"
+        assert "requirements-dev.lock:/app/requirements-dev.lock:ro" in text, path.name
