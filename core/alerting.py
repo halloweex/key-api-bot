@@ -213,7 +213,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # answer — the marker, or the flag — says a write chain owns the table
     # (DN-22a for the orders, DN-22b for the catalogue, expenses, buyers and
     # the classification), and its shipper stopped on the same answer. A
-    # decision somebody took, not a fault. Filed on that answer only.
+    # decision somebody took, not a fault. Also filed on the owner rows alone
+    # for the buyers and the classification, whose shippers read them too and
+    # have stopped: the table is not being damaged, and the latch that is wrong
+    # has its own page (chain_latch_disagrees / chain_owner_unregistered).
     "mirror_stood_down": _c(
         "the chain hands its tables back to DuckDB, or its flag returns "
         "to duckdb before it ever latched"),
@@ -224,10 +227,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "order_owner_row_without_marker": _c(
         "the marker is back, or scripts/chain_copy_back.py releases the owner "
         "rows — a human, not a job"),
-    # The same fault on every other landing and replicated table (DN-22b): the
-    # sync's shippers — the catalogue and expense mirrors, the buyers mirror,
-    # the classification copy — ask the local answer alone and so still ship
-    # over the chain's rows. Never clears by itself.
+    # The same fault on the catalogue and the order-level expenses (DN-22b):
+    # their per-tick mirror asks the local answer alone and so still ships
+    # over the chain's rows. The buyers mirror and the classification copy
+    # read the owner rows too since the DN-22b review, so they file
+    # mirror_stood_down instead. Never clears by itself.
     "owner_row_without_marker": _c(
         "the marker is back, or scripts/chain_copy_back.py releases the owner "
         "rows — a human, not a job"),

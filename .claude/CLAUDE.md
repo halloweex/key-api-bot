@@ -2357,7 +2357,8 @@ The disagreement is never silent — `/api/health` publishes `latched`,
 `latched_at` and `mismatch` per chain, the canary pages `write_chain_flag_mismatch`
 (WARN) within one probe, the shipper stamps the chain's tables failing, and the
 daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
-(both CRITICAL). Today nothing is latched: `app.manual_expenses` holds zero
+(both CRITICAL) — and `chain_owner_unregistered` for an owner row no chain in
+the running build declares. Today nothing is latched: `app.manual_expenses` holds zero
 rows, so chain 8's flag can still be moved freely, and the first typed expense
 ends that.
 
@@ -2686,10 +2687,17 @@ generic home, `core.pg_landing.tables_stood_down(unit)` (the local answer) and
 `tables_stood_down_or_owned(pool, unit)` (plus the owner rows, read as
 themselves too), and the order helpers are its `ORDER_UNIT` case.
 
-- **The sync's shippers** — `_mirror` (products, categories, expenses, from
-  every sync site), `mirror_buyers`, `replicate_managers` — skip with
-  `stood down: a write chain owns …` on the local answer, before DuckDB or
-  Postgres is read.
+- **The sync's shippers** skip with `stood down: a write chain owns …`.
+  `_mirror` (products, categories, expenses, from every sync site) asks the
+  local answer alone: it is the per-tick write path, like the orders mirror.
+  `replicate_managers` and `mirror_buyers` ask it first and then, after
+  `require_revision()`, the owner rows — both before DuckDB is read, the
+  buyers only for a batch that has rows. The review reproduced why: with the
+  marker lost, the classification copy's full replace deleted every interval
+  a human had set in Postgres the first time it ran, hours before the page.
+  It runs from the daily sync and stats job, at startup and on an admin
+  click, so the per-tick argument never applied. An owner read that fails is
+  a failure there like any other — nothing shipped, counted, stamped.
 - **The backfills** (`backfill_buyers`, `backfill_expenses`) refuse; their
   **hourly diffs** return `{"stood_down": [...]}` without an ERROR;
   `POST /api/mirror/backfill/expenses` answers 409 (503 when the owner rows
@@ -2697,9 +2705,22 @@ themselves too), and the order helpers are its `ORDER_UNIT` case.
   after `require_revision()`.
 - **The comparisons** — `reconcile_mirror`, `reconcile_expenses`,
   `reconcile_buyers` — file `mirror_stood_down` (INFO) per table on the local
-  answer, and `owner_row_without_marker` (CRITICAL) on the owner rows alone,
-  because every sync shipper asks only the local answer and is still writing
-  over the chain's rows.
+  answer. On the owner rows alone the answer follows the shipper
+  (`pg_landing.sync_reads_the_owner_rows`): the catalogue and expenses, whose
+  per-tick mirror is still writing over the chain's rows, are
+  `owner_row_without_marker` (CRITICAL); the buyers and the classification,
+  whose shippers have stopped, are `mirror_stood_down` (INFO) naming the
+  latch's own page. A test checks each claim against what its shipper does.
+- **The operational pair reads each owner row as itself too.**
+  `replicate_operational` and `reconcile_operational` expanded owner rows
+  through the registered chains alone, so on an image older than chain 4 the
+  hourly full replace put DuckDB's `app.buyer_gender` over the chain's
+  verdicts, human overrides included, while the buyers' own paths stood down
+  — and the two copies then agreed. Both now stand down on
+  `chain_latch.owned_tables` (the one union every owner-reading path uses),
+  and `reconcile_operational` files **`chain_owner_unregistered`**
+  (CRITICAL, one finding) for owner rows no chain in the build declares. It is
+  not stamped on the watermark: only a later shipment could clear it.
 - **A unit stands down whole**: the buyers with their contacts, the managers
   with their classifications, the orders with their line items. The units are
   what one writer writes in one transaction; `tests/unit/test_write_chains.py`
@@ -2716,9 +2737,23 @@ only from functions that do (`write_orders`, `pg_buyers._write`,
 registered chains, the alert journal, ClickHouse, the Postgres-derived layers,
 and three replicators that stand down on a switch of their own (the walk checks
 each evaluates it). Every comparison that reads a spec's Postgres copy of our
-tables is walked the same way. Two limits, named: a statement routed through a
-helper that renders its own target (`_users_run`) is not seen, and a target
-held on an object attribute (`dialect.silver_orders`) reads as unknown.
+tables is walked the same way.
+
+The review found two writers it passed, and the walk reads both now: a helper
+that transforms the statement it is handed (`conn.execute(numbered(sql))`, or
+hands it on — `_users_run` → `execute(rendered)`), which counts as an executor
+when its statement carries one of its parameters, to a fixed point; and
+`copy_records_to_table`/`copy_to_table`, read by `schema_name` (absent or
+unresolved counts). That also made `_users_run`'s writers visible, so the three
+store helpers that route by a switch of their own (`_sms_run`, `_users_run`,
+`_perms_run`) exempt what goes only through them, each checked to read its
+switch. And "holding a pool" means reaching `get_pool` through a callee too —
+`replicate_managers` held it inside `write_managers`, where the walk did not
+look — with `_mirror` and `upsert_orders` the two named per-tick exemptions.
+Limits that remain: a target held on an object attribute
+(`dialect.silver_orders`) reads as unknown, statements kept in a container
+constant (a dict of SQL) are not rendered, and DuckDB SQL beside a Postgres
+call in one function reads as Postgres's (why `copy_back` is exempt).
 
 **The order watches do not learn the stand-down — chain 3 writes through
 `write_orders`.** DN-22a's review asked what happens to the canary's
@@ -2737,9 +2772,11 @@ Production today stands nothing down: no chain declares any of these tables
 and no owner row names one, so the per-tick shippers read no variable and no
 file. What does run is an owner read after a revision check — in each hourly
 diff and again in the backfill it calls, in each of the three daily
-comparisons, and in the expenses route — and none of them finds a row that
-names these tables. The retail-status route now warns only on a replica that
-failed, not on one that was skipped.
+comparisons, in the expenses route, in every classification copy and in the
+buyers mirror when a sync fetched new buyers — and none of them finds a row
+that names these tables; `chain_owner_unregistered` has nothing to report. The
+retail-status route now warns only on a replica that failed, not on one that
+was skipped.
 
 ## TODO: Full DuckDB Resync Solution
 

@@ -1868,8 +1868,9 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "POST /api/mirror/backfill/<orders|expenses> for the table named, "
      "then wait for 07:30"),
     # The generic `mirror_` line would send the reader to a re-ship the stand
-    # down exists to prevent. Filed on the local answer only — the marker or
-    # the flag — where the sync's mirror has stopped too.
+    # down exists to prevent. Filed wherever the sync's shipper has stopped
+    # too: on the local answer, and on the owner rows alone for the buyers and
+    # the classification, whose latch fault is paged under its own name.
     ("mirror_stood_down",
      "Not a defect: a write chain owns the table. Never backfill it from DuckDB"),
     # The owner rows alone: the sync's mirror has NOT stopped, and every tick
@@ -1877,7 +1878,8 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("order_owner_row_without_marker",
      "Sync overwrites chain-owned orders each tick: restore data/write-chain-owners "
      "(or redeploy the chain's build), else scripts/chain_copy_back.py"),
-    # The same, for the catalogue, expenses, buyers and classification (DN-22b).
+    # The same, for the catalogue and the order-level expenses (DN-22b), whose
+    # per-tick mirror asks the local answer alone.
     ("owner_row_without_marker",
      "Sync overwrites chain-owned rows each run: restore data/write-chain-owners "
      "(or redeploy the chain's build), else scripts/chain_copy_back.py"),
