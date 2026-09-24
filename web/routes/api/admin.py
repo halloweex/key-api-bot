@@ -520,13 +520,23 @@ async def sync_buyers(
     try:
         sync_service = await get_sync_service()
         count = await sync_service.sync_missing_buyers(limit=limit)
-        return {
-            "status": "success",
-            "message": f"Synced {count} buyers from KeyCRM",
-            "buyers_synced": count,
-        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Buyer sync failed: {str(e)}")
+
+    # The step never raises any more — it records a failure and returns 0 — so
+    # "0 synced" and "failed" would read the same here without this. The class
+    # only, as on /api/health: the text of a write error can carry a buyer's data.
+    state = sync_service.buyer_sync_state
+    if state.last_ok_at is None or state.last_ok_at < state.last_attempt_at:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Buyer sync failed: {state.last_error_class}; "
+                   f"the watermark was not moved. See web's log.")
+    return {
+        "status": "success",
+        "message": f"Synced {count} buyers from KeyCRM",
+        "buyers_synced": count,
+    }
 
 
 @router.post("/duckdb/sync-all-buyers")

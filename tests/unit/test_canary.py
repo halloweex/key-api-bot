@@ -537,3 +537,59 @@ async def test_run_canary_warns_on_a_derivation_mode_web_did_not_understand():
             result = await run_canary(DASHBOARD, client=client)
     assert result.severity == "warn"
     assert result.failure_keys == ["derivation_mode_invalid"]
+
+
+# ─── the buyers step (chain 4, PR-1) ─────────────────────────────────────────
+
+class TestBuyerSync:
+    """`buyer_sync` is the buyers step of the incremental tick. Warn when it has
+    not succeeded for 90 minutes or has failed three times in a row for a reason
+    that is neither KeyCRM nor the data; stay quiet about an absent block."""
+
+    @staticmethod
+    def _block(**kw):
+        block = {"last_ok_age_s": 600, "ever_ok": True, "consecutive_failures": 0,
+                 "last_error_class": None, "retry_in_s": None}
+        block.update(kw)
+        return {"buyer_sync": block}
+
+    def test_an_absent_or_null_block_is_not_judged(self):
+        assert canary.check_buyer_sync({}) == []
+        assert canary.check_buyer_sync({"buyer_sync": None}) == []
+        assert canary.check_buyer_sync(None) == []
+
+    def test_a_healthy_step_is_quiet(self):
+        assert canary.check_buyer_sync(self._block()) == []
+        # Two failures and a young success are the retry window doing its job.
+        assert canary.check_buyer_sync(self._block(consecutive_failures=2)) == []
+
+    def test_three_failures_in_a_row_warn(self):
+        [(key, message)] = canary.check_buyer_sync(
+            self._block(consecutive_failures=3, last_error_class="RuntimeError"))
+        assert key == "buyer_sync_stalled"
+        assert "3 failures" in message and "RuntimeError" in message
+
+    def test_no_success_for_ninety_minutes_warns(self):
+        stale = canary.BUYER_SYNC_STALE_S + 1
+        [(key, message)] = canary.check_buyer_sync(self._block(last_ok_age_s=stale))
+        assert key == "buyer_sync_stalled"
+        assert canary.check_buyer_sync(
+            self._block(last_ok_age_s=canary.BUYER_SYNC_STALE_S)) == []
+
+    @pytest.mark.asyncio
+    async def test_it_pages_through_run_canary_as_a_warning(self):
+        payload = _healthy_payload()
+        payload.update(self._block(consecutive_failures=5, last_error_class="OSError"))
+
+        def handler(request):
+            return httpx.Response(200, json=payload)
+
+        future = datetime.now(timezone.utc) + timedelta(days=60)
+        fake_cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+        async with _mock_transport(handler) as client:
+            with patch.object(canary, "_fetch_peer_cert", return_value=fake_cert):
+                result = await run_canary(DASHBOARD, client=client)
+
+        assert result.severity == "warn"
+        assert "buyer_sync_stalled" in result.failure_keys
+        assert "Buyer sync" in canary._what_to_do(result)
