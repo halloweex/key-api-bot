@@ -1,16 +1,17 @@
-"""Where a refusal goes when no swept HTTP request is waiting for it (DN-20b).
+"""Where a refusal goes when no swept HTTP request is waiting for it
+(DN-20b), and where it stops (DN-20c).
 
 Under `KS_READ_FALLBACK=off` a router raises `ReadUnavailable`, and one place
 raises for every caller. An HTTP GET route turns it into a 503 naming the
 surface, and `tests/unit/test_read_fallback_http.py` proves that for every
-such route by running it. Everything else that can reach a refusing router is
-DN-20c's to answer, and until DN-20c lands a refusal arriving there is an
-exception like any other. That list used to be remembered — "the weekly
-reports, the assistant, training, the sync" — and it missed the Monday goals
-job: `seasonality_calc` reaches `_goals_run` through
-`calculate_suggested_goals`, and under `off` with Postgres down it wrote
-`seasonal_indices`, then raised before `calculate_yoy_growth` ran, leaving
-the shared goal tables half updated.
+such route by running it. Everything else that can reach a refusing router
+answers it itself (DN-20c) — `test_read_fallback_off_consumers.py` runs each
+answer. That list used to be remembered — "the weekly reports, the
+assistant, training, the sync" — and it missed the Monday goals job:
+`seasonality_calc` reaches `_goals_run` through `calculate_suggested_goals`,
+and under `off` with Postgres down it wrote `seasonal_indices`, then raised
+before `calculate_yoy_growth` ran, leaving the shared goal tables half
+updated. It now asks that read first.
 
 So the list is derived here. The walk starts at every function that refuses —
 a call to `fall_back`, `no_address` or `no_engine` — and follows callers up
@@ -26,6 +27,20 @@ script's `__main__` invokes it by reference. Each entry point is then one of:
 
 Both pins are **derived and then compared**: a new consumer fails this test
 until somebody writes it down, which is the moment to decide what it answers.
+
+WHERE EACH ONE STOPS (DN-20c)
+
+Then the walk goes back down from each consumer, following every edge
+through the `try` its call sits in, and finds the handler that keeps the
+refusal in: one naming `ReadUnavailable` (the jobs' deferrals, the
+assistant's `data_unavailable`), or an `except Exception` that already
+contained every failure of its step (the buyers step, the boot's). No
+consumer may let a refusal out as an exception, where each one stops is
+pinned (`ANSWERS`, and `UNSWEPT_STOPS` for the writing routes), and a named
+answer may sit only in a function reached from those consumers alone — the
+exemption `test_read_fallback_http.py` makes from its rule that a handler
+naming the refusal must raise it. What the walk cannot see is order: that
+the goals job asks before it writes is proved by running it.
 
 WHAT THE WALK RESOLVES, AND WHAT IT CANNOT
 
