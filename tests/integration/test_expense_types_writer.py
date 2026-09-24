@@ -352,9 +352,9 @@ class TestTheStandingWatch:
                 f"UPDATE {TABLE} SET name = 'dictionaries.expense_types.kind_5' "
                 "WHERE id IN (5, 11)")
             # An underscore is LIKE's wildcard; a name that differs from the
-            # prefix only there must not be counted.
+            # prefix only there is a display name and must not be counted.
             await conn.execute(
-                f"UPDATE {TABLE} SET name = 'dictionariesXexpenseYtypesZkind' WHERE id = 7")
+                f"UPDATE {TABLE} SET name = 'dictionaries.expenseXtypes.kind' WHERE id = 7")
         found, _ = await self._findings(pool)
         issue = found[inv.NAME_UNRESOLVED]
         assert issue.count == 2 and issue.sample_ids == (5, 11)
