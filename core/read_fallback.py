@@ -298,6 +298,27 @@ def no_address(surface: str, switch: Any) -> None:
         _refuse(surface, line, None)
 
 
+READ_UNAVAILABLE = "read_unavailable"
+
+
+def answered(consumer: str, exc: ReadUnavailable, answer: str) -> Dict[str, str]:
+    """`consumer` received a refusal that no HTTP request is waiting for, and
+    answered it itself (DN-20c). Returns the fields its result carries.
+
+    `consumer` names the caller as a reader of the job list would —
+    `weekly_report`, `revenue_prediction` — and `answer` says in words what
+    it did instead of reading DuckDB: deferred, kept the previous model,
+    skipped the step. The refusal itself was logged at ERROR and counted
+    where it was raised (`read_fallback_mode.refused`), so this line says
+    only what became of it, at WARNING, and never the phrase the soak greps
+    for. The returned `{"reason", "surface"}` goes into the consumer's own
+    result, so `/api/jobs` history shows a refusal rather than a quiet run.
+    """
+    logger.warning("refused read answered by %s (%s): %s",
+                   consumer, exc.surface, answer)
+    return {"reason": READ_UNAVAILABLE, "surface": exc.surface}
+
+
 def counts() -> Dict[str, Dict[str, object]]:
     """`{surface: {count, last_at}}` — reads answered from DuckDB since this
     process started. A copy."""

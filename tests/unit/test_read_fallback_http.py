@@ -649,6 +649,29 @@ def swallowing_handlers(source: str) -> List[int]:
             and _names_read_unavailable(node) and not _lets_it_through(node)]
 
 
+def enclosing_functions(source: str) -> Dict[int, str]:
+    """Line → `Class.function` (or `function`) of the innermost function
+    holding it — the form `test_read_fallback_consumers.py` keys functions
+    by, so a handler can be matched to an answer written down there."""
+    found: Dict[int, str] = {}
+
+    def visit(node, cls, qual):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                visit(child, child.name, qual)
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = f"{cls}.{child.name}" if cls else child.name
+                for inner in ast.walk(child):
+                    if hasattr(inner, "lineno"):
+                        found[inner.lineno] = name
+                visit(child, cls, name)
+            else:
+                visit(child, cls, qual)
+
+    visit(ast.parse(source), None, None)
+    return found
+
+
 class TestNoHandlerSwallowsARefusal:
     """The static half of the guard; `TestEveryRoute` is the half that runs.
     This one sees a handler that *names* the refusal — anywhere an HTTP route
@@ -656,21 +679,35 @@ class TestNoHandlerSwallowsARefusal:
     `except Exception` that catches it without naming it is invisible here
     and is what the sweep is for.
 
-    DN-20c will give the assistant a named "data unavailable" tool result,
-    which is a handler naming the refusal and returning — reachable from
-    `web/routes/chat.py`. When it lands, this rule learns that exception by
-    function, and nowhere else."""
+    DN-20c's answers are the one exception, by function and nowhere else:
+    the scheduler's jobs defer or skip, and the assistant's tools return a
+    named "data unavailable" result. Those modules are importable from
+    `web/`, but the functions holding the answers are reached only by the
+    consumers no HTTP request waits for — which
+    `test_read_fallback_consumers.py` proves by walking up from each."""
 
     def test_every_handler_naming_it_raises(self):
         """A handler that names the refusal and does not raise it has turned
         a 503 into an answer — the DuckDB one, or a quiet partial one. The
         walk in `test_read_fallback_sites.py` accepts naming the refusal as
         a decision; on an HTTP path the only decision is to let it through."""
-        bad = []
+        from tests.unit.test_read_fallback_consumers import named_answer_functions
+
+        answers = named_answer_functions()
+        bad, exempted = [], set()
         for path in http_files():
-            for line in swallowing_handlers(path.read_text(encoding="utf-8")):
-                bad.append(f"{path.relative_to(REPO).as_posix()}:{line}")
+            rel = path.relative_to(REPO).as_posix()
+            source = path.read_text(encoding="utf-8")
+            where = enclosing_functions(source)
+            for line in swallowing_handlers(source):
+                key = f"{rel}:{where.get(line)}"
+                if key in answers:
+                    exempted.add(key)
+                else:
+                    bad.append(f"{rel}:{line} ({where.get(line)})")
         assert not bad, "a refusal swallowed on an HTTP path: " + ", ".join(bad)
+        # Each exemption is used: an answer that moved leaves no stale one.
+        assert exempted == answers, sorted(answers - exempted)
 
     def test_it_is_looking(self):
         """Non-vacuity: the handlers that name it today are found, and found

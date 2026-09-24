@@ -109,6 +109,55 @@ UNSWEPT_ROUTES = {
     "POST /api/revenue/forecast/tune",
 }
 
+# DN-20c: where each consumer's refusal stops, as `file:function:kind`.
+# `named` is a handler naming `ReadUnavailable` that answers it — the job's
+# result says `read_unavailable` and the surface. `broad` is an `except
+# Exception` that was there already and contains every failure of a step
+# the same way, a refusal included: the buyers step holds its watermark and
+# the tick goes on (the plan's "record the failure and skip that step"), and
+# the boot keeps serving. Derived and compared, like the lists above: a
+# handler added on a consumer's path — or one taken away, which would let a
+# refusal out as an exception — fails here until somebody writes it down.
+_BUYERS = "core/sync_service.py:SyncService.sync_missing_buyers:broad"
+_TOOLS = "core/chat_tools.py:execute_tool:named"
+ANSWERS = {
+    "core/scheduler.py:BackgroundScheduler._run_incremental_sync": {_BUYERS},
+    "core/scheduler.py:BackgroundScheduler._run_meilisearch_sync": {
+        "core/scheduler.py:BackgroundScheduler._run_meilisearch_sync:named"},
+    "core/scheduler.py:BackgroundScheduler._run_revenue_prediction": {
+        "core/scheduler.py:BackgroundScheduler._run_revenue_prediction:named"},
+    "core/scheduler.py:BackgroundScheduler._run_seasonality_calc": {
+        "core/scheduler.py:BackgroundScheduler._run_seasonality_calc:named"},
+    "core/scheduler.py:BackgroundScheduler._run_traffic_report": {
+        "core/scheduler.py:BackgroundScheduler._run_traffic_report:named"},
+    "core/scheduler.py:BackgroundScheduler._run_weekly_report": {
+        "core/scheduler.py:BackgroundScheduler._run_weekly_report:named"},
+    # The boot: each step it runs contains its own failures, and a refused
+    # read is one of them. Nothing is served before this returns, so there
+    # is no request to answer 503 to.
+    "web/main.py:startup_event": {
+        _BUYERS,
+        "core/sync_service.py:init_and_sync:broad",
+        "web/main.py:_train_prediction_model:broad",
+    },
+    "web/services/chat_service.py:ChatService.chat": {_TOOLS},
+    "web/services/chat_service.py:ChatService.chat_stream": {_TOOLS},
+}
+
+# The writing routes the sweep does not run, and where a refusal stops on
+# each before the 503 handler — empty means it reaches the handler. One does
+# not: the buyers step is shared with the scheduler's tick, and its `except
+# Exception` answers the route too — "Synced 0 buyers" under `off`. It is
+# written down rather than changed here, because chain 4 (PR #249) rebuilds
+# that step and that route; see DN-20c's deviations.
+UNSWEPT_STOPS = {
+    "DELETE /api/goals/{period_type}": set(),
+    "POST /api/duckdb/sync-buyers": {_BUYERS},
+    "POST /api/goals": set(),
+    "POST /api/revenue/forecast/train": set(),
+    "POST /api/revenue/forecast/tune": set(),
+}
+
 
 # ─── The walk ─────────────────────────────────────────────────────────────
 
@@ -155,6 +204,10 @@ class Graph:
     reaching: Set[Fn]
     store: Set[Tuple[str, str]]
     trees: Dict[str, ast.Module]
+    # Every call in a function's own body, with what it resolves to — the
+    # per-call form of `calls`, which is what the containment walk needs:
+    # whether a refusal escapes depends on which `try` a call sits in.
+    sites: Dict[Fn, List[Tuple[ast.Call, Set[Fn]]]] = field(default_factory=dict)
 
 
 def _parse(tops) -> Dict[str, ast.Module]:
@@ -253,10 +306,12 @@ def build_graph(tops=WALKED) -> Graph:
             aliases |= a
         return modules, names, aliases
 
-    def resolve(fn: Fn) -> Set[Fn]:
+    def resolve(fn: Fn) -> List[Tuple[ast.Call, Set[Fn]]]:
         modules, names, aliases = scope(fn)
-        out: Set[Fn] = set()
+        found: List[Tuple[ast.Call, Set[Fn]]] = []
         for call in (n for n in _own(fn.node) if isinstance(n, ast.Call)):
+            out: Set[Fn] = set()
+            found.append((call, out))
             f = call.func
             if isinstance(f, ast.Name):
                 if f.id in names:
@@ -284,9 +339,11 @@ def build_graph(tops=WALKED) -> Graph:
             elif (len(other_methods.get(attr, ())) == 1
                   and not (isinstance(recv, ast.Name) and recv.id in aliases)):
                 out.add(other_methods[attr][0])
-        return out
+        return found
 
-    calls = {fn: resolve(fn) for fn in functions}
+    sites = {fn: resolve(fn) for fn in functions}
+    calls = {fn: set().union(*(t for _c, t in found)) if found else set()
+             for fn, found in sites.items()}
     callers: Dict[Fn, Set[Fn]] = defaultdict(set)
     for fn, targets in calls.items():
         for target in targets:
@@ -311,7 +368,7 @@ def build_graph(tops=WALKED) -> Graph:
             if fn not in reaching and targets & reaching:
                 reaching.add(fn)
                 changed = True
-    return Graph(functions, calls, callers, reaching, store, trees)
+    return Graph(functions, calls, callers, reaching, store, trees, sites)
 
 
 def _in_router_layer(fn: Fn, graph: Graph) -> bool:
@@ -386,9 +443,146 @@ def classify(graph: Graph):
     return swept, unswept, consumers
 
 
+# ─── Where a refusal stops (DN-20c) ───────────────────────────────────────
+#
+# The walk above follows every call. Whether a refusal *leaves* a function
+# depends on the `try` its call sits in, so this follows the same edges and
+# cuts one where a handler catches `ReadUnavailable` and does not raise it
+# again. A handler catches it when it names it, or when it is bare or names
+# `Exception`/`BaseException`; the first such handler of the innermost `try`
+# decides, and one that ends in `raise` passes it to the next `try` out —
+# which is how `_train_impl` lets a refusal through its `except Exception`.
+
+_TRY = tuple(t for t in (ast.Try, getattr(ast, "TryStar", None)) if t)
+_BROAD = {"Exception", "BaseException"}
+
+
+def _catches(handler: ast.ExceptHandler) -> Optional[str]:
+    """`named`, `broad`, or None when the handler lets a refusal pass."""
+    if handler.type is None:
+        return "broad"
+    names = {n.id if isinstance(n, ast.Name) else n.attr
+             for n in ast.walk(handler.type)
+             if isinstance(n, (ast.Name, ast.Attribute))}
+    if "ReadUnavailable" in names:
+        return "named"
+    return "broad" if names & _BROAD else None
+
+
+def _guarded_calls(node: ast.AST) -> Dict[ast.Call, List[ast.AST]]:
+    """Every call in a function's own body, with the `try` statements whose
+    *body* holds it, innermost first. A handler, an `else` or a `finally` is
+    not protected by its own `try`."""
+    out: Dict[ast.Call, List[ast.AST]] = {}
+
+    def visit(parent, tries):
+        for name, value in ast.iter_fields(parent):
+            for child in (value if isinstance(value, list) else [value]):
+                if not isinstance(child, ast.AST) or isinstance(
+                        child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                ast.Lambda, ast.ClassDef)):
+                    continue
+                inner = ([parent] + tries
+                         if isinstance(parent, _TRY) and name == "body" else tries)
+                if isinstance(child, ast.Call):
+                    out[child] = inner
+                visit(child, inner)
+
+    visit(node, [])
+    return out
+
+
+def _stopped_by(tries) -> Optional[str]:
+    """The kind of the handler that keeps a refusal raised under these
+    `try`s from going further, or None when it leaves the function."""
+    from tests.unit.test_read_fallback_http import _lets_it_through
+
+    for t in tries:
+        for handler in t.handlers:
+            kind = _catches(handler)
+            if kind is None:
+                continue
+            if _lets_it_through(handler):
+                break
+            return kind
+    return None
+
+
+def _is_refusal(call: ast.Call) -> bool:
+    f = call.func
+    return (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)) in REFUSERS
+
+
+@dataclass
+class Containment:
+    graph: Graph
+    escaping: Set[Fn]
+    stop: Dict[Tuple[Fn, int], Optional[str]]
+
+    def stops_of(self, start: Fn) -> Set[str]:
+        """Every handler that stops a refusal on some path from `start`, as
+        `file:function:kind`. Follows every edge toward a refusal, stopped or
+        not, because a stop that catches nothing — `startup_event`'s own
+        `except` around a boot whose steps all contain themselves — is not
+        where the refusal ends and is not listed."""
+        found, seen, frontier = set(), set(), [start]
+        while frontier:
+            fn = frontier.pop()
+            if fn in seen:
+                continue
+            seen.add(fn)
+            for call, targets in self.graph.sites[fn]:
+                kind = self.stop.get((fn, id(call)))
+                if kind and (_is_refusal(call) or targets & self.escaping):
+                    found.add(f"{fn.key}:{kind}")
+                frontier.extend(targets & self.graph.reaching)
+        return found
+
+
+def containment(graph: Graph) -> Containment:
+    stop: Dict[Tuple[Fn, int], Optional[str]] = {}
+    for fn in graph.reaching:
+        guarded = _guarded_calls(fn.node)
+        for call, _targets in graph.sites[fn]:
+            stop[(fn, id(call))] = _stopped_by(guarded.get(call, ()))
+    escaping: Set[Fn] = set()
+    changed = True
+    while changed:
+        changed = False
+        for fn in graph.reaching:
+            if fn in escaping:
+                continue
+            if any(stop[(fn, id(call))] is None
+                   and (_is_refusal(call) or targets & escaping)
+                   for call, targets in graph.sites[fn]):
+                escaping.add(fn)
+                changed = True
+    return Containment(graph, escaping, stop)
+
+
+def entries_reaching(graph: Graph, target: Fn) -> Set[str]:
+    """The functions nothing in the repository calls that reach `target` —
+    the entry points a handler in `target` answers for."""
+    found, seen, frontier = set(), set(), [target]
+    while frontier:
+        fn = frontier.pop()
+        if fn in seen:
+            continue
+        seen.add(fn)
+        if not graph.callers[fn]:
+            found.add(fn.key)
+        frontier.extend(graph.callers[fn])
+    return found
+
+
 @pytest.fixture(scope="module")
 def graph() -> Graph:
     return build_graph()
+
+
+@pytest.fixture(scope="module")
+def contained(graph) -> Containment:
+    return containment(graph)
 
 
 # ─── The pins, derived ────────────────────────────────────────────────────
@@ -444,6 +638,110 @@ class TestWhereARefusalGoes:
         train = index["core/prediction_service.py:PredictionService.train"]
         assert index["core/prediction_service.py:_train_model"] not in graph.callers[train]
         assert not any(fn.rel == "core/keycrm.py" for fn in graph.reaching)
+
+
+class TestEveryConsumerAnswers:
+    """DN-20c: a refusal never leaves a consumer no HTTP request is waiting
+    for as an exception, and each one stops where it is written down."""
+
+    def test_no_refusal_escapes_a_non_http_consumer(self, graph, contained):
+        index = {fn.key: fn for fn in graph.functions}
+        escaped = sorted(k for k in NON_HTTP_CONSUMERS
+                         if index[k] in contained.escaping)
+        assert not escaped, (
+            "a refusal can leave these as an exception — give each an "
+            f"answer: {escaped}")
+
+    def test_each_consumer_answers_where_it_is_written_down(self, graph, contained):
+        index = {fn.key: fn for fn in graph.functions}
+        derived = {k: contained.stops_of(index[k]) for k in NON_HTTP_CONSUMERS}
+        assert derived == ANSWERS, {
+            k: {"derived": sorted(derived[k]), "pinned": sorted(ANSWERS.get(k, ()))}
+            for k in derived if derived[k] != ANSWERS.get(k)}
+
+    def test_a_named_answer_is_never_on_an_http_path(self, graph):
+        """A handler that answers a refusal takes the 503 away from any route
+        that reaches it. So every function holding one is reached only from
+        the consumers above — and `test_read_fallback_http.py` exempts these
+        functions, and no others, from its rule that a handler naming the
+        refusal must raise it."""
+        index = {fn.key: fn for fn in graph.functions}
+        for fn_key in named_answer_functions():
+            entries = entries_reaching(graph, index[fn_key])
+            assert entries <= NON_HTTP_CONSUMERS, (fn_key, sorted(entries - NON_HTTP_CONSUMERS))
+
+    def test_the_writing_routes_stop_where_they_are_written_down(self, graph, contained):
+        routes = _routes(graph)
+        derived = {}
+        for fn, served in routes.items():
+            for method, path in served:
+                label = f"{method} {path}"
+                if label in UNSWEPT_ROUTES:
+                    derived[label] = contained.stops_of(fn)
+        assert derived == UNSWEPT_STOPS
+
+    def test_the_walk_sees_a_refusal_escape(self, graph, contained):
+        """Non-vacuity: the routers themselves escape — that is what a
+        refusal is — and so do the helpers between a job and its answer."""
+        index = {fn.key: fn for fn in graph.functions}
+        for key in ("core/repositories/traffic.py:TrafficMixin._traffic_run",
+                    "core/weekly_report.py:_weekly_run",
+                    "core/weekly_report.py:warehouse_max_date",
+                    "core/prediction_service.py:PredictionService._train_impl",
+                    "core/sync_service.py:SyncService.sync_to_meilisearch"):
+            assert index[key] in contained.escaping, key
+
+
+def named_answer_functions() -> Set[str]:
+    """`file:function` of every named answer in `ANSWERS`."""
+    return {entry.rsplit(":", 1)[0]
+            for stops in ANSWERS.values() for entry in stops
+            if entry.endswith(":named")}
+
+
+class TestTheContainmentRule:
+    """`_stopped_by` on synthetic code: which handler keeps a refusal in."""
+
+    @staticmethod
+    def _kind(src: str) -> Optional[str]:
+        tree = ast.parse(src)
+        fn = tree.body[0]
+        call = next(c for c, _t in _guarded_calls(fn).items()
+                    if getattr(c.func, "attr", None) == "read")
+        return _stopped_by(_guarded_calls(fn)[call])
+
+    @pytest.mark.parametrize("handlers,kind", [
+        ("    except read_fallback.ReadUnavailable as exc:\n        return 1\n", "named"),
+        ("    except Exception:\n        return 1\n", "broad"),
+        ("    except:\n        return 1\n", "broad"),
+        ("    except (KeyError, BaseException):\n        return 1\n", "broad"),
+        ("    except OSError:\n        return 1\n", None),
+        ("    except ReadUnavailable:\n        raise\n"
+         "    except Exception:\n        return 1\n", None),
+        ("    except ReadUnavailable as exc:\n        log(exc)\n        raise exc\n", None),
+    ])
+    def test_the_first_handler_that_catches_it_decides(self, handlers, kind):
+        src = "async def f(store):\n    try:\n        await store.read()\n" + handlers
+        assert self._kind(src) == kind
+
+    def test_an_outer_try_catches_what_an_inner_one_raises_again(self):
+        src = ("async def f(store):\n"
+               "    try:\n"
+               "        try:\n"
+               "            await store.read()\n"
+               "        except Exception:\n"
+               "            raise\n"
+               "    except ReadUnavailable:\n"
+               "        return 1\n")
+        assert self._kind(src) == "named"
+
+    def test_a_call_in_a_handler_is_not_guarded_by_its_own_try(self):
+        src = ("async def f(store):\n"
+               "    try:\n"
+               "        pass\n"
+               "    except Exception:\n"
+               "        await store.read()\n")
+        assert self._kind(src) is None
 
 
 class TestOnlyTheseProcessesRefuse:

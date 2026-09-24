@@ -1139,10 +1139,21 @@ class BackgroundScheduler:
             with correlation_context() as corr_id:
                 logger.info("Starting revenue prediction training job")
 
+                from core import read_fallback
                 from core.prediction_service import get_prediction_service
                 service = get_prediction_service()
 
-                result = await service.train(sales_type="retail")
+                # Under KS_READ_FALLBACK=off the training input may be refused
+                # rather than read from DuckDB (DN-20c). The refusal is the
+                # first read `train` makes, so nothing was fitted, saved or
+                # predicted: the previous model keeps serving, and tomorrow's
+                # 03:30 run asks again.
+                try:
+                    result = await service.train(sales_type="retail")
+                except read_fallback.ReadUnavailable as exc:
+                    return {"status": "skipped", **read_fallback.answered(
+                        "revenue_prediction", exc,
+                        "training skipped, the previous model is kept")}
 
                 logger.info(
                     "Revenue prediction job complete",
@@ -1167,8 +1178,25 @@ class BackgroundScheduler:
             # falls back to a hard-coded 0.10). Nothing read the b2b rows as
             # b2b: a b2b caller got the same shared rows. Until sales_type is
             # part of the keys, the shared rows mean retail.
+            #
+            # The suggestions come FIRST, and that order is the whole of
+            # DN-20c here. They are the only read in this job that goes
+            # through a router (`/goals`' own), so under KS_READ_FALLBACK=off
+            # they are the only one that can be refused — and they write
+            # nothing and read neither table the other two write. Asked
+            # after `calculate_seasonality_indices`, a refusal left the new
+            # `seasonal_indices` beside last week's `growth_metrics`; asked
+            # first, it defers the whole job with nothing written.
+            from core import read_fallback
+            try:
+                retail_goals = await store.calculate_suggested_goals(
+                    sales_type="retail", growth_factor=1.10)
+            except read_fallback.ReadUnavailable as exc:
+                return {"skipped": True, **read_fallback.answered(
+                    "seasonality_calc", exc,
+                    "nothing written; seasonal_indices and growth_metrics "
+                    "keep their previous values")}
             retail_indices = await store.calculate_seasonality_indices("retail")
-            retail_goals = await store.calculate_suggested_goals(sales_type="retail", growth_factor=1.10)
             await store.calculate_yoy_growth("retail")
 
             result = {
@@ -1220,7 +1248,17 @@ class BackgroundScheduler:
                     return {"skipped": True, "reason": "Meilisearch not available"}
 
                 sync_service = await get_sync_service()
-                stats = await sync_service.sync_to_meilisearch()
+                # Under KS_READ_FALLBACK=off the index's read may be refused
+                # rather than served from DuckDB (DN-20c). The refusal comes
+                # before anything is indexed or the watermark moves, so the
+                # step is skipped whole and the next tick asks again.
+                from core import read_fallback
+                try:
+                    stats = await sync_service.sync_to_meilisearch()
+                except read_fallback.ReadUnavailable as exc:
+                    return {"skipped": True, **read_fallback.answered(
+                        "meilisearch_sync", exc,
+                        "index not refreshed this tick, watermark held")}
 
                 logger.debug(
                     "Meilisearch sync job complete",
@@ -3434,6 +3472,7 @@ class BackgroundScheduler:
         """
         from datetime import datetime as _datetime
 
+        from core import read_fallback
         from core.config import ADMIN_USER_IDS, DASHBOARD_URL
         from core.duckdb_store import get_store
         from core.weekly_report import (
@@ -3464,15 +3503,26 @@ class BackgroundScheduler:
                     logger.debug("Weekly report for %s already sent", week)
                     return {"sent": False, "week": week, "reason": "already_sent"}
 
-            max_date = await warehouse_max_date(store)
-            if max_date is None or max_date < week_end:
-                logger.info(
-                    "Weekly report deferred: warehouse at %s, week ends %s",
-                    max_date, week_end,
-                )
-                return {"sent": False, "week": week, "reason": "warehouse_behind"}
+            # Under KS_READ_FALLBACK=off a read DuckDB would have answered is
+            # refused instead (DN-20c). Both reads come before the ledger
+            # write, so a refusal defers exactly like `warehouse_behind`: no
+            # row, and tomorrow's tick asks again. A report built from a store
+            # that has stopped being written cannot be recalled from anybody's
+            # phone.
+            try:
+                max_date = await warehouse_max_date(store)
+                if max_date is None or max_date < week_end:
+                    logger.info(
+                        "Weekly report deferred: warehouse at %s, week ends %s",
+                        max_date, week_end,
+                    )
+                    return {"sent": False, "week": week, "reason": "warehouse_behind"}
 
-            report = await build_report(store, today, sales_type)
+                report = await build_report(store, today, sales_type)
+            except read_fallback.ReadUnavailable as exc:
+                return {"sent": False, "week": week, **read_fallback.answered(
+                    "weekly_report", exc,
+                    f"week {week} deferred to tomorrow's tick, no ledger row")}
 
             if report.current.orders == 0:
                 logger.warning("Weekly report skipped: no orders in %s", week)
@@ -3621,6 +3671,7 @@ class BackgroundScheduler:
         """
         from datetime import datetime as _datetime
 
+        from core import read_fallback
         from core.config import DASHBOARD_URL
         from core.duckdb_store import get_store
         from core.traffic_report import (
@@ -3660,15 +3711,23 @@ class BackgroundScheduler:
 
             # Outside the block, for the weekly job's reason: the gate is
             # routed now and its DuckDB path takes the same non-reentrant lock.
-            max_date = await warehouse_max_date(store)
-            if max_date is None or max_date < week_end:
-                logger.info(
-                    "Traffic report deferred: warehouse at %s, week ends %s",
-                    max_date, week_end,
-                )
-                return {"sent": False, "week": week, "reason": "warehouse_behind"}
+            # A refusal under KS_READ_FALLBACK=off defers, as in the sales
+            # report: the tab's router would otherwise answer from DuckDB, and
+            # the ledger is written only after a delivery (DN-20c).
+            try:
+                max_date = await warehouse_max_date(store)
+                if max_date is None or max_date < week_end:
+                    logger.info(
+                        "Traffic report deferred: warehouse at %s, week ends %s",
+                        max_date, week_end,
+                    )
+                    return {"sent": False, "week": week, "reason": "warehouse_behind"}
 
-            report = await build_report(store, today, sales_type)
+                report = await build_report(store, today, sales_type)
+            except read_fallback.ReadUnavailable as exc:
+                return {"sent": False, "week": week, **read_fallback.answered(
+                    "traffic_report", exc,
+                    f"week {week} deferred to tomorrow's tick, no ledger row")}
 
             if report.orders == 0:
                 logger.warning("Traffic report skipped: no orders in %s", week)
