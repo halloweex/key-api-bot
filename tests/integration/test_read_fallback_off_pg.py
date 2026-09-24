@@ -46,9 +46,17 @@ SWITCHES = {
     "KS_READ_MARGIN": "postgres",
     "KS_READ_PRODUCTS_INTEL": "postgres",
     "KS_READ_INVENTORY": "postgres",
+    # The routers the plan does not list, reached by HTTP all the same: the
+    # one raise refuses them too, so a working Postgres must be read there.
+    "KS_READ_REPORTS": "postgres",
+    "KS_READ_MARKETING": "postgres",
+    "KS_READ_DASHBOARD": "postgres",
+    "KS_READ_LOOKUPS": "postgres",
+    "KS_READ_SILVER": "postgres",
 }
 
-# (surface, method, args) — one read per router DN-20b covers.
+# (surface, method, args) — one read per router DN-20b covers, then one per
+# router the same raise reaches from an HTTP route.
 READS = [
     ("dashboard", "get_summary_stats", (DAY, DAY)),
     ("dashboard", "get_revenue_trend", (START, DAY)),
@@ -58,6 +66,11 @@ READS = [
     ("margin", "get_margin_overview", (START, DAY)),
     ("products_intel", "get_basket_summary", (START, DAY)),
     ("inventory", "get_stock_summary", ()),
+    ("reports", "get_report_summary", (START, DAY)),
+    ("marketing", "get_promocode_analytics", (START, DAY)),
+    ("dashboard", "get_customer_insights", (START, DAY)),
+    ("lookups", "get_categories", ()),
+    ("managers", "get_manager_sales_365d", ()),
 ]
 
 

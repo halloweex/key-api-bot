@@ -11,8 +11,13 @@ What is proved here, through the real app and a Postgres pool that raises:
 - under `off`, 503 naming the surface for each router DN-20b covers — the
   dashboard's summary and trend, goals, traffic, expenses (both through the
   history gate `backfilled()` and through the router), margin, products
-  intel, inventory, and cohorts; nothing is counted as a fallback, and the
-  refusal is counted and published beside the mode instead;
+  intel, inventory, and cohorts — and, because the raise is one, every other
+  router an HTTP route reaches (reports, marketing, the dashboard's own
+  router, the filter lookups, the managers screen); nothing is counted as a
+  fallback, and the refusal is counted and published beside the mode instead;
+- the trend's forecast overlay, whose reads already degrade to "no forecast",
+  drops under a refusal while the chart answers — no DuckDB number reaches
+  the page, and the refusal is counted;
 - cohorts under `off` are answered by a live ClickHouse or not at all: a
   switch naming no configured ClickHouse is refused too, and a live one
   answers 200;
@@ -79,6 +84,21 @@ CASES: List[Case] = [
          "/api/products/intel/summary", WINDOW),
     Case("inventory", "inventory", {"KS_READ_INVENTORY": "postgres"},
          "/api/stocks/summary"),
+    # Beyond the plan's list, and not by choice: `fall_back` is one raise, so
+    # every other router behind an HTTP route refuses too. Each is here to
+    # prove that nothing between it and the handler turns the refusal into a
+    # 500 or a quiet answer — the filter bar's lookups included, which under
+    # `off` are refused on every tab at once, exactly like the tab they sit on.
+    Case("reports", "reports", {"KS_READ_REPORTS": "postgres"},
+         "/api/reports/summary", WINDOW),
+    Case("marketing", "marketing", {"KS_READ_MARKETING": "postgres"},
+         "/api/promocodes/analytics", WINDOW),
+    Case("insights", "dashboard", {"KS_READ_DASHBOARD": "postgres"},
+         "/api/customers/insights", WINDOW),
+    Case("lookups", "lookups", {"KS_READ_LOOKUPS": "postgres"},
+         "/api/categories"),
+    Case("managers", "managers", {"KS_READ_SILVER": "postgres"},
+         "/api/managers"),
 ]
 
 COHORTS = "/api/customers/cohort-retention"
@@ -190,6 +210,25 @@ class TestOffRefuses:
         response = admin_client.get("/api/expenses/summary", params=WINDOW)
         assert response.status_code == 503
         assert response.json()["surface"] == "expenses"
+
+    def test_a_refused_forecast_drops_the_overlay_not_the_chart(
+        self, admin_client, stores, monkeypatch,
+    ):
+        """The trend's forecast is an overlay, and its reads already degrade
+        to "no forecast" on any failure (`get_forecast_data`, and the handler
+        around it in the route). A refusal there is one of those failures:
+        the chart answers without the overlay, nothing is served from DuckDB,
+        and the refusal is still counted — so a broken goals port stays
+        visible under `read_fallback_mode.refused`. What `off` forbids is
+        DuckDB's numbers, and none reach the page."""
+        _mode(monkeypatch, "off")
+        _switches(monkeypatch, {"KS_READ_GOALS": "postgres"})
+        response = admin_client.get("/api/revenue/trend", params={
+            "period": "month", "include_forecast": "true"})
+        assert response.status_code == 200, response.text
+        assert "forecast" not in response.json()
+        assert read_fallback.refusals()["goals"]["count"] >= 1
+        assert read_fallback.counts() == {}
 
     def test_a_switch_left_at_duckdb_is_not_a_fallback(
         self, admin_client, stores, monkeypatch,
