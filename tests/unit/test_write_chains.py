@@ -2273,6 +2273,22 @@ class TestTheComparisonsStandDown:
             _never_reached_postgres(pool)
 
     @pytest.mark.asyncio
+    async def test_a_catalogue_wholly_stood_down_costs_neither_store_anything(
+            self, pool, landing_chain):
+        """With every table of the landing comparison held on the local
+        answer, nothing is left to compare, and Postgres is not asked at all —
+        not the pool, not the revision, not the owner rows. The categories are
+        compared in the test above, so only this one can see the order."""
+        from core.mirror_reconciliation import MIRRORED_TABLES, reconcile_mirror
+
+        landing_chain(tables=LANDING + (CATEGORIES, CONTACTS, CLASSIFICATIONS))
+        issues = await reconcile_mirror({})
+        assert sorted(i.table_name for i in issues) == sorted(
+            s.pg_table for s in MIRRORED_TABLES)
+        assert {i.check_name for i in issues} == {"mirror_stood_down"}
+        _never_reached_postgres(pool)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("name", sorted(_COMPARED))
     @pytest.mark.parametrize("road", ["marker_lost", "rolled_back"])
     async def test_on_the_owner_rows_alone_one_critical_and_no_read(
