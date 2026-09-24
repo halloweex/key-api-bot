@@ -12,8 +12,10 @@ tests pin the two halves that replaced it:
   only DSN at hand is the web container's writer DSN — and summarises counts
   only, never a name.
 
-The executed half needs a real PostgreSQL and skips without `KS_PG_DSN`; CI
-provides one and fails the job if anything still skips for want of it.
+The executed half needs a real PostgreSQL and skips without `KS_PG_DSN`. Its
+reason says "needs a live PostgreSQL" on purpose: that phrase is what CI counts
+to fail a run in which a store test skipped, and a skip spelled any other way
+would stop running without anyone being told.
 """
 from __future__ import annotations
 
@@ -40,7 +42,7 @@ script = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(script)
 
 DSN = os.getenv("KS_PG_DSN", "").strip()
-needs_pg = pytest.mark.skipif(not DSN, reason="KS_PG_DSN is not set")
+needs_pg = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
 # The message DuckDB 1.5.5 gives a second process, verbatim from production.
 LOCKED = ('IO Error: Could not set lock on file "/app/data/analytics.duckdb": '
