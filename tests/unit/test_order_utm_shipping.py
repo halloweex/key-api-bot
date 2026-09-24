@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import functools
 import inspect
 import textwrap
 from contextlib import asynccontextmanager
@@ -172,8 +173,10 @@ class TestAFailingShipperSaysSo:
 #
 # Production is every module under these roots. `scripts/` is outside
 # `testpaths` and is walked deliberately: `backfill_utm.py` rewrites the same
-# table the same way, and a divergence there is just as invisible.
-PRODUCTION_ROOTS = ("core", "web", "scripts", "bot")
+# table the same way, and a divergence there is just as invisible. `deploy/`
+# for the same reason: host cron runs it, and `snapshot_export.py` imports
+# `core` — a ship reached from there would run under `postgres` like any other.
+PRODUCTION_ROOTS = ("core", "web", "scripts", "bot", "deploy")
 
 # The one scheduled DuckDB parse: the warehouse tick. Every other caller of
 # `refresh_utm_silver_layer` is a door that went round the tick.
@@ -188,9 +191,14 @@ DOORS = {
     ("scripts/backfill_utm.py", "backfill_utm"),
 }
 
-# What reaches Postgres' `silver.order_utm` other than through the router.
-DIRECT = {"ship_order_utm", "ship_after_reparse", "parse_full",
-          "parse_incremental", "parse_incremental_locked"}
+# The two ships, and everything that reaches Postgres' `silver.order_utm`
+# other than through the router.
+SHIPS = {"ship_order_utm", "ship_after_reparse"}
+DIRECT = SHIPS | {"parse_full", "parse_incremental", "parse_incremental_locked"}
+
+# Where those names are defined, and so the only modules that may bind them
+# to anything or look them up by a string.
+DEFINING = {"core/pg_order_utm.py", "core/pg_utm_parse.py"}
 
 GUARD = "parses_in_postgres"
 
@@ -200,11 +208,60 @@ def _called(call: ast.Call):
     return func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
 
 
+@functools.lru_cache(maxsize=1)
+def _trees():
+    """`((relative path, tree), ...)` for every production module, parsed
+    once per run: four walks read the same trees."""
+    return tuple(
+        (str(path.relative_to(REPO)), ast.parse(path.read_text()))
+        for root in PRODUCTION_ROOTS
+        for path in sorted((REPO / root).rglob("*.py"))
+    )
+
+
 def _production():
     """`(relative path, tree)` for every production module."""
-    for root in PRODUCTION_ROOTS:
-        for path in sorted((REPO / root).rglob("*.py")):
-            yield str(path.relative_to(REPO)), ast.parse(path.read_text())
+    return iter(_trees())
+
+
+@functools.lru_cache(maxsize=1)
+def _aliases() -> dict:
+    """`{bound name: every name it may stand for}`, over all of production and
+    to a fixed point.
+
+    `from core.pg_order_utm import ship_after_reparse as _carry` binds a ship
+    to `_carry`, and a walk that matches bare names never sees `_carry()` —
+    the review of DN-19 put exactly that into `refresh_traffic_data` and every
+    walk here passed. Global rather than per module, and transitive, so a
+    re-export imported elsewhere under its new name still resolves. The price
+    is that an unrelated `_carry` somewhere is read as a ship too — an error
+    only ever towards failing."""
+    edges: dict = {}
+    for _rel, tree in _trees():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.asname and alias.asname != alias.name:
+                        edges.setdefault(alias.asname, set()).add(alias.name)
+    closed = {}
+    for name in edges:
+        seen, todo = set(), [name]
+        while todo:
+            for target in edges.get(todo.pop(), ()):
+                if target not in seen:
+                    seen.add(target)
+                    todo.append(target)
+        closed[name] = frozenset(seen)
+    return closed
+
+
+def _names(call: ast.Call) -> set:
+    """Every name a call may be calling: its own, and whatever an import
+    bound it to. Empty for a call through a subscript or a call result."""
+    name = _called(call)
+    if name is None:
+        return set()
+    return {name} | _aliases().get(name, frozenset())
 
 
 def _parents(tree) -> dict:
@@ -230,7 +287,12 @@ def _owner(node, parents):
 
 def _is_guard(test) -> "str | None":
     """'postgres' when `test` is `parses_in_postgres()`, 'duckdb' when it is
-    `not parses_in_postgres()`, else None."""
+    `not parses_in_postgres()`, else None.
+
+    By the guard's own name only, never through `_aliases`: a ship is resolved
+    generously and the guard strictly, so each can only make a walk fail. An
+    aliased guard is not taken for one, and a ship behind it reads as
+    unguarded."""
     if isinstance(test, ast.Call) and _called(test) == GUARD:
         return "postgres"
     if (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
@@ -273,12 +335,13 @@ class TestAReparseReachesPostgres:
             parents = _parents(tree)
             for node in ast.walk(tree):
                 if not (isinstance(node, ast.Call)
-                        and _called(node) == "refresh_utm_silver_layer"):
+                        and "refresh_utm_silver_layer" in _names(node)):
                     continue
                 fn = _owner(node, parents)
                 assert fn is not None, f"{rel}:{node.lineno} parses at module level"
                 doors[(rel, fn.name)] = (fn, {
-                    _called(c) for c in ast.walk(fn) if isinstance(c, ast.Call)})
+                    name for c in ast.walk(fn) if isinstance(c, ast.Call)
+                    for name in _names(c)})
         assert TICK in doors, "the walk no longer finds the tick — it is not looking"
         del doors[TICK]
         return doors
@@ -289,7 +352,8 @@ class TestAReparseReachesPostgres:
         thrown off by the words appearing in a comment. So each function that
         re-parses is checked for a router call of its own — and for no direct
         path to the table beside it, which would ship or parse whatever the
-        mode says."""
+        mode says. A name is read through the imports that bound it, so
+        `ship_after_reparse as _carry` is still a direct path."""
         doors = self._doors()
         assert DOORS <= set(doors), sorted(DOORS - set(doors))
         for (rel, name), (_fn, calls) in doors.items():
@@ -313,7 +377,7 @@ class TestAReparseReachesPostgres:
                 and "DELETE FROM silver_order_utm" in n.value
                 for n in ast.walk(fn))
             routes = [c for c in ast.walk(fn)
-                      if isinstance(c, ast.Call) and _called(c) == "reparse_router"]
+                      if isinstance(c, ast.Call) and "reparse_router" in _names(c)]
             for call in routes:
                 full = next((k.value for k in call.keywords if k.arg == "full"), None)
                 said = isinstance(full, ast.Constant) and full.value is True
@@ -332,8 +396,15 @@ class TestAReparseReachesPostgres:
         branch of an `if` on `parses_in_postgres()`. The closure must stay
         inside `core/pg_order_utm.py`, where the ships are defined — one
         unguarded caller anywhere else is a production path that ships under
-        `postgres`. By name, so a same-named function elsewhere is counted as
-        a ship too: the walk can only err towards failing."""
+        `postgres`.
+
+        By name, and every name is read through the `from … import … as` that
+        bound it, anywhere in production (`_aliases`): an aliased or
+        re-exported ship is still a ship, and a same-named function elsewhere
+        is counted as one too. On names the walk errs only towards failing.
+        What no call-following walk can see, a ship handed on as a value or
+        looked up by a string, the two tests after this one forbid outright.
+        A name computed at runtime is beyond any walk."""
         trees = list(_production())
         ships = {"ship_order_utm"}
         reaching: set = set()
@@ -344,7 +415,7 @@ class TestAReparseReachesPostgres:
             for rel, tree in trees:
                 parents = _parents(tree)
                 for node in ast.walk(tree):
-                    if not (isinstance(node, ast.Call) and _called(node) in ships):
+                    if not (isinstance(node, ast.Call) and _names(node) & ships):
                         continue
                     fn = _owner(node, parents)
                     if fn is None:
@@ -367,7 +438,8 @@ class TestAReparseReachesPostgres:
     def test_a_ship_is_never_handed_on_uncalled(self):
         """The walk above follows calls. A ship passed as a value — to a
         `partial`, a task, a dict of handlers — would be called somewhere the
-        walk cannot see, so outside its own module a ship is only ever called."""
+        walk cannot see, so outside its own module a ship is only ever called.
+        Under whatever name an import gave it."""
         for rel, tree in _production():
             if rel == "core/pg_order_utm.py":
                 continue
@@ -375,11 +447,32 @@ class TestAReparseReachesPostgres:
             for node in ast.walk(tree):
                 name = (node.id if isinstance(node, ast.Name)
                         else node.attr if isinstance(node, ast.Attribute) else None)
-                if name not in {"ship_order_utm", "ship_after_reparse"}:
+                if name is None or not ({name} | _aliases().get(name, frozenset())) & SHIPS:
                     continue
                 parent = parents.get(node)
                 assert isinstance(parent, ast.Call) and parent.func is node, (
                     f"{rel}:{node.lineno} hands {name} on without calling it"
+                )
+
+    def test_nothing_is_looked_up_by_a_ships_name(self):
+        """`getattr(pg_order_utm, "ship_after_reparse")(store)` is a call no
+        walk of calls can see, and so is the dotted name handed to an
+        importer. Outside the two modules that define them, no string in
+        production is one of these names, bare or as the last part of a
+        dotted path. Exact match only, so a log line that mentions a ship
+        among other words is not a lookup."""
+        for rel, tree in _production():
+            if rel in DEFINING:
+                continue
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+                    continue
+                value = node.value.strip()
+                if " " in value:
+                    continue
+                assert value.rsplit(".", 1)[-1] not in DIRECT, (
+                    f"{rel}:{node.lineno} names {value!r} as a string — a lookup "
+                    "the walks cannot follow"
                 )
 
     def test_it_ships_under_the_layer_lock(self):
