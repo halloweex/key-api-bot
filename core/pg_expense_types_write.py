@@ -33,7 +33,8 @@ to both. Invert the write without that and DuckDB overwrites Postgres once an
 hour out of a dictionary it no longer receives: `replicate_sms`' recorded
 failure of 2026-09-06, exactly. `last_sync_expense_types` moves with the chain
 to `meta.chain_watermarks` (revision 0032), so the freshness check judges the
-store that is actually written.
+store that is actually written — and, until the first full sync under the flag
+has written it there, DuckDB's last stamp (`CHAIN_WATERMARK_INHERITS_DUCKDB`).
 
 FAILURE POLICY: THIS ONE RAISES
 
@@ -103,6 +104,18 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_expense_types",)
 # key from `meta.chain_watermarks`, and saying the same stall twice under two
 # names would make one page read as two problems.
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
+
+# Until the first full sync under the flag writes the key to
+# `meta.chain_watermarks`, `_freshness_check` judges DuckDB's frozen stamp
+# instead of calling the dictionary never synced. Flipped on a Wednesday, the
+# key would otherwise be absent until Sunday 02:00 Kyiv, and every integrity
+# run in between — 01, 07, 13, 19 — would file `freshness_expense_types` into
+# the 09:00 digest about a dictionary the hourly copy shipped until the flip.
+# DuckDB's stamp is the honest age of what Postgres holds then, judged at the
+# same 192 h: a first sync that fails still pages when a DuckDB one would
+# have. Chain 1 does not declare this — its keys move every hour, so absence
+# past one tick is itself the finding.
+CHAIN_WATERMARK_INHERITS_DUCKDB = True
 
 
 def env_writes_postgres() -> bool:

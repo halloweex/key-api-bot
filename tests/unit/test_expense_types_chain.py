@@ -350,3 +350,73 @@ class TestItsWatermarkIsNotJudgedAtNinetyMinutes:
             (inv.WatermarkAge("some_chain", "last_sync_x", "x", age_s=150 * 60),))
         assert issue.check_name == inv.WATERMARK_STALE
         assert f"{inv.WATERMARK_MAX_AGE_MIN}-minute" in issue.description
+
+
+class TestTheFreshnessCheckBridgesTheWeekAfterTheFlip:
+    """The key moves on the Sunday full sync, so after a mid-week flip
+    `meta.chain_watermarks` has none for up to a week. It used to read as
+    "entity never synced" on every integrity run until Sunday (review of
+    DN-26); DuckDB's frozen stamp now stands in, at the same 192 h."""
+
+    NOW = datetime(2026, 9, 24, 9, 0, tzinfo=timezone.utc)   # a Thursday
+
+    def _duckdb(self, expense_types_age_h):
+        import duckdb
+        from datetime import timedelta
+
+        conn = duckdb.connect()
+        conn.execute("CREATE TABLE sync_metadata "
+                     "(key VARCHAR PRIMARY KEY, value VARCHAR, updated_at TIMESTAMP)")
+        # Everything else fresh, so the only thing that can be said is about
+        # the dictionary.
+        for entity in ("orders", "products", "buyers", "offers", "stocks",
+                       "managers", "categories"):
+            conn.execute("INSERT INTO sync_metadata VALUES (?, ?, now())",
+                         [f"last_sync_{entity}", (self.NOW - timedelta(minutes=5)).isoformat()])
+        if expense_types_age_h is not None:
+            conn.execute("INSERT INTO sync_metadata VALUES (?, ?, now())",
+                         ["last_sync_expense_types",
+                          (self.NOW - timedelta(hours=expense_types_age_h)).isoformat()])
+        return conn
+
+    def _judge(self, flags, conn, marks):
+        from core.data_quality import _freshness_check
+
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        return [(i.check_name, i.severity.value, i.count, i.description)
+                for i in _freshness_check(conn, self.NOW, chain_watermarks=marks)]
+
+    def test_the_chain_declares_it_and_chain_1_does_not(self):
+        from core import pg_inventory_write
+
+        assert chain.CHAIN_WATERMARK_INHERITS_DUCKDB is True
+        assert not getattr(pg_inventory_write, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
+
+    def test_a_mid_week_flip_is_quiet_about_a_dictionary_synced_on_sunday(self, flags):
+        # 103 h: Sunday 02:00 Kyiv to Thursday 09:00 UTC. `{}` is what
+        # `read_values` returns for a key Postgres does not hold yet.
+        assert self._judge(flags, self._duckdb(103), {}) == []
+
+    def test_the_frozen_stamp_still_pages_at_the_same_threshold(self, flags):
+        """A first sync under the flag that failed must page when a failed
+        DuckDB one would have — the stand-in is not a pass."""
+        (issue,) = self._judge(flags, self._duckdb(200), {})
+        name, severity, count, description = issue
+        assert (name, severity, count) == ("freshness_expense_types", "WARN", 200)
+        assert "threshold 192" in description and "before the switch" in description
+
+    def test_once_postgres_holds_the_key_it_wins(self, flags):
+        """The stand-in is only for an absent key: a stale Postgres stamp
+        beside a fresh DuckDB one is a stall."""
+        from datetime import timedelta
+
+        stale = (self.NOW - timedelta(hours=200)).isoformat()
+        (issue,) = self._judge(flags, self._duckdb(10),
+                               {"last_sync_expense_types": stale})
+        assert issue[0] == "freshness_expense_types" and issue[2] == 200
+        assert "before the switch" not in issue[3]
+
+    def test_with_no_stamp_anywhere_it_is_still_never_synced(self, flags):
+        (issue,) = self._judge(flags, self._duckdb(None), {})
+        assert issue[0] == "freshness_expense_types"
+        assert "never synced" in issue[3]

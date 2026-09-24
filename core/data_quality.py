@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta, timezone
 from enum import Enum
 from typing import (
-    Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple,
+    Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple,
 )
 
 logger = logging.getLogger(__name__)
@@ -488,6 +488,15 @@ def _freshness_check(
     days after a switch that changed nothing. Called without it while a chain
     has moved, the moved entities are left out and the check says so, rather
     than judging a frozen copy or going quiet.
+
+    A moved key Postgres does not hold yet is "never synced" — unless its
+    chain declares `CHAIN_WATERMARK_INHERITS_DUCKDB`, in which case DuckDB's
+    frozen stamp stands in, at the same threshold, until the first sync under
+    the flag writes one. That is for a chain whose sync is rarer than this
+    check: chain 6a's dictionary moves on the Sunday full sync, so a mid-week
+    flip would otherwise file "never synced" on every run for up to a week
+    about a dictionary the hourly copy shipped until the flip — and DuckDB's
+    stamp is exactly the age of what Postgres then holds.
     """
     from core.write_chains import WRITE_CHAINS, chain_name, stood_down_sync_keys_checked
 
@@ -530,12 +539,19 @@ def _freshness_check(
                    "`chain_watermarks=` from core.pg_chain_watermarks.read_values.")
             ),
         ))
+    inherits = {k[len("last_sync_"):] for c in WRITE_CHAINS
+                if getattr(c, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
+                for k in getattr(c, "CHAIN_SYNC_KEYS", ())}
+    inherited: Set[str] = set()
     for entity in moved:
-        seen.pop(entity, None)
+        frozen = seen.pop(entity, None)
         if chain_watermarks is not None:
             value = chain_watermarks.get(f"last_sync_{entity}")
             if value:
                 seen[entity] = value
+            elif frozen and entity in inherits:
+                seen[entity] = frozen
+                inherited.add(entity)
 
     for entity, (max_hours, sev) in FRESHNESS_THRESHOLDS.items():
         if entity in blind:
@@ -575,6 +591,9 @@ def _freshness_check(
                 description=(
                     f"{entity} last synced {age_h:.1f}h ago "
                     f"(threshold {max_hours}h) — sync may be stalled"
+                    + (" (DuckDB's stamp from before the switch: no sync under "
+                       "the flag has written meta.chain_watermarks yet)"
+                       if entity in inherited else "")
                 ),
             ))
     return issues

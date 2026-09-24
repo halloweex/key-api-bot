@@ -2635,7 +2635,7 @@ source and the hourly full replace copied it. Under
 directly (`core/pg_expense_types_write.py`), **after** `core.landing_rows`
 has resolved the localisation-key names, so both stores are handed the same
 names; `last_sync_expense_types` moves with it, and the hourly copy and the
-daily comparison stand down. Two things differ from the chains before it:
+daily comparison stand down. Three things differ from the chains before it:
 
 - **`full_sync` contains the raise.** A Postgres fault, or a flag nobody can
   read, leaves the watermark where it was and the sync carries on with
@@ -2647,6 +2647,13 @@ daily comparison stand down. Two things differ from the chains before it:
   192 h. The standing watch judges instead that the table is not empty
   (CRITICAL — /expenses collapses into "Other") and that no name is still a
   localisation key (WARN).
+- **Its watermark is inherited across the flip.** Postgres holds no
+  `last_sync_expense_types` until the Sunday full sync under the flag writes
+  one, and a mid-week flip used to file "entity never synced" on every
+  integrity run until then. `CHAIN_WATERMARK_INHERITS_DUCKDB` has the check
+  judge DuckDB's frozen stamp for the absent key instead — the age of what
+  the hourly copy last shipped — at the same 192 h, so a first sync that
+  fails still pages. Chain 1 does not declare it: its keys move hourly.
 
 **Turn `KS_READ_EXPENSES=postgres` on first.** Every reader of the dictionary
 goes through `_expenses_run`; with the read flag off the page reads DuckDB's
