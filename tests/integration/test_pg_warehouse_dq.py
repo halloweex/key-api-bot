@@ -392,11 +392,18 @@ class TestTheRowValues:
     async def test_every_branch_of_the_rule_recomputes_to_what_the_rebuild_wrote(self, rv):
         """The recompute's pass 2 is a SELECT, the rebuild's an UPDATE
         (`silver_pass2_sql`): two statements of one rule, and nothing ties them
-        but a fixture on which both run. So this one takes every branch either
-        can take — each sales_type, a return by group and by the legacy status
-        list, an inactive source first in a buyer's history, a return on the
-        buyer's first day, no buyer, a promocode — and the real rebuild must
+        but a fixture on which both run. So this one takes the branches that
+        decide pass 2's inputs — each sales_type, a return by group and by the
+        legacy status list, an inactive source first in a buyer's history, a
+        return on the buyer's first day, no buyer, a promocode, and an order
+        whose Kyiv date is not its UTC date — and the real rebuild must
         recompute to itself with nothing reported and nothing in flight.
+
+        Not every branch of `silver_sales_type_case`: its last fallback, the
+        `RETAIL_MANAGER_IDS` list, needs a database with no classification and
+        no retail manager at all, which this fixture cannot be. Nor is that
+        where the two statements can drift: the case lives in pass 1, and pass
+        1 is one text in both (`silver_select_sql`).
 
         Then the fixture proves its own coverage from what the rebuild wrote, so
         an edit that stops exercising a branch fails here rather than going
@@ -406,6 +413,10 @@ class TestTheRowValues:
 
         r = RULE_IDS
         noon = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+        # 00:30 on a Kyiv wall clock: the day before in UTC under EET and EEST
+        # alike. An offset from UTC noon crosses Kyiv midnight only in summer.
+        day = (noon - timedelta(days=3)).date()
+        kyiv_midnight = datetime(day.year, day.month, day.day, 0, 30, tzinfo=KYIV)
         async with rv.acquire() as conn:
             await conn.executemany(
                 "INSERT INTO bronze.managers (id, name, is_retail, mirrored_at)"
@@ -432,7 +443,7 @@ class TestTheRowValues:
             await _landed(conn, r[13], source=4, manager=UNCLASSIFIED)
             await _landed(conn, r[14], promocode="DN13", total=1234.56)          # no buyer
             await _landed(conn, r[15], buyer=97106,                              # a Kyiv midnight
-                          at=noon - timedelta(days=3) + timedelta(hours=9, minutes=30))
+                          at=kyiv_midnight.astimezone(timezone.utc))
             await _landed(conn, r[16], buyer=97106, days_ago=2)
         await rebuild_silver(rv)
 
@@ -462,6 +473,12 @@ class TestTheRowValues:
         assert s[r[7]]["is_new_customer"] and not s[r[8]]["is_new_customer"]
         assert s[r[9]]["is_return"] and s[r[9]]["buyer_first_order_date"] is None
         assert s[r[14]]["buyer_id"] is None and s[r[14]]["promocode"] == "DN13"
+        # the midnight case is one: its Kyiv date is not its UTC date, and pass
+        # 2 dates the buyer's history by the Kyiv one
+        assert s[r[15]]["order_date"] == kyiv_midnight.date()
+        assert s[r[15]]["order_date"] != s[r[15]]["ordered_at"].astimezone(timezone.utc).date()
+        assert s[r[16]]["buyer_first_order_date"] == kyiv_midnight.date()
+        assert s[r[15]]["is_new_customer"] and not s[r[16]]["is_new_customer"]
 
     @pytest.mark.asyncio
     async def test_an_old_rows_grand_total_changed_under_a_later_rebuild_is_critical_with_the_id(self, rv):
