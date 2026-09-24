@@ -828,18 +828,139 @@ class TestTheLandingTablesOnAnOwnerRowAlone:
             [*self.BUYERS, self.EXPENSES]) == 0
 
     @pytest.mark.asyncio
-    async def test_the_comparisons_page_on_them_and_read_neither_table(self, landed):
+    async def test_the_comparisons_read_neither_table_and_say_what_the_sync_does(
+            self, landed):
+        """The expenses' per-tick mirror still ships on the local answer, so
+        that is a page; the buyers mirror reads the owner rows too (the
+        DN-22b review) and has stopped, so each buyers table is an INFO that
+        points at the latch's own finding."""
         from core.mirror_reconciliation import reconcile_buyers, reconcile_expenses
 
         store, pool = landed
         await self._own(pool, "bronze.buyers", self.EXPENSES)
         buyers = await reconcile_buyers(store)
         expenses = await reconcile_expenses(store)
-        assert [(i.check_name, i.table_name, i.severity.value) for i in buyers] == [
-            ("owner_row_without_marker", "bronze.buyer_contacts, bronze.buyers", "CRITICAL")]
+        assert sorted((i.check_name, i.table_name, i.severity.value) for i in buyers) == [
+            ("mirror_stood_down", "bronze.buyer_contacts", "INFO"),
+            ("mirror_stood_down", "bronze.buyers", "INFO")]
         assert [(i.check_name, i.table_name, i.severity.value) for i in expenses] == [
             ("owner_row_without_marker", self.EXPENSES, "CRITICAL")]
-        assert "no chain in this build declares them" in buyers[0].description
+        assert "no chain in this build declares them" in expenses[0].description
+        assert all("chain_owner_unregistered" in i.description for i in buyers)
+
+    @pytest.mark.asyncio
+    async def test_the_buyers_mirror_stands_down_on_them_too(self, landed):
+        """The sync's own shipper of the buyers: nothing lands, no watermark
+        moves. The control is the same batch without the row."""
+        from core.models import Buyer
+        from core.pg_buyers import mirror_buyers
+
+        store, pool = landed
+        batch = [Buyer(id=self.BUYER_ID, full_name="Anna", phones=["+380500000201"])]
+        await self._own(pool, "bronze.buyer_contacts")
+        out = await mirror_buyers(batch)
+        assert out["stood_down"] == sorted(self.BUYERS), out
+        assert await self._count(pool, "SELECT count(*) FROM bronze.buyers") == 0
+        assert await self._count(
+            pool, "SELECT count(*) FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+            list(self.BUYERS)) == 0
+
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM meta.chain_watermarks")
+        assert (await mirror_buyers(batch)) == {"rows": 1}
+        assert await self._count(
+            pool, "SELECT count(*) FROM bronze.buyers WHERE id = $1", self.BUYER_ID) == 1
+
+
+class TestTheClassificationOnAnOwnerRowAlone:
+    """The DN-22b review, reproduced here first: a chain owns the manager
+    classification in Postgres, its marker is lost (flag `duckdb`, no file),
+    and a human has reclassified manager 4 there — an interval DuckDB never
+    saw. `replicate_managers` asked the local answer alone, and its full
+    replace deleted the interval the first time it ran; the 07:30 page came
+    after. It reads the owner rows now, before DuckDB. The control on the same
+    database shows the replace is real."""
+
+    TABLES = ("bronze.managers", "app.manager_classifications")
+
+    @pytest_asyncio.fixture
+    async def reclassified(self, stores):
+        import types
+
+        from core import write_chains
+        from core.pg_replication import replicate_managers
+
+        store, pool, env = stores
+        fake = types.ModuleType("core.pg_managers_write")
+        fake.WRITE_ENV = "KS_WRITE_MANAGERS"
+        fake.CHAIN_TABLES = self.TABLES
+        fake.env_writes_postgres = lambda: False          # flag at duckdb
+        env.setattr(write_chains, "WRITE_CHAINS", write_chains.WRITE_CHAINS + (fake,))
+        async with store.connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO managers (id, name, is_retail) "
+                         "VALUES (4, 'M', TRUE)")
+            conn.execute("DELETE FROM manager_classifications")
+            conn.execute("INSERT INTO manager_classifications (manager_id, is_retail, "
+                         "valid_from) VALUES (4, TRUE, DATE '1970-01-01')")
+        assert (await replicate_managers(store))["ok"]    # Postgres as DuckDB has it
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE app.manager_classifications "
+                               "SET valid_to = DATE '2026-09-22' WHERE manager_id = 4")
+            await conn.execute(
+                "INSERT INTO app.manager_classifications "
+                "(manager_id, is_retail, valid_from, set_by, note) "
+                "VALUES (4, FALSE, DATE '2026-09-22', 1, 'human, via the chain')")
+        yield store, pool
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.manager_classifications")
+            await conn.execute("DELETE FROM bronze.managers")
+            await conn.execute(
+                "DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                list(self.TABLES))
+
+    @staticmethod
+    async def _intervals(pool):
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT is_retail, valid_from, note FROM app.manager_classifications "
+                "WHERE manager_id = 4 ORDER BY valid_from")
+        return [(r["is_retail"], r["valid_from"].isoformat(), r["note"]) for r in rows]
+
+    @pytest.mark.asyncio
+    async def test_the_control_replaces_the_human_interval(self, reclassified):
+        from core.pg_replication import replicate_managers
+
+        store, pool = reclassified
+        assert (await replicate_managers(store))["ok"]
+        assert await self._intervals(pool) == [(True, "1970-01-01", None)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("named", TABLES)
+    async def test_the_owner_row_keeps_it(self, reclassified, named):
+        from core.pg_replication import replicate_managers
+
+        store, pool = reclassified
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                "VALUES ($1, '2026-09-21T08:00:00+00:00', now())",
+                chain_latch.owner_key(named))
+            before = await conn.fetchval(
+                "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = $1",
+                "app.manager_classifications")
+
+        out = await replicate_managers(store)
+
+        assert out["ok"] is False and out["error"] is None, out
+        assert out["stood_down"] == sorted(self.TABLES), out
+        assert await self._intervals(pool) == [
+            (True, "1970-01-01", None), (False, "2026-09-22", "human, via the chain")], (
+            "the classification copy deleted an interval only Postgres held")
+        async with pool.acquire() as conn:
+            after = await conn.fetchval(
+                "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = $1",
+                "app.manager_classifications")
+        assert after == before
 
 
 class TestAnOwnerRowNoChainHereDeclares:

@@ -1531,13 +1531,22 @@ def _landing_stood_down(
     shipper asks the same answer and has stopped: a decision, with nothing
     left writing DuckDB's copy over the chain's rows.
 
-    **With `owners` given and the owner rows alone naming a unit,
-    `owner_row_without_marker` (CRITICAL), one for all of them.** Every sync
-    shipper of these tables asks the local answer alone, so each time it runs
-    it writes DuckDB's copy over the chain's rows — damage, not a decision,
-    and a page and the digest print the label and lever, never this text.
+    **With `owners` given and the owner rows alone naming a unit, it depends
+    on the unit's sync shipper** (`pg_landing.sync_reads_the_owner_rows`):
+
+    - one that reads the owner rows too — the buyers mirror, the
+      classification copy — has stopped: `mirror_stood_down` (INFO) per
+      table, saying so. The latch is still wrong, but that is one fact about
+      a chain and it has its own page: `chain_latch_disagrees` for a chain
+      this build declares, `chain_owner_unregistered` for one it does not,
+      both filed by `reconcile_operational` on the same layer;
+    - one that asks the local answer alone — the catalogue and expense
+      mirrors — writes DuckDB's copy over the chain's rows each time it runs:
+      `owner_row_without_marker` (CRITICAL), one for all of them — damage,
+      not a decision, and a page and the digest print the label and lever,
+      never this text.
     """
-    from core import pg_landing
+    from core import chain_latch, pg_landing
     from core.write_chains import WRITE_CHAINS
 
     wanted = set(tables)
@@ -1551,6 +1560,31 @@ def _landing_stood_down(
     held: set = set()
     owned_only: List[str] = []
     for unit in units:
+        if owners is not None and not pg_landing.tables_stood_down(unit) \
+                and pg_landing.owned_among(owners, unit) \
+                and pg_landing.sync_reads_the_owner_rows(unit):
+            held |= set(unit)
+            owned = ", ".join(sorted(set(unit) & chain_latch.owned_tables(owners)))
+            for table in unit:
+                if table not in wanted:
+                    continue
+                issues.append(IntegrityIssue(
+                    check_name="mirror_stood_down",
+                    table_name=table,
+                    severity=Severity.INFO,
+                    count=1,
+                    description=(
+                        f"Not compared: an owner row in Postgres says a write "
+                        f"chain owns {owned}, and the sync no longer ships "
+                        f"DuckDB's copy of {table} — its shipper reads the "
+                        "owner rows too, and ownership passes for "
+                        f"{', '.join(unit)} as a unit. This process's own "
+                        "answer still says DuckDB writes it; why is "
+                        "chain_latch_disagrees' or chain_owner_unregistered's "
+                        "finding, not this one's."
+                    ),
+                ))
+            continue
         local = pg_landing.tables_stood_down(unit)
         if local:
             held |= set(unit)
@@ -1595,8 +1629,9 @@ def _landing_stood_down(
                 f"this process's own answer says DuckDB still writes them: "
                 f"{why}. Until then each sync that ships these tables writes "
                 "DuckDB's copy over the chain's rows. Not compared: the "
-                "backfills, the hourly diffs and this comparison stand down on "
-                "the owner row, and only the sync's shippers do not."
+                "backfills, the hourly diffs, the buyers and classification "
+                "copies and this comparison stand down on the owner row; the "
+                "per-tick mirror of these tables does not."
             ),
         ))
     return issues, frozenset(held)

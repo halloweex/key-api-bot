@@ -122,6 +122,22 @@ async def write_managers(
             await mark_if_owned(conn)
 
 
+async def _failed(out: Dict[str, Any], detail: str, managers: int,
+                  classifications: int) -> Dict[str, Any]:
+    """A Postgres failure, counted against both tables and returned."""
+    from core import pg_landing
+
+    out["error"] = detail
+    logger.error("replicate: the classification was not copied: %s", detail)
+    for table, rows in (
+        (MANAGERS_TABLE, managers),
+        (CLASSIFICATIONS_TABLE, classifications),
+    ):
+        pg_landing._record_error(table, rows, detail)
+        await pg_landing._record_failure(table, detail)
+    return out
+
+
 async def replicate_managers(store) -> Dict[str, Any]:
     """Copy the classification from DuckDB to Postgres. Never raises.
 
@@ -135,12 +151,22 @@ async def replicate_managers(store) -> Dict[str, Any]:
     This is a full replace out of DuckDB, so against a chain's rows it would
     not overwrite some of them — it would delete every classification a human
     made in Postgres since the handover and put DuckDB's frozen answer in
-    their place. Asked before DuckDB is read, and on the local answer alone:
-    the callers are the sync's manager step and the retail-status endpoint's
-    write path, the per-tick mirrors' shape. The owner rows are the daily
-    comparison's to read, where a lost marker is filed CRITICAL.
+    their place: the ₴3.1M mistake, made again by a copy.
+
+    **On either copy of the latch** — DN-06's rule for anything holding a
+    Postgres connection, which this is about to. The local answer first,
+    before Postgres is asked anything; then the owner rows, after
+    `require_revision()`, before DuckDB is read. The local answer alone let a
+    lost marker delete a human's interval the first time this ran, and the
+    07:30 page arrived after the damage (the DN-22b review, reproduced on
+    PostgreSQL 17.2). Nothing here argues for the per-tick exemption the sync
+    mirrors take: this runs from the daily manager sync and stats job, once at
+    startup and from an admin click, and it fails anyway when Postgres is down.
+    An owner row that cannot be read fails the copy closed — counted, logged
+    and stamped like any other failure here, and nothing written.
     """
     from core import pg_landing
+    from core.pg import get_pool, require_revision
 
     out: Dict[str, Any] = {
         "managers": 0, "classifications": 0, "ok": False, "skipped": None,
@@ -152,6 +178,13 @@ async def replicate_managers(store) -> Dict[str, Any]:
         return out
 
     moved = pg_landing.tables_stood_down(MANAGER_UNIT)
+    if not moved:
+        try:
+            pool = await get_pool()
+            await require_revision()
+            moved = await pg_landing.tables_stood_down_or_owned(pool, MANAGER_UNIT)
+        except Exception as exc:
+            return await _failed(out, f"{type(exc).__name__}: {exc}", 0, 0)
     if moved:
         out["skipped"] = pg_landing.stood_down_reason(moved)
         out["stood_down"] = sorted(moved)
@@ -173,15 +206,8 @@ async def replicate_managers(store) -> Dict[str, Any]:
     try:
         await write_managers(managers, classifications)
     except Exception as exc:
-        detail = f"{type(exc).__name__}: {exc}"
-        out["error"] = detail
-        for table, rows in (
-            (MANAGERS_TABLE, len(managers)),
-            (CLASSIFICATIONS_TABLE, len(classifications)),
-        ):
-            pg_landing._record_error(table, rows, detail)
-            await pg_landing._record_failure(table, detail)
-        return out
+        return await _failed(out, f"{type(exc).__name__}: {exc}",
+                             len(managers), len(classifications))
 
     out["ok"] = True
     pg_landing._record_ok(MANAGERS_TABLE, len(managers))

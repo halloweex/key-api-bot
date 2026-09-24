@@ -345,8 +345,10 @@ class _Walk:
                     for m in self.modules.values() for name, fn in m.funcs.items()}
         self.calls = {key: _called_names(fn) for key, (_m, fn) in self.fns.items()}
         self.callers = self._callers()
+        self.callees = self._callees()
         self.consulting = self._consulting()
         self.executors = _executors(self.modules)
+        self._pool_memo: dict = {}
 
     def _callers(self) -> dict:
         """`{(rel, name): {(rel, name) of each caller}}`, by resolved name:
@@ -377,6 +379,52 @@ class _Walk:
                 for target in targets:
                     callers.setdefault(target, set()).add(key)
         return callers
+
+    def _callees(self) -> dict:
+        """`{(rel, name): {(rel, name) it calls}}`, resolved calls only: a
+        plain name through this module or its imports, `alias.f()` through a
+        module alias, `self.f()` within the module. The narrow half of
+        `_callers` on purpose — a function wrongly counted as reaching the
+        pool would be held to reading owner rows for a pool it never takes."""
+        out: dict = {}
+        for key, (module, fn) in self.fns.items():
+            found = set()
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Name):
+                    hit = _resolve(module, node.func.id, self.modules)
+                    if hit:
+                        found.add((hit[0].rel, hit[1].name))
+                elif isinstance(node.func, ast.Attribute) \
+                        and isinstance(node.func.value, ast.Name):
+                    base = node.func.value.id
+                    alias = module.module_aliases.get(base)
+                    other = self.modules.get(alias) if alias else None
+                    if other is not None and node.func.attr in other.funcs:
+                        found.add((other.rel, node.func.attr))
+                    elif base == "self" and node.func.attr in module.funcs:
+                        found.add((module.rel, node.func.attr))
+            out[key] = found
+        return out
+
+    def reaches_pool(self, key, seen=frozenset()) -> bool:
+        """It takes the Postgres pool itself or through a function it calls —
+        `replicate_managers` takes it inside `write_managers`, and a walk that
+        looked only at the asker's own body let it read the local answer
+        alone (the DN-22b review)."""
+        if key in self._pool_memo:
+            return self._pool_memo[key]
+        if "get_pool" in self.calls[key]:
+            found = True
+        elif key in seen:
+            return False
+        else:
+            found = any(self.reaches_pool(c, seen | {key})
+                        for c in self.callees.get(key, ()) if c in self.fns)
+        if not seen:
+            self._pool_memo[key] = found
+        return found
 
     def question_names(self) -> set:
         """The names that ask which tables have changed hands:
@@ -529,14 +577,38 @@ class TestEveryPostgresWriterAsksTheRegistry:
 
     def test_one_that_takes_the_pool_reads_the_owner_rows_too(self, walk):
         """DN-06: anything already holding a Postgres connection stands down
-        on either copy of the latch. Walked over every asker — the sync's
-        shippers take no pool before they ask, and so are not held to it."""
-        owner_reads = {"order_tables_stood_down_or_owned",
-                       "tables_stood_down_or_owned", "read_owners"}
-        holding = [key for key in walk.consulting if "get_pool" in walk.calls[key]]
-        assert len(holding) >= 10, holding
-        missing = sorted(key for key in holding if not walk.calls[key] & owner_reads)
+        on either copy of the latch. Walked over every asker that takes the
+        pool — itself or through what it calls, which is how
+        `replicate_managers` holds it — and only the per-tick mirrors named
+        below keep the local answer alone."""
+        holding = [key for key in walk.consulting if walk.reaches_pool(key)]
+        assert len(holding) >= 19, holding
+        missing = sorted(key for key in holding
+                         if not walk.calls[key] & _OWNER_READS
+                         and key not in _PER_TICK_MIRRORS)
         assert not missing, f"holds a pool but reads only the local latch: {missing}"
+
+    def test_the_per_tick_exemptions_are_exactly_what_the_walk_finds(self, walk):
+        """Each exempt mirror asks, reaches the pool and reads no owner row —
+        so a stale entry, or one that started reading them, fails here."""
+        for key in _PER_TICK_MIRRORS:
+            assert key in walk.consulting, key
+            assert walk.reaches_pool(key), key
+            assert not walk.calls[key] & _OWNER_READS, key
+
+
+_OWNER_READS = {"order_tables_stood_down_or_owned", "tables_stood_down_or_owned",
+                "read_owners"}
+# The sync's per-tick mirrors, which keep the local answer alone: the write
+# path, once a minute, where a Postgres read is the one `writes_postgres()`
+# exists to avoid (DN-22a). The daily comparisons page the state they cannot
+# see — `order_owner_row_without_marker`, `owner_row_without_marker`.
+_PER_TICK_MIRRORS = {
+    ("core/pg_landing.py", "_mirror"):
+        "the catalogue and expense mirror, every sync tick",
+    ("core/duckdb_store.py", "upsert_orders"):
+        "the orders mirror, every sync tick",
+}
 
 
 _SPEC_TYPES = {"MirroredTable", "BucketedTable"}
@@ -2009,6 +2081,86 @@ class TestTheSyncShippersStandDown:
         assert not pool.wrote(EXPENSES), pool.sql
 
 
+# The two sync shippers that read the owner rows as well as the local answer
+# (the DN-22b review): the unit each one writes in one transaction.
+_OWNER_AWARE = {
+    "mirror_buyers": (BUYERS, CONTACTS),
+    "replicate_managers": (MANAGERS, CLASSIFICATIONS),
+}
+
+
+class TestTheBuyersAndClassificationCopiesReadTheOwnerRows:
+    """`replicate_managers` asked the local answer alone, so a lost marker let
+    its full replace delete every interval a human set in Postgres the first
+    time it ran — reproduced on PostgreSQL 17.2 — and the 07:30 page came
+    after the damage. `mirror_buyers` had the same shape. Both now read the
+    owner rows once the local answer is empty, before DuckDB is read."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_OWNER_AWARE))
+    @pytest.mark.parametrize("half", [0, 1])
+    @pytest.mark.parametrize("road", ["marker_lost", "rolled_back"])
+    async def test_the_owner_row_alone_stands_the_unit_down(
+            self, flags, pool, landing_chain, path, half, road):
+        from core.pg_landing import stood_down_reason
+
+        unit = _OWNER_AWARE[path]
+        if road == "marker_lost":
+            landing_chain(tables=unit, env=lambda: False)
+        else:
+            _no_landing_chain(flags)
+        pool.owner_rows = {unit[half]: "2026-09-20T08:00:00+00:00"}
+
+        out = await _ship(path, _NoStore())
+
+        assert _skip_reason(out) == stood_down_reason(unit), out
+        assert out["stood_down"] == sorted(unit), out
+        assert pool.only_asked_who_owns(), pool.sql
+        from core import pg
+        pg.require_revision.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_OWNER_AWARE))
+    async def test_an_unreadable_owner_row_ships_nothing_and_says_so(
+            self, pool, landing_chain, tmp_path, path):
+        """Not an absent owner row: the copy fails closed, as any other
+        Postgres failure here does — counted, never shipped on the strength of
+        a read that did not happen."""
+        landing_chain(tables=_OWNER_AWARE[path], env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        out = await _ship(path, await _landing_store(tmp_path))
+
+        assert "unreadable" in out["error"], out
+        assert not any(pool.wrote(t) for t in _OWNER_AWARE[path]), pool.sql
+        assert [s for s in pool.sql if "failures_since_ok + 1" in s], (
+            "the failure left no trace in the watermark")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", sorted(_OWNER_AWARE))
+    async def test_a_schema_behind_the_code_fails_before_the_owner_read(
+            self, pool, tmp_path, path):
+        """`require_revision()` first: the owner row is present here, so a
+        path that read it first would report a stand-down off an old schema."""
+        from core import pg
+
+        pg.require_revision.side_effect = pg.SchemaVersionError(
+            "database at 0031, code wants 0033")
+        pool.owner_rows = {_OWNER_AWARE[path][0]: "2026-09-20T08:00:00+00:00"}
+        out = await _ship(path, await _landing_store(tmp_path))
+
+        assert out["error"].startswith("SchemaVersionError"), out
+        assert not [s for s in pool.sql if "meta.chain_watermarks" in s], pool.sql
+        assert not any(pool.wrote(t) for t in _OWNER_AWARE[path]), pool.sql
+
+    @pytest.mark.asyncio
+    async def test_an_empty_buyer_batch_asks_postgres_nothing(self, pool):
+        """The owner read is paid for a batch to ship, not for every tick."""
+        from core.pg_buyers import mirror_buyers
+
+        assert await mirror_buyers([]) == {"rows": 0}
+        _never_reached_postgres(pool)
+
+
 # The backfills and the hourly diffs, which hold a pool and so read the owner
 # rows too: (the call, what it ships, how it says it stood down).
 _POOLED = {
@@ -2221,6 +2373,12 @@ _COMPARED = {
 }
 
 
+# The tables whose sync shipper asks the local answer alone — `_mirror`, the
+# per-tick catalogue and expense mirror. The buyers mirror and the
+# classification copy read the owner rows too since the DN-22b review.
+_SHIPPED_ON_THE_LOCAL_ANSWER = {PRODUCTS, CATEGORIES, EXPENSES}
+
+
 async def _compare(name, store):
     """Run one comparison the way the 07:30 job does. `reconcile_mirror` is
     handed a DuckDB side holding the categories alone: a stood-down table it
@@ -2291,8 +2449,13 @@ class TestTheComparisonsStandDown:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name", sorted(_COMPARED))
     @pytest.mark.parametrize("road", ["marker_lost", "rolled_back"])
-    async def test_on_the_owner_rows_alone_one_critical_and_no_read(
+    async def test_on_the_owner_rows_alone_what_each_shipper_earns_and_no_read(
             self, flags, pool, landing_chain, name, road):
+        """A CRITICAL for the tables whose sync shipper asks the local answer
+        alone and is still writing over the chain's rows; an INFO per table
+        for the buyers and the classification, whose shippers read the owner
+        rows too and have stopped (the DN-22b review) — the latch itself is
+        `chain_latch_disagrees`' or `chain_owner_unregistered`'s page."""
         from core.data_quality import Severity
 
         tables = _COMPARED[name][0]
@@ -2307,16 +2470,27 @@ class TestTheComparisonsStandDown:
             pool.owner_rows = {t: "2026-09-20T08:00:00+00:00" for t in tables}
         issues = await _compare(name, None)
 
-        (page,) = [i for i in issues if i.check_name == "owner_row_without_marker"]
-        assert page.severity is Severity.CRITICAL
-        assert page.table_name == ", ".join(sorted(tables))
-        assert page.count == len(tables)
-        assert "mirror_stood_down" not in {i.check_name for i in issues}
-        assert _read_a_table(pool, tables) == [], pool.sql
-        if road == "marker_lost":
-            assert "the marker is missing" in page.description
+        still = sorted(t for t in tables if t in _SHIPPED_ON_THE_LOCAL_ANSWER)
+        stopped = sorted(t for t in tables if t not in _SHIPPED_ON_THE_LOCAL_ANSWER)
+        pages = [i for i in issues if i.check_name == "owner_row_without_marker"]
+        if still:
+            (page,) = pages
+            assert page.severity is Severity.CRITICAL
+            assert page.table_name == ", ".join(still)
+            assert page.count == len(still)
+            if road == "marker_lost":
+                assert "the marker is missing" in page.description
+            else:
+                assert "no chain in this build declares them" in page.description
         else:
-            assert "no chain in this build declares them" in page.description
+            assert pages == [], pages
+        infos = [i for i in issues if i.check_name == "mirror_stood_down"]
+        assert sorted(i.table_name for i in infos) == stopped
+        for info in infos:
+            assert info.severity is Severity.INFO
+            assert "reads the owner rows too" in info.description
+            assert "chain_owner_unregistered" in info.description
+        assert _read_a_table(pool, tables) == [], pool.sql
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name", sorted(_COMPARED))
@@ -2370,20 +2544,21 @@ class TestTheLandingFindingSaysWhetherTheSyncStillShips:
             stopped = "the sync no longer ships DuckDB's copy" in text
             shipping = "the sync is still shipping" in text
             assert stopped != shipping, f"says neither or both: {text}"
-        text = issues[0].description
-        shipping = "the sync is still shipping" in text
 
-        # Every sync shipper of the tables the finding covers — the catalogue
-        # comparison covers two, and the claim is made about both.
+        # Every sync shipper of the tables the findings cover — the catalogue
+        # comparison covers two, which since the DN-22b review can earn
+        # different claims — each checked against the finding naming its table.
         store = await _landing_store(tmp_path)
         shippers = {"reconcile_mirror": (("mirror_products", PRODUCTS),
                                          ("replicate_managers", MANAGERS))}.get(
             name, ((shipper, tables[0]),))
         for path, table in shippers:
+            (issue,) = [i for i in issues if table in i.table_name.split(", ")]
+            shipping = "the sync is still shipping" in issue.description
             pool.sql.clear()
             await _ship(path, store)
-            assert pool.wrote(table) == shipping, (path, text, pool.sql)
-            assert pool.wrote(table) == (issues[0].severity.value == "CRITICAL")
+            assert pool.wrote(table) == shipping, (path, issue.description, pool.sql)
+            assert pool.wrote(table) == (issue.severity.value == "CRITICAL")
 
 
 class TestWhatTheLandingStandDownTellsAHuman:

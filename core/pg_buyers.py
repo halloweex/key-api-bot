@@ -167,27 +167,51 @@ async def _record_failure(error: str) -> None:
         logger.debug("pg_buyers: could not record the failure either: %s", exc)
 
 
+def _stood_down(moved, count: int) -> Dict[str, Any]:
+    """What `mirror_buyers` returns when a write chain owns the unit."""
+    from core import pg_landing
+
+    reason = pg_landing.stood_down_reason(moved)
+    logger.info("pg_buyers: %s; %d buyer(s) not shipped out of DuckDB",
+                reason, count)
+    return {"skipped": reason, "stood_down": sorted(moved)}
+
+
 async def mirror_buyers(buyers: Sequence[Any]) -> Dict[str, Any]:
     """Ship one parsed Buyer batch. Never raises.
 
     Skipped, and says so, once a write chain owns the buyers or their contacts
     (DN-22b): its writer puts buyers in Postgres DuckDB never sees, and this
     upsert — with its per-buyer contact delete — would write DuckDB's copy
-    over them. The local answer only: this is the sync's own write path.
+    over them.
+
+    **On either copy of the latch** (DN-06's rule, the DN-22b review, and
+    step 7 of the chain-4 plan): the local answer before Postgres is asked
+    anything, then — only when there is a batch to ship, so an empty tick
+    costs nothing — the owner rows, after `require_revision()`, in the same
+    guard as the write. A lost marker would otherwise put DuckDB's copy over
+    the chain's buyers on the next sync that fetched one; the per-tick
+    exemption `_mirror` and the orders mirror take does not fit a path that
+    runs for the ~19 new buyers a day and is about to hold the pool anyway.
+    An owner row that cannot be read ships nothing and is recorded like any
+    other failure here.
     """
     from core import pg_landing
+    from core.pg import get_pool, require_revision
 
     if not pg_landing.enabled():
         return {"skipped": "KS_PG_DSN is not set"}
     moved = pg_landing.tables_stood_down(BUYER_UNIT)
     if moved:
-        reason = pg_landing.stood_down_reason(moved)
-        logger.info("pg_buyers: %s; %d buyer(s) not shipped out of DuckDB",
-                    reason, len(buyers))
-        return {"skipped": reason, "stood_down": sorted(moved)}
+        return _stood_down(moved, len(buyers))
     if not buyers:
         return {"rows": 0}
     try:
+        pool = await get_pool()
+        await require_revision()
+        moved = await pg_landing.tables_stood_down_or_owned(pool, BUYER_UNIT)
+        if moved:
+            return _stood_down(moved, len(buyers))
         rows = [buyer_row(b) for b in buyers]
         contacts = [(b.id, contact_rows(b)) for b in buyers]
         await _write(rows, contacts)

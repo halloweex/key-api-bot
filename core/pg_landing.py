@@ -217,15 +217,42 @@ def tables_stood_down(unit: Sequence[str]) -> FrozenSet[str]:
     table here today — nothing is evaluated at all, so the per-tick mirrors
     that ask this read no variable and open no file.
 
-    This is the answer the **sync's own shippers** take — `_mirror`,
-    `pg_buyers.mirror_buyers`, `pg_replication.replicate_managers` — because
-    they are the write path, and a Postgres read there is the one
-    `writes_postgres()` exists to avoid. Everything that already holds a pool
-    asks `tables_stood_down_or_owned` instead.
+    This is the only answer the **per-tick sync mirrors** take — `_mirror`
+    (the catalogue and the order-level expenses) and the orders mirror in
+    `DuckDBStore.upsert_orders` — because they are the write path, once a
+    minute, and a Postgres read there is the one `writes_postgres()` exists
+    to avoid. Everything else that is about to hold a pool asks this first and
+    `tables_stood_down_or_owned` next, the buyers mirror and the
+    classification copy included (`sync_reads_the_owner_rows`).
     """
     from core.write_chains import stood_down_among
 
     return stood_down_among(unit)
+
+
+def sync_reads_the_owner_rows(unit: Sequence[str]) -> bool:
+    """Does the sync's shipper of `unit` stand down on the owner rows too?
+
+    True for the buyers (`pg_buyers.mirror_buyers`) and the classification
+    (`pg_replication.replicate_managers`), which read them after the local
+    answer since the DN-22b review: the classification copy is a full replace
+    run a few times a day, and on the local answer alone a lost marker let it
+    delete a human's interval in Postgres the first time it ran. False for
+    everything `_mirror` ships and for the order tables, whose per-tick
+    mirrors keep the local answer alone.
+
+    The comparisons read this to say which of the two is true when only the
+    owner rows name a unit — a shipper that has stopped (INFO; the latch
+    itself is `chain_latch_disagrees`' or `chain_owner_unregistered`'s page)
+    or one still writing over the chain's rows (CRITICAL). A unit it does not
+    know reads as still shipping, the louder answer.
+    `tests/unit/test_write_chains.py` checks each claim against what the
+    shipper then does.
+    """
+    from core.pg_buyers import BUYER_UNIT
+    from core.pg_replication import MANAGER_UNIT
+
+    return frozenset(unit) in (frozenset(BUYER_UNIT), frozenset(MANAGER_UNIT))
 
 
 def owned_among(owners: Mapping[str, str], unit: Sequence[str]) -> FrozenSet[str]:

@@ -44,6 +44,17 @@ def _clean():
     pg_landing.reset_health()
 
 
+@pytest.fixture(autouse=True)
+def _nothing_owns_the_classification(monkeypatch):
+    """`replicate_managers` asks Postgres's owner rows before it reads DuckDB
+    (the DN-22b review). These tests are about what it copies and how it
+    fails, so Postgres answers that no write chain owns either table; the
+    stand-down itself is pinned in `tests/unit/test_write_chains.py`."""
+    monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=object()))
+    monkeypatch.setattr("core.pg.require_revision", AsyncMock())
+    monkeypatch.setattr("core.chain_latch.read_owners", AsyncMock(return_value={}))
+
+
 async def _store(tmp_path: Path) -> DuckDBStore:
     store = DuckDBStore(db_path=tmp_path / "mgr.duckdb")
     await store.connect()
