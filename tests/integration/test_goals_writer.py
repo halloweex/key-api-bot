@@ -113,6 +113,23 @@ class TestUnderTheFlag:
         assert goals["monthly"]["isCustom"] is True
 
     @pytest.mark.asyncio
+    async def test_the_clock_is_the_callers_not_the_servers(self, stores):
+        """`updated_at` orders a DuckDB version of a goal against a Postgres
+        one in the copy-back's handover, so both writers stamp it from the
+        same clock — the web container's — and the Postgres writer stores
+        what it is handed rather than its own `now()`."""
+        from datetime import datetime, timezone
+
+        _store, pool, _env = stores
+        stamp = datetime(2026, 9, 1, 8, 30, tzinfo=timezone.utc)
+
+        row = await pg_goals_write.set_goal(
+            "monthly", 1_000_000.0, True, 900_000.0, 1.1, stamp)
+
+        assert row[5] == stamp
+        assert (await _pg_goals(pool))["monthly"][5] == stamp
+
+    @pytest.mark.asyncio
     async def test_it_latches_and_claims_inside_the_write(self, stores):
         store, pool, env = stores
         env.setenv("KS_WRITE_GOALS", "postgres")
