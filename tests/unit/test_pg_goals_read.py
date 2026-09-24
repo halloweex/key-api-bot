@@ -256,8 +256,10 @@ class TestTheBoundary:
                  if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)}
         assert "connection" in calls, (
             f"{name} no longer opens DuckDB. `app.revenue_goals` is an hourly "
-            f"read replica and DuckDB is still the writer, so a write that "
-            f"went to Postgres would be overwritten within the hour."
+            f"read replica and DuckDB is the writer by default, so a write "
+            f"that went to Postgres outside a write chain — for `set_goal`, "
+            f"chain 7a behind KS_WRITE_GOALS — would be overwritten within the "
+            f"hour."
         )
 
     def test_no_write_statement_ever_reaches_the_router(self):

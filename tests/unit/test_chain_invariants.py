@@ -53,7 +53,7 @@ class TestNothingIsReadWhileNothingHasMoved:
 
     @pytest.mark.asyncio
     async def test_no_chain_watched_means_no_query_and_no_pool(self, monkeypatch):
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY"):
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         get_pool = AsyncMock(side_effect=AssertionError("asked for a pool"))
         with patch("core.pg.get_pool", new=get_pool):
@@ -140,6 +140,8 @@ class _Recorder:
             max_id = next((n for table, n in self.max_ids.items() if table in sql),
                           None)
             return {"last_value": 1, "is_called": False, "max_id": max_id}
+        if "revenue_goals" in sql:
+            return {"updated_at": 0, "is_custom": 0}
         if "recorded_at" in sql:
             return {"recorded_at": 0, "source": 0}
         if "created_at" in sql:
@@ -207,6 +209,16 @@ class TestProductionToday:
             assert chain_1 not in read, chain_1
         # Zero rows: an allocator with nothing to collide with, no NULLs.
         assert inv.check_chain_invariants(facts) == []
+        # Nothing latched, so a NULL would be named as older than the
+        # handover rather than laid on a writer that has not run.
+        assert facts.expenses.latched_at is None
+
+    @pytest.mark.asyncio
+    async def test_the_first_expense_brings_its_stamp_to_the_verdict(self, production):
+        _latch("pg_expenses_write")
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(_Recorder()))
+        assert facts.expenses.latched_at == UTC_NOW
 
     @pytest.mark.asyncio
     async def test_an_unreachable_postgres_is_one_warn(self, production):
@@ -272,7 +284,7 @@ class TestAChainWithNoInvariants:
         fake.env_writes_postgres = lambda: True
         monkeypatch.setattr(write_chains, "WRITE_CHAINS",
                             write_chains.WRITE_CHAINS + (fake,))
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY"):
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
         return "pg_orders_write"
@@ -296,7 +308,120 @@ class TestAChainWithNoInvariants:
         missing = [chain_name(c) for c in WRITE_CHAINS
                    if chain_name(c) not in readers]
         assert not missing, f"no chain invariants for {missing}"
-        assert set(readers.values()) <= {"expenses", "inventory"}
+        assert set(readers.values()) <= {"expenses", "inventory", "goals"}
+        # And each names a field `Facts` actually carries — a reader whose
+        # group the verdict never looks at is read and then judged by nothing.
+        import dataclasses
+
+        fields = {f.name for f in dataclasses.fields(inv.Facts)}
+        assert set(readers.values()) <= fields, set(readers.values()) - fields
+
+
+class TestChain7aGoals:
+    """DN-25. `app.revenue_goals` has no allocator and no sync watermark; what
+    is true of it on its own is that its writer supplies the two columns
+    Postgres does not default — `updated_at`, the copy-back's clock, and
+    `is_custom`, without which `get_smart_goals` drops a typed goal for the
+    suggestion."""
+
+    @pytest.fixture
+    def flagged(self, monkeypatch):
+        monkeypatch.setenv("KS_WRITE_GOALS", "postgres")
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY"):
+            monkeypatch.delenv(env, raising=False)
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
+
+    def test_the_flag_alone_makes_it_watched(self, flagged):
+        assert inv.watched_chains() == {"pg_goals_write": None}
+
+    @pytest.mark.asyncio
+    async def test_it_reads_the_goals_table_and_nothing_else(self, flagged):
+        conn = _Recorder()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(conn))
+        assert facts.watched == ("pg_goals_write",) and facts.whole is None
+        assert isinstance(facts.goals, inv.Goals)
+        assert facts.expenses is None and facts.inventory is None
+        read = "\n".join(conn.sql)
+        assert "FROM app.revenue_goals" in read
+        for other in ("manual_expenses", "stock_movements", "chain_watermarks"):
+            assert other not in read, other
+        assert inv.check_chain_invariants(facts) == []
+
+    def test_a_null_either_column_names_it(self):
+        from core.data_quality import Severity
+
+        facts = inv.Facts(
+            watched=("pg_goals_write",), now=UTC_NOW,
+            goals=inv.Goals(nulls=inv.Nulls(
+                "app.revenue_goals", {"updated_at": 1, "is_custom": 2})))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert issue.check_name == inv.COLUMN_NULL
+        assert issue.table_name == "app.revenue_goals"
+        assert issue.severity is Severity.CRITICAL and issue.count == 3
+        assert "updated_at in 1 row(s)" in issue.description
+        assert "is_custom in 2 row(s)" in issue.description
+        assert "pg_goals_write" in issue.description
+
+    def test_the_goals_page_says_nothing_about_a_recorded_at(self):
+        """The review's fifth finding: the shared wording ended on a sentence
+        about `recorded_at` and windowed reads — `stock_movements`' — on a
+        table that has no such column and a check that reads it whole."""
+        for latched_at in (None, UTC_NOW):
+            facts = inv.Facts(
+                watched=("pg_goals_write",), now=UTC_NOW,
+                goals=inv.Goals(nulls=inv.Nulls(
+                    "app.revenue_goals", {"updated_at": 0, "is_custom": 1}),
+                    latched_at=latched_at))
+            (issue,) = inv.check_chain_invariants(facts)
+            assert "recorded_at" not in issue.description, latched_at
+
+    def test_before_the_first_write_the_null_is_older_than_the_handover(self):
+        """Watched from the flag, the chain has written nothing: a NULL there
+        came across with the replication, and blaming the writer would send
+        the reader after code that never ran."""
+        facts = inv.Facts(
+            watched=("pg_goals_write",), now=UTC_NOW,
+            goals=inv.Goals(nulls=inv.Nulls(
+                "app.revenue_goals", {"updated_at": 1, "is_custom": 0})))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert "since before the handover" in issue.description
+        assert "has not written this table yet" in issue.description
+        assert "is not supplying one" not in issue.description
+
+    def test_after_the_first_write_it_names_the_writer(self):
+        facts = inv.Facts(
+            watched=("pg_goals_write",), now=UTC_NOW,
+            goals=inv.Goals(nulls=inv.Nulls(
+                "app.revenue_goals", {"updated_at": 1, "is_custom": 0}),
+                latched_at=UTC_NOW))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert "pg_goals_write is not supplying one" in issue.description
+        assert "since before the handover" not in issue.description
+
+    @pytest.mark.asyncio
+    async def test_read_facts_carries_the_latch_stamp_to_the_verdict(self, flagged):
+        """The wording turns on `latched_at`, so the reader must bring it."""
+        _latch("pg_goals_write")
+        conn = _Recorder()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(conn))
+        assert facts.goals.latched_at == UTC_NOW
+
+    @pytest.mark.asyncio
+    async def test_read_facts_carries_no_stamp_for_a_flag_alone(self, flagged):
+        conn = _Recorder()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(conn))
+        assert facts.goals.latched_at is None
+
+    def test_an_unreadable_goals_table_is_blindness_not_silence(self):
+        facts = inv.Facts(watched=("pg_goals_write",), now=UTC_NOW,
+                          goals=inv.Unwatched("relation does not exist"))
+        issues = inv.check_chain_invariants(facts)
+        assert [i.check_name for i in issues] == [inv.UNWATCHED]
+        assert "pg_goals_write" in issues[0].description
+        assert inv.unverified_conditions(issues) == sorted(inv.CONDITIONS)
 
 
 class TestWhoIsWatched:
@@ -446,6 +571,15 @@ class TestTheAllocator:
     def test_an_empty_table_has_nothing_to_collide_with(self):
         assert inv.check_chain_invariants(_expenses(next_id=1, max_id=None)) == []
 
+    def test_a_null_before_chain_8s_first_write_is_not_blamed_on_it(self):
+        """Production's own state: `KS_WRITE_EXPENSES=postgres`, nothing
+        latched. A NULL `created_at` there was carried across by the
+        replication; the writer has not run."""
+        (issue,) = inv.check_chain_invariants(_expenses(nulls={"created_at": 1}))
+        assert "since before the handover" in issue.description
+        assert "is not supplying one" not in issue.description
+        assert "recorded_at" not in issue.description
+
 
 class TestTheInventoryThresholds:
     def _inventory(self, **kw) -> inv.Facts:
@@ -486,6 +620,17 @@ class TestTheInventoryThresholds:
         day = (UTC_NOW - timedelta(days=1)).date()
         assert self._names(snapshot_days=((day, 450),)) == []
         assert self._names(snapshot_days=((day, 449),)) == [inv.SNAPSHOT_SHORT]
+
+    def test_the_recorded_at_sentence_is_the_movements_own(self):
+        """It stays where it is true — a NULL `recorded_at` escapes the
+        windows the since-the-handover checks read by — and only there."""
+        (issue,) = inv.check_chain_invariants(self._inventory(
+            nulls=inv.Nulls("app.stock_movements", {"recorded_at": 2, "source": 0})))
+        assert "A NULL recorded_at is also invisible" in issue.description
+        assert "pg_inventory_write is not supplying one" in issue.description
+        (issue,) = inv.check_chain_invariants(self._inventory(
+            nulls=inv.Nulls("app.stock_movements", {"recorded_at": 0, "source": 2})))
+        assert "recorded_at" not in issue.description
 
     def test_the_since_the_handover_checks_stand_down_before_the_handover(self):
         """A chain that is flagged but has never written has no handover to

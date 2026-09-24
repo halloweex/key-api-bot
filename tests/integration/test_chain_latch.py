@@ -51,7 +51,7 @@ async def stores(tmp_path, monkeypatch):
     """
     from core.duckdb_store import DuckDBStore
 
-    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES"):
+    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     store = DuckDBStore(db_path=tmp_path / "latch.duckdb")

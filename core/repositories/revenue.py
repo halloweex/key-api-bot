@@ -341,12 +341,20 @@ class RevenueMixin:
         fail differently and a rollback should cost one of them. `/marketing`
         also reads Gold and the goals, where `/reports` reads only Silver — so
         the surfaces genuinely differ, and so does what going wrong looks like.
+
+        The goals are the exception to the flag: a statement reading
+        `{revenue_goals}` goes where chain 7a writes, and without a fallback —
+        `GoalsMixin._goals_run`'s rule, for `core/pg_goals_write.py`'s reason.
         """
         from core.sql_dialect import DUCKDB, POSTGRES
 
-        from core import pg_marketing_read
+        from core import pg_goals_write, pg_marketing_read
 
         params = list(params or [])
+        if pg_goals_write.reads_the_chain(sql):
+            return await pg_marketing_read.fetch(
+                self._render_report(sql, POSTGRES, **extra), params,
+            )
         if pg_marketing_read.enabled() and pg_marketing_read.available():
             try:
                 return await pg_marketing_read.fetch(
@@ -2198,9 +2206,12 @@ class RevenueMixin:
             })
 
         # The target line. Postgres holds an hourly read replica of the goals
-        # (revision 0017); the goals API still writes DuckDB, so a target set
-        # this hour appears here next hour. That is a display lag on a figure
-        # changed a few times a year.
+        # (revision 0017); the goals API writes DuckDB by default, so a target
+        # set this hour appears here next hour. That is a display lag on a
+        # figure changed a few times a year. Under `KS_WRITE_GOALS=postgres`
+        # (chain 7a) the goal is written to Postgres directly and there is no
+        # lag: `_marketing_run` sends this read where the chain writes,
+        # whatever `KS_READ_MARKETING` says.
         goal_rows = await self._marketing_run(
             "SELECT goal_amount FROM {revenue_goals} WHERE period_type = 'monthly'"
         )

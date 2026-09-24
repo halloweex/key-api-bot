@@ -26,11 +26,15 @@ import logging
 from types import ModuleType
 from typing import Dict, FrozenSet, Iterable, Optional, Tuple
 
-from core import pg_expenses_write, pg_inventory_write
+from core import pg_expenses_write, pg_goals_write, pg_inventory_write
 
 logger = logging.getLogger(__name__)
 
-WRITE_CHAINS = (pg_inventory_write, pg_expenses_write)
+# Chain 7a (`pg_goals_write`, DN-25) is the third: `app.revenue_goals`, the
+# three goal amounts a human types. Its flag is off by default, so until
+# `KS_WRITE_GOALS=postgres` it stands down nothing and only adds a row to the
+# `/api/health` block.
+WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write)
 
 # A KS_WRITE_* value no chain understands must stop that chain and nothing
 # else. The registry used to evaluate every chain's flag for every question, so

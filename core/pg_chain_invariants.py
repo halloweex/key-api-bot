@@ -68,6 +68,20 @@ Inventory (chain 1):
   means stock changes nobody records one by one, so this watches the same two
   keys at 90 minutes (`WATERMARK_MAX_AGE_MIN` has the arithmetic).
 
+Goals (chain 7a, DN-25):
+
+* **`updated_at` and `is_custom`.** `app.revenue_goals` has no default on
+  either — revision 0017 built it to receive DuckDB's values — so the writer
+  supplies both — and refuses a write without them — so after its first
+  write a NULL is a writer that stopped, and before it one the replication
+  carried across; the finding says which (`_null_issues`). Each one costs
+  something specific: `updated_at` is the clock the copy-back's handover
+  orders two versions of a goal by, so a NULL leaves it nothing to order with;
+  and `get_smart_goals` keeps a stored goal only `if is_custom`, so a NULL
+  there silently replaces the number a human typed with the suggestion. No
+  allocator and no watermark: the table is keyed on `period_type` and has no
+  sync behind it.
+
 WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
 
 A chain is watched when `core.write_chains.chain_modes()` says its writes go to
@@ -236,6 +250,15 @@ class WatermarkAge:
 class Expenses:
     allocator: Allocator
     nulls: Nulls
+    # None for a chain that is flagged but has never written here: whatever
+    # its table holds arrived before the handover. `_null_issues` says so.
+    latched_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
+class Goals:
+    nulls: Nulls
+    latched_at: Optional[datetime] = None
 
 
 @dataclass(frozen=True)
@@ -258,7 +281,7 @@ class Inventory:
     window_end: Optional[date] = None
 
 
-Group = Union[Expenses, Inventory, Unwatched, None]
+Group = Union[Expenses, Inventory, Goals, Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -275,6 +298,7 @@ class Facts:
     now: Optional[datetime] = None
     expenses: Group = None
     inventory: Group = None
+    goals: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
@@ -354,10 +378,11 @@ def _reader_groups() -> Dict[str, str]:
     member of `WRITE_CHAINS` missing from this mapping, so the gap shows in CI
     before it shows at 01:00.
     """
-    from core import pg_expenses_write, pg_inventory_write
+    from core import pg_expenses_write, pg_goals_write, pg_inventory_write
 
     return {pg_expenses_write.CHAIN: "expenses",
-            pg_inventory_write.CHAIN: "inventory"}
+            pg_inventory_write.CHAIN: "inventory",
+            pg_goals_write.CHAIN: "goals"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -371,6 +396,20 @@ SELECT (SELECT last_value FROM {sequence})            AS last_value,
 _EXPENSE_NULLS_SQL = """
 SELECT count(*) FILTER (WHERE created_at IS NULL) AS created_at
 FROM app.manual_expenses
+"""
+
+# Over the whole table, for `_MOVEMENT_NULLS_SQL`'s reason below: three rows
+# at most, every one of them a number somebody typed. NOT measured on
+# production, unlike the movements: DuckDB defaults both columns and its
+# `set_goal` passes both, so a NULL the replication carried across would have
+# had to be inserted by hand. If one exists, this reports it the moment the
+# flag goes on — the chain is watched from the flag, before its first write —
+# which is the right time to learn it, and why the flip checks this layer
+# first.
+_GOAL_NULLS_SQL = """
+SELECT count(*) FILTER (WHERE updated_at IS NULL) AS updated_at,
+       count(*) FILTER (WHERE is_custom IS NULL)  AS is_custom
+FROM app.revenue_goals
 """
 
 # Over the whole table and not only the rows since the handover, because a row
@@ -493,14 +532,24 @@ async def _read_allocator(conn, table: str, sequence: str) -> Allocator:
                      max_id=None if row["max_id"] is None else int(row["max_id"]))
 
 
-async def _read_expenses(conn) -> Expenses:
+async def _read_expenses(conn, latched_at: Optional[datetime] = None) -> Expenses:
     allocator = await _read_allocator(
         conn, "app.manual_expenses", "app.manual_expenses_id_seq")
     row = await conn.fetchrow(_EXPENSE_NULLS_SQL)
     return Expenses(
         allocator=allocator,
         nulls=Nulls(table="app.manual_expenses",
-                    counts={"created_at": int(row["created_at"])}))
+                    counts={"created_at": int(row["created_at"])}),
+        latched_at=latched_at)
+
+
+async def _read_goals(conn, latched_at: Optional[datetime] = None) -> Goals:
+    row = await conn.fetchrow(_GOAL_NULLS_SQL)
+    return Goals(nulls=Nulls(
+        table="app.revenue_goals",
+        counts={"updated_at": int(row["updated_at"]),
+                "is_custom": int(row["is_custom"])}),
+        latched_at=latched_at)
 
 
 async def _read_inventory(conn, latched_at: Optional[datetime],
@@ -625,7 +674,7 @@ async def read_facts(*, pool=None) -> Facts:
     except Exception as e:  # noqa: BLE001 — becomes the blindness reason
         return Facts.blind(names, f"{type(e).__name__}: {e}")
 
-    from core import pg_inventory_write
+    from core import pg_expenses_write, pg_goals_write, pg_inventory_write
 
     groups: Dict[str, Group] = {}
     watermarks_unread: Optional[Unwatched] = None
@@ -639,8 +688,11 @@ async def read_facts(*, pool=None) -> Facts:
                     "SELECT (now() AT TIME ZONE 'Europe/Kyiv')::date")
                 since = _stamp(watched.get(pg_inventory_write.CHAIN))
                 reader_of = {
-                    "expenses": _read_expenses,
+                    "expenses": lambda c: _read_expenses(
+                        c, _stamp(watched.get(pg_expenses_write.CHAIN))),
                     "inventory": lambda c: _read_inventory(c, since, today),
+                    "goals": lambda c: _read_goals(
+                        c, _stamp(watched.get(pg_goals_write.CHAIN))),
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -675,6 +727,7 @@ async def read_facts(*, pool=None) -> Facts:
     return Facts(watched=names, whole=None, now=now,
                  expenses=groups.get("expenses"),
                  inventory=groups.get("inventory"),
+                 goals=groups.get("goals"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
                  unread=unread)
 
@@ -747,23 +800,44 @@ def _allocator_issues(allocator: Allocator, chain: str) -> List:
             "that step is not running."))]
 
 
-def _null_issues(nulls: Nulls, chain: str) -> List:
+def _null_issues(nulls: Nulls, chain: str,
+                 latched_at: Optional[datetime]) -> List:
+    """One finding per table, worded for what can have put the NULL there.
+
+    Before the chain's first write (`latched_at` None) the chain is watched
+    from its flag alone and has written nothing, so a NULL was carried across
+    by the replication before the handover and naming the writer would send
+    the reader after code that never ran. And the sentence about windowed
+    reads is `stock_movements`' alone: its `recorded_at` is what the
+    since-the-handover checks window on, while the goals and expenses checks
+    read their whole table and have no such column.
+    """
     from core.data_quality import Severity
 
     offenders = {c: n for c, n in sorted(nulls.counts.items()) if n}
     if not offenders:
         return []
+    found = (f"{nulls.table} has NULLs the writer must not leave: "
+             + ", ".join(f"{c} in {n} row(s)" for c, n in offenders.items())
+             + ". These columns have no database default — they were built to "
+             "receive the value from the writer, and DuckDB's defaults do not "
+             "travel")
+    if latched_at is None:
+        cause = (f" — and {chain} has not written this table yet: it is "
+                 "watched from its flag, before its first write, so the NULL "
+                 "has been present since before the handover, carried across "
+                 "by the replication out of DuckDB. Correct the row before "
+                 "the chain's first write.")
+    else:
+        cause = f" — so {chain} is not supplying one."
+    if nulls.table == "app.stock_movements" and "recorded_at" in offenders:
+        cause += (" A NULL recorded_at is also invisible to every "
+                  "time-windowed read of this table, this check's own "
+                  "included.")
     return [_issue(
         check_name=COLUMN_NULL, table_name=nulls.table,
         severity=Severity.CRITICAL, count=sum(offenders.values()),
-        description=(
-            f"{nulls.table} has NULLs the writer must not leave: "
-            + ", ".join(f"{c} in {n} row(s)" for c, n in offenders.items())
-            + f". These columns have no database default — they were built to "
-            "receive the value from the writer, and DuckDB's defaults do not "
-            f"travel — so {chain} is not supplying one. A NULL recorded_at is "
-            "also invisible to every time-windowed read of this table, this "
-            "check's own included."))]
+        description=found + cause)]
 
 
 def _initial_burst_issues(inv: Inventory) -> List:
@@ -894,7 +968,7 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     against. It cannot be told apart from a chain that is fine, so it is
     reported rather than assumed harmless.
     """
-    from core import pg_expenses_write, pg_inventory_write
+    from core import pg_expenses_write, pg_goals_write, pg_inventory_write
 
     if facts is None:
         watched = tuple(sorted(watched_chains()))
@@ -916,7 +990,8 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
                                       (pg_expenses_write.CHAIN,)))
     elif isinstance(facts.expenses, Expenses):
         issues += _allocator_issues(facts.expenses.allocator, pg_expenses_write.CHAIN)
-        issues += _null_issues(facts.expenses.nulls, pg_expenses_write.CHAIN)
+        issues += _null_issues(facts.expenses.nulls, pg_expenses_write.CHAIN,
+                               facts.expenses.latched_at)
 
     if isinstance(facts.inventory, Unwatched):
         issues.append(unwatched_issue(facts.inventory.reason,
@@ -924,11 +999,19 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     elif isinstance(facts.inventory, Inventory):
         inv = facts.inventory
         issues += _allocator_issues(inv.allocator, pg_inventory_write.CHAIN)
-        issues += _null_issues(inv.nulls, pg_inventory_write.CHAIN)
+        issues += _null_issues(inv.nulls, pg_inventory_write.CHAIN,
+                               inv.latched_at)
         if inv.latched_at is not None:
             issues += _initial_burst_issues(inv)
             issues += _first_seen_issues(inv)
             issues += _snapshot_issues(inv)
+
+    if isinstance(facts.goals, Unwatched):
+        issues.append(unwatched_issue(facts.goals.reason,
+                                      (pg_goals_write.CHAIN,)))
+    elif isinstance(facts.goals, Goals):
+        issues += _null_issues(facts.goals.nulls, pg_goals_write.CHAIN,
+                               facts.goals.latched_at)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(

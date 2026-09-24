@@ -170,13 +170,23 @@ class GoalsMixin:
         `/goals` keeps its own switch for every other tab's reason, sharpened:
         this is the one tab that writes from the interface, and
         `app.revenue_goals` is an hourly read replica. Reading it from Postgres
-        is safe; writing there would land in a copy.
+        is safe; writing there through this router would land in a copy. The
+        write moves only as chain 7a (`KS_WRITE_GOALS`, `set_goal` below),
+        which stands the replica down for that table.
+
+        So a statement reading `{revenue_goals}` goes where the chain writes,
+        whatever this flag says, and does not fall back: once the chain writes
+        Postgres, DuckDB's copy is frozen, and a fallback would show the goal
+        from before the flip as if it were current. `core/pg_goals_write.py`
+        has the reasoning; every other statement here keeps the flag.
         """
         from core.sql_dialect import DUCKDB, POSTGRES, render_tables
 
-        from core import pg_goals_read
+        from core import pg_goals_read, pg_goals_write
 
         params = list(params or [])
+        if pg_goals_write.reads_the_chain(sql):
+            return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
         if pg_goals_read.enabled() and pg_goals_read.available():
             try:
                 return await pg_goals_read.fetch(
@@ -388,18 +398,29 @@ class GoalsMixin:
         suggestions = await self.calculate_suggested_goals()
         calculated = suggestions[period_type]["suggested"]
 
-        async with self.connection() as conn:
-            now = datetime.now(DEFAULT_TZ)
-            conn.execute("""
-                INSERT INTO revenue_goals (period_type, goal_amount, is_custom, calculated_goal, growth_factor, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (period_type) DO UPDATE SET
-                    goal_amount = excluded.goal_amount,
-                    is_custom = excluded.is_custom,
-                    calculated_goal = excluded.calculated_goal,
-                    growth_factor = excluded.growth_factor,
-                    updated_at = excluded.updated_at
-            """, [period_type, amount, is_custom, calculated, growth_factor, now])
+        # Chain 7a: `KS_WRITE_GOALS` decides which store holds the number a
+        # human typed. Routed here and not in the route, because
+        # `reset_goal_to_auto` writes through this method too. See
+        # `core/pg_goals_write.py`.
+        from core import pg_goals_write
+
+        if pg_goals_write.writes_postgres():
+            await pg_goals_write.set_goal(
+                period_type, amount, is_custom, calculated, growth_factor,
+                datetime.now(DEFAULT_TZ))
+        else:
+            async with self.connection() as conn:
+                now = datetime.now(DEFAULT_TZ)
+                conn.execute("""
+                    INSERT INTO revenue_goals (period_type, goal_amount, is_custom, calculated_goal, growth_factor, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (period_type) DO UPDATE SET
+                        goal_amount = excluded.goal_amount,
+                        is_custom = excluded.is_custom,
+                        calculated_goal = excluded.calculated_goal,
+                        growth_factor = excluded.growth_factor,
+                        updated_at = excluded.updated_at
+                """, [period_type, amount, is_custom, calculated, growth_factor, now])
 
         return {
             "periodType": period_type,

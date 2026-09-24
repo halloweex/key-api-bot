@@ -34,7 +34,7 @@ async def _stored(pool):
 async def pg_only(monkeypatch):
     from core.duckdb_store import DuckDBStore
 
-    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES"):
+    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
         monkeypatch.delenv(env, raising=False)
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     await _clean(pool)
@@ -114,7 +114,7 @@ class TestTheHourlyReplaceCannotRollItBack:
     async def both_stores(self, tmp_path, monkeypatch):
         from core.duckdb_store import DuckDBStore
 
-        for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES"):
+        for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_PG_DSN", DSN)
         store = DuckDBStore(db_path=tmp_path / "frozen.duckdb")

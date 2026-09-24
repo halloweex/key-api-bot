@@ -44,8 +44,10 @@ class TestTheClockIsDerived:
         """`synced_column` from the daily spec, kept only when every column it
         names is shipped and compared. Anything else is one store's
         bookkeeping and orders nothing across the two."""
+        from core.write_chains import WRITE_CHAINS
+
         clocks = {s.pg_table: s.clock
-                  for chain in (pg_inventory_write, pg_expenses_write)
+                  for chain in WRITE_CHAINS
                   for s in chain_transfer.chain_specs(chain)}
         assert clocks == {
             "bronze.offers": (),                   # shipped, never compared
@@ -55,6 +57,10 @@ class TestTheClockIsDerived:
             "app.inventory_sku_history": (),       # append: written once
             "app.inventory_history": ("recorded_at",),
             "app.manual_expenses": ("updated_at", "created_at"),
+            # Chain 7a (DN-25). Both stores carry it as a value and both
+            # writers stamp it from the web container's clock, so a DuckDB
+            # edit later than Postgres's is refused rather than overwritten.
+            "app.revenue_goals": ("updated_at",),
         }
 
 
@@ -446,3 +452,45 @@ class TestTheExitCodes:
         printed = json.loads(out)
         assert printed["committed"] is True and printed["released"] is False
         assert printed["latch"] == latch
+
+
+class TestChain7aIsCarriedLikeTheOthers:
+    """DN-25. The goals chain is derived into the copy-back from the lists that
+    already exist — no fifth description of `app.revenue_goals` — and the
+    runbook does not send its operator to another chain's soak check."""
+
+    def test_its_one_table_is_a_full_replace_with_the_daily_spec(self):
+        from core import pg_goals_write
+        from core.pg_operational import GOAL_COLUMNS
+
+        (spec,) = chain_transfer.chain_specs(pg_goals_write)
+        assert spec.pg_table == "app.revenue_goals" and not spec.is_append
+        assert spec.dk_table == "revenue_goals"
+        assert spec.columns == GOAL_COLUMNS
+        assert spec.compare.key_columns == ("period_type",)
+        assert chain_transfer.chain_sequences(pg_goals_write) == ()
+
+    def test_the_operator_types_goals(self):
+        from core import pg_goals_write
+        assert chain_transfer.resolve_chain("goals") is pg_goals_write
+
+    def test_the_runbook_names_no_other_chain_s_check(self):
+        from core import pg_goals_write
+
+        text = "\n".join(chain_transfer._runbook(
+            pg_goals_write, executed=True, released=True))
+        assert "KS_WRITE_GOALS=duckdb" in text
+        for foreign in ("E1", "E2", "I1", "I2", "I3", "expenses", "inventory"):
+            assert foreign not in text, foreign
+        assert "meta.mirror_state" in text
+
+    def test_the_other_two_runbooks_are_unchanged(self):
+        from core import pg_expenses_write, pg_inventory_write
+
+        exp = "\n".join(chain_transfer._runbook(
+            pg_expenses_write, executed=True, released=True))
+        inv = "\n".join(chain_transfer._runbook(
+            pg_inventory_write, executed=True, released=True))
+        assert "run deploy/stage4_soak.sh and read E1 (expenses copy stood down) and E2" in exp
+        assert ("run deploy/stage4_soak.sh and read I1 (inventory copy stood "
+                "down), I2 and I3") in inv
