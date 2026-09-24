@@ -241,7 +241,7 @@ def owned_among(owners: Mapping[str, str], unit: Sequence[str]) -> FrozenSet[str
     from core import chain_latch
 
     whole = frozenset(unit)
-    owned = (chain_latch.claimed_tables(owners) | set(owners)) & whole
+    owned = chain_latch.owned_tables(owners) & whole
     return whole if owned else frozenset()
 
 

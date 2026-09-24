@@ -840,3 +840,92 @@ class TestTheLandingTablesOnAnOwnerRowAlone:
         assert [(i.check_name, i.table_name, i.severity.value) for i in expenses] == [
             ("owner_row_without_marker", self.EXPENSES, "CRITICAL")]
         assert "no chain in this build declares them" in buyers[0].description
+
+
+class TestAnOwnerRowNoChainHereDeclares:
+    """The DN-22b review, against the real `meta.chain_watermarks`: an image
+    older than chain 4, owner rows for its three tables, and a verdict a human
+    overrode in Postgres that DuckDB never saw. The buyers' own paths stood
+    down on the rows; the hourly full replace did not, and put DuckDB's
+    verdict back within the hour — after which the two copies agreed and the
+    comparison had nothing to say. The control first, on the same database."""
+
+    BUYER_ID = 990_301
+    TABLES = ("bronze.buyers", "bronze.buyer_contacts", "app.buyer_gender")
+
+    @pytest_asyncio.fixture
+    async def overridden(self, stores):
+        """DuckDB says 'f' by name; Postgres holds a human's 'm'. No chain in
+        this build declares any of the three tables."""
+        from core import write_chains
+
+        store, pool, env = stores
+        env.setattr(write_chains, "WRITE_CHAINS", tuple(
+            c for c in write_chains.WRITE_CHAINS
+            if not set(self.TABLES) & set(c.CHAIN_TABLES)))
+        async with store.connection() as conn:
+            conn.execute("INSERT INTO buyers (id, full_name) VALUES (?, 'Anna')",
+                         [self.BUYER_ID])
+            conn.execute(
+                "INSERT INTO buyer_gender (buyer_id, gender, method, confidence, "
+                "decided_from, rules_version, override_by_human, decided_at) VALUES "
+                "(?, 'f', 'name', 'high', 'first_name', 1, FALSE, now())",
+                [self.BUYER_ID])
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.buyer_gender")
+            await conn.execute(
+                "INSERT INTO app.buyer_gender (buyer_id, gender, method, confidence, "
+                "decided_from, rules_version, override_by_human, decided_at) VALUES "
+                "($1, 'm', 'human', 'certain', 'first_name', 1, TRUE, now())",
+                self.BUYER_ID)
+        yield store, pool
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM app.buyer_gender")
+
+    async def _verdict(self, pool):
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT gender, method, override_by_human FROM app.buyer_gender "
+                "WHERE buyer_id = $1", self.BUYER_ID)
+        return dict(row) if row else None
+
+    @pytest.mark.asyncio
+    async def test_the_control_replaces_the_override(self, overridden):
+        from core.pg_operational import replicate_operational
+
+        store, pool = overridden
+        result = await replicate_operational(store)
+        assert "error" not in result, result
+        assert await self._verdict(pool) == {
+            "gender": "f", "method": "name", "override_by_human": False}
+
+    @pytest.mark.asyncio
+    async def test_the_owner_rows_keep_it_and_the_comparison_pages(self, overridden):
+        from core.mirror_reconciliation import reconcile_operational
+        from core.pg_buyers import hourly_ids_diff
+        from core.pg_operational import replicate_operational
+
+        store, pool = overridden
+        stamp = "2026-09-21T08:00:00+00:00"
+        async with pool.acquire() as conn:
+            for table in self.TABLES:
+                await conn.execute(
+                    "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                    "VALUES ($1, $2, now())", chain_latch.owner_key(table), stamp)
+
+        # The buyers' own path, as before this fix — the two now agree.
+        assert "stood_down" in await hourly_ids_diff(store)
+        result = await replicate_operational(store)
+
+        assert "error" not in result, result
+        assert await self._verdict(pool) == {
+            "gender": "m", "method": "human", "override_by_human": True}, (
+            "the hourly copy replaced a verdict only Postgres held")
+        assert "app.buyer_gender" in result["stood_down"]
+        assert result["chain_owner_unregistered"] == {"app.buyer_gender": stamp}
+
+        issues = await reconcile_operational(store)
+        (page,) = [i for i in issues if i.check_name == "chain_owner_unregistered"]
+        assert page.severity.value == "CRITICAL"
+        assert page.table_name == ", ".join(sorted(self.TABLES))
+        assert [i for i in issues if i.table_name == "app.buyer_gender"] == []

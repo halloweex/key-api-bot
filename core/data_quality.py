@@ -1899,6 +1899,8 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Compare data/write-chain-owners/<chain> with the owner: rows in meta.chain_watermarks; scripts/chain_copy_back.py is the only release"),
     ("chain_shipper_overwrote",
      "Do not re-run the shipper: it replaced rows only Postgres held. Read meta.mirror_state.last_ok_at, then restore from the nightly dump"),
+    ("chain_owner_unregistered",
+     "Redeploy a build that declares the chain, or run scripts/chain_copy_back.py from one; never re-ship these tables from DuckDB"),
     ("sync_watermarks_unwatched",
      "The integrity job must pre-read meta.chain_watermarks, or the chain's flag goes back"),
     # The standing watch on a chain's own tables (DN-07). Nothing here is
@@ -2014,6 +2016,7 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "write_chain_flag_invalid": "a write chain's flag is not understood",
     "chain_latch_disagrees": "the two copies of a chain's latch disagree",
     "chain_shipper_overwrote": "the hourly copy overwrote a table it no longer owns",
+    "chain_owner_unregistered": "a write chain owns tables this build does not know",
     "integrity_check_raised": "integrity checks crashed",
     "mirror_never_shipped": "table never shipped",
     "mirror_backfill_pending": "history not carried over yet",

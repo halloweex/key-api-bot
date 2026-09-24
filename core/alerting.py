@@ -239,6 +239,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "chain_shipper_overwrote": _c(
         "nothing repairs the rows it replaced; it stops when the chain is "
         "handed back with scripts/chain_copy_back.py, which releases the latch"),
+    # Owner rows naming a table no chain in the running build declares — an
+    # image older than the chain (DN-22b review). The copies stand down on
+    # them; the build's own writers do not know the chain, so a human decides.
+    "chain_owner_unregistered": _c(
+        "a build that declares the chain runs again, or scripts/chain_copy_back.py "
+        "releases the owner rows — a human, not a job"),
     # The standing watch on the tables a chain has taken (DN-07). The hourly
     # shipper and the daily comparison both stand down for them, so these are
     # the only checks those tables have — and none of them clears by itself:

@@ -2440,3 +2440,146 @@ class TestWhatTheLandingStandDownTellsAHuman:
         (lever,) = remediation_for(["mirror_stood_down"])
         assert "order" not in lever.lower(), lever
         assert "never backfill" in lever.lower()
+
+
+# ─── An owner row no chain here declares holds the operational copy too ──────
+#
+# The DN-22b review: `replicate_operational` and `reconcile_operational`
+# expanded the owner rows through the registered chains alone, while the
+# landing paths read each row as itself. On an image older than chain 4 the
+# buyers' hourly diff stood down on `owner:bronze.buyers` and the hourly full
+# replace, in the same hour, put DuckDB's `app.buyer_gender` over the verdicts
+# the chain had written — a human override included — after which the two
+# copies agreed and the comparison had nothing to say. Both now stand down on
+# `chain_latch.owned_tables`, and the comparison says why.
+
+GENDER = "app.buyer_gender"
+STAMP = "2026-09-20T08:00:00+00:00"
+
+
+def _no_chain_declares(flags, *tables) -> None:
+    """No chain in this build declares `tables` — made so, `_rolled_back`'s
+    reason: once chain 4 is registered for real these tests keep meaning an
+    image older than it."""
+    from core import write_chains
+
+    flags.setattr(write_chains, "WRITE_CHAINS", tuple(
+        c for c in write_chains.WRITE_CHAINS if not set(tables) & set(c.CHAIN_TABLES)))
+
+
+@pytest.fixture
+def dsn(flags):
+    """`replicate_operational` asks `configured()` before anything else; the
+    recorder stands behind whatever the variable names."""
+    flags.setenv("KS_PG_DSN", "postgresql://recorded/ks")
+
+
+def _touched(pool, table) -> list:
+    """The statements that replaced or appended to `table`."""
+    return [s for s in pool.sql
+            if table in s and ("DELETE FROM" in s or "INSERT INTO" in s)]
+
+
+class TestAnUnregisteredOwnerRowHoldsTheOperationalCopy:
+    @pytest.mark.asyncio
+    async def test_the_control_replaces_the_table(self, flags, dsn, pool, tmp_path):
+        """Without the row the hourly copy replaces `app.buyer_gender` — a
+        recorder that could not see that would pass the test below."""
+        from core.pg_operational import replicate_operational
+
+        _no_chain_declares(flags, GENDER)
+        result = await replicate_operational(await _landing_store(tmp_path))
+        assert "error" not in result, result
+        assert _touched(pool, GENDER), pool.sql
+        assert "chain_owner_unregistered" not in result
+
+    @pytest.mark.asyncio
+    async def test_the_owner_row_alone_holds_it_and_nothing_else(
+            self, flags, dsn, pool, tmp_path):
+        from core.pg_operational import replicate_operational
+
+        _no_chain_declares(flags, GENDER)
+        pool.owner_rows = {GENDER: STAMP}
+        result = await replicate_operational(await _landing_store(tmp_path))
+
+        assert "error" not in result, result
+        assert _touched(pool, GENDER) == [], pool.sql
+        assert GENDER in result["stood_down"] and GENDER not in result["replaced"]
+        assert result["chain_owner_unregistered"] == {GENDER: STAMP}
+        # Per table, not an off switch: every other table still ships.
+        assert _touched(pool, "app.revenue_goals"), pool.sql
+        # And not stamped: the chain writes this table, not this job, and a
+        # failure count only a later shipment could clear would outlive the
+        # rollback it describes.
+        assert not [s for s in pool.sql if "failures_since_ok + 1" in s], pool.sql
+
+    @pytest.mark.asyncio
+    async def test_an_owner_row_for_a_table_it_never_ships_is_not_reported(
+            self, flags, dsn, pool, tmp_path):
+        """`bronze.buyers` is not an operational table: held down or not, this
+        job has nothing to say about it."""
+        from core.pg_operational import replicate_operational
+
+        _no_chain_declares(flags, BUYERS)
+        pool.owner_rows = {BUYERS: STAMP}
+        result = await replicate_operational(await _landing_store(tmp_path))
+        assert "error" not in result, result
+        assert "chain_owner_unregistered" not in result
+        assert _touched(pool, GENDER), pool.sql
+
+
+class TestTheComparisonSaysWhyItStoodDown:
+    @pytest.mark.asyncio
+    async def test_the_owner_row_alone_is_critical_and_the_table_is_not_read(
+            self, flags, pool, tmp_path):
+        from core.data_quality import Severity
+        from core.mirror_reconciliation import reconcile_operational
+
+        _no_chain_declares(flags, GENDER, BUYERS, CONTACTS)
+        pool.owner_rows = {GENDER: STAMP, BUYERS: STAMP, CONTACTS: STAMP}
+        issues = await reconcile_operational(await _landing_store(tmp_path))
+
+        (page,) = [i for i in issues if i.check_name == "chain_owner_unregistered"]
+        assert page.severity is Severity.CRITICAL
+        assert page.table_name == ", ".join(sorted((GENDER, BUYERS, CONTACTS)))
+        assert page.count == 3
+        assert STAMP in page.description
+        assert "scripts/chain_copy_back.py" in page.description
+        assert [i for i in issues if i.table_name == GENDER] == []
+        assert _read_a_table(pool, [GENDER]) == [], pool.sql
+
+    @pytest.mark.asyncio
+    async def test_the_control_compares_it_and_files_nothing_about_owners(
+            self, flags, pool, tmp_path):
+        from core.mirror_reconciliation import reconcile_operational
+
+        _no_chain_declares(flags, GENDER)
+        issues = await reconcile_operational(await _landing_store(tmp_path))
+        assert "chain_owner_unregistered" not in {i.check_name for i in issues}
+        assert _read_a_table(pool, [GENDER]), pool.sql
+
+    @pytest.mark.asyncio
+    async def test_a_registered_chain_is_not_reported_as_unregistered(
+            self, pool, landing_chain, tmp_path):
+        """A chain this build declares is `chain_latch_disagrees`' business,
+        not this finding's — one fact, one page."""
+        from core.mirror_reconciliation import reconcile_operational
+
+        landing_chain(tables=(GENDER,), env=lambda: False)
+        pool.owner_rows = {GENDER: STAMP}
+        issues = await reconcile_operational(await _landing_store(tmp_path))
+        names = {i.check_name for i in issues}
+        assert "chain_owner_unregistered" not in names
+        assert "chain_latch_disagrees" in names
+
+    def test_what_a_human_reads_names_the_lever(self):
+        from core.alerting import REGISTRY, Kind
+        from core.data_quality import human_check_name, remediation_for
+
+        (lever,) = remediation_for(["chain_owner_unregistered"])
+        assert "scripts/chain_copy_back.py" in lever and len(lever) <= 150
+        assert "never re-ship" in lever.lower()
+        assert "does not know" in human_check_name("chain_owner_unregistered")
+        spec = REGISTRY["chain_owner_unregistered"]
+        assert spec.kind is Kind.CONDITION
+        assert "a human, not a job" in spec.clears

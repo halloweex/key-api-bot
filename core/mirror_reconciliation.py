@@ -3327,6 +3327,14 @@ def _chain_latch_findings(
     a shipment that predates the handover, which is why the owner row stores
     the moment ownership passed and never moves it forward.
 
+    **`chain_owner_unregistered`.** An owner row naming a table no chain in
+    this build declares: the build is older than the chain (a rollback, a
+    pinned `sha-*`), or the chain left `WRITE_CHAINS` without being copied
+    back. The two findings above walk the registered chains and so cannot see
+    it, and the hourly copy and the landing paths stand down on it
+    (`chain_latch.owned_tables`) — which makes this the one place it is said.
+    One finding for all of them, like the landing's owner-row page.
+
     Takes the owner rows the caller has already read rather than reading them
     itself: the same query decides which tables this run may compare at all,
     and two reads could disagree about that within one run.
@@ -3394,6 +3402,26 @@ def _chain_latch_findings(
                     "handover is gone. Do not re-run the shipper."
                 ),
             ))
+
+    unregistered = chain_latch.unregistered_owned_tables(owners)
+    if unregistered:
+        named = ", ".join(sorted(unregistered))
+        issues.append(IntegrityIssue(
+            check_name="chain_owner_unregistered",
+            table_name=named,
+            severity=Severity.CRITICAL,
+            count=len(unregistered),
+            description=(
+                f"Owner rows in Postgres say a write chain owns {named} since "
+                f"{min(unregistered.values())}, and no chain in this build "
+                "declares them — an image older than the chain, or a chain "
+                "dropped from WRITE_CHAINS without its copy-back. The hourly "
+                "copy and this comparison stand down on them, but this build "
+                "has no writer for them in Postgres, so whatever it writes goes "
+                "to DuckDB alone. Redeploy a build that declares the chain, or "
+                "run scripts/chain_copy_back.py from one."
+            ),
+        ))
     return issues
 
 
@@ -3473,7 +3501,12 @@ async def reconcile_operational(
     # standing reason that the two must not disagree about which tables have
     # changed hands.
     owners = await chain_latch.read_owners(pool)
-    stood_down = stood_down | chain_latch.claimed_tables(owners)
+    # Each owner row as itself too (`owned_tables`), the shipper's union: on an
+    # image older than the chain nothing here declares the table, and the
+    # comparison would either file every chain-written row as a discrepancy or
+    # — once the shipper had overwritten them — report two agreeing copies.
+    # `chain_owner_unregistered` below says which tables and why.
+    stood_down = stood_down | chain_latch.owned_tables(owners)
 
     whole = tuple(s for s in OPERATIONAL_TABLES if s.pg_table not in stood_down)
 

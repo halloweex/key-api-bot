@@ -318,3 +318,33 @@ def claimed_tables(owners: Mapping[str, str]) -> FrozenSet[str]:
         for chain in WRITE_CHAINS if chain_name(chain) in claimed
         for table in chain.CHAIN_TABLES
     )
+
+
+def owned_tables(owners: Mapping[str, str]) -> FrozenSet[str]:
+    """Every table the owner rows hold down: the whole of each registered
+    chain one of them names (`claimed_tables`), and every owner row as itself.
+
+    **The second half is what an image older than the chain needs.** Such a
+    build declares no chain for the table, so `claimed_tables` alone hands it
+    back to DuckDB, and the hourly full replace then puts a frozen DuckDB's
+    copy over rows only Postgres holds. Reproduced for `app.buyer_gender`
+    (DN-22b review): a verdict a human overrode in Postgres was replaced within
+    the hour, and the two copies then agreed, so the daily comparison had
+    nothing to say. `chain_owner_unregistered` is what says it instead.
+
+    Every path that holds a pool and stands down on the owner rows reads this
+    one answer — the operational pair and `pg_landing.owned_among` — so no two
+    of them can disagree about which tables have changed hands.
+    """
+    return claimed_tables(owners) | frozenset(owners)
+
+
+def unregistered_owned_tables(owners: Mapping[str, str]) -> Dict[str, str]:
+    """`{table: latched_at}` for every owner row that names a table no chain in
+    this build declares — an image older than the chain, or a chain dropped
+    from `WRITE_CHAINS` without its copy-back. Held down by `owned_tables`,
+    reported by the daily comparison as `chain_owner_unregistered`."""
+    from core.write_chains import WRITE_CHAINS
+
+    declared = {table for chain in WRITE_CHAINS for table in chain.CHAIN_TABLES}
+    return {table: at for table, at in owners.items() if table not in declared}
