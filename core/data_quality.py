@@ -1984,6 +1984,9 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("pg_order_utm_",
      "manager_comment in fingerprint? Copy it to DuckDB from bronze.orders. "
      "Else read meta.mirror_state for silver.order_utm. Then POST /api/traffic/refresh"),
+    ("buyers_without_verdict",
+     "Read replicate_operational's gender block in /api/jobs; a RULES_VERSION bump just before explains it"),
+    ("buyers_missing_for_orders", "Read buyer_sync in /api/health: the step's failures and retry window"),
     ("pg_silver_arc_unwatched", "The Postgres twins did not look: read the reason in the finding"),
     ("pg_attribution_coverage_unwatched", "The orders mirror is failing or silent: see mirror freshness in /api/health"),
     ("pg_line_items_unwatched", "The Postgres twins did not look: read the reason in the finding"),
@@ -2092,6 +2095,8 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "pg_order_utm_missing": "orders with no traffic verdict (Postgres)",
     "pg_order_utm_stale": "traffic verdict older than its order (Postgres)",
     "pg_order_utm_in_flight": "traffic verdicts still on their way",
+    "buyers_without_verdict": "buyers with no gender verdict",
+    "buyers_missing_for_orders": "orders whose buyer never arrived",
     "gold_missing_cells": "days missing from Gold",
     "gold_cell_values": "Gold cells differ",
     "silver_row_values": "Silver differs between engines",

@@ -334,6 +334,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_order_utm_stale": _c("a finished re-parse is shipped and carries the newer verdicts"),
     # INFO and counted, never a page: the gap #213 accepted, measured.
     "pg_order_utm_in_flight": _c("the verdicts land inside the grace, as they normally do"),
+    # Buyer completeness (chain 4 PR-1, mirror_landing): Postgres alone, WARN.
+    "buyers_without_verdict": _c("the hourly derivation gives every landed buyer a verdict"),
+    "buyers_missing_for_orders": _c("the buyer sync reaches every buyer an order names"),
 
     # ── data-quality findings: ClickHouse copies and derivations ──
     "ch_reconcile_pending": _c("silver ships fresh again (hourly ch_sync)"),

@@ -3294,6 +3294,153 @@ async def reconcile_order_utm_completeness(
     )
 
 
+# ─── Buyer completeness: two questions no comparison can answer ─────────────
+#
+# `reconcile_buyers` compares DuckDB with Postgres, so it sees a buyer that one
+# copy has and the other lacks. It cannot see a buyer BOTH lack, and it has
+# nothing to compare once chain 4 makes Postgres the only writer. These two
+# read Postgres alone, so they hold in every state of the chain — and run now,
+# with the flag off, so that their false-positive rate is measured before the
+# flip rather than discovered after it (chain 4, PR-1, step 4).
+#
+# - `buyers_without_verdict`: a buyer that landed more than 90 minutes ago with
+#   no gender verdict of the current RULES_VERSION. The derivation is an hourly
+#   tick, so 90 minutes is one missed tick. A human override counts as a
+#   verdict whatever its version: nothing rewrites it, by design.
+# - `buyers_missing_for_orders`: a buyer an order names that bronze.buyers does
+#   not hold, or holds with no name — exactly what the buyer sync selects —
+#   whose earliest order is more than a day old. The sync is hourly and the
+#   measured lag from order to buyer has a median of 37 minutes, so a day is
+#   not lag. The day is a starting point: this check, run with the flag off, is
+#   what says whether it is the right one.
+#
+# WARN, both: neither loses anything, but both are a writer that stopped, and
+# under chain 4 there is only one writer. Ids only in the samples.
+
+BUYER_VERDICT_GRACE_MINUTES = 90
+BUYER_MISSING_AFTER_HOURS = 24
+
+BUYER_COMPLETENESS_SQL = """
+WITH no_verdict AS (
+    SELECT b.id, b.mirrored_at
+    FROM bronze.buyers b
+    LEFT JOIN app.buyer_gender g ON g.buyer_id = b.id
+    WHERE b.mirrored_at < $1
+      AND (g.buyer_id IS NULL
+           OR (NOT g.override_by_human AND g.rules_version < $2))
+),
+missing AS (
+    SELECT o.buyer_id AS id, min(o.ordered_at) AS first_order_at
+    FROM silver.orders o
+    LEFT JOIN bronze.buyers b ON b.id = o.buyer_id
+    WHERE o.buyer_id IS NOT NULL
+      AND (b.id IS NULL OR b.full_name IS NULL OR b.full_name = '')
+    GROUP BY o.buyer_id
+    HAVING min(o.ordered_at) < $3
+)
+SELECT
+    (SELECT count(*) FROM no_verdict)                             AS without_verdict,
+    (SELECT (array_agg(id ORDER BY id))[1:$4] FROM no_verdict)    AS without_verdict_ids,
+    (SELECT min(mirrored_at) FROM no_verdict)                     AS without_verdict_since,
+    (SELECT count(*) FROM missing)                                AS missing,
+    (SELECT (array_agg(id ORDER BY id))[1:$4] FROM missing)       AS missing_ids,
+    (SELECT min(first_order_at) FROM missing)                     AS missing_since
+"""
+
+
+def buyer_completeness_findings(
+    row: Mapping[str, Any], *, verdict_grace_minutes: int = BUYER_VERDICT_GRACE_MINUTES,
+    missing_after_hours: int = BUYER_MISSING_AFTER_HOURS,
+) -> List[IntegrityIssue]:
+    """The findings one aggregate row of `BUYER_COMPLETENESS_SQL` makes. Pure."""
+    issues: List[IntegrityIssue] = []
+
+    def _ids(key: str) -> Tuple[int, ...]:
+        return tuple(int(i) for i in (row[key] or ()))
+
+    def _since(key: str) -> str:
+        value = row[key]
+        return value.isoformat() if isinstance(value, datetime) else "unknown"
+
+    without = int(row["without_verdict"] or 0)
+    if without:
+        issues.append(IntegrityIssue(
+            check_name="buyers_without_verdict",
+            table_name="app.buyer_gender",
+            severity=Severity.WARN,
+            count=without,
+            sample_ids=_ids("without_verdict_ids"),
+            description=(
+                f"{without} buyer(s) landed in bronze.buyers more than "
+                f"{verdict_grace_minutes} minutes ago (the oldest at "
+                f"{_since('without_verdict_since')}) with no gender verdict of "
+                "the current rules. The derivation is an hourly tick, so at "
+                "least one tick has passed them by. They are in no gendered "
+                "SMS audience — `gender IN (...)` never matches NULL — and "
+                "nothing on the page says so. Read replicate_operational's "
+                "`gender` block in /api/jobs; a RULES_VERSION bump deployed "
+                "shortly before this ran explains a large count by itself."
+            ),
+        ))
+
+    missing = int(row["missing"] or 0)
+    if missing:
+        issues.append(IntegrityIssue(
+            check_name="buyers_missing_for_orders",
+            table_name="bronze.buyers",
+            severity=Severity.WARN,
+            count=missing,
+            sample_ids=_ids("missing_ids"),
+            description=(
+                f"{missing} buyer(s) are named by orders in silver.orders and "
+                "absent from bronze.buyers, or present with no name — what the "
+                "hourly buyer sync selects — with their first order more than "
+                f"{missing_after_hours} hours old (the oldest at "
+                f"{_since('missing_since')}). The sync is not reaching them: "
+                "read `buyer_sync` in /api/health for the step's own state. "
+                "An id KeyCRM will not serve stays here until it does."
+            ),
+        ))
+    return issues
+
+
+async def buyer_completeness_row(
+    conn, *, now: datetime, rules_version: int, max_samples: int = 10,
+    verdict_grace_minutes: int = BUYER_VERDICT_GRACE_MINUTES,
+    missing_after_hours: int = BUYER_MISSING_AFTER_HOURS,
+) -> Mapping[str, Any]:
+    """One aggregate row, on a connection the caller holds — so a test can seed
+    a scenario inside a transaction it rolls back: the query reads the whole of
+    bronze.buyers and silver.orders."""
+    return await conn.fetchrow(
+        BUYER_COMPLETENESS_SQL,
+        now - timedelta(minutes=int(verdict_grace_minutes)),
+        int(rules_version),
+        now - timedelta(hours=int(missing_after_hours)),
+        int(max_samples),
+    )
+
+
+async def reconcile_buyer_completeness(
+    *, now: Optional[datetime] = None, max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """Does every landed buyer have a current verdict, and does every buyer an
+    order names exist? Postgres alone; reports only; no store."""
+    from core import pg_landing
+    from core.gender import RULES_VERSION
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        return []
+    now = now or datetime.now(timezone.utc)
+    pool = await get_pool()
+    await require_revision()
+    async with pool.acquire() as conn:
+        row = await buyer_completeness_row(
+            conn, now=now, rules_version=RULES_VERSION, max_samples=max_samples)
+    return buyer_completeness_findings(row)
+
+
 # ─── The order-level expenses: a delta mirror read whole ─────────────────────
 #
 # `bronze.expenses` ships what a sync fetched, so it is gated on

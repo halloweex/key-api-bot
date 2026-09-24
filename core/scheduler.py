@@ -2258,6 +2258,13 @@ class BackgroundScheduler:
                 # And the buyer landing — step 2. Same layer, same argument.
                 from core.mirror_reconciliation import reconcile_buyers
                 await check("reconcile_buyers", lambda: reconcile_buyers(store))
+                # And whether every landed buyer has a verdict and every buyer
+                # an order names exists — Postgres alone, so it holds in every
+                # state of chain 4, and runs with the flag off so its false
+                # positives are measured before the flip (chain 4 PR-1 step 4).
+                from core.mirror_reconciliation import reconcile_buyer_completeness
+                await check("reconcile_buyer_completeness",
+                            lambda: reconcile_buyer_completeness())
                 # And the SMS tab's own six (revision 0013), on the way to
                 # answering /sms without DuckDB. Five of them are irreplaceable
                 # in `stock_movements`' sense — a frozen roster cannot be
