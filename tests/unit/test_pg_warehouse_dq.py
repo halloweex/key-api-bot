@@ -1041,3 +1041,197 @@ class TestTheLandingLevers:
         (pg,) = remediation_for(["pg_fk_orphan_order_products_order_id"])
         (duck,) = remediation_for(["fk_orphan_order_products_order_id"])
         assert pg != duck and "bronze.orders" in pg
+
+
+# ─── The stand-down (DN-28) ───────────────────────────────────────────────────
+#
+# Once Postgres alone derives (step 13), the DuckDB checks over Silver, Gold and
+# UTM do not run, and the twins must stand in for them rather than compare
+# against a count nobody took. Until DN-14 that standalone path had never run
+# anywhere; its pairing record has been saying in shadow what it would file.
+# These pin that the path the switch relies on files exactly that.
+
+
+def _looked_as_the_job_computes_it(stood_down, raised=()):
+    from core.data_quality import GUARDED_CHECK_CONDITIONS
+
+    return ((frozenset(GUARDED_CHECK_CONDITIONS) | twins.DUCKDB_BARE_CHECKS)
+            - frozenset(raised) - frozenset(stood_down))
+
+
+class TestTheStandDown:
+    LI = LineItems(5, 500.0, (1,), 7, 700.0, (2,))
+
+    def test_the_line_item_twins_file_what_the_standalone_record_said(self):
+        from core import warehouse_cutover as wc
+
+        looked = _looked_as_the_job_computes_it(wc.STOOD_DOWN_WHEN_POSTGRES)
+        assert not {"headline_vs_line_items", "goods_shipped_without_sale"} & looked
+        facts = _facts(line_items=self.LI)
+
+        real = {i.check_name: i.count for i in twins.check_pg_warehouse(
+            facts, duckdb_issues=[], duckdb_looked=looked)}
+        record = _pairing(facts, duckdb_issues=[], duckdb_looked=looked)
+
+        assert (real["pg_headline_vs_line_items"],
+                real["pg_goods_shipped_without_sale"]) == (5, 7)
+        for name in ("pg_headline_vs_line_items", "pg_goods_shipped_without_sale"):
+            assert real[name] == record["standalone"][name]
+        assert "pg_line_items_disagree" not in real
+        # And DuckDB's side of the record says it did not look, not zero.
+        assert record["duckdb"]["headline_vs_line_items"] is None
+        assert record["duckdb"]["goods_shipped_without_sale"] is None
+
+    def test_the_landing_twins_still_compare(self):
+        """The switch freezes Silver, not `orders`: DuckDB's landing checks
+        still look, so their twins still compare rather than file."""
+        from core import warehouse_cutover as wc
+
+        looked = _looked_as_the_job_computes_it(wc.STOOD_DOWN_WHEN_POSTGRES)
+        assert twins.DUCKDB_BARE_CHECKS <= looked
+        assert "status_group_agreement" in looked
+
+    def test_what_the_twins_file_standing_in_equals_the_standalone_record_whole(self):
+        """Every group, not only the line items: with every Silver guard stood
+        down the real run and the shadow agree name for name. The landing twins
+        still compare, so they are the one difference."""
+        from core import warehouse_cutover as wc
+
+        looked = _looked_as_the_job_computes_it(wc.STOOD_DOWN_WHEN_POSTGRES)
+        facts = _facts(line_items=self.LI,
+                       silver_arc=SilverArc(3, 3, 300.0, 9000, (4, 5, 6), 0, 0.0, ()))
+        real = {i.check_name: i.count for i in twins.check_pg_warehouse(
+            facts, duckdb_issues=[], duckdb_looked=looked)}
+        standalone = _pairing(facts, duckdb_issues=[], duckdb_looked=looked)["standalone"]
+        assert real == standalone
+
+
+class TestTheScanSkipsWhatStandsDown:
+    """`check_internal_integrity` does not run a stood-down check: nothing is
+    filed for it, and it is not named as raised."""
+
+    @pytest.fixture
+    def conn(self, tmp_path):
+        """A file with the store's schema, empty, opened as the scan sees it."""
+        import asyncio
+
+        import duckdb
+
+        from core.duckdb_store import DuckDBStore
+
+        path = tmp_path / "scan.duckdb"
+        store = DuckDBStore(db_path=path)
+        asyncio.run(store.connect())
+        asyncio.run(store.close())
+        c = duckdb.connect(str(path))
+        yield c
+        c.close()
+
+    def _scan(self, conn, monkeypatch, **kw):
+        from core import data_quality as dq
+
+        called = []
+
+        def boom(*_a, **_k):
+            called.append(True)
+            raise RuntimeError("silver_orders is frozen")
+
+        monkeypatch.setattr(dq, "_headline_vs_line_items_check", boom)
+        raised: list = []
+        issues = dq.check_internal_integrity(conn, raised_out=raised, **kw)
+        return issues, raised, called
+
+    def test_a_stood_down_check_is_not_run(self, conn, monkeypatch):
+        issues, raised, called = self._scan(
+            conn, monkeypatch, stood_down=frozenset({"headline_vs_line_items"}))
+        assert called == []
+        assert "headline_vs_line_items" not in raised
+        assert not any(i.check_name == "integrity_check_raised"
+                       and "headline_vs_line_items" in i.description for i in issues)
+
+    def test_by_default_it_asks_the_writer(self, conn, monkeypatch):
+        from core import warehouse_cutover as wc
+
+        monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
+        _issues, raised, called = self._scan(conn, monkeypatch)
+        assert called == [] and "headline_vs_line_items" not in raised
+
+    def test_while_duckdb_derives_it_runs_as_before(self, conn, monkeypatch):
+        from core import warehouse_cutover as wc
+
+        monkeypatch.setattr(wc, "_mode", wc.DUCKDB)
+        _issues, raised, called = self._scan(conn, monkeypatch)
+        assert called == [True] and "headline_vs_line_items" in raised
+
+
+class TestTheJobUnderTheStandDown:
+    """The integrity job end to end on a real (empty) DuckDB, the twins' facts
+    handed in: the scan skips the Silver checks, `duckdb_looked` leaves them
+    out, and the twins file on their own."""
+
+    LI = LineItems(5, 500.0, (1,), 7, 700.0, (2,))
+
+    @pytest.fixture
+    def job(self, tmp_path, monkeypatch):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from core.duckdb_store import DuckDBStore
+        from core.scheduler import BackgroundScheduler
+
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS"):
+            monkeypatch.delenv(env, raising=False)
+        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
+        asyncio.run(store.connect())
+        scheduler = BackgroundScheduler()
+        monkeypatch.setattr(scheduler, "_send_dq_alert_throttled",
+                            AsyncMock(return_value=True))
+        facts = _facts(line_items=self.LI)
+        with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
+             patch("core.alerting.resolve_group", AsyncMock(return_value=0)), \
+             patch.object(twins, "read_facts", AsyncMock(return_value=facts)):
+            yield scheduler, store
+        asyncio.run(store.close())
+
+    def _run(self, scheduler, store):
+        import asyncio
+        import json
+
+        from core.data_quality import fetch_run_issues
+
+        async def go():
+            result = await scheduler._run_dq_integrity()
+            async with store.connection() as conn:
+                return {r["check_name"]: r for r in fetch_run_issues(conn, result["run_id"])}
+
+        persisted = asyncio.run(go())
+        record = json.loads(persisted["pg_twin_pairing"]["description"])
+        return persisted, record
+
+    def test_under_postgres_the_twins_file_on_their_own(self, job, monkeypatch):
+        from core import warehouse_cutover as wc
+
+        monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
+        persisted, record = self._run(*job)
+        assert persisted["pg_headline_vs_line_items"]["count"] == 5
+        assert persisted["pg_goods_shipped_without_sale"]["count"] == 7
+        assert "pg_line_items_disagree" not in persisted
+        assert "integrity_check_raised" not in persisted
+        for name in ("pg_headline_vs_line_items", "pg_goods_shipped_without_sale"):
+            assert persisted[name]["count"] == record["standalone"][name]
+        assert not set(wc.STOOD_DOWN_WHEN_POSTGRES) & set(record["duckdb"]["looked"])
+
+    def test_while_duckdb_derives_they_compare_as_before(self, job, monkeypatch):
+        """The same facts against DuckDB's own count — zero, on an empty file —
+        disagree beyond the orders in flight, and the twins file nothing of
+        their own. Production today, unchanged."""
+        from core import warehouse_cutover as wc
+
+        monkeypatch.setattr(wc, "_mode", wc.DUCKDB)
+        persisted, record = self._run(*job)
+        assert "pg_headline_vs_line_items" not in persisted
+        assert "pg_goods_shipped_without_sale" not in persisted
+        assert persisted["pg_line_items_disagree"]["count"] == 2
+        assert {"headline_vs_line_items", "goods_shipped_without_sale"} <= set(
+            record["duckdb"]["looked"])

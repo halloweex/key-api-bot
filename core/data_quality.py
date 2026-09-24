@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta, timezone
 from enum import Enum
 from typing import (
-    Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple,
+    AbstractSet, Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple,
 )
 
 logger = logging.getLogger(__name__)
@@ -1492,12 +1492,20 @@ def check_internal_integrity(
     chain_watermarks: Optional[Dict[str, str]] = None,
     raised_out: Optional[List[str]] = None,
     pairing_out: Optional[Dict[str, Dict[str, int]]] = None,
+    stood_down: Optional[AbstractSet[str]] = None,
 ) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
 
     `pairing_out`, when given, receives what a check measured where its
     findings alone would not say it — today the attribution counts, under the
     guard's name — for the Postgres twins' pairing record.
+
+    `stood_down` names guarded checks that do not run at all — the DuckDB
+    checks over Silver, Gold and UTM once Postgres alone derives them
+    (`core.warehouse_cutover.stood_down_duckdb_checks()`, which is what None
+    asks). A stood-down check is not a raised one: it files nothing, is not
+    named in `integrity_check_raised`, and its conditions resolve rather than
+    being held — the Postgres twins open their own. Empty in this build.
 
     Cheap by design: only DB scans, no external I/O. Suitable for running
     every few hours alongside the heavier reconciliation job.
@@ -1516,8 +1524,14 @@ def check_internal_integrity(
     # the other checks ran, and the layer's age, the canary and paging stay
     # exactly where they were.
     raised: List[str] = []
+    if stood_down is None:
+        from core.warehouse_cutover import stood_down_duckdb_checks
+
+        stood_down = stood_down_duckdb_checks()
 
     def guarded(name: str, run) -> List[IntegrityIssue]:
+        if name in stood_down:
+            return []
         try:
             return run()
         except Exception as exc:  # noqa: BLE001 — named in `integrity_check_raised`
