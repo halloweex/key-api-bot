@@ -643,6 +643,47 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
         ]
         assert owned.only_asked_who_owns()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", [
+        "backfill_orders", "hourly_orders_ids_diff", "reconcile_orders",
+        "ship_orders_by_id",
+    ])
+    async def test_a_schema_behind_the_code_breaks_before_the_owner_read(
+            self, owned, path):
+        """The owner rows live in `meta.chain_watermarks` (revision 0032), so
+        each path asks `require_revision()` first and a database behind the
+        code breaks as `SchemaVersionError` — never as a missing table, and
+        never as a stand-down read off a schema nobody verified. Here the owner
+        row is present, so a path that read it first would stand down or skip
+        instead of surfacing the error; and a path that dropped the revision
+        check altogether would do the same. `assert_awaited` alone could see
+        neither: the patched check passes in any position."""
+        from core import pg
+        from core.mirror_reconciliation import reconcile_orders
+        from core.pg_backfill import (
+            backfill_orders, hourly_orders_ids_diff, ship_orders_by_id,
+        )
+        from core.pg_order_versions import BACKFILL
+
+        pg.require_revision.side_effect = pg.SchemaVersionError(
+            "database at 0031, code wants 0033")
+        calls = {
+            "backfill_orders": lambda: backfill_orders(_NoStore()),
+            "hourly_orders_ids_diff": lambda: hourly_orders_ids_diff(_NoStore()),
+            "reconcile_orders": lambda: reconcile_orders(_NoStore()),
+            "ship_orders_by_id": lambda: ship_orders_by_id(
+                _NoStore(), [1], version_kind=BACKFILL),
+        }
+        if path == "hourly_orders_ids_diff":
+            # The job's never-raises contract: the error is returned.
+            result = await calls[path]()
+            assert result.get("error", "").startswith("SchemaVersionError"), result
+        else:
+            with pytest.raises(pg.SchemaVersionError):
+                await calls[path]()
+        pg.require_revision.assert_awaited_once()
+        assert owned.sql == [] and owned.acquired == 0, owned.sql
+
 
 class TestTheAdminBackfill:
     def _client(self, flags):
