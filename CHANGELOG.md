@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.242
+
+- DN-13: the lever line fits the arrow
+- DN-13: a rebuild covers under the rule it ran; the rule dates no row
+- DN-13: the budget and JIT numbers restated on a production-shaped snapshot
+- DN-13: the Kyiv-midnight order is one in every season
+- DN-13: tests for the three round-3 mutants that survived
+- DN-13: a changed Silver rule is a rebuild owed, not a rebuild at fault
+- DN-13: a piggyback rebuild covers what it read
+- DN-13: the JIT numbers are the ones that reproduce
+- DN-13: the recompute's pass 2 held to the rebuild's on every branch
+- DN-13: one buyer-clock join, not two
+- DN-13: pg_silver_row_values — Postgres Silver recomputed from bronze (step 8b)
+
+
 ## 3.0.241
 
 - DN-12: say what the forecast signal's fallback does, and correct three texts
