@@ -408,7 +408,15 @@ class RevenueMixin:
         four are drawn on *every* page, so a rollback here is the one that
         must not be tangled up with a tab's. It is also the only router in
         this file whose failure would be visible on nine tabs at once, which
-        is why the fallback below is not negotiable.
+        is why, under the default, the fallback below is not negotiable.
+
+        Under `KS_READ_FALLBACK=off` it is refused like the tab it sits on
+        (DN-20b): `/api/categories`, `/api/brands`, `/api/promocodes` and the
+        category children answer 503 naming `lookups`, on every tab at once.
+        Deliberately — a filter bar drawn from a DuckDB nothing writes any
+        more would offer categories and brands the page's own numbers no
+        longer know, and `off` is the promise that no DuckDB answer reaches a
+        page. `tests/unit/test_read_fallback_http.py` pins it.
         """
         from core.sql_dialect import DUCKDB, POSTGRES
 
