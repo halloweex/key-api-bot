@@ -353,6 +353,58 @@ class TestChain7aGoals:
         assert "is_custom in 2 row(s)" in issue.description
         assert "pg_goals_write" in issue.description
 
+    def test_the_goals_page_says_nothing_about_a_recorded_at(self):
+        """The review's fifth finding: the shared wording ended on a sentence
+        about `recorded_at` and windowed reads — `stock_movements`' — on a
+        table that has no such column and a check that reads it whole."""
+        for latched_at in (None, UTC_NOW):
+            facts = inv.Facts(
+                watched=("pg_goals_write",), now=UTC_NOW,
+                goals=inv.Goals(nulls=inv.Nulls(
+                    "app.revenue_goals", {"updated_at": 0, "is_custom": 1}),
+                    latched_at=latched_at))
+            (issue,) = inv.check_chain_invariants(facts)
+            assert "recorded_at" not in issue.description, latched_at
+
+    def test_before_the_first_write_the_null_is_older_than_the_handover(self):
+        """Watched from the flag, the chain has written nothing: a NULL there
+        came across with the replication, and blaming the writer would send
+        the reader after code that never ran."""
+        facts = inv.Facts(
+            watched=("pg_goals_write",), now=UTC_NOW,
+            goals=inv.Goals(nulls=inv.Nulls(
+                "app.revenue_goals", {"updated_at": 1, "is_custom": 0})))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert "since before the handover" in issue.description
+        assert "has not written this table yet" in issue.description
+        assert "is not supplying one" not in issue.description
+
+    def test_after_the_first_write_it_names_the_writer(self):
+        facts = inv.Facts(
+            watched=("pg_goals_write",), now=UTC_NOW,
+            goals=inv.Goals(nulls=inv.Nulls(
+                "app.revenue_goals", {"updated_at": 1, "is_custom": 0}),
+                latched_at=UTC_NOW))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert "pg_goals_write is not supplying one" in issue.description
+        assert "since before the handover" not in issue.description
+
+    @pytest.mark.asyncio
+    async def test_read_facts_carries_the_latch_stamp_to_the_verdict(self, flagged):
+        """The wording turns on `latched_at`, so the reader must bring it."""
+        _latch("pg_goals_write")
+        conn = _Recorder()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(conn))
+        assert facts.goals.latched_at == UTC_NOW
+
+    @pytest.mark.asyncio
+    async def test_read_facts_carries_no_stamp_for_a_flag_alone(self, flagged):
+        conn = _Recorder()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(conn))
+        assert facts.goals.latched_at is None
+
     def test_an_unreadable_goals_table_is_blindness_not_silence(self):
         facts = inv.Facts(watched=("pg_goals_write",), now=UTC_NOW,
                           goals=inv.Unwatched("relation does not exist"))
@@ -509,6 +561,15 @@ class TestTheAllocator:
     def test_an_empty_table_has_nothing_to_collide_with(self):
         assert inv.check_chain_invariants(_expenses(next_id=1, max_id=None)) == []
 
+    def test_a_null_before_chain_8s_first_write_is_not_blamed_on_it(self):
+        """Production's own state: `KS_WRITE_EXPENSES=postgres`, nothing
+        latched. A NULL `created_at` there was carried across by the
+        replication; the writer has not run."""
+        (issue,) = inv.check_chain_invariants(_expenses(nulls={"created_at": 1}))
+        assert "since before the handover" in issue.description
+        assert "is not supplying one" not in issue.description
+        assert "recorded_at" not in issue.description
+
 
 class TestTheInventoryThresholds:
     def _inventory(self, **kw) -> inv.Facts:
@@ -549,6 +610,17 @@ class TestTheInventoryThresholds:
         day = (UTC_NOW - timedelta(days=1)).date()
         assert self._names(snapshot_days=((day, 450),)) == []
         assert self._names(snapshot_days=((day, 449),)) == [inv.SNAPSHOT_SHORT]
+
+    def test_the_recorded_at_sentence_is_the_movements_own(self):
+        """It stays where it is true — a NULL `recorded_at` escapes the
+        windows the since-the-handover checks read by — and only there."""
+        (issue,) = inv.check_chain_invariants(self._inventory(
+            nulls=inv.Nulls("app.stock_movements", {"recorded_at": 2, "source": 0})))
+        assert "A NULL recorded_at is also invisible" in issue.description
+        assert "pg_inventory_write is not supplying one" in issue.description
+        (issue,) = inv.check_chain_invariants(self._inventory(
+            nulls=inv.Nulls("app.stock_movements", {"recorded_at": 0, "source": 2})))
+        assert "recorded_at" not in issue.description
 
     def test_the_since_the_handover_checks_stand_down_before_the_handover(self):
         """A chain that is flagged but has never written has no handover to
