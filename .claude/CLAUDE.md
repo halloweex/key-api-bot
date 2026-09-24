@@ -2675,6 +2675,69 @@ must not move the chain with nothing written. Chains 1, 8 and 7a still latch
 before the acquire; `tests/unit/test_chain_latch.py` names them in a strict
 xfail ledger that can only shrink, and holds every other chain to the rule.
 
+### Every other shipper asks too, and a walk finds them (DN-22b)
+
+The catalogue, the order-level expenses, the buyers and the manager
+classification reached Postgres through paths that never asked who owns the
+table — so registering chain 4, 5 or 6 would have had DuckDB's copy shipped
+over the chain's rows, and for the classification a full replace deleting every
+interval a human set in Postgres since the handover. Now the question has one
+generic home, `core.pg_landing.tables_stood_down(unit)` (the local answer) and
+`tables_stood_down_or_owned(pool, unit)` (plus the owner rows, read as
+themselves too), and the order helpers are its `ORDER_UNIT` case.
+
+- **The sync's shippers** — `_mirror` (products, categories, expenses, from
+  every sync site), `mirror_buyers`, `replicate_managers` — skip with
+  `stood down: a write chain owns …` on the local answer, before DuckDB or
+  Postgres is read.
+- **The backfills** (`backfill_buyers`, `backfill_expenses`) refuse; their
+  **hourly diffs** return `{"stood_down": [...]}` without an ERROR;
+  `POST /api/mirror/backfill/expenses` answers 409 (503 when the owner rows
+  cannot be read). All of them hold a pool, so they read the owner rows too,
+  after `require_revision()`.
+- **The comparisons** — `reconcile_mirror`, `reconcile_expenses`,
+  `reconcile_buyers` — file `mirror_stood_down` (INFO) per table on the local
+  answer, and `owner_row_without_marker` (CRITICAL) on the owner rows alone,
+  because every sync shipper asks only the local answer and is still writing
+  over the chain's rows.
+- **A unit stands down whole**: the buyers with their contacts, the managers
+  with their classifications, the orders with their line items. The units are
+  what one writer writes in one transaction; `tests/unit/test_write_chains.py`
+  derives them from the writers, requires `pg_landing.shipping_units()` to
+  equal them, and fails on a registered chain that splits one.
+
+**The walk replaced a list.** The old test named the operational shipper and
+its comparison, and guarded exactly those two. It now finds every function in
+`core/`, `web/` and `scripts/` that executes a Postgres write naming a
+`bronze.`/`app.` table — or a target it cannot read, which counts rather than
+being assumed foreign — and requires each to ask the registry or be reached
+only from functions that do (`write_orders`, `pg_buyers._write`,
+`write_managers`). The destination side is exempt with a reason: the
+registered chains, the alert journal, ClickHouse, the Postgres-derived layers,
+and three replicators that stand down on a switch of their own (the walk checks
+each evaluates it). Every comparison that reads a spec's Postgres copy of our
+tables is walked the same way. Two limits, named: a statement routed through a
+helper that renders its own target (`_users_run`) is not seen, and a target
+held on an object attribute (`dialect.silver_orders`) reads as unknown.
+
+**The order watches do not learn the stand-down — chain 3 writes through
+`write_orders`.** DN-22a's review asked what happens to the canary's
+`mirror_stale:bronze.orders` and to `order_versions_stalled` once a chain owns
+the order tables and the sync's mirror stops. Answer: the chain's writer ships
+through `write_orders`, which moves that watermark and captures the version in
+the row's own transaction, so both watches keep meaning what they say. The
+alternative would blind the one liveness check on the one table nothing can
+rebuild at the moment its writer changes hands. Pinned: the order tables and
+the archive each have exactly one writer, a chain module included, and the two
+watches do not ask the registry. The chain's writer also owes one thing
+`mirror_orders` does today — recording its failures with `_record_failure` —
+or `mirror_failing` loses its fast signal.
+
+Production today stands nothing down: no chain declares any of these tables
+and no owner row names one, so the per-tick shippers read no variable and no
+file. What does run is one owner read (after a revision check) per run of each
+hourly diff, each daily comparison and the expenses route.
+
 ## TODO: Full DuckDB Resync Solution
 
 ### Overview
