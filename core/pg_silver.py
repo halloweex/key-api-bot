@@ -47,9 +47,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
+
+# When this process loaded the code that rebuilds Silver. The rule it runs —
+# `silver_select_sql`, `silver_pass2_sql`, `REVENUE_SOURCE_IDS`, the return
+# statuses, the manager constants — cannot change inside a process, so every
+# rebuild this process performs began after this moment and ran the code that
+# is running now, while a rebuild that began before it may have run other code.
+# The row-values twin (`pg_warehouse_dq`) dates every row's inputs no earlier
+# than this: after a deploy that changed the rule, stored Silver differs from
+# the recompute until this process rebuilds it, and that is a rebuild owed, not
+# a rebuild that failed. Found reviewing DN-13.
+RULE_LOADED_AT = datetime.now(timezone.utc)
 
 # One process, several actors over the same Postgres layer: the scheduler's
 # rebuild tick (silver → gold → витрина), the витрина's own rebuild-and-check,

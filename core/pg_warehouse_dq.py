@@ -53,7 +53,9 @@ it is the check that has to keep working once DuckDB stops deriving.
   alone: `bronze.orders.mirrored_at`; the classification's `mirrored_at` when
   `sales_type` is what moved; and, when a pass-2 column moved, the latest
   change to any order the buyer has or had — a first order cancelled today
-  makes a months-old second order the buyer's first.
+  makes a months-old second order the buyer's first. Never earlier than this
+  process loaded the Silver rule: the rule is an input too, and a rebuild run
+  by the code before a deploy cannot cover a change of rule.
 - **Covered is CRITICAL, whatever its age.** A change made before the last
   Silver rebuild began is in that rebuild's snapshot, so a row still wrong
   after it is a rebuild that does not produce what bronze holds. The rebuild
@@ -187,8 +189,11 @@ class RowValues:
 
     `reported` is `covered` + `abandoned` + the rows inside the repair window;
     `in_flight` are the ones still inside the settle grace, counted apart and
-    never filed. `compared` and `elapsed_ms` are the recompute's size and cost,
-    kept so the hold budget can be judged against the real thing.
+    never filed. `dated_by_rule` are reported rows no rebuild covered whose
+    latest input is this process loading the Silver rule (`rule_loaded_at`)
+    rather than anything in bronze. `compared` and `elapsed_ms` are the
+    recompute's size and cost, kept so the hold budget can be judged against
+    the real thing.
     """
     reported: int
     covered: int
@@ -200,6 +205,8 @@ class RowValues:
     rebuilt_at: Optional[datetime]
     compared: int
     elapsed_ms: int
+    dated_by_rule: int = 0
+    rule_loaded_at: Optional[datetime] = None
 
 
 Group = Union[SilverArc, Attribution, LineItems, RowValues, Unwatched, None]
@@ -319,7 +326,8 @@ def _row_values_sql() -> str:
 
     $1 the settle grace and $2 the repair window, in minutes; $3 the margin a
     change must clear to count as inside a rebuild's snapshot; $4 the
-    derivation's layer; $5 Silver's row in `meta.mirror_state`. Rendered per
+    derivation's layer; $5 Silver's row in `meta.mirror_state`; $6 when this
+    process loaded the Silver rule (`pg_silver.RULE_LOADED_AT`). Rendered per
     call rather than at import: every import in this module is lazy, and this
     one would otherwise pull the DuckDB store in with it.
 
@@ -347,6 +355,17 @@ def _row_values_sql() -> str:
       Silver still gives them, so an order moved to another buyer is a recent
       change for the buyer it left — bronze alone no longer says it was theirs.
       (The moved order itself needs no such help: its own stamp is recent.)
+    - the moment this process loaded the Silver rule, for every row. The rule
+      is an input as much as bronze is: a deploy that changes it — the rendered
+      text, `REVENUE_SOURCE_IDS`, the return statuses — makes stored Silver
+      differ from the recompute on rows nobody touched, and a rebuild that
+      began before this process existed ran the old code, so it cannot cover
+      them. They are in flight until this process's first rebuild — the first
+      derivation under own, the first DuckDB dirty tick under piggyback — and
+      page on the usual windows if it never comes. The cost, stated: a row that
+      was already wrong is dated no earlier than the restart too, so a deploy
+      holds its verdict until that first rebuild, and it is WARN rather than
+      CRITICAL if the settle grace passes first.
     """
     from core.data_quality import _SILVER_ROW_COLUMNS, _silver_row_differs
     from core.duckdb_store import silver_recompute_ctes
@@ -393,7 +412,8 @@ stale AS (
            GREATEST(c.mirrored_at,
                     CASE WHEN c.d_sales_type THEN i.classified_at END,
                     CASE WHEN c.d_is_new_customer OR c.d_buyer_first_order_date
-                         THEN c.buyer_changed_at END) AS changed_at,
+                         THEN c.buyer_changed_at END,
+                    $6::timestamptz) AS changed_at,
            i.rebuilt_at
     FROM compared c CROSS JOIN inputs i
     WHERE {any_differs}
@@ -415,6 +435,8 @@ SELECT (SELECT count(*) FROM compared) AS compared,
        count(*) FILTER (WHERE covered) AS covered,
        count(*) FILTER (WHERE abandoned AND NOT covered) AS abandoned,
        count(*) FILTER (WHERE NOT reported) AS in_flight,
+       count(*) FILTER (WHERE reported AND NOT covered
+                          AND changed_at = $6::timestamptz) AS dated_by_rule,
        EXTRACT(EPOCH FROM now() - MIN(changed_at) FILTER (WHERE reported))::int AS oldest_age_s,
        (array_agg(id ORDER BY (covered OR abandoned) DESC, id DESC)
             FILTER (WHERE reported))[1:10] AS sample,
@@ -472,17 +494,19 @@ async def _read_row_values(conn, grace: int, page_after: int) -> RowValues:
     """The recompute. Not gated on the backfill, unlike attribution and line
     items: Silver is derived from whatever bronze holds, history or not, so a
     partial bronze still has a Silver that must match it."""
+    from core import pg_silver
     from core.data_quality import _SILVER_ROW_COLUMNS
     from core.pg_derivation import DROPPED_MARK_MARGIN, LAYER
-    from core.pg_silver import SILVER_TABLE
 
     # The margin is DROPPED_MARK_MARGIN, for its two reasons: a writer outside
     # `_heavy_job_lock` commits a round trip after the instant its rows are
-    # stamped with, and a journal's `started_at` comes from the web container's
-    # clock where `mirrored_at` and the watermark come from Postgres'.
+    # stamped with, and the journal's `started_at` and the rule's load time
+    # come from the web container's clock where `mirrored_at` and the watermark
+    # come from Postgres'.
+    loaded_at = pg_silver.RULE_LOADED_AT
     started = time.monotonic()
     row = await conn.fetchrow(_row_values_sql(), grace, page_after,
-                              DROPPED_MARK_MARGIN, LAYER, SILVER_TABLE)
+                              DROPPED_MARK_MARGIN, LAYER, pg_silver.SILVER_TABLE, loaded_at)
     elapsed_ms = int((time.monotonic() - started) * 1000)
     columns = tuple(sorted(
         ((c, int(row[f"n_{c}"])) for c, _ in _SILVER_ROW_COLUMNS if row[f"n_{c}"]),
@@ -492,7 +516,8 @@ async def _read_row_values(conn, grace: int, page_after: int) -> RowValues:
         abandoned=int(row["abandoned"]), in_flight=int(row["in_flight"]),
         columns=columns, sample=_ids(row["sample"]),
         oldest_age_s=row["oldest_age_s"], rebuilt_at=row["rebuilt_at"],
-        compared=int(row["compared"]), elapsed_ms=elapsed_ms)
+        compared=int(row["compared"]), elapsed_ms=elapsed_ms,
+        dated_by_rule=int(row["dated_by_rule"]), rule_loaded_at=loaded_at)
     # INFO on every run: the cost is what decides whether this group can keep
     # sharing the snapshot's hold budget, and a number nobody logged is a
     # number nobody can compare with HOLD_BUDGET_S when Silver has grown.
@@ -687,6 +712,13 @@ def _row_values_check(rv: RowValues) -> list:
                      f"{page_after}-minute repair window: under own the next mark or the "
                      "hourly heartbeat rebuilds them, under piggyback the next DuckDB "
                      "dirty tick.")
+    if rv.dated_by_rule:
+        loaded = ("?" if rv.rule_loaded_at is None
+                  else rv.rule_loaded_at.isoformat(timespec="seconds"))
+        parts.append(f"{rv.dated_by_rule} of the uncovered rows have nothing in bronze newer "
+                     f"than this process loading the Silver rule ({loaded}), and no rebuild "
+                     "has begun since: a deploy that changed the rule looks exactly like "
+                     "this until the first rebuild under it.")
     if rv.in_flight:
         parts.append(f"{rv.in_flight} more changed in the last {grace} minutes and are "
                      "in flight, not counted.")

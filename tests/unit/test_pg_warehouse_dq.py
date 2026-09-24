@@ -197,6 +197,18 @@ class TestTheRowValues:
         (issue,) = twins._row_values_check(_rv(reported=1, in_flight=4))
         assert issue.count == 1 and "4 more" in issue.description
 
+    def test_rows_dated_by_the_rules_load_say_so(self):
+        """After a deploy that changed the Silver rule, the rows it moved have
+        nothing newer in bronze than the process loading it. The words say so,
+        so a reader does not go looking for a change in the data."""
+        loaded = datetime(2026, 9, 17, 6, 20, tzinfo=timezone.utc)
+        (issue,) = twins._row_values_check(_rv(
+            reported=3, dated_by_rule=3, rule_loaded_at=loaded, columns=(("is_active_source", 3),)))
+        assert issue.severity == Severity.WARN
+        assert f"loading the Silver rule ({loaded.isoformat(timespec='seconds')})" in issue.description
+        (plain,) = twins._row_values_check(_rv(reported=3, columns=(("grand_total", 3),)))
+        assert "Silver rule" not in plain.description
+
     def test_a_budget_spent_on_the_recompute_blinds_it_alone(self):
         held = []
         issues = twins.check_pg_warehouse(_facts(silver_row_values=Unwatched(
@@ -248,17 +260,18 @@ class TestTheRowValuesSql:
 
         from core.data_quality import _SILVER_ROW_COLUMNS
         from core.pg_derivation import DROPPED_MARK_MARGIN, LAYER
-        from core.pg_silver import SILVER_TABLE
+        from core.pg_silver import RULE_LOADED_AT, SILVER_TABLE
 
         row = {"reported": 0, "covered": 0, "abandoned": 0, "in_flight": 0, "sample": None,
-               "oldest_age_s": None, "rebuilt_at": None, "compared": 0,
+               "oldest_age_s": None, "rebuilt_at": None, "compared": 0, "dated_by_rule": 0,
                **{f"n_{c}": 0 for c, _ in _SILVER_ROW_COLUMNS}}
         conn = MagicMock(fetchrow=AsyncMock(return_value=row))
-        asyncio.run(twins._read_row_values(conn, 20, 80))
+        facts = asyncio.run(twins._read_row_values(conn, 20, 80))
         sql, *args = conn.fetchrow.await_args.args
         assert "error IS NULL" in sql and "layer = $4" in sql
         assert "FROM meta.mirror_state" in sql and "table_name = $5" in sql
-        assert args == [20, 80, DROPPED_MARK_MARGIN, LAYER, SILVER_TABLE]
+        assert args == [20, 80, DROPPED_MARK_MARGIN, LAYER, SILVER_TABLE, RULE_LOADED_AT]
+        assert facts.rule_loaded_at == RULE_LOADED_AT
 
     def test_the_snapshot_runs_without_jit(self):
         """JIT compilation never paid for itself on the recompute, and past
