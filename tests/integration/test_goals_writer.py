@@ -13,7 +13,12 @@ to survive, and what has to stay true around it, is what these tests pin:
   copy-back changes nothing (OD-19 (a)): the writes stay in Postgres, the
   replace stays stood down, and the disagreement is published;
 - the copy-back carries the goals into DuckDB, compares them at zero, releases
-  the latch, and the hourly copy resumes shipping exactly what came back.
+  the latch, and the hourly copy resumes shipping exactly what came back;
+- every read of the table follows the chain whatever `KS_READ_GOALS` or
+  `KS_READ_MARKETING` say, and a Postgres failure there raises rather than
+  showing DuckDB's frozen copy;
+- input Postgres would refuse is refused before the latch, so a typing slip
+  cannot latch the chain with no owner row behind it.
 
 Everything goes through the repository methods — the path both the POST and
 the DELETE (reset to auto) take — because the routing lives there.
@@ -50,8 +55,9 @@ async def _clean(pool):
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
     """A real DuckDB with the whole schema and an empty goals table, a live
-    Postgres, and the page reading Postgres — the production read mode this
-    chain presupposes (see `core/pg_goals_write.py`)."""
+    Postgres, and the page reading Postgres — production's read mode. The goal
+    reads follow the chain whatever that flag says; `TestTheReadsFollowTheChain`
+    puts it back to `duckdb` to prove it."""
     from core.duckdb_store import DuckDBStore
 
     for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
