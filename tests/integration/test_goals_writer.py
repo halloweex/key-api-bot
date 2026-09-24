@@ -181,6 +181,96 @@ class TestUnderTheFlag:
         assert not chain_latch.latched(CHAIN)
 
 
+class TestInputPostgresWouldRefuseNeverTakesTheLatch:
+    """The review's third finding. `POST /api/goals` bounds `amount` only from
+    below, and `goal_amount` is `NUMERIC(12,2)`: ₴10 000 000 000 raised inside
+    the write, after `_latch()` had written the marker — a chain latched for
+    good with no owner row, a CRITICAL `chain_latch_disagrees` the next
+    morning, and a copy-back that refuses. DuckDB refuses the same input and
+    leaves no trace; so must this writer, and before the latch."""
+
+    @staticmethod
+    def _stamp():
+        from datetime import datetime, timezone
+        return datetime(2026, 9, 1, 8, 30, tzinfo=timezone.utc)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field, value", [
+        ("amount", 1e10),
+        ("amount", 1e30),                     # longer than the decimal context
+        ("amount", 9_999_999_999.995),        # rounds up to 10^10
+        ("amount", -9_999_999_999.995),
+        ("amount", float("inf")),
+        ("amount", float("nan")),             # NUMERIC takes NaN; DuckDB does not
+        ("amount", None),
+        ("calculated_goal", 1e10),
+        ("growth_factor", 99.995),            # NUMERIC(4,2)
+        ("growth_factor", float("inf")),
+    ])
+    async def test_refused_before_the_latch_and_nothing_lands(self, stores, field, value):
+        _store, pool, env = stores
+        env.setenv("KS_WRITE_GOALS", "postgres")
+        args = {"amount": 1_000_000.0, "calculated_goal": 900_000.0,
+                "growth_factor": 1.1}
+        args[field] = value
+
+        with pytest.raises(ValueError):
+            await pg_goals_write.set_goal(
+                "monthly", args["amount"], True, args["calculated_goal"],
+                args["growth_factor"], self._stamp())
+
+        assert not chain_latch.latched(CHAIN), "bad input took the latch"
+        assert await chain_latch.read_owners(pool) == {}
+        assert await _pg_goals(pool) == {}
+
+    @pytest.mark.asyncio
+    async def test_through_the_repository_too(self, stores):
+        """The path `POST /api/goals` takes, with the review's own number."""
+        store, pool, env = stores
+        env.setenv("KS_WRITE_GOALS", "postgres")
+
+        with pytest.raises(ValueError, match="goal_amount"):
+            await store.set_goal("monthly", 1e10)
+
+        assert not chain_latch.latched(CHAIN)
+        assert await chain_latch.read_owners(pool) == {}
+        assert await _pg_goals(pool) == {} and await _duck_goals(store) == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["is_custom", "updated_at"])
+    async def test_a_null_the_invariants_would_page_on_is_refused_too(self, stores, field):
+        _store, pool, env = stores
+        env.setenv("KS_WRITE_GOALS", "postgres")
+        is_custom = None if field == "is_custom" else True
+        stamp = None if field == "updated_at" else self._stamp()
+
+        with pytest.raises(ValueError, match=field):
+            await pg_goals_write.set_goal(
+                "monthly", 1_000_000.0, is_custom, 900_000.0, 1.1, stamp)
+
+        assert not chain_latch.latched(CHAIN)
+        assert await _pg_goals(pool) == {}
+
+    @pytest.mark.asyncio
+    async def test_the_bound_is_postgres_own_and_no_tighter(self, stores):
+        """The largest values the columns hold are written, stored exactly —
+        so the check refuses what the server would and nothing more."""
+        from decimal import Decimal
+
+        _store, pool, env = stores
+        env.setenv("KS_WRITE_GOALS", "postgres")
+
+        await pg_goals_write.set_goal(
+            "monthly", 9_999_999_999.994, True, 9_999_999_999.99, 99.994,
+            self._stamp())
+
+        row = (await _pg_goals(pool))["monthly"]
+        assert row[1] == Decimal("9999999999.99")
+        assert row[3] == Decimal("9999999999.99")
+        assert row[4] == Decimal("99.99")
+        assert chain_latch.latched(CHAIN)
+
+
 class TestTheReadsFollowTheChain:
     """The review's first two findings, reproduced and closed. The goal a
     human typed is read where the chain wrote it, whatever the page's own

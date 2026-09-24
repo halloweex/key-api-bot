@@ -78,7 +78,8 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
-from typing import Any, Tuple
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any, Optional, Tuple
 
 from core import chain_latch
 
@@ -167,6 +168,54 @@ def reads_the_chain(sql: str) -> bool:
     return TABLE_HOLE in sql and reads_postgres()
 
 
+# `NUMERIC(precision, scale)` of the columns a caller's number lands in —
+# revision 0017's, and DuckDB's `DECIMAL`s beside them.
+NUMERIC_COLUMNS = {
+    "goal_amount": (12, 2),
+    "calculated_goal": (12, 2),
+    "growth_factor": (4, 2),
+}
+
+
+def _fits(column: str, value: Optional[float], *, nullable: bool) -> None:
+    """Raise `ValueError` for a number Postgres would refuse in `column`.
+
+    **Asked before the latch, because the latch is permanent.** A value
+    Postgres rejects raises inside the write, after `_latch()` has written the
+    marker: the chain is then latched for good, with no owner row behind it —
+    a CRITICAL `chain_latch_disagrees` the next morning and a copy-back that
+    refuses — for an input DuckDB would have refused without a trace. The
+    route bounds `amount` only from below, so ₴10 000 000 000 is one typing
+    slip away.
+
+    Postgres' own rule, written out: the value rounded half away from zero to
+    `scale` places must be under `10^(precision - scale)`, and an infinity
+    never fits. NaN does fit a `NUMERIC(12,2)` and is refused anyway: DuckDB's
+    `DECIMAL` refuses it, and a goal of NaN is not a number anybody typed.
+    `Decimal(str(value))` is what asyncpg sends for a float, so the boundary
+    lands where the server's does — `tests/integration/test_goals_writer.py`
+    writes both sides of it.
+    """
+    if value is None:
+        if nullable:
+            return
+        raise ValueError(f"{column} must not be NULL")
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        raise ValueError(f"{column}={value!r} is not a number")
+    precision, scale = NUMERIC_COLUMNS[column]
+    exact = Decimal(str(value))
+    if not exact.is_finite():                  # inf and NaN, float or Decimal
+        raise ValueError(f"{column}={value!r} is not a finite number")
+    digits = precision - scale
+    # The magnitude first: `quantize` itself raises `InvalidOperation`, not
+    # `ValueError`, on a number too long for the decimal context (1e30).
+    if exact.adjusted() >= digits or abs(exact.quantize(
+            Decimal(1).scaleb(-scale), rounding=ROUND_HALF_UP)) >= 10 ** digits:
+        raise ValueError(
+            f"{column}={value!r} does not fit NUMERIC({precision},{scale}): "
+            f"it must round to under 10^{digits}")
+
+
 def _latch() -> str:
     """Take the local half of the latch before this process writes Postgres.
 
@@ -203,6 +252,17 @@ async def set_goal(
     """
     if period_type not in PERIOD_TYPES:
         raise ValueError(f"Invalid period_type: {period_type}")
+    # Everything Postgres could refuse on input is refused here, before the
+    # latch — see `_fits`. `is_custom` and `updated_at` have no default and
+    # `core/pg_chain_invariants.py` pages on a NULL in either, so the writer
+    # does not leave one.
+    _fits("goal_amount", amount, nullable=False)
+    _fits("calculated_goal", calculated_goal, nullable=True)
+    _fits("growth_factor", growth_factor, nullable=True)
+    if not isinstance(is_custom, bool):
+        raise ValueError(f"is_custom={is_custom!r} is not a boolean")
+    if updated_at is None:
+        raise ValueError("updated_at must be supplied — it is the copy-back's clock")
 
     pool = await _pool()
     stamp = _latch()
