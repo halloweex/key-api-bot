@@ -369,7 +369,9 @@ _FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
     # renders the breakdown *by name*, so an empty dictionary collapses every
     # type into "Other" and empties the filter. Measured on production the
     # hour the flag first went on. DuckDB has the 27 rows every minute of that
-    # week, so this copies them.
+    # week, so this copies them — until chain 6a moves the write itself to
+    # Postgres (`KS_WRITE_EXPENSE_TYPES`, `core/pg_expense_types_write.py`),
+    # from which point this entry stands down with the rest of that chain.
     (EXPENSE_TYPES_TABLE, "expense_types", EXPENSE_TYPE_COLUMNS, "id"),
     (MISSES_TABLE, "order_backfill_misses", MISS_COLUMNS, "order_id"),
     (INVENTORY_HISTORY_TABLE, "inventory_history", INVENTORY_HISTORY_COLUMNS, "date"),

@@ -28,7 +28,8 @@ import pytest_asyncio
 
 from bot import canary as canary_module
 from core import (
-    chain_latch, pg_expenses_write, pg_goals_write, pg_inventory_write, write_chains,
+    chain_latch, pg_expense_types_write, pg_expenses_write, pg_goals_write,
+    pg_inventory_write, write_chains,
 )
 
 CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
@@ -38,8 +39,8 @@ CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
 def flags(monkeypatch):
     """No chain's variable set, and nothing latched — the conftest fixture has
     already pointed the marker directory at this test's own tmp_path."""
-    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
-        monkeypatch.delenv(env, raising=False)
+    for chain in write_chains.WRITE_CHAINS:
+        monkeypatch.delenv(chain.WRITE_ENV, raising=False)
     return monkeypatch
 
 
@@ -154,7 +155,7 @@ class TestTheMarker:
 
 
 class TestTheOneAnswerEveryConsumerReads:
-    @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS)
+    @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_latched_outranks_the_flag(self, flags, chain):
         assert chain.writes_postgres() is False
         chain_latch.latch(chain.CHAIN)
@@ -163,7 +164,7 @@ class TestTheOneAnswerEveryConsumerReads:
         assert chain.writes_postgres() is True
         assert chain.env_writes_postgres() is False, "the variable is still readable"
 
-    @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS)
+    @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_latched_outranks_a_value_nobody_can_read(self, flags, chain):
         """A typo must not route a latched chain back to DuckDB either — it is
         the same second writer, arrived at by accident instead of by decision."""
@@ -325,6 +326,43 @@ class TestAWriteThatNeverReachesPostgres:
             assert conn.execute("SELECT COUNT(*) FROM manual_expenses").fetchone()[0] == 0
 
     @pytest.mark.asyncio
+    async def test_the_dictionary_chain_when_the_pool_has_no_connection_to_give(
+        self, flags, store,
+    ):
+        """The pool is in hand and the revision passed; `acquire` is what fails.
+
+        Chain 6a writes inside the Sunday full sync, whose other steps hold the
+        pool's five connections, so a timed-out acquire is ordinary there. The
+        latch used to be taken between `_pool()` and `acquire()` and this
+        latched the chain with nothing written (review of DN-26)."""
+
+        class _Exhausted:
+            """asyncpg's shape: `acquire()` returns a context whose entry is
+            what waits for a connection, and times out."""
+
+            def acquire(self):
+                class _Ctx:
+                    async def __aenter__(self_inner):
+                        raise asyncio.TimeoutError("no connection within the timeout")
+
+                    async def __aexit__(self_inner, *exc):
+                        return False
+                return _Ctx()
+
+        flags.setenv("KS_WRITE_EXPENSE_TYPES", "postgres")
+        flags.setenv("KS_READ_EXPENSES", "postgres")      # its precondition
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=_Exhausted())), \
+                patch("core.pg.require_revision", new=AsyncMock()):
+            with pytest.raises(asyncio.TimeoutError):
+                await store.upsert_expense_types([{"id": 1, "name": "Delivery"}])
+
+        assert not chain_latch.latched("pg_expense_types_write"), (
+            "a write that never got a connection latched the chain")
+        assert not chain_latch.marker_path("pg_expense_types_write").exists()
+        flags.setenv("KS_WRITE_EXPENSE_TYPES", "duckdb")
+        assert pg_expense_types_write.writes_postgres() is False
+
+    @pytest.mark.asyncio
     async def test_the_inventory_chain_too(self, flags, store):
         """Chain 1 has not been flipped yet, and the sync tick runs every
         minute — so a deploy race would make its first flip irreversible with
@@ -375,6 +413,22 @@ _DB_CALLS = {"execute", "executemany", "fetch", "fetchrow", "fetchval"}
 _CONNECT_CALLS = {"get_pool", "require_revision", "_pool"}
 
 
+# Chains whose writers still take the latch between `_pool()` and
+# `pool.acquire()` — written before an acquire was counted as part of getting
+# the connection (review of DN-26, 2026-09-24). Strict xfail: a chain fixed
+# here turns its entry into a failure until it is removed, so this can only
+# shrink, and a chain not named here is held to the rule from its first line.
+_LATCHES_BEFORE_ACQUIRE = {
+    "pg_inventory_write": "chain 1 latches before acquire; DN-24 rewrites those lines",
+    "pg_expenses_write": "chain 8 latches before acquire; it is live, left for its own change",
+    # Chain 7a (DN-25) was written in parallel with this rule and merged
+    # beside it: its `set_goal` still latches between `_pool()` and the
+    # acquire. Named rather than rewritten on the rebase, so fixing it is its
+    # own change and this entry turns red the day it lands.
+    "pg_goals_write": "chain 7a latches before acquire; merged beside DN-26, left for its own change",
+}
+
+
 class TestEveryWriterLatchesFirst:
     def test_the_walk_finds_the_writers_that_exist(self):
         assert set(_writers(pg_expenses_write)) == {
@@ -386,6 +440,7 @@ class TestEveryWriterLatchesFirst:
         # precisely so that this walk sees it — a module-level constant would
         # have left the three guards below passing over an empty set.
         assert set(_writers(pg_goals_write)) == {"set_goal"}
+        assert set(_writers(pg_expense_types_write)) == {"upsert_expense_types"}
 
     def test_every_registered_chain_has_a_writer_the_walk_can_see(self):
         """The guards below are parametrised over `WRITE_CHAINS`; a chain whose
@@ -393,7 +448,7 @@ class TestEveryWriterLatchesFirst:
         for chain in write_chains.WRITE_CHAINS:
             assert _writers(chain), f"{chain.__name__}: the walk found no writer"
 
-    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS)
+    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_each_one_calls_the_latch_before_it_touches_postgres(self, module):
         for name, node in _writers(module).items():
             latches = [n.lineno for n in ast.walk(node)
@@ -406,7 +461,7 @@ class TestEveryWriterLatchesFirst:
             assert not touches or min(latches) < min(touches), (
                 f"{module.__name__}.{name} reaches Postgres before taking the latch")
 
-    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS)
+    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_and_none_of_them_latches_before_the_connection(self, module):
         """The window between the two calls is the whole point.
 
@@ -430,7 +485,29 @@ class TestEveryWriterLatchesFirst:
                 f"{module.__name__}.{name} latches before the connection is in "
                 "hand, so a write that never reaches Postgres latches for ever")
 
-    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS)
+    @pytest.mark.parametrize("module", [
+        pytest.param(m, marks=pytest.mark.xfail(
+            strict=True, reason=_LATCHES_BEFORE_ACQUIRE[write_chains.chain_name(m)]))
+        if write_chains.chain_name(m) in _LATCHES_BEFORE_ACQUIRE else m
+        for m in write_chains.WRITE_CHAINS
+    ], ids=write_chains.chain_name)
+    def test_nor_before_the_pool_has_handed_over_a_connection(self, module):
+        """`pool.acquire()` fails on its own: an exhausted pool, a connection
+        that will not reset. Separate from the test above so the chains still
+        named in `_LATCHES_BEFORE_ACQUIRE` stay pinned to that one in full."""
+        for name, node in _writers(module).items():
+            latches = [n.lineno for n in ast.walk(node)
+                       if isinstance(n, ast.Call)
+                       and getattr(n.func, "id", "") == "_latch"]
+            acquires = [n.lineno for n in ast.walk(node)
+                        if isinstance(n, ast.Call)
+                        and getattr(n.func, "attr", "") == "acquire"]
+            assert acquires, f"{module.__name__}.{name} never acquires a connection"
+            assert min(latches) > max(acquires), (
+                f"{module.__name__}.{name} latches before the pool has handed over "
+                "a connection, so a timed-out acquire latches for ever")
+
+    @pytest.mark.parametrize("module", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_each_one_claims_the_owner_rows_too(self, module):
         """The audit copy, inside the writing transaction: a write that rolls
         back must not claim what it did not write."""

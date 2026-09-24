@@ -448,6 +448,33 @@ def check_write_chain_latch(payload: Optional[dict]) -> "list[tuple[str, str]]":
              + "; ".join(f"{n} since {t}" for n, t in sorted(owned.items())))]
 
 
+def check_write_chain_precondition(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge each chain's own condition for moving (`unmet_precondition`).
+
+    Two states, one warning. Unlatched, the chain is HELD on DuckDB although
+    its KS_WRITE_* says postgres: safe — every consumer reads the same
+    "duckdb" — but somebody believes the chain moved. Latched, it keeps
+    writing Postgres (OD-19 (a)) while the condition that made that readable
+    has gone, so what it writes is not what the page shows. Warn, not page:
+    nothing is lost in either, and the lever is one variable. Judged from the
+    published block alone, `check_write_chain_latch`'s reason.
+    """
+    block = (payload or {}).get("write_chains")
+    if not isinstance(block, dict):
+        return []
+    parts = []
+    for name, state in sorted(block.items()):
+        if not isinstance(state, dict) or not state.get("unmet_precondition"):
+            continue
+        env = state.get("env") or "its KS_WRITE_*"
+        where = (f"{name} writes Postgres" if state.get("mode") == "postgres"
+                 else f"{name} held on DuckDB despite {env}=postgres")
+        parts.append(f"{where}: {state['unmet_precondition']}")
+    if not parts:
+        return []
+    return [("write_chain_precondition_unmet", "write chains: " + "; ".join(parts))]
+
+
 # How long a dropped derivation mark may stand before it says the heal is not
 # happening. A drop owes nothing — the rows landed, only the signal did not —
 # so in a quiet hour the rebuild that covers it is the hourly heartbeat. This is
@@ -667,6 +694,14 @@ async def run_canary(
         if latch_failures and severity == "ok":
             severity = "warn"
 
+        # A chain's own condition for moving that does not hold — held on
+        # DuckDB against its flag, or latched while its readers are not.
+        precondition_failures = check_write_chain_precondition(payload)
+        for key, message in precondition_failures:
+            fail(key, message)
+        if precondition_failures and severity == "ok":
+            severity = "warn"
+
     if cert_err:
         fail("cert_unreachable", f"cert check failed: {cert_err}")
         if severity == "ok":
@@ -714,6 +749,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Set the named KS_WRITE_* back to postgres, or run scripts/chain_copy_back.py to hand the tables back"),
     ("read_fallback_mode_invalid",
      "Set KS_READ_FALLBACK to duckdb or off in .env, then recreate web"),
+    ("write_chain_precondition_unmet",
+     "Set the read flag the message names to postgres, then docker compose up -d web"),
 )
 
 def _what_to_do(result: CanaryResult) -> Optional[str]:

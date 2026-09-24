@@ -26,15 +26,20 @@ import logging
 from types import ModuleType
 from typing import Dict, FrozenSet, Iterable, Optional, Tuple
 
-from core import pg_expenses_write, pg_goals_write, pg_inventory_write
+from core import (
+    pg_expense_types_write, pg_expenses_write, pg_goals_write, pg_inventory_write,
+)
 
 logger = logging.getLogger(__name__)
 
 # Chain 7a (`pg_goals_write`, DN-25) is the third: `app.revenue_goals`, the
-# three goal amounts a human types. Its flag is off by default, so until
-# `KS_WRITE_GOALS=postgres` it stands down nothing and only adds a row to the
-# `/api/health` block.
-WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write)
+# three goal amounts a human types. Chain 6a (`pg_expense_types_write`, DN-26)
+# is the fourth: `bronze.expense_types`, the dictionary /expenses names its
+# costs by. Both flags are off by default, so until `KS_WRITE_GOALS` or
+# `KS_WRITE_EXPENSE_TYPES` says postgres each stands down nothing and only adds
+# a row to the `/api/health` block.
+WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
+                pg_expense_types_write)
 
 # A KS_WRITE_* value no chain understands must stop that chain and nothing
 # else. The registry used to evaluate every chain's flag for every question, so
@@ -79,21 +84,50 @@ def _chain_state(chain: ModuleType) -> Dict[str, Optional[object]]:
     except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
         env_mode, error = None, str(exc)
     since = chain_latch.latched_at(name)
+    # A chain may name something that must hold before its flag can move the
+    # writes (`unmet_precondition()`, chain 6a's read flag). Asked only where
+    # it could matter — the flag says postgres, or the latch already has —
+    # and unmet, it holds an unlatched chain on DuckDB: every consumer here
+    # then reads "duckdb", so the writer, the sync key, the shipper and the
+    # comparison stay together on the store that is still read. A latched
+    # chain keeps writing Postgres (OD-19 (a)); what is unmet is published
+    # either way, and the canary warns on it.
+    unmet = (_unmet_precondition(chain)
+             if since or env_mode == "postgres" else None)
+    effective = "duckdb" if (env_mode == "postgres" and unmet) else env_mode
     return {
         "env": chain.WRITE_ENV,
-        "mode": "postgres" if (since or env_mode == "postgres") else env_mode,
+        "mode": "postgres" if (since or effective == "postgres") else effective,
         "error": error,
         "latched": since is not None,
         "latched_at": since,
         "mismatch": since is not None and env_mode != "postgres",
+        "unmet_precondition": unmet,
     }
 
 
+def _unmet_precondition(chain: ModuleType) -> Optional[str]:
+    """What the chain says must hold before its writes move, when it does not;
+    None when it holds or the chain names nothing. Never raises — a check that
+    cannot answer is itself unmet, since nobody can say the readers follow."""
+    check = getattr(chain, "unmet_precondition", None)
+    if check is None:
+        return None
+    try:
+        return check()
+    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
+        return f"the precondition could not be read: {exc}"
+
+
 def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
-    """`{chain: {"env", "mode", "error", "latched", "latched_at", "mismatch"}}`.
+    """`{chain: {"env", "mode", "error", "latched", "latched_at", "mismatch",
+    "unmet_precondition"}}`.
 
     `mode` is where the chain's writes actually go — "postgres", "duckdb", or
     None when the environment was not understood and no latch overrides it.
+    `unmet_precondition` is a chain's own condition for moving (`_chain_state`
+    has the rule): unmet under a postgres flag, `mode` is "duckdb" until it
+    holds, unless the chain is latched.
     `mismatch` is the state DN-06 exists to make visible: the chain has already
     written Postgres, so it keeps writing Postgres (OD-19 (a)), while its
     variable says something else. Both halves are published, because a latched

@@ -1323,21 +1323,32 @@ async def release_chain(pool, chain: ModuleType) -> bool:
 
 
 # What an operator reads at +2 min, per chain, in `deploy/stage4_soak.sh`. A
-# chain with no soak check of its own — chain 7a (DN-25) today — is told where
-# the same evidence lives rather than sent to a check about another chain's
-# tables: the hourly copy stamps `meta.mirror_state` for every table it
-# writes, which is what E1 and I1 read.
+# chain with no soak check of its own — chain 7a (DN-25) and chain 6a (DN-26)
+# today — is told where the same evidence lives rather than sent to a check
+# about another chain's tables: the hourly copy stamps `meta.mirror_state` for
+# every table it writes, which is what E1 and I1 read, and names each one
+# under `replaced` in its log line. Looked up, not an if/else: a third chain
+# used to fall into the inventory branch and be sent to read checks about
+# somebody else's six tables.
 _SOAK_AFTER_RELEASE = {
     "KS_WRITE_EXPENSES": "run deploy/stage4_soak.sh and read E1 (expenses "
                          "copy stood down) and E2",
     "KS_WRITE_INVENTORY": "run deploy/stage4_soak.sh and read I1 (inventory "
                           "copy stood down), I2 and I3",
 }
-_SOAK_WITHOUT_A_CHECK = (
-    "read meta.mirror_state for this chain's tables — deploy/stage4_soak.sh "
-    "has no check of its own for it yet — and see failures_since_ok at 0 and "
-    "last_ok_at moved by the next replicate_operational"
-)
+
+
+def _soak_without_a_check(chain: ModuleType) -> str:
+    """The same evidence for a chain `deploy/stage4_soak.sh` has no check for,
+    naming the chain's own tables so nobody has to look them up."""
+    return (
+        f"read meta.mirror_state for this chain's tables "
+        f"({', '.join(chain.CHAIN_TABLES)}) — deploy/stage4_soak.sh has no "
+        "check of its own for it yet — and see failures_since_ok at 0 and "
+        "last_ok_at moved by the next replicate_operational (POST "
+        "/api/jobs/replicate_operational/trigger runs it now; its web-log line "
+        "must list them under `replaced` again, not `stood_down`)"
+    )
 
 
 def _runbook(chain: ModuleType, *, executed: bool, released: bool = False) -> List[str]:
@@ -1348,7 +1359,7 @@ def _runbook(chain: ModuleType, *, executed: bool, released: bool = False) -> Li
     has to be taken by whoever can watch the soak checks afterwards.
     """
     name = chain.WRITE_ENV
-    soak = _SOAK_AFTER_RELEASE.get(name, _SOAK_WITHOUT_A_CHECK)
+    soak = _SOAK_AFTER_RELEASE.get(name) or _soak_without_a_check(chain)
     if not executed:
         return [
             "This was a dry run. Nothing was written and nothing released.",

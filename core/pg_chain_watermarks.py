@@ -49,7 +49,9 @@ async def get_value(key: str) -> Optional[datetime]:
 async def read_values(keys: Iterable[str]) -> Dict[str, str]:
     """`{key: raw value}` for the given keys that exist — the freshness check's
     input, in the shape `sync_metadata` rows have. Missing keys are absent, so
-    "never synced since the switch" still reads as never synced."""
+    "never synced since the switch" still reads as never synced — except for a
+    chain declaring `CHAIN_WATERMARK_INHERITS_DUCKDB`, whose absent key the
+    check judges by DuckDB's frozen stamp instead (`_freshness_check`)."""
     keys = list(keys)
     if not keys:
         return {}

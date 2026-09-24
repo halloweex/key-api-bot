@@ -58,7 +58,8 @@ class TestTheRegistryNeverRaises:
         # still decides anything (DN-06).
         assert modes["pg_expenses_write"] == {
             "env": "KS_WRITE_EXPENSES", "mode": "postgres", "error": None,
-            "latched": False, "latched_at": None, "mismatch": False}
+            "latched": False, "latched_at": None, "mismatch": False,
+            "unmet_precondition": None}
         assert modes["pg_inventory_write"]["mode"] is None and "yes" in modes["pg_inventory_write"]["error"]
 
     def test_valid_flags_are_unchanged(self, flags):

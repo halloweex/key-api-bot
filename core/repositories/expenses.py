@@ -72,6 +72,17 @@ class ExpensesMixin:
 
         rows = expense_type_rows(expense_types)
 
+        # Chain 6a: `KS_WRITE_EXPENSE_TYPES` decides which store holds the
+        # dictionary, and it is asked AFTER the parse so both stores are
+        # handed the same resolved names. Raises — see
+        # `core/pg_expense_types_write.py`.
+        from core import pg_expense_types_write
+
+        if pg_expense_types_write.writes_postgres():
+            written = await pg_expense_types_write.upsert_expense_types(rows)
+            logger.info(f"Upserted {written} expense types to Postgres")
+            return written
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:

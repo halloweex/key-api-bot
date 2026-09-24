@@ -61,6 +61,9 @@ class TestTheClockIsDerived:
             # writers stamp it from the web container's clock, so a DuckDB
             # edit later than Postgres's is refused rather than overwritten.
             "app.revenue_goals": ("updated_at",),
+            # Chain 6a (DN-26). DuckDB's `synced_at` and Postgres's
+            # `mirrored_at` are each store's own bookkeeping.
+            "bronze.expense_types": (),
         }
 
 

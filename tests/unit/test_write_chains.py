@@ -53,7 +53,8 @@ class TestEveryWriteChainIsRegistered:
         — chain 7a (DN-25) included, which is the one this walk must see for
         the registry above to be proven rather than assumed."""
         found = {p.stem for p in CORE.glob("*.py") if _declares_a_write_chain(p)}
-        assert {"pg_inventory_write", "pg_expenses_write", "pg_goals_write"} <= found
+        assert {"pg_inventory_write", "pg_expenses_write", "pg_goals_write",
+                "pg_expense_types_write"} <= found
 
 
 class TestTheShipperAndTheComparisonAskOneAnswer:
@@ -74,7 +75,8 @@ class TestTheShipperAndTheComparisonAskOneAnswer:
 
 @pytest.fixture
 def flags(monkeypatch):
-    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
+    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS",
+                "KS_WRITE_EXPENSE_TYPES"):
         monkeypatch.delenv(env, raising=False)
     return monkeypatch
 

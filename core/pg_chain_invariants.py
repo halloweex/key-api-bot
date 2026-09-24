@@ -82,6 +82,26 @@ Goals (chain 7a, DN-25):
   allocator and no watermark: the table is keyed on `period_type` and has no
   sync behind it.
 
+The expense-type dictionary (chain 6a):
+
+* **Not empty.** `/expenses` names every order-level cost by joining this
+  table; with no rows the breakdown collapses into one "Other" and the filter
+  empties. The writer upserts and never deletes, so nothing in this chain
+  empties it — a table found empty is somebody else's statement, or a flip
+  onto a Postgres the hourly copy never reached, and the only path KeyCRM
+  serves the dictionary to is the weekly full sync.
+* **Every name resolved.** KeyCRM serves some names as localisation keys
+  (`dictionaries.expense_types.delivery`) and `core.landing_rows` turns them
+  into display names. A key standing in the table is a writer that went round
+  that parse — and once the chain moves there is no comparison left to notice
+  the two stores naming an expense differently.
+* **Not its watermark.** `last_sync_expense_types` moves once a week, so the
+  90-minute limit above would page every run; the chain declares
+  `CHAIN_WATERMARK_MAX_AGE_MIN = None` and `_freshness_check` judges it at
+  192 h from `meta.chain_watermarks`, alone — and from DuckDB's frozen stamp
+  until the first full sync under the flag writes one there
+  (`CHAIN_WATERMARK_INHERITS_DUCKDB`).
+
 WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
 
 A chain is watched when `core.write_chains.chain_modes()` says its writes go to
@@ -244,6 +264,9 @@ class WatermarkAge:
     key: str
     raw: Optional[str]
     age_s: Optional[float]
+    # The chain's own limit (`watermark_limit_min`), carried with the reading
+    # so the pure verdict judges each key against the number its chain chose.
+    limit_min: int = WATERMARK_MAX_AGE_MIN
 
 
 @dataclass(frozen=True)
@@ -259,6 +282,14 @@ class Expenses:
 class Goals:
     nulls: Nulls
     latched_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
+class ExpenseTypes:
+    """The dictionary's size and the names still carrying a localisation key."""
+    rows: int
+    unresolved: int = 0
+    unresolved_sample: Tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -281,7 +312,7 @@ class Inventory:
     window_end: Optional[date] = None
 
 
-Group = Union[Expenses, Inventory, Goals, Unwatched, None]
+Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -299,6 +330,7 @@ class Facts:
     expenses: Group = None
     inventory: Group = None
     goals: Group = None
+    expense_types: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
@@ -319,6 +351,8 @@ FIRST_SEEN_RESET = "chain_first_seen_reset"
 ROLLUP_MISSING = "chain_daily_rollup_missing"
 SNAPSHOT_SHORT = "chain_snapshot_rows_short"
 WATERMARK_STALE = "chain_watermark_stale"
+DICTIONARY_EMPTY = "chain_dictionary_empty"
+NAME_UNRESOLVED = "chain_name_unresolved"
 UNWATCHED = "chain_invariants_unwatched"
 
 # What a blind run holds rather than resolves — `data_quality`'s
@@ -326,6 +360,7 @@ UNWATCHED = "chain_invariants_unwatched"
 CONDITIONS: Tuple[str, ...] = (
     SEQUENCE_BEHIND, COLUMN_NULL, INITIAL_BURST, FIRST_SEEN_RESET,
     ROLLUP_MISSING, SNAPSHOT_SHORT, WATERMARK_STALE,
+    DICTIONARY_EMPTY, NAME_UNRESOLVED,
 )
 
 # The family name every condition above carries, and the key the integrity
@@ -378,11 +413,15 @@ def _reader_groups() -> Dict[str, str]:
     member of `WRITE_CHAINS` missing from this mapping, so the gap shows in CI
     before it shows at 01:00.
     """
-    from core import pg_expenses_write, pg_goals_write, pg_inventory_write
+    from core import (
+        pg_expense_types_write, pg_expenses_write, pg_goals_write,
+        pg_inventory_write,
+    )
 
     return {pg_expenses_write.CHAIN: "expenses",
             pg_inventory_write.CHAIN: "inventory",
-            pg_goals_write.CHAIN: "goals"}
+            pg_goals_write.CHAIN: "goals",
+            pg_expense_types_write.CHAIN: "expense_types"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -391,6 +430,17 @@ _ALLOCATOR_SQL = """
 SELECT (SELECT last_value FROM {sequence})            AS last_value,
        (SELECT is_called  FROM {sequence})            AS is_called,
        (SELECT MAX(id) FROM {table})                  AS max_id
+"""
+
+# `starts_with` and not LIKE: the prefix carries two underscores, which LIKE
+# reads as "any character".
+_EXPENSE_TYPES_SQL = """
+SELECT count(*) AS rows,
+       count(*) FILTER (WHERE starts_with(name, $1)) AS unresolved,
+       COALESCE((array_agg(id ORDER BY id)
+                 FILTER (WHERE starts_with(name, $1)))[1:10],
+                '{}'::int[]) AS sample
+FROM bronze.expense_types
 """
 
 _EXPENSE_NULLS_SQL = """
@@ -552,6 +602,17 @@ async def _read_goals(conn, latched_at: Optional[datetime] = None) -> Goals:
         latched_at=latched_at)
 
 
+async def _read_expense_types(conn) -> ExpenseTypes:
+    # The prefix the shared parse resolves, read from it rather than typed
+    # again: a second spelling would stop matching the day the parse changed.
+    from core.landing_rows import _LOCALISATION_PREFIX
+
+    row = await conn.fetchrow(_EXPENSE_TYPES_SQL, _LOCALISATION_PREFIX)
+    return ExpenseTypes(
+        rows=int(row["rows"]), unresolved=int(row["unresolved"]),
+        unresolved_sample=tuple(int(i) for i in row["sample"]))
+
+
 async def _read_inventory(conn, latched_at: Optional[datetime],
                           today: date) -> Inventory:
     from core.landing_rows import MOVEMENT_INITIAL
@@ -601,6 +662,13 @@ async def _read_inventory(conn, latched_at: Optional[datetime],
         window_start=start, window_end=end)
 
 
+def watermark_limit_min(chain) -> Optional[int]:
+    """How stale a chain's `last_sync_*` may be before it is called stalled —
+    `WATERMARK_MAX_AGE_MIN` unless the chain declares its own, and None for a
+    chain whose keys this module does not judge at all."""
+    return getattr(chain, "CHAIN_WATERMARK_MAX_AGE_MIN", WATERMARK_MAX_AGE_MIN)
+
+
 async def _read_watermarks(conn, watched: Mapping[str, Optional[str]],
                            now: datetime) -> Tuple[WatermarkAge, ...]:
     """The `last_sync_*` keys of every watched chain, aged against one `now`.
@@ -613,9 +681,15 @@ async def _read_watermarks(conn, watched: Mapping[str, Optional[str]],
     from core.write_chains import WRITE_CHAINS, chain_name
 
     wanted: List[Tuple[str, str]] = []
+    limits: Dict[str, int] = {}
     for chain in WRITE_CHAINS:
         name = chain_name(chain)
-        if name in watched:
+        # A chain whose sync is not hourly says so: None leaves its keys to
+        # `_freshness_check` alone (chain 6a's weekly dictionary). Absent means
+        # this module's limit, which is what every chain before 6a relied on.
+        limit = watermark_limit_min(chain)
+        if name in watched and limit is not None:
+            limits[name] = limit
             wanted += [(name, key) for key in getattr(chain, "CHAIN_SYNC_KEYS", ())]
     if not wanted:
         return ()
@@ -636,7 +710,8 @@ async def _read_watermarks(conn, watched: Mapping[str, Optional[str]],
                 if stamp.tzinfo is None:
                     stamp = stamp.replace(tzinfo=now.tzinfo)
                 age = (now - stamp).total_seconds()
-        out.append(WatermarkAge(chain=name, key=key, raw=raw, age_s=age))
+        out.append(WatermarkAge(chain=name, key=key, raw=raw, age_s=age,
+                                limit_min=limits[name]))
     return tuple(out)
 
 
@@ -693,6 +768,7 @@ async def read_facts(*, pool=None) -> Facts:
                     "inventory": lambda c: _read_inventory(c, since, today),
                     "goals": lambda c: _read_goals(
                         c, _stamp(watched.get(pg_goals_write.CHAIN))),
+                    "expense_types": _read_expense_types,
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -728,6 +804,7 @@ async def read_facts(*, pool=None) -> Facts:
                  expenses=groups.get("expenses"),
                  inventory=groups.get("inventory"),
                  goals=groups.get("goals"),
+                 expense_types=groups.get("expense_types"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
                  unread=unread)
 
@@ -923,11 +1000,42 @@ def _snapshot_issues(inv: Inventory) -> List:
     return issues
 
 
+def _expense_type_issues(et: ExpenseTypes, chain: str) -> List:
+    from core.data_quality import Severity
+
+    issues: List = []
+    if not et.rows:
+        issues.append(_issue(
+            check_name=DICTIONARY_EMPTY, table_name="bronze.expense_types",
+            severity=Severity.CRITICAL, count=1,
+            description=(
+                f"bronze.expense_types holds no rows, and {chain} writes it: "
+                "/expenses names every order-level cost by joining this table, "
+                "so the breakdown is one 'Other' and the type filter is empty. "
+                "The writer upserts and never deletes, so something else emptied "
+                "it, or the chain was flipped onto a Postgres the hourly copy "
+                "never reached. KeyCRM serves this dictionary only to the full "
+                "sync, and nothing else will bring it back.")))
+    if et.unresolved:
+        shown = ", ".join(str(i) for i in et.unresolved_sample)
+        issues.append(_issue(
+            check_name=NAME_UNRESOLVED, table_name="bronze.expense_types",
+            severity=Severity.WARN, count=et.unresolved,
+            sample_ids=et.unresolved_sample,
+            description=(
+                f"{et.unresolved} of {et.rows} expense type(s) are named by a "
+                f"KeyCRM localisation key rather than a display name (e.g. id "
+                f"{shown}). core.landing_rows.expense_type_rows resolves those, "
+                f"so a key standing here is a write that went round the shared "
+                f"parse — and with {chain} writing Postgres there is no "
+                "comparison left to notice the two stores naming it differently.")))
+    return issues
+
+
 def _watermark_issues(marks: Tuple[WatermarkAge, ...]) -> List:
     from core.data_quality import Severity
 
     issues: List = []
-    limit = WATERMARK_MAX_AGE_MIN * 60
     for mark in marks:
         if mark.raw is None:
             # Absent is what a chain that has not synced since the handover
@@ -944,14 +1052,14 @@ def _watermark_issues(marks: Tuple[WatermarkAge, ...]) -> List:
                     f"not a timestamp. {mark.chain} writes it, and nothing can tell "
                     "from it whether that sync is still running.")))
             continue
-        if mark.age_s <= limit:
+        if mark.age_s <= mark.limit_min * 60:
             continue
         issues.append(_issue(
             check_name=WATERMARK_STALE, table_name=mark.key,
             severity=Severity.WARN, count=int(mark.age_s // 60),
             description=(
                 f"{mark.key} last moved {mark.age_s / 60:.0f} min ago, over the "
-                f"{WATERMARK_MAX_AGE_MIN}-minute limit. That sync falls due an hour "
+                f"{mark.limit_min}-minute limit. That sync falls due an hour "
                 "after its last success and is retried on every incremental tick "
                 "after that, at most about six minutes apart, so every retry "
                 f"{mark.chain} made for over twenty minutes has failed. Until "
@@ -968,7 +1076,10 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     against. It cannot be told apart from a chain that is fine, so it is
     reported rather than assumed harmless.
     """
-    from core import pg_expenses_write, pg_goals_write, pg_inventory_write
+    from core import (
+        pg_expense_types_write, pg_expenses_write, pg_goals_write,
+        pg_inventory_write,
+    )
 
     if facts is None:
         watched = tuple(sorted(watched_chains()))
@@ -1012,6 +1123,13 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     elif isinstance(facts.goals, Goals):
         issues += _null_issues(facts.goals.nulls, pg_goals_write.CHAIN,
                                facts.goals.latched_at)
+
+    if isinstance(facts.expense_types, Unwatched):
+        issues.append(unwatched_issue(facts.expense_types.reason,
+                                      (pg_expense_types_write.CHAIN,)))
+    elif isinstance(facts.expense_types, ExpenseTypes):
+        issues += _expense_type_issues(facts.expense_types,
+                                       pg_expense_types_write.CHAIN)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(
