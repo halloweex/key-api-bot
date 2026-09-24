@@ -349,19 +349,24 @@ class TestOneMutationEach:
     async def test_a_null_goal_clock_or_custom_flag_names_the_column(self, latched):
         """Chain 7a (DN-25). `updated_at` is the copy-back's clock and
         `is_custom` decides whether `get_smart_goals` keeps a typed goal; the
-        Postgres table defaults neither."""
+        Postgres table defaults neither.
+
+        Two rows of one column and one of the other, so a reader that put
+        each count under the other's name is caught — one of each could not
+        tell the two apart."""
         pool, _, _ = latched
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE app.revenue_goals SET updated_at = NULL "
-                "WHERE period_type = 'monthly'")
+                "WHERE period_type IN ('monthly', 'daily')")
             await conn.execute(
                 "UPDATE app.revenue_goals SET is_custom = NULL "
                 "WHERE period_type = 'weekly'")
         found = [i for i in await _findings(names_only=False)
                  if i.check_name == inv.COLUMN_NULL]
         assert len(found) == 1 and found[0].table_name == "app.revenue_goals"
-        assert "updated_at in 1 row(s)" in found[0].description
+        assert found[0].count == 3
+        assert "updated_at in 2 row(s)" in found[0].description
         assert "is_custom in 1 row(s)" in found[0].description
         assert "pg_goals_write" in found[0].description
 

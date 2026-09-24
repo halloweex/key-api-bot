@@ -153,7 +153,62 @@ class TestUnderTheFlag:
         assert list(goals) == ["weekly"]
         assert float(goals["weekly"][1]) == 350_000.0
         assert float(goals["weekly"][4]) == 1.2
-        assert goals["weekly"][5] >= first[5]
+        # Strictly: `>=` also held for an upsert that never moved the clock.
+        assert goals["weekly"][5] > first[5]
+
+    @pytest.mark.asyncio
+    async def test_a_rewrite_replaces_every_column_the_caller_supplies(self, stores):
+        """Every column of the second call, exactly — so an `ON CONFLICT` that
+        forgot one (the clock the copy-back orders versions by, the
+        suggestion kept for reference) is caught, not just the amount.
+        `mirrored_at` is set to 2020 between the calls, so that it moved is
+        the writer's doing and not two `now()`s a microsecond apart."""
+        from datetime import datetime, timezone
+        from decimal import Decimal
+
+        _store, pool, env = stores
+        env.setenv("KS_WRITE_GOALS", "postgres")
+        t1 = datetime(2026, 9, 1, 8, 30, tzinfo=timezone.utc)
+        t2 = datetime(2026, 9, 2, 9, 45, tzinfo=timezone.utc)
+        old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+
+        await pg_goals_write.set_goal("weekly", 300_000.0, True, 250_000.0, 1.10, t1)
+        async with pool.acquire() as conn:
+            await conn.execute(f"UPDATE {GOALS} SET mirrored_at = $1", old)
+        returned = await pg_goals_write.set_goal(
+            "weekly", 350_000.0, False, 320_000.0, 1.25, t2)
+
+        expected = ("weekly", Decimal("350000.00"), False, Decimal("320000.00"),
+                    Decimal("1.25"), t2)
+        assert (await _pg_goals(pool))["weekly"] == expected
+        assert returned == expected
+        async with pool.acquire() as conn:
+            mirrored = await conn.fetchval(f"SELECT mirrored_at FROM {GOALS}")
+        assert mirrored > old, "the rewrite left this store's own stamp behind"
+
+    @pytest.mark.asyncio
+    async def test_both_branches_store_the_same_goal(self, stores):
+        """The same calls through `GoalsMixin.set_goal` under each engine store
+        the same row, bookkeeping aside — the two clocks and Postgres'
+        `mirrored_at`, which differ by construction. `calculated_goal` is the
+        column this is really about: it is the suggestion, computed in the
+        repository and handed to both branches, and a Postgres branch handed
+        the amount instead would pass every other test here. The typed
+        monthly amount is therefore chosen off the suggestion."""
+        store, pool, env = stores
+
+        await store.set_goal("monthly", 1_234_500.0, growth_factor=1.2)   # DuckDB
+        await store.reset_goal_to_auto("daily")
+        duck = await _duck_goals(store)
+        env.setenv("KS_WRITE_GOALS", "postgres")
+        await store.set_goal("monthly", 1_234_500.0, growth_factor=1.2)   # Postgres
+        await store.reset_goal_to_auto("daily")
+        pg = await _pg_goals(pool)
+
+        assert set(duck) == set(pg) == {"daily", "monthly"}
+        assert duck["monthly"][3] != duck["monthly"][1], (
+            "the suggestion equals the amount, so this cannot tell them apart")
+        assert {k: v[:5] for k, v in pg.items()} == {k: v[:5] for k, v in duck.items()}
 
     @pytest.mark.asyncio
     async def test_reset_to_auto_goes_through_the_same_writer(self, stores):
