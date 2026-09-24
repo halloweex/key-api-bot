@@ -61,6 +61,19 @@ cleanup() {
         >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
 }
+# One gate on this host at a time, of either kind. The stores have fixed
+# names and both gates build the same image tag, so two runs at once — two
+# sessions, or a run started before the last one finished — migrate one
+# database, test each other's image, and each one's cleanup removes the other's
+# stores. Seen 2026-09-24: a gate from a second checkout died at the migration
+# on a duplicate `alembic_version`, and its cleanup took the running gate's
+# Postgres with it. So the second run waits here instead; the lock goes when
+# this shell exits, however it exits.
+exec 9>/tmp/ks-gate.lock
+if command -v flock >/dev/null 2>&1; then
+    flock 9
+fi
+
 trap cleanup EXIT
 
 cleanup
