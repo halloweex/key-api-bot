@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.239
+
+- Let CI see the preview's Postgres test if it ever stops running
+- Make backfill_gender.py work in production, or say why it cannot
+
+
 ## 3.0.238
 
 - DN-16: the lever line orders its levers by cause and fits the arrow
