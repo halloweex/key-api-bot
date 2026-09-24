@@ -77,7 +77,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import (
     Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
 )
@@ -505,3 +505,186 @@ async def read_snapshot_calendar(
             window_floor,
         )
     return first_day, frozenset(r["date"] for r in rows)
+
+
+# ─── Before the flip (DN-24) ─────────────────────────────────────────────────
+#
+# Three things have to be true on the day `KS_WRITE_INVENTORY` is switched on,
+# and each used to be a query somebody had to remember to run by hand. They are
+# asked here, together, and published on /api/health as
+# `write_chains.pg_inventory_write.preflight`, so the answer is one look away
+# from the person about to recreate web.
+
+# The six tables' last hourly copy must be younger than this. The flip is a
+# recreate of web, and the margin to the hour is the time it is given to land
+# in before the next stock sync writes DuckDB behind the copy — a row that
+# `scripts/chain_copy_back.py --handover` would then refuse the flip on.
+PREFLIGHT_REPLICATED_WITHIN = timedelta(minutes=50)
+
+# The findings are read out of Postgres' copy of the quality journal, which is
+# itself shipped hourly, and a copy that stopped would keep showing yesterday's
+# clean run for as long as anybody looked. DN-03's limit for that copy, and the
+# same row it reads.
+PREFLIGHT_JOURNAL_COPY_WITHIN = timedelta(minutes=75)
+JOURNAL_COPY = "app.data_quality_runs"
+
+# The comparison whose findings count: `reconcile_operational`, inside the
+# daily `mirror_landing` run. A verdict older than the canary's own limit for
+# that layer is not a verdict about today — `tests/unit/test_inventory_preflip.py`
+# pins the two together.
+OPERATIONAL_LAYER = "mirror_landing"
+PREFLIGHT_VERDICT_WITHIN = timedelta(hours=30)
+
+# How many open findings the published answer names. The rest are counted.
+_PREFLIGHT_NAMED = 5
+
+
+def _minutes(delta: timedelta) -> int:
+    return int(delta.total_seconds() // 60)
+
+
+async def preflight(
+    pool=None, *, now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Whether chain 1 may be switched to Postgres now, and why not. Never raises.
+
+    `ok` is True only when all three hold:
+
+    * the writing role may create a temporary table — without it every status
+      rebuild raises (`rebuild_sku_inventory_status`), and it is granted by
+      initdb only on a cluster new enough to have the line;
+    * each of the six tables was copied by `replicate_operational` within
+      `PREFLIGHT_REPLICATED_WITHIN`, with no failure since;
+    * the latest `mirror_landing` run — from a journal copy that is itself
+      fresh — is recent, did not fail, and filed nothing against the six
+      tables or the chain.
+
+    `ok` is None once the chain already writes Postgres: this is the question
+    before the flip, and afterwards the copy it asks about stands down by
+    design. A value of `KS_WRITE_INVENTORY` nobody understands is not "writes
+    Postgres" — the chain is stood down, and the checks below say what that
+    costs.
+
+    `reasons` are sentences of this module's own; a Postgres error is named by
+    its class only, because /api/health is public and a driver's message is
+    not.
+    """
+    try:
+        moved = writes_postgres()
+    except RuntimeError:
+        moved = False
+    if moved:
+        return {"ok": None, "reasons": [
+            "chain 1 already writes Postgres; the preflight is the question "
+            "asked before the flip"]}
+
+    now = now or datetime.now(timezone.utc)
+    reasons: List[str] = []
+    out: Dict[str, Any] = {
+        "ok": False, "temporary": None, "replicated": {},
+        "journal_copy_age_s": None, "operational_run": None, "reasons": reasons,
+    }
+    try:
+        if pool is None:
+            from core.pg import get_pool, require_revision
+
+            pool = await get_pool()
+            await require_revision()
+        async with pool.acquire() as conn:
+            role, database, temporary = await conn.fetchrow(
+                "SELECT current_user, current_database(), "
+                "has_database_privilege(current_database(), 'TEMPORARY')")
+            marks = {r["table_name"]: r for r in await conn.fetch(
+                "SELECT table_name, last_ok_at, failures_since_ok "
+                "FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                [*CHAIN_TABLES, JOURNAL_COPY])}
+            run = await conn.fetchrow(
+                "SELECT run_id, started_at, error_message "
+                "FROM app.data_quality_runs WHERE layer = $1 "
+                "ORDER BY run_id DESC LIMIT 1",
+                OPERATIONAL_LAYER)
+            findings = [] if run is None else await conn.fetch(
+                "SELECT check_name, table_name FROM app.data_quality_issues "
+                "WHERE run_id = $1 AND table_name = ANY($2::text[]) "
+                "ORDER BY check_name, table_name",
+                run["run_id"], [*CHAIN_TABLES, CHAIN])
+    except Exception as exc:  # noqa: BLE001 — named by class, never raised
+        reasons.append(f"Postgres could not be read ({type(exc).__name__})")
+        return out
+
+    # ── the temporary table the status rebuild needs ──
+    out["temporary"] = bool(temporary)
+    if not temporary:
+        reasons.append(
+            f"{role} cannot create a temporary table in {database}, so every "
+            f"status rebuild would raise; as a superuser: "
+            f"GRANT TEMPORARY ON DATABASE {database} TO {role}")
+
+    # ── the six tables' last copy ──
+    limit = _minutes(PREFLIGHT_REPLICATED_WITHIN)
+    for table in CHAIN_TABLES:
+        mark = marks.get(table)
+        ok_at = mark["last_ok_at"] if mark else None
+        failures = int(mark["failures_since_ok"]) if mark else 0
+        age = now - ok_at if ok_at else None
+        out["replicated"][table] = {
+            "age_s": int(age.total_seconds()) if age is not None else None,
+            "failures_since_ok": failures,
+        }
+        if ok_at is None:
+            reasons.append(f"{table} has never been copied into Postgres")
+        elif failures:
+            reasons.append(f"the copy of {table} is failing ({failures} in a row)")
+        elif age >= PREFLIGHT_REPLICATED_WITHIN:
+            reasons.append(
+                f"{table} was last copied {_minutes(age)} min ago (limit {limit})")
+
+    # ── the journal copy the findings are read from ──
+    journal = marks.get(JOURNAL_COPY)
+    journal_ok_at = journal["last_ok_at"] if journal else None
+    if journal_ok_at is not None:
+        out["journal_copy_age_s"] = int((now - journal_ok_at).total_seconds())
+    if journal_ok_at is None:
+        reasons.append(
+            "the quality journal has never been copied into Postgres, so open "
+            "findings cannot be read")
+    elif journal["failures_since_ok"]:
+        reasons.append(
+            f"the copy of the quality journal is failing "
+            f"({int(journal['failures_since_ok'])} in a row)")
+    elif now - journal_ok_at >= PREFLIGHT_JOURNAL_COPY_WITHIN:
+        reasons.append(
+            f"the copy of the quality journal is {_minutes(now - journal_ok_at)} "
+            f"min old (limit {_minutes(PREFLIGHT_JOURNAL_COPY_WITHIN)})")
+
+    # ── the latest operational comparison ──
+    if run is None:
+        reasons.append(f"no {OPERATIONAL_LAYER} run in the quality journal")
+    else:
+        age = now - run["started_at"]
+        out["operational_run"] = {
+            "run_id": int(run["run_id"]),
+            "age_s": int(age.total_seconds()),
+            "failed": run["error_message"] is not None,
+            "findings": len(findings),
+        }
+        if age >= PREFLIGHT_VERDICT_WITHIN:
+            reasons.append(
+                f"the latest {OPERATIONAL_LAYER} run ({run['run_id']}) is "
+                f"{int(age.total_seconds() // 3600)} h old (limit "
+                f"{int(PREFLIGHT_VERDICT_WITHIN.total_seconds() // 3600)})")
+        if run["error_message"] is not None:
+            reasons.append(
+                f"the latest {OPERATIONAL_LAYER} run ({run['run_id']}) failed and "
+                "compared nothing")
+        if findings:
+            named = ", ".join(f"{f['check_name']} on {f['table_name']}"
+                              for f in findings[:_PREFLIGHT_NAMED])
+            more = len(findings) - _PREFLIGHT_NAMED
+            reasons.append(
+                f"{len(findings)} open finding(s) on chain 1 in "
+                f"{OPERATIONAL_LAYER} run {run['run_id']}: {named}"
+                + (f" and {more} more" if more > 0 else ""))
+
+    out["ok"] = not reasons
+    return out
