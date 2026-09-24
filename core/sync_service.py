@@ -185,8 +185,9 @@ def _expense_types_off_duckdb() -> bool:
 # the next morning by a comparison.
 
 BUYER_RETRY_AFTER_S = 600
-# The getter may read Postgres (a chain's watermark lives there); a store that
-# hangs must not hold the tick.
+# The getter will read Postgres once a chain owns `last_sync_buyers` (a chain's
+# watermark lives in meta.chain_watermarks); a store that hangs must not hold
+# the tick. Shielded where it is used — see the tick, and DN-05a.
 BUYER_WATERMARK_TIMEOUT_S = 10
 
 # Classes that mean "this data cannot be written", not "the step is broken".
@@ -538,8 +539,29 @@ class SyncService:
             missing_ids = sorted(missing_ids)
             logger.info(f"Fetching {len(missing_ids)} missing buyers from KeyCRM...")
             client = await get_async_client()
-            buyers = await client.fetch_buyers_by_ids(missing_ids)
+            fetch_errors: list = []
+            buyers = await client.fetch_buyers_by_ids(
+                missing_ids, errors_out=fetch_errors)
             buyers = sorted(buyers or [], key=lambda b: b.id)
+            if not buyers and fetch_errors:
+                # Every fetch failed for a reason other than "no such buyer".
+                # That is a KeyCRM outage, not an empty selection, and it must
+                # not be stamped as a completed sync: raised as the KeyCRM
+                # family it is, it holds the watermark, opens the retry window
+                # and — not counted as a step failure — lets the growing age of
+                # `last_ok` page after 90 minutes. A breaker that is open
+                # (CircuitOpenError) is KeyCRM being unavailable too.
+                first = fetch_errors[0]
+                if isinstance(first, KeyCRMError):
+                    raise first
+                raise KeyCRMConnectionError(
+                    f"{type(first).__name__}: all {len(missing_ids)} buyer "
+                    "fetches failed") from first
+            if fetch_errors:
+                logger.warning(
+                    f"Buyer fetch: {len(fetch_errors)} of {len(missing_ids)} "
+                    f"failed ({type(fetch_errors[0]).__name__}); the rest are "
+                    "written and the failed ids stay selected for next time")
 
             if buyers:
                 # Mirrored to Postgres inside the store method, portion by
@@ -1225,9 +1247,20 @@ class SyncService:
             # TypeError that would lose the tick's completion event too.
             if self._buyers_retry_in() is None:
                 try:
-                    last_buyers_sync = await asyncio.wait_for(
-                        self.store.get_last_sync_time("buyers"),
-                        BUYER_WATERMARK_TIMEOUT_S)
+                    # Behind a shield, the DN-05a form `_run_pg_derivation`
+                    # uses: a bare `wait_for` waits for the cancelled read to
+                    # unwind, and a Postgres read cut inside a query unwinds
+                    # into asyncpg's cancel request to a server that may not
+                    # answer — measured 150 s past a 10 s bound on a paused
+                    # container. Shielded, the tick returns at the bound and
+                    # the read is cancelled and left to unwind on its own.
+                    read = asyncio.ensure_future(
+                        self.store.get_last_sync_time("buyers"))
+                    try:
+                        last_buyers_sync = await asyncio.wait_for(
+                            asyncio.shield(read), BUYER_WATERMARK_TIMEOUT_S)
+                    finally:
+                        read.cancel()
                     if not last_buyers_sync or (datetime.now(DEFAULT_TZ) - last_buyers_sync).total_seconds() > 3600:
                         stats["buyers"] = await self.sync_missing_buyers()
                 except Exception as e:  # noqa: BLE001 — recorded and published

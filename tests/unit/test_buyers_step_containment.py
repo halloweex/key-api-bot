@@ -144,15 +144,116 @@ class TestAFailedWriteIsContained:
         assert state.consecutive_failures == 0
         assert svc._buyers_retry_in() is not None     # but it still backs off
 
-    @pytest.mark.asyncio
-    async def test_a_keycrm_error_backs_off_without_counting(self, monkeypatch, no_mirror):
-        from core.exceptions import KeyCRMConnectionError
 
-        svc, _, client = _service(monkeypatch)
-        client.fetch_buyers_by_ids.side_effect = KeyCRMConnectionError("timeout")
+
+def _real_client(answer):
+    """The REAL `KeyCRMClient.fetch_buyers_by_ids`, with only the network call
+    replaced. The first draft of these tests faked `fetch_buyers_by_ids` itself
+    to raise — something the real method never does, since it skips every
+    failed buyer — and so pinned a path production cannot take."""
+    from core.keycrm import KeyCRMClient
+
+    client = KeyCRMClient.__new__(KeyCRMClient)
+
+    async def get_customer(buyer_id):
+        return answer(buyer_id)
+
+    client.get_customer = get_customer
+    return client
+
+
+def _raise(exc):
+    def answer(_bid):
+        raise exc
+    return answer
+
+
+class TestAKeyCRMOutageIsAFailureNotAnEmptySelection:
+    """Every buyer fetch failing used to come back as [] — "nothing to fetch" —
+    and was stamped as a completed sync: watermark moved, no retry window, the
+    canary's age never grew. Reproduced by PR-1's review with the real client."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exc,recorded", [
+        ("connection", "KeyCRMConnectionError"),
+        ("forbidden", "KeyCRMAPIError"),
+        ("breaker", "KeyCRMConnectionError"),     # CircuitOpenError, wrapped
+    ])
+    async def test_it_holds_the_watermark_and_backs_off(
+            self, monkeypatch, no_mirror, exc, recorded):
+        from core import sync_service as mod
+        from core.exceptions import KeyCRMAPIError, KeyCRMConnectionError
+        from core.resilience import CircuitOpenError
+
+        error = {"connection": KeyCRMConnectionError("API returned 429"),
+                 "forbidden": KeyCRMAPIError("forbidden", status_code=403),
+                 "breaker": CircuitOpenError("circuit open")}[exc]
+        svc, store, _ = _service(monkeypatch)
+        monkeypatch.setattr(mod, "get_async_client",
+                            AsyncMock(return_value=_real_client(_raise(error))))
+
         await svc.incremental_sync()
-        assert svc.buyer_sync_state.consecutive_failures == 0
+
+        state = svc.buyer_sync_state
+        assert state.last_error_class == recorded
+        assert state.last_ok_at is None
+        assert state.consecutive_failures == 0          # KeyCRM: the age pages
         assert svc._buyers_retry_in() is not None
+        assert not _buyers_stamped(store)
+        store.upsert_buyers.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_every_buyer_gone_is_an_empty_selection_not_an_outage(
+            self, monkeypatch, no_mirror):
+        from core import sync_service as mod
+        from core.exceptions import KeyCRMAPIError
+
+        svc, store, _ = _service(monkeypatch)
+        monkeypatch.setattr(mod, "get_async_client", AsyncMock(return_value=_real_client(
+            _raise(KeyCRMAPIError("not found", status_code=404)))))
+
+        await svc.incremental_sync()
+
+        assert _buyers_stamped(store)
+        assert svc.buyer_sync_state.last_error_class is None
+        assert svc._buyers_retry_in() is None
+
+    @pytest.mark.asyncio
+    async def test_a_partial_fetch_writes_what_came_back(self, monkeypatch, no_mirror):
+        from core import sync_service as mod
+        from core.exceptions import KeyCRMAPIError
+
+        def answer(bid):
+            if bid == 2:
+                raise KeyCRMAPIError("boom", status_code=500)
+            return {"id": bid, "full_name": f"Покупець {bid}"}
+
+        svc, store, _ = _service(monkeypatch)
+        monkeypatch.setattr(mod, "get_async_client",
+                            AsyncMock(return_value=_real_client(answer)))
+
+        await svc.incremental_sync()
+
+        written = store.upsert_buyers.await_args.args[0]
+        assert [b.id for b in written] == [1, 3]
+        assert _buyers_stamped(store)      # buyer 2 is still missing: re-selected
+
+    @pytest.mark.asyncio
+    async def test_the_ids_reach_keycrm_in_the_sorted_order(self, monkeypatch, no_mirror):
+        """`set` used to shuffle them inside the client."""
+        from core import sync_service as mod
+
+        asked = []
+
+        def answer(bid):
+            asked.append(bid)
+            return {"id": bid, "full_name": "x"}
+
+        svc, _, _ = _service(monkeypatch)
+        monkeypatch.setattr(mod, "get_async_client",
+                            AsyncMock(return_value=_real_client(answer)))
+        await svc.sync_missing_buyers()
+        assert asked == [1, 2, 3]
 
 
 class TestAFailedGetterIsContained:
@@ -191,6 +292,36 @@ class TestAFailedGetterIsContained:
         await asyncio.wait_for(svc.incremental_sync(), 5)
         svc.sync_offers.assert_awaited_once()
         assert svc.buyer_sync_state.last_error_class == "TimeoutError"
+
+
+class TestAGetterThatUnwindsSlowly:
+    @pytest.mark.asyncio
+    async def test_the_tick_returns_at_the_bound_not_when_the_read_unwinds(
+            self, monkeypatch, no_mirror):
+        """A Postgres read cut inside a query unwinds into asyncpg's cancel
+        request; a bare `wait_for` waits for that and a shielded one does not
+        (DN-05a). The fake unwinds for three seconds on cancel."""
+        from core import sync_service as mod
+
+        monkeypatch.setattr(mod, "BUYER_WATERMARK_TIMEOUT_S", 0.05)
+        now = datetime.now(TZ)
+
+        async def last(key):
+            if key == "buyers":
+                try:
+                    await asyncio.sleep(30)
+                except asyncio.CancelledError:
+                    await asyncio.shield(asyncio.sleep(3))
+                    raise
+            return {"orders": now, "products": now, "managers": now}.get(
+                key, now - timedelta(hours=2))
+
+        svc, _, _ = _service(monkeypatch, getter=AsyncMock(side_effect=last))
+        started = time.monotonic()
+        await svc.incremental_sync()
+        assert time.monotonic() - started < 1.5
+        assert svc.buyer_sync_state.last_error_class == "TimeoutError"
+        svc.sync_offers.assert_awaited_once()
 
 
 class TestTheStepItself:
