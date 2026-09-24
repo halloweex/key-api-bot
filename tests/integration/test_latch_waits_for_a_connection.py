@@ -249,7 +249,7 @@ async def refusing(request):
     configured here: no acquire timeout (`core.pg.get_pool`), so a pool with
     nothing free is a wait, and each shape below is how a wait ends badly.
 
-    `restarted` — production's incident. One connection, held for the whole
+    `restarted` — the shape production has. One connection, held for the whole
     test (the Sunday full sync holding all five, at this pool's size); the
     writer queues behind it; Postgres ends the held connection, which hands
     its slot to the writer, and the reconnect the acquire then makes is
