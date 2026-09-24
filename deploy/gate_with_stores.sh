@@ -143,12 +143,18 @@ docker exec "$PG" psql -U postgres -tAc "ALTER ROLE ks_app WITH PASSWORD '$PW'" 
 
 # The schema the application demands. `require_revision` refuses any mismatch,
 # so the suite needs head here just as production does.
+# alembic and SQLAlchemy at the lock's versions, with the `asyncio` extra that
+# brings greenlet. An unpinned `pip install alembic` resolved a SQLAlchemy
+# that no longer pulls greenlet by itself, and every gate died here on
+# 2026-09-25 with the suite never started. The migrate image already asks
+# for `sqlalchemy[asyncio]` (Dockerfile.migrate); this matches it.
 docker run --rm --user root --network "$NET" \
     -e "KS_PG_DSN=postgresql://ks_app:$PW@$PG:5432/ks" \
     -v "$REPO/migrations:/app/migrations:ro" \
     -v "$REPO/alembic.ini:/app/alembic.ini:ro" \
+    -v "$REPO/requirements-dev.lock:/app/requirements-dev.lock:ro" \
     --entrypoint sh "$IMAGE" -c \
-    'pip install -q alembic >/dev/null 2>&1; cd /app && python -m alembic upgrade head' \
+    'pip install -q -c /app/requirements-dev.lock alembic "sqlalchemy[asyncio]" >/dev/null 2>&1; cd /app && python -m alembic upgrade head' \
     || { echo "GATE: migrations failed"; exit 1; }
 
 # Repo files the runtime image deliberately does not carry. A dozen tests read
