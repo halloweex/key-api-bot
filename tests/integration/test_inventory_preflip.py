@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from datetime import date
 from unittest.mock import AsyncMock, patch
 
@@ -44,6 +45,11 @@ PROVISIONED = ("needs a live PostgreSQL provisioned as .github/workflows/ci.yml 
 
 # A day nothing else in the suite photographs, so the rows are ours to delete.
 DAY = date(2031, 1, 7)
+
+# How long a snapshot holds after its "already taken?" read for the other one
+# to make the same read. Without the lock the other arrives in milliseconds and
+# the hold ends there; with it, the hold runs out and costs the test this much.
+_OVERLAP_WAIT_S = 1.0
 
 
 async def _clean(pool):
@@ -134,13 +140,60 @@ class TestTheChainLock:
             await pool.release(holder)
 
     @pytest.mark.asyncio
-    async def test_the_second_snapshot_of_the_day_waits_and_finds_it_taken(self, pool):
+    @pytest.mark.parametrize("call, guard", [
+        pytest.param(lambda: pg_inventory_write.record_sku_inventory_snapshot(DAY),
+                     "FROM app.inventory_sku_history WHERE date", id="per-SKU"),
+        pytest.param(lambda: pg_inventory_write.record_inventory_snapshot(today=DAY),
+                     "FROM app.inventory_history WHERE date", id="rolled-up"),
+    ])
+    async def test_the_second_snapshot_of_the_day_waits_and_finds_it_taken(
+            self, pool, call, guard):
+        """Two photographs of one day, with the overlap forced: each writer
+        holds after its "already taken?" read until the other has made the
+        same read, so without the lock both find the day free and the second
+        INSERT dies on the primary key.
+
+        With the lock the second cannot reach its read while the first is
+        open, so the first holds only until `_OVERLAP_WAIT_S` runs out, then
+        commits — and the second reads the day as taken. Called one after the
+        other on a cold pool, the two never overlapped at all: the second was
+        still opening a connection when the first committed, and this passed
+        with the lock removed."""
         await pg_inventory_write.rebuild_sku_inventory_status()   # three SKUs to photograph
-        first, second = await asyncio.gather(
-            pg_inventory_write.record_sku_inventory_snapshot(DAY),
-            pg_inventory_write.record_sku_inventory_snapshot(DAY),
-        )
+        reached = []
+        both = asyncio.Event()
+
+        class _HoldAfterGuard:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+            async def fetchval(self, sql, *args):
+                value = await self._conn.fetchval(sql, *args)
+                if guard in sql:
+                    reached.append(value)
+                    if len(reached) == 2:
+                        both.set()
+                    try:
+                        await asyncio.wait_for(both.wait(), _OVERLAP_WAIT_S)
+                    except asyncio.TimeoutError:
+                        pass
+                return value
+
+        class _Holding:
+            @asynccontextmanager
+            async def acquire(self):
+                async with pool.acquire() as conn:
+                    yield _HoldAfterGuard(conn)
+
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=_Holding())):
+            first, second = await asyncio.gather(call(), call())
+
         assert sorted([first, second]) == [False, True]
+        # The second read saw the first one's commit: it came after, not beside.
+        assert reached == [None, 1]
 
 
 # ─── preflight() against the real schema ─────────────────────────────────────
