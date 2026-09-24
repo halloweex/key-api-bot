@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.238
+
+- DN-16: the lever line orders its levers by cause and fits the arrow
+- DN-16: the fixture's now() is the transaction's start, not the wall clock
+- DN-16: name the cause no ship can reach, the clock's blind spot, and a lever that ships
+- DN-16: the completeness grace follows the ship's floor, and the job's call is pinned
+- DN-16: every order the UTM parser reads has a current verdict in Postgres
+
+
 ## 3.0.237
 
 - DN-21: stop dating the page to a merge that has not happened
