@@ -1867,12 +1867,13 @@ class BackgroundScheduler:
                     "the moved syncs unwatched: %s", e)
 
             raised_checks: list = []
+            duckdb_measured: Dict[str, Dict[str, int]] = {}
             try:
                 async with store.connection() as conn:
                     issues = check_internal_integrity(
                         conn, inventory_calendar=inventory_calendar,
                         chain_watermarks=chain_watermarks,
-                        raised_out=raised_checks)
+                        raised_out=raised_checks, pairing_out=duckdb_measured)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("DQ integrity scan raised")
@@ -1882,9 +1883,10 @@ class BackgroundScheduler:
             # after the DuckDB half whatever it did — their facts are read here
             # and judged purely, so a DuckDB fault cannot discard a Postgres
             # finding. `core/pg_warehouse_dq.py` has the design. Step 8b's
-            # recompute of Silver from bronze (`pg_silver_row_values`) is a
-            # fourth group in the same read and budget; it compares Postgres
-            # with Postgres, so `duckdb_looked` does not reach it.
+            # recompute of Silver from bronze (`pg_silver_row_values`) and
+            # DN-14's reading of the derivation journal (`pg_signal_missed`)
+            # are groups in the same read and budget; they compare Postgres
+            # with Postgres, so `duckdb_looked` does not reach them.
             from core import pg_warehouse_dq
             from core.data_quality import GUARDED_CHECK_CONDITIONS
 
@@ -1906,6 +1908,12 @@ class BackgroundScheduler:
                 pg_issues = pg_warehouse_dq.check_pg_warehouse(
                     pg_facts, duckdb_issues=issues, duckdb_looked=duckdb_looked,
                     held_out=pg_held)
+                # DN-14: both engines' numbers for this run, and what the twins
+                # would file standing alone — one INFO row the soak parses.
+                # Built from what was already read; it asks nobody anything.
+                pg_issues.append(pg_warehouse_dq.pairing_record(
+                    pg_facts, duckdb_issues=issues, duckdb_looked=duckdb_looked,
+                    duckdb_attribution=duckdb_measured.get("attribution_coverage")))
 
             # The standing watch on the tables a write chain has taken to
             # Postgres (DN-07), here beside the twins and for their reason: these

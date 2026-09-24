@@ -257,6 +257,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # Step 8b: the recompute of Postgres Silver from bronze.
     "pg_silver_row_values": _c("a Postgres derivation recomputes the values"),
     "pg_silver_row_values_unwatched": _c("the twin recomputes Postgres Silver again"),
+    # DN-14: an orders write the derivation's mark did not see, judged from its
+    # journal; and the pairing record, one INFO per run — a fact about that
+    # run, which nothing clears.
+    "pg_signal_missed": _c("a day of derivation runs in which every orders write raised its mark"),
+    "pg_derivation_signal_unwatched": _c("the twins read the derivation journal again"),
+    "pg_twin_pairing": _EVENT,
     "pg_warehouse_unwatched": _c("the twins read their snapshot again"),
     "pg_warehouse_dq_flag_invalid": _c("web restarts with a valid KS_DQ_PG_WAREHOUSE"),
     # Every order the UTM parser reads has a current verdict in Postgres

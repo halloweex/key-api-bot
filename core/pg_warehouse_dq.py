@@ -74,22 +74,44 @@ it is the check that has to keep working once DuckDB stops deriving.
   the absolute bound, so a derivation that stopped leaves rows paging rather
   than in flight for ever.
 - **Last in the snapshot.** It reads the whole of Silver and bronze, so a hold
-  budget it spends blinds it alone and the three cheap groups keep their
-  verdicts.
+  budget it spends blinds it alone and the cheap groups keep their verdicts.
 
-Still deferred, with the owner's decisions they need: the positive pairing
-record for the soak (DN-14) and making blindness news in every digest (OD-05).
+DN-14 adds what the soak needs to say "the twins agree" out loud, and one
+detector the design asked for and nobody built.
+
+- **`pg_signal_missed`**, from the derivation's own journal (a fifth group,
+  `derivation_signal`, read before the recompute). Every run records the mark
+  it had seen (`requested_seen`) and how far bronze had got
+  (`pg_derivation.HIGH_WATER`). Two consecutive error-free runs where bronze
+  moved on and the mark did not are an orders write that raised no mark: the
+  rows were rebuilt by the later run, so nothing is lost, but only because the
+  heartbeat came — the thing that makes a broken mark path invisible to every
+  other check. WARN, over the last day of runs, because the digest reads one
+  integrity run a day. A run journalled as `first_tick` is not judged: before
+  DN-05b a boot sync wrote with no mark by design, and that run is what
+  covered it. Postgres against its own journal, not against DuckDB.
+- **`pg_twin_pairing`**, one INFO finding per run whose description is JSON:
+  both engines' arc, attribution and line-item numbers side by side, and what
+  `check_pg_warehouse` would file for the same facts standing alone
+  (`duckdb_looked` empty). The line-item twins never file while DuckDB looks —
+  they compare — so without this the standalone path step 13 relies on would
+  have no record at all when it starts. Pure over facts already read: the
+  shadow evaluation costs no read.
+
+Still deferred, with the owner's decision it needs: making blindness news in
+every digest (OD-05).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import os
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +144,15 @@ GRACE_MARGIN_MIN = 10
 LANDING_MAX_AGE_S = 8 * 3600
 
 WEBSITE_SOURCE_ID = 4
+
+# How far back `pg_signal_missed` judges derivation runs. A day, not the six
+# hours between integrity runs: the digest reads the latest integrity run once
+# a morning, so a miss must stand in every run for a day to be read at all.
+SIGNAL_LOOKBACK_H = 24
+
+# The pairing record's shape. Bumped when a key changes meaning, so a soak
+# reading a week of records can tell which rows it may compare.
+PAIRING_VERSION = 1
 
 
 def flag() -> Tuple[bool, Optional[str]]:
@@ -228,7 +259,29 @@ class RowValues:
     rule_loaded_at: Optional[datetime] = None
 
 
-Group = Union[SilverArc, Attribution, LineItems, RowValues, Unwatched, None]
+@dataclass(frozen=True)
+class JournalRun:
+    """One error-free derivation run, as `meta.derivation_runs` has it.
+    `high_water` is None on a run journalled before DN-14, or over an empty
+    bronze; such a run is never judged."""
+    id: int
+    trigger: str
+    started_at: datetime
+    requested_seen: Optional[int]
+    high_water: Optional[datetime]
+
+
+@dataclass(frozen=True)
+class DerivationJournal:
+    """The runs `pg_signal_missed` judges: every error-free run that started at
+    or after `since`, in journal order, led by the last one before it — the
+    first judged run's predecessor, however old."""
+    since: datetime
+    runs: Tuple[JournalRun, ...]
+
+
+Group = Union[SilverArc, Attribution, LineItems, RowValues, DerivationJournal,
+              Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -238,6 +291,7 @@ class Facts:
     silver_arc: Group = None
     attribution: Group = None
     line_items: Group = None
+    derivation_signal: Group = None
     silver_row_values: Group = None
 
     @classmethod
@@ -248,7 +302,8 @@ class Facts:
 # In reading order. The recompute is last on purpose: it is the one group heavy
 # enough to spend the hold budget, and a budget spent on it should blind it
 # alone rather than the cheap groups queued behind it.
-GROUPS = ("silver_arc", "attribution", "line_items", "silver_row_values")
+GROUPS = ("silver_arc", "attribution", "line_items", "derivation_signal",
+          "silver_row_values")
 
 # Each guard and the conditions its twin emits — `data_quality.GUARDED_CHECK_CONDITIONS`'
 # shape, for the same use: what a blind run must hold rather than resolve.
@@ -257,12 +312,14 @@ GUARD_CONDITIONS: Dict[str, Tuple[str, ...]] = {
     "attribution": ("pg_attribution_coverage_website",),
     "line_items": ("pg_headline_vs_line_items", "pg_goods_shipped_without_sale",
                    "pg_line_items_disagree"),
+    "derivation_signal": ("pg_signal_missed",),
     "silver_row_values": ("pg_silver_row_values",),
 }
 UNWATCHED_NAMES: Dict[str, str] = {
     "silver_arc": "pg_silver_arc_unwatched",
     "attribution": "pg_attribution_coverage_unwatched",
     "line_items": "pg_line_items_unwatched",
+    "derivation_signal": "pg_derivation_signal_unwatched",
     "silver_row_values": "pg_silver_row_values_unwatched",
 }
 WHOLE_UNWATCHED = "pg_warehouse_unwatched"
@@ -337,6 +394,21 @@ JOIN li ON li.order_id = s.id
 WHERE NOT s.is_return AND s.is_active_source
   AND s.grand_total = 0 AND li.amount > 0
 GROUP BY 1
+"""
+
+
+# The error-free runs of the lookback, led by the last one before it. $1 the
+# layer, $2 the start of the lookback, $3 the high-water key. The cast is on
+# the selected rows only: one malformed value from long ago must not blind the
+# group for good.
+_JOURNAL_SQL = """
+SELECT id, trigger, started_at, requested_seen,
+       (validation ->> $3::text)::timestamptz AS high_water
+FROM meta.derivation_runs
+WHERE layer = $1 AND error IS NULL
+  AND id >= COALESCE((SELECT max(id) FROM meta.derivation_runs
+                       WHERE layer = $1 AND error IS NULL AND started_at < $2), 0)
+ORDER BY id
 """
 
 
@@ -532,6 +604,21 @@ async def _read_line_items(conn, watermark: Watermark) -> Union[LineItems, Unwat
     return LineItems(h[0], h[1], h[2], g[0], g[1], g[2])
 
 
+async def _read_journal(conn) -> DerivationJournal:
+    """The derivation's journal for `pg_signal_missed`. Not gated on the
+    backfill or the derivation mode: under piggyback nothing is journalled, and
+    an empty journal judges nothing."""
+    from core.pg_derivation import HIGH_WATER, LAYER
+
+    since = await conn.fetchval("SELECT now() - make_interval(hours => $1)",
+                                SIGNAL_LOOKBACK_H)
+    rows = await conn.fetch(_JOURNAL_SQL, LAYER, since, HIGH_WATER)
+    return DerivationJournal(since=since, runs=tuple(
+        JournalRun(id=int(r["id"]), trigger=r["trigger"], started_at=r["started_at"],
+                   requested_seen=r["requested_seen"], high_water=r["high_water"])
+        for r in rows))
+
+
 async def _read_row_values(conn, grace: int, page_after: int) -> RowValues:
     """The recompute. Not gated on the backfill, unlike attribution and line
     items: Silver is derived from whatever bronze holds, history or not, so a
@@ -632,6 +719,7 @@ async def read_facts(*, today: Optional[date] = None, pool=None) -> Facts:
                         ("silver_arc", lambda c: _read_silver_arc(c, grace, page_after)),
                         ("attribution", lambda c: _read_attribution(c, watermark)),
                         ("line_items", lambda c: _read_line_items(c, watermark)),
+                        ("derivation_signal", _read_journal),
                         ("silver_row_values",
                          lambda c: _read_row_values(c, grace, page_after)),
                     )
@@ -787,6 +875,61 @@ def _row_values_check(rv: RowValues) -> list:
         description=" ".join(parts))]
 
 
+def signal_missed_pairs(journal: DerivationJournal) -> List[Tuple[JournalRun, JournalRun]]:
+    """Consecutive error-free runs, `(before, run)`, where bronze moved on and
+    the mark did not: `run` started inside the lookback, its high-water mark is
+    later than `before`'s, and its `requested_seen` is the same.
+
+    Not judged: a run whose trigger is `first_tick`. Before DN-05b a process
+    configured its modes after the boot sync, so that sync's writes carried no
+    mark by design and this run is what rebuilt them; after DN-05b the
+    exclusion reaches only processes started before it. A `signal` run needs no
+    exclusion — `due` says `signal` only when `requested` passed `built`, which
+    the previous run left at its own `requested_seen`, so its mark has moved by
+    construction. Nor is a pair either of whose runs has no high-water mark or
+    no `requested_seen`: a run journalled before DN-14 says nothing either way.
+    """
+    from core.pg_derivation import FIRST_TICK
+
+    pairs = []
+    for before, run in zip(journal.runs, journal.runs[1:]):
+        if run.started_at < journal.since or run.trigger == FIRST_TICK:
+            continue
+        if None in (before.high_water, run.high_water,
+                    before.requested_seen, run.requested_seen):
+            continue
+        if run.high_water > before.high_water and run.requested_seen == before.requested_seen:
+            pairs.append((before, run))
+    return pairs
+
+
+def _signal_check(journal: DerivationJournal) -> list:
+    """WARN `pg_signal_missed`, one finding for the lookback. Never CRITICAL:
+    the run that saw the write rebuilt it, so what failed is the signal, and
+    the heartbeat caps what it costs at an hour of lag."""
+    from core.data_quality import Severity
+
+    missed = signal_missed_pairs(journal)
+    if not missed:
+        return []
+    before, run = missed[-1]
+    return [_issue(
+        check_name="pg_signal_missed", table_name="meta.derivation_runs",
+        severity=Severity.WARN, count=len(missed),
+        sample_ids=tuple(r.id for _, r in reversed(missed))[:10],
+        description=(
+            f"{len(missed)} Postgres derivation run(s) in the last {SIGNAL_LOOKBACK_H} h found "
+            "bronze.orders written since the run before them, with no derivation mark raised "
+            f"in between. The latest: run {run.id} ({run.trigger}, started "
+            f"{run.started_at.isoformat(timespec='seconds')}) saw the latest mirrored_at move "
+            f"from {before.high_water.isoformat(timespec='seconds')} to "
+            f"{run.high_water.isoformat(timespec='seconds')} with requested still at "
+            f"{run.requested_seen}. That run rebuilt the rows, so nothing is lost; the signal "
+            "did not fire for them, and while it does not, Silver waits up to the hourly "
+            "heartbeat. A mark dropped on its lock timeout reads the same way: see "
+            "meta.mirror_state for meta.derivation_signal. Sample: meta.derivation_runs ids."))]
+
+
 def _attribution_check(att: Attribution, watermark: Watermark) -> list:
     """The DuckDB check's verdict over Postgres' counts — its thresholds read
     from its own signature, so the two cannot drift apart."""
@@ -919,6 +1062,7 @@ def check_pg_warehouse(
         "line_items": lambda: _line_items_check(
             facts.line_items, facts.watermark,
             duckdb_issues=duckdb_issues, duckdb_looked=duckdb_looked),
+        "derivation_signal": lambda: _signal_check(facts.derivation_signal),
         "silver_row_values": lambda: _row_values_check(facts.silver_row_values),
     }
     for group, judge in judges.items():
@@ -939,6 +1083,123 @@ def check_pg_warehouse(
         if group == "silver_row_values" and facts.silver_row_values.held:
             hold(group)
     return issues
+
+
+# ─── The pairing record (DN-14) ───────────────────────────────────────────────
+#
+# What each engine measured, keyed by DuckDB's finding name so the two sides
+# read across: `(DuckDB's guard, DuckDB's finding)`. A DuckDB number is its
+# finding's count when the guard looked — nothing filed is 0 — and None when it
+# did not look, which is not the same as 0.
+_PAIRED_DUCKDB = (
+    ("silver_arc", "silver_missing_rows"),
+    ("silver_arc", "silver_orphan_rows"),
+    ("silver_arc", "silver_row_values"),
+    ("headline_vs_line_items", "headline_vs_line_items"),
+    ("goods_shipped_without_sale", "goods_shipped_without_sale"),
+)
+_DUCKDB_ATTRIBUTION_GUARD = "attribution_coverage"
+
+
+def _coverage(counts: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Orders, tagged and the share, for the window and the baseline before it.
+    A share over no orders is None, never 0 %."""
+    if not counts or counts.get("orders") is None:
+        return None
+
+    def pct(orders, tagged):
+        return None if not orders or tagged is None else round(tagged / orders * 100.0, 2)
+
+    orders, tagged = counts.get("orders"), counts.get("tagged")
+    base_orders, base_tagged = counts.get("base_orders"), counts.get("base_tagged")
+    return {"orders": orders, "tagged": tagged, "pct": pct(orders, tagged),
+            "base_orders": base_orders, "base_tagged": base_tagged,
+            "base_pct": pct(base_orders, base_tagged)}
+
+
+def _pairing(facts: Optional[Facts], duckdb_issues: Sequence,
+             duckdb_looked: FrozenSet[str],
+             duckdb_attribution: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    counts: Dict[str, int] = {}
+    for issue in duckdb_issues:
+        counts[issue.check_name] = counts.get(issue.check_name, 0) + int(issue.count)
+    duckdb: Dict[str, Any] = {"looked": sorted(duckdb_looked)}
+    for guard, name in _PAIRED_DUCKDB:
+        duckdb[name] = counts.get(name, 0) if guard in duckdb_looked else None
+    duckdb["attribution"] = (_coverage(duckdb_attribution)
+                             if _DUCKDB_ATTRIBUTION_GUARD in duckdb_looked else None)
+
+    postgres: Dict[str, Any] = {name: None for _, name in _PAIRED_DUCKDB}
+    postgres["attribution"] = None
+    unwatched: Dict[str, str] = {}
+    in_flight = None
+    if facts is None or facts.whole is not None:
+        unwatched["*"] = "facts were not read" if facts is None else facts.whole.reason
+    else:
+        in_flight = facts.watermark.in_flight
+        for group in GROUPS:
+            value = getattr(facts, group)
+            if isinstance(value, Unwatched):
+                unwatched[group] = value.reason
+        arc, li, rv, att = (facts.silver_arc, facts.line_items, facts.silver_row_values,
+                            facts.attribution)
+        if isinstance(arc, SilverArc):
+            postgres["silver_missing_rows"] = arc.missing
+            postgres["silver_orphan_rows"] = arc.orphans
+        if isinstance(rv, RowValues):
+            postgres["silver_row_values"] = rv.reported + rv.held
+        if isinstance(li, LineItems):
+            postgres["headline_vs_line_items"] = li.headline
+            postgres["goods_shipped_without_sale"] = li.goods
+        if isinstance(att, Attribution):
+            postgres["attribution"] = _coverage(
+                {"orders": att.orders, "tagged": att.tagged,
+                 "base_orders": att.base_orders, "base_tagged": att.base_tagged})
+    postgres["unwatched"] = unwatched
+
+    # The shadow: the same facts judged as if DuckDB had not looked at all,
+    # which is how the twins will run once it stops deriving (step 13). Pure,
+    # so it reads nothing; its findings are recorded here and filed nowhere.
+    standalone = {issue.check_name: issue.count for issue in check_pg_warehouse(
+        facts, duckdb_issues=(), duckdb_looked=frozenset())}
+    return {"version": PAIRING_VERSION, "in_flight": in_flight,
+            "duckdb": duckdb, "postgres": postgres, "standalone": standalone}
+
+
+def pairing_record(
+    facts: Optional[Facts], *, duckdb_issues: Sequence = (),
+    duckdb_looked: FrozenSet[str] = frozenset(),
+    duckdb_attribution: Optional[Mapping[str, Any]] = None,
+):
+    """INFO `pg_twin_pairing`: both engines' numbers for one integrity run,
+    as JSON in the description, for the soak to parse. Never raises.
+
+    - `duckdb` and `postgres` carry the arc counts, attribution coverage and
+      line-item counts each engine measured, under DuckDB's names. A DuckDB
+      guard that did not look is None, and a Postgres group that could not
+      look is None with its reason under `postgres.unwatched`.
+    - `standalone` is what `check_pg_warehouse` files for these facts with
+      `duckdb_looked` empty — names and counts. While DuckDB looks, the
+      line-item twins compare and file nothing of their own, so this is the
+      only record that `pg_headline_vs_line_items` and
+      `pg_goods_shipped_without_sale` would find what DuckDB finds.
+    - `in_flight` is the tolerance the soak compares counts within.
+
+    One INFO row a run: it never pages, and a digest shows it as one line.
+    `duckdb_attribution` is the counts `_attribution_coverage_check` measured
+    (`check_internal_integrity(pairing_out=)`).
+    """
+    from core.data_quality import Severity
+
+    try:
+        body = _pairing(facts, duckdb_issues, duckdb_looked, duckdb_attribution)
+    except Exception as exc:  # noqa: BLE001 — a record that could not be built says so
+        logger.error("Postgres twin pairing record not built: %s: %s", type(exc).__name__, exc)
+        body = {"version": PAIRING_VERSION, "error": f"{type(exc).__name__}: {exc}"}
+    return _issue(
+        check_name="pg_twin_pairing", table_name="(postgres twins)",
+        severity=Severity.INFO, count=1,
+        description=json.dumps(body, sort_keys=True, default=str))
 
 
 def unverified_pg_conditions(*, ran: bool, flag_invalid: bool, held: Sequence[str] = ()) -> List[str]:
