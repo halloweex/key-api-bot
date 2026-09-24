@@ -61,6 +61,7 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 
 # Centralized exception handlers for consistent error responses
 from core.exceptions import ValidationError, QueryTimeoutError
+from core.read_fallback import ReadUnavailable
 
 
 @app.exception_handler(ValidationError)
@@ -77,6 +78,29 @@ async def query_timeout_handler(request: Request, exc: QueryTimeoutError):
     return JSONResponse(
         status_code=504,
         content={"error": "Query Timeout", "detail": str(exc)}
+    )
+
+
+@app.exception_handler(ReadUnavailable)
+async def read_unavailable_handler(request: Request, exc: ReadUnavailable):
+    """A read refused under `KS_READ_FALLBACK=off` (DN-20b): its engine
+    failed, and DuckDB may not answer in its place.
+
+    One handler for every route, so no router has to know it is behind HTTP:
+    `core.read_fallback` raises, this answers. 503, not 500 — nothing here
+    is broken, the store behind the page is unavailable — and the frontend
+    already reads a 503 as temporary and retries it. The surface is named
+    so that a reader of nginx's log or of the response can tell which page's
+    store went; the cause stays in web's log, next to the refusal.
+    """
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "Service Unavailable",
+            "detail": (f"The data behind '{exc.surface}' cannot be read right "
+                       f"now. Try again shortly."),
+            "surface": exc.surface,
+        },
     )
 
 

@@ -15,17 +15,32 @@ one in-process counter per surface, and `/api/health` publishes the counters
 under `read_fallbacks`. `tests/unit/test_read_fallback_sites.py` walks `core/`
 and `web/` for the shapes a fallback takes rather than trusting a list.
 
-NOTHING HERE CHANGES WHAT A READ RETURNS
+UNDER `off`, A FALLBACK IS REFUSED (DN-20b)
 
+`KS_READ_FALLBACK` is `duckdb`, the default, or `off`. Under `duckdb`,
 `fall_back` counts and logs, and the caller then reads DuckDB exactly as it
-did before. `KS_READ_FALLBACK` is parsed now — `duckdb`, the default, or
-`off` — so that the value an operator sets is validated and published from
-the first deploy, but under `off` this module still falls back. Refusing is
-DN-20b (HTTP routes, a 503 naming the surface) and DN-20c (the weekly
-reports, the assistant, training and the sync), and both raise
-`ReadUnavailable` from here, which is why the class exists already: a
-handler wrapping a router has to be able to let it through, and the walk
-checks that it does.
+did before this module existed. Under `off` it raises `ReadUnavailable`
+instead, so the DuckDB read below the call is never reached, and
+`web/main.py` maps that exception, from any route, to one 503 naming the
+surface. After step 13 a fallback serves frozen Silver and Gold, and after
+the first Sunday compaction empty ones, behind a page that looks as if it
+works; a 503 is an outage somebody can see. The frontend already reads a
+503 as "temporarily unavailable" and retries it (`ApiErrorState`).
+
+A refusal is not a fallback, so it is counted apart (`refusals()`), logged
+without the phrase the soak greps for, and published only beside the mode
+that produces it (`read_fallback_mode.refused` on `/api/health`, under `off`
+alone). `read_fallbacks` keeps meaning "answered from DuckDB", and under `off`
+it stays empty.
+
+One place raises, so every consumer of a router refuses at once. The HTTP
+routes answer 503 here. The non-HTTP consumers (the weekly reports, the
+assistant, training, the sync) are DN-20c, which gives each its own named
+answer; until then a refusal that reaches one of them is an exception like
+any other, and nothing ships `off` before DN-20c does. Cohorts go one step
+further, because they have no Postgres body: under `off` they are answered
+by a live ClickHouse or not at all (`no_engine`), whatever `KS_READ_COHORTS`
+says.
 
 AN UNKNOWN VALUE DOES NOT STOP WEB
 
@@ -58,7 +73,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, NoReturn, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -82,15 +97,20 @@ _misconfigured: List[str] = []
 
 _lock = threading.Lock()
 _counts: Dict[str, Dict[str, object]] = {}
+# Refusals under `off`, apart from the fallbacks: a refusal served nothing
+# from DuckDB, and `read_fallbacks` is read as exactly that.
+_refused: Dict[str, Dict[str, object]] = {}
 
 
 class ReadUnavailable(Exception):
-    """A read that would have fallen back to DuckDB, refused instead.
+    """A read that would have been answered by DuckDB, refused instead.
 
-    Nothing raises it in DN-20a. DN-20b and DN-20c make `fall_back` raise it
-    under `KS_READ_FALLBACK=off`; it is defined now so that a handler around a
-    router — `GoalsMixin._get_ml_forecast_total` is the one there is — can
-    already let it through rather than turn a refusal into a quiet answer.
+    Raised by `fall_back` and `no_engine` under `KS_READ_FALLBACK=off`, and
+    by nothing else. `web/main.py` maps it to a 503 carrying `surface`, so a
+    handler between a route and a router must let it through — the walk in
+    `tests/unit/test_read_fallback_sites.py` requires every handler around a
+    router to say so, and `GoalsMixin._get_ml_forecast_total` is the one
+    that had to.
     """
 
     def __init__(self, surface: str):
@@ -132,8 +152,10 @@ def configure_mode() -> str:
     _mode_error = error
     if _mode == OFF and previous != OFF:
         logger.warning(
-            "%s=off is read but not enforced yet: every fallback is still "
-            "served from DuckDB and counted under read_fallbacks", ENV)
+            "%s=off: a read whose engine fails is refused rather than "
+            "answered from DuckDB — an HTTP route answers 503 naming the "
+            "surface. Refusals are published under read_fallback_mode.refused",
+            ENV)
 
     misconfigured = _misconfigured_reads()
     for line in misconfigured:
@@ -158,22 +180,50 @@ def misconfigured() -> List[str]:
     return list(_misconfigured)
 
 
-def fall_back(surface: str, exc: Optional[BaseException] = None) -> None:
-    """A read on `surface` is about to be answered by DuckDB: count it, say so.
+def refusing() -> bool:
+    """Whether a read that would be answered by DuckDB is refused instead."""
+    return mode() == OFF
 
-    Called from the handler that caught the other engine's failure, before
-    the DuckDB read — so that DN-20b can make this the one place that refuses
-    instead. `surface` is the tab or consumer a reader would name
-    (`dashboard`, `goals`, `cohorts`…), never the flag: several flags serve
-    one tab, and the question the count answers is which page was not
-    reading the store it claims to.
-    """
+
+def _tally(table: Dict[str, Dict[str, object]], surface: str) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with _lock:
-        entry = _counts.setdefault(surface, {"count": 0, "last_at": None})
+        entry = table.setdefault(surface, {"count": 0, "last_at": None})
         entry["count"] = int(entry["count"]) + 1
         entry["last_at"] = now
-        count = entry["count"]
+        return int(entry["count"])
+
+
+def _refuse(surface: str, why: str, exc: Optional[BaseException]) -> NoReturn:
+    """Count one refusal on `surface`, say why, and raise `ReadUnavailable`.
+
+    The line deliberately does not say "falling back to DuckDB": nothing
+    fell back, and that phrase is what the soak before the flip greps for.
+    """
+    count = _tally(_refused, surface)
+    logger.error(
+        "read refused: %s — %s, and %s=off forbids answering from DuckDB "
+        "(%d refused since start): %s", surface, why, ENV, count, exc,
+        exc_info=exc if isinstance(exc, BaseException) else None,
+    )
+    raise ReadUnavailable(surface) from exc
+
+
+def fall_back(surface: str, exc: Optional[BaseException] = None) -> None:
+    """A read on `surface` is about to be answered by DuckDB: count it, say so
+    — or, under `KS_READ_FALLBACK=off`, refuse it.
+
+    Called from the handler that caught the other engine's failure, before
+    the DuckDB read, which is what makes this the one place that refuses:
+    under `off` it raises `ReadUnavailable` and the DuckDB read below the
+    call is never reached. `surface` is the tab or consumer a reader would
+    name (`dashboard`, `goals`, `cohorts`…), never the flag: several flags
+    serve one tab, and the question the count answers is which page was not
+    reading the store it claims to.
+    """
+    if refusing():
+        _refuse(surface, "its engine failed", exc)
+    count = _tally(_counts, surface)
     logger.error(
         "read fallback: %s read failed, falling back to DuckDB (%d since "
         "start): %s", surface, count, exc,
@@ -181,13 +231,35 @@ def fall_back(surface: str, exc: Optional[BaseException] = None) -> None:
     )
 
 
+def no_engine(surface: str, why: str) -> None:
+    """`surface` is about to be answered by DuckDB because no other engine
+    is live for it — not because one failed.
+
+    Under `duckdb` that is routing, not a failure: nothing is counted and
+    nothing is said, per request. Under `off` it is refused like a fallback.
+    One caller today, the cohorts: they have no Postgres body, so under
+    `off` a live ClickHouse is the only thing that may answer them (DN-20b).
+    """
+    if refusing():
+        _refuse(surface, why, None)
+
+
 def counts() -> Dict[str, Dict[str, object]]:
-    """`{surface: {count, last_at}}` since this process started. A copy."""
+    """`{surface: {count, last_at}}` — reads answered from DuckDB since this
+    process started. A copy."""
     with _lock:
         return {surface: dict(entry) for surface, entry in _counts.items()}
+
+
+def refusals() -> Dict[str, Dict[str, object]]:
+    """`{surface: {count, last_at}}` — reads refused under `off` since this
+    process started. A copy."""
+    with _lock:
+        return {surface: dict(entry) for surface, entry in _refused.items()}
 
 
 def reset_counts() -> None:
     """Forget every count. Tests only; a process never forgets its own."""
     with _lock:
         _counts.clear()
+        _refused.clear()

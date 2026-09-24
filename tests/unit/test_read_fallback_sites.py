@@ -481,15 +481,18 @@ class TestTheMode:
         assert fresh_read_fallback.configure_mode() == "duckdb"
         assert fresh_read_fallback.mode_error() is None
 
-    def test_off_is_read_and_still_falls_back(self, fresh_read_fallback, monkeypatch, caplog):
-        """Refusing is DN-20b and DN-20c. Until then `off` is validated and
-        published, and a fallback is still served — and says so at start."""
+    def test_off_is_read_and_refuses(self, fresh_read_fallback, monkeypatch, caplog):
+        """DN-20b: under `off` a fallback is refused, not served — and the
+        start says so. What the refusal looks like is
+        `tests/unit/test_read_fallback_http.py`'s business."""
         monkeypatch.setenv("KS_READ_FALLBACK", "off")
         with caplog.at_level(logging.WARNING, logger="core.read_fallback"):
             assert fresh_read_fallback.configure_mode() == "off"
-        assert "not enforced" in caplog.text
-        fresh_read_fallback.fall_back("dashboard", RuntimeError("down"))
-        assert fresh_read_fallback.counts()["dashboard"]["count"] == 1
+        assert "refused rather than answered from DuckDB" in caplog.text
+        with pytest.raises(fresh_read_fallback.ReadUnavailable):
+            fresh_read_fallback.fall_back("dashboard", RuntimeError("down"))
+        assert fresh_read_fallback.counts() == {}
+        assert fresh_read_fallback.refusals()["dashboard"]["count"] == 1
 
     def test_an_unknown_value_runs_as_duckdb_and_never_raises(
         self, fresh_read_fallback, monkeypatch, caplog,

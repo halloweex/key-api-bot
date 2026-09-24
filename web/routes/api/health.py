@@ -94,14 +94,22 @@ def _read_fallbacks() -> dict:
 def _read_fallback_mode() -> dict:
     """KS_READ_FALLBACK as this process understood it at start, the error when
     it was not understood, and every read switch naming an engine this process
-    has no address for. Local state, no I/O."""
+    has no address for. Local state, no I/O.
+
+    Under `off`, also `refused` — `{surface: {count, last_at}}`, the reads
+    answered 503 rather than from DuckDB (DN-20b). Only under `off`: nothing
+    can be refused under `duckdb`, and the block keeps the shape it has
+    always had there."""
     from core import read_fallback
 
-    return {
+    block = {
         "mode": read_fallback.mode(),
         "error": read_fallback.mode_error(),
         "misconfigured": read_fallback.misconfigured(),
     }
+    if read_fallback.refusing():
+        block["refused"] = read_fallback.refusals()
+    return block
 
 
 def _derivation_mode() -> dict:
