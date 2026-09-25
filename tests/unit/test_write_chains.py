@@ -2446,7 +2446,9 @@ class TestTheBackfillsAndTheHourlyDiffs:
     async def test_the_chain_stands_it_down_before_postgres(
             self, pool, landing_chain, tmp_path, path, caplog):
         landing_chain()
-        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        # `_NoStore`: a stood-down path never opens DuckDB either, which held
+        # only by the order of lines until chain 4's PR-2 made it a test.
+        await _expect_stood_down(path, _NoStore(), caplog)
         _never_reached_postgres(pool)
 
     @pytest.mark.asyncio
@@ -2457,7 +2459,7 @@ class TestTheBackfillsAndTheHourlyDiffs:
         table moved, and a path holding a pool reads it — DN-06's rule."""
         landing_chain(env=lambda: False)
         pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
-        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        await _expect_stood_down(path, _NoStore(), caplog)
         assert pool.only_asked_who_owns(), pool.sql
 
     @pytest.mark.asyncio
@@ -2467,7 +2469,7 @@ class TestTheBackfillsAndTheHourlyDiffs:
         """An image older than the chain: the owner row is read as itself."""
         _no_landing_chain(flags)
         pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
-        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        await _expect_stood_down(path, _NoStore(), caplog)
         assert pool.only_asked_who_owns(), pool.sql
 
     @pytest.mark.asyncio
