@@ -2376,7 +2376,10 @@ tick goes on to offers and stocks; the boot contains each of them. The
 assistant's tools return a named `data_unavailable` result, which is what
 the model reads instead of numbers. A job puts
 `{"reason": "read_unavailable", "surface"}` in its result
-(`read_fallback.answered`), so `/api/jobs` shows a refusal, not a quiet run.
+(`read_fallback.answered`), so `/api/jobs` shows a refusal, not a quiet run —
+except the incremental sync, whose buyers step is still answered by
+`sync_missing_buyers`' own broad handler (chain 4's to change): its refusal
+shows only in the log and in `/api/health` `read_fallback_mode.refused`.
 Several of these never had a fallback — the weekly report, the training
 input, the buyers step and the index read Postgres or nothing — so for them
 a Postgres failure is still their own error, as before; `off` adds only the
