@@ -53,13 +53,16 @@ first dictionary written here, only `scripts/chain_copy_back.py` can move the
 writes back to DuckDB.
 
 "Once a connection has come out of the pool", and not merely once the pool is
-in hand: `pool.acquire()` fails on its own — five connections, all taken by the
-Sunday full sync it runs inside, or one that fails to reset — and a latch taken
-before it would move the chain with nothing written, leaving copy-back as the
-only way back and `chain_latch_disagrees` (CRITICAL) the next morning. Chains 1
-and 8 were written before that was counted, and still latch between the two;
-`tests/unit/test_chain_latch.py` holds them to it by name, strictly, so the
-list can only shrink.
+in hand. The acquire does not time out — `core.pg.get_pool` sets no acquire
+timeout, so the Sunday full sync this runs inside holding all five connections
+is a wait — but the wait can end without a connection: a Postgres restart
+during it leaves a reconnect that is refused, and a cancellation ends it too
+(`pg_expenses_write._latch`). A latch taken before it would move the chain with
+nothing written, leaving copy-back as the only way back and
+`chain_latch_disagrees` (CRITICAL) the next morning. Chains
+1, 8 and 7a were written before that was counted and latched between the two
+until 2026-09-25; every chain now latches inside the acquire, and
+`tests/unit/test_chain_latch.py` holds each registered chain to it.
 
 A PRECONDITION THE FLAG ENFORCES
 
@@ -221,8 +224,9 @@ async def upsert_expense_types(rows: List[ExpenseTypeRow]) -> int:
     )
     pool = await _pool()
     async with pool.acquire() as conn:
-        # Inside the acquire, not before it: an exhausted pool is an ordinary
-        # event during the full sync this runs in (module docstring).
+        # Inside the acquire, not before it: the full sync this runs in holds
+        # the pool, so this is where it waits, and a wait can end without a
+        # connection (module docstring).
         stamp = _latch()
         async with conn.transaction():
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)

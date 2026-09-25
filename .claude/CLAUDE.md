@@ -2836,11 +2836,32 @@ copy. DN-27's rule, generic in the registry. Chain 8 carries the same
 assumption unenforced: it is live, so enforcing it is its own change.
 Rollback is `scripts/chain_copy_back.py expense_types` once latched.
 
-**The latch waits for a connection.** 6a latches inside `pool.acquire()`, not
-between `_pool()` and it: an acquire that times out during the Sunday sync
-must not move the chain with nothing written. Chains 1, 8 and 7a still latch
-before the acquire; `tests/unit/test_chain_latch.py` names them in a strict
-xfail ledger that can only shrink, and holds every other chain to the rule.
+**The latch waits for a connection.** Every chain latches inside
+`pool.acquire()`, not between `_pool()` and it. `core.pg.get_pool` sets no
+acquire timeout, so a pool with nothing free — the Sunday sync holding all
+five — is a wait, not a failure, and a latch taken before the acquire sat on
+disk through the whole wait. What ends a wait without a connection: a Postgres
+restart (or a reset that failed on release) leaves the connection handed back
+dead and the reconnect is refused; a cancellation; a closed pool; or the
+process stopped mid-wait. Each of those used to move the chain with nothing
+written. Nothing in web cancels these writers: `RequestTimeoutMiddleware`
+answers 504 and lets the handler run on (Starlette's `BaseHTTPMiddleware`,
+checked on 1.6.0), so an expense can land after its 504. 6a was written that
+way; chains 1, 8 and 7a latched before the acquire until 2026-09-25 and were
+moved, chain 8 while live — only *when* its latch is taken changed.
+`tests/unit/test_chain_latch.py` holds every registered chain to it by nesting,
+not by line: each `_latch()` inside `async with …acquire()`, each `claim`
+inside `async with …transaction()`. Its walk counts as a writer every public
+async function of a chain module that reaches a connection or a writing
+statement, through the module's private helpers and constants — the first walk
+read only SQL spelled in the function itself and passed a writer whose
+statement sat in a helper — bar the readers it names and holds to writing
+nothing. A function handed its connection whose statement lives in another
+module is still past it. `tests/integration/test_latch_waits_for_a_connection.py`
+proves it per writer against a live pool: no marker while it waits, none and
+no owner row after a refused reconnect, a cancellation or a closed pool; no
+owner row after a write that rolls back; and a first write takes the marker
+and claims its owner rows in the transaction that writes the row.
 
 ### Every other shipper asks too, and a walk finds them (DN-22b)
 

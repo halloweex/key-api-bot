@@ -56,9 +56,9 @@ saw it, looking healthy in between. Both ask
 
 AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 
-Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) — after the
-connection is in hand and before the statement runs. From the first goal
-typed here the flag cannot move the writes back to DuckDB; only
+Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) once a
+connection has come out of the pool and before the transaction opens. From
+the first goal typed here the flag cannot move the writes back to DuckDB; only
 `scripts/chain_copy_back.py goals` can, and it carries the three rows back and
 compares them at zero before it releases anything.
 
@@ -221,9 +221,11 @@ def _latch() -> str:
 
     Raises if the marker cannot be written, and the write is then not
     attempted. **Called after the connection is in hand, never before it** —
-    `core/pg_expenses_write.py._latch` has the reasoning: the latch is
-    permanent, so taking it for a write that never reaches Postgres spends a
-    rollback that is still available.
+    inside `pool.acquire()`, not merely after `_pool()`, since a wait for a
+    connection can end without one (a refused reconnect after a restart, a
+    cancellation). `core/pg_expenses_write.py._latch` has the reasoning:
+    the latch is permanent, so taking it for a write that never reaches
+    Postgres spends a rollback that is still available.
     """
     return chain_latch.latch(CHAIN, WRITE_ENV)
 
@@ -265,8 +267,10 @@ async def set_goal(
         raise ValueError("updated_at must be supplied — it is the copy-back's clock")
 
     pool = await _pool()
-    stamp = _latch()
     async with pool.acquire() as conn:
+        # Inside the acquire, not before it: an acquire that ends without a
+        # connection is a write that never reached Postgres (`_latch`).
+        stamp = _latch()
         # The owner row and the goal land together or neither does, so a claim
         # can never outlive the write that earned it.
         async with conn.transaction():

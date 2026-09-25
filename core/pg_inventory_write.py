@@ -61,8 +61,9 @@ lose it inside an hour.
 here; after that the latch does (`core/chain_latch.py`, OD-19 (a)). Setting the
 flag back would otherwise let DuckDB's `seq_stock_movements_id` reissue ids the
 Postgres sequence has already handed out — one movement with two names, which
-is the rule revision 0030 restated. Every writer below latches before its first
-write, and `scripts/chain_copy_back.py` is the only way back.
+is the rule revision 0030 restated. Every writer below latches once a
+connection is out of the pool and before its first write, and
+`scripts/chain_copy_back.py` is the only way back.
 
 FAILURE POLICY: THIS ONE RAISES
 
@@ -180,12 +181,16 @@ def _latch() -> str:
     a movement in Postgres that no marker records is how the next boot comes to
     believe DuckDB still allocates these ids.
 
-    **Called after the pool is in hand and `require_revision()` has passed**,
-    `pg_expenses_write._latch`'s reason and more sharply here: the sync tick
-    runs every minute, so a deploy that brings `web` up ahead of `migrate`, or a
-    Postgres restart, meets a writer within seconds. Latched there, the flip of
-    `KS_WRITE_INVENTORY` would become irreversible with not one movement
-    written — the chain's whole pre-flip rehearsal spent on an error.
+    **Called with a connection out of the pool** — after `require_revision()`
+    has passed and inside `pool.acquire()`, `pg_expenses_write._latch`'s reason
+    and more sharply here: the sync tick runs every minute, so a deploy that
+    brings `web` up ahead of `migrate`, or a Postgres restart — which ends a
+    writer's wait for a connection in a refused reconnect — meets a writer
+    within seconds. A pool with nothing free is only a wait (no acquire
+    timeout), but a latch taken before the acquire is on disk through all of
+    it. Latched there, the flip of `KS_WRITE_INVENTORY` would become
+    irreversible with not one movement written — the chain's whole pre-flip
+    rehearsal spent on an error.
     """
     return chain_latch.latch(CHAIN, WRITE_ENV)
 
@@ -249,7 +254,6 @@ async def upsert_offers(rows: List[OfferRow]) -> int:
 
     pool = await get_pool()
     await require_revision()
-    stamp = _latch()
     # `bronze.offers` carries `synced_at` — revision 0029 copied DuckDB's own
     # column, because this table is REPLICATED rather than mirrored.
     # `bronze.offer_stocks` beside it does not: it is older, from revision
@@ -258,6 +262,10 @@ async def upsert_offers(rows: List[OfferRow]) -> int:
     sql = _upsert(
         "bronze.offers", OFFER_COLUMNS + ("synced_at",), ("id",))
     async with pool.acquire() as conn:
+        # Inside the acquire, not before it: a wait for a connection that ends
+        # in a refused reconnect is a write that never reached Postgres
+        # (`_latch`).
+        stamp = _latch()
         async with conn.transaction():
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             await conn.executemany(sql, [(*r, None) for r in rows])
@@ -285,8 +293,8 @@ async def upsert_stocks(stocks: List[Dict[str, Any]]) -> Tuple[int, int]:
 
     pool = await get_pool()
     await require_revision()
-    stamp = _latch()
     async with pool.acquire() as conn:
+        stamp = _latch()
         async with conn.transaction():
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
             current: Dict[int, Tuple[int, int]] = {
@@ -365,8 +373,8 @@ async def rebuild_sku_inventory_status() -> int:
 
     pool = await get_pool()
     await require_revision()
-    stamp = _latch()
     async with pool.acquire() as conn:
+        stamp = _latch()
         async with conn.transaction():
             await _chain_lock(conn)
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
@@ -407,8 +415,8 @@ async def record_sku_inventory_snapshot(today: Optional[date] = None) -> bool:
 
     pool = await get_pool()
     await require_revision()
-    stamp = _latch()
     async with pool.acquire() as conn:
+        stamp = _latch()
         async with conn.transaction():
             await _chain_lock(conn)
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
@@ -442,8 +450,8 @@ async def record_inventory_snapshot(
 
     pool = await get_pool()
     await require_revision()
-    stamp = _latch()
     async with pool.acquire() as conn:
+        stamp = _latch()
         async with conn.transaction():
             await _chain_lock(conn)
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
