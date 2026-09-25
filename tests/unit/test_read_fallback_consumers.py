@@ -15,9 +15,11 @@ updated. It now asks that read first.
 
 So the list is derived here. The walk starts at every function that refuses —
 a call to `fall_back`, `no_address` or `no_engine` — and follows callers up
-through the repository until it reaches an **entry point**: a function nothing
-in the repository calls, because a scheduler, an executor, an HTTP route or a
-script's `__main__` invokes it by reference. Each entry point is then one of:
+through the repository until it reaches an **entry point**: a function a
+scheduler, an executor, an HTTP route or a script's `__main__` invokes by
+reference — nothing in the repository calls it, or something hands it on as
+a value (`func=self._run_x`), which keeps a job an entry on the day a route
+calls it directly too. Each entry point is then one of:
 
 - a GET route under `/api/` that the sweep runs — proved there, not here;
 - another HTTP route (`POST`, `DELETE`) — answered by the same 503 handler,
@@ -267,6 +269,10 @@ class Graph:
     # per-call form of `calls`, which is what the containment walk needs:
     # whether a refusal escapes depends on which `try` a call sits in.
     sites: Dict[Fn, List[Tuple[ast.Call, Set[Fn]]]] = field(default_factory=dict)
+    # Functions some other function names as a value rather than calling —
+    # `func=self._run_x` handed to the scheduler. Each is an entry point
+    # whether or not something also calls it.
+    referenced: Set[Fn] = field(default_factory=set)
 
 
 def _parse(tops) -> Dict[str, ast.Module]:
@@ -466,7 +472,34 @@ def build_graph(tops=WALKED) -> Graph:
                 out.add(other_methods[attr][0])
         return found
 
+    def references(fn: Fn) -> Set[Fn]:
+        """The repository functions `fn` names without calling them: `f`,
+        an imported `f`, `m.f`, or `self.f` on its own class — what a job
+        registration, an executor or a callback is handed."""
+        modules, names, _aliases = scope(fn)
+        called = {id(n.func) for n in _own(fn.node) if isinstance(n, ast.Call)}
+        out: Set[Fn] = set()
+        for n in _own(fn.node):
+            if id(n) in called or not isinstance(getattr(n, "ctx", None), ast.Load):
+                continue
+            target = None
+            if isinstance(n, ast.Name):
+                if n.id in names:
+                    rel, name = names[n.id]
+                    target = by_module[rel].get(name)
+                else:
+                    target = by_module[fn.rel].get(n.id)
+            elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+                if n.value.id in ("self", "cls") and fn.cls:
+                    target = by_class[(fn.rel, fn.cls)].get(n.attr)
+                elif n.value.id in modules:
+                    target = by_module[modules[n.value.id]].get(n.attr)
+            if target is not None and target is not fn:
+                out.add(target)
+        return out
+
     sites = {fn: resolve(fn) for fn in functions}
+    referenced = set().union(*(references(fn) for fn in functions))
     calls = {fn: set().union(*(t for _c, t in found)) if found else set()
              for fn, found in sites.items()}
     callers: Dict[Fn, Set[Fn]] = defaultdict(set)
@@ -493,7 +526,7 @@ def build_graph(tops=WALKED) -> Graph:
             if fn not in reaching and targets & reaching:
                 reaching.add(fn)
                 changed = True
-    return Graph(functions, calls, callers, reaching, store, trees, sites)
+    return Graph(functions, calls, callers, reaching, store, trees, sites, referenced)
 
 
 def _in_router_layer(fn: Fn, graph: Graph) -> bool:
@@ -502,11 +535,18 @@ def _in_router_layer(fn: Fn, graph: Graph) -> bool:
             or re.fullmatch(r"core/(pg|ch)_[^/]*\.py", fn.rel) is not None)
 
 
+def _is_entry(fn: Fn, graph: Graph) -> bool:
+    """Invoked by reference: nothing in the repository calls it, or
+    something hands it on as a value — a job the scheduler runs is its
+    consumer even on the day a route calls it directly too."""
+    return not graph.callers[fn] or fn in graph.referenced
+
+
 def entry_points(graph: Graph) -> List[Fn]:
-    """Functions that reach a refusal and that nothing in the repository
-    calls — invoked by reference. Dead router methods are not entries."""
+    """Functions that reach a refusal and are invoked by reference. Dead
+    router methods are not entries."""
     return sorted((fn for fn in graph.reaching
-                   if not graph.callers[fn] and not _in_router_layer(fn, graph)),
+                   if _is_entry(fn, graph) and not _in_router_layer(fn, graph)),
                   key=lambda fn: fn.key)
 
 
@@ -707,15 +747,15 @@ def containment(graph: Graph) -> Containment:
 
 
 def entries_reaching(graph: Graph, target: Fn) -> Set[Fn]:
-    """The functions nothing in the repository calls that reach `target` —
-    the entry points a handler in `target` answers for."""
+    """The entry points that reach `target` — the ones a handler in
+    `target` answers for."""
     found, seen, frontier = set(), set(), [target]
     while frontier:
         fn = frontier.pop()
         if fn in seen:
             continue
         seen.add(fn)
-        if not graph.callers[fn]:
+        if _is_entry(fn, graph):
             found.add(fn)
         frontier.extend(graph.callers[fn])
     return found
@@ -996,6 +1036,22 @@ class TestTheWalkBites:
         # Take its one route to a refusal away, and it is no longer an entry.
         graph.calls[job] = set()
         graph.reaching.discard(job)
+        assert job not in entry_points(graph)
+
+    def test_a_job_a_route_also_calls_is_still_a_consumer(self):
+        """A job is invoked by reference, so it used to count as an entry
+        only while nothing called it: give the Monday goals job a route that
+        runs it directly, and the scheduler's invocation would have left the
+        list. It is registered by value, and that keeps it there."""
+        graph = build_graph()
+        index = {fn.key: fn for fn in graph.functions}
+        job = index["core/scheduler.py:BackgroundScheduler._run_seasonality_calc"]
+        route = index["web/routes/chat.py:chat_status"]
+        assert job in graph.referenced
+        graph.calls[route].add(job)
+        graph.callers[job].add(route)
+        assert job in entry_points(graph)
+        graph.referenced.discard(job)
         assert job not in entry_points(graph)
 
     def test_a_named_answer_on_a_swept_route_is_out_of_place(self):
