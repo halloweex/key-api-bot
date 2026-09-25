@@ -290,14 +290,23 @@ async def backfill_mirror_expenses(
 async def get_warehouse_status(request: Request):
     """Get warehouse layer (Silver/Gold) status and last refresh info."""
     store = await get_store()
-    status = await store.get_warehouse_status()
-    # Under KS_PG_DERIVE=own Postgres derives on its own signal, and a status
-    # page that showed only DuckDB's refreshes would describe the engine the
-    # dashboard is leaving.
     from core import pg_derivation, warehouse_cutover
 
-    if pg_derivation.owns():
-        status = {**status, "postgres": await _pg_derivation_status()}
+    if warehouse_cutover.writes_postgres():
+        # Postgres alone derives (KS_WRITE_WAREHOUSE=postgres, DN-29): the
+        # Postgres block leads, and DuckDB's last refresh — as old as the
+        # switch — is nested and named for what it is, never the top-level
+        # answer an operator reads as the warehouse's state.
+        status = {"writer": warehouse_cutover.POSTGRES,
+                  "postgres": await _pg_derivation_status(),
+                  "duckdb_frozen": await store.get_warehouse_status()}
+    else:
+        status = await store.get_warehouse_status()
+        # Under KS_PG_DERIVE=own Postgres derives on its own signal, and a
+        # status page that showed only DuckDB's refreshes would describe the
+        # engine the dashboard is leaving.
+        if pg_derivation.owns():
+            status = {**status, "postgres": await _pg_derivation_status()}
     # Step 13's readiness (DN-28, DN-29): KS_WRITE_WAREHOUSE as this process
     # read it, what settling the writer found, and every precondition of the
     # switch still unmet, each by name. Published whatever the mode — the list

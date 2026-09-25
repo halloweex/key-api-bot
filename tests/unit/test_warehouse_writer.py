@@ -1174,3 +1174,49 @@ class TestASettleThatCouldNotFinishIsAskedAgain:
             assert _metadata(store, "warehouse_dirty")[0] == "full"
         finally:
             asyncio.run(store.close())
+
+
+# ─── The status page ─────────────────────────────────────────────────────────
+
+
+class TestTheStatusPage:
+    def _get(self, tmp_path):
+        from web.routes.api import admin
+
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        store = _store(tmp_path)
+        try:
+            with patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
+                asyncio.run(store.refresh_warehouse_layers(trigger="dirty_flag"))
+            with patch.object(admin, "get_store", AsyncMock(return_value=store)), \
+                 patch.object(admin, "_pg_derivation_status",
+                              AsyncMock(return_value={"mode": "own", "owed": False})), \
+                 patch.object(wc, "readiness", AsyncMock(return_value={"mode": wc.mode()})):
+                return asyncio.run(_unwrap(admin.get_warehouse_status)(MagicMock()))
+        finally:
+            asyncio.run(store.close())
+
+    def test_under_postgres_the_frozen_duckdb_refresh_is_not_the_answer(
+        self, tmp_path, monkeypatch,
+    ):
+        """DuckDB's last tick is as old as the switch; an operator reading the
+        page after the flip must not take it for the warehouse's state."""
+        body_before = self._get(tmp_path / "a")
+        assert body_before["last_trigger"] == "dirty_flag"
+
+        monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
+        body = self._get(tmp_path / "b")
+        assert "last_refresh" not in body and "validation_passed" not in body
+        assert body["writer"] == "postgres" and body["postgres"]["mode"] == "own"
+        assert body["duckdb_frozen"]["last_trigger"] == "dirty_flag"
+        assert body["cutover"] == {"mode": "postgres"}
+
+    def test_the_default_answers_as_before(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("KS_PG_DERIVE", raising=False)
+        from core import pg_derivation
+
+        pg_derivation.configure_mode()
+        body = self._get(tmp_path)
+        assert body["last_trigger"] == "dirty_flag" and body["validation_passed"] is True
+        assert "postgres" not in body and "duckdb_frozen" not in body
+        assert "writer" not in body
