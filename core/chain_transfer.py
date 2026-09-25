@@ -111,11 +111,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import ModuleType
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 from core.data_quality import IntegrityIssue, Severity
 from core.mirror_reconciliation import (
     APPEND_ONLY_TABLES,
+    MIRRORED_LANDING_TABLES,
     OPERATIONAL_TABLES,
     BucketedTable,
     MirroredTable,
@@ -172,10 +173,39 @@ class TableTransfer:
     # The columns that date one version of a row in BOTH stores, first
     # non-NULL wins; empty when there are none. See `_shared_clock`.
     clock: Tuple[str, ...] = ()
+    # "operational" — shipped by `replicate_operational`, whole or above a
+    # watermark. "mirrored" — a landing table the buyers mirror writes in
+    # Postgres from the same parse as DuckDB, which nothing replaces whole;
+    # chain 4's tables are the first (see `_REWRITTEN_BY`).
+    kind: str = "operational"
+    # A mirrored table only: the column naming the buyer whose
+    # `bronze.buyers.mirrored_at` dates this row's last write in Postgres.
+    rewritten_by: Optional[str] = None
 
     @property
     def is_append(self) -> bool:
         return self.append is not None
+
+    @property
+    def is_mirrored(self) -> bool:
+        return self.kind == "mirrored"
+
+
+# How a mirrored table shows that chain 4's writer rewrote a row after the
+# latch. Every write of a buyer sets `bronze.buyers.mirrored_at = now()`
+# (`core.pg_buyer_rows`), and the transaction that takes the latch writes the
+# owner row with `updated_at = now()` (`chain_latch.claim`): both are
+# Postgres's own clock, so no host's clock is compared with another's. A buyer
+# written in the latching transaction carries exactly the owner row's instant,
+# which is why the rule is `>=`. Contacts have no clock of their own — the
+# writer deletes and rewrites a buyer's contacts whole — so a contact is dated
+# by its buyer.
+#
+# Declared, because nothing else says it: `chain_specs` raises for a mirrored
+# table missing here rather than guessing, the rule the rest of this module
+# keeps for the shipping shapes.
+_REWRITE_CLOCK_TABLE = "bronze.buyers"
+_REWRITTEN_BY = {"bronze.buyers": "id", "bronze.buyer_contacts": "buyer_id"}
 
 
 def _compare_spec(source: MirroredTable | BucketedTable,
@@ -269,6 +299,10 @@ def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
     appends = {spec.pg_table: spec for spec in _APPEND_ABOVE}
     compare_full = {spec.pg_table: spec for spec in OPERATIONAL_TABLES}
     compare_appended = {spec.pg_table: spec for spec in APPEND_ONLY_TABLES}
+    # The third source (chain 4): landing tables the mirror ships, where the
+    # daily comparison's spec IS the shipping shape — its columns are what the
+    # shared parse writes to both stores.
+    mirrored = {spec.pg_table: spec for spec in MIRRORED_LANDING_TABLES}
 
     out: List[TableTransfer] = []
     for table in chain.CHAIN_TABLES:
@@ -300,9 +334,27 @@ def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
                 clock=_shared_clock(source),
             ))
             continue
+        if table in mirrored:
+            source = mirrored[table]
+            owner = _REWRITTEN_BY.get(table)
+            if owner is None:
+                raise LookupError(
+                    f"{table} is a mirrored landing table with no entry in "
+                    "_REWRITTEN_BY; the copy-back cannot tell a row the chain "
+                    "rewrote from one it never touched"
+                )
+            out.append(TableTransfer(
+                pg_table=table, dk_table=source.dk_table,
+                columns=tuple(source.columns),
+                order_by=", ".join(source.key_columns),
+                compare=_compare_spec(source, (), source.columns),
+                kind="mirrored", rewritten_by=owner,
+            ))
+            continue
         raise LookupError(
-            f"{table} is in {chain.CHAIN} but in neither _FULL_REPLACE nor "
-            "_APPEND_ABOVE: nothing knows how to carry it in either direction"
+            f"{table} is in {chain.CHAIN} but in none of _FULL_REPLACE, "
+            "_APPEND_ABOVE or MIRRORED_LANDING_TABLES: nothing knows how to "
+            "carry it in either direction"
         )
     return tuple(out)
 
@@ -382,6 +434,8 @@ def classify_handover(
     *,
     moved_on: bool,
     max_samples: int = 10,
+    required: Sequence[str] = (),
+    rewritten: Optional[AbstractSet[Any]] = None,
 ) -> List[IntegrityIssue]:
     """Both sides of one table, already read. Pure, so every branch is testable.
 
@@ -412,12 +466,88 @@ def classify_handover(
       no shared clock exists the difference is taken as Postgres being newer
       and the description says so; `--handover` clean before the flip is what
       makes that true by construction, which is why the runbook requires it.
+    - **Mirrored tables** (chain 4's buyers and contacts) are stricter, because
+      they can be: Postgres dates every write of a buyer (`_REWRITTEN_BY`).
+      Before a flip, a key only Postgres holds is CRITICAL as well — nothing
+      replaces these tables whole, so it would stay in the new source of truth.
+      After the latch, a difference or a contact only DuckDB holds is INFO only
+      for a buyer the chain's writer rewrote since the latch (`rewritten`), and
+      CRITICAL otherwise: decision 6, proved by data rather than by trusting
+      that `--handover` was clean. A buyer only DuckDB holds stays CRITICAL —
+      the chain's writer never deletes one.
+    - **A Postgres row the copy could not write** — NULL in a column DuckDB
+      declares NOT NULL (`required`) — is CRITICAL in both states. Without
+      this the copy-back found it only at its first INSERT, as a traceback
+      and exit 1, while `--handover` had said nothing: the rule is that the
+      handover's CRITICALs are exactly what `--execute` refuses on.
     """
     table, dk_table = spec.pg_table, spec.dk_table
     issues: List[IntegrityIssue] = []
 
+    def owned_by_rewritten(row: Tuple[Any, ...]) -> bool:
+        if rewritten is None or spec.rewritten_by is None:
+            return False
+        return row[spec.compare.columns.index(spec.rewritten_by)] in rewritten
+
+    def critical(check: str, keys: Sequence[Any], description: str) -> None:
+        issues.append(IntegrityIssue(
+            check_name=check, table_name=table, severity=Severity.CRITICAL,
+            count=len(keys), sample_ids=_sample(spec.compare, keys, max_samples),
+            description=description,
+        ))
+
+    def info(check: str, keys: Sequence[Any], description: str) -> None:
+        issues.append(IntegrityIssue(
+            check_name=check, table_name=table, severity=Severity.INFO,
+            count=len(keys), sample_ids=_sample(spec.compare, keys, max_samples),
+            description=description,
+        ))
+
+    positions = [spec.compare.columns.index(c) for c in required
+                 if c in spec.compare.columns]
+    if positions:
+        unwritable = sorted(
+            (key for key, row in pg_rows.items()
+             if any(row[i] is None for i in positions)),
+            key=_sortable,
+        )
+        if unwritable:
+            critical("handover_rows_unwritable", unwritable, (
+                f"{len(unwritable)} row(s) in {table} carry NULL in "
+                f"{', '.join(c for c in required if c in spec.compare.columns)}, "
+                f"which DuckDB's {dk_table} declares NOT NULL, so a copy-back "
+                "could not write them: its transaction would fail on the first "
+                "one and roll back. The writers of this table never produce "
+                "NULL there, so a write went round them. Correct those rows in "
+                "Postgres by id, and ask again."
+            ))
+
     missing = sorted(dk_rows.keys() - pg_rows.keys(), key=_sortable)
-    if missing:
+    if missing and spec.is_mirrored and moved_on:
+        dropped = [k for k in missing if owned_by_rewritten(dk_rows[k])]
+        stranded = [k for k in missing if k not in set(dropped)]
+        if dropped:
+            info("handover_rows_missing", dropped, (
+                f"{len(dropped)} row(s) in DuckDB's {dk_table} are not in "
+                f"{table}, and the chain's writer rewrote their buyer after "
+                "the latch — it replaces a buyer's contacts whole, so these "
+                "are ones it dropped. The copy-back removes them from DuckDB."
+            ))
+        if stranded:
+            critical("handover_rows_missing", stranded, (
+                f"{len(stranded)} row(s) in DuckDB's {dk_table} have no "
+                f"counterpart in {table}, and nothing the chain wrote since "
+                "the latch explains them: its writer never deletes a buyer, "
+                "and replaces a buyer's contacts only when it rewrites that "
+                "buyer. So DuckDB holds something Postgres never had — stranded "
+                "at the flip, or written to DuckDB since — and a copy-back "
+                "would delete it. Bring web back up: the buyers step fetches "
+                "any buyer an order names that Postgres lacks, through the "
+                "chain; re-fetching a buyer rewrites its contacts "
+                "(POST /api/duckdb/sync-all-buyers re-fetches every buyer and "
+                "also fills city and region, decision 3). Then ask again."
+            ))
+    elif missing:
         if spec.is_append:
             why = (
                 f"{table} is append-only in both stores, so nothing can have "
@@ -425,6 +555,14 @@ def classify_handover(
                 "hourly shipment. A copy-back copies in the other direction, "
                 "so it can neither carry them nor delete them, and its "
                 "comparison would never be clean."
+            )
+        elif spec.is_mirrored:
+            why = (
+                "The buyers mirror and its hourly ids-diff both stand down the "
+                "moment this chain routes to Postgres, so a flip now strands "
+                "them. Bring web back with the flag unchanged, run "
+                "POST /api/mirror/backfill/buyers — it re-ships every buyer "
+                "and contact DuckDB holds — and check again."
             )
         elif moved_on:
             why = (
@@ -446,16 +584,9 @@ def classify_handover(
                 "strands them. Bring web back with the flag unchanged, let "
                 "replicate_operational run, and check again."
             )
-        issues.append(IntegrityIssue(
-            check_name="handover_rows_missing",
-            table_name=table,
-            severity=Severity.CRITICAL,
-            count=len(missing),
-            sample_ids=_sample(spec.compare, missing, max_samples),
-            description=(
-                f"{len(missing)} row(s) in DuckDB's {dk_table} have no "
-                f"counterpart in {table}. {why}"
-            ),
+        critical("handover_rows_missing", missing, (
+            f"{len(missing)} row(s) in DuckDB's {dk_table} have no "
+            f"counterpart in {table}. {why}"
         ))
 
     differing = sorted(
@@ -464,61 +595,68 @@ def classify_handover(
         key=_sortable,
     )
     if differing and spec.is_append:
-        issues.append(IntegrityIssue(
-            check_name="handover_rows_differ",
-            table_name=table,
-            severity=Severity.CRITICAL,
-            count=len(differing),
-            sample_ids=_sample(spec.compare, differing, max_samples),
-            description=(
-                f"{len(differing)} key(s) are held by both stores with "
-                f"different rows. {table} is append-only — a row is written "
-                "once — so these are two events under one key, not an older "
-                "and a newer. For an id-keyed table the usual cause is an id "
-                "both allocators handed out: Postgres floors its sequence on "
-                "its own MAX(id), so a movement DuckDB wrote after the last "
-                "shipment is an id Postgres issues again after the flip. "
-                "Nothing here can decide which event keeps the key, and "
-                "running this again gives the same answer."
-            ),
+        critical("handover_rows_differ", differing, (
+            f"{len(differing)} key(s) are held by both stores with "
+            f"different rows. {table} is append-only — a row is written "
+            "once — so these are two events under one key, not an older "
+            "and a newer. For an id-keyed table the usual cause is an id "
+            "both allocators handed out: Postgres floors its sequence on "
+            "its own MAX(id), so a movement DuckDB wrote after the last "
+            "shipment is an id Postgres issues again after the flip. "
+            "Nothing here can decide which event keeps the key, and "
+            "running this again gives the same answer."
         ))
     elif differing and not moved_on:
-        issues.append(IntegrityIssue(
-            check_name="handover_rows_differ",
-            table_name=table,
-            severity=Severity.CRITICAL,
-            count=len(differing),
-            sample_ids=_sample(spec.compare, differing, max_samples),
-            description=(
-                f"{len(differing)} row(s) differ between DuckDB's {dk_table} "
-                f"and {table}. Postgres has no writer yet but the hourly copy "
-                "of DuckDB, so it cannot be newer: the two must agree, and a "
-                "flip now would freeze these values in Postgres."
-            ),
+        lever = (
+            " Bring web back with the flag unchanged, run "
+            "POST /api/mirror/backfill/buyers — it re-ships every buyer and "
+            "contact DuckDB holds — and check again."
+            if spec.is_mirrored else ""
+        )
+        critical("handover_rows_differ", differing, (
+            f"{len(differing)} row(s) differ between DuckDB's {dk_table} "
+            f"and {table}. Postgres has no writer yet but the "
+            + ("mirror of DuckDB" if spec.is_mirrored else "hourly copy of DuckDB")
+            + ", so it cannot be newer: the two must agree, and a flip now "
+            f"would freeze these values in Postgres.{lever}"
         ))
+    elif differing and spec.is_mirrored:
+        carried = [k for k in differing if owned_by_rewritten(pg_rows[k])]
+        unexplained = [k for k in differing if k not in set(carried)]
+        if carried:
+            info("handover_rows_differ", carried, (
+                f"{len(carried)} row(s) differ between DuckDB's {dk_table} "
+                f"and {table}, and the chain's writer rewrote their buyer "
+                "after the latch — the work a copy-back carries."
+            ))
+        if unexplained:
+            critical("handover_rows_differ", unexplained, (
+                f"{len(unexplained)} row(s) differ between DuckDB's "
+                f"{dk_table} and {table}, and the chain's writer has not "
+                "rewritten their buyer since the latch: Postgres holds the "
+                "mirror's last copy, and DuckDB something else. Neither store "
+                "says which is right, and a copy-back would overwrite DuckDB's. "
+                "KeyCRM decides: re-fetch those buyers through the chain "
+                "(POST /api/duckdb/sync-all-buyers re-fetches every buyer and "
+                "also fills city and region, decision 3), which rewrites them "
+                "in Postgres after the latch. Then ask again."
+            ))
     elif differing:
         newer_in_duckdb = [
             key for key in differing
             if _later_in_duckdb(spec, dk_rows[key], pg_rows[key])
         ]
         if newer_in_duckdb:
-            issues.append(IntegrityIssue(
-                check_name="handover_rows_newer_in_duckdb",
-                table_name=table,
-                severity=Severity.CRITICAL,
-                count=len(newer_in_duckdb),
-                sample_ids=_sample(spec.compare, newer_in_duckdb, max_samples),
-                description=(
-                    f"{len(newer_in_duckdb)} row(s) differ and DuckDB's "
-                    f"version is the later one by the row's own clock "
-                    f"({', '.join(spec.clock)}, carried by both stores). "
-                    "DuckDB stopped writing this chain at the flip, so these "
-                    "are edits made after the last shipment that never "
-                    "reached Postgres, and a copy-back would overwrite them "
-                    "with the older values. Carry them into Postgres, or "
-                    "decide they are to be discarded, before running this "
-                    "again."
-                ),
+            critical("handover_rows_newer_in_duckdb", newer_in_duckdb, (
+                f"{len(newer_in_duckdb)} row(s) differ and DuckDB's "
+                f"version is the later one by the row's own clock "
+                f"({', '.join(spec.clock)}, carried by both stores). "
+                "DuckDB stopped writing this chain at the flip, so these "
+                "are edits made after the last shipment that never "
+                "reached Postgres, and a copy-back would overwrite them "
+                "with the older values. Carry them into Postgres, or "
+                "decide they are to be discarded, before running this "
+                "again."
             ))
         refused = set(newer_in_duckdb)
         overwritten = [k for k in differing if k not in refused]
@@ -529,18 +667,11 @@ def classify_handover(
                 "Postgres being newer — true by construction when --handover "
                 "was clean before the flip."
             )
-            issues.append(IntegrityIssue(
-                check_name="handover_rows_differ",
-                table_name=table,
-                severity=Severity.INFO,
-                count=len(overwritten),
-                sample_ids=_sample(spec.compare, overwritten, max_samples),
-                description=(
-                    f"{len(overwritten)} row(s) differ between DuckDB's "
-                    f"{dk_table} and {table}. Postgres has been the writer "
-                    "since the latch, so these are its later writes — the "
-                    f"work a copy-back carries.{clockless}"
-                ),
+            info("handover_rows_differ", overwritten, (
+                f"{len(overwritten)} row(s) differ between DuckDB's "
+                f"{dk_table} and {table}. Postgres has been the writer "
+                "since the latch, so these are its later writes — the "
+                f"work a copy-back carries.{clockless}"
             ))
 
     ahead = sorted(pg_rows.keys() - dk_rows.keys(), key=_sortable)
@@ -555,44 +686,47 @@ def classify_handover(
                 or (not spec.append.inclusive and pg_rows[key][position] == floor)
             ]
             if behind:
-                issues.append(IntegrityIssue(
-                    check_name="handover_rows_behind_watermark",
-                    table_name=table,
-                    severity=Severity.CRITICAL,
-                    count=len(behind),
-                    sample_ids=_sample(spec.compare, behind, max_samples),
-                    description=(
-                        f"{len(behind)} row(s) in {table} sit at or below "
-                        f"DuckDB's MAX({spec.append.watermark}) = {floor} and "
-                        f"are not in DuckDB's {dk_table}. Nothing deletes from "
-                        "an append-only table, so DuckDB lost them or "
-                        "something other than the shipper and the chain's own "
-                        "writer put them in Postgres — and a copy-back, which "
-                        "carries this table only from that MAX upwards, could "
-                        "never bring them back."
-                    ),
+                critical("handover_rows_behind_watermark", behind, (
+                    f"{len(behind)} row(s) in {table} sit at or below "
+                    f"DuckDB's MAX({spec.append.watermark}) = {floor} and "
+                    f"are not in DuckDB's {dk_table}. Nothing deletes from "
+                    "an append-only table, so DuckDB lost them or "
+                    "something other than the shipper and the chain's own "
+                    "writer put them in Postgres — and a copy-back, which "
+                    "carries this table only from that MAX upwards, could "
+                    "never bring them back."
                 ))
             unreachable = set(behind)
             ahead = [key for key in ahead if key not in unreachable]
-    if ahead:
-        issues.append(IntegrityIssue(
-            check_name="handover_rows_ahead",
-            table_name=table,
-            severity=Severity.INFO,
-            count=len(ahead),
-            sample_ids=_sample(spec.compare, ahead, max_samples),
-            description=(
-                f"{len(ahead)} row(s) in {table} are not in DuckDB's "
-                f"{dk_table}. "
-                + ("Written since the chain was latched — the size of the "
-                   "copy-back."
-                   if moved_on else
-                   "Nothing writes Postgres here but the hourly copy of "
-                   "DuckDB, so these are rows DuckDB has deleted since it "
-                   "last ran, which the next full replace removes — or, for "
-                   "an append-only table that never deletes, a writer that "
-                   "is not the copy.")
-            ),
+    if ahead and spec.is_mirrored and not moved_on:
+        lever = (
+            "POST /api/mirror/backfill/buyers re-ships every buyer DuckDB "
+            "holds with its contacts, which removes a contact of theirs that "
+            "only Postgres has; a contact of a buyer DuckDB does not hold is "
+            "a buyer of its own to decide."
+            if spec.pg_table != _REWRITE_CLOCK_TABLE else
+            "Re-shipping never deletes a buyer, so decide per id: delete it "
+            "from Postgres (with its contacts and verdict) if nothing should "
+            "hold it, or find the writer that put it there."
+        )
+        critical("handover_rows_ahead", ahead, (
+            f"{len(ahead)} row(s) in {table} are not in DuckDB's {dk_table}. "
+            "Nothing writes Postgres here but the mirror of DuckDB, and "
+            "nothing replaces this table whole, so they would stay in the "
+            f"store a flip makes the source of truth. {lever} Then ask again."
+        ))
+    elif ahead:
+        info("handover_rows_ahead", ahead, (
+            f"{len(ahead)} row(s) in {table} are not in DuckDB's "
+            f"{dk_table}. "
+            + ("Written since the chain was latched — the size of the "
+               "copy-back."
+               if moved_on else
+               "Nothing writes Postgres here but the hourly copy of "
+               "DuckDB, so these are rows DuckDB has deleted since it "
+               "last ran, which the next full replace removes — or, for "
+               "an append-only table that never deletes, a writer that "
+               "is not the copy.")
         ))
     return issues
 
@@ -612,14 +746,52 @@ async def _handover_issues(
     rows a side in production.
     """
     issues: List[IntegrityIssue] = []
+    rewritten = (await _rewritten_since_latch(pool)
+                 if moved_on and any(s.is_mirrored for s in specs) else None)
     for spec in specs:
         async with store.connection() as conn:
             dk_rows, _synced = fetch_duckdb_rows(conn, spec.compare)
+            required = _not_null_columns(conn, spec)
         pg_rows = await fetch_pg_rows(pool, spec.compare)
         issues += classify_handover(
             spec, dk_rows, pg_rows, moved_on=moved_on, max_samples=max_samples,
+            required=required, rewritten=rewritten,
         )
     return issues
+
+
+def _not_null_columns(conn, spec: TableTransfer) -> Tuple[str, ...]:
+    """The columns the copy writes that DuckDB declares NOT NULL, read from
+    DuckDB's own catalogue — so the handover refuses exactly the rows the
+    copy's INSERT would, and no list of them is kept here."""
+    rows = conn.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = ? AND is_nullable = 'NO'",
+        [spec.dk_table],
+    ).fetchall()
+    declared = {row[0] for row in rows}
+    return tuple(c for c in spec.columns if c in declared)
+
+
+async def _rewritten_since_latch(pool) -> FrozenSet[Any]:
+    """The buyers chain 4's writer has written since the latch — `_REWRITTEN_BY`
+    says why this dates them. Empty when the buyers table has no owner row:
+    then nothing can be shown to be the chain's, and every difference in a
+    mirrored table stays CRITICAL."""
+    from core import chain_latch
+
+    async with pool.acquire() as conn:
+        latched = await conn.fetchval(
+            "SELECT updated_at FROM meta.chain_watermarks WHERE key = $1",
+            chain_latch.owner_key(_REWRITE_CLOCK_TABLE),
+        )
+        if latched is None:
+            return frozenset()
+        rows = await conn.fetch(
+            f"SELECT id FROM {_REWRITE_CLOCK_TABLE} WHERE mirrored_at >= $1",
+            latched,
+        )
+    return frozenset(row["id"] for row in rows)
 
 
 async def _owned_since(pool, name: str) -> Optional[str]:
