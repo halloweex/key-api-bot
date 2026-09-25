@@ -2433,12 +2433,18 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         columns=BUYER_GENDER_COLUMNS,
         key_columns=("buyer_id",),
         synced_column="decided_at",
-        # Shipped and never compared, `sku_inventory_status.updated_at`'s
-        # situation exactly: a full re-derivation stamps all 20 145 rows in one
-        # pass, so comparing it would ask the two copies to have been taken at
-        # the same instant. What matters is the verdict, and the verdict IS
-        # compared.
-        ignore_columns=("decided_at",),
+        # Compared, and the grace clock too (chain 4, decision 7). It was
+        # ignored as `sku_inventory_status.updated_at`'s twin, and it is not
+        # one: the hourly derive restamps only the verdicts it writes — the
+        # buyers that had none — so the stamp dates its own row, and the full
+        # replace ships it as it stands, so the two copies agree to the
+        # microsecond (production, 23.09: 20 545 of 20 545). It is also the
+        # clock chain 4's copy-back hands over on, which only means something
+        # if a drifted value here is a finding. The rare whole-table re-derive
+        # (`backfill_gender.py --all`, a RULES_VERSION bump) restamps every row
+        # at once; the per-row grace forgives those for OPERATIONAL_GRACE_MINUTES,
+        # which the next hourly copy lands inside, and a copy that failed is
+        # already `mirror_failing` on the watermark in the meantime.
         full_replace=True,
         one_failure_warns=True,
     ),
@@ -2464,8 +2470,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # daily retrain, so every row carries one stamp from one run.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
-        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
-        # same case.
+        # identical. `app.sku_inventory_status` is the same
+        # case.
         ignore_columns=("created_at",),
         numeric=("predicted_revenue", "model_mae", "model_mape", "model_wape"),
         full_replace=True,
@@ -2483,8 +2489,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # statement, stamping every one of them with the same value.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
-        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
-        # same case.
+        # identical. `app.sku_inventory_status` is the same
+        # case.
         ignore_columns=("updated_at",),
         numeric=("seasonality_index", "avg_revenue", "min_revenue",
                  "max_revenue", "yoy_growth"),
@@ -2502,8 +2508,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # `calculate_weekly_patterns` writes all sixty month-weeks in one pass.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
-        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
-        # same case.
+        # identical. `app.sku_inventory_status` is the same
+        # case.
         ignore_columns=("updated_at",),
         numeric=("weight",),
         full_replace=True,
@@ -2520,8 +2526,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # One row, rewritten whole by `calculate_yoy_growth`.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
-        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
-        # same case.
+        # identical. `app.sku_inventory_status` is the same
+        # case.
         ignore_columns=("updated_at",),
         numeric=("value",),
         full_replace=True,

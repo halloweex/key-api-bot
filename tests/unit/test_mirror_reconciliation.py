@@ -504,6 +504,13 @@ class TestSyncedColumnDualRole:
         # own `last_sync_<entity>` and stamps that row at that moment, so the
         # value dates the row it sits on and nothing else.
         "app.sync_metadata": "updated_at",
+        # Moved here from WHOLE_TABLE_STAMPS by chain 4 (decision 7). The
+        # hourly derive restamps only the verdicts it writes — buyers that had
+        # none — and the copy ships the value as it stands, so it dates its own
+        # row. A whole-table re-derive (`backfill_gender.py --all`, a
+        # RULES_VERSION bump) is the rare exception, and the per-row grace
+        # covers it until the next hourly copy.
+        "app.buyer_gender": "decided_at",
     }
     WHOLE_TABLE_STAMPS = {
         "app.sku_inventory_status": "updated_at",
@@ -516,12 +523,6 @@ class TestSyncedColumnDualRole:
         # `bronze.offer_stocks`, which travels in the same call, is the same
         # case — and the pair is why both are replicated rather than mirrored.
         "bronze.offers": "synced_at",
-        # `scripts/backfill_gender.py` re-derives every row in one pass
-        # whenever `core.gender.RULES_VERSION` moves, so all 20 145 rows carry
-        # the same stamp from the same run. Comparing it would ask the two
-        # copies to have been taken at the same instant. The verdict columns —
-        # gender, method, confidence, override_by_human — are all compared.
-        "app.buyer_gender": "decided_at",
         # The forecast group (revision 0025). Every one of the four is written
         # whole by its producer in a single statement — the daily retrain
         # DELETEs and re-INSERTs the forecast, and the three seasonality
@@ -678,6 +679,56 @@ class TestGraceOnDifferingValues:
             src = inspect.getsource(fn)
             body = src.split("dk_rows.keys() & pg_rows.keys()")[1]
             assert "in_flight" in body, f"{fn.__name__} skips the grace window"
+
+
+class TestBuyerGenderDecidedAtIsCompared:
+    """Chain 4, decision 7: `app.buyer_gender.decided_at` is a fact of the row
+    and the copy-back's handover clock, so the daily check compares it — on the
+    real spec, not a stand-in, so that restoring the ignore fails here."""
+
+    def _spec(self):
+        from core.mirror_reconciliation import OPERATIONAL_TABLES
+        return next(s for s in OPERATIONAL_TABLES
+                    if s.pg_table == "app.buyer_gender")
+
+    def _row(self, decided_at):
+        """A row as both readers hand it to `compare_table`: through
+        `_normalise_row` with the spec's own ignore list, which is where an
+        ignored column becomes a sentinel — a raw tuple would be compared on
+        every column whatever the spec says."""
+        from core.mirror_reconciliation import _normalise_row
+        spec = self._spec()
+        # BUYER_GENDER_COLUMNS: buyer_id, gender, method, confidence,
+        # decided_from, rules_version, override_by_human, decided_at
+        raw = (41, "f", "dictionary", "high", "given", 1, False, decided_at)
+        return _normalise_row(raw, spec.columns, spec.numeric, spec.ignore_columns)
+
+    def test_a_drifted_stamp_on_a_settled_row_is_reported(self):
+        """The DuckDB stamp is six hours old, so no copy is in flight: the only
+        thing that differs is the clock, and that is now a finding."""
+        from core.mirror_reconciliation import (
+            OPERATIONAL_GRACE_MINUTES, compare_table,
+        )
+        stamp = NOW - timedelta(hours=6)
+        dk = {41: self._row(stamp)}
+        pg = {41: self._row(stamp + timedelta(microseconds=1))}
+        issues = compare_table(self._spec(), dk, {41: stamp}, pg, _watermark(),
+                               now=NOW, grace_minutes=OPERATIONAL_GRACE_MINUTES)
+        assert _names(issues) == {"mirror_row_values"}
+        assert _by_name(issues, "mirror_row_values").sample_ids == (41,)
+
+    def test_a_verdict_re_derived_minutes_ago_is_forgiven(self):
+        """The control: the stamp is per row now, so a verdict the hourly job
+        rewrote before its copy landed is in flight, not drifted."""
+        from core.mirror_reconciliation import (
+            OPERATIONAL_GRACE_MINUTES, compare_table,
+        )
+        fresh = NOW - timedelta(minutes=20)
+        dk = {41: self._row(fresh)}
+        pg = {41: self._row(NOW - timedelta(hours=6))}
+        issues = compare_table(self._spec(), dk, {41: fresh}, pg, _watermark(),
+                               now=NOW, grace_minutes=OPERATIONAL_GRACE_MINUTES)
+        assert issues == []
 
 
 class TestStampIsPerRow:
