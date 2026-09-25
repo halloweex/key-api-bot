@@ -1129,7 +1129,11 @@ def _marker_steps(chain: ModuleType, name: str) -> List[str]:
         f"container, data/write-chain-owners/{name} on the host;",
         "  4. docker compose up -d web bot. With the flag at duckdb the hourly "
         "copy resumes and carries whatever DuckDB wrote before the marker; ask "
-        "--handover again, in a stopped window, before any later flip.",
+        "--handover again, in a stopped window, before any later flip."
+        + (" The buyers mirror resumes with it: its hourly ids-diff carries a "
+           "buyer DuckDB wrote before the marker, and a buyer that changed "
+           "needs POST /api/mirror/backfill/buyers."
+           if _mirrored_tables(chain) else ""),
     ]
 
 
@@ -1510,17 +1514,39 @@ _SOAK_AFTER_RELEASE = {
 }
 
 
+def _mirrored_tables(chain: ModuleType) -> Tuple[str, ...]:
+    """The chain's tables the buyers mirror ships, not `replicate_operational`."""
+    mirrored = {spec.pg_table for spec in MIRRORED_LANDING_TABLES}
+    return tuple(t for t in chain.CHAIN_TABLES if t in mirrored)
+
+
 def _soak_without_a_check(chain: ModuleType) -> str:
     """The same evidence for a chain `deploy/stage4_soak.sh` has no check for,
-    naming the chain's own tables so nobody has to look them up."""
-    return (
-        f"read meta.mirror_state for this chain's tables "
-        f"({', '.join(chain.CHAIN_TABLES)}) — deploy/stage4_soak.sh has no "
-        "check of its own for it yet — and see failures_since_ok at 0 and "
-        "last_ok_at moved by the next replicate_operational (POST "
-        "/api/jobs/replicate_operational/trigger runs it now; its web-log line "
-        "must list them under `replaced` again, not `stood_down`)"
-    )
+    naming the chain's own tables so nobody has to look them up — and telling
+    each table's own shipper apart. A table the mirror ships is never stamped
+    by `replicate_operational` and never listed under its `replaced`, so
+    sending an operator there for chain 4's buyers would send them to wait for
+    a line that cannot come."""
+    mirrored = _mirrored_tables(chain)
+    operational = tuple(t for t in chain.CHAIN_TABLES if t not in mirrored)
+    parts = []
+    if operational:
+        parts.append(
+            f"read meta.mirror_state for this chain's tables "
+            f"({', '.join(operational)}) — deploy/stage4_soak.sh has no "
+            "check of its own for it yet — and see failures_since_ok at 0 and "
+            "last_ok_at moved by the next replicate_operational (POST "
+            "/api/jobs/replicate_operational/trigger runs it now; its web-log "
+            "line must list them under `replaced` again, not `stood_down`)"
+        )
+    if mirrored:
+        parts.append(
+            f"read meta.mirror_state for {', '.join(mirrored)}: the buyers "
+            "mirror stamps it on its next non-empty batch, and "
+            "POST /api/mirror/backfill/buyers stamps it now; see "
+            "failures_since_ok at 0 and last_ok_at moved"
+        )
+    return "; and ".join(parts)
 
 
 def _runbook(chain: ModuleType, *, executed: bool, released: bool = False) -> List[str]:
