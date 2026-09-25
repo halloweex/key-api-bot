@@ -2046,8 +2046,13 @@ def compare_gold(
     now: Optional[datetime] = None,
     grace_minutes: int = GOLD_GRACE_MINUTES,
     max_samples: int = 10,
+    rollup_internal: bool = True,
 ) -> List[IntegrityIssue]:
-    """Both sides, already read. No I/O, so it is testable whole."""
+    """Both sides, already read. No I/O, so it is testable whole.
+
+    `rollup_internal=False` leaves out `gold_rollup_mismatch`, for a run in
+    which `pg_gold_internal_check` asks it standalone — once per run, and not
+    behind a DuckDB read."""
     now = now or datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=int(grace_minutes))
     issues: List[IntegrityIssue] = []
@@ -2145,8 +2150,34 @@ def compare_gold(
             ),
         ))
 
-    issues += _gold_internal_findings(pg_rollup, pg_fine, max_samples=max_samples)
+    if rollup_internal:
+        issues += _gold_internal_findings(pg_rollup, pg_fine, max_samples=max_samples)
     return issues
+
+
+async def pg_gold_internal_check(*, max_samples: int = 10) -> List[IntegrityIssue]:
+    """`gold_rollup_mismatch` over Postgres alone — no DuckDB read (DN-28).
+
+    Until now the only caller of `_gold_internal_findings` was `compare_gold`,
+    reached only after `reconcile_gold` has read DuckDB's Gold. Step 13 retires
+    that comparison, and with it the one check that sees the fine rows of
+    sources 3 and 5 at all. So the same function gets a caller of its own:
+    registered in `dq_mirror_landing` while Postgres alone derives the
+    warehouse (`core.warehouse_cutover.writes_postgres()`), where
+    `reconcile_gold` passes `rollup_internal=False` — one verdict a run, under
+    the same condition name, so a page carries over rather than resolving and
+    reopening under another.
+
+    Not gated on the landing mirror: whether the grains of one table agree does
+    not depend on what feeds it. An empty table finds nothing, and saying Gold
+    was never built is the derivation's own job and the canary's.
+    """
+    from core.pg import get_pool, require_revision
+
+    pool = await get_pool()
+    await require_revision()
+    pg_rollup, pg_fine = await fetch_pg_gold(pool)
+    return _gold_internal_findings(pg_rollup, pg_fine, max_samples=max_samples)
 
 
 def _gold_internal_findings(
@@ -2248,9 +2279,15 @@ async def reconcile_gold(
         return issues
 
     pg_rollup, pg_fine = await fetch_pg_gold(pool)
+    # While Postgres alone derives, `pg_gold_internal_check` asks the roll-up
+    # question in the same run on its own; asking it here too would file it
+    # twice and tie it to the DuckDB read above.
+    from core.warehouse_cutover import writes_postgres
+
     return issues + compare_gold(
         dk_rows, dk_fresh, pg_rollup, pg_fine,
         now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+        rollup_internal=not writes_postgres(),
     )
 
 

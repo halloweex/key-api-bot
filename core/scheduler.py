@@ -1867,6 +1867,14 @@ class BackgroundScheduler:
                     "chain watermarks unreadable, freshness check will report "
                     "the moved syncs unwatched: %s", e)
 
+            # The DuckDB checks over Silver, Gold and UTM that do not run while
+            # Postgres alone derives them (DN-28). Read once, so the scan and
+            # `duckdb_looked` below agree on one answer: a check the scan
+            # skipped is one the twins must stand in for, not compare against.
+            # Empty in this build — the switch is DN-29.
+            from core.warehouse_cutover import stood_down_duckdb_checks
+
+            stood_down = stood_down_duckdb_checks()
             raised_checks: list = []
             duckdb_measured: Dict[str, Dict[str, int]] = {}
             try:
@@ -1874,7 +1882,8 @@ class BackgroundScheduler:
                     issues = check_internal_integrity(
                         conn, inventory_calendar=inventory_calendar,
                         chain_watermarks=chain_watermarks,
-                        raised_out=raised_checks, pairing_out=duckdb_measured)
+                        raised_out=raised_checks, pairing_out=duckdb_measured,
+                        stood_down=stood_down)
             except Exception as e:
                 error_message = f"{type(e).__name__}: {e}"
                 logger.exception("DQ integrity scan raised")
@@ -1902,10 +1911,14 @@ class BackgroundScheduler:
                 logger.error(pg_flag_error)
                 pg_issues = [pg_warehouse_dq.flag_invalid_issue(pg_flag_error)]
             elif pg_on:
+                # What DuckDB looked at this scan: nothing when it failed; else
+                # every guard less the ones that raised and the ones stood down.
+                # A stood-down guard counted as looked would have the line-item
+                # twins compare against a count nobody took, and never file.
                 duckdb_looked = (frozenset() if error_message else
                                  (frozenset(GUARDED_CHECK_CONDITIONS)
                                   | pg_warehouse_dq.DUCKDB_BARE_CHECKS)
-                                 - frozenset(raised_checks))
+                                 - frozenset(raised_checks) - stood_down)
                 try:
                     pg_facts = await pg_warehouse_dq.read_facts()
                 except Exception as e:  # noqa: BLE001 — it promises not to; if it does, it is blindness
@@ -2166,6 +2179,16 @@ class BackgroundScheduler:
                 # see `check` — the layer still has one age and the run is still
                 # failed, but the checks below still run and still page.)
                 await check("reconcile_gold", lambda: reconcile_gold(store))
+                # And, while Postgres alone derives the warehouse, the roll-up
+                # question asked of Postgres by itself (DN-28): `reconcile_gold`
+                # leaves it out on the same predicate, so it is asked once and
+                # needs no DuckDB read. Never true in this build — the switch
+                # is DN-29 — so production runs exactly the checks above.
+                from core import warehouse_cutover
+
+                if warehouse_cutover.writes_postgres():
+                    from core.mirror_reconciliation import pg_gold_internal_check
+                    await check("pg_gold_internal_check", lambda: pg_gold_internal_check())
                 # And the five tables that are neither landing nor computed —
                 # the ones with no source to be rebuilt from. Last because they
                 # are the least likely to be wrong and the most expensive to

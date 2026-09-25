@@ -39,7 +39,7 @@ def configure_modes() -> Dict[str, str]:
     to know whether the other already has. The latch is re-read rather than
     assumed unchanged, because a copy-back between two calls releases it.
     """
-    from core import chain_latch, pg_derivation, read_fallback
+    from core import chain_latch, pg_derivation, read_fallback, warehouse_cutover
 
     # Not in the returned mapping: that maps an environment variable to the
     # value read from it, and the latch is read from disk and answers over the
@@ -52,7 +52,12 @@ def configure_modes() -> Dict[str, str]:
     # engine this process has no address for. Never raises: web is the only
     # syncer, and a crash loop over how a read degrades would stop order
     # intake — see `core/read_fallback.py`.
+    # `KS_WRITE_WAREHOUSE` (DN-28): read and published, never acted on in this
+    # build — the switch is DN-29, and it must find the mode cached before the
+    # boot sync, whose empty-DuckDB path runs a full warehouse rebuild. Never
+    # raises, for `KS_READ_FALLBACK`'s reason — see `core/warehouse_cutover.py`.
     return {
         pg_derivation.ENV: pg_derivation.configure_mode(),
         read_fallback.ENV: read_fallback.configure_mode(),
+        warehouse_cutover.ENV: warehouse_cutover.configure_mode(),
     }

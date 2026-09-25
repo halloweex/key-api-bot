@@ -153,7 +153,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
 | `/api/managers/{id}/retail-status` | Classify a manager, marks warehouse dirty (POST, admin) |
 | `/api/health/data-quality` | Latest run per layer — integrity, reconciliation, mirror_landing, reconciliation_pg, reconciliation_ch — with issues/diffs (за сессией) |
-| `/api/warehouse/status` | Last refresh, checksums, validation_passed |
+| `/api/warehouse/status` | Last refresh, checksums, validation_passed; `cutover` — step 13's unmet preconditions (DN-28) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/mirror/backfill/orders` | Ship the orders Postgres is missing; idempotent (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
@@ -2617,6 +2617,50 @@ bounded at 5 s, and publishes the answer.
   attempt waits 10 min, or the held watermark would refetch every stock from
   KeyCRM once a minute. The DuckDB path is unchanged, a failure escaping it
   included.
+
+### Step 13 is published, not switched (DN-28)
+
+`KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts once
+DuckDB stops: `duckdb` (default) or `postgres`. It is read in
+`configure_modes()`, before the boot sync, and **nothing in this build acts on
+it**: `postgres` is published and still runs as `duckdb`, because the switch
+itself — no DuckDB refresh, no dirty marks — is DN-29, and half of it would
+stand DuckDB's checks down while DuckDB went on deriving. An unknown value runs
+as `duckdb` and publishes the error on `/api/health` (`warehouse_writer_mode`),
+where the canary warns `warehouse_mode_invalid` — a typo costs nothing in this
+build, and the day it would is the flip; it never raises, since web is the only
+syncer.
+
+What the switch will need is in place and idle. `stood_down_duckdb_checks()`
+(`core/warehouse_cutover.py`) names the five DuckDB integrity checks over
+Silver, Gold and UTM; the scan skips them and `duckdb_looked` leaves them out,
+so the Postgres twins stand in — at the counts the DN-14 pairing record has
+been giving in shadow. `pg_gold_internal_check` asks `gold_rollup_mismatch` of
+Postgres alone in `dq_mirror_landing`, and `reconcile_gold` leaves it out on the
+same predicate, so it is asked once a run. Both are empty or unregistered while
+the mode is `duckdb`, which today is always.
+
+`GET /api/warehouse/status` publishes `cutover`: the variable as read,
+`switch_built: false`, and every unmet precondition by name, from
+`evaluate_preconditions(env, facts)` — `KS_PG_DERIVE=own`, the twins on,
+`KS_UTM_PARSE=postgres`, `KS_READ_FALLBACK=off`, a DSN and the required
+revision, the landing mirror on, every Silver/Gold/UTM read switch on
+`postgres` (a test reads every string in `core/`, `web/` and `bot/` for a
+`KS_READ_*` or `KS_*_STORE` name, so a new one has to be put on the list or
+excluded by name — `KS_SMS_STORE` is read inline and the first walk missed
+it), cohorts on ClickHouse with `KS_CH_URL`, no write chain owning a table
+the goals bridge reads (DN-12), and **no delivered page open under a condition
+only a stood-down check reports** (`retired_conditions_clear`). A stood-down
+check is not a raised one, so the integrity job does not hold its conditions,
+and the first run after the switch would announce such a page "✅ Resolved"
+with no check looking. Holding them instead would keep it open for as long as
+Postgres derives, since nothing re-examines a retired check; so the switch
+waits while the DuckDB check can still clear it. It reads the Alert Gate's
+delivered map — what `resolve_group` announces from — not `app.alert_series`,
+which can miss a delivered page (its fired row is fire-and-forget).
+`preconditions_met: true` is a checklist done, not a switch thrown. An
+exception reading any fact is published by its class alone and logged whole:
+a driver's text names the database user, host and port.
 
 ### The order write path asks the registry too (DN-22a)
 

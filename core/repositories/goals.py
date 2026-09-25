@@ -5,7 +5,7 @@ import calendar
 import logging
 from collections import defaultdict
 from datetime import datetime, date, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 from core.duckdb_constants import DEFAULT_TZ, _date_in_kyiv
 from core.models import OrderStatus
@@ -140,6 +140,29 @@ _FORECAST_PREDICTED_SQL = """
 # fails the moment `core/write_chains.WRITE_CHAINS` registers a chain owning
 # `bronze.orders`, `bronze.managers` or `app.manager_classifications` while this
 # file still renders the DuckDB case.
+#
+# The same question is asked at run time by the step-13 readiness
+# (`core/warehouse_cutover.py`, DN-28), through `sales_type_bridge_owners` —
+# one answer the deployed build gives, beside the one CI gave. Delete both with
+# the bridge.
+
+# The tables the bridge reads out of DuckDB, by the names the write chains
+# declare them under.
+SALES_TYPE_BRIDGE_TABLES = frozenset(
+    {"bronze.orders", "bronze.managers", "app.manager_classifications"})
+
+
+def sales_type_bridge_owners() -> Dict[str, Tuple[str, ...]]:
+    """`{chain: tables}` for every registered write chain that owns a table
+    the bridge reads from DuckDB. Empty is the tripwire green."""
+    from core.write_chains import WRITE_CHAINS, chain_name
+
+    owners: Dict[str, Tuple[str, ...]] = {}
+    for chain in WRITE_CHAINS:
+        owned = frozenset(getattr(chain, "CHAIN_TABLES", ())) & SALES_TYPE_BRIDGE_TABLES
+        if owned:
+            owners[chain_name(chain)] = tuple(sorted(owned))
+    return owners
 
 
 def _orders_sales_type_predicate(sales_type: str) -> tuple[str, List[Any]]:

@@ -294,11 +294,23 @@ async def get_warehouse_status(request: Request):
     # Under KS_PG_DERIVE=own Postgres derives on its own signal, and a status
     # page that showed only DuckDB's refreshes would describe the engine the
     # dashboard is leaving.
-    from core import pg_derivation
+    from core import pg_derivation, warehouse_cutover
 
     if pg_derivation.owns():
         status = {**status, "postgres": await _pg_derivation_status()}
-    return status
+    # Step 13's readiness (DN-28): KS_WRITE_WAREHOUSE as this process read it,
+    # and every precondition of the switch still unmet, each by name. Published
+    # whatever the mode — the list is what a person reads before the flip, and
+    # the switch itself is not in this build.
+    try:
+        cutover = await warehouse_cutover.readiness()
+    except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
+        # The class alone, as everywhere readiness reports: the text is a
+        # driver's and names the database user, host and port. Whole in the log.
+        logger.error("cutover readiness raised: %s: %s", type(e).__name__, e)
+        cutover = {**warehouse_cutover.status(),
+                   "readiness_error": type(e).__name__}
+    return {**status, "cutover": cutover}
 
 
 async def _pg_derivation_status() -> dict:
