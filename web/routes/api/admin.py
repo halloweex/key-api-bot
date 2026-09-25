@@ -284,6 +284,92 @@ async def backfill_mirror_expenses(
         raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
 
 
+@router.post("/mirror/backfill/buyers")
+@limiter.limit("2/hour")
+async def backfill_mirror_buyers(
+    request: Request,
+    chunk_size: int = Query(2000, ge=100, le=10000),
+    admin: dict = Depends(require_admin),
+):
+    """Re-ship every buyer and contact DuckDB holds into Postgres. Idempotent.
+
+    The lever chain 4's handover names before the flip (decision 5): the
+    hourly ids-diff ships only buyers Postgres is missing, so a buyer on both
+    sides that differs, or a contact only Postgres holds, stays until this
+    rewrites them — `pg_buyers.reship_buyers` says what it does and costs.
+
+    Detached, like `sync-all-buyers`: ~20 000 buyers with a DELETE of each
+    one's contacts is minutes, and a request held that long is answered 504 by
+    the app's own 30 s timeout while the handler keeps writing. Each portion
+    takes the heavy-job lock, waited for boundedly, so it lands between two
+    sync ticks; a lock that stays busy stops the run, and running it again
+    finishes it. The outcome is logged as `Buyer reship:`.
+
+    Refused before anything starts, the other two backfills' arrangement: 409
+    with the mirror off, 409 while a reship is running, 409 once a write chain
+    owns the buyers or their contacts — asked of the local answer and then of
+    the owner rows after `require_revision()` — and 503 when the owner read
+    fails, because nothing can be verified.
+    """
+    from core.pg_buyers import BUYER_UNIT, reship_buyers
+    from core.pg_landing import enabled, tables_stood_down, tables_stood_down_or_owned
+
+    if not enabled():
+        raise HTTPException(
+            status_code=409, detail="KS_MIRROR_LANDING is off; nothing was started")
+    if any(t.get_name() == "reship_buyers" and not t.done() for t in _BACKGROUND_TASKS):
+        raise HTTPException(status_code=409, detail="A buyer reship is already running")
+
+    moved = tables_stood_down(BUYER_UNIT)
+    if not moved:
+        from core.pg import get_pool, require_revision
+
+        try:
+            pool = await get_pool()
+            await require_revision()
+            moved = await tables_stood_down_or_owned(pool, BUYER_UNIT)
+        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
+            logger.error("Buyer reship: cannot read who owns the buyers: %s: %s",
+                         type(e).__name__, e)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Cannot tell whether a write chain owns the buyers, so "
+                    f"nothing was started: {type(e).__name__}: {e}"
+                ),
+            ) from e
+    if moved:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{', '.join(sorted(moved))} is written by a write chain, not "
+                "shipped out of DuckDB; a reship would overwrite rows only "
+                "Postgres holds."
+            ),
+        )
+
+    store = await get_store()
+
+    async def run():
+        try:
+            result = await reship_buyers(
+                store, chunk=chunk_size,
+                portion_guard=lambda: _heavy_lock(SYNC_ALL_LOCK_WAIT_S),
+            )
+            logger.info(f"Buyer reship: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Buyer reship failed: {type(e).__name__}: {e}", exc_info=True)
+            raise
+
+    task = asyncio.create_task(run(), name="reship_buyers")
+    # A strong reference, or the loop may collect the task mid-flight.
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return {"status": "started", "message": "Buyer reship started; see web's log "
+            "for 'Buyer reship:'"}
+
+
 # ─── Warehouse ─────────────────────────────────────────────────────────────────
 
 @router.get("/warehouse/status")

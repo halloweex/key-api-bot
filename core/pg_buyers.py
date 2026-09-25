@@ -239,6 +239,100 @@ async def backfill_buyers(store, *, chunk: int = 2000) -> Dict[str, Any]:
     return {"shipped": shipped, "missing_was": len(missing)}
 
 
+async def reship_buyers(store, *, chunk: int = 2000,
+                        portion_guard=None) -> Dict[str, Any]:
+    """Re-ship EVERY buyer and contact DuckDB holds, through the one writer.
+
+    The lever the copy-back's handover names before chain 4's flip (decision
+    5), for what the ids-diff cannot reach: it ships only buyers Postgres is
+    missing, so a buyer present on both sides and differing, a contact only
+    Postgres holds, or one a failed batch never wrote, stays as it is. This
+    rewrites each buyer whole and replaces its contacts, so afterwards the two
+    stores agree on every buyer DuckDB holds and `--handover` can say so. It
+    never deletes a buyer: one only Postgres holds is left for a person.
+
+    Idempotent, no cursor: a stopped run is finished by running it again.
+    `portion_guard`, when given, is an async context manager factory yielding
+    True to go on and False to stop — the route passes the scheduler's
+    heavy-job lock, waited for boundedly, so each portion lands between two
+    sync ticks and never inside one. `_write` stamps the watermarks per
+    portion, as the mirror does.
+
+    Refuses — raises — when the mirror is off, and when a write chain owns the
+    buyers or their contacts: asked before the first portion and again before
+    each, so a flip in the middle stops it rather than writing over the
+    chain's rows.
+
+    Two costs, both named rather than found: every buyer's `mirrored_at`
+    moves, so the search index re-indexes every buyer on its next pass; and
+    `buyers_without_verdict`, which judges only buyers landed more than 90
+    minutes ago, is blind for 90 minutes after.
+    """
+    import contextlib
+
+    from core import pg_landing
+    from core.pg import get_pool, require_revision
+
+    if not pg_landing.enabled():
+        raise RuntimeError("KS_MIRROR_LANDING is off; the buyers mirror is not "
+                           "running, so there is nothing to re-ship through")
+    def refusal(moved) -> RuntimeError:
+        return RuntimeError(
+            f"{', '.join(sorted(moved))} is written by a write chain, not "
+            "shipped out of DuckDB; refusing to re-ship over rows only "
+            "Postgres holds."
+        )
+
+    # The local answer before Postgres is asked anything, then the owner rows
+    # once the pool is in hand (DN-06) — `backfill_buyers`' order, asked here
+    # in the function's own body so the registry walk sees this path ask for
+    # itself and not only through its caller.
+    moved = pg_landing.tables_stood_down(BUYER_UNIT)
+    if moved:
+        raise refusal(moved)
+    pool = await get_pool()
+    await require_revision()
+
+    async def refuse_if_owned() -> None:
+        moved = pg_landing.tables_stood_down(BUYER_UNIT)
+        if not moved:
+            moved = await pg_landing.tables_stood_down_or_owned(pool, BUYER_UNIT)
+        if moved:
+            raise refusal(moved)
+
+    await refuse_if_owned()
+
+    async with store.connection() as conn:
+        ids = [r[0] for r in conn.execute("SELECT id FROM buyers ORDER BY id").fetchall()]
+
+    guard = portion_guard or (lambda: contextlib.nullcontext(True))
+    shipped = contacts = 0
+    for start in range(0, len(ids), chunk):
+        portion = ids[start:start + chunk]
+        async with guard() as go:
+            if not go:
+                return {"status": "stopped", "reason": "the portion guard said stop",
+                        "buyers_total": len(ids), "buyers_shipped": shipped,
+                        "contacts_shipped": contacts}
+            await refuse_if_owned()
+            ph = ", ".join("?" for _ in portion)
+            async with store.connection() as conn:
+                buyer_rows = conn.execute(
+                    _DK_BUYERS_SELECT.format(ph=ph), portion).fetchall()
+                contact_rows_ = conn.execute(
+                    _DK_CONTACTS_SELECT.format(ph=ph), portion).fetchall()
+            by_buyer: Dict[int, List[Tuple[int, str, str, bool]]] = {
+                r[0]: [] for r in buyer_rows}
+            for row in contact_rows_:
+                if row[0] in by_buyer:
+                    by_buyer[row[0]].append((row[0], row[1], row[2], bool(row[3])))
+            await _write([tuple(r) for r in buyer_rows], list(by_buyer.items()))
+            shipped += len(buyer_rows)
+            contacts += sum(len(c) for c in by_buyer.values())
+    return {"status": "done", "buyers_total": len(ids), "buyers_shipped": shipped,
+            "contacts_shipped": contacts}
+
+
 # The last self-heal this process performed, read by reconcile_buyers so a
 # repair leaves a trace in the DQ findings and not only in a log line. It is
 # process-local on purpose: the healer and the reconciliation run in the same

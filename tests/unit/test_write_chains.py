@@ -635,6 +635,8 @@ class TestEveryPostgresWriterAsksTheRegistry:
             ("core/pg_buyers.py", "mirror_buyers"),
             ("core/pg_buyers.py", "backfill_buyers"),
             ("core/pg_buyers.py", "hourly_ids_diff"),
+            ("core/pg_buyers.py", "reship_buyers"),
+            ("web/routes/api/admin.py", "backfill_mirror_buyers"),
             ("core/pg_replication.py", "replicate_managers"),
             ("core/pg_expense_backfill.py", "backfill_expenses"),
             ("core/pg_expense_backfill.py", "hourly_expenses_ids_diff"),
@@ -2393,6 +2395,8 @@ class TestTheBuyersAndClassificationCopiesReadTheOwnerRows:
 _POOLED = {
     "backfill_buyers": BUYERS,
     "hourly_ids_diff": BUYERS,
+    # Chain 4's pre-flip lever: every buyer DuckDB holds, not only the missing.
+    "reship_buyers": BUYERS,
     "backfill_expenses": EXPENSES,
     "hourly_expenses_ids_diff": EXPENSES,
 }
@@ -2404,6 +2408,7 @@ async def _run_pooled(path, store):
     return await {
         "backfill_buyers": pg_buyers.backfill_buyers,
         "hourly_ids_diff": pg_buyers.hourly_ids_diff,
+        "reship_buyers": pg_buyers.reship_buyers,
         "backfill_expenses": pg_expense_backfill.backfill_expenses,
         "hourly_expenses_ids_diff": pg_expense_backfill.hourly_expenses_ids_diff,
     }[path](store)
@@ -2588,6 +2593,83 @@ class TestTheAdminExpenseBackfill:
         res = self._post(flags)
         assert res.status_code == 200, res.json()
         backfill.assert_awaited_once()
+        assert pool.only_asked_who_owns()
+
+
+class TestTheAdminBuyerReship:
+    """`POST /api/mirror/backfill/buyers` (chain 4, PR-2): the lever the
+    copy-back's handover names before the flip. Detached, like sync-all —
+    minutes of work would outlive the request budget — so every refusal has
+    to be answered here, before "started"."""
+
+    @pytest.fixture
+    def reship(self, flags):
+        from unittest.mock import AsyncMock
+
+        run = AsyncMock(return_value={"status": "done"})
+        flags.setattr("core.pg_buyers.reship_buyers", run)
+        flags.setattr("web.routes.api.admin.get_store", AsyncMock(return_value=object()))
+        return run
+
+    def _post(self, flags):
+        return _admin_client(flags).post("/api/mirror/backfill/buyers")
+
+    REFUSAL = "is written by a write chain, not shipped out of DuckDB"
+
+    def test_409_on_the_chain_and_postgres_is_not_asked(
+            self, flags, pool, landing_chain, reship):
+        landing_chain()
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert self.REFUSAL in res.json()["detail"]
+        assert BUYERS in res.json()["detail"]
+        reship.assert_not_called()
+        _never_reached_postgres(pool)
+
+    def test_409_on_the_owner_row_when_the_marker_is_lost(
+            self, flags, pool, landing_chain, reship):
+        landing_chain(env=lambda: False)
+        pool.owner_rows = {CONTACTS: "2026-09-20T08:00:00+00:00"}
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert self.REFUSAL in res.json()["detail"]
+        reship.assert_not_called()
+        assert pool.only_asked_who_owns()
+
+    def test_an_unreadable_owner_row_is_a_503(self, flags, pool, landing_chain, reship):
+        landing_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        res = self._post(flags)
+        assert res.status_code == 503, res.json()
+        assert "unreadable" in res.json()["detail"]
+        reship.assert_not_called()
+
+    def test_the_mirror_off_is_a_409_and_postgres_is_not_asked(self, flags, pool, reship):
+        flags.setenv("KS_MIRROR_LANDING", "0")
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert "KS_MIRROR_LANDING" in res.json()["detail"]
+        reship.assert_not_called()
+        _never_reached_postgres(pool)
+
+    def test_a_second_reship_while_one_runs_is_refused(self, flags, pool, reship):
+        from unittest.mock import MagicMock
+
+        from web.routes.api import admin
+
+        running = MagicMock()
+        running.get_name.return_value = "reship_buyers"
+        running.done.return_value = False
+        flags.setattr(admin, "_BACKGROUND_TASKS", {running})
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert "already running" in res.json()["detail"]
+        reship.assert_not_called()
+
+    def test_without_a_chain_it_answers_started(self, flags, pool, reship):
+        res = self._post(flags)
+        assert res.status_code == 200, res.json()
+        assert res.json()["status"] == "started"
         assert pool.only_asked_who_owns()
 
 
