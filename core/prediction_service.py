@@ -1319,6 +1319,8 @@ class PredictionService:
 
     async def _train_impl(self, sales_type: str) -> Dict[str, Any]:
         """Internal training implementation."""
+        from core import read_fallback
+
         try:
             from core.duckdb_store import get_store
             store = await get_store()
@@ -1392,6 +1394,16 @@ class PredictionService:
                 "predictions_generated": len(predictions),
             }
 
+        except read_fallback.ReadUnavailable:
+            # Under KS_READ_FALLBACK=off the input gate refused a read DuckDB
+            # would have answered (DN-20c). It is the first read, so nothing
+            # has been trained, saved or predicted, and the previous model
+            # stands. Raised rather than answered here: `train` is shared by
+            # the scheduler's job, which defers and says so in its result,
+            # and by `POST /api/revenue/forecast/train`, which answers 503
+            # naming the surface like every other route. Caught below as
+            # "error", it was neither.
+            raise
         except Exception as e:
             logger.error(f"Model training failed: {e}", exc_info=True)
             return {"status": "error", "error": str(e)}

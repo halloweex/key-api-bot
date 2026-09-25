@@ -2360,18 +2360,47 @@ somebody read the page. The trend's forecast
 overlay, which already degrades to "no forecast" on any failure, drops under
 a refusal and the chart answers; the forecast's own endpoint,
 `/api/revenue/forecast`, is not an overlay and answers 503 — it used to read
-an outage as "Forecast not available yet", a model nobody had trained. Everything else a refusal can reach is DN-20c's:
-the sync and its search index, training, the Monday goals job
-(`seasonality_calc`, which writes `seasonal_indices` before the read that
-refuses, so it must defer whole rather than half-write), the two weekly
-reports, the boot sync and the assistant. **That list is derived, not
-remembered** — `tests/unit/test_read_fallback_consumers.py` walks up from
-every `fall_back`/`no_address`/`no_engine` to the entry points nothing in the
-repository calls, and pins the ones no swept route answers (`NON_HTTP_CONSUMERS`,
-plus the five writing routes the sweep does not run); a new consumer fails it
-until somebody decides what it answers. A remembered list had missed the
-goals job. Until DN-20c lands a refusal reaching one of them is an exception
-like any other, so **`off` is not set before DN-20c ships**. An
+an outage as "Forecast not available yet", a model nobody had trained.
+
+**Everything else a refusal can reach answers it itself** (DN-20c), and
+never with a DuckDB number. The two weekly reports defer: no message, no
+ledger row, and tomorrow's tick asks again. The Monday goals job
+(`seasonality_calc`) asks its one routed read — the suggestions — *before*
+it writes `seasonal_indices`, so a refusal defers it whole instead of
+leaving new indices beside last week's `growth_metrics`. Training is skipped
+and the previous model stands; `_train_impl` lets the refusal through its
+`except Exception`, so `POST /api/revenue/forecast/train` answers 503 like
+every route rather than 200 `"status": "error"`. The search index and the
+buyers step skip their step for the tick with the watermark held, and the
+tick goes on to offers and stocks; the boot contains each of them. The
+assistant's tools return a named `data_unavailable` result, which is what
+the model reads instead of numbers. A job puts
+`{"reason": "read_unavailable", "surface"}` in its result
+(`read_fallback.answered`), so `/api/jobs` shows a refusal, not a quiet run —
+except the incremental sync, whose buyers step is still answered by
+`sync_missing_buyers`' own broad handler (chain 4's to change): its refusal
+shows only in the log and in `/api/health` `read_fallback_mode.refused`.
+Several of these never had a fallback — the weekly report, the training
+input, the buyers step and the index read Postgres or nothing — so for them
+a Postgres failure is still their own error, as before; `off` adds only the
+switch with no address. **That list is derived, not remembered** —
+`tests/unit/test_read_fallback_consumers.py` walks up from every
+`fall_back`/`no_address`/`no_engine` to the entry points nothing in the
+repository calls (`NON_HTTP_CONSUMERS`), then back down through the `try`
+each call sits in, and pins where every consumer's refusal stops
+(`ANSWERS`): a refusal that could leave one as an exception fails it, and a
+handler that answers rather than raises may sit only where no HTTP route
+reaches but the assistant's two, `POST /api/chat` and `GET /api/chat/stream`,
+which answer inside the conversation (`IN_BAND_ROUTES`). That rule first
+passed by not seeing those routes — `service.chat(...)` names a method two
+classes define — so the walk types an object by the annotated factory that
+made it, and pins every call it still leaves unresolved under the name of a
+function that reaches a refusal (`UNRESOLVED_NAMESAKES`). A remembered list
+had missed the goals job. One writing route still
+does not reach the 503: `POST /api/duckdb/sync-buyers` shares the buyers
+step, whose `except Exception` answers "Synced 0 buyers" — pinned in
+`UNSWEPT_STOPS` and left to chain 4, which rebuilds that step and that
+route. An
 unknown value **runs as `duckdb` and never raises** — web is the only syncer,
 so a crash loop over how a read degrades would stop order intake (OD-09); it
 publishes `read_fallback_mode.error` and the canary warns
@@ -2404,7 +2433,10 @@ return {}` was invisible to the static walk and to a hand-kept list of
 thirteen routes; the sweep finds it by the route. The static half checks
 every module `web/` imports: a handler that names `ReadUnavailable` must end
 in a bare `raise` or `raise <its name>` — `raise HTTPException(500)` turns a
-503 naming the surface into a 500 naming nothing.
+503 naming the surface into a 500 naming nothing. DN-20c's answers are the
+one exemption, by function: those pinned, each proved reached from the
+non-HTTP consumers and the assistant's routes alone, and each required to
+exist.
 
 ### A write flag is no longer a rollback
 

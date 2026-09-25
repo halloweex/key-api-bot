@@ -600,6 +600,7 @@ class SyncService:
             Dict with counts for each synced entity
         """
         from core import pg_search_index_read as pg_index
+        from core import read_fallback
 
         stats = {"buyers": 0, "orders": 0, "products": 0}
 
@@ -610,8 +611,8 @@ class SyncService:
             # the index READS moves — the watermark is still `sync_metadata`
             # bookkeeping, written by DuckDB until that table's stage-4 chain.
             # Under KS_READ_FALLBACK=off a switch with no address is refused
-            # rather than read from DuckDB; the handler below skips the step.
-            from core import read_fallback
+            # rather than read from DuckDB, before anything is indexed or the
+            # watermark is touched; the handlers below say who answers it.
             read_fallback.no_address("search_index", pg_index)
             use_pg = pg_index.enabled() and pg_index.available()
             watermark_key = pg_index.WATERMARK_KEY if use_pg else "meilisearch"
@@ -684,6 +685,11 @@ class SyncService:
                 await self.store.set_last_sync_time(watermark_key)
             return stats
 
+        except read_fallback.ReadUnavailable:
+            # DN-20c: raised to the caller, which skips the step and says so
+            # — the scheduler's job in its result, the boot in its log. Kept
+            # below, it read as an index with nothing to refresh.
+            raise
         except Exception as e:
             logger.error(f"Meilisearch sync error: {e}")
             return stats
