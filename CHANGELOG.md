@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.251
+
+- DN-19 review: the pg_order_utm levers follow KS_UTM_PARSE
+- DN-19 review: say who holds PG_LAYER_LOCK when the parse runs
+- DN-19 review: the ship walks read names through their imports
+- DN-19: say in CLAUDE.md what KS_UTM_PARSE moves and how it rolls back
+- DN-19: real-Postgres proof that the parse is the derivation's last step
+- DN-19: KS_UTM_PARSE wires the Postgres UTM parse (default duckdb)
+- DN-28 review: CLAUDE.md names the retired-conditions precondition and why it waits
+- DN-28 review: an unknown KS_WRITE_WAREHOUSE reaches /api/health and the canary
+- DN-28 review: the reader walk reads every string in core, web and bot
+- DN-28 review: readiness publishes an exception by its class alone
+- DN-28 review: pin that the evaluator names exactly the published precondition list
+- DN-28 review: a page open under a retired check holds the switch
+- DN-28: the real-Postgres stand-down test also proves the scan ran none of the five
+- DN-28: pin that the integrity job hands its stand-down to the scan
+- DN-28: say in CLAUDE.md what step 13a publishes, and that nothing is switched
+- DN-28: real-Postgres proof of the standalone roll-up check and the stood-down twins
+- DN-28: the integrity scan and duckdb_looked consume the stand-down; readiness on /api/warehouse/status
+- DN-28: KS_WRITE_WAREHOUSE read, the step-13 preconditions named, Gold's roll-up check on Postgres alone
+
+
 ## 3.0.250
 
 
