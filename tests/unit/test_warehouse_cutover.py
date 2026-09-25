@@ -454,10 +454,13 @@ class TestAPageUnderARetiredCheckHoldsTheSwitch:
     for as long as Postgres derives."""
 
     def test_they_are_the_stood_down_checks_conditions(self):
+        """And, since DN-29 retires `reconcile_gold` with them, the Gold
+        comparison's own two."""
         assert wc.retired_conditions() == {
             "silver_missing_rows", "silver_orphan_rows", "silver_row_values",
             "attribution_coverage_website", "gold_cell_values",
-            "headline_vs_line_items", "goods_shipped_without_sale"}
+            "headline_vs_line_items", "goods_shipped_without_sale",
+            "gold_missing_cells", "gold_orphan_cells"}
 
     @staticmethod
     def _still_firing(tmp_path, monkeypatch, mode):
@@ -496,9 +499,14 @@ class TestAPageUnderARetiredCheckHoldsTheSwitch:
         """The review's reproduction as the definition: a raised check's
         conditions are held, a stood-down one's are not, and the difference is
         the set the precondition reads."""
+        from core.data_quality import GUARDED_CHECK_CONDITIONS
+
         held_when_raised = self._still_firing(tmp_path, monkeypatch, wc.DUCKDB)
         held_when_stood_down = self._still_firing(tmp_path, monkeypatch, wc.POSTGRES)
-        assert held_when_raised - held_when_stood_down == wc.retired_conditions()
+        integrity = {c for guard in wc.STOOD_DOWN_WHEN_POSTGRES
+                     for c in GUARDED_CHECK_CONDITIONS[guard]}
+        assert held_when_raised - held_when_stood_down == integrity
+        assert integrity <= wc.retired_conditions()
 
     @staticmethod
     def _unmet(**delivered):

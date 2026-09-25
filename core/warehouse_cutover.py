@@ -219,14 +219,32 @@ def stood_down_duckdb_checks() -> FrozenSet[str]:
 # cannot announce.
 
 
+# The conditions `compare_gold` alone reports, which DN-29 retires with
+# `reconcile_gold`: on `dq:mirror_landing` a page of theirs would be announced
+# resolved by the first run after the switch exactly as a stood-down integrity
+# check's would. `gold_cell_values` is also the integrity check's name.
+# `tests/unit/test_warehouse_writer.py` reads the set out of `compare_gold`'s
+# source. `gold_rollup_mismatch` is not here: `pg_gold_internal_check` goes on
+# asking it. The Silver and UTM comparisons report under the `mirror_*` names
+# every comparison in that job shares, so a page of theirs cannot be told from
+# one a comparison that stays up owns, and those names are not retired.
+RETIRED_COMPARISON_CONDITIONS: FrozenSet[str] = frozenset({
+    "gold_missing_cells",
+    "gold_orphan_cells",
+    "gold_cell_values",
+})
+
+
 def retired_conditions() -> FrozenSet[str]:
     """The conditions the stood-down checks report, from the table the
     integrity job holds a raised check's conditions by — one source, so a
-    condition added to a stood-down check is covered here too."""
+    condition added to a stood-down check is covered here too — and those
+    only the retired Gold comparison reports."""
     from core.data_quality import GUARDED_CHECK_CONDITIONS
 
     return frozenset(condition for guard in STOOD_DOWN_WHEN_POSTGRES
-                     for condition in GUARDED_CHECK_CONDITIONS[guard])
+                     for condition in GUARDED_CHECK_CONDITIONS[guard]) \
+        | RETIRED_COMPARISON_CONDITIONS
 
 
 def open_retired_conditions() -> Dict[str, Optional[str]]:

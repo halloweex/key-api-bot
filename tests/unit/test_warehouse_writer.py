@@ -814,6 +814,30 @@ class TestTheHoldEndsOnAValidatedFullTick:
         assert released is False and wc.held()
 
 
+# ─── The retired Gold comparison's own conditions hold the switch ────────────
+
+
+class TestTheRetiredComparisonsConditions:
+    def test_they_are_what_compare_gold_names(self):
+        """Read out of the source: a name `compare_gold` learns later is a
+        page the first run after the switch would announce resolved."""
+        tree = ast.parse((REPO / "core/mirror_reconciliation.py").read_text(encoding="utf-8"))
+        (fn,) = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                 and n.name == "compare_gold"]
+        named = {kw.value.value for n in ast.walk(fn) if isinstance(n, ast.Call)
+                 for kw in n.keywords
+                 if kw.arg == "check_name" and isinstance(kw.value, ast.Constant)}
+        assert named == wc.RETIRED_COMPARISON_CONDITIONS
+        assert "gold_rollup_mismatch" not in wc.retired_conditions()
+
+    def test_an_open_page_under_one_holds_the_switch(self):
+        from core.alerting import _gate
+
+        _gate.note_delivered_conditions(["gold_missing_cells"], "dq:mirror_landing")
+        facts = asyncio.run(wc.gather_facts({}))
+        assert facts.open_retired == {"gold_missing_cells": "dq:mirror_landing"}
+
+
 # ─── Published, and judged ───────────────────────────────────────────────────
 
 
