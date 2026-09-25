@@ -16,7 +16,9 @@
 comes first in both. **Before flipping a chain** it is the gate: exit 0 says
 everything DuckDB holds has reached Postgres, and anything CRITICAL is a row the
 flip would strand, because the shipper stands down the moment the chain routes
-to Postgres and these tables have no backfill. **Before rolling one back** it is
+to Postgres and a replicated table has no backfill (a mirrored one — chain 4's
+buyers — has the reship, `POST /api/mirror/backfill/buyers`, which the finding
+names). **Before rolling one back** it is
 the preview: its CRITICALs are exactly what `--execute` refuses on, and its INFO
 lines are the size of the copy. `--execute` asks the same question again itself
 and refuses before writing anything, so skipping step 1 cannot destroy a row —
@@ -101,14 +103,23 @@ logging.basicConfig(
 logger = logging.getLogger("chain_copy_back")
 
 
+def _short_names() -> list:
+    """What an operator may type, from the registry — the list `--help` gave
+    by hand went stale the day a fifth chain registered."""
+    from core.write_chains import WRITE_CHAINS, chain_name
+
+    return [chain_name(c).removeprefix("pg_").removesuffix("_write")
+            for c in WRITE_CHAINS]
+
+
 def _parse(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Copy a latched write chain's tables back into DuckDB.",
     )
     parser.add_argument(
         "chain",
-        help="the chain: 'expenses', 'inventory', 'goals' or 'expense_types' "
-             "(or its module name)",
+        help="the chain: " + ", ".join(repr(n) for n in _short_names())
+             + " (or its module name)",
     )
     parser.add_argument(
         "--execute", action="store_true",
@@ -269,7 +280,11 @@ def _report(result: dict) -> None:
         for seq, issued in sorted(result["sequences"].items()):
             burned = (result.get("burned") or {}).get(seq)
             tail = "" if burned is None else f"   (burned {burned:,} in DuckDB)"
-            print(f"  {seq:<32} {issued}{tail}")
+            # None is a table with no id in Postgres at all — chain 4's
+            # contacts — not an unread value; DuckDB's own MAX is the floor.
+            shown = ("Postgres keeps no sequence for it; floored on DuckDB's "
+                     "own MAX" if issued is None else issued)
+            print(f"  {seq:<32} {shown}{tail}")
     handover = result.get("handover") or []
     if handover:
         print("\nwhat the copy overwrites or carries (none of it blocking):")

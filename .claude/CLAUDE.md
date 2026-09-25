@@ -156,6 +156,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/warehouse/status` | Last refresh, checksums, validation_passed; `cutover` — step 13's unmet preconditions (DN-28) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/mirror/backfill/orders` | Ship the orders Postgres is missing; idempotent (POST, admin) |
+| `/api/mirror/backfill/buyers` | Re-ship every buyer and contact DuckDB holds, detached; chain 4's pre-flip lever (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
 
@@ -1321,8 +1322,29 @@ changed nothing about which store is written, and four things about how:
   day old and never landed. Running with the flag off is the point: its false
   positives are measured before the flip. It read zero of each on 2026-09-24.
 
+PR-2 made the way back ready, still with no chain registered and nothing
+routed differently:
+
+- **One writer of buyer rows**, `core.pg_buyer_rows._write_buyer_rows` — the
+  mirror runs it now and the chain will. The rows go on the caller's
+  transaction (the chain proves its first write by the owner row sharing an
+  `xmin` with the row) and it never touches `meta.mirror_state`, which stays
+  the mirror's. It lives outside the chain module on purpose: the registry
+  walk derives `BUYER_UNIT` from the function that writes it and skips chain
+  modules.
+- **`app.buyer_gender.decided_at` is compared** every morning (decision 7):
+  the hourly derive restamps only the verdicts it writes and the copy ships
+  the value as it stands. Per row now, so a re-derive is forgiven for the
+  90-minute grace and no longer.
+- **`buyer_contacts` left `snapshot_validation.MONOTONE`**: its writers replace
+  a buyer's contacts whole, so a count that fell is not a loss.
+- **The copy-back knows mirrored tables** — see "A write flag is no longer a
+  rollback" — and `POST /api/mirror/backfill/buyers` is the lever its
+  pre-flip handover names.
+
 The chain itself, its rollback under the DN-06 latch and the owner's decisions
-are in `.planning/DUCKDB_EXIT_CHAIN4_PLAN.md`.
+are in `.planning/DUCKDB_EXIT_CHAIN4_PLAN.md`, revised against today's main in
+`.planning/DUCKDB_EXIT_CHAIN4_PLAN_REV2.md`.
 
 ### The Postgres mirror of landing
 One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
@@ -2470,8 +2492,10 @@ rather than writing DuckDB.
 
 The disagreement is never silent — `/api/health` publishes `latched`,
 `latched_at` and `mismatch` per chain, the canary pages `write_chain_flag_mismatch`
-(WARN) within one probe, the shipper stamps the chain's tables failing, and the
-daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
+(WARN) within one probe, the shipper stamps failing the chain's tables it ships
+itself (never a table another shipper carries — chain 4's bronze buyers are the
+buyers mirror's, and a stamp there only that mirror's next success could clear),
+and the daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
 (both CRITICAL) — and `chain_owner_unregistered` for an owner row no chain in
 the running build declares. Today nothing is latched: `app.manual_expenses` holds zero
 rows, so chain 8's flag can still be moved freely, and the first typed expense
@@ -2544,7 +2568,22 @@ the ids and the two levers.
 Its specs are derived rather than written out — `_FULL_REPLACE` and
 `_APPEND_ABOVE` intersected with the chain's `CHAIN_TABLES`, plus the daily
 comparison's own specs — and a chain table with no shipping shape or no
-comparison spec **raises** instead of being skipped. The two big tables are
+comparison spec **raises** instead of being skipped. Chain 4 added a third
+source, `MIRRORED_LANDING_TABLES`: `bronze.buyers` and `bronze.buyer_contacts`
+are shipped by the buyers mirror from the same parse as DuckDB and nothing
+replaces them whole. Their handover is stricter because it can be — Postgres
+dates every write of a buyer (`mirrored_at = now()`), and the owner row's
+`updated_at` is `now()` in the latching transaction, one clock. Before a flip
+any difference, either side, is CRITICAL and names its lever:
+`POST /api/mirror/backfill/buyers`, which re-ships every buyer DuckDB holds
+(detached, heavy lock per portion; it moves every `mirrored_at`, so the
+search index re-indexes everything and `buyers_without_verdict` is blind for
+90 minutes). After the latch a difference, or a contact only DuckDB holds, is
+INFO only for a buyer the chain rewrote since the latch, CRITICAL otherwise
+(decision 6); a buyer only DuckDB holds always refuses — the chain never
+deletes one. For every chain, a Postgres row with NULL where DuckDB declares
+NOT NULL (read from DuckDB's catalogue) is a handover CRITICAL, so `--handover`
+refuses what `--execute` would otherwise have died on at its first INSERT. The two big tables are
 compared row by row rather than by fingerprint, because the fingerprint's one
 blind spot — a text column rewritten to the same length — is affordable every
 morning and not affordable in the comparison that releases a latch.

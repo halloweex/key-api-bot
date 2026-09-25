@@ -109,6 +109,21 @@ class TestMonotone:
         v = validate_snapshot(_healthy(), previous_counts=previous)
         assert v.ok
 
+    def test_fewer_buyer_contacts_is_a_buyer_who_dropped_a_number(self):
+        """Both writers replace a buyer's contacts wholesale, and chain 4's
+        copy-back writes back whatever Postgres holds — one fewer contact is
+        not a lost row, and rejecting it would reject every night after."""
+        v = validate_snapshot(
+            _healthy(buyer_contacts=32_700),
+            previous_counts=_healthy(),
+        )
+        assert v.ok, v.errors
+
+    def test_buyers_still_may_not_be_empty(self):
+        v = validate_snapshot(_healthy(buyers=0), previous_counts=_healthy())
+        assert not v.ok
+        assert any("buyers" in e for e in v.errors)
+
 
 class TestEmptyMustBeDeclared:
     def test_the_historical_case_passes_but_is_named(self):
