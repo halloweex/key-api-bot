@@ -583,6 +583,28 @@ def check_warehouse_writer_mode(payload: Optional[dict]) -> "list[tuple[str, str
     return []
 
 
+def check_warehouse_preconditions(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `warehouse_writer_mode` block: KS_WRITE_WAREHOUSE=postgres
+    with a precondition of the switch unmet (DN-29).
+
+    Pages, unlike the typo: web runs as duckdb (OD-09 (b) — never a raise, it
+    is the only syncer), so the numbers keep coming — but somebody deployed
+    the switch that retires DuckDB's derivation, the owner's decision behind
+    it has not taken effect, and the flip is the moment to hear that, not the
+    next audit. The keys name what to do; the details are on the admin status
+    page. An absent block or field is not a failure; an older web publishes
+    none."""
+    block = (payload or {}).get("warehouse_writer_mode")
+    if not isinstance(block, dict):
+        return []
+    unmet = block.get("preconditions_unmet")
+    if not isinstance(unmet, list) or not unmet:
+        return []
+    return [("warehouse_preconditions_unmet",
+             "KS_WRITE_WAREHOUSE=postgres ran as duckdb, unmet: "
+             + ", ".join(str(key) for key in unmet))]
+
+
 def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
     """Judge the `utm_parse` block: a KS_UTM_PARSE web ran as `duckdb` instead
     of what was set — a value it did not understand, or `postgres` without
@@ -714,6 +736,14 @@ async def run_canary(
         if warehouse_mode_failures and severity == "ok":
             severity = "warn"
 
+        # KS_WRITE_WAREHOUSE=postgres held back by an unmet precondition.
+        # Pages: the switch somebody deployed did not happen (OD-09 (b)).
+        warehouse_unmet = check_warehouse_preconditions(payload)
+        for key, message in warehouse_unmet:
+            fail(key, message)
+        if warehouse_unmet:
+            severity = "critical"
+
         # A KS_UTM_PARSE web ran as duckdb instead. Warn, for the same reason:
         # the copy /traffic has always had is still shipped.
         utm_mode_failures = check_utm_parse_mode(payload)
@@ -793,6 +823,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("health_status", "/api/health names what degraded; a restart won't fix a migration"),
     ("cert_expiring", "Check certbot on the host — auto-renew broke"),
     ("cert_unreachable", "TLS handshake fails: nginx or the network, not the app"),
+    ("warehouse_preconditions_unmet",
+     "Read cutover.unmet on /api/warehouse/status; meet each, or unset KS_WRITE_WAREHOUSE; recreate web"),
     ("mirror_", "Check meta.mirror_state and web's log; the mirror re-ships itself"),
     ("dq_", "Check /api/jobs — nothing is verifying the warehouse meanwhile"),
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),

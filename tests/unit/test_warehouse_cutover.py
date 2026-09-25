@@ -1,5 +1,7 @@
 """Step 13a (DN-28): the warehouse writer's mode, what it stands down, and the
-precondition evaluator. Nothing here switches, and these pin that too.
+precondition evaluator. The switch those feed is DN-29's, and its own tests are
+in `tests/unit/test_warehouse_writer.py`; what is pinned here of it is that
+`postgres` with a precondition unmet still runs as `duckdb`.
 
 The integrity plumbing the stand-down feeds — the scan skipping the checks and
 the twins standing in — is in `tests/unit/test_pg_warehouse_dq.py`; the
@@ -34,8 +36,8 @@ def fresh(monkeypatch):
 
 @pytest.fixture
 def postgres_writer(monkeypatch):
-    """The state DN-29 makes reachable. This build never configures it, so the
-    plumbing that consumes it is proven by setting it directly."""
+    """The state DN-29 reaches when every precondition holds, set directly so
+    the plumbing that consumes it is proven without assembling them."""
     monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
 
 
@@ -63,24 +65,26 @@ class TestTheMode:
         # web's startup and the scheduler both configure: one ERROR per cause.
         assert caplog.text.count("postgress") == 1
 
-    def test_postgres_is_read_and_published_and_not_acted_on(
+    def test_postgres_with_its_preconditions_unmet_runs_as_duckdb(
         self, fresh, monkeypatch, caplog,
     ):
-        """The switch is DN-29. Half of it — the checks stood down while
-        DuckDB goes on deriving — must not be reachable from the variable."""
+        """OD-09 (b): nothing in this environment is met, so the value is
+        read, the verdict published, and DuckDB goes on deriving with every
+        check up — the other half of a switch never reached."""
         monkeypatch.setenv(wc.ENV, " Postgres ")
         with caplog.at_level(logging.WARNING, logger="core.warehouse_cutover"):
             assert fresh.configure_mode() == "duckdb"
         assert fresh.value() == "postgres" and fresh.mode_error() is None
-        assert not fresh.writes_postgres()
+        assert not fresh.writes_postgres() and fresh.duckdb_derives()
         assert fresh.stood_down_duckdb_checks() == frozenset()
-        assert "DN-29" in caplog.text
+        assert "precondition(s) of the switch are unmet" in caplog.text
         status = fresh.status()
         assert (status["value"], status["mode"], status["switch_built"]) == (
-            "postgres", "duckdb", False)
+            "postgres", "duckdb", True)
+        assert "pg_derive_own" in {u["key"] for u in status["preconditions_unmet"]}
 
-    def test_this_build_does_not_carry_the_switch(self):
-        assert wc.SWITCH_BUILT is False
+    def test_this_build_carries_the_switch(self):
+        assert wc.SWITCH_BUILT is True
 
     def test_configure_modes_reads_it_before_the_boot_sync(self, fresh, monkeypatch):
         """Read where every cached mode is read (DN-05b), so DN-29 finds it
@@ -646,13 +650,13 @@ class TestReadiness:
             body = asyncio.run(wc.readiness({**MET_ENV, "KS_UTM_PARSE": "duckdb"}))
         assert body["variable"] == "KS_WRITE_WAREHOUSE"
         assert (body["value"], body["mode"], body["switch_built"]) == (
-            "postgres", "duckdb", False)
+            "postgres", "duckdb", True)
         assert body["preconditions_met"] is False
         assert [u["key"] for u in body["unmet"]] == ["utm_parse_postgres"]
         assert body["preconditions"] == KEYS
         assert body["stood_down_duckdb_checks"] == []
 
-    def test_all_met_says_so_and_still_switches_nothing(self, fresh):
+    def test_all_met_says_so_and_a_readiness_switches_nothing(self, fresh):
         fresh.configure_mode()
         with patch("core.pg.current_revision",
                    AsyncMock(return_value=REQUIRED_REVISION)):

@@ -359,16 +359,24 @@ async def refresh_warehouse(
     admin: dict = Depends(require_admin),
 ):
     """Manually trigger warehouse layer refresh (Silver -> Gold). Requires admin."""
+    from core import warehouse_cutover
     from core.scheduler import get_scheduler
 
-    store = await get_store()
-    # Under the heavy-job lock, like the two-minute job that runs the same
-    # code. Without it a manual refresh interleaved with the scheduled one:
-    # a validation reading Bronze/Silver across the other's commits reported
-    # a correct rebuild as failed, and the two raced each other's fired and
-    # resolved notices for the same alert group.
-    async with get_scheduler()._heavy_job_lock:
-        result = await store.refresh_warehouse_layers(trigger="manual")
+    if warehouse_cutover.duckdb_derives():
+        store = await get_store()
+        # Under the heavy-job lock, like the two-minute job that runs the same
+        # code. Without it a manual refresh interleaved with the scheduled one:
+        # a validation reading Bronze/Silver across the other's commits reported
+        # a correct rebuild as failed, and the two raced each other's fired and
+        # resolved notices for the same alert group.
+        async with get_scheduler()._heavy_job_lock:
+            result = await store.refresh_warehouse_layers(trigger="manual")
+    else:
+        # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB no longer derives, and
+        # the lever is the Postgres derivation below — own is a precondition
+        # of the switch, so it always runs here.
+        result = {"status": "skipped", "trigger": "manual",
+                  "reason": "KS_WRITE_WAREHOUSE=postgres: DuckDB does not derive"}
     # The lever every Silver/Gold alert names. Under KS_PG_DERIVE=own it
     # rebuilds the Postgres layers too — otherwise it would repair the engine
     # the dashboard no longer reads and leave the one it does as it was.
@@ -389,28 +397,36 @@ async def rebuild_silver_from_scratch(
     DROP + CREATE + INSERT silver_orders from bronze. Bypasses MVCC —
     use when silver has corrupted rows blocking DELETE+INSERT rebuild.
     """
+    from core import warehouse_cutover
     from core.duckdb_store import (
         SILVER_ORDERS_DDL, silver_select_sql, silver_pass2_sql,
     )
 
-    store = await get_store()
+    if not warehouse_cutover.duckdb_derives():
+        # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB's Silver is frozen on
+        # purpose, and rebuilding it would hand no tick anything to validate —
+        # the refresh job is not registered. The Postgres half below still runs.
+        result = {"status": "skipped",
+                  "reason": "KS_WRITE_WAREHOUSE=postgres: DuckDB does not derive"}
+    else:
+        store = await get_store()
 
-    async with store.connection() as conn:
-        conn.execute("DROP TABLE IF EXISTS silver_orders")
-        conn.execute(SILVER_ORDERS_DDL)
-        conn.execute(f"INSERT INTO silver_orders SELECT {silver_select_sql()} FROM orders o")
-        conn.execute(silver_pass2_sql())
-        count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
-        max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
+        async with store.connection() as conn:
+            conn.execute("DROP TABLE IF EXISTS silver_orders")
+            conn.execute(SILVER_ORDERS_DDL)
+            conn.execute(f"INSERT INTO silver_orders SELECT {silver_select_sql()} FROM orders o")
+            conn.execute(silver_pass2_sql())
+            count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
+            max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
 
-    logger.info(f"Rebuilt silver_orders from scratch: {count} rows, max_date={max_date}")
-    # DROP/CREATE/INSERT are autocommit statements on purpose (this endpoint
-    # exists to bypass the transactional path when Silver is already
-    # misbehaving), so an INSERT that dies leaves Silver empty. Marking dirty
-    # hands the result to the next refresh tick, which validates it and, if it
-    # is half-done, rebuilds it.
-    await store.mark_warehouse_dirty(None)
-    result = {"status": "ok", "silver_rows": count, "max_order_date": str(max_date)}
+        logger.info(f"Rebuilt silver_orders from scratch: {count} rows, max_date={max_date}")
+        # DROP/CREATE/INSERT are autocommit statements on purpose (this endpoint
+        # exists to bypass the transactional path when Silver is already
+        # misbehaving), so an INSERT that dies leaves Silver empty. Marking dirty
+        # hands the result to the next refresh tick, which validates it and, if it
+        # is half-done, rebuilds it.
+        await store.mark_warehouse_dirty(None)
+        result = {"status": "ok", "silver_rows": count, "max_order_date": str(max_date)}
     from core import pg_derivation
 
     if pg_derivation.owns():

@@ -1,47 +1,59 @@
-"""Step 13a (DN-28): the warehouse writer's mode, what it stands down, and
-whether this deployment is ready for the switch. **Nothing here switches.**
+"""Step 13 (DN-28, DN-29): the warehouse writer's mode, what it stands down,
+whether this deployment is ready for the switch — and the switch.
 
 Step 13 stops DuckDB deriving Silver, Gold and the UTM verdicts, and leaves
-Postgres the only engine that computes them. The switch itself is DN-29. This
-is everything the switch needs in place before it can be built, and nothing
-that changes what production does:
+Postgres the only engine that computes them. DN-28 built everything the switch
+needed in place; DN-29 is the switch.
 
 - **`KS_WRITE_WAREHOUSE` is read once, in `core.runtime_modes.configure_modes()`**,
   before web's boot sync — a mode cached at scheduler start misses everything
   the boot does (DN-05b), and on an empty DuckDB the boot runs a full rebuild.
-  `duckdb` is the default. An unknown value runs as `duckdb` and publishes the
-  error — on `/api/health` under `warehouse_writer_mode`, where the canary
-  warns `warehouse_mode_invalid` — `KS_PG_DERIVE`'s rule and OD-09's
-  recommendation: web is the only syncer, so refusing to start over this
-  variable would stop order intake.
-  `postgres` is understood and published, and **still runs as `duckdb`**: the
-  switch is not in this build (`SWITCH_BUILT`), and a value that stood the
-  DuckDB checks down while DuckDB went on deriving would be half a switch.
-- **`stood_down_duckdb_checks()`** names the DuckDB integrity checks that read
-  Silver, Gold or UTM and so go wrong on a frozen table — the arc pages four
-  times a day for rows that are fine, attribution and the Gold recompute go
-  vacuously green. The integrity scan skips them and the Postgres twins stop
-  comparing against them, so the twins file their own findings: the standalone
-  path the DN-14 pairing record has been recording in shadow. Empty while the
-  mode is `duckdb`, which in this build is always.
+  `duckdb` is the default, and under it nothing here changes a byte of what
+  DuckDB does. An unknown value runs as `duckdb` and publishes the error — on
+  `/api/health` under `warehouse_writer_mode`, where the canary warns
+  `warehouse_mode_invalid` — `KS_PG_DERIVE`'s rule and OD-09's answer: web is
+  the only syncer, so refusing to start over this variable would stop order
+  intake.
+- **`postgres` switches only when every precondition holds** —
+  `evaluate_preconditions` over the environment and the facts it cannot
+  hold, the Postgres revision among them. One unmet item and the process runs
+  as `duckdb` and publishes the keys of what is unmet; the canary pages
+  `warehouse_preconditions_unmet` (CRITICAL). OD-09 (b): never a raise. The
+  verdict is reached once per process and kept, so web's startup and the
+  scheduler cannot disagree about it — a revision read that timed out the
+  second time must not hand a boot that ran under `postgres` a scheduler that
+  runs under `duckdb`.
+- **Under `postgres`** DuckDB stops deriving: `duckdb_derives()` is False, so
+  the `warehouse_refresh` job is not registered, every production call of
+  `refresh_warehouse_layers` is skipped (a test walks them), the DuckDB half of
+  rebuild-silver is skipped, and `mark_warehouse_dirty` is a no-op. The DuckDB
+  checks over Silver, Gold and UTM stand down (`stood_down_duckdb_checks`), as
+  do the three mirror-landing comparisons that set DuckDB's Silver, Gold and
+  UTM against Postgres'.
+- **The writer is recorded** in DuckDB's `sync_metadata` under
+  `warehouse_writer` by `settle_writer`, once per process before the boot sync.
+  The first start under `postgres` records it and closes the `warehouse` alert
+  group — its only resolver was the DuckDB tick, which no longer runs — once,
+  recorded, so a second restart does not announce it again.
+- **The way back.** A start under `duckdb` that finds `postgres` recorded owes
+  DuckDB a full rebuild: it marks the warehouse dirty in full, and holds the
+  stood-down checks down until a full tick validates — the Silver they would
+  read is as old as the switch. When DuckDB's `silver_order_utm` is empty (a
+  Sunday compaction ran in between) it also flags a reclassify as needed.
 - **`evaluate_preconditions(env, facts)`** names every unmet precondition of
   the switch, one entry each, so the readiness a person reads is a list of
   things to do rather than a "no". Pure over what it is handed.
   `readiness()` gathers the facts and is what `GET /api/warehouse/status`
   publishes under `cutover`.
-
-The preconditions are the plan's, named by the variable an operator sets and
-the value it needs — `KS_UTM_PARSE` and the enforcement behind
-`KS_READ_FALLBACK=off` are built on other branches, and this names them by
-value rather than importing them. A precondition met is not a promise that the
-code behind it is deployed; DN-29 depends on those branches being merged.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -51,20 +63,32 @@ DUCKDB = "duckdb"
 POSTGRES = "postgres"
 _VALID = (DUCKDB, POSTGRES)
 
-# DN-29 builds the switch. Until then `postgres` is read, published and not
-# acted on — `configure_mode` never answers it.
-SWITCH_BUILT = False
+# DN-29: `postgres` is acted on when its preconditions hold.
+SWITCH_BUILT = True
 
 _value: Optional[str] = None
 _mode: Optional[str] = None
 _mode_error: Optional[str] = None
+# The unmet preconditions `configure_mode` found for `postgres`, and the value
+# the verdict was reached for — kept for the life of the process.
+_unmet: Tuple["Unmet", ...] = ()
+_decided_for: Optional[str] = None
+# What `settle_writer` found and did, per process — see THE RECORDED WRITER.
+_settled = False
+_held = False
+_reclassify_needed = False
+_writer_record: Optional[Dict[str, Any]] = None
 
 
 def configure_mode() -> str:
     """Read `KS_WRITE_WAREHOUSE` once. Never raises. Called by
     `configure_modes()`; idempotent, and logs a cause once rather than on every
-    call — web's startup and the scheduler both configure."""
-    global _value, _mode, _mode_error
+    call — web's startup and the scheduler both configure.
+
+    Under `postgres` the preconditions are evaluated here, the Postgres
+    revision included (`_gather_facts_blocking`), and only the first call of a
+    process asks: the verdict is kept."""
+    global _value, _mode, _mode_error, _unmet, _decided_for
     value = os.getenv(ENV, DUCKDB).strip().lower() or DUCKDB
     if value in _VALID:
         error = None
@@ -73,15 +97,26 @@ def configure_mode() -> str:
                  f"running as {DUCKDB!r}")
     if error and error != _mode_error:
         logger.error(error)
-    if value == POSTGRES and _value != POSTGRES and not SWITCH_BUILT:
-        logger.warning(
-            "%s=postgres is read but this build does not carry the switch "
-            "(DN-29): DuckDB goes on deriving and every DuckDB check stays up",
-            ENV)
     _value, _mode_error = value, error
-    # The one line DN-29 changes: it answers `postgres` here when the value
-    # asks for it and `evaluate_preconditions` finds nothing unmet.
-    _mode = DUCKDB
+    if value != POSTGRES:
+        _mode, _unmet, _decided_for = DUCKDB, (), None
+        return _mode
+    if _decided_for == POSTGRES and _mode is not None:
+        return _mode
+    env = os.environ
+    unmet = tuple(evaluate_preconditions(env, _gather_facts_blocking(env)))
+    _unmet, _decided_for = unmet, POSTGRES
+    if unmet:
+        _mode = DUCKDB
+        logger.critical(
+            "%s=postgres, but %d precondition(s) of the switch are unmet — "
+            "running as duckdb, DuckDB goes on deriving: %s", ENV, len(unmet),
+            "; ".join(f"{u.key}: {u.detail}" for u in unmet))
+    else:
+        _mode = POSTGRES
+        logger.warning(
+            "%s=postgres and every precondition holds: DuckDB no longer derives "
+            "Silver, Gold or the UTM verdicts in this process", ENV)
     return _mode
 
 
@@ -99,9 +134,29 @@ def mode_error() -> Optional[str]:
     return _mode_error
 
 
+def preconditions_unmet() -> Tuple["Unmet", ...]:
+    """What held `postgres` back at start; empty unless it was asked for."""
+    return _unmet
+
+
 def writes_postgres() -> bool:
     """Postgres alone derives the warehouse. Reads the cache, never the env."""
     return _mode == POSTGRES
+
+
+def duckdb_derives() -> bool:
+    """DuckDB derives its own Silver and Gold in this process — the predicate
+    every production call of `refresh_warehouse_layers` stands behind, and
+    `mark_warehouse_dirty` and the `warehouse_refresh` job with it.
+    `tests/unit/test_warehouse_writer.py` walks for a call that does not."""
+    return not writes_postgres()
+
+
+def warehouse_checks_stand_down() -> bool:
+    """The DuckDB checks over Silver, Gold and UTM — and the mirror-landing
+    comparisons of those tables — do not run: Postgres alone derives, or the
+    way back is still owed its first validated full tick (`held()`)."""
+    return writes_postgres() or _held
 
 
 # ─── What stands down ────────────────────────────────────────────────────────
@@ -136,8 +191,9 @@ STOOD_DOWN_WHEN_POSTGRES: FrozenSet[str] = frozenset({
 
 def stood_down_duckdb_checks() -> FrozenSet[str]:
     """The DuckDB integrity checks that do not run, and that the twins do not
-    compare against, in this process. Empty unless Postgres alone derives."""
-    return STOOD_DOWN_WHEN_POSTGRES if writes_postgres() else frozenset()
+    compare against, in this process. Empty unless Postgres alone derives, or
+    the way back has not yet validated a full DuckDB tick."""
+    return STOOD_DOWN_WHEN_POSTGRES if warehouse_checks_stand_down() else frozenset()
 
 
 # ─── What the stood-down checks leave behind ─────────────────────────────────
@@ -339,14 +395,34 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
     return unmet
 
 
-async def gather_facts(env: Optional[Mapping[str, str]] = None) -> Facts:
+async def _revision_on_its_own_connection(dsn: str) -> Optional[str]:
+    """The Alembic revision, read on a connection opened for it and closed
+    after — never the application's pool, which belongs to the loop that
+    opened it (see `_gather_facts_blocking`)."""
+    import asyncpg
+
+    from core.pg import current_revision
+
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        return await current_revision(conn)
+    finally:
+        await conn.close()
+
+
+async def gather_facts(env: Optional[Mapping[str, str]] = None, *,
+                       own_connection: bool = False) -> Facts:
     """The facts `evaluate_preconditions` needs from outside the environment.
     Never raises: a fact that cannot be read is reported as unmet, by why.
 
     An exception is published by its class alone and logged whole at ERROR:
     a driver's text names the database user, the host and the port, and a
     status page — admin-only or not — is not where those go. `/api/health`'s
-    rule, and the log is where a person goes next anyway."""
+    rule, and the log is where a person goes next anyway.
+
+    `own_connection` reads the revision on a connection of its own instead of
+    the pool: what `configure_mode` needs, from a loop that is not the
+    application's."""
     env = os.environ if env is None else env
     from core.pg import REQUIRED_REVISION
 
@@ -357,8 +433,9 @@ async def gather_facts(env: Optional[Mapping[str, str]] = None) -> Facts:
         try:
             from core.pg import current_revision
 
-            revision = await asyncio.wait_for(
-                current_revision(), timeout=REVISION_READ_TIMEOUT_S)
+            read = (_revision_on_its_own_connection(env[PG_DSN].strip())
+                    if own_connection else current_revision())
+            revision = await asyncio.wait_for(read, timeout=REVISION_READ_TIMEOUT_S)
             if revision is None:
                 revision_error = "Postgres recorded no Alembic revision"
         except asyncio.TimeoutError:
@@ -394,14 +471,217 @@ async def gather_facts(env: Optional[Mapping[str, str]] = None) -> Facts:
                  open_retired=open_retired, open_retired_error=open_retired_error)
 
 
+def _gather_facts_blocking(env: Mapping[str, str]) -> Facts:
+    """`gather_facts`, from synchronous code — `configure_mode`'s. Never raises.
+
+    `configure_modes()` is synchronous and web calls it inside its own event
+    loop, before the boot sync, so the revision cannot be awaited there; and it
+    must not be read through `core.pg.get_pool()` from another loop either — a
+    pool opened on a loop that then ends is a pool nobody after it can use. So
+    it is read in a worker thread, on a loop and a connection of its own,
+    bounded by `REVISION_READ_TIMEOUT_S`. It blocks the caller for at most that
+    long, once per process, and only when `postgres` is asked for."""
+    import concurrent.futures
+
+    def run() -> Facts:
+        return asyncio.run(gather_facts(env, own_connection=True))
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="warehouse-cutover") as pool:
+            return pool.submit(run).result()
+    except Exception as exc:  # noqa: BLE001 — gather_facts promises not to; unmet, by class
+        logger.error("cutover preconditions could not be gathered: %s: %s",
+                     type(exc).__name__, exc)
+        name = type(exc).__name__
+        from core.pg import REQUIRED_REVISION
+
+        return Facts(revision_error=name, required_revision=REQUIRED_REVISION,
+                     bridge_owners=None, bridge_error=name,
+                     open_retired=None, open_retired_error=name)
+
+
+# ─── THE RECORDED WRITER ─────────────────────────────────────────────────────
+#
+# The mode is per process; the question "did Postgres alone derive since DuckDB
+# last did?" outlives it. It is written into DuckDB's own `sync_metadata`,
+# under `warehouse_writer`, as JSON: `{"writer": "postgres", "since": …,
+# "resolved": …}` from the first start under `postgres`, and `{"writer":
+# "duckdb", "since": …}` once the way back has validated a full DuckDB tick.
+# Absent means DuckDB has always derived, and a start under `duckdb` that
+# finds it absent writes nothing — the default path is unchanged.
+#
+# DuckDB and not Postgres: the way back must be readable by the process that
+# needs it, from the file whose Silver it describes. `sync_metadata` survives
+# the Sunday compaction (only the derived tables are dropped there), and the
+# hourly copy carries the row to `app.sync_metadata` like every other key; it
+# is never deleted, so it is not one of the transient keys that copy excludes.
+#
+# Why both halves are needed, in the order they were found:
+#
+# - **Once, the resolve.** The `warehouse` alert group's only resolver is the
+#   DuckDB tick (`refresh_warehouse_layers`), which never runs again under
+#   `postgres`. A page it delivered would stand open forever, so the first
+#   start under `postgres` closes the group — without a validating tick, which
+#   is the price the design names — and records that it did. `resolved` stays
+#   False only when the ledger could not record the resolution and the gate
+#   kept the keys; the next start tries again.
+# - **The way back.** On a rollback the warehouse_refresh job is registered
+#   again and its first tick would peek the id list abandoned at the switch — a
+#   list, not "full" — and run an incremental rebuild over a Silver as old as
+#   the switch; its checksums compare Silver with Gold, which agree, so it
+#   would validate. So a start under `duckdb` that finds `postgres` recorded
+#   marks the warehouse dirty in full, before anything registers, and holds the
+#   stood-down checks and the three mirror comparisons down until a full tick
+#   validates. That tick writes `duckdb` back.
+
+WRITER_KEY = "warehouse_writer"
+# Appended to the resolve the first start under `postgres` announces.
+RESOLVE_NOTE = ("DuckDB derivation retired (KS_WRITE_WAREHOUSE=postgres): the "
+                "warehouse group is closed without a validating tick")
+
+_settle_lock: Optional[asyncio.Lock] = None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def read_writer(store) -> Optional[Dict[str, Any]]:
+    """The recorded writer, or None when nothing was ever recorded. A value
+    that is not the JSON this module writes is read as `postgres` unresolved:
+    the cautious answer costs one full DuckDB rebuild, the other would skip
+    one that is owed."""
+    async with store.connection() as conn:
+        row = conn.execute("SELECT value FROM sync_metadata WHERE key = ?",
+                           [WRITER_KEY]).fetchone()
+    if not row or not isinstance(row[0], str) or not row[0]:
+        return None
+    try:
+        record = json.loads(row[0])
+        if isinstance(record, dict) and record.get("writer") in _VALID:
+            return record
+    except ValueError:
+        pass
+    logger.error("sync_metadata.%s holds %r, which this build did not write; "
+                 "read as postgres", WRITER_KEY, row[0])
+    return {"writer": POSTGRES, "resolved": False, "unreadable": True}
+
+
+async def _write_writer(store, record: Dict[str, Any]) -> None:
+    async with store.connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP)",
+            [WRITER_KEY, json.dumps(record, sort_keys=True)])
+
+
+async def _count_utm_rows(store) -> int:
+    async with store.connection() as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM silver_order_utm").fetchone()[0])
+
+
+async def _resolve_the_warehouse_group() -> bool:
+    """Close the `warehouse` group; whether nothing of it is left delivered."""
+    from core.alerting import delivered_conditions, resolve_group
+
+    try:
+        await resolve_group("warehouse", note=RESOLVE_NOTE)
+    except Exception as exc:  # noqa: BLE001 — retried by the next start
+        logger.error("warehouse group resolve raised: %s: %s", type(exc).__name__, exc)
+        return False
+    return not any(group == "warehouse" for group in delivered_conditions().values())
+
+
+async def settle_writer(store) -> Dict[str, Any]:
+    """Record the writer and settle what a change of writer owes. Once per
+    process, and before anything derives: web's boot sync calls it first, the
+    scheduler's start and the refresh tick again (a no-op once settled). Raises
+    what DuckDB raises; a caller that cannot afford that catches it, and the
+    next caller tries again."""
+    global _settled, _held, _reclassify_needed, _writer_record, _settle_lock
+    if _settled:
+        return status()
+    if _settle_lock is None:
+        _settle_lock = asyncio.Lock()
+    async with _settle_lock:
+        if _settled:
+            return status()
+        record = await read_writer(store)
+        if writes_postgres():
+            if record is None or record.get("writer") != POSTGRES:
+                record = {"writer": POSTGRES, "since": _now_iso(), "resolved": False}
+                await _write_writer(store, record)
+                logger.warning(
+                    "warehouse writer recorded as postgres: DuckDB's Silver, Gold "
+                    "and UTM verdicts are frozen from now, and the id list pending "
+                    "in warehouse_dirty is abandoned")
+            if not record.get("resolved"):
+                if await _resolve_the_warehouse_group():
+                    record = {**record, "resolved": True, "resolved_at": _now_iso()}
+                    await _write_writer(store, record)
+                else:
+                    logger.warning("the warehouse group is not yet closed; the next "
+                                   "start under postgres tries again")
+        elif record is not None and record.get("writer") == POSTGRES:
+            await store.mark_warehouse_dirty(None)
+            _held = True
+            _reclassify_needed = await _count_utm_rows(store) == 0
+            logger.warning(
+                "warehouse writer back to duckdb from postgres (since %s): a full "
+                "DuckDB rebuild is owed and marked; the DuckDB checks over Silver, "
+                "Gold and UTM stay down until a full tick validates%s",
+                record.get("since"),
+                "; silver_order_utm is empty — POST /api/traffic/reclassify"
+                if _reclassify_needed else "")
+        _writer_record = record
+        _settled = True
+    return status()
+
+
+async def note_refresh(store, *, silver_mode: str, validation_passed: bool) -> bool:
+    """Called by `refresh_warehouse_layers` after every successful tick: a full
+    one that validated ends the way back's hold, and writes `duckdb` back as
+    the recorded writer. Whether it did. Nothing at all unless held."""
+    global _held, _reclassify_needed, _writer_record
+    if not _held or silver_mode != "full" or not validation_passed:
+        return False
+    record = {"writer": DUCKDB, "since": _now_iso()}
+    await _write_writer(store, record)
+    _writer_record, _held = record, False
+    _reclassify_needed = await _count_utm_rows(store) == 0
+    logger.warning(
+        "warehouse writer is duckdb again: a full DuckDB tick validated, and the "
+        "DuckDB checks over Silver, Gold and UTM resume%s",
+        "; silver_order_utm is still empty — POST /api/traffic/reclassify"
+        if _reclassify_needed else "")
+    return True
+
+
+def held() -> bool:
+    """The way back is owed its first validated full DuckDB tick."""
+    return _held
+
+
+def reclassify_needed() -> bool:
+    """DuckDB's `silver_order_utm` was found empty on the way back."""
+    return _reclassify_needed
+
+
 def status() -> Dict[str, Any]:
-    """The mode as this process read it. Local state, no I/O."""
+    """The mode as this process read it, and what settling found. Local state,
+    no I/O. `preconditions_unmet` is the verdict reached at start; the live
+    list is `readiness()`'s `unmet`."""
     return {
         "variable": ENV,
         "value": value(),
         "mode": mode(),
         "error": mode_error(),
         "switch_built": SWITCH_BUILT,
+        "preconditions_unmet": [{"key": u.key, "detail": u.detail} for u in _unmet],
+        "writer": _writer_record,
+        "held": _held,
+        "reclassify_needed": _reclassify_needed,
         "stood_down_duckdb_checks": sorted(stood_down_duckdb_checks()),
     }
 

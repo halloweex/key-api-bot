@@ -2162,9 +2162,9 @@ async def pg_gold_internal_check(*, max_samples: int = 10) -> List[IntegrityIssu
     reached only after `reconcile_gold` has read DuckDB's Gold. Step 13 retires
     that comparison, and with it the one check that sees the fine rows of
     sources 3 and 5 at all. So the same function gets a caller of its own:
-    registered in `dq_mirror_landing` while Postgres alone derives the
-    warehouse (`core.warehouse_cutover.writes_postgres()`), where
-    `reconcile_gold` passes `rollup_internal=False` — one verdict a run, under
+    registered in `dq_mirror_landing` in place of `reconcile_gold` while the
+    DuckDB comparisons stand down
+    (`core.warehouse_cutover.warehouse_checks_stand_down()`) — one verdict a run, under
     the same condition name, so a page carries over rather than resolving and
     reopening under another.
 
@@ -2279,15 +2279,16 @@ async def reconcile_gold(
         return issues
 
     pg_rollup, pg_fine = await fetch_pg_gold(pool)
-    # While Postgres alone derives, `pg_gold_internal_check` asks the roll-up
-    # question in the same run on its own; asking it here too would file it
-    # twice and tie it to the DuckDB read above.
-    from core.warehouse_cutover import writes_postgres
+    # While the DuckDB comparisons stand down, `pg_gold_internal_check` asks
+    # the roll-up question in the same run on its own; asking it here too
+    # would file it twice and tie it to the DuckDB read above. The job does
+    # not call this function then (DN-29); the predicate is the same one.
+    from core.warehouse_cutover import warehouse_checks_stand_down
 
     return issues + compare_gold(
         dk_rows, dk_fresh, pg_rollup, pg_fine,
         now=now, grace_minutes=grace_minutes, max_samples=max_samples,
-        rollup_internal=not writes_postgres(),
+        rollup_internal=not warehouse_checks_stand_down(),
     )
 
 

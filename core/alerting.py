@@ -112,6 +112,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_WAREHOUSE set to a value web did not understand (ran as duckdb,
     # DN-28). Not a stop: web is the only syncer.
     "warehouse_mode_invalid": _c("web restarts with a valid KS_WRITE_WAREHOUSE"),
+    # KS_WRITE_WAREHOUSE=postgres with a precondition of the switch unmet: web
+    # runs as duckdb (DN-29, OD-09 (b)) — never a raise, web is the only syncer.
+    "warehouse_preconditions_unmet": _c(
+        "web restarts with every precondition met, or with KS_WRITE_WAREHOUSE unset"),
     # KS_UTM_PARSE set to a value web did not understand, or to postgres
     # without KS_PG_DERIVE=own; ran as duckdb, the ship as before (DN-19).
     "utm_parse_mode_invalid": _c(
@@ -931,7 +935,7 @@ def _age(seconds: float) -> str:
 
 async def resolve_group(
     group: str, still_firing: "Sequence[str]" = (),
-    *, only_prefix: "str | None" = None,
+    *, only_prefix: "str | None" = None, note: "str | None" = None,
 ) -> int:
     """Announce that a group's delivered conditions have cleared.
 
@@ -941,6 +945,10 @@ async def resolve_group(
     only conditions whose fired notice reached someone are in the map, so
     "✅ resolved" can never be the first a human hears of a condition. One
     notice per fired-cycle: taking a key out of the map is the idempotence.
+
+    `note` is one more line under the list, for a resolve whose reason is not
+    a healthy pass — the warehouse group closed by the switch that retires its
+    only resolver (`core.warehouse_cutover.settle_writer`).
 
     Returns admins reached (0: nothing to resolve, or nothing deliverable).
     """
@@ -957,6 +965,8 @@ async def resolve_group(
         for key, first in sorted(taken.items())
     ]
     text = "✅ Resolved:\n" + "\n".join(lines)
+    if note:
+        text += "\n" + note
 
     # The ledger first, the notice second. A resolve whose fire-and-forget
     # write missed its one-second budget left the series firing for good —

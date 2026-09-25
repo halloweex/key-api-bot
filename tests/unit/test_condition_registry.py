@@ -232,12 +232,14 @@ def collect_canary_keys() -> set:
     # through fail(); a declared family, like disk's and memory's.
     keys |= {"alerting_block_missing", "alerting_transport_failing"}
     # check_derivation_mode, check_read_fallback_mode, check_utm_parse_mode,
-    # check_warehouse_writer_mode, check_write_chains, check_write_chain_latch
-    # and check_write_chain_precondition return their keys the same way.
+    # check_warehouse_writer_mode, check_warehouse_preconditions,
+    # check_write_chains, check_write_chain_latch and
+    # check_write_chain_precondition return their keys the same way.
     keys.add("derivation_mode_invalid")
     keys.add("read_fallback_mode_invalid")
     keys.add("utm_parse_mode_invalid")
     keys.add("warehouse_mode_invalid")
+    keys.add("warehouse_preconditions_unmet")
     keys.add("write_chain_flag_invalid")
     keys.add("write_chain_flag_mismatch")
     keys.add("write_chain_precondition_unmet")
