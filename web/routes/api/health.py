@@ -76,6 +76,26 @@ async def _mirror_freshness() -> "dict | None":
         return data
 
 
+def _buyer_sync() -> "dict | None":
+    """The buyers step's state, read from the sync service already running.
+
+    Never constructs one: a health probe must not start the thing it reports
+    on, and before the first sync there is simply nothing to say — None, which
+    the canary reads as "not judged" rather than as a failure. Local state
+    only, so it answers while either store is down.
+    """
+    from core import sync_service
+
+    service = sync_service._sync_service
+    if service is None:
+        return None
+    try:
+        return service.buyer_sync_health()
+    except Exception as e:  # noqa: BLE001 — a health probe never fails on this
+        logger.warning(f"buyer_sync block unavailable: {type(e).__name__}")
+        return None
+
+
 def _write_chains() -> dict:
     """Each write chain's KS_WRITE_* as understood now, and whether the chain
     has already written Postgres. Local state: the environment, plus the latch,
@@ -434,6 +454,7 @@ async def health_check(request: Request):
         "read_fallback_mode": _read_fallback_mode(),
         "warehouse_writer_mode": _warehouse_writer_mode(),
         "utm_parse": _utm_parse_mode(),
+        "buyer_sync": _buyer_sync(),
     }
 
 

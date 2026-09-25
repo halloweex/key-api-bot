@@ -475,6 +475,53 @@ def check_write_chain_precondition(payload: Optional[dict]) -> "list[tuple[str, 
     return [("write_chain_precondition_unmet", "write chains: " + "; ".join(parts))]
 
 
+# The buyers step, published by web as `buyer_sync` (chain 4, PR-1). The step
+# runs at most hourly by its watermark, so a success older than an hour and a
+# half means one hourly run has already been missed; three consecutive
+# failures that are neither KeyCRM nor data errors mean the retry is not going
+# to heal it. Warn in both cases: nothing is lost while buyers still land in
+# DuckDB and ship to Postgres behind them. Once chain 4 makes this step the
+# ONLY writer of buyers, a stall there is a CRITICAL of its own, added with
+# the chain — not here, where there is no chain to ask.
+BUYER_SYNC_STALE_S = 90 * 60
+BUYER_SYNC_FAILURES = 3
+
+
+def check_buyer_sync(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `buyer_sync` block: a buyers step that stopped succeeding.
+
+    An absent or null block is not judged — an older web publishes none, and a
+    web that has not started syncing yet has nothing to say. The age is
+    floored at web's start, so a process that has never completed the step is
+    as stale as its uptime rather than unknown.
+    """
+    block = (payload or {}).get("buyer_sync")
+    if not isinstance(block, dict):
+        return []
+    failures = _number(block.get("consecutive_failures")) or 0
+    age = _number(block.get("last_ok_age_s"))
+    if failures >= BUYER_SYNC_FAILURES:
+        return [("buyer_sync_stalled",
+                 f"buyer sync: {failures} failures in a row"
+                 f" ({block.get('last_error_class') or 'unknown'})")]
+    if age is not None and age > BUYER_SYNC_STALE_S:
+        # The step is attempted at least hourly, and every ten minutes after a
+        # failure. An attempt that is missing or as old as the success means
+        # the tick never REACHED the step — it stops earlier, at the orders
+        # fetch or write — and blaming the buyers step would send the reader
+        # to the wrong log line. Minutes, not `_format_age`: that truncates to
+        # hours, and "1h" read against a 90-minute threshold.
+        attempt = _number(block.get("last_attempt_age_s"))
+        if attempt is None or attempt > BUYER_SYNC_STALE_S:
+            return [("buyer_sync_stalled",
+                     f"buyer sync: step not reached for {age // 60} min — "
+                     "the incremental tick stops before it (orders fetch/write)")]
+        return [("buyer_sync_stalled",
+                 f"buyer sync: no success for {age // 60} min"
+                 f" ({block.get('last_error_class') or 'no error recorded'})")]
+    return []
+
+
 # How long a dropped derivation mark may stand before it says the heal is not
 # happening. A drop owes nothing — the rows landed, only the signal did not —
 # so in a quiet hour the rebuild that covers it is the hourly heartbeat. This is
@@ -754,6 +801,12 @@ async def run_canary(
             fail(key, message)
         if precondition_failures and severity == "ok":
             severity = "warn"
+        # The buyers step: warn. Its own reasons are in check_buyer_sync.
+        buyer_failures = check_buyer_sync(payload)
+        for key, message in buyer_failures:
+            fail(key, message)
+        if buyer_failures and severity == "ok":
+            severity = "warn"
 
     if cert_err:
         fail("cert_unreachable", f"cert check failed: {cert_err}")
@@ -798,6 +851,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),
     ("derivation_marks_",
      "Read meta.derivation_signal's last_error in meta.mirror_state, then meta.derivation_runs"),
+    ("buyer_sync_",
+     "grep web's log for 'Buyer' and 'Incremental sync'; 'step not reached' means the whole tick stops"),
     ("write_chain_flag_mismatch",
      "Set the named KS_WRITE_* back to postgres, or run scripts/chain_copy_back.py to hand the tables back"),
     ("read_fallback_mode_invalid",

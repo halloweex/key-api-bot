@@ -12,6 +12,7 @@ Features:
 import asyncio
 import contextlib
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from zoneinfo import ZoneInfo
@@ -162,6 +163,99 @@ def _expense_types_off_duckdb() -> bool:
     return chain_modes()[pg_expense_types_write.CHAIN]["mode"] != "duckdb"
 
 
+# ─── The buyers step, contained ──────────────────────────────────────────────
+#
+# The buyers step runs inside the incremental tick, BEFORE offers and stocks,
+# and until chain 4's preparation nothing caught what it raised except KeyCRM
+# errors. So a write it could not complete — a birthday DuckDB refused, a store
+# fault — escaped the tick and cost the inventory syncs behind it; and because
+# a failed step never moves its watermark, the next tick sixty seconds later
+# fetched the same buyers and failed the same way. Measured on a scratch store,
+# not observed in production. Two things now hold:
+#
+# - the step cannot take anything else down: whatever it raises is recorded
+#   and the tick goes on to offers and stocks;
+# - a failed step waits `BUYER_RETRY_AFTER_S` before trying again, and inside
+#   that window it asks neither Postgres nor KeyCRM anything — up to 500 GETs
+#   a minute against a failing store is not a retry policy.
+#
+# Its state is published on /api/health as `buyer_sync` and judged by the
+# canary (`buyer_sync_stalled`), because under chain 4 this step becomes the
+# ONLY writer of buyers, and a writer that stopped would otherwise be noticed
+# the next morning by a comparison.
+
+BUYER_RETRY_AFTER_S = 600
+# The getter will read Postgres once a chain owns `last_sync_buyers` (a chain's
+# watermark lives in meta.chain_watermarks); a store that hangs must not hold
+# the tick. Shielded where it is used — see the tick, and DN-05a.
+BUYER_WATERMARK_TIMEOUT_S = 10
+
+# Classes that mean "this data cannot be written", not "the step is broken".
+# Matched by name so this module need not import either driver. They do not
+# count toward `consecutive_failures`: a batch that carries such a value fails
+# the same way until the value changes, and paging a person about it three
+# times an hour says nothing the growing age of `last_ok` does not.
+_DATA_ERROR_NAMES = frozenset({
+    "ConversionException", "ConstraintException", "InvalidInputException",
+    "DataError", "CharacterNotInRepertoireError",
+})
+
+
+def _is_data_error(exc: BaseException) -> bool:
+    return any(k.__name__ in _DATA_ERROR_NAMES for k in type(exc).__mro__)
+
+
+@dataclass
+class BuyerSyncState:
+    """What the buyers step last did, in this process.
+
+    `started_at` is the floor for "how long without a success": a web that has
+    never completed the step since it started is as stale as its uptime, not
+    unknown. Only the error's CLASS is kept — the text can carry a buyer's
+    data, and this reaches a public endpoint.
+    """
+    started_at: datetime = field(default_factory=lambda: datetime.now(DEFAULT_TZ))
+    last_attempt_at: Optional[datetime] = None
+    last_ok_at: Optional[datetime] = None
+    consecutive_failures: int = 0
+    last_error_class: Optional[str] = None
+    last_selected: int = 0
+    last_written: int = 0
+    unreadable_birthdays: int = 0
+
+    def succeeded(self, *, selected: int, written: int, unreadable: int = 0) -> None:
+        self.last_ok_at = datetime.now(DEFAULT_TZ)
+        self.consecutive_failures = 0
+        self.last_error_class = None
+        self.last_selected = selected
+        self.last_written = written
+        self.unreadable_birthdays += unreadable
+
+    def failed(self, exc: BaseException) -> None:
+        self.last_error_class = type(exc).__name__
+        if not isinstance(exc, KeyCRMError) and not _is_data_error(exc):
+            self.consecutive_failures += 1
+
+    def published(self, retry_in_s: Optional[int]) -> Dict[str, Any]:
+        """The /api/health block. Ages and counts only."""
+        now = datetime.now(DEFAULT_TZ)
+
+        def age(t: Optional[datetime]) -> Optional[int]:
+            return None if t is None else int((now - t).total_seconds())
+
+        return {
+            "last_attempt_age_s": age(self.last_attempt_at),
+            "last_ok_age_s": age(self.last_ok_at or self.started_at),
+            "ever_ok": self.last_ok_at is not None,
+            "consecutive_failures": self.consecutive_failures,
+            "last_error_class": self.last_error_class,
+            "last_selected": self.last_selected,
+            "last_written": self.last_written,
+            "unreadable_birthdays": self.unreadable_birthdays,
+            "retry_in_s": retry_in_s,
+        }
+
+
 class SyncService:
     """
     Service for syncing KeyCRM data to DuckDB.
@@ -197,6 +291,9 @@ class SyncService:
         # may try again after a failure (a `time.monotonic()` instant).
         self.inventory_step = InventoryStepState()
         self._inventory_retry_at = 0.0
+        # The buyers step, contained — see BuyerSyncState.
+        self.buyer_sync_state = BuyerSyncState()
+        self._buyers_retry_after: Optional[float] = None
 
     def _is_off_hours(self) -> bool:
         """Check if current time is during off-hours (low activity period)."""
@@ -398,12 +495,20 @@ class SyncService:
         Fetches buyer details from KeyCRM API for orders that have buyer_id
         but no corresponding buyer record.
 
+        Never raises. A failure is recorded in `buyer_sync_state`, holds the
+        buyers watermark, and opens the retry window, so the incremental tick
+        goes on to offers and stocks and does not come back for ten minutes.
+
         Args:
             limit: Maximum number of buyers to sync per call
 
         Returns:
-            Number of buyers synced
+            Number of buyers synced — 0 on any failure
         """
+        from core.landing_rows import birthday_is_unreadable
+
+        state = self.buyer_sync_state
+        state.last_attempt_at = datetime.now(DEFAULT_TZ)
         logger.info("Syncing missing buyers...")
         try:
             # Get buyer IDs from orders that don't have buyer records.
@@ -419,40 +524,102 @@ class SyncService:
                 logger.error(
                     f"Buyer selection failed, buyers watermark not moved: {e}",
                     exc_info=True)
+                self._buyer_step_failed(e)
                 return 0
 
             if not missing_ids:
                 logger.info("No missing buyers to sync")
                 await self.store.set_last_sync_time("buyers")
+                self._buyer_step_ok(selected=0, written=0)
                 return 0
 
+            # Sorted before the request and before the write, so two runs over
+            # the same selection fetch and write in the same order — a failure
+            # then names the same buyer twice rather than a different one.
+            missing_ids = sorted(missing_ids)
             logger.info(f"Fetching {len(missing_ids)} missing buyers from KeyCRM...")
             client = await get_async_client()
-            buyers = await client.fetch_buyers_by_ids(missing_ids)
+            fetch_errors: list = []
+            buyers = await client.fetch_buyers_by_ids(
+                missing_ids, errors_out=fetch_errors)
+            buyers = sorted(buyers or [], key=lambda b: b.id)
+            if not buyers and fetch_errors:
+                # Every fetch failed for a reason other than "no such buyer".
+                # That is a KeyCRM outage, not an empty selection, and it must
+                # not be stamped as a completed sync: raised as the KeyCRM
+                # family it is, it holds the watermark, opens the retry window
+                # and — not counted as a step failure — lets the growing age of
+                # `last_ok` page after 90 minutes. A breaker that is open
+                # (CircuitOpenError) is KeyCRM being unavailable too.
+                first = fetch_errors[0]
+                if isinstance(first, KeyCRMError):
+                    raise first
+                raise KeyCRMConnectionError(
+                    f"{type(first).__name__}: all {len(missing_ids)} buyer "
+                    "fetches failed") from first
+            if fetch_errors:
+                logger.warning(
+                    f"Buyer fetch: {len(fetch_errors)} of {len(missing_ids)} "
+                    f"failed ({type(fetch_errors[0]).__name__}); the rest are "
+                    "written and the failed ids stay selected for next time")
 
             if buyers:
+                # Mirrored to Postgres inside the store method, portion by
+                # portion — the one call site every buyer writer shares.
                 count = await self.store.upsert_buyers(buyers)
-                # Step 2 of «Одна бронза»: the same parsed batch, two stores —
-                # `mirror_products`' shape. Never raises; failures land in
-                # meta.mirror_state where the daily comparison reads them.
-                from core.pg_buyers import mirror_buyers
-
-                await mirror_buyers(buyers)
                 await self.store.set_last_sync_time("buyers")
                 logger.info(f"Synced {count} buyers from KeyCRM")
+                self._buyer_step_ok(
+                    selected=len(missing_ids), written=count,
+                    unreadable=sum(1 for b in buyers
+                                   if birthday_is_unreadable(b.birthday)))
                 return count
 
             await self.store.set_last_sync_time("buyers")
+            self._buyer_step_ok(selected=len(missing_ids), written=0)
             return 0
         except KeyCRMConnectionError as e:
             logger.warning(f"Buyer sync connection error (will retry): {e}")
+            self._buyer_step_failed(e)
             return 0
         except KeyCRMAPIError as e:
             logger.error(f"Buyer sync API error: {e}")
+            self._buyer_step_failed(e)
             return 0
         except KeyCRMError as e:
             logger.error(f"Buyer sync error: {e}")
+            self._buyer_step_failed(e)
             return 0
+        except Exception as e:  # noqa: BLE001 — recorded and published, never lost
+            # A write that failed. Before chain 4's preparation this escaped
+            # the tick and cost offers and stocks; now it holds the watermark
+            # and waits out the retry window like every other failure here.
+            logger.error(
+                f"Buyer sync failed, buyers watermark not moved: "
+                f"{type(e).__name__}", exc_info=True)
+            self._buyer_step_failed(e)
+            return 0
+
+    def _buyer_step_ok(self, **counts: int) -> None:
+        """Record a completed buyers step and close the retry window."""
+        self.buyer_sync_state.succeeded(**counts)
+        self._buyers_retry_after = None
+
+    def _buyer_step_failed(self, exc: BaseException) -> None:
+        """Record a failed buyers step and open the retry window."""
+        self.buyer_sync_state.failed(exc)
+        self._buyers_retry_after = time.monotonic() + BUYER_RETRY_AFTER_S
+
+    def _buyers_retry_in(self) -> Optional[int]:
+        """Seconds left in the retry window, or None outside it."""
+        if self._buyers_retry_after is None:
+            return None
+        left = self._buyers_retry_after - time.monotonic()
+        return int(left) + 1 if left > 0 else None
+
+    def buyer_sync_health(self) -> Dict[str, Any]:
+        """The `buyer_sync` block of /api/health."""
+        return self.buyer_sync_state.published(self._buyers_retry_in())
 
     async def sync_offers(self) -> int:
         """
@@ -1070,9 +1237,37 @@ class SyncService:
                 stats["managers"] = await self.sync_managers()
 
             # Sync missing buyers (fetch buyer details for orders that don't have them)
-            last_buyers_sync = await self.store.get_last_sync_time("buyers")
-            if not last_buyers_sync or (datetime.now(DEFAULT_TZ) - last_buyers_sync).total_seconds() > 3600:
-                stats["buyers"] = await self.sync_missing_buyers()
+            #
+            # Contained, and in this order on purpose: the retry window is
+            # checked BEFORE the watermark getter, so a step that failed asks
+            # nothing of any store for ten minutes; the getter is bounded; and
+            # whatever escapes is recorded and dropped here, so offers and
+            # stocks below run whatever happened. The failure is NOT put in
+            # `stats`: that dict is summed in `finally`, and a string there is a
+            # TypeError that would lose the tick's completion event too.
+            if self._buyers_retry_in() is None:
+                try:
+                    # Behind a shield, the DN-05a form `_run_pg_derivation`
+                    # uses: a bare `wait_for` waits for the cancelled read to
+                    # unwind, and a Postgres read cut inside a query unwinds
+                    # into asyncpg's cancel request to a server that may not
+                    # answer — measured 150 s past a 10 s bound on a paused
+                    # container. Shielded, the tick returns at the bound and
+                    # the read is cancelled and left to unwind on its own.
+                    read = asyncio.ensure_future(
+                        self.store.get_last_sync_time("buyers"))
+                    try:
+                        last_buyers_sync = await asyncio.wait_for(
+                            asyncio.shield(read), BUYER_WATERMARK_TIMEOUT_S)
+                    finally:
+                        read.cancel()
+                    if not last_buyers_sync or (datetime.now(DEFAULT_TZ) - last_buyers_sync).total_seconds() > 3600:
+                        stats["buyers"] = await self.sync_missing_buyers()
+                except Exception as e:  # noqa: BLE001 — recorded and published
+                    logger.error(
+                        f"Buyer step failed before it started: {type(e).__name__}",
+                        exc_info=True)
+                    self._buyer_step_failed(e)
 
             if _inventory_writes_postgres():
                 # Chain 1 writes Postgres: a failure there is recorded and the

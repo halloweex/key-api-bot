@@ -132,6 +132,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_*, or latched while its readers read DuckDB (DN-26).
     "write_chain_precondition_unmet": _c(
         "the read flag the chain names is set to postgres and web restarts"),
+    # The buyers step stopped succeeding: no success for 90 min, or three
+    # failures in a row that are neither KeyCRM nor data errors (chain 4 PR-1).
+    "buyer_sync_stalled": _c("a buyers step that completes"),
     "mirror_missing:bronze.orders": _c("the table reports freshness again"),
     "mirror_never:bronze.orders": _c("the table's first successful shipment"),
     "mirror_stale:bronze.orders": _c("a shipment inside the age limit"),
@@ -331,6 +334,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "pg_order_utm_stale": _c("a finished re-parse is shipped and carries the newer verdicts"),
     # INFO and counted, never a page: the gap #213 accepted, measured.
     "pg_order_utm_in_flight": _c("the verdicts land inside the grace, as they normally do"),
+    # Buyer completeness (chain 4 PR-1, mirror_landing): Postgres alone, WARN.
+    "buyers_without_verdict": _c("the hourly derivation gives every landed buyer a verdict"),
+    "buyers_missing_for_orders": _c("the buyer sync reaches every buyer an order names"),
 
     # ── data-quality findings: ClickHouse copies and derivations ──
     "ch_reconcile_pending": _c("silver ships fresh again (hourly ch_sync)"),

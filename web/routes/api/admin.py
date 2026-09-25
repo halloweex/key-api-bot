@@ -1,5 +1,6 @@
 """Admin operations: DuckDB management, warehouse, cache, jobs, sync, events."""
 import asyncio
+import contextlib
 import logging
 
 from datetime import date
@@ -508,6 +509,82 @@ async def purge_orders(
 
 # ─── Buyer Sync ────────────────────────────────────────────────────────────────
 
+# How long the manual buyer sync waits for the heavy-job lock before answering
+# 409. It has to fit inside RequestTimeoutMiddleware's 30 s budget with room for
+# the sync itself: at 60 s the middleware answered a bare 504 first, and the
+# handler went on and wrote after that answer.
+HEAVY_LOCK_WAIT_S = 20
+# The full buyer sync runs detached, outside any request budget, and waits this
+# long for the lock before each portion. A full sync or a resync holds the lock
+# for minutes; the minute tick for seconds.
+SYNC_ALL_LOCK_WAIT_S = 300
+
+
+@contextlib.asynccontextmanager
+async def _heavy_lock(wait_s: float):
+    """The scheduler's heavy-job lock, waited for boundedly.
+
+    Yields True with the lock held, False when it could not be had in time.
+    `wait_for` over `acquire` cannot leak it: asyncio.Lock marks itself taken
+    only after the waiter returns normally, so a timeout leaves it free.
+    """
+    from core.scheduler import get_scheduler
+
+    lock = get_scheduler()._heavy_job_lock
+    try:
+        await asyncio.wait_for(lock.acquire(), wait_s)
+    except asyncio.TimeoutError:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        lock.release()
+
+
+@contextlib.asynccontextmanager
+async def _heavy_lock_or_409(what: str):
+    """The heavy-job lock for a request, or a 409 inside its time budget."""
+    async with _heavy_lock(HEAVY_LOCK_WAIT_S) as held:
+        if not held:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{what}: a heavy job holds the warehouse; try again shortly",
+            )
+        yield
+
+
+async def _sync_all_buyers(store) -> dict:
+    """Every buyer KeyCRM has, written in portions under the heavy-job lock.
+
+    Detached from the request that starts it: the ~460 KeyCRM pages alone take
+    minutes, so no request budget could hold it. The fetch runs OUTSIDE any
+    lock; each portion takes the lock, writes (and mirrors, inside
+    `upsert_buyers`), and lets go. A portion that cannot get the lock in
+    `SYNC_ALL_LOCK_WAIT_S` stops the run; what was written stays written — each
+    portion is a complete, mirrored upsert — and a rerun writes it again.
+    """
+    from core.keycrm import KeyCRMClient
+
+    async with store.connection() as conn:
+        before = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+    async with KeyCRMClient() as client:
+        buyers = await client.fetch_all_buyers() or []
+
+    portion, written = store.BUYER_WRITE_PORTION, 0
+    for start in range(0, len(buyers), portion):
+        async with _heavy_lock(SYNC_ALL_LOCK_WAIT_S) as held:
+            if not held:
+                return {"status": "stopped", "reason": "the heavy-job lock stayed busy",
+                        "buyers_fetched": len(buyers), "buyers_written": written}
+            written += await store.upsert_buyers(buyers[start:start + portion])
+
+    async with store.connection() as conn:
+        after = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+    return {"status": "done", "buyers_fetched": len(buyers), "buyers_written": written,
+            "before_count": before, "after_count": after, "new_buyers": after - before}
+
+
 @router.post("/duckdb/sync-buyers")
 @limiter.limit("120/minute")
 async def sync_buyers(
@@ -517,49 +594,65 @@ async def sync_buyers(
     """Manually sync missing buyers from KeyCRM. (Admin enforced at router level.)"""
     from core.sync_service import get_sync_service
 
-    try:
-        sync_service = await get_sync_service()
-        count = await sync_service.sync_missing_buyers(limit=limit)
-        return {
-            "status": "success",
-            "message": f"Synced {count} buyers from KeyCRM",
-            "buyers_synced": count,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Buyer sync failed: {str(e)}")
+    async with _heavy_lock_or_409("Buyer sync"):
+        try:
+            sync_service = await get_sync_service()
+            count = await sync_service.sync_missing_buyers(limit=limit)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Buyer sync failed: {str(e)}")
+
+    # The step never raises any more — it records a failure and returns 0 — so
+    # "0 synced" and "failed" would read the same here without this. The class
+    # only, as on /api/health: the text of a write error can carry a buyer's data.
+    state = sync_service.buyer_sync_state
+    if state.last_ok_at is None or state.last_ok_at < state.last_attempt_at:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Buyer sync failed: {state.last_error_class}; "
+                   f"the watermark was not moved. See web's log.")
+    return {
+        "status": "success",
+        "message": f"Synced {count} buyers from KeyCRM",
+        "buyers_synced": count,
+    }
 
 
 @router.post("/duckdb/sync-all-buyers")
 @limiter.limit("1/hour")
 async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)):
-    """Sync ALL buyers from KeyCRM (including those without orders). Requires admin."""
-    from core.keycrm import KeyCRMClient
+    """Start a sync of ALL buyers from KeyCRM, detached. Requires admin.
 
-    try:
-        store = await get_store()
+    DO NOT RUN THIS IN PRODUCTION TO SEE WHETHER IT WORKS. It is the only path
+    that fetches buyers with `include=loyalty,shipping`, so it fills city and
+    region for every buyer — which moves `customer_profile.city` and the SMS
+    audience's city filter. That is a decision, not a test.
 
-        async with store.connection() as conn:
-            before_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
+    Answers at once and runs in the background, like /mirror/backfill/orders:
+    the fetch alone takes minutes, and a request held that long was answered
+    504 by the app's own 30 s timeout while the handler kept writing behind it,
+    with its result thrown away. The outcome is logged as `Full buyer sync:`.
+    See `_sync_all_buyers` for what one run does.
+    """
+    if any(t.get_name() == "sync_all_buyers" and not t.done() for t in _BACKGROUND_TASKS):
+        raise HTTPException(status_code=409, detail="A full buyer sync is already running")
 
-        async with KeyCRMClient() as client:
-            buyers = await client.fetch_all_buyers()
+    store = await get_store()
 
-        if buyers:
-            await store.upsert_buyers(buyers)
+    async def run():
+        try:
+            result = await _sync_all_buyers(store)
+            logger.info(f"Full buyer sync: {result}")
+            return result
+        except Exception as e:
+            logger.error(f"Full buyer sync failed: {type(e).__name__}: {e}", exc_info=True)
+            raise
 
-        async with store.connection() as conn:
-            after_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
-
-        return {
-            "status": "success",
-            "message": "Synced all buyers from KeyCRM",
-            "buyers_fetched": len(buyers),
-            "before_count": before_count,
-            "after_count": after_count,
-            "new_buyers": after_count - before_count,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Full buyer sync failed: {str(e)}")
+    task = asyncio.create_task(run(), name="sync_all_buyers")
+    # A strong reference, or the loop may collect the task mid-flight.
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return {"status": "started", "message": "Full buyer sync started; see web's log "
+            "for 'Full buyer sync:'"}
 
 
 @router.get("/buyers/stats")

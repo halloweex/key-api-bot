@@ -26,8 +26,13 @@ the mirror hiccuped.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
+
+# The shared contract — what both stores hold for a buyer, bookkeeping aside —
+# and the one reading of a payload both stores are handed. Both live with the
+# other landing rows, and everything that needs the column tuples, the daily
+# comparison included, imports them from there: a contract with one home.
+from core.landing_rows import BUYER_COLUMNS, parse_buyers
 
 logger = logging.getLogger(__name__)
 
@@ -36,17 +41,6 @@ CONTACTS_STATE = "bronze.buyer_contacts"
 # What `_write` writes in one transaction, and so what changes hands as one:
 # whoever takes the buyers takes their contacts (`pg_landing.tables_stood_down`).
 BUYER_UNIT = (BUYERS_STATE, CONTACTS_STATE)
-
-# The shared contract: what both stores hold for a buyer, bookkeeping aside.
-BUYER_COLUMNS: Tuple[str, ...] = (
-    "id", "full_name", "birthday", "note", "phone", "email",
-    "manager_id", "company_id", "company_name", "city", "region",
-    "loyalty_program_name", "loyalty_level_name",
-    "loyalty_discount", "loyalty_amount",
-    "created_at", "updated_at",
-)
-
-CONTACT_COLUMNS: Tuple[str, ...] = ("buyer_id", "contact_type", "value", "is_primary")
 
 _UPSERT_BUYER = f"""
 INSERT INTO bronze.buyers ({", ".join(BUYER_COLUMNS)})
@@ -68,42 +62,6 @@ ON CONFLICT (table_name) DO UPDATE SET
     last_error        = NULL,
     last_rows         = EXCLUDED.last_rows
 """
-
-
-def _as_date(value: Any) -> Optional[date]:
-    if value is None or isinstance(value, date):
-        return value
-    return date.fromisoformat(str(value)[:10])
-
-
-def _as_ts(value: Any) -> Optional[datetime]:
-    if value is None or isinstance(value, datetime):
-        return value
-    # KeyCRM serialises as ISO with either 'T' or a space; both parse.
-    return datetime.fromisoformat(str(value).replace(" ", "T"))
-
-
-def buyer_row(buyer: Any) -> Tuple[Any, ...]:
-    """One Buyer model rendered as the tuple both stores agree on."""
-    return (
-        buyer.id, buyer.full_name, _as_date(buyer.birthday), buyer.note,
-        buyer.phone, buyer.email, buyer.manager_id, buyer.company_id,
-        buyer.company_name, buyer.city, buyer.region,
-        buyer.loyalty_program_name, buyer.loyalty_level_name,
-        buyer.loyalty_discount, buyer.loyalty_amount,
-        _as_ts(buyer.created_at), _as_ts(buyer.updated_at),
-    )
-
-
-def contact_rows(buyer: Any) -> List[Tuple[int, str, str, bool]]:
-    """The contact list exactly as `upsert_buyers` writes it: first is
-    primary, empties skipped, duplicates collapsed by the natural key."""
-    rows: Dict[Tuple[int, str, str], bool] = {}
-    for kind, values in (("phone", buyer.phones), ("email", buyer.emails)):
-        for i, value in enumerate(values or []):
-            if value:
-                rows.setdefault((buyer.id, kind, value), i == 0)
-    return [(b, k, v, p) for (b, k, v), p in rows.items()]
 
 
 async def _write(buyers_rows, contacts_by_buyer) -> None:
@@ -212,8 +170,8 @@ async def mirror_buyers(buyers: Sequence[Any]) -> Dict[str, Any]:
         moved = await pg_landing.tables_stood_down_or_owned(pool, BUYER_UNIT)
         if moved:
             return _stood_down(moved, len(buyers))
-        rows = [buyer_row(b) for b in buyers]
-        contacts = [(b.id, contact_rows(b)) for b in buyers]
+        parsed = parse_buyers(buyers)
+        rows, contacts = parsed.rows, parsed.contacts
         await _write(rows, contacts)
         logger.info("pg_buyers: mirrored %d buyer(s)", len(rows))
         return {"rows": len(rows)}
