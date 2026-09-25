@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.253
+
+- Call the restarted refusal production's shape, not an incident on record
+- Say what actually ends a writer's acquire without a connection
+- Refuse the writer's acquire the ways production does, and roll every writer back
+- Latch guards judge nesting and what a writer holds, not lines and literals
+- Prove per writer, on a live pool, that a failed acquire never latches
+- Chains 1, 8 and 7a latch inside the acquire, not before it
+
+
 ## 3.0.252
 
 - DN-20b: ask a route parameter whether it is required the way fastapi 0.141 can answer
