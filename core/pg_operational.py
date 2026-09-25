@@ -892,10 +892,22 @@ async def replicate_operational(
             if stamps:
                 from core.pg_landing import _record_failure
 
+                # Only on tables this job ships itself. A chain may also own
+                # tables another shipper carries — chain 4's bronze buyers are
+                # the buyers mirror's — and a failure stamped on one of those
+                # is a count this job never clears: only that shipper's next
+                # non-empty success resets `failures_since_ok`, so after a
+                # rollback the daily comparison would page `mirror_failing` on
+                # two stores that agree. Those tables carry the disagreement
+                # through `chain_latch_disagrees`, `write_chain_flag_mismatch`
+                # and `write_chain_flag_invalid` instead. Every table of chains
+                # 1, 8, 7a and 6a is shipped here, so for them nothing moves.
+                ships = set(_tables_to_ship(frozenset()))
                 for name, note in stamps:
                     chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
                     for table in chain.CHAIN_TABLES:
-                        await _record_failure(table, note)
+                        if table in ships:
+                            await _record_failure(table, note)
             logger.info("Operational history replicated: %s", result)
             return result
         except Exception as e:

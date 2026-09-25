@@ -2470,8 +2470,10 @@ rather than writing DuckDB.
 
 The disagreement is never silent — `/api/health` publishes `latched`,
 `latched_at` and `mismatch` per chain, the canary pages `write_chain_flag_mismatch`
-(WARN) within one probe, the shipper stamps the chain's tables failing, and the
-daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
+(WARN) within one probe, the shipper stamps failing the chain's tables it ships
+itself (never a table another shipper carries — chain 4's bronze buyers are the
+buyers mirror's, and a stamp there only that mirror's next success could clear),
+and the daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
 (both CRITICAL) — and `chain_owner_unregistered` for an owner row no chain in
 the running build declares. Today nothing is latched: `app.manual_expenses` holds zero
 rows, so chain 8's flag can still be moved freely, and the first typed expense
