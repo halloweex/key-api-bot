@@ -298,10 +298,11 @@ async def get_warehouse_status(request: Request):
 
     if pg_derivation.owns():
         status = {**status, "postgres": await _pg_derivation_status()}
-    # Step 13's readiness (DN-28): KS_WRITE_WAREHOUSE as this process read it,
-    # and every precondition of the switch still unmet, each by name. Published
-    # whatever the mode — the list is what a person reads before the flip, and
-    # the switch itself is not in this build.
+    # Step 13's readiness (DN-28, DN-29): KS_WRITE_WAREHOUSE as this process
+    # read it, what settling the writer found, and every precondition of the
+    # switch still unmet, each by name. Published whatever the mode — the list
+    # is what a person reads before the flip, and after it what a restart
+    # would need to stay switched.
     try:
         cutover = await warehouse_cutover.readiness()
     except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail

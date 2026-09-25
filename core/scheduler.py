@@ -1998,7 +1998,7 @@ class BackgroundScheduler:
             # Postgres alone derives them (DN-28). Read once, so the scan and
             # `duckdb_looked` below agree on one answer: a check the scan
             # skipped is one the twins must stand in for, not compare against.
-            # Empty in this build — the switch is DN-29.
+            # Empty unless Postgres alone derives, or the way back holds (DN-29).
             from core.warehouse_cutover import stood_down_duckdb_checks
 
             stood_down = stood_down_duckdb_checks()
