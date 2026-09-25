@@ -30,6 +30,8 @@ import pytest
 
 from core import warehouse_cutover as wc
 from core.pg import REQUIRED_REVISION
+# The derivation's own fixtures: a scheduler under KS_PG_DERIVE=own.
+from tests.unit.test_pg_own_derivation import job, mode  # noqa: F401
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
@@ -993,3 +995,182 @@ class TestTheResolveNote:
              patch("bot.main.send_admin_message", AsyncMock(return_value=1)) as send:
             asyncio.run(resolve_group("warehouse"))
         assert send.await_args.args[0].splitlines()[-1].startswith("• warehouse:")
+
+
+# ─── What a settle that could not finish still owes ──────────────────────────
+
+
+def _seed(store, **rows):
+    """sync_metadata rows, by key; a dict value is written as the JSON the
+    cutover writes."""
+    async def seed():
+        async with store.connection() as conn:
+            for key, value in rows.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
+                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                    [key, json.dumps(value) if isinstance(value, dict) else value])
+    asyncio.run(seed())
+
+
+class TestAPageTheWayBackDeliveredIsClosed:
+    def test_the_next_start_under_postgres_closes_it(self, tmp_path, postgres, monkeypatch):
+        """A way back that never validated leaves the record saying `postgres`,
+        resolved — and its DuckDB ticks can page the group. Back under
+        postgres nothing else would ever resolve that page."""
+        from core.alerting import _gate, delivered_conditions
+
+        store = _store(tmp_path)
+        try:
+            with patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
+                asyncio.run(wc.settle_writer(store))
+            assert _writer(store)["resolved"] is True
+
+            _restart()
+            monkeypatch.delenv(wc.ENV)
+            wc.configure_mode()
+            asyncio.run(wc.settle_writer(store))
+            assert wc.held()
+            # The owed full tick crashed once, and paged.
+            _gate.note_delivered_conditions(["warehouse:refresh_errored"], "warehouse")
+
+            _restart()
+            monkeypatch.setenv(wc.ENV, "postgres")
+            assert wc.configure_mode() == wc.POSTGRES
+            with patch("core.alert_archive.write_resolved_now", AsyncMock(return_value=True)), \
+                 patch("bot.main.send_admin_message", AsyncMock(return_value=1)) as send:
+                asyncio.run(wc.settle_writer(store))
+            assert "warehouse:refresh_errored" not in delivered_conditions()
+            (text,) = send.await_args.args[:1]
+            assert "warehouse:refresh_errored" in text and wc.RESOLVE_NOTE in text
+            assert _writer(store)["resolved"] is True
+        finally:
+            asyncio.run(store.close())
+
+    def test_with_nothing_open_a_resolved_record_asks_nothing(self, tmp_path, postgres):
+        store = _store(tmp_path)
+        resolve = AsyncMock(return_value=0)
+        try:
+            _seed(store, **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True}})
+            with patch("core.alerting.resolve_group", resolve):
+                asyncio.run(wc.settle_writer(store))
+            assert resolve.await_count == 0
+        finally:
+            asyncio.run(store.close())
+
+
+class TestASettleThatCouldNotFinishIsAskedAgain:
+    def test_a_resolve_the_ledger_refused_leaves_the_process_unsettled(
+        self, tmp_path, postgres,
+    ):
+        """Asked again in the same process — the derivation tick's call —
+        rather than at the next restart."""
+        from core.alerting import _gate
+
+        store = _store(tmp_path)
+        try:
+            _gate.note_delivered_conditions(["warehouse:validation_retrying"], "warehouse")
+            with patch("core.alert_archive.write_resolved_now", AsyncMock(return_value=False)):
+                asyncio.run(wc.settle_writer(store))
+            assert _writer(store)["resolved"] is False
+            with patch("core.alert_archive.write_resolved_now", AsyncMock(return_value=True)), \
+                 patch("bot.main.send_admin_message", AsyncMock(return_value=1)) as send:
+                asyncio.run(wc.settle_writer(store))
+            assert _writer(store)["resolved"] is True
+            assert wc.RESOLVE_NOTE in send.await_args.args[0]
+        finally:
+            asyncio.run(store.close())
+
+    def test_under_postgres_the_derivation_tick_records_what_the_start_could_not(
+        self, tmp_path, postgres, job, monkeypatch,
+    ):
+        """The only job that ticks under postgres. Without it a process whose
+        boot and start could not write the record runs unrecorded, and a way
+        back after it owes DuckDB nothing: an incremental tick over the id list
+        abandoned at the switch."""
+        from tests.unit.test_pg_own_derivation import _derive
+
+        store = _store(tmp_path)
+        try:
+            _seed(store, warehouse_dirty="[1, 2]")
+            real = wc._write_writer
+            monkeypatch.setattr(wc, "_write_writer", AsyncMock(side_effect=OSError("disk")))
+            for _ in ("boot", "scheduler start"):
+                with pytest.raises(OSError):
+                    asyncio.run(wc.settle_writer(store))
+            monkeypatch.setattr(wc, "_write_writer", real)
+
+            with patch("core.duckdb_store.get_store", AsyncMock(return_value=store)):
+                _derive(job)
+            assert _writer(store)["writer"] == "postgres"
+
+            _restart()
+            monkeypatch.delenv(wc.ENV)
+            wc.configure_mode()
+            asyncio.run(wc.settle_writer(store))
+            assert wc.held() and _metadata(store, "warehouse_dirty")[0] == "full"
+        finally:
+            asyncio.run(store.close())
+
+    def test_on_the_way_back_the_first_refresh_tick_settles_before_its_peek(
+        self, tmp_path, monkeypatch,
+    ):
+        """Boot and start could not read the record: the first tick must still
+        find the rebuild owed in full and the checks held before it peeks, or
+        it runs incremental over a Silver as old as the switch."""
+        from core.scheduler import BackgroundScheduler
+
+        class _Peeked(Exception):
+            pass
+
+        store = _store(tmp_path)
+        try:
+            _seed(store, warehouse_dirty="[7, 8]",
+                  **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True}})
+            real = wc.read_writer
+            monkeypatch.setattr(wc, "read_writer", AsyncMock(side_effect=OSError("disk")))
+            for _ in ("boot", "scheduler start"):
+                with pytest.raises(OSError):
+                    asyncio.run(wc.settle_writer(store))
+            monkeypatch.setattr(wc, "read_writer", real)
+            assert not wc.held()
+
+            seen = {}
+
+            async def peek():
+                async with store.connection() as conn:
+                    seen["dirty"] = conn.execute(
+                        "SELECT value FROM sync_metadata WHERE key = 'warehouse_dirty'"
+                    ).fetchone()[0]
+                seen["held"] = wc.held()
+                raise _Peeked
+
+            monkeypatch.setattr(store, "peek_warehouse_dirty", peek)
+            with patch("core.duckdb_store.get_store", AsyncMock(return_value=store)):
+                with pytest.raises(_Peeked):
+                    asyncio.run(BackgroundScheduler()._run_warehouse_refresh())
+            assert seen == {"dirty": "full", "held": True}
+        finally:
+            asyncio.run(store.close())
+
+    def test_a_release_that_raises_asks_for_another_full_tick(self, tmp_path, monkeypatch):
+        """The hold outlives a record it could not write only if the next tick
+        is full again; the job clears the flag it peeked, so the re-mark is
+        what keeps it."""
+        from core.scheduler import BackgroundScheduler
+
+        store = _store(tmp_path)
+        try:
+            asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
+            _seed(store, **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True}})
+            asyncio.run(wc.settle_writer(store))
+            assert wc.held()
+            monkeypatch.setattr(wc, "_write_writer", AsyncMock(side_effect=OSError("disk")))
+            with patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
+                 patch.object(BackgroundScheduler, "_rebuild_postgres_layers", AsyncMock()):
+                result = asyncio.run(BackgroundScheduler()._run_warehouse_refresh())
+            assert result["status"] == "success" and result["validation_passed"] is True
+            assert wc.held()
+            assert _metadata(store, "warehouse_dirty")[0] == "full"
+        finally:
+            asyncio.run(store.close())

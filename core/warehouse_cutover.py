@@ -550,13 +550,15 @@ def _gather_facts_blocking(env: Mapping[str, str]) -> Facts:
 #
 # Why both halves are needed, in the order they were found:
 #
-# - **Once, the resolve.** The `warehouse` alert group's only resolver is the
-#   DuckDB tick (`refresh_warehouse_layers`), which never runs again under
-#   `postgres`. A page it delivered would stand open forever, so the first
-#   start under `postgres` closes the group — without a validating tick, which
-#   is the price the design names — and records that it did. `resolved` stays
-#   False only when the ledger could not record the resolution and the gate
-#   kept the keys; the next start tries again.
+# - **The resolve.** The `warehouse` alert group's only resolver is the DuckDB
+#   tick (`refresh_warehouse_layers`), which never runs under `postgres`. A
+#   page it delivered would stand open forever, so the first start under
+#   `postgres` closes the group — without a validating tick, which is the price
+#   the design names — and records that it did. A later start closes it again
+#   only when a page of it is open: a way back that never validated has DuckDB
+#   ticks that can page, and its record still says `postgres`, resolved. When
+#   the ledger cannot record the resolution the gate keeps the keys, and the
+#   process stays unsettled, so the derivation tick asks again.
 # - **The way back.** On a rollback the warehouse_refresh job is registered
 #   again and its first tick would peek the id list abandoned at the switch — a
 #   list, not "full" — and run an incremental rebuild over a Silver as old as
@@ -612,24 +614,35 @@ async def _count_utm_rows(store) -> int:
         return int(conn.execute("SELECT COUNT(*) FROM silver_order_utm").fetchone()[0])
 
 
+def _warehouse_pages_open() -> bool:
+    """A page of the `warehouse` group is delivered and not yet resolved, in
+    this process's Alert Gate — what `resolve_group` would announce from."""
+    from core.alerting import delivered_conditions
+
+    return any(group == "warehouse" for group in delivered_conditions().values())
+
+
 async def _resolve_the_warehouse_group() -> bool:
     """Close the `warehouse` group; whether nothing of it is left delivered."""
-    from core.alerting import delivered_conditions, resolve_group
+    from core.alerting import resolve_group
 
     try:
         await resolve_group("warehouse", note=RESOLVE_NOTE)
-    except Exception as exc:  # noqa: BLE001 — retried by the next start
+    except Exception as exc:  # noqa: BLE001 — retried by the next settle
         logger.error("warehouse group resolve raised: %s: %s", type(exc).__name__, exc)
         return False
-    return not any(group == "warehouse" for group in delivered_conditions().values())
+    return not _warehouse_pages_open()
 
 
 async def settle_writer(store) -> Dict[str, Any]:
     """Record the writer and settle what a change of writer owes. Once per
-    process, and before anything derives: web's boot sync calls it first, the
-    scheduler's start and the refresh tick again (a no-op once settled). Raises
-    what DuckDB raises; a caller that cannot afford that catches it, and the
-    next caller tries again."""
+    process, and before anything derives: web's boot sync calls it first, then
+    the scheduler's start, then every tick of whichever derivation runs — the
+    DuckDB refresh under `duckdb`, the Postgres one under `postgres` — a no-op
+    once settled. Raises what DuckDB raises; a caller that cannot afford that
+    catches it, and the next caller tries again. Under `postgres` a group the
+    ledger would not let it close leaves the process unsettled, so the next
+    caller tries that again too."""
     global _settled, _held, _reclassify_needed, _writer_record, _settle_lock
     if _settled:
         return status()
@@ -639,6 +652,7 @@ async def settle_writer(store) -> Dict[str, Any]:
         if _settled:
             return status()
         record = await read_writer(store)
+        settled = True
         if writes_postgres():
             if record is None or record.get("writer") != POSTGRES:
                 record = {"writer": POSTGRES, "since": _now_iso(), "resolved": False}
@@ -647,13 +661,18 @@ async def settle_writer(store) -> Dict[str, Any]:
                     "warehouse writer recorded as postgres: DuckDB's Silver, Gold "
                     "and UTM verdicts are frozen from now, and the id list pending "
                     "in warehouse_dirty is abandoned")
-            if not record.get("resolved"):
+            # Once on the switch, and again whenever a page of the group is
+            # open: nothing under postgres resolves it otherwise, and a way
+            # back that never validated leaves the record saying `resolved`
+            # over a page its own DuckDB ticks delivered.
+            if not record.get("resolved") or _warehouse_pages_open():
                 if await _resolve_the_warehouse_group():
                     record = {**record, "resolved": True, "resolved_at": _now_iso()}
                     await _write_writer(store, record)
                 else:
+                    settled = False
                     logger.warning("the warehouse group is not yet closed; the next "
-                                   "start under postgres tries again")
+                                   "derivation tick tries again")
         elif record is not None and record.get("writer") == POSTGRES:
             await store.mark_warehouse_dirty(None)
             _held = True
@@ -666,7 +685,7 @@ async def settle_writer(store) -> Dict[str, Any]:
                 "; silver_order_utm is empty — POST /api/traffic/reclassify"
                 if _reclassify_needed else "")
         _writer_record = record
-        _settled = True
+        _settled = settled
     return status()
 
 

@@ -258,7 +258,7 @@ class BackgroundScheduler:
         # What a change of warehouse writer owes (DN-29), settled before a job
         # is registered — web's boot sync has already done it, so this is a
         # no-op there; a scheduler started elsewhere, or a boot whose settle
-        # raised, gets it here. Never fatal: the refresh tick tries again.
+        # raised, gets it here. Never fatal: the next derivation tick tries again.
         await self._settle_warehouse_writer()
 
         # Register jobs
@@ -1564,6 +1564,12 @@ class BackgroundScheduler:
 
         if not derivation.owns():
             return {"skipped": True, "reason": "KS_PG_DERIVE is not own"}
+        # The warehouse writer, once more (DN-29): under KS_WRITE_WAREHOUSE=
+        # postgres this is the only job that ticks, so a boot and a start whose
+        # settle raised — or whose resolve the ledger refused — are retried
+        # here rather than at the next restart, which, if it is the way back,
+        # would find no record and owe DuckDB nothing. A no-op once settled.
+        await self._settle_warehouse_writer()
 
         async def read_signal():
             pool = await get_pool()
