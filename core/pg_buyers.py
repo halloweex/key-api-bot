@@ -12,7 +12,10 @@ upsert — a buyer whose phone list shrank must not keep the old number in one
 store only. The key is the natural triple `(buyer_id, contact_type, value)`;
 DuckDB's sequence id is deliberately not carried, because a generated id would
 give one contact two names and the comparison would be meaningless before it
-began (`stock_movements`' lesson, solved by not having the column).
+began (`stock_movements`' lesson, solved by not having the column). The
+statements themselves live in `core.pg_buyer_rows`, which chain 4's writer
+runs too; what this module keeps is what only the mirror does — the
+stand-downs, the connection, the transaction and `meta.mirror_state`.
 
 Timestamps arrive as strings on the Buyer model and are parsed here, loudly:
 a value Python cannot parse raises and lands in the mirror's failure record,
@@ -42,14 +45,6 @@ CONTACTS_STATE = "bronze.buyer_contacts"
 # whoever takes the buyers takes their contacts (`pg_landing.tables_stood_down`).
 BUYER_UNIT = (BUYERS_STATE, CONTACTS_STATE)
 
-_UPSERT_BUYER = f"""
-INSERT INTO bronze.buyers ({", ".join(BUYER_COLUMNS)})
-VALUES ({", ".join(f"${i}" for i in range(1, len(BUYER_COLUMNS) + 1))})
-ON CONFLICT (id) DO UPDATE SET
-    {", ".join(f"{c} = EXCLUDED.{c}" for c in BUYER_COLUMNS if c != "id")},
-    mirrored_at = now()
-"""
-
 _WATERMARK_OK = """
 INSERT INTO meta.mirror_state
        (table_name, last_attempted_at, last_ok_at,
@@ -65,42 +60,27 @@ ON CONFLICT (table_name) DO UPDATE SET
 
 
 async def _write(buyers_rows, contacts_by_buyer) -> None:
-    """Upsert buyers, replace their contacts, move both watermarks — one
-    transaction, `pg_landing._write`'s reasoning."""
-    from core.pg import get_pool
+    """Ship buyers and their contacts, and move both watermarks — one
+    transaction, `pg_landing._write`'s reasoning.
 
+    The rows themselves are written by `core.pg_buyer_rows`, which chain 4's
+    writer runs too; what stays here is what only the mirror does: the
+    connection, the transaction, and `meta.mirror_state`. The watermarks go
+    first so the derivation mark is still the last statement of the
+    transaction (`write_orders`' order), and they move on every call, an empty
+    one included, as they always have."""
+    from core.pg import get_pool
+    from core.pg_buyer_rows import _write_buyer_rows
+
+    contacts_by_buyer = list(contacts_by_buyer)
+    contact_count = (sum(len(c) for _id, c in contacts_by_buyer)
+                     if buyers_rows else 0)
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            if buyers_rows:
-                await conn.executemany(_UPSERT_BUYER, buyers_rows)
-                contact_count = 0
-                for buyer_id, contacts in contacts_by_buyer:
-                    await conn.execute(
-                        "DELETE FROM bronze.buyer_contacts WHERE buyer_id = $1",
-                        buyer_id,
-                    )
-                    if contacts:
-                        await conn.executemany(
-                            """
-                            INSERT INTO bronze.buyer_contacts
-                                   (buyer_id, contact_type, value, is_primary)
-                            VALUES ($1, $2, $3, $4)
-                            """,
-                            contacts,
-                        )
-                        contact_count += len(contacts)
-            else:
-                contact_count = 0
             await conn.execute(_WATERMARK_OK, BUYERS_STATE, len(buyers_rows))
             await conn.execute(_WATERMARK_OK, CONTACTS_STATE, contact_count)
-            # `app.customer_profile` joins `bronze.buyers`. A no-op unless
-            # KS_PG_DERIVE=own; `core/pg_derivation.py` says why it cannot
-            # cost this transaction.
-            if buyers_rows:
-                from core.pg_derivation import mark_if_owned
-
-                await mark_if_owned(conn)
+            await _write_buyer_rows(conn, buyers_rows, contacts_by_buyer)
 
 
 async def _record_failure(error: str) -> None:
