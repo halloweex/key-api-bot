@@ -329,7 +329,7 @@ async def heal_dropped_marks(conn, started: datetime) -> bool:
 # journal and alerted as `warehouse_pg:validation_failed`.
 #
 # Nothing reads this row yet, nor the profile's — a deliberate follow-up, and
-# `BackgroundScheduler._derive_pg_layers` says why.
+# `BackgroundScheduler._derive_and_journal_pg_layers` says why.
 RUNS_TABLE = "meta.derivation_runs"
 
 _TAIL_OK = """

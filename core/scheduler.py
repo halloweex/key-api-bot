@@ -1407,7 +1407,8 @@ class BackgroundScheduler:
         # every DuckDB tick costs a ~220 ms global-lock read (measured on the
         # 2026-09-17 backup, 33,203 rows) and a TRUNCATE that stalls /traffic
         # every two minutes, and the real fix is step 9 — parsing UTM inside
-        # the Postgres derivation, where the two are one transaction's work.
+        # the Postgres derivation, where the two are one run's work. That is
+        # `KS_UTM_PARSE=postgres` (DN-19), under which the ship below stops.
         if not pg_derivation.owns():
             logger.info("Rebuilding Silver in Postgres: %s", await rebuild_silver())
             logger.info("Rebuilding Gold in Postgres: %s", await rebuild_gold())
@@ -1430,13 +1431,23 @@ class BackgroundScheduler:
         # where it was first written — made a shipping fault cost the revenue
         # Gold, which `/summary` and `/marketing` have read since 2026-08-28.
         # The ordering rule above is about dependency, and this has none.
-        from core.duckdb_store import get_store
-        from core.pg_order_utm import ship_order_utm
+        #
+        # **Not under `KS_UTM_PARSE=postgres`** (DN-19), where Postgres parses
+        # the table itself as the derivation's last step and a copy of
+        # DuckDB's would overwrite that parse — or, once DuckDB stops being
+        # derived, overwrite it with a frozen table and after the first Sunday
+        # compaction an empty one. That mode needs own, so under it the tick
+        # has nothing left to do in Postgres at all.
+        from core import pg_utm_parse
 
-        logger.info(
-            "Shipping order UTM to Postgres: %s",
-            await ship_order_utm(await get_store()),
-        )
+        if not pg_utm_parse.parses_in_postgres():
+            from core.duckdb_store import get_store
+            from core.pg_order_utm import ship_order_utm
+
+            logger.info(
+                "Shipping order UTM to Postgres: %s",
+                await ship_order_utm(await get_store()),
+            )
 
     # Whether this process has derived yet. The first tick rebuilds regardless
     # of the signal: a deploy is exactly when an owed rebuild used to be lost.
@@ -1582,6 +1593,45 @@ class BackgroundScheduler:
         )
 
     async def _derive_pg_layers(self, pool, trigger: str) -> Dict[str, Any]:
+        """One whole derivation, then — under `KS_UTM_PARSE=postgres` — the UTM
+        parse, as its last step.
+
+        **In its own try, after the journal row, and whatever the derivation
+        did.** Nothing is computed from `silver.order_utm`, so nothing waits
+        for it; but after step 9 this parse is the only classifier there is,
+        and inside the derivation's try a persistent Gold or profile fault
+        would stop it too — every new order falling through the COALESCE to
+        organic or unattributed for the length of an unrelated outage, with
+        the page naming Gold (the chain-2 review, "the order of steps inside
+        the derivation job"). So the derivation journals itself first, and
+        the parse's failure is its own: recorded against `silver.order_utm`
+        by the parse, judged by the canary through that row, and never the
+        derivation's verdict. Under `duckdb` this returns exactly what the
+        derivation returned.
+        """
+        result = await self._derive_and_journal_pg_layers(pool, trigger)
+        utm = await self._parse_order_utm_in_postgres(pool)
+        if utm is not None:
+            result["order_utm"] = utm
+        return result
+
+    @staticmethod
+    async def _parse_order_utm_in_postgres(pool) -> Optional[Dict[str, Any]]:
+        """The incremental UTM parse, or None when Postgres does not parse it.
+        Never raises: the parse has written its failure into the watermark
+        before raising, and this is the ERROR line beside it."""
+        from core import pg_utm_parse
+
+        if not pg_utm_parse.parses_in_postgres():
+            return None
+        try:
+            return await pg_utm_parse.parse_incremental_locked(pool)
+        except Exception as e:  # noqa: BLE001 — see the docstring
+            logger.error("Order UTM parse in Postgres failed after the derivation: %s",
+                         e, exc_info=True)
+            return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+
+    async def _derive_and_journal_pg_layers(self, pool, trigger: str) -> Dict[str, Any]:
         """One whole derivation, its validation, its journal row and its alerts."""
         import html
 

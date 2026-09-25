@@ -112,6 +112,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_WAREHOUSE set to a value web did not understand (ran as duckdb,
     # DN-28). Not a stop: web is the only syncer.
     "warehouse_mode_invalid": _c("web restarts with a valid KS_WRITE_WAREHOUSE"),
+    # KS_UTM_PARSE set to a value web did not understand, or to postgres
+    # without KS_PG_DERIVE=own; ran as duckdb, the ship as before (DN-19).
+    "utm_parse_mode_invalid": _c(
+        "web restarts with a valid KS_UTM_PARSE, postgres only beside KS_PG_DERIVE=own"),
     # Derivation marks dropped and demonstrably not being healed: the latest
     # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
     "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),
@@ -383,6 +387,12 @@ for _table in ("silver.orders", "gold.daily_revenue"):
     REGISTRY[f"mirror_never:{_table}"] = _c("the layer's first successful derivation")
     REGISTRY[f"mirror_stale:{_table}"] = _c("a derivation inside the age limit")
     REGISTRY[f"mirror_failing:{_table}"] = _c("failures_since_ok back to zero")
+# The same family for the UTM table once Postgres parses it itself
+# (KS_UTM_PARSE=postgres, DN-19): web declares its limit then, and the row is
+# the parse's liveness stamp, written by the derivation's last step.
+REGISTRY["mirror_never:silver.order_utm"] = _c("the first successful parse in Postgres")
+REGISTRY["mirror_stale:silver.order_utm"] = _c("a parse inside the age limit")
+REGISTRY["mirror_failing:silver.order_utm"] = _c("failures_since_ok back to zero")
 
 REGISTRY["fk_orphan_order_products_order_id"] = _c("the parent order lands or the orphans go")
 for _col in ("ordered_at", "source_id", "status_id"):

@@ -1269,7 +1269,9 @@ Cap what rebounds; only delete what stays deleted.
   add one.
 - **The alert says what the machine already tried**, and still never triggers
   a repair. `machine_attempts_note()` reads the two ids-diff heal ledgers
-  (24 h window) and is *passed into* `format_alert_message`, which stays pure.
+  (24 h window) and is *passed into* `format_alert_message`, which stays pure
+  but for one mode cached at boot: `KS_UTM_PARSE` picks which lever line the
+  `pg_order_utm_*` findings carry (`REMEDIATION_UTM_PARSED_IN_POSTGRES`).
 - **Mirror freshness**: `/api/health` publishes `mirrors` — `last_ok_at` age,
   `failures_since_ok` and a boolean `failing` for `bronze.orders`. The error
   *text* is deliberately not published; this endpoint is public and the text
@@ -2097,8 +2099,8 @@ pixel-only заказов за 180 дней (**₴4.55 млн**) несут **о
 
 `platform` материализована в `silver_order_utm`, а перепарсинг трогает только
 заказы с изменившимся `updated_at` — поэтому правка правил классификации
-доезжает до экрана лишь после `POST /api/traffic/reclassify` (он же отгружает
-результат в Postgres через `ship_after_reparse`). Без этого вызова старые
+доезжает до экрана лишь после `POST /api/traffic/reclassify` (он же доносит
+результат до Postgres через `reparse_router`). Без этого вызова старые
 строки продолжают называть Facebook то, что классификатор уже так не считает.
 Проверено на проде 09.09: со сменённым классификатором, но без перепарсинга,
 `unattributed` показывает 25 заказов — ровно те, у кого строки атрибуции нет
@@ -2220,13 +2222,14 @@ COUNT(*) FROM ( ... )` без имени производной таблицы; 
 склад грязным**. Пока вкладка читала DuckDB, это было безобидно — она читала ту
 самую таблицу; теперь она читает Postgres, и без отгрузки админ, только что
 сменивший правила классификации, увидел бы на странице предыдущие. Все четыре
-зовут `ship_after_reparse`: под `PG_LAYER_LOCK` (планировщик отгружает ту же
-таблицу, и две переплётшиеся TRUNCATE+INSERT оставят ту копию, что закоммитилась
-позже, под свежей OK-вотермаркой — включая копию, прочитанную *до* перепарсинга),
-с ограниченным ожиданием лока (под ним ходит сетевой ClickHouse-шиппер, а три
-из четырёх вызывающих — HTTP-хендлеры) и никогда не бросая, потому что работа в
-DuckDB уже удалась. Тест обходит AST: функция, зовущая `refresh_utm_silver_layer`,
-обязана звать и отгрузку.
+зовут `reparse_router` (DN-19), который при `KS_UTM_PARSE=duckdb` — по
+умолчанию — и есть `ship_after_reparse`: под `PG_LAYER_LOCK` (планировщик
+отгружает ту же таблицу, и две переплётшиеся TRUNCATE+INSERT оставят ту копию,
+что закоммитилась позже, под свежей OK-вотермаркой — включая копию, прочитанную
+*до* перепарсинга), с ограниченным ожиданием лока (под ним ходит сетевой
+ClickHouse-шиппер, а три из четырёх вызывающих — HTTP-хендлеры) и никогда не
+бросая, потому что работа в DuckDB уже удалась. Тест обходит AST: функция,
+зовущая `refresh_utm_silver_layer`, обязана звать роутер.
 
 **Отказ шиппера пишется в вотермарку** (`_record_failure` из `core/pg_landing.py`),
 и внутрь гарда занесены `get_pool` с `require_revision`: `SchemaVersionError` от
@@ -2235,6 +2238,34 @@ DuckDB уже удалась. Тест обходит AST: функция, зо�
 Соседние *деривированные* слои (`rebuild_silver`, `rebuild_gold`) так намеренно
 не делают и правы: их можно пересчитать, а это копия состояния, которое есть
 только у DuckDB.
+
+**`KS_UTM_PARSE=postgres` переносит разбор в Postgres** (шаг 9, DN-19; по
+умолчанию `duckdb`, и тогда не меняется ничего). Нужен `KS_PG_DERIVE=own`:
+последний шаг деривации — `parse_incremental_locked` из `bronze.orders`, в
+своём `try` после строки журнала, так что сбой Gold его не останавливает, а
+его сбой пишется в вотермарку `silver.order_utm`, а не в вердикт деривации.
+`PG_LAYER_LOCK` он берёт сам, уже после того как деривация его отпустила:
+лок не реентерабелен, и внутри `async with` деривации разбор ждал бы сам себя
+`LOCK_WAIT_S` и записывал отказ каждый прогон. Тик DuckDB перестаёт
+отгружать, двери зовут `parse_full` (reclassify и CLI — те, что делают
+DELETE) или `parse_incremental_locked`, а `/api/health` публикует
+`silver.order_utm` среди наблюдаемых таблиц со своим `max_age_s`. Разбор
+DuckDB не останавливается нигде, поэтому откат — снять переменную: следующий
+тик отгрузит копию, которая всё это время была актуальной. Неизвестное
+значение или `postgres` без `own` работает как `duckdb`, публикует ошибку в
+`utm_parse` и будит канарейку `utm_parse_mode_invalid` — web не падает, он
+единственный синкер. Рычаги находок `pg_order_utm_*` следуют режиму: при
+`postgres` строка «→» — вотермарка `silver.order_utm`, затем
+`POST /api/traffic/refresh` или `/api/warehouse/refresh` (деривация кончается
+тем же разбором), а копию комментария в DuckDB она не предлагает — этот
+разбор DuckDB не читает. При `duckdb` и строка, и описания прежние байт в
+байт. Тест обходит `core/`, `web/`, `scripts/`, `bot/` и
+`deploy/` до неподвижной точки и читает каждое имя через `import … as`,
+которым его связали: ни одна функция вне `core/pg_order_utm.py` не доходит до
+отгрузки иначе как из ветки `duckdb` проверки `parses_in_postgres()`. Чего
+обход вызовов не видит — отгрузку, переданную значением без вызова, и имя
+отгрузки строкой (`getattr`, импорт по пути), — запрещено отдельными тестами.
+Имя, вычисленное во время работы, не увидит никакой обход.
 
 **Индексов по `platform` и `traffic_type` на этой таблице нет** (ревизия 0019
 сняла их). Каждый предикат вкладки оборачивает колонку в `COALESCE` с запасным

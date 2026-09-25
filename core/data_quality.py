@@ -1979,6 +1979,8 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # Then the watermark, read before anything ships: a successful ship
     # clears `last_error`. Then the one lever that ships with nothing marked
     # dirty; `POST /api/warehouse/refresh` never ships this table at all.
+    # All of this is KS_UTM_PARSE=duckdb; under postgres the line is
+    # `REMEDIATION_UTM_PARSED_IN_POSTGRES`'s below.
     ("pg_order_utm_",
      "manager_comment in fingerprint? Copy it to DuckDB from bronze.orders. "
      "Else read meta.mirror_state for silver.order_utm. Then POST /api/traffic/refresh"),
@@ -2019,6 +2021,22 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
 
 DEFAULT_REMEDIATION = (
     "No lever written down — see CLAUDE.md «How a failure reaches a human», add one"
+)
+
+# DN-19. Under KS_UTM_PARSE=postgres the `pg_order_utm_` levers above are
+# wrong twice over. The parser reads bronze.orders itself, so copying a
+# comment into DuckDB moves nothing. And `POST /api/warehouse/refresh` does
+# reach the table: under KS_PG_DERIVE=own its derivation's last step is the
+# parse. What is left is the parse's own watermark row, where it records every
+# failure before it raises, and the two routes that run it. `remediation_for`
+# puts these in place of the entries with the same prefix while the mode is
+# postgres. Under the default the table above is read unchanged, byte for
+# byte. The reasons ride in the findings' descriptions, as above
+# (`mirror_reconciliation._ORDER_UTM_LEVER_REASONS_POSTGRES`).
+REMEDIATION_UTM_PARSED_IN_POSTGRES: Tuple[Tuple[str, str], ...] = (
+    ("pg_order_utm_",
+     "Read meta.mirror_state for silver.order_utm: the parse writes its error there. "
+     "Then POST /api/traffic/refresh or /api/warehouse/refresh"),
 )
 
 
@@ -2090,19 +2108,35 @@ def human_check_name(name: str) -> str:
     return f"{label} ({name})" if label else name
 
 
-def remediation_for(check_names: Iterable[str]) -> List[str]:
+def remediation_for(
+    check_names: Iterable[str], *, utm_parsed_in_postgres: Optional[bool] = None,
+) -> List[str]:
     """The distinct "what to do" lines for a set of check names.
 
     Longest prefix wins, so `mirror_never_shipped` gets its own sentence
     rather than the generic `mirror_` one. Deduplicated and order-stable: an
     alert naming eight `fk_orphan_*` checks should say the one useful thing
     once.
+
+    `utm_parsed_in_postgres` picks `REMEDIATION_UTM_PARSED_IN_POSTGRES` over
+    the entries it names. None, which is what every alert passes, reads the
+    cached `KS_UTM_PARSE` mode: set once at boot by `configure_modes()`, so
+    this reads configuration and nothing that changes while web runs.
     """
+    if utm_parsed_in_postgres is None:
+        from core import pg_utm_parse
+
+        utm_parsed_in_postgres = pg_utm_parse.parses_in_postgres()
+    table = REMEDIATION
+    if utm_parsed_in_postgres:
+        swapped = dict(REMEDIATION_UTM_PARSED_IN_POSTGRES)
+        table = tuple((prefix, swapped.get(prefix, line)) for prefix, line in REMEDIATION)
+
     lines: List[str] = []
     for name in check_names:
         best = ""
         chosen = DEFAULT_REMEDIATION
-        for prefix, line in REMEDIATION:
+        for prefix, line in table:
             if name.startswith(prefix) and len(prefix) > len(best):
                 best, chosen = prefix, line
         if chosen not in lines:
@@ -2158,7 +2192,9 @@ def format_alert_message(
 
     Формат — ответ на прямую правку владельца 30.08: «коротко — ясно и по
     сути». Обоснования рычагов живут в CLAUDE.md; детали — в журнале и у
-    агента-диагноста, который приходит вторым сообщением. Чистая функция.
+    агента-диагноста, который приходит вторым сообщением. Чистая функция —
+    кроме режима `KS_UTM_PARSE`, закэшированного при старте: он выбирает
+    рычаг находок `pg_order_utm_` (`remediation_for`).
 
     Пример:
         🚨 <b>Сверка копий: строки расходятся между копиями — 891</b>

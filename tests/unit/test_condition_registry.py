@@ -219,17 +219,24 @@ def collect_canary_keys() -> set:
     for table in DERIVED_TABLES:
         keys |= {f"mirror_never:{table}", f"mirror_stale:{table}",
                  f"mirror_failing:{table}"}
+    # And the UTM table, which web declares a limit for once Postgres parses
+    # it (KS_UTM_PARSE=postgres, DN-19): the same loop, the same three keys.
+    from core.pg_utm_parse import UTM_TABLE
+
+    keys |= {f"mirror_never:{UTM_TABLE}", f"mirror_stale:{UTM_TABLE}",
+             f"mirror_failing:{UTM_TABLE}"}
     keys.add("dq_block_missing")
     keys.add("mirror_block_missing")
     keys.add("unkeyed")  # the guaranteed-fallback bucket in decide()
     # check_alerting_health returns its keys as tuple literals rather than
     # through fail(); a declared family, like disk's and memory's.
     keys |= {"alerting_block_missing", "alerting_transport_failing"}
-    # check_derivation_mode, check_read_fallback_mode,
+    # check_derivation_mode, check_read_fallback_mode, check_utm_parse_mode,
     # check_warehouse_writer_mode, check_write_chains, check_write_chain_latch
     # and check_write_chain_precondition return their keys the same way.
     keys.add("derivation_mode_invalid")
     keys.add("read_fallback_mode_invalid")
+    keys.add("utm_parse_mode_invalid")
     keys.add("warehouse_mode_invalid")
     keys.add("write_chain_flag_invalid")
     keys.add("write_chain_flag_mismatch")

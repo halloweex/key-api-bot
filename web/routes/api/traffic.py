@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
-from core.pg_order_utm import ship_after_reparse
+from core.pg_utm_parse import reparse_router
 from web.services import dashboard_service
 from web.routes.auth import require_admin
 from ._deps import (
@@ -212,8 +212,10 @@ async def refresh_traffic_data(
         # And on to Postgres, which is what the tab reads. These endpoints do
         # not mark the warehouse dirty, so without this the reclassification
         # sits in DuckDB until the next dirty tick while the page keeps
-        # rendering the previous one. Never raises — see `ship_after_reparse`.
-        await ship_after_reparse(store)
+        # rendering the previous one. The router ships DuckDB's parse, or
+        # under KS_UTM_PARSE=postgres parses in Postgres what is new; never
+        # raises — see `core/pg_utm_parse.py`.
+        await reparse_router(store)
 
         return {
             "success": True,
@@ -258,9 +260,10 @@ async def reclassify_traffic(
     the middle of it. DuckDB *is* inconsistent for those minutes — the DELETE
     commits on its own connection and the re-parse writes in batches of a
     thousand on theirs — but the page reads Postgres, and Postgres keeps the
-    previous complete copy until `ship_after_reparse` replaces the whole table
-    at the end. So the window is invisible from the screen rather than merely
-    short.
+    previous complete copy until `reparse_router` replaces the whole table at
+    the end: shipped from DuckDB by `ship_after_reparse`, or under
+    KS_UTM_PARSE=postgres re-parsed by `parse_full` in one transaction. So the
+    window is invisible from the screen rather than merely short.
     """
     store = await get_store()
 
@@ -272,8 +275,11 @@ async def reclassify_traffic(
         # And on to Postgres, which is what the tab reads. These endpoints do
         # not mark the warehouse dirty, so without this the reclassification
         # sits in DuckDB until the next dirty tick while the page keeps
-        # rendering the previous one. Never raises — see `ship_after_reparse`.
-        await ship_after_reparse(store)
+        # rendering the previous one. `full`: everything was re-parsed, so
+        # under KS_UTM_PARSE=postgres the table is replaced whole — the only
+        # way a rule change reaches orders whose `updated_at` has not moved.
+        # Never raises — see `core/pg_utm_parse.py`.
+        await reparse_router(store, full=True)
 
         return {
             "success": True,
@@ -369,11 +375,11 @@ async def _run_backfill_inner(days: int):
                 # they are one write: the UPDATE moves DuckDB and the ship
                 # carries the same rows to `bronze.orders`. That is not what
                 # `/traffic` reads — the tab reads `silver.orders LEFT JOIN
-                # silver.order_utm` and the parsed rows already reach Postgres
-                # through `ship_after_reparse` below — it is what the daily
+                # silver.order_utm` and the parsed rows reach Postgres
+                # through `reparse_router` below — it is what the daily
                 # `mirror_landing` fingerprint compares (`manager_comment` is
                 # one of its columns) and what step 9's Postgres UTM parser
-                # will read. The three scheduled syncs hold this lock across
+                # reads under KS_UTM_PARSE=postgres. The three scheduled syncs hold this lock across
                 # their own DuckDB write *and* their mirror call, so a chunk
                 # taken under it cannot straddle one — and without it a sync
                 # writing between our UPDATE and our read would leave Postgres
@@ -489,8 +495,11 @@ async def _run_backfill_inner(days: int):
         # And on to Postgres, which is what the tab reads. These endpoints do
         # not mark the warehouse dirty, so without this the reclassification
         # sits in DuckDB until the next dirty tick while the page keeps
-        # rendering the previous one. Never raises — see `ship_after_reparse`.
-        await ship_after_reparse(store)
+        # rendering the previous one. Not `full`: this run only adds comments,
+        # and under KS_UTM_PARSE=postgres the incremental parse reads them
+        # out of `bronze.orders`, where `ship_orders_by_id` put them above.
+        # Never raises — see `core/pg_utm_parse.py`.
+        await reparse_router(store)
 
         logger.info(f"UTM backfill complete: {utm_count} UTM records")
 
