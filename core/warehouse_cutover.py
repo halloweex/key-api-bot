@@ -40,6 +40,11 @@ needed in place; DN-29 is the switch.
   stood-down checks down until a full tick validates — the Silver they would
   read is as old as the switch. When DuckDB's `silver_order_utm` is empty (a
   Sunday compaction ran in between) it also flags a reclassify as needed.
+- **The UTM doors** (refresh, reclassify, the `manager_comment` backfill and
+  its CLI) parse in Postgres alone under `postgres`. The two that re-parse
+  everything note it in the record, and the way back then empties DuckDB's
+  `silver_order_utm` so the full tick it owes re-parses every verdict under
+  the rules in force — see THE UTM DOORS.
 - **`evaluate_preconditions(env, facts)`** names every unmet precondition of
   the switch, one entry each, so the readiness a person reads is a list of
   things to do rather than a "no". Pure over what it is handed.
@@ -573,7 +578,20 @@ WRITER_KEY = "warehouse_writer"
 RESOLVE_NOTE = ("DuckDB derivation retired (KS_WRITE_WAREHOUSE=postgres): the "
                 "warehouse group is closed without a validating tick")
 
+# Serialises every read-modify-write of the record in this process: settling,
+# and a door noting a Postgres-only re-parse (`note_utm_reparsed_in_postgres`).
 _settle_lock: Optional[asyncio.Lock] = None
+
+# In the record while `postgres` is: when a door last re-parsed every UTM
+# verdict in Postgres alone — see THE UTM DOORS below.
+UTM_REPARSED = "utm_reparsed_at"
+
+
+def _record_lock() -> asyncio.Lock:
+    global _settle_lock
+    if _settle_lock is None:
+        _settle_lock = asyncio.Lock()
+    return _settle_lock
 
 
 def _now_iso() -> str:
@@ -614,6 +632,54 @@ async def _count_utm_rows(store) -> int:
         return int(conn.execute("SELECT COUNT(*) FROM silver_order_utm").fetchone()[0])
 
 
+# ─── THE UTM DOORS ───────────────────────────────────────────────────────────
+#
+# Four doors re-parse the UTM verdicts outside the tick — `POST
+# /api/traffic/refresh`, `/traffic/reclassify`, the `manager_comment` backfill
+# and `scripts/backfill_utm.py` (`core/pg_utm_parse.py`, THE ROUTER). Under
+# `postgres` each parses in Postgres alone. DuckDB derives no verdict there,
+# and it must not stand in front of the table /traffic reads: a DuckDB parse
+# that raised used to leave the Postgres reclassify unrun, and after a Sunday
+# compaction every door re-parsed every order in DuckDB first (~281 s).
+#
+# Two of them re-parse everything, which is the only way a rule change reaches
+# an order whose `updated_at` has not moved. From then on DuckDB's verdicts
+# are older than the rules, and no incremental parse will ever notice — so the
+# record says when, and the way back empties DuckDB's `silver_order_utm`: the
+# full tick it owes then re-parses every verdict under the rules in force,
+# which is what the reclassify it skipped would have done.
+
+
+async def note_utm_reparsed_in_postgres(store) -> None:
+    """A door is about to re-parse every UTM verdict in Postgres alone: say so
+    in the record, so the way back re-parses DuckDB's. Noted before the parse —
+    one that then fails costs the way back a re-parse it did not need, the
+    other order would cost it one it did. Nothing unless `postgres` is the
+    mode. Raises what DuckDB raises; the doors log it and parse anyway."""
+    global _writer_record
+    if not writes_postgres():
+        return
+    async with _record_lock():
+        record = await read_writer(store)
+        if record is None or record.get("writer") != POSTGRES:
+            # Not recorded yet — the settle that would have raised. The
+            # record it would have written; its retry finds it unresolved.
+            record = {"writer": POSTGRES, "since": _now_iso(), "resolved": False}
+        record = {key: value for key, value in record.items() if key != "unreadable"}
+        record[UTM_REPARSED] = _now_iso()
+        await _write_writer(store, record)
+        _writer_record = record
+
+
+async def _forget_duckdb_utm(store) -> None:
+    """Empty DuckDB's `silver_order_utm` on the way back, so the owed full tick
+    re-parses every verdict. Only while DuckDB derives."""
+    if not duckdb_derives():
+        return
+    async with store.connection() as conn:
+        conn.execute("DELETE FROM silver_order_utm")
+
+
 def _warehouse_pages_open() -> bool:
     """A page of the `warehouse` group is delivered and not yet resolved, in
     this process's Alert Gate — what `resolve_group` would announce from."""
@@ -643,12 +709,10 @@ async def settle_writer(store) -> Dict[str, Any]:
     catches it, and the next caller tries again. Under `postgres` a group the
     ledger would not let it close leaves the process unsettled, so the next
     caller tries that again too."""
-    global _settled, _held, _reclassify_needed, _writer_record, _settle_lock
+    global _settled, _held, _reclassify_needed, _writer_record
     if _settled:
         return status()
-    if _settle_lock is None:
-        _settle_lock = asyncio.Lock()
-    async with _settle_lock:
+    async with _record_lock():
         if _settled:
             return status()
         record = await read_writer(store)
@@ -676,13 +740,22 @@ async def settle_writer(store) -> Dict[str, Any]:
         elif record is not None and record.get("writer") == POSTGRES:
             await store.mark_warehouse_dirty(None)
             _held = True
+            # After the mark, so a DuckDB that refuses the DELETE has still
+            # been told what it owes; settling again repeats both.
+            reparsed = record.get(UTM_REPARSED)
+            if reparsed:
+                await _forget_duckdb_utm(store)
             _reclassify_needed = await _count_utm_rows(store) == 0
             logger.warning(
                 "warehouse writer back to duckdb from postgres (since %s): a full "
                 "DuckDB rebuild is owed and marked; the DuckDB checks over Silver, "
-                "Gold and UTM stay down until a full tick validates%s",
+                "Gold and UTM stay down until a full tick validates%s%s",
                 record.get("since"),
-                "; silver_order_utm is empty — POST /api/traffic/reclassify"
+                f"; the UTM verdicts were re-parsed in Postgres alone at {reparsed}, "
+                "so DuckDB's silver_order_utm is emptied and the owed full tick "
+                "re-parses every one" if reparsed else "",
+                "; silver_order_utm is empty — POST /api/traffic/reclassify if the "
+                "tick's own parse does not refill it"
                 if _reclassify_needed else "")
         _writer_record = record
         _settled = settled

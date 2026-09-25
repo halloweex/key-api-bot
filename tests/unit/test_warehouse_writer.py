@@ -561,6 +561,13 @@ def _guarded_calls(tree: ast.Module, callee: str):
     of an `if <...>.duckdb_derives():` (never its else), or the function it
     sits in returns under `if not <...>.duckdb_derives():` in a statement of
     its own body that comes before the one holding the call."""
+    return [(line, guarded) for line, guarded, _fn in _guarded_nodes(
+        tree, lambda node: isinstance(node, ast.Call) and _name(node.func) == callee)]
+
+
+def _guarded_nodes(tree: ast.Module, match):
+    """`(lineno, guarded, enclosing function name or None)` for every node
+    `match` accepts, guarded as `_guarded_calls` says."""
     found = []
 
     def visit(node, ifs, fn):
@@ -574,8 +581,9 @@ def _guarded_calls(tree: ast.Module, callee: str):
                     inner_ifs = ifs + (node,)
                 inner_fn = child if isinstance(child, (ast.FunctionDef,
                                                        ast.AsyncFunctionDef)) else fn
-                if isinstance(child, ast.Call) and _name(child.func) == callee:
-                    found.append((child.lineno, bool(inner_ifs) or _early_return(fn, child)))
+                if match(child):
+                    found.append((child.lineno, bool(inner_ifs) or _early_return(fn, child),
+                                  fn.name if fn is not None else None))
                 visit(child, inner_ifs if inner_fn is fn else (), inner_fn)
 
     def _early_return(fn, call) -> bool:
@@ -642,6 +650,62 @@ class TestEveryRefreshStandsBehindThePredicate:
     def test_the_walk_reads_each_shape(self, source, guarded):
         ((_line, found),) = _guarded_calls(ast.parse(source), "refresh_warehouse_layers")
         assert found is guarded
+
+
+# The tick is the one DuckDB UTM parse the refresh walk above already guards —
+# every call of `refresh_warehouse_layers` stands behind the predicate.
+UTM_TICK = "refresh_warehouse_layers"
+
+
+def _deletes_duckdb_utm(node) -> bool:
+    return (isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and "DELETE FROM silver_order_utm" in node.value)
+
+
+def _parses_duckdb_utm(node) -> bool:
+    return isinstance(node, ast.Call) and _name(node.func) == "refresh_utm_silver_layer"
+
+
+def _production_nodes(match):
+    out = []
+    for root in PRODUCTION_ROOTS:
+        for path in sorted((REPO / root).rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for lineno, guarded, fn in _guarded_nodes(tree, match):
+                out.append((f"{path.relative_to(REPO)}:{lineno}", guarded, fn))
+    return out
+
+
+class TestEveryDuckdbUtmParseStandsBehindThePredicate:
+    """Under postgres DuckDB derives no UTM verdict at all — not in the tick,
+    and not at the four doors that re-parse outside it. Walked, like the
+    refresh, over every production root."""
+
+    def test_no_door_parses_or_empties_duckdb_utm_under_postgres(self):
+        found = [(where, guarded) for where, guarded, fn in
+                 _production_nodes(lambda n: _parses_duckdb_utm(n) or _deletes_duckdb_utm(n))
+                 if fn != UTM_TICK]
+        bypass = [where for where, guarded in found if not guarded]
+        assert bypass == [], (
+            f"{bypass} parse or empty DuckDB's silver_order_utm without asking "
+            "warehouse_cutover.duckdb_derives(): under KS_WRITE_WAREHOUSE=postgres "
+            "a DuckDB failure there would stand in front of the table /traffic reads")
+
+    def test_the_walk_finds_the_doors(self):
+        """Three routes, the CLI, and the way back's own DELETE — a walk that
+        found none would pass on a codebase it cannot read."""
+        parses = {where.rsplit(":", 1)[0] for where, _g, fn in
+                  _production_nodes(_parses_duckdb_utm) if fn != UTM_TICK}
+        assert parses == {"web/routes/api/traffic.py", "scripts/backfill_utm.py"}
+        assert len([1 for _w, _g, fn in _production_nodes(_parses_duckdb_utm)
+                    if fn != UTM_TICK]) == 4
+        deletes = {where.rsplit(":", 1)[0] for where, _g, _fn in
+                   _production_nodes(_deletes_duckdb_utm)}
+        assert deletes == {"web/routes/api/traffic.py", "scripts/backfill_utm.py",
+                           "core/warehouse_cutover.py"}
+        (tick,) = [fn for _w, _g, fn in _production_nodes(_parses_duckdb_utm)
+                   if fn == UTM_TICK]
+        assert tick == UTM_TICK
 
 
 # ─── The recorded writer ─────────────────────────────────────────────────────
@@ -1220,3 +1284,258 @@ class TestTheStatusPage:
         assert body["last_trigger"] == "dirty_flag" and body["validation_passed"] is True
         assert "postgres" not in body and "duckdb_frozen" not in body
         assert "writer" not in body
+
+
+# ─── The UTM doors under postgres ────────────────────────────────────────────
+
+
+def _broken_duckdb():
+    """A DuckDB that raises on everything — what a door under postgres must
+    not need."""
+    store = MagicMock()
+    store.connection = MagicMock(side_effect=RuntimeError("duckdb is gone"))
+    store.refresh_utm_silver_layer = AsyncMock(side_effect=RuntimeError("duckdb parse died"))
+    return store
+
+
+class TestTheUtmDoorsUnderPostgres:
+    def _door(self, name, store, router):
+        from web.routes.api import traffic
+
+        with patch.object(traffic, "get_store", AsyncMock(return_value=store)), \
+             patch.object(traffic, "reparse_router", router):
+            return asyncio.run(_unwrap(getattr(traffic, name))(request=None, user={}))
+
+    def test_the_reclassify_parses_postgres_alone_whatever_duckdb_does(
+        self, postgres, caplog,
+    ):
+        """The review's reproduction: a DuckDB parse that raised left the
+        Postgres reclassify — what /traffic reads — unrun, behind a 500."""
+        store = _broken_duckdb()
+        router = AsyncMock(return_value={"rows": 5, "replaced": 4, "duration_ms": 1})
+        result = self._door("reclassify_traffic", store, router)
+        assert result == {"success": True, "utm_records": 5, "engine": "postgres"}
+        router.assert_awaited_once_with(store, full=True)
+        store.refresh_utm_silver_layer.assert_not_awaited()
+        assert "will not re-parse them" in caplog.text, "the refused note is logged"
+
+    def test_the_refresh_parses_postgres_alone_and_only_adds(self, postgres):
+        store = _broken_duckdb()
+        router = AsyncMock(return_value={"parsed": 2, "rows": 9, "duration_ms": 1})
+        result = self._door("refresh_traffic_data", store, router)
+        assert result == {"success": True, "utm_orders_parsed": 2, "engine": "postgres"}
+        router.assert_awaited_once_with(store, full=False)
+        store.refresh_utm_silver_layer.assert_not_awaited()
+
+    @pytest.mark.parametrize("answer, status", [
+        ({"error": "LockNotAvailableError: lock timeout"}, 500),
+        ({"refused": "0 rows would replace 9"}, 409),
+    ])
+    def test_postgres_failing_is_the_doors_answer(self, postgres, answer, status):
+        """There is no DuckDB half that succeeded for it to report instead."""
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as raised:
+            self._door("reclassify_traffic", _broken_duckdb(), AsyncMock(return_value=answer))
+        assert raised.value.status_code == status
+
+    def test_the_reclassify_notes_the_record_and_leaves_duckdb_alone(
+        self, tmp_path, postgres,
+    ):
+        store = _store(tmp_path)
+        try:
+            with patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
+                asyncio.run(wc.settle_writer(store))
+            _one_utm_row(store)
+            router = AsyncMock(return_value={"rows": 1, "replaced": 1})
+            self._door("reclassify_traffic", store, router)
+            record = _writer(store)
+            assert record["writer"] == "postgres" and record["resolved"] is True
+            assert wc.UTM_REPARSED in record
+            assert _utm_rows(store) == 1, "DuckDB's verdicts are left as they stand"
+        finally:
+            asyncio.run(store.close())
+
+    def test_a_note_before_the_first_settle_records_postgres_unresolved(
+        self, tmp_path, postgres,
+    ):
+        """The settle that would have written it raised; its retry then finds
+        the record unresolved and closes the group."""
+        store = _store(tmp_path)
+        try:
+            asyncio.run(wc.note_utm_reparsed_in_postgres(store))
+            record = _writer(store)
+            assert record["writer"] == "postgres" and record["resolved"] is False
+            assert wc.UTM_REPARSED in record
+        finally:
+            asyncio.run(store.close())
+
+    def test_the_default_reclassify_is_unchanged(self, tmp_path):
+        store = _store(tmp_path)
+        try:
+            asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
+            router = AsyncMock(return_value={"shipped": 2})
+            result = self._door("reclassify_traffic", store, router)
+            assert result == {"success": True, "utm_records": 2}
+            router.assert_awaited_once_with(store, full=True)
+            assert _utm_rows(store) == 2
+            assert _writer(store) is None, "the default writes no record"
+        finally:
+            asyncio.run(store.close())
+
+
+def _one_utm_row(store) -> None:
+    async def seed():
+        async with store.connection() as conn:
+            conn.execute("INSERT INTO silver_order_utm (order_id) VALUES (1)")
+    asyncio.run(seed())
+
+
+def _utm_rows(store) -> int:
+    async def count():
+        async with store.connection() as conn:
+            return conn.execute("SELECT COUNT(*) FROM silver_order_utm").fetchone()[0]
+    return asyncio.run(count())
+
+
+class TestTheBackfillDoorsUnderPostgres:
+    """The `manager_comment` backfill task and the CLI: the comments still land
+    in DuckDB's `orders` and ship to `bronze.orders` — landing, which the
+    switch does not move — and the verdicts are Postgres' alone."""
+
+    @pytest.mark.asyncio
+    async def test_the_task_parses_postgres_alone(self, tmp_path, postgres):
+        from tests.unit.test_comment_backfill_survives_a_ship_fault import (
+            _Client, _two_orders)
+        from web.routes.api import traffic
+
+        store = await _two_orders(tmp_path)
+        scheduler = MagicMock()
+        scheduler._heavy_job_lock = asyncio.Lock()
+        before = dict(traffic._backfill_status)
+
+        async def ship(_store, ids, *, version_kind, **_kw):
+            return {"orders_shipped": len(ids)}
+
+        router = AsyncMock(return_value={"parsed": 1, "rows": 2})
+        try:
+            with patch.object(traffic, "get_store", AsyncMock(return_value=store)), \
+                 patch("core.keycrm.get_async_client", AsyncMock(return_value=_Client())), \
+                 patch("core.scheduler.get_scheduler", return_value=scheduler), \
+                 patch("core.pg_backfill.ship_orders_by_id", new=ship), \
+                 patch.object(store, "refresh_utm_silver_layer",
+                              new=AsyncMock(side_effect=AssertionError("DuckDB parsed"))), \
+                 patch.object(traffic, "reparse_router", router), \
+                 patch("asyncio.sleep", new=AsyncMock()):
+                await asyncio.wait_for(traffic._run_backfill_inner(1), timeout=20)
+            result = dict(traffic._backfill_status["result"])
+
+            router.return_value = {"error": "RuntimeError: postgres went away"}
+            async with store.connection() as conn:
+                conn.execute("UPDATE orders SET manager_comment = NULL WHERE id = 2")
+            with patch.object(traffic, "get_store", AsyncMock(return_value=store)), \
+                 patch("core.keycrm.get_async_client", AsyncMock(return_value=_Client())), \
+                 patch("core.scheduler.get_scheduler", return_value=scheduler), \
+                 patch("core.pg_backfill.ship_orders_by_id", new=ship), \
+                 patch.object(store, "refresh_utm_silver_layer",
+                              new=AsyncMock(side_effect=AssertionError("DuckDB parsed"))), \
+                 patch.object(traffic, "reparse_router", router), \
+                 patch("asyncio.sleep", new=AsyncMock()):
+                await asyncio.wait_for(traffic._run_backfill_inner(1), timeout=20)
+            failed = dict(traffic._backfill_status["result"])
+        finally:
+            traffic._backfill_status.clear()
+            traffic._backfill_status.update(before)
+            await store.close()
+
+        assert result["status"] == "success" and result["utm_records_parsed"] == 1
+        assert "pg_parse_error" not in result
+        router.assert_awaited_with(store)
+        assert failed["status"] == "partial"
+        assert failed["pg_parse_error"].startswith("RuntimeError")
+
+    @pytest.mark.asyncio
+    async def test_the_cli_parses_postgres_alone_and_notes_it(self, tmp_path, postgres):
+        import scripts.backfill_utm as cli
+        from tests.unit.test_comment_backfill_survives_a_ship_fault import (
+            _Client, _two_orders)
+
+        store = await _two_orders(tmp_path, name="cli.duckdb")
+        async with store.connection() as conn:
+            conn.execute("INSERT INTO silver_order_utm (order_id) VALUES (1)")
+
+        async def ship(_store, ids, *, version_kind, **_kw):
+            return {"orders_shipped": len(ids)}
+
+        router = AsyncMock(return_value={"rows": 2, "replaced": 1})
+        try:
+            with patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
+                 patch("core.keycrm.get_async_client", AsyncMock(return_value=_Client())), \
+                 patch("core.runtime_modes.configure_modes", MagicMock()), \
+                 patch("core.pg_backfill.ship_orders_by_id", new=ship), \
+                 patch.object(store, "refresh_utm_silver_layer",
+                              new=AsyncMock(side_effect=AssertionError("DuckDB parsed"))), \
+                 patch("core.pg_utm_parse.reparse_router", router):
+                await asyncio.wait_for(cli.backfill_utm(days_back=1), timeout=20)
+            async with store.connection() as conn:
+                kept = conn.execute("SELECT COUNT(*) FROM silver_order_utm").fetchone()[0]
+                raw = conn.execute("SELECT value FROM sync_metadata WHERE key = ?",
+                                   [wc.WRITER_KEY]).fetchone()
+        finally:
+            await store.close()
+
+        router.assert_awaited_once_with(store, full=True, force=False)
+        assert kept == 1, "DuckDB's silver_order_utm was emptied under postgres"
+        assert wc.UTM_REPARSED in json.loads(raw[0])
+
+
+class TestTheWayBackReparsesWhatPostgresAloneReclassified:
+    @pytest.fixture
+    def reclassified(self, tmp_path):
+        """DuckDB holding a verdict under the old rules, and a record saying a
+        reclassify ran in Postgres alone since."""
+        store = _store(tmp_path)
+        asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
+        asyncio.run(store.refresh_utm_silver_layer())
+
+        async def seed():
+            async with store.connection() as conn:
+                conn.execute("UPDATE silver_order_utm SET platform = 'old-rules'")
+                conn.execute(
+                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
+                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                    [wc.WRITER_KEY, json.dumps({
+                        "writer": "postgres", "resolved": True,
+                        wc.UTM_REPARSED: "2026-09-20T10:00:00+00:00"})])
+        asyncio.run(seed())
+        yield store
+        asyncio.run(store.close())
+
+    def test_the_way_back_empties_duckdbs_verdicts_and_the_owed_tick_reparses(
+        self, reclassified,
+    ):
+        asyncio.run(wc.settle_writer(reclassified))
+        assert wc.held() and _utm_rows(reclassified) == 0
+        assert _metadata(reclassified, "warehouse_dirty")[0] == "full"
+
+        result = asyncio.run(reclassified.refresh_warehouse_layers(trigger="dirty_flag"))
+        assert result["validation_passed"] is True and result["utm_orders_parsed"] == 2
+        assert not wc.held() and not wc.reclassify_needed()
+
+        async def platforms():
+            async with reclassified.connection() as conn:
+                return {r[0] for r in conn.execute(
+                    "SELECT DISTINCT platform FROM silver_order_utm").fetchall()}
+        assert "old-rules" not in asyncio.run(platforms())
+
+    def test_without_the_note_the_verdicts_stay(self, tmp_path):
+        """What the note buys: the incremental parse re-reads only what changed."""
+        store = _store(tmp_path)
+        try:
+            asyncio.run(store.upsert_orders(_orders(1, comment="utm_source=instagram")))
+            asyncio.run(store.refresh_utm_silver_layer())
+            _seed(store, **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True}})
+            asyncio.run(wc.settle_writer(store))
+            assert wc.held() and _utm_rows(store) == 1
+        finally:
+            asyncio.run(store.close())
