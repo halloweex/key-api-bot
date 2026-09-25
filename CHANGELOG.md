@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.252
+
+- DN-20b: ask a route parameter whether it is required the way fastapi 0.141 can answer
+- DN-20b review: DN-20c's consumers are derived by a walk, not remembered
+- DN-20b review: every GET route is swept for a refusal that misses the 503
+- DN-20b review: /api/revenue/forecast answers a refusal with 503, not "not trained"
+- DN-20b review: the lookups docstring says what off does to the filter bar
+- DN-20b review: under off, a switch with no address is refused like a failure
+- DN-20b: say in CLAUDE.md that off is enforced for HTTP, and what it refuses
+- DN-20b: every router an HTTP route reaches refuses, and the forecast overlay drops
+- DN-20b: under off a working Postgres is read, and a real outage is refused
+- DN-20b: KS_READ_FALLBACK=off refuses a fallback, and a route answers 503 naming the surface
+
+
 ## 3.0.251
 
 - DN-19 review: the pg_order_utm levers follow KS_UTM_PARSE
