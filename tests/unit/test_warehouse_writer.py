@@ -142,6 +142,33 @@ class TestTheMode:
         (unmet,) = wc.preconditions_unmet()
         assert unmet.key == "pg_revision" and "did not answer" in unmet.detail
 
+    def test_a_worker_that_outlives_the_bound_does_not_hold_the_caller(
+        self, met, monkeypatch,
+    ):
+        """What a name that does not resolve does: `asyncio.run` waits for the
+        resolver thread past the read's own bound. Modelled as a gather that
+        blocks its thread; the caller returns at twice the bound, unmet."""
+        import threading
+        import time
+
+        release = threading.Event()
+
+        async def stuck(env, *, own_connection=False):
+            release.wait(5)
+            return wc.Facts()
+
+        monkeypatch.setattr(wc, "gather_facts", stuck)
+        monkeypatch.setattr(wc, "REVISION_READ_TIMEOUT_S", 0.05)
+        monkeypatch.setenv(wc.ENV, "postgres")
+        started = time.monotonic()
+        try:
+            assert wc.configure_mode() == wc.DUCKDB
+        finally:
+            release.set()
+        assert time.monotonic() - started < 2
+        assert {u.key for u in wc.preconditions_unmet()} >= {
+            "pg_revision", "goals_bridge", "retired_conditions_clear"}
+
     def test_it_can_be_configured_from_inside_a_running_loop(self, met, monkeypatch):
         """Where web calls it: `startup_event` is a coroutine. The revision is
         read on a loop of the worker's own, never the caller's."""

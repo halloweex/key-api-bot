@@ -497,26 +497,39 @@ def _gather_facts_blocking(env: Mapping[str, str]) -> Facts:
     must not be read through `core.pg.get_pool()` from another loop either — a
     pool opened on a loop that then ends is a pool nobody after it can use. So
     it is read in a worker thread, on a loop and a connection of its own,
-    bounded by `REVISION_READ_TIMEOUT_S`. It blocks the caller for at most that
-    long, once per process, and only when `postgres` is asked for."""
+    bounded by `REVISION_READ_TIMEOUT_S` inside and by twice that out here:
+    `asyncio.run` waits at its end for the loop's resolver threads, and a
+    name that does not resolve can keep one busy past the inner bound. The
+    caller is never held longer, once per process, and only when `postgres`
+    is asked for; a worker still stuck is left to finish on its own."""
     import concurrent.futures
+
+    from core.pg import REQUIRED_REVISION
 
     def run() -> Facts:
         return asyncio.run(gather_facts(env, own_connection=True))
 
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="warehouse-cutover")
     try:
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="warehouse-cutover") as pool:
-            return pool.submit(run).result()
+        return pool.submit(run).result(timeout=2 * REVISION_READ_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        logger.error("cutover preconditions were not gathered within %g s",
+                     2 * REVISION_READ_TIMEOUT_S)
+        return Facts(revision_error=f"Postgres did not answer in "
+                                    f"{2 * REVISION_READ_TIMEOUT_S:g} s",
+                     required_revision=REQUIRED_REVISION,
+                     bridge_owners=None, bridge_error="not read",
+                     open_retired=None, open_retired_error="not read")
     except Exception as exc:  # noqa: BLE001 — gather_facts promises not to; unmet, by class
         logger.error("cutover preconditions could not be gathered: %s: %s",
                      type(exc).__name__, exc)
         name = type(exc).__name__
-        from core.pg import REQUIRED_REVISION
-
         return Facts(revision_error=name, required_revision=REQUIRED_REVISION,
                      bridge_owners=None, bridge_error=name,
                      open_retired=None, open_retired_error=name)
+    finally:
+        pool.shutdown(wait=False)
 
 
 # ─── THE RECORDED WRITER ─────────────────────────────────────────────────────
