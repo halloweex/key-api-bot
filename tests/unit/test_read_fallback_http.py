@@ -627,12 +627,30 @@ def _names_read_unavailable(handler: ast.ExceptHandler) -> bool:
         for n in ast.walk(handler.type))
 
 
+def _returns_somewhere(handler: ast.ExceptHandler) -> bool:
+    """A `return` anywhere in the handler's own statements — nested
+    functions aside. A handler that can return has an exit that is not the
+    raise, and `return x` before a final `raise` never reaches it (DN-20c)."""
+    stack = list(handler.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Return):
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.Lambda, ast.ClassDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    return False
+
+
 def _lets_it_through(handler: ast.ExceptHandler) -> bool:
     """The handler ends in a bare `raise`, or `raise <the name it bound>` —
-    the refusal itself, not something raised in its place. `raise
-    HTTPException(500)` would turn the 503 naming the surface into a 500
-    naming nothing."""
+    the refusal itself, not something raised in its place — and has no
+    `return` on the way. `raise HTTPException(500)` would turn the 503
+    naming the surface into a 500 naming nothing."""
     if not handler.body or not isinstance(handler.body[-1], ast.Raise):
+        return False
+    if _returns_somewhere(handler):
         return False
     last = handler.body[-1]
     if last.exc is None:
@@ -733,6 +751,21 @@ class TestNoHandlerSwallowsARefusal:
         )
         assert swallowing_handlers(src) == [4]
         assert swallowing_handlers(src.replace("return []", "raise")) == []
+
+    def test_a_return_before_the_raise_is_an_exit(self):
+        """`return` first and the final `raise` never runs — the shape the
+        rule's last-statement check alone passed (found by a DN-20c
+        mutation)."""
+        src = (
+            "async def f(self):\n"
+            "    try:\n"
+            "        return await self._traffic_run('x')\n"
+            "    except read_fallback.ReadUnavailable:\n"
+            "        if self.quiet:\n"
+            "            return None\n"
+            "        raise\n"
+        )
+        assert swallowing_handlers(src) == [4]
 
     @pytest.mark.parametrize("ending,swallows", [
         ("raise", False),

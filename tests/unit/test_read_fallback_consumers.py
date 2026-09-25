@@ -507,15 +507,29 @@ def _guarded_calls(node: ast.AST) -> Dict[ast.Call, List[ast.AST]]:
     return out
 
 
+def _has_return(node: ast.AST) -> bool:
+    return isinstance(node, ast.Return) or any(
+        _has_return(child) for child in ast.iter_child_nodes(node)
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda, ast.ClassDef)))
+
+
 def _passes_it_on(handler: ast.ExceptHandler) -> bool:
     """The handler raises the refusal again — a bare `raise`, or `raise`
-    of the name it bound — as a statement of its own body. Anywhere in it,
-    not only last: what follows an unconditional `raise` never runs."""
-    return any(
-        isinstance(s, ast.Raise) and s.cause is None and (
-            s.exc is None
-            or (isinstance(s.exc, ast.Name) and s.exc.id == handler.name))
-        for s in handler.body)
+    of the name it bound — as a statement of its own body, with no `return`
+    in any statement before it. The raise need not be last: what follows an
+    unconditional `raise` never runs. A `return` on the way is an exit that
+    is not the raise, so that handler is read as a stop — the conservative
+    side, because a stop is pinned in `ANSWERS` where somebody reads it."""
+    for statement in handler.body:
+        if isinstance(statement, ast.Raise) and statement.cause is None and (
+                statement.exc is None
+                or (isinstance(statement.exc, ast.Name)
+                    and statement.exc.id == handler.name)):
+            return True
+        if _has_return(statement):
+            return False
+    return False
 
 
 def _stopped_by(tries) -> Optional[str]:
@@ -745,6 +759,9 @@ class TestTheContainmentRule:
         ("    except ReadUnavailable as exc:\n        log(exc)\n        raise exc\n", None),
         # What follows an unconditional raise never runs.
         ("    except ReadUnavailable:\n        raise\n        return 1\n", None),
+        # A return on the way is an exit that is not the raise.
+        ("    except ReadUnavailable:\n        if x:\n            return 1\n"
+         "        raise\n", "named"),
         # Something raised in its place is not the refusal passed on.
         ("    except Exception as exc:\n        raise RuntimeError('x') from exc\n", "broad"),
     ])
