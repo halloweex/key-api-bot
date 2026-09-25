@@ -612,8 +612,13 @@ class GoalsMixin:
             return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
             sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
-            # Get yearly totals — only full years (12 months with orders)
-            # to avoid startup partial year and current incomplete year
+            # Get yearly totals — only full years, to avoid the startup partial
+            # year and the current incomplete one. `months_active >= 11` keeps
+            # out the first; it cannot keep out the second, which reaches 11
+            # active months on 1 November with two months still to run, and a
+            # year compared a sixth short reads as a fall. So the current year
+            # (in Kyiv, as the dates are) is excluded by the calendar.
+            current_year = int(datetime.now(DEFAULT_TZ).year)
             yearly_sql = f"""
                 WITH yearly_data AS (
                     SELECT
@@ -627,6 +632,7 @@ class GoalsMixin:
                 )
                 SELECT year, revenue FROM yearly_data
                 WHERE months_active >= 11
+                    AND year < {current_year}
                 ORDER BY year
             """
             yearly_results = conn.execute(yearly_sql, sales_params).fetchall()
@@ -638,7 +644,10 @@ class GoalsMixin:
                 prev_year = yearly_results[i-1][1]
                 curr_year = yearly_results[i][1]
                 if prev_year > 0:
-                    yoy_rate = (curr_year - prev_year) / prev_year
+                    # The sums are DECIMAL (grand_total is DECIMAL(12,2)) and
+                    # the recency weights below are floats; Decimal * float
+                    # raises. Divided in Decimal, then rounded once to float.
+                    yoy_rate = float((curr_year - prev_year) / prev_year)
                     yoy_rates.append(yoy_rate)
 
             if yoy_rates:
