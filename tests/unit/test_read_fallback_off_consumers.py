@@ -532,7 +532,7 @@ class TestAssistant:
     async def test_the_model_reads_the_named_result_in_the_conversation(
         self, stores, monkeypatch,
     ):
-        """Through `ChatService.chat`, the consumer the walk found: the tool
+        """Through `ChatService.chat`, which `POST /api/chat` calls: the tool
         result the model is given is the named one."""
         from web.services import chat_service as cs
 

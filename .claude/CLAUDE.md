@@ -2387,7 +2387,13 @@ repository calls (`NON_HTTP_CONSUMERS`), then back down through the `try`
 each call sits in, and pins where every consumer's refusal stops
 (`ANSWERS`): a refusal that could leave one as an exception fails it, and a
 handler that answers rather than raises may sit only where no HTTP route
-reaches. A remembered list had missed the goals job. One writing route still
+reaches but the assistant's two, `POST /api/chat` and `GET /api/chat/stream`,
+which answer inside the conversation (`IN_BAND_ROUTES`). That rule first
+passed by not seeing those routes — `service.chat(...)` names a method two
+classes define — so the walk types an object by the annotated factory that
+made it, and pins every call it still leaves unresolved under the name of a
+function that reaches a refusal (`UNRESOLVED_NAMESAKES`). A remembered list
+had missed the goals job. One writing route still
 does not reach the 503: `POST /api/duckdb/sync-buyers` shares the buyers
 step, whose `except Exception` answers "Synced 0 buyers" — pinned in
 `UNSWEPT_STOPS` and left to chain 4, which rebuilds that step and that
@@ -2425,8 +2431,9 @@ thirteen routes; the sweep finds it by the route. The static half checks
 every module `web/` imports: a handler that names `ReadUnavailable` must end
 in a bare `raise` or `raise <its name>` — `raise HTTPException(500)` turns a
 503 naming the surface into a 500 naming nothing. DN-20c's answers are the
-one exemption, by function: those in `ANSWERS`, each proved reached from the
-non-HTTP consumers alone, and each required to exist.
+one exemption, by function: those pinned, each proved reached from the
+non-HTTP consumers and the assistant's routes alone, and each required to
+exist.
 
 ### A write flag is no longer a rollback
 

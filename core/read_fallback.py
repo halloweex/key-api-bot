@@ -56,8 +56,9 @@ the entry points nothing in the repository calls (`NON_HTTP_CONSUMERS`), then
 back down through the `try` each call sits in, and pins where every
 consumer's refusal stops (`ANSWERS`): a refusal that could leave one as an
 exception, or a new handler on the way, fails it. A handler that answers
-rather than raises may live only in a function no HTTP route reaches, or it
-would take that route's 503 away.
+rather than raises may live only in a function no HTTP route reaches but
+the assistant's two (`POST /api/chat`, `GET /api/chat/stream`), which answer
+inside the conversation; anywhere else it would take that route's 503 away.
 
 AN UNKNOWN VALUE DOES NOT STOP WEB
 
@@ -312,8 +313,10 @@ READ_UNAVAILABLE = "read_unavailable"
 
 
 def answered(consumer: str, exc: ReadUnavailable, answer: str) -> Dict[str, str]:
-    """`consumer` received a refusal that no HTTP request is waiting for, and
-    answered it itself (DN-20c). Returns the fields its result carries.
+    """`consumer` received a refusal the 503 handler will not answer — no
+    HTTP request is waiting for it, or (the assistant) the request is a
+    conversation and the answer goes inside it — and answered it itself
+    (DN-20c). Returns the fields its result carries.
 
     `consumer` names the caller as a reader of the job list would —
     `weekly_report`, `revenue_prediction` — and `answer` says in words what

@@ -22,8 +22,14 @@ script's `__main__` invokes it by reference. Each entry point is then one of:
 - a GET route under `/api/` that the sweep runs — proved there, not here;
 - another HTTP route (`POST`, `DELETE`) — answered by the same 503 handler,
   but not swept, because a sweep that writes is not a probe;
+- the assistant's two routes, `POST /api/chat` and `GET /api/chat/stream` —
+  HTTP, but a refusal there is answered inside the conversation: its tools
+  return a named `data_unavailable` result the model reads, because a 503
+  cannot be sent once a stream is open. Not swept either: each call spends
+  the Anthropic API. These are the only routes a named answer may sit on
+  (`IN_BAND_ROUTES`);
 - an entry that is no HTTP request's at all — a scheduler job, the boot sync,
-  the assistant, a script. These are DN-20c's, pinned below.
+  a script. These are DN-20c's, pinned below.
 
 Both pins are **derived and then compared**: a new consumer fails this test
 until somebody writes it down, which is the moment to decide what it answers.
@@ -36,11 +42,12 @@ refusal in: one naming `ReadUnavailable` (the jobs' deferrals, the
 assistant's `data_unavailable`), or an `except Exception` that already
 contained every failure of its step (the buyers step, the boot's). No
 consumer may let a refusal out as an exception, where each one stops is
-pinned (`ANSWERS`, and `UNSWEPT_STOPS` for the writing routes), and a named
-answer may sit only in a function reached from those consumers alone — the
-exemption `test_read_fallback_http.py` makes from its rule that a handler
-naming the refusal must raise it. What the walk cannot see is order: that
-the goals job asks before it writes is proved by running it.
+pinned (`ANSWERS`, and `UNSWEPT_STOPS` for the routes the sweep does not
+run), and a named answer may sit only in a function reached from those
+consumers and the assistant's routes alone — the exemption
+`test_read_fallback_http.py` makes from its rule that a handler naming the
+refusal must raise it. What the walk cannot see is order: that the goals
+job asks before it writes is proved by running it.
 
 WHAT THE WALK RESOLVES, AND WHAT IT CANNOT
 
@@ -49,13 +56,25 @@ means five things in this repository. `self.x()` inside the store's mixins is
 any mixin's `x` — they compose one class; elsewhere it is the class's own
 method. `x()` is the module's function, or the one a `from core.m import x`
 names — function-local imports included, which is where most of them are
-here. `m.x()` follows an imported repository module. A store method is
+here. `m.x()` follows an imported repository module. `obj.x()` on an object
+a factory made — `service = get_chat_service()`, in the function or one
+enclosing it, or `get_chat_service().x()` — is that class's `x` when the
+factory is annotated to return a repository class. A store method is
 reached through a receiver called `store` (`store.x()`, `self.store.x()`,
 `get_store().x()`). Any other `obj.x()` resolves only when exactly one class
 in the repository defines `x` and `obj` is not an imported module
 (`lgb.train` is not `PredictionService.train`). A method nothing calls in
 the router layer itself is not an entry point but dead code, and is not
 listed.
+
+A name two classes define is where that last rule goes blind, and it went
+blind on the assistant: `chat` is `LLMClient`'s and `ChatService`'s, so the
+routes' `service.chat(...)` resolved to nothing, `ChatService.chat` looked
+like an entry point of its own, and the rule below — a named answer on no
+HTTP path — passed while both assistant routes reached one. So every call
+left unresolved that bears the name of a function reaching a refusal is
+derived and pinned (`UNRESOLVED_NAMESAKES`), each read and found to be
+something else: the next such miss fails there instead of hiding.
 
 What it cannot see is a call by `getattr` or through a dispatch table.
 `chat_tools.execute_tool` dispatches its tools by name and is itself resolved;
@@ -108,21 +127,28 @@ NON_HTTP_CONSUMERS = {
     "core/scheduler.py:BackgroundScheduler._run_weekly_report",
     # The boot sync, before web serves anything.
     "web/main.py:startup_event",
-    # The assistant: its tools run inside a conversation, where a 503 cannot
-    # be sent mid-stream (and /api/chat/stream is not swept, for the network).
-    "web/services/chat_service.py:ChatService.chat",
-    "web/services/chat_service.py:ChatService.chat_stream",
 }
 
-# HTTP, so the 503 handler answers them — but each writes, so the sweep does
-# not run them, and a broad handler on their path is not proved absent.
+# The assistant's routes. HTTP, but its tools run inside a conversation,
+# where a 503 cannot be sent once the stream is open, so a refusal is a
+# named `data_unavailable` tool result the model reads and relays. The only
+# routes a named answer may take the 503 handler's place on.
+IN_BAND_ROUTES = {
+    "GET /api/chat/stream",
+    "POST /api/chat",
+}
+
+# HTTP routes the sweep does not run, so a handler on their path is not
+# proved absent by running them. The writing ones, because a sweep that
+# writes is not a probe; the assistant's, because each call spends the
+# Anthropic API (and the stream is one of the sweep's NETWORK_ROUTES).
 UNSWEPT_ROUTES = {
     "DELETE /api/goals/{period_type}",
     "POST /api/duckdb/sync-buyers",
     "POST /api/goals",
     "POST /api/revenue/forecast/train",
     "POST /api/revenue/forecast/tune",
-}
+} | IN_BAND_ROUTES
 
 # DN-20c: where each consumer's refusal stops, as `file:function:kind`.
 # `named` is a handler naming `ReadUnavailable` that answers it — the job's
@@ -155,22 +181,40 @@ ANSWERS = {
         "core/sync_service.py:init_and_sync:broad",
         "web/main.py:_train_prediction_model:broad",
     },
-    "web/services/chat_service.py:ChatService.chat": {_TOOLS},
-    "web/services/chat_service.py:ChatService.chat_stream": {_TOOLS},
 }
 
-# The writing routes the sweep does not run, and where a refusal stops on
-# each before the 503 handler — empty means it reaches the handler. One does
-# not: the buyers step is shared with the scheduler's tick, and its `except
-# Exception` answers the route too — "Synced 0 buyers" under `off`. It is
+# The routes the sweep does not run, and where a refusal stops on each before
+# the 503 handler — empty means it reaches the handler. The assistant's stop
+# at its tools, by design (`IN_BAND_ROUTES`). One writing route does too, and
+# not by design: the buyers step is shared with the scheduler's tick, and its
+# `except Exception` answers the route — "Synced 0 buyers" under `off`. It is
 # written down rather than changed here, because chain 4 (PR #249) rebuilds
 # that step and that route; see DN-20c's deviations.
 UNSWEPT_STOPS = {
     "DELETE /api/goals/{period_type}": set(),
+    "GET /api/chat/stream": {_TOOLS},
+    "POST /api/chat": {_TOOLS},
     "POST /api/duckdb/sync-buyers": {_BUYERS},
     "POST /api/goals": set(),
     "POST /api/revenue/forecast/train": set(),
     "POST /api/revenue/forecast/tune": set(),
+}
+
+# Calls the resolver leaves unresolved although a function that reaches a
+# refusal bears the same name — `file:function: call`, each read by hand and
+# found to be something else. Derived and compared: a call to a name two
+# classes define, on a receiver the walk cannot type, lands here first, which
+# is how the assistant's routes were missed (`service.chat(...)`).
+UNRESOLVED_NAMESAKES = {
+    # KeyCRM's API client, not the store's `get_categories`.
+    "core/keycrm.py:SyncKeyCRMClient._get: client.get_categories",
+    # LightGBM's `train`, not PredictionService's.
+    "core/prediction_service.py:_run_evaluation: lgb.train",
+    "core/prediction_service.py:_train_model: lgb.train",
+    "core/prediction_service.py:_tune_hyperparameters: lgb.train",
+    # The Anthropic client under the assistant, which reads no store.
+    "web/services/chat_service.py:ChatService.chat: self.llm.chat",
+    "web/services/chat_service.py:ChatService.chat_stream: self.llm.chat_stream",
 }
 
 
@@ -321,26 +365,92 @@ def build_graph(tops=WALKED) -> Graph:
             aliases |= a
         return modules, names, aliases
 
+    def class_named(rel: str, annotation) -> Optional[Tuple[str, str]]:
+        """The repository class a return annotation names — `-> ChatService`,
+        `-> "ChatService"`, `-> Optional[ChatService]` — defined in `rel` or
+        imported into it by name. None for anything else."""
+        if isinstance(annotation, ast.Subscript):
+            annotation = annotation.slice
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            name = annotation.value
+        elif isinstance(annotation, ast.Name):
+            name = annotation.id
+        else:
+            return None
+        if (rel, name) in classes:
+            return (rel, name)
+        imported = top_level[rel][1].get(name)
+        return imported if imported in classes else None
+
+    # What a factory hands back: `def get_chat_service() -> ChatService`.
+    returns = {fn: class_named(fn.rel, fn.node.returns)
+               for fn in functions if fn.node.returns is not None}
+
+    def callee(call: ast.Call, fn: Fn, modules, names) -> Optional[Fn]:
+        """The one repository function a plain call names — `f()`, an
+        imported `f()`, or `m.f()` on a repository module."""
+        f = call.func
+        if isinstance(f, ast.Name):
+            if f.id in names:
+                rel, name = names[f.id]
+                return by_module[rel].get(name)
+            return by_module[fn.rel].get(f.id)
+        if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                and f.value.id in modules):
+            return by_module[modules[f.value.id]].get(f.attr)
+        return None
+
+    def made_by(value, fn: Fn, modules, names) -> Optional[Tuple[str, str]]:
+        """The class of an object a factory returned: `get_x()` or
+        `await get_x()`, where `get_x` is annotated to return a class."""
+        if isinstance(value, ast.Await):
+            value = value.value
+        if not isinstance(value, ast.Call):
+            return None
+        target = callee(value, fn, modules, names)
+        return returns.get(target) if target is not None else None
+
+    def bound(fn: Fn, modules, names) -> Dict[str, Tuple[str, str]]:
+        """Local names bound from a factory, in this function and every one
+        enclosing it — `service = get_chat_service()` in a route is what its
+        nested `event_generator` calls `service.chat_stream` on. A method
+        name defined by two classes (`chat` is LLMClient's and ChatService's)
+        resolves through this and nothing else."""
+        out: Dict[str, Tuple[str, str]] = {}
+        chain, g = [], fn
+        while g is not None:
+            chain.append(g)
+            g = g.outer
+        for g in reversed(chain):
+            for node in _own(g.node):
+                if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name)):
+                    cls = made_by(node.value, g, modules, names)
+                    if cls is not None:
+                        out[node.targets[0].id] = cls
+        return out
+
     def resolve(fn: Fn) -> List[Tuple[ast.Call, Set[Fn]]]:
         modules, names, aliases = scope(fn)
+        objects = bound(fn, modules, names)
         found: List[Tuple[ast.Call, Set[Fn]]] = []
         for call in (n for n in _own(fn.node) if isinstance(n, ast.Call)):
             out: Set[Fn] = set()
             found.append((call, out))
             f = call.func
             if isinstance(f, ast.Name):
-                if f.id in names:
-                    rel, name = names[f.id]
-                    target = by_module[rel].get(name)
-                    if target:
-                        out.add(target)
-                elif f.id in by_module[fn.rel]:
-                    out.add(by_module[fn.rel][f.id])
+                target = callee(call, fn, modules, names)
+                if target:
+                    out.add(target)
                 continue
             if not isinstance(f, ast.Attribute):
                 continue
             attr, recv = f.attr, f.value
-            if isinstance(recv, ast.Name) and recv.id in ("self", "cls"):
+            made = (objects.get(recv.id) if isinstance(recv, ast.Name)
+                    else made_by(recv, fn, modules, names))
+            if made is not None and attr in by_class[made]:
+                out.add(by_class[made][attr])
+            elif isinstance(recv, ast.Name) and recv.id in ("self", "cls"):
                 if (fn.rel, fn.cls) in store:
                     out.update(store_methods.get(attr, ()))
                 elif fn.cls and attr in by_class[(fn.rel, fn.cls)]:
@@ -451,8 +561,6 @@ def classify(graph: Graph):
             if (method == "GET" and path.startswith("/api/")
                     and path not in NETWORK_ROUTES):
                 swept.add(f"{method} {path}")
-            elif path in NETWORK_ROUTES:
-                consumers.add(fn.key)
             else:
                 unswept.add(f"{method} {path}")
     return swept, unswept, consumers
@@ -598,7 +706,7 @@ def containment(graph: Graph) -> Containment:
     return Containment(graph, escaping, stop)
 
 
-def entries_reaching(graph: Graph, target: Fn) -> Set[str]:
+def entries_reaching(graph: Graph, target: Fn) -> Set[Fn]:
     """The functions nothing in the repository calls that reach `target` —
     the entry points a handler in `target` answers for."""
     found, seen, frontier = set(), set(), [target]
@@ -608,8 +716,41 @@ def entries_reaching(graph: Graph, target: Fn) -> Set[str]:
             continue
         seen.add(fn)
         if not graph.callers[fn]:
-            found.add(fn.key)
+            found.add(fn)
         frontier.extend(graph.callers[fn])
+    return found
+
+
+def named_answers_out_of_place(graph: Graph, routes=None) -> Dict[str, List[str]]:
+    """Every named answer reached from an entry that is neither a non-HTTP
+    consumer nor one of the assistant's routes — `{file:function: [entry]}`,
+    an entry as `METHOD /path` when it is a route and `file:function`
+    otherwise. Empty when each answer sits only where it is allowed to."""
+    routes = _routes(graph) if routes is None else routes
+    index = {fn.key: fn for fn in graph.functions}
+    allowed = NON_HTTP_CONSUMERS | IN_BAND_ROUTES
+    out: Dict[str, List[str]] = {}
+    for fn_key in sorted(named_answer_functions()):
+        labels = set()
+        for entry in entries_reaching(graph, index[fn_key]):
+            served = routes.get(entry)
+            labels |= ({f"{m} {p}" for m, p in served} if served else {entry.key})
+        if labels - allowed:
+            out[fn_key] = sorted(labels - allowed)
+    return out
+
+
+def unresolved_namesakes(graph: Graph) -> Set[str]:
+    """`file:function: call` for every call the resolver left without a
+    target whose name is that of a function reaching a refusal."""
+    reaching = {fn.name for fn in graph.reaching}
+    found = set()
+    for fn, sites in graph.sites.items():
+        for call, targets in sites:
+            f = call.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+            if not targets and name in reaching:
+                found.add(f"{fn.key}: {ast.unparse(f)}")
     return found
 
 
@@ -697,18 +838,46 @@ class TestEveryConsumerAnswers:
             k: {"derived": sorted(derived[k]), "pinned": sorted(ANSWERS.get(k, ()))}
             for k in derived if derived[k] != ANSWERS.get(k)}
 
-    def test_a_named_answer_is_never_on_an_http_path(self, graph):
+    def test_a_named_answer_is_on_no_http_path_but_the_assistants(self, graph):
         """A handler that answers a refusal takes the 503 away from any route
         that reaches it. So every function holding one is reached only from
-        the consumers above — and `test_read_fallback_http.py` exempts these
-        functions, and no others, from its rule that a handler naming the
-        refusal must raise it."""
-        index = {fn.key: fn for fn in graph.functions}
-        for fn_key in named_answer_functions():
-            entries = entries_reaching(graph, index[fn_key])
-            assert entries <= NON_HTTP_CONSUMERS, (fn_key, sorted(entries - NON_HTTP_CONSUMERS))
+        the non-HTTP consumers above and the assistant's two routes, which
+        answer in the conversation — and `test_read_fallback_http.py` exempts
+        these functions, and no others, from its rule that a handler naming
+        the refusal must raise it."""
+        assert named_answer_functions(), "no named answer is pinned at all"
+        assert named_answers_out_of_place(graph) == {}
 
-    def test_the_writing_routes_stop_where_they_are_written_down(self, graph, contained):
+    def test_the_assistant_is_reached_from_its_routes(self, graph):
+        """The edge a name-only walk missed: `service = get_chat_service()`
+        in each route, annotated `-> ChatService`, is what makes
+        `service.chat(...)` ChatService's and not LLMClient's. Without it
+        the assistant looked like an entry point of its own and the rule
+        above held by not seeing the routes."""
+        index = {fn.key: fn for fn in graph.functions}
+        chat = index["web/services/chat_service.py:ChatService.chat"]
+        stream = index["web/services/chat_service.py:ChatService.chat_stream"]
+        assert chat in graph.calls[index["web/routes/chat.py:chat"]]
+        # The stream is read in a generator nested in the route.
+        assert stream in graph.calls[index["web/routes/chat.py:event_generator"]]
+        assert index["core/llm_client.py:LLMClient.chat"] not in graph.calls[
+            index["web/routes/chat.py:chat"]]
+        routes, served = _routes(graph), set()
+        for fn in entries_reaching(graph, index["core/chat_tools.py:execute_tool"]):
+            served |= {f"{m} {p}" for m, p in routes.get(fn, ())}
+        assert served == IN_BAND_ROUTES
+
+    def test_every_namesake_left_unresolved_is_written_down(self, graph):
+        """The resolver's blind spot, derived: a call it cannot type whose
+        name is that of a function reaching a refusal. Each written down has
+        been read and is something else; a new one is a possible missed
+        edge — resolve it, or read it and write it down."""
+        derived = unresolved_namesakes(graph)
+        assert derived == UNRESOLVED_NAMESAKES, (
+            f"new: {sorted(derived - UNRESOLVED_NAMESAKES)}; "
+            f"gone: {sorted(UNRESOLVED_NAMESAKES - derived)}")
+
+    def test_the_unswept_routes_stop_where_they_are_written_down(self, graph, contained):
         routes = _routes(graph)
         derived = {}
         for fn, served in routes.items():
@@ -731,9 +900,11 @@ class TestEveryConsumerAnswers:
 
 
 def named_answer_functions() -> Set[str]:
-    """`file:function` of every named answer in `ANSWERS`."""
+    """`file:function` of every named answer in `ANSWERS` and
+    `UNSWEPT_STOPS`."""
     return {entry.rsplit(":", 1)[0]
-            for stops in ANSWERS.values() for entry in stops
+            for pins in (ANSWERS, UNSWEPT_STOPS)
+            for stops in pins.values() for entry in stops
             if entry.endswith(":named")}
 
 
@@ -826,3 +997,18 @@ class TestTheWalkBites:
         graph.calls[job] = set()
         graph.reaching.discard(job)
         assert job not in entry_points(graph)
+
+    def test_a_named_answer_on_a_swept_route_is_out_of_place(self):
+        """The rule seen to bite: give `GET /api/chat/status` — swept, and
+        holding the same `service = get_chat_service()` — a call into the
+        assistant, and the tools' named answer is on a route that expects a
+        503. The walk names that route."""
+        graph = build_graph()
+        index = {fn.key: fn for fn in graph.functions}
+        status = index["web/routes/chat.py:chat_status"]
+        chat = index["web/services/chat_service.py:ChatService.chat"]
+        assert named_answers_out_of_place(graph) == {}
+        graph.calls[status].add(chat)
+        graph.callers[chat].add(status)
+        assert named_answers_out_of_place(graph) == {
+            "core/chat_tools.py:execute_tool": ["GET /api/chat/status"]}

@@ -701,7 +701,8 @@ class TestNoHandlerSwallowsARefusal:
     the scheduler's jobs defer or skip, and the assistant's tools return a
     named "data unavailable" result. Those modules are importable from
     `web/`, but the functions holding the answers are reached only by the
-    consumers no HTTP request waits for — which
+    consumers no HTTP request waits for and by the assistant's two routes,
+    which answer inside the conversation (`IN_BAND_ROUTES`) — which
     `test_read_fallback_consumers.py` proves by walking up from each."""
 
     def test_every_handler_naming_it_raises(self):
