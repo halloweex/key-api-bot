@@ -826,7 +826,7 @@ whole reason the group is read from the source now.
 
 | Job | Trigger | What it does |
 |---|---|---|
-| `warehouse_refresh` | every 2 min | Silver + Gold rebuild, validation, cell guard |
+| `warehouse_refresh` | every 2 min | Silver + Gold rebuild, validation, cell guard; not registered under `KS_WRITE_WAREHOUSE=postgres` |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **all three stores** (DuckDB, PG, ClickHouse), one fetch; слои `reconciliation`, `reconciliation_pg`, `reconciliation_ch` |
@@ -2729,30 +2729,50 @@ bounded at 5 s, and publishes the answer.
   KeyCRM once a minute. The DuckDB path is unchanged, a failure escaping it
   included.
 
-### Step 13 is published, not switched (DN-28)
+### Step 13: the switch is built, and not switched (DN-28, DN-29)
 
-`KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts once
-DuckDB stops: `duckdb` (default) or `postgres`. It is read in
-`configure_modes()`, before the boot sync, and **nothing in this build acts on
-it**: `postgres` is published and still runs as `duckdb`, because the switch
-itself — no DuckDB refresh, no dirty marks — is DN-29, and half of it would
-stand DuckDB's checks down while DuckDB went on deriving. An unknown value runs
-as `duckdb` and publishes the error on `/api/health` (`warehouse_writer_mode`),
-where the canary warns `warehouse_mode_invalid` — a typo costs nothing in this
-build, and the day it would is the flip; it never raises, since web is the only
-syncer.
+`KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts:
+`duckdb` (default) or `postgres`. It is read in `configure_modes()`, before
+the boot sync, and **production does not set it**. An unknown value runs as
+`duckdb` and publishes the error on `/api/health` (`warehouse_writer_mode`),
+where the canary warns `warehouse_mode_invalid`; it never raises, since web is
+the only syncer.
 
-What the switch will need is in place and idle. `stood_down_duckdb_checks()`
-(`core/warehouse_cutover.py`) names the five DuckDB integrity checks over
-Silver, Gold and UTM; the scan skips them and `duckdb_looked` leaves them out,
-so the Postgres twins stand in — at the counts the DN-14 pairing record has
-been giving in shadow. `pg_gold_internal_check` asks `gold_rollup_mismatch` of
-Postgres alone in `dq_mirror_landing`, and `reconcile_gold` leaves it out on the
-same predicate, so it is asked once a run. Both are empty or unregistered while
-the mode is `duckdb`, which today is always.
+**What `postgres` does (DN-29)** — only when every precondition below holds;
+the verdict is reached once per process, the Postgres revision read on a
+connection of its own. DuckDB stops deriving: `warehouse_refresh` is not
+registered, every production call of `refresh_warehouse_layers` stands behind
+`duckdb_derives()` (a test walks `core/`, `web/`, `bot/`, `scripts/` and
+`deploy/` for one that does not), `mark_warehouse_dirty` is a no-op and the id
+list pending at the switch is abandoned, `POST /api/warehouse/refresh` and
+rebuild-silver run the Postgres derivation alone. The five DuckDB integrity
+checks over Silver, Gold and UTM stand down and the Postgres twins stand in;
+in `dq_mirror_landing` `reconcile_silver`, `reconcile_order_utm` and
+`reconcile_gold` stand down and `pg_gold_internal_check` asks
+`gold_rollup_mismatch` in `reconcile_gold`'s place. The first start records
+`sync_metadata.warehouse_writer` in DuckDB and closes the `warehouse` alert
+group once — its only resolver was the DuckDB tick — without a validating
+tick. **One precondition unmet and it runs as `duckdb`** (OD-09 (b)):
+`/api/health` lists the unmet keys under `warehouse_writer_mode` (keys only,
+the endpoint is public) and the canary pages `warehouse_preconditions_unmet`,
+CRITICAL.
+
+**The way back costs a full DuckDB rebuild.** Unset the variable and
+`up -d web`: a start under `duckdb` that finds `postgres` recorded marks the
+warehouse dirty in full, before any job exists, and holds the stood-down
+checks and the three comparisons down until a full tick validates — the Silver
+they would read is as old as the switch, and an incremental rebuild over it
+would validate. That tick writes `duckdb` back. When DuckDB's
+`silver_order_utm` is empty (a Sunday compaction ran in between) it publishes
+`reclassify_needed`; the tick's own parse refills every commented order with
+no verdict, so `POST /api/traffic/reclassify` is the lever only if that parse
+fails. Every day spent under `postgres` is a day no independent derivation
+proves Postgres Silver/Gold, and that cannot be re-verified afterwards. The
+gate-stack rehearsal on the production backups — a container killed mid
+Postgres rebuild, the owed state surviving — runs on the host before any flip.
 
 `GET /api/warehouse/status` publishes `cutover`: the variable as read,
-`switch_built: false`, and every unmet precondition by name, from
+`switch_built: true`, and every unmet precondition by name, from
 `evaluate_preconditions(env, facts)` — `KS_PG_DERIVE=own`, the twins on,
 `KS_UTM_PARSE=postgres`, `KS_READ_FALLBACK=off`, a DSN and the required
 revision, the landing mirror on, every Silver/Gold/UTM read switch on
@@ -2769,9 +2789,11 @@ Postgres derives, since nothing re-examines a retired check; so the switch
 waits while the DuckDB check can still clear it. It reads the Alert Gate's
 delivered map — what `resolve_group` announces from — not `app.alert_series`,
 which can miss a delivered page (its fired row is fire-and-forget).
-`preconditions_met: true` is a checklist done, not a switch thrown. An
-exception reading any fact is published by its class alone and logged whole:
-a driver's text names the database user, host and port.
+`gold_missing_cells` and `gold_orphan_cells` count as retired too, since
+`reconcile_gold` goes with the switch. `preconditions_met: true` is a
+checklist done, not a switch thrown. An exception reading any fact is
+published by its class alone and logged whole: a driver's text names the
+database user, host and port.
 
 ### The order write path asks the registry too (DN-22a)
 
