@@ -43,13 +43,20 @@ MUST_BE_NONEMPTY = frozenset({
 # a count that fell between snapshots means loss — either upstream, or in the
 # export itself. Deliberately does not include tables that are rebuilt or
 # pruned by design (disk_samples, memory_samples, the derived layers).
+#
+# `buyer_contacts` was here and never belonged: both of its writers replace a
+# buyer's contacts wholesale (DELETE then INSERT per buyer — a phone list that
+# shrank must not keep the old number), so a count that fell is a buyer who
+# dropped a number, not a lost row. Chain 4's copy-back makes it certain rather
+# than rare: it writes back whatever Postgres holds, and one fewer contact
+# would have rejected every nightly snapshot from then on. `buyers` stays in
+# MUST_BE_NONEMPTY — its writer never deletes.
 MONOTONE = frozenset({
     "orders",
     "order_products",
     "expenses",
     "stock_movements",
     "inventory_sku_history",
-    "buyer_contacts",
     "sms_campaign_members",
     "marketing_optouts",
     "reconciliation_log",
