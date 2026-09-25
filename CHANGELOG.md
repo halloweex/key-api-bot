@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.254
+
+
+
 ## 3.0.253
 
 - Call the restarted refusal production's shape, not an incident on record
