@@ -71,8 +71,8 @@ class TestEveryWriteChainIsRegistered:
 # `app.` table, or one whose target it cannot read (`INSERT INTO {table}`: a
 # guard that could not resolve a name must not read it as "not ours"). Each
 # must ask the registry itself, or be reached only from functions that do —
-# `write_orders`, `pg_buyers._write` and `write_managers` are such primitives,
-# and it is their callers that ask. What is exempt is the destination side,
+# `write_orders`, `pg_buyer_rows._write_buyer_rows` (through `pg_buyers._write`)
+# and `write_managers` are such primitives, and it is their callers that ask. What is exempt is the destination side,
 # each entry with its reason, and the list must be exactly what the walk finds.
 #
 # Two shapes the walk used to miss, found by the DN-22b review, are read now: a
@@ -604,9 +604,11 @@ class TestEveryPostgresWriterAsksTheRegistry:
             f"table, and not only from a function that asks: {uncovered}")
 
     def test_the_callers_of_the_named_primitives_ask(self, walk):
-        """The plan names `pg_buyers._write` and `write_managers`: every
-        function that calls either asks, directly or through its callers."""
+        """The plan names `pg_buyers._write` and `write_managers`, and chain 4
+        added the buyers' row writer both the mirror and the chain run: every
+        function that calls one asks, directly or through its callers."""
         for primitive in (("core/pg_buyers.py", "_write"),
+                          ("core/pg_buyer_rows.py", "_write_buyer_rows"),
                           ("core/pg_replication.py", "write_managers")):
             callers = walk.callers.get(primitive, set())
             assert callers, f"nothing calls {primitive} — the walk is not looking"
@@ -621,7 +623,7 @@ class TestEveryPostgresWriterAsksTheRegistry:
         assert {
             ("core/pg_landing.py", "_write"),
             ("core/pg_landing.py", "write_orders"),
-            ("core/pg_buyers.py", "_write"),
+            ("core/pg_buyer_rows.py", "_write_buyer_rows"),
             ("core/pg_replication.py", "write_managers"),
             ("core/pg_expense_backfill.py", "backfill_expenses"),
             ("core/pg_operational.py", "replicate_operational"),

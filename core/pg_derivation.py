@@ -139,11 +139,13 @@ def signal_unreadable_ticks() -> int:
 # the signal in its own transaction. Silver reads `bronze.orders` and the
 # manager classification; the customer profile reads `bronze.buyers`. A test
 # walks the code for writers of those tables and fails on one not listed here,
-# and fails on a listed one that does not call `mark_if_owned`.
+# and fails on a listed one that does not call `mark_if_owned`. The buyers'
+# writer is `core.pg_buyer_rows`, which the landing mirror and chain 4's writer
+# both run, so one mark covers both.
 MARK_SITES: Dict[str, str] = {
     "core.pg_landing": "write_orders",
     "core.pg_replication": "write_managers",
-    "core.pg_buyers": "_write",
+    "core.pg_buyer_rows": "_write_buyer_rows",
 }
 SOURCE_TABLES = ("bronze.orders", "bronze.managers",
                  "app.manager_classifications", "bronze.buyers")
