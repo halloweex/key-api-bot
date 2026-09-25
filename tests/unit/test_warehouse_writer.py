@@ -156,8 +156,10 @@ class TestTheMode:
         import time
 
         release = threading.Event()
+        asked = []
 
         async def stuck(env, *, own_connection=False):
+            asked.append(own_connection)
             release.wait(5)
             return {"revision": REQUIRED_REVISION, "revision_error": None,
                     "unread": False}
@@ -171,6 +173,8 @@ class TestTheMode:
         finally:
             release.set()
         assert time.monotonic() - started < 2
+        # A worker left stuck is a read that failed, and is asked again.
+        assert asked == [True] * wc.REVISION_READ_ATTEMPTS
         # Only what was not read: the registry and the Alert Gate are this
         # process's own, read on the caller's thread, and nobody failed them.
         assert [u.key for u in wc.preconditions_unmet()] == ["pg_revision"]
