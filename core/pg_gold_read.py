@@ -56,6 +56,16 @@ def enabled() -> bool:
     return value == "postgres" and bool(os.getenv("KS_PG_DSN", "").strip())
 
 
+def available() -> bool:
+    """Postgres is configured at all. `enabled()` already folds it in — it
+    predates the other switches — so at the gate this changes nothing; it is
+    here so the gate reads `enabled() and available()` like every other
+    switch's, which is the shape the fallback walk
+    (`tests/unit/test_read_fallback_sites.py`) finds and holds to
+    `read_fallback.no_address` (DN-20b)."""
+    return bool(os.getenv("KS_PG_DSN", "").strip())
+
+
 def _predicate(
     sales_type: str, source_id: Optional[int], params: List[object],
 ) -> str:

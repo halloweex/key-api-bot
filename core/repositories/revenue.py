@@ -305,6 +305,7 @@ class RevenueMixin:
         from core import pg_reports_read
 
         params = list(params or [])
+        read_fallback.no_address("reports", pg_reports_read)
         if pg_reports_read.enabled() and pg_reports_read.available():
             try:
                 return await pg_reports_read.fetch(
@@ -355,6 +356,7 @@ class RevenueMixin:
             return await pg_marketing_read.fetch(
                 self._render_report(sql, POSTGRES, **extra), params,
             )
+        read_fallback.no_address("marketing", pg_marketing_read)
         if pg_marketing_read.enabled() and pg_marketing_read.available():
             try:
                 return await pg_marketing_read.fetch(
@@ -383,6 +385,7 @@ class RevenueMixin:
         from core import pg_dashboard_read
 
         params = list(params or [])
+        read_fallback.no_address("dashboard", pg_dashboard_read)
         if pg_dashboard_read.enabled() and pg_dashboard_read.available():
             try:
                 return await pg_dashboard_read.fetch(
@@ -405,13 +408,22 @@ class RevenueMixin:
         four are drawn on *every* page, so a rollback here is the one that
         must not be tangled up with a tab's. It is also the only router in
         this file whose failure would be visible on nine tabs at once, which
-        is why the fallback below is not negotiable.
+        is why, under the default, the fallback below is not negotiable.
+
+        Under `KS_READ_FALLBACK=off` it is refused like the tab it sits on
+        (DN-20b): `/api/categories`, `/api/brands`, `/api/promocodes` and the
+        category children answer 503 naming `lookups`, on every tab at once.
+        Deliberately — a filter bar drawn from a DuckDB nothing writes any
+        more would offer categories and brands the page's own numbers no
+        longer know, and `off` is the promise that no DuckDB answer reaches a
+        page. `tests/unit/test_read_fallback_http.py` pins it.
         """
         from core.sql_dialect import DUCKDB, POSTGRES
 
         from core import pg_lookups_read
 
         params = list(params or [])
+        read_fallback.no_address("lookups", pg_lookups_read)
         if pg_lookups_read.enabled() and pg_lookups_read.available():
             try:
                 return await pg_lookups_read.fetch(
@@ -470,7 +482,8 @@ class RevenueMixin:
 
         if source_id and source_id not in self._GOLD_SOURCE_COLUMNS:
             return None  # DuckDB answers zeros here; parity keeps it that way
-        if not pg_gold_read.enabled():
+        read_fallback.no_address("dashboard", pg_gold_read)
+        if not (pg_gold_read.enabled() and pg_gold_read.available()):
             return None
         try:
             return await pg_gold_read.fetch_summary(
@@ -507,7 +520,8 @@ class RevenueMixin:
 
         if source_id and source_id not in self._GOLD_SOURCE_COLUMNS:
             return None  # same guard as the summary twin — parity by routing
-        if not pg_gold_read.enabled():
+        read_fallback.no_address("dashboard", pg_gold_read)
+        if not (pg_gold_read.enabled() and pg_gold_read.available()):
             return None
         try:
             return await pg_gold_read.fetch_series(
@@ -546,6 +560,7 @@ class RevenueMixin:
             # here is exactly the lock this block exists to avoid.
             pg_totals = None
             from core import pg_silver_read
+            read_fallback.no_address("dashboard", pg_silver_read)
             if pg_silver_read.enabled() and pg_silver_read.available():
                 cat_ids = (await self._category_ids(category_id)
                            if category_id else None)
@@ -893,6 +908,7 @@ class RevenueMixin:
         from core import pg_silver_read
         from core.sql_dialect import POSTGRES, render_tables
 
+        read_fallback.no_address(surface, pg_silver_read)
         if not (pg_silver_read.enabled() and pg_silver_read.available()):
             return None
         try:
@@ -1102,6 +1118,7 @@ class RevenueMixin:
             # the same rule: before the lock. The bodies are the builders the
             # DuckDB fallback below uses, rendered for Postgres by `_pg_silver`.
             from core import pg_silver_read
+            read_fallback.no_address("dashboard", pg_silver_read)
             if pg_silver_read.enabled() and pg_silver_read.available():
                 pre_cat_ids = (await self._category_ids(category_id)
                                if category_id else None)

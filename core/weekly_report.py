@@ -409,9 +409,10 @@ async def _weekly_run(store, sql: str, params=None, *, mode: str = "all"):
     stop being written would send a plausible week of zeros.
     """
     from core.sql_dialect import DUCKDB, POSTGRES, render_tables
-    from core import pg_weekly_read
+    from core import pg_weekly_read, read_fallback
 
     params = list(params or [])
+    read_fallback.no_address("weekly_report", pg_weekly_read)
     if pg_weekly_read.enabled() and pg_weekly_read.available():
         rows = await pg_weekly_read.fetch(render_tables(sql, POSTGRES), params)
         return (rows[0] if rows else None) if mode == "one" else rows
@@ -437,8 +438,9 @@ async def fetch_channels(
     # nothing. Every other body in this module needs the predicate and this one
     # must not have it — which is why it is stated rather than left to inference.
     from core.sql_dialect import DUCKDB, POSTGRES, channel_totals_items
-    from core import pg_weekly_read
+    from core import pg_weekly_read, read_fallback
 
+    read_fallback.no_address("weekly_report", pg_weekly_read)
     dialect = (POSTGRES if (pg_weekly_read.enabled() and pg_weekly_read.available())
                else DUCKDB)
     channels = channel_totals_items(dialect)

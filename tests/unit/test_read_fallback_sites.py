@@ -29,14 +29,23 @@ THE THREE SHAPES, AND WHAT EACH MUST DO
 what DN-20b and DN-20c raise from `fall_back`, and a broad handler around a
 router must not turn the refusal into a quiet answer.
 
+4. **Every gate asks whether its switch has an address** (DN-20b). The
+   function holding an `X.enabled() and X.available()` gate must call
+   `read_fallback.no_address(surface, X)` with that same `X` — or
+   `no_engine`, the cohorts' stronger form. That is the one route to DuckDB
+   no exception marks: the switch names Postgres, no DSN is set, and the gate
+   is simply false. Under `duckdb` the call does nothing; under `off` it
+   refuses, so a lost DSN line is a 503 and not frozen numbers.
+
 A read-switch module is one whose `ENV` names a `KS_READ_*` variable, found by
 walking `core/` — not listed either.
 
 Two fallbacks are deliberately not counted per request, and each has another
 answer: a gate whose switch is on and whose engine has no address
 (`KS_READ_GOLD=postgres` without `KS_PG_DSN`) is a configuration, published at
-startup under `read_fallback_mode.misconfigured`; and `backfilled()` answering
-"no history yet" is a correct routing decision, not a failure.
+startup under `read_fallback_mode.misconfigured` — and, under `off`, refused
+by rule 4; and `backfilled()` answering "no history yet" is a correct routing
+decision, not a failure.
 """
 from __future__ import annotations
 
@@ -68,7 +77,7 @@ EXITS = (ast.Return, ast.Raise, ast.Continue, ast.Break)
 
 @dataclass(frozen=True)
 class Site:
-    rule: str          # "log" | "gate" | "handler"
+    rule: str          # "log" | "gate" | "handler" | "address"
     path: str
     line: int
     function: str
@@ -151,6 +160,28 @@ def _is_gate(node: ast.AST) -> bool:
     called = {_call_name(n) for v in node.values for n in ast.walk(v)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
     return {"enabled", "available"} <= called
+
+
+def _gate_switches(gate: ast.AST) -> Set[str]:
+    """The names a gate calls `enabled()` on — `pg_traffic_read`, `pg_index`."""
+    return {n.func.value.id for n in ast.walk(gate)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "enabled" and isinstance(n.func.value, ast.Name)}
+
+
+def _asks_for_an_address(fn: ast.AST, switches: Set[str]) -> bool:
+    """`fn` calls `no_address(<surface>, X)` for a switch X its gate consults,
+    or `no_engine`, which refuses whatever the switch says."""
+    for n in _own_nodes(fn):
+        if not isinstance(n, ast.Call):
+            continue
+        name = _call_name(n)
+        if name == "no_engine":
+            return True
+        if (name == "no_address" and len(n.args) >= 2
+                and isinstance(n.args[1], ast.Name) and n.args[1].id in switches):
+            return True
+    return False
 
 
 def _string_parts(node: ast.AST) -> List[str]:
@@ -274,6 +305,9 @@ def walk_source(source: str, relpath: str, switches: Set[str]) -> List[Site]:
         judged = [(h, t) for h, t in _handlers(fn) if _carries_on_to_duckdb(h)]
         ok = all(_decides(h, t) for h, t in judged)
         sites.append(Site("gate", relpath, gate.lineno, fn.name, ok))
+        # 4. The same gate, asked whether its switch has an address.
+        sites.append(Site("address", relpath, gate.lineno, fn.name,
+                          _asks_for_an_address(fn, _gate_switches(gate))))
 
     # 3. Every handler in a function that reaches another engine's read.
     if _in_handler_scope(relpath):
@@ -321,8 +355,14 @@ class TestTheWalk:
 
     def test_it_is_looking(self, sites):
         """Floors, not a list: the walk found the gates and the handlers it
-        exists for. Twenty gates and seventeen handlers when it was written."""
+        exists for. Twenty gates and seventeen handlers when it was written;
+        twenty-three gates once the two Gold readers took the shape (DN-20b),
+        and every gate is also an address site."""
         gates = {(s.path, s.function) for s in sites if s.rule == "gate"}
+        assert gates == {(s.path, s.function) for s in sites
+                         if s.rule == "address"}
+        assert ("core/repositories/revenue.py", "_pg_gold_summary") in gates
+        assert ("core/repositories/revenue.py", "_pg_gold_series") in gates
         handlers = [s for s in sites if s.rule == "handler"]
         assert len(gates) >= 15, sorted(gates)
         assert len(handlers) >= 15, handlers
@@ -340,12 +380,14 @@ class TestTheWalk:
 
     def test_every_counted_surface_is_a_literal(self, sites):
         """A surface is a key in /api/health, so it must be readable from the
-        code — never computed from a flag or an exception."""
+        code — never computed from a flag or an exception. The refusals
+        (`no_address`, `no_engine`) are keys there too, under `off`."""
         surfaces = set()
         for top in WALKED:
             for path in (REPO / top).rglob("*.py"):
                 for n in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                    if (isinstance(n, ast.Call) and _call_name(n) == "fall_back"
+                    if (isinstance(n, ast.Call) and _call_name(n) in (
+                            "fall_back", "no_address", "no_engine")
                             and n.args):
                         arg = n.args[0]
                         if isinstance(arg, ast.Constant):
@@ -365,8 +407,10 @@ class TestTheWalk:
 class TestTheRules:
     SWITCHES = {"pg_x_read"}
 
-    def _ok(self, source, relpath="core/repositories/x.py"):
-        return [(s.rule, s.ok) for s in walk_source(source, relpath, self.SWITCHES)]
+    def _ok(self, source, relpath="core/repositories/x.py",
+            rules=("log", "gate", "handler")):
+        return [(s.rule, s.ok) for s in walk_source(source, relpath, self.SWITCHES)
+                if s.rule in rules]
 
     def test_a_log_line_alone_is_not_counting(self):
         src = (
@@ -441,6 +485,50 @@ class TestTheRules:
                               "        raise\n", "")
         assert self._ok(without) == [("handler", False)]
 
+    def test_a_gate_must_ask_whether_its_switch_has_an_address(self):
+        """Rule 4 (DN-20b): the gate is false when the switch names Postgres
+        and no DSN is set, and DuckDB answers with nothing to count."""
+        src = (
+            "async def f(self):\n"
+            "    if pg_x_read.enabled() and pg_x_read.available():\n"
+            "        return await pg_x_read.fetch()\n"
+            "    async with self.connection() as conn:\n"
+            "        return conn.execute('x').fetchall()\n"
+        )
+        assert self._ok(src, "core/somewhere.py", rules=("address",)) == [
+            ("address", False)]
+        asked = src.replace(
+            "    if pg_x_read", "    read_fallback.no_address('x', pg_x_read)\n"
+                              "    if pg_x_read")
+        assert self._ok(asked, "core/somewhere.py", rules=("address",)) == [
+            ("address", True)]
+
+    def test_the_address_asked_for_is_the_gates_own_switch(self):
+        """A copied line naming another tab's switch asks the wrong question:
+        this gate's switch could be the one without an address."""
+        src = (
+            "async def f(self):\n"
+            "    read_fallback.no_address('x', pg_y_read)\n"
+            "    if pg_x_read.enabled() and pg_x_read.available():\n"
+            "        return await pg_x_read.fetch()\n"
+            "    return None\n"
+        )
+        assert self._ok(src, "core/somewhere.py", rules=("address",)) == [
+            ("address", False)]
+
+    def test_no_engine_answers_rule_four(self):
+        """The cohorts' form: refused whatever the switch says."""
+        src = (
+            "async def f(self):\n"
+            "    if ch_x.enabled() and ch_x.available():\n"
+            "        return await ch_x.fetch()\n"
+            "    else:\n"
+            "        read_fallback.no_engine('cohorts', 'no clickhouse')\n"
+            "    return None\n"
+        )
+        assert self._ok(src, "core/somewhere.py", rules=("address",)) == [
+            ("address", True)]
+
     def test_a_switch_function_imported_by_name_is_reaching(self):
         src = (
             "from core.pg_x_read import fetch\n"
@@ -481,15 +569,18 @@ class TestTheMode:
         assert fresh_read_fallback.configure_mode() == "duckdb"
         assert fresh_read_fallback.mode_error() is None
 
-    def test_off_is_read_and_still_falls_back(self, fresh_read_fallback, monkeypatch, caplog):
-        """Refusing is DN-20b and DN-20c. Until then `off` is validated and
-        published, and a fallback is still served — and says so at start."""
+    def test_off_is_read_and_refuses(self, fresh_read_fallback, monkeypatch, caplog):
+        """DN-20b: under `off` a fallback is refused, not served — and the
+        start says so. What the refusal looks like is
+        `tests/unit/test_read_fallback_http.py`'s business."""
         monkeypatch.setenv("KS_READ_FALLBACK", "off")
         with caplog.at_level(logging.WARNING, logger="core.read_fallback"):
             assert fresh_read_fallback.configure_mode() == "off"
-        assert "not enforced" in caplog.text
-        fresh_read_fallback.fall_back("dashboard", RuntimeError("down"))
-        assert fresh_read_fallback.counts()["dashboard"]["count"] == 1
+        assert "refused rather than answered from DuckDB" in caplog.text
+        with pytest.raises(fresh_read_fallback.ReadUnavailable):
+            fresh_read_fallback.fall_back("dashboard", RuntimeError("down"))
+        assert fresh_read_fallback.counts() == {}
+        assert fresh_read_fallback.refusals()["dashboard"]["count"] == 1
 
     def test_an_unknown_value_runs_as_duckdb_and_never_raises(
         self, fresh_read_fallback, monkeypatch, caplog,
@@ -561,6 +652,94 @@ class TestMisconfiguredReads:
         fresh_read_fallback.configure_mode()
         published = {line.split("=", 1)[0] for line in fresh_read_fallback.misconfigured()}
         assert published == set(envs)
+
+    def test_every_published_switch_is_refused_under_off(
+        self, fresh_read_fallback, monkeypatch, caplog,
+    ):
+        """What is published under `misconfigured` and what `no_address`
+        refuses are one rule, so under `off` the two lists are the same list
+        — shown for every switch the walk finds, Postgres and ClickHouse."""
+        import importlib
+
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.delenv("KS_CH_URL", raising=False)
+        modules = []
+        for name in sorted(read_switch_modules()):
+            module = importlib.import_module(f"core.{name}")
+            monkeypatch.setenv(module.ENV, "clickhouse" if name.startswith("ch_")
+                               else "postgres")
+            modules.append(module)
+        monkeypatch.setenv("KS_READ_FALLBACK", "off")
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            fresh_read_fallback.configure_mode()
+        assert "every read behind it is refused" in caplog.text
+        for module in modules:
+            with pytest.raises(fresh_read_fallback.ReadUnavailable):
+                fresh_read_fallback.no_address(module.__name__, module)
+        assert set(fresh_read_fallback.refusals()) == {m.__name__ for m in modules}
+        assert len(fresh_read_fallback.misconfigured()) == len(modules)
+
+
+class TestNoAddress:
+    """`no_address`: refused under `off` only, and only for a switch naming an
+    engine this process has no address for (DN-20b)."""
+
+    def test_under_duckdb_it_does_nothing_and_reads_nothing(
+        self, fresh_read_fallback, monkeypatch,
+    ):
+        from core import pg_traffic_read
+
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
+        fresh_read_fallback.configure_mode()
+
+        def boom(name):
+            raise AssertionError("the environment is read under duckdb")
+
+        monkeypatch.setattr(fresh_read_fallback, "_unaddressed", boom)
+        fresh_read_fallback.no_address("traffic", pg_traffic_read)
+        assert fresh_read_fallback.refusals() == {}
+        assert fresh_read_fallback.counts() == {}
+
+    def test_under_off_only_the_unaddressed_switch_is_refused(
+        self, fresh_read_fallback, monkeypatch, caplog,
+    ):
+        from core import ch_cohorts, pg_traffic_read
+
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.delenv("KS_CH_URL", raising=False)
+        monkeypatch.setenv("KS_READ_FALLBACK", "off")
+        fresh_read_fallback.configure_mode()
+
+        # Unset, or naming DuckDB: routing, never refused here.
+        fresh_read_fallback.no_address("traffic", pg_traffic_read)
+        monkeypatch.setenv("KS_READ_TRAFFIC", "duckdb")
+        fresh_read_fallback.no_address("traffic", pg_traffic_read)
+        assert fresh_read_fallback.refusals() == {}
+
+        # Naming Postgres with no DSN: refused, and the log says which switch.
+        monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            with pytest.raises(fresh_read_fallback.ReadUnavailable) as raised:
+                fresh_read_fallback.no_address("traffic", pg_traffic_read)
+        assert raised.value.surface == "traffic"
+        assert "KS_READ_TRAFFIC=postgres without KS_PG_DSN" in caplog.text
+        assert "falling back to DuckDB" not in caplog.text
+        assert ": None" not in caplog.text
+        assert fresh_read_fallback.refusals()["traffic"]["count"] == 1
+
+        # With the address the gate will ask Postgres: nothing to refuse.
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
+        fresh_read_fallback.no_address("traffic", pg_traffic_read)
+        assert fresh_read_fallback.refusals()["traffic"]["count"] == 1
+
+        # ClickHouse by its own address.
+        monkeypatch.setenv("KS_READ_COHORTS", "clickhouse")
+        with pytest.raises(fresh_read_fallback.ReadUnavailable):
+            fresh_read_fallback.no_address("cohorts", ch_cohorts)
+        monkeypatch.setenv("KS_CH_URL", "http://ch:8123")
+        fresh_read_fallback.no_address("cohorts", ch_cohorts)
+        assert fresh_read_fallback.refusals()["cohorts"]["count"] == 1
 
 
 class TestTheCounter:

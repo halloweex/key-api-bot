@@ -609,6 +609,10 @@ class SyncService:
             # The engine is chosen once: the watermark belongs to it. Only what
             # the index READS moves — the watermark is still `sync_metadata`
             # bookkeeping, written by DuckDB until that table's stage-4 chain.
+            # Under KS_READ_FALLBACK=off a switch with no address is refused
+            # rather than read from DuckDB; the handler below skips the step.
+            from core import read_fallback
+            read_fallback.no_address("search_index", pg_index)
             use_pg = pg_index.enabled() and pg_index.available()
             watermark_key = pg_index.WATERMARK_KEY if use_pg else "meilisearch"
             last_sync = await self.store.get_last_sync_time(watermark_key)

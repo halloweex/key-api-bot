@@ -2334,19 +2334,52 @@ and after the first Sunday compaction empty ones, behind a page that looks as
 if it works. So every such site calls `core.read_fallback.fall_back(surface,
 exc)`: one uniform ERROR line carrying that phrase, and a per-surface counter
 `/api/health` publishes as `read_fallbacks {surface: {count, last_at}}` — no
-exception text, the endpoint is public. **Nothing a read returns changed.**
+exception text, the endpoint is public. **Under the default, nothing a read
+returns changed.**
 
 `KS_READ_FALLBACK` (`duckdb` default | `off`) is read in `configure_modes()`,
-before the boot sync. `off` is validated and published but **not enforced**:
-refusing is DN-20b (HTTP, a 503 naming the surface) and DN-20c (reports,
-assistant, training, sync), which raise `ReadUnavailable` from `fall_back`. An
+before the boot sync. **Under `off`, `fall_back` raises `ReadUnavailable`**
+(DN-20b) instead of letting its caller read DuckDB, and one exception handler
+in `web/main.py` answers it, from any route, with a 503 carrying `surface` —
+the cause stays in the log. One raise, so it refuses every router an HTTP
+route reaches, the filter bar's lookups included, not only the tabs the plan
+named. A refusal is not a fallback: counted apart, logged without the phrase
+the soak greps for, published as `read_fallback_mode.refused` under `off`
+alone, so `read_fallbacks` stays empty there and the block keeps its shape
+under `duckdb`. `off` refuses a *failure*, never a switch left at `duckdb` —
+except the cohorts, which have no Postgres body: under `off` a live
+ClickHouse answers them or nobody does (`no_engine`). A switch naming an
+engine this process has **no address** for (`KS_READ_TRAFFIC=postgres`
+without `KS_PG_DSN`) counts as a failure there: the gate is simply false and
+DuckDB answers with nothing to count, so every `enabled() and available()`
+gate first calls `no_address(surface, switch)`, which refuses under `off` and
+does nothing under `duckdb`. A lost DSN line is then a 503 on every tab, not
+frozen numbers behind all of them. Chosen over having the canary page
+`misconfigured` under `off`, which would have kept serving DuckDB until
+somebody read the page. The trend's forecast
+overlay, which already degrades to "no forecast" on any failure, drops under
+a refusal and the chart answers; the forecast's own endpoint,
+`/api/revenue/forecast`, is not an overlay and answers 503 — it used to read
+an outage as "Forecast not available yet", a model nobody had trained. Everything else a refusal can reach is DN-20c's:
+the sync and its search index, training, the Monday goals job
+(`seasonality_calc`, which writes `seasonal_indices` before the read that
+refuses, so it must defer whole rather than half-write), the two weekly
+reports, the boot sync and the assistant. **That list is derived, not
+remembered** — `tests/unit/test_read_fallback_consumers.py` walks up from
+every `fall_back`/`no_address`/`no_engine` to the entry points nothing in the
+repository calls, and pins the ones no swept route answers (`NON_HTTP_CONSUMERS`,
+plus the five writing routes the sweep does not run); a new consumer fails it
+until somebody decides what it answers. A remembered list had missed the
+goals job. Until DN-20c lands a refusal reaching one of them is an exception
+like any other, so **`off` is not set before DN-20c ships**. An
 unknown value **runs as `duckdb` and never raises** — web is the only syncer,
 so a crash loop over how a read degrades would stop order intake (OD-09); it
 publishes `read_fallback_mode.error` and the canary warns
 `read_fallback_mode_invalid`. The same call lists, under
 `read_fallback_mode.misconfigured`, every `KS_READ_*=postgres` without
 `KS_PG_DSN` and `=clickhouse` without `KS_CH_URL` — found by prefix in the
-environment, not listed: those reads serve DuckDB with nothing failing to count.
+environment, not listed: under `duckdb` those reads serve DuckDB with nothing
+failing to count, and under `off` exactly those are refused, by the same rule.
 
 `tests/unit/test_read_fallback_sites.py` walks `core/` and `web/` for the
 shapes, never a list of routers: a "falling back to DuckDB" log; an
@@ -2356,7 +2389,22 @@ shapes, never a list of routers: a "falling back to DuckDB" log; an
 False and `_pg_gold_summary` returns None and it is the caller that then reads
 DuckDB. Each must call `fall_back`, re-raise, or say in the same `try` what
 `ReadUnavailable` means — `_get_ml_forecast_total` lets it through, so a
-refusal is never turned into a goal computed without its signal.
+refusal is never turned into a goal computed without its signal. And every
+gate's function must call `no_address` with the switch the gate consults (or
+`no_engine`); the two Gold readers gained `pg_gold_read.available()` so they
+take the gate's shape and the walk sees them.
+
+That the refusal then *reaches* the 503 is proved by running it, not listing
+it: `tests/unit/test_read_fallback_http.py` sweeps **every GET route under
+`/api/` read off the app** — every switch on, once with an engine that fails
+and once with no address — and fails on any request that left a refusal
+counted without answering 503 naming it. Only `/api/chat/stream` is skipped,
+and for the network. A service wrapping a router in `except Exception:
+return {}` was invisible to the static walk and to a hand-kept list of
+thirteen routes; the sweep finds it by the route. The static half checks
+every module `web/` imports: a handler that names `ReadUnavailable` must end
+in a bare `raise` or `raise <its name>` — `raise HTTPException(500)` turns a
+503 naming the surface into a 500 naming nothing.
 
 ### A write flag is no longer a rollback
 

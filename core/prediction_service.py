@@ -1549,8 +1549,9 @@ class PredictionService:
         # rather than an error, and both callers already degrade — `/trend`
         # drops the forecast and returns the chart, `_train_impl` returns
         # `status: error` and keeps the previous model.
-        from core import pg_forecast_read
+        from core import pg_forecast_read, read_fallback
 
+        read_fallback.no_address("forecast", pg_forecast_read)
         if pg_forecast_read.enabled() and pg_forecast_read.available():
             return await pg_forecast_read.fetch_frame(
                 start_date, today, sales_type, exclude_today)

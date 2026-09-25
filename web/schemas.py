@@ -151,18 +151,24 @@ class HealthResponse(BaseModel):
             "cohorts, ClickHouse) failed, per surface: `count` since the "
             "process started and `last_at`. Empty is none. Counted by "
             "`core.read_fallback.fall_back`, which every such site calls; the "
-            "log line beside each one carries the error (DN-20a)."
+            "log line beside each one carries the error (DN-20a). Always empty "
+            "under KS_READ_FALLBACK=off, where such a read is refused instead "
+            "and counted under `read_fallback_mode.refused`."
         ),
     )
     read_fallback_mode: Optional[Dict[str, Any]] = Field(
         None,
         description=(
             "`mode` is KS_READ_FALLBACK as understood at start — duckdb or "
-            "off, and off is not enforced before DN-20b — and `error` names a "
-            "value that was not understood and ran as duckdb; judged by the "
-            "canary. `misconfigured` lists every KS_READ_* naming an engine "
-            "without its address (KS_PG_DSN, KS_CH_URL): each of those reads "
-            "is served by DuckDB with nothing failing to count."
+            "off; under off a read whose engine fails is refused, and an HTTP "
+            "route answers 503 naming the surface (DN-20b) — and `error` "
+            "names a value that was not understood and ran as duckdb; judged "
+            "by the canary. `misconfigured` lists every KS_READ_* naming an "
+            "engine without its address (KS_PG_DSN, KS_CH_URL): under duckdb "
+            "each of those reads is served by DuckDB with nothing failing to "
+            "count, and under off each is refused. Under off only, `refused` "
+            "is `{surface: {count, last_at}}` for the reads refused since the "
+            "process started."
         ),
     )
     warehouse_writer_mode: Optional[Dict[str, Any]] = Field(

@@ -429,10 +429,11 @@ async def _chat_run(sql: str, params, *, mode: str = "all"):
     bare `SUM(revenue)` there counts every order twice. No fallback — see
     `core/pg_chat_read.py`.
     """
-    from core import pg_chat_read
+    from core import pg_chat_read, read_fallback
     from core.sql_dialect import DUCKDB, POSTGRES, render_tables
 
     params = list(params)
+    read_fallback.no_address("assistant", pg_chat_read)
     if pg_chat_read.enabled() and pg_chat_read.available():
         rows = await pg_chat_read.fetch(render_tables(sql, POSTGRES), params)
         return (rows[0] if rows else None) if mode == "one" else rows
@@ -644,7 +645,7 @@ async def _get_top_products(period: str, by: str, limit: int) -> Dict[str, Any]:
 
 async def _get_source_breakdown(period: str) -> Dict[str, Any]:
     """Get sales breakdown by source."""
-    from core import pg_chat_read
+    from core import pg_chat_read, read_fallback
     from core.sql_dialect import DUCKDB, POSTGRES, channel_totals_items
 
     start_date, end_date = _get_date_range(period)
@@ -655,6 +656,7 @@ async def _get_source_breakdown(period: str) -> Dict[str, Any]:
     # the dialect is chosen here — the same compromise as the weekly report's
     # `fetch_channels`, and safe for the same reason: there is no fallback to
     # carry one engine's spelling into the other.
+    read_fallback.no_address("assistant", pg_chat_read)
     dialect = (POSTGRES if (pg_chat_read.enabled() and pg_chat_read.available())
                else DUCKDB)
     channels = channel_totals_items(dialect)

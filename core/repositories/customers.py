@@ -1393,6 +1393,13 @@ class CustomersMixin:
 
         `render` takes an `AnalyticsDialect` and returns the SQL; one function
         for both, so neither engine gets a body of its own.
+
+        Under `KS_READ_FALLBACK=off` a live ClickHouse is the only thing that
+        may answer (DN-20b): a failed read is refused by `fall_back`, and so
+        is a switch that does not name a configured ClickHouse at all. These
+        queries have no Postgres body, so DuckDB is the only other engine, and
+        after step 13 its Silver is frozen — the one thing `off` is there to
+        keep off a page. Under `duckdb`, the default, `no_engine` does nothing.
         """
         from core import ch_cohorts
 
@@ -1403,6 +1410,10 @@ class CustomersMixin:
                 )
             except Exception as exc:  # noqa: BLE001
                 read_fallback.fall_back("cohorts", exc)
+        else:
+            read_fallback.no_engine(
+                "cohorts", f"{ch_cohorts.ENV} does not name a configured "
+                "ClickHouse, and cohorts have no Postgres body")
 
         async with self.connection() as conn:
             return conn.execute(render(DUCKDB_ANALYTICS), list(params)).fetchall()

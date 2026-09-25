@@ -210,6 +210,7 @@ class GoalsMixin:
         params = list(params or [])
         if pg_goals_write.reads_the_chain(sql):
             return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
+        read_fallback.no_address("goals", pg_goals_read)
         if pg_goals_read.enabled() and pg_goals_read.available():
             try:
                 return await pg_goals_read.fetch(
@@ -920,8 +921,9 @@ class GoalsMixin:
             # A fallback refused (DN-20b, `KS_READ_FALLBACK=off`) is not a
             # missing signal: it passes through, so the goal is not computed
             # from two signals while the third reads a store nobody writes.
-            # Nothing raises it yet; DN-20a's walk requires the decision to be
-            # written here, as for every handler around a router.
+            # It reaches the route, which answers 503 naming `goals`; DN-20a's
+            # walk requires the decision to be written here, as for every
+            # handler around a router.
             raise
         except Exception as exc:  # noqa: BLE001
             # What reaches here is a read that failed on the engine that
