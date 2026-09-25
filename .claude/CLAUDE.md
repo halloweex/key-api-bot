@@ -2771,6 +2771,30 @@ proves Postgres Silver/Gold, and that cannot be re-verified afterwards. The
 gate-stack rehearsal on the production backups — a container killed mid
 Postgres rebuild, the owed state surviving — runs on the host before any flip.
 
+**After a flip, a start with any precondition unmet IS the way back**, not
+only an operator's unset: the same full rebuild and hold, and the next start
+under `postgres` records a new `since` — the soak clock starts again — and
+closes the `warehouse` group again without a validating tick. The canary's
+lever says so first. So a Postgres read that failed (no answer in time, or an
+exception — never an answer such as a wrong revision) is asked again before
+the verdict: three asks, 2 s and 5 s apart, at most 37 s, once per process.
+The write-chain registry and the Alert Gate are read on the caller's thread,
+outside that bound, so a start that could not reach Postgres names
+`pg_revision` alone.
+
+**The UTM doors parse Postgres alone under `postgres`.** `POST
+/api/traffic/refresh`, `/traffic/reclassify`, the `manager_comment` backfill
+and `scripts/backfill_utm.py` neither empty nor re-parse DuckDB's
+`silver_order_utm`: a DuckDB parse that raised used to leave the Postgres
+reclassify — what /traffic reads — unrun behind a 500, and after a compaction
+each door re-parsed every order in DuckDB first. The Postgres answer is the
+door's (an error is a 500, a refused full parse a 409, a failed parse makes
+the backfill `partial`). The reclassify and the CLI note the re-parse in the
+recorded writer (`utm_reparsed_at`), and the way back then empties DuckDB's
+`silver_order_utm`, so the full tick it owes re-parses every verdict under
+the rules in force — an incremental parse would never notice a rule change on
+an order whose `updated_at` has not moved.
+
 `GET /api/warehouse/status` publishes `cutover`: the variable as read,
 `switch_built: true`, and every unmet precondition by name, from
 `evaluate_preconditions(env, facts)` — `KS_PG_DERIVE=own`, the twins on,

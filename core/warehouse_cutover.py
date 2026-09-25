@@ -22,7 +22,11 @@ needed in place; DN-29 is the switch.
   verdict is reached once per process and kept, so web's startup and the
   scheduler cannot disagree about it — a revision read that timed out the
   second time must not hand a boot that ran under `postgres` a scheduler that
-  runs under `duckdb`.
+  runs under `duckdb`. **After a flip, a start with anything unmet IS the way
+  back** — a full DuckDB rebuild, a new `since` on the next start under
+  `postgres`, the `warehouse` group closed again — so a Postgres read that
+  failed is asked again before the verdict (`REVISION_READ_ATTEMPTS`), and
+  the facts this process holds itself are read outside that read's bound.
 - **Under `postgres`** DuckDB stops deriving: `duckdb_derives()` is False, so
   the `warehouse_refresh` job is not registered, every production call of
   `refresh_warehouse_layers` is skipped (a test walks them), the DuckDB half of
@@ -329,6 +333,12 @@ PRECONDITIONS: Tuple[Tuple[str, str], ...] = (
 # reports; it does not hang on a database that has stopped answering.
 REVISION_READ_TIMEOUT_S = 5.0
 
+# How many times a start asks Postgres before its verdict, and how long it
+# waits between asks — only after a read that failed, never after an answer.
+# Worst case, `start_bound_s()`: 3 × 10 s + 7 s = 37 s, once per process.
+REVISION_READ_ATTEMPTS = 3
+REVISION_RETRY_DELAYS_S: Tuple[float, ...] = (2.0, 5.0)
+
 
 @dataclass(frozen=True)
 class Unmet:
@@ -433,41 +443,45 @@ async def _revision_on_its_own_connection(dsn: str) -> Optional[str]:
         await conn.close()
 
 
-async def gather_facts(env: Optional[Mapping[str, str]] = None, *,
-                       own_connection: bool = False) -> Facts:
-    """The facts `evaluate_preconditions` needs from outside the environment.
-    Never raises: a fact that cannot be read is reported as unmet, by why.
+async def _read_postgres(env: Mapping[str, str], *,
+                         own_connection: bool) -> Dict[str, Any]:
+    """What `gather_facts` asks Postgres: `{"revision", "revision_error",
+    "unread"}`. `unread` is a read that failed — no answer in time, or an
+    exception — as against an answer: a revision, a database never migrated,
+    or no DSN to ask. Only an unread fact is worth asking again. Never raises.
 
     An exception is published by its class alone and logged whole at ERROR:
     a driver's text names the database user, the host and the port, and a
     status page — admin-only or not — is not where those go. `/api/health`'s
-    rule, and the log is where a person goes next anyway.
-
-    `own_connection` reads the revision on a connection of its own instead of
-    the pool: what `configure_mode` needs, from a loop that is not the
-    application's."""
-    env = os.environ if env is None else env
-    from core.pg import REQUIRED_REVISION
-
-    revision, revision_error = None, None
+    rule, and the log is where a person goes next anyway."""
     if not (env.get(PG_DSN) or "").strip():
-        revision_error = f"not asked: {PG_DSN} is not set"
-    else:
-        try:
-            from core.pg import current_revision
+        return {"revision": None, "revision_error": f"not asked: {PG_DSN} is not set",
+                "unread": False}
+    try:
+        from core.pg import current_revision
 
-            read = (_revision_on_its_own_connection(env[PG_DSN].strip())
-                    if own_connection else current_revision())
-            revision = await asyncio.wait_for(read, timeout=REVISION_READ_TIMEOUT_S)
-            if revision is None:
-                revision_error = "Postgres recorded no Alembic revision"
-        except asyncio.TimeoutError:
-            revision_error = f"Postgres did not answer in {REVISION_READ_TIMEOUT_S:g} s"
-        except Exception as exc:  # noqa: BLE001 — reported as unmet, by class
-            logger.error("cutover readiness: the Postgres revision could not be "
-                         "read: %s: %s", type(exc).__name__, exc)
-            revision_error = type(exc).__name__
+        read = (_revision_on_its_own_connection(env[PG_DSN].strip())
+                if own_connection else current_revision())
+        revision = await asyncio.wait_for(read, timeout=REVISION_READ_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return {"revision": None,
+                "revision_error": f"Postgres did not answer in {REVISION_READ_TIMEOUT_S:g} s",
+                "unread": True}
+    except Exception as exc:  # noqa: BLE001 — reported as unmet, by class
+        logger.error("cutover readiness: the Postgres revision could not be "
+                     "read: %s: %s", type(exc).__name__, exc)
+        return {"revision": None, "revision_error": type(exc).__name__, "unread": True}
+    if revision is None:
+        return {"revision": None, "revision_error": "Postgres recorded no Alembic revision",
+                "unread": False}
+    return {"revision": revision, "revision_error": None, "unread": False}
 
+
+def _local_facts() -> Dict[str, Any]:
+    """The facts this process holds itself — the write-chain registry and the
+    Alert Gate's delivered map. No I/O, so never behind the bound Postgres is
+    read under: a start that could not reach Postgres must not also report
+    these two as unread, naming preconditions nobody failed. Never raises."""
     owners: Optional[Mapping[str, Tuple[str, ...]]]
     bridge_error = None
     try:
@@ -488,14 +502,29 @@ async def gather_facts(env: Optional[Mapping[str, str]] = None, *,
                      type(exc).__name__, exc)
         open_retired, open_retired_error = None, type(exc).__name__
 
-    return Facts(revision=revision, revision_error=revision_error,
-                 required_revision=REQUIRED_REVISION,
-                 bridge_owners=owners, bridge_error=bridge_error,
-                 open_retired=open_retired, open_retired_error=open_retired_error)
+    return {"bridge_owners": owners, "bridge_error": bridge_error,
+            "open_retired": open_retired, "open_retired_error": open_retired_error}
 
 
-def _gather_facts_blocking(env: Mapping[str, str]) -> Facts:
-    """`gather_facts`, from synchronous code — `configure_mode`'s. Never raises.
+async def gather_facts(env: Optional[Mapping[str, str]] = None, *,
+                       own_connection: bool = False) -> Facts:
+    """The facts `evaluate_preconditions` needs from outside the environment.
+    Never raises: a fact that cannot be read is reported as unmet, by why.
+
+    `own_connection` reads the revision on a connection of its own instead of
+    the pool: what `configure_mode` needs, from a loop that is not the
+    application's. Asked once — the status page reports what it finds; only
+    the start asks again (`_gather_facts_blocking`)."""
+    env = os.environ if env is None else env
+    from core.pg import REQUIRED_REVISION
+
+    read = await _read_postgres(env, own_connection=own_connection)
+    read.pop("unread")
+    return Facts(required_revision=REQUIRED_REVISION, **read, **_local_facts())
+
+
+def _read_postgres_in_a_worker(env: Mapping[str, str]) -> Dict[str, Any]:
+    """`_read_postgres` from synchronous code, once, bounded. Never raises.
 
     `configure_modes()` is synchronous and web calls it inside its own event
     loop, before the boot sync, so the revision cannot be awaited there; and it
@@ -504,37 +533,70 @@ def _gather_facts_blocking(env: Mapping[str, str]) -> Facts:
     it is read in a worker thread, on a loop and a connection of its own,
     bounded by `REVISION_READ_TIMEOUT_S` inside and by twice that out here:
     `asyncio.run` waits at its end for the loop's resolver threads, and a
-    name that does not resolve can keep one busy past the inner bound. The
-    caller is never held longer, once per process, and only when `postgres`
-    is asked for; a worker still stuck is left to finish on its own."""
+    name that does not resolve can keep one busy past the inner bound. A
+    worker still stuck is left to finish on its own."""
     import concurrent.futures
 
-    from core.pg import REQUIRED_REVISION
-
-    def run() -> Facts:
-        return asyncio.run(gather_facts(env, own_connection=True))
+    def run() -> Dict[str, Any]:
+        return asyncio.run(_read_postgres(env, own_connection=True))
 
     pool = concurrent.futures.ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="warehouse-cutover")
     try:
         return pool.submit(run).result(timeout=2 * REVISION_READ_TIMEOUT_S)
     except concurrent.futures.TimeoutError:
-        logger.error("cutover preconditions were not gathered within %g s",
+        logger.error("cutover preconditions: Postgres was not read within %g s",
                      2 * REVISION_READ_TIMEOUT_S)
-        return Facts(revision_error=f"Postgres did not answer in "
-                                    f"{2 * REVISION_READ_TIMEOUT_S:g} s",
-                     required_revision=REQUIRED_REVISION,
-                     bridge_owners=None, bridge_error="not read",
-                     open_retired=None, open_retired_error="not read")
-    except Exception as exc:  # noqa: BLE001 — gather_facts promises not to; unmet, by class
-        logger.error("cutover preconditions could not be gathered: %s: %s",
+        return {"revision": None, "unread": True,
+                "revision_error": f"Postgres did not answer in "
+                                  f"{2 * REVISION_READ_TIMEOUT_S:g} s"}
+    except Exception as exc:  # noqa: BLE001 — _read_postgres promises not to; unmet, by class
+        logger.error("cutover preconditions: Postgres could not be read: %s: %s",
                      type(exc).__name__, exc)
-        name = type(exc).__name__
-        return Facts(revision_error=name, required_revision=REQUIRED_REVISION,
-                     bridge_owners=None, bridge_error=name,
-                     open_retired=None, open_retired_error=name)
+        return {"revision": None, "revision_error": type(exc).__name__, "unread": True}
     finally:
         pool.shutdown(wait=False)
+
+
+def _gather_facts_blocking(env: Mapping[str, str]) -> Facts:
+    """`gather_facts`, from synchronous code — `configure_mode`'s. Never raises.
+
+    **A read that failed is asked again before the verdict** — up to
+    `REVISION_READ_ATTEMPTS` times, `REVISION_RETRY_DELAYS_S` apart — and an
+    answer never is. The verdict is kept for the life of the process, and
+    after a flip a start that runs as `duckdb` IS the way back: a full DuckDB
+    rebuild, a new `since` on the next start under `postgres`, and the
+    `warehouse` group closed again. A Postgres slow to come up beside web
+    (both started at once after a host reboot) must not cost that; a Postgres
+    still unread after the last ask does, and says so. The local facts are
+    read here, on the caller's thread, and never time out with Postgres.
+    Bounded: at most `start_bound_s()` seconds, once per process, and only
+    when `postgres` is asked for."""
+    import time
+
+    from core.pg import REQUIRED_REVISION
+
+    local = _local_facts()
+    read = _read_postgres_in_a_worker(env)
+    for attempt in range(1, REVISION_READ_ATTEMPTS):
+        if not read["unread"]:
+            break
+        delay = REVISION_RETRY_DELAYS_S[min(attempt - 1, len(REVISION_RETRY_DELAYS_S) - 1)]
+        logger.warning("cutover preconditions: Postgres was not read (%s); asking "
+                       "again in %g s, %d of %d", read["revision_error"], delay,
+                       attempt + 1, REVISION_READ_ATTEMPTS)
+        time.sleep(delay)
+        read = _read_postgres_in_a_worker(env)
+    read.pop("unread")
+    return Facts(required_revision=REQUIRED_REVISION, **read, **local)
+
+
+def start_bound_s() -> float:
+    """The longest `_gather_facts_blocking` holds a start: every attempt at
+    its outer bound, and every wait between them."""
+    waits = [REVISION_RETRY_DELAYS_S[min(i, len(REVISION_RETRY_DELAYS_S) - 1)]
+             for i in range(REVISION_READ_ATTEMPTS - 1)]
+    return REVISION_READ_ATTEMPTS * 2 * REVISION_READ_TIMEOUT_S + sum(waits)
 
 
 # ─── THE RECORDED WRITER ─────────────────────────────────────────────────────

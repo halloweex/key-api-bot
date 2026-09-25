@@ -377,6 +377,7 @@ class TestAMissingPrecondition:
     async def test_a_postgres_that_does_not_answer_keeps_duckdb(self, world, monkeypatch):
         from core import warehouse_cutover as wc
 
+        monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
         monkeypatch.setenv("KS_PG_DSN", "postgresql://ks_app:x@127.0.0.1:9/ks")
         from core.runtime_modes import configure_modes
 
@@ -384,3 +385,29 @@ class TestAMissingPrecondition:
         assert wc.mode() == wc.DUCKDB
         (unmet,) = wc.preconditions_unmet()
         assert unmet.key == "pg_revision" and "127.0.0.1" not in unmet.detail
+
+    @pytest.mark.asyncio
+    async def test_a_postgres_that_answers_on_the_second_ask_switches(
+        self, world, monkeypatch,
+    ):
+        """After a flip a start that runs as duckdb is the way back. A first
+        read refused — Postgres still coming up beside web — is asked again,
+        and the second, real read decides."""
+        from core import warehouse_cutover as wc
+
+        real = wc._revision_on_its_own_connection
+        asks = []
+
+        async def refused_once(dsn):
+            asks.append(dsn)
+            if len(asks) == 1:
+                raise ConnectionRefusedError("still starting")
+            return await real(dsn)
+
+        monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
+        monkeypatch.setattr(wc, "_revision_on_its_own_connection", refused_once)
+        from core.runtime_modes import configure_modes
+
+        configure_modes()
+        assert len(asks) == 2
+        assert wc.mode() == wc.POSTGRES and wc.preconditions_unmet() == ()

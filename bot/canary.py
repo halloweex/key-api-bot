@@ -591,9 +591,11 @@ def check_warehouse_preconditions(payload: Optional[dict]) -> "list[tuple[str, s
     is the only syncer), so the numbers keep coming — but somebody deployed
     the switch that retires DuckDB's derivation, the owner's decision behind
     it has not taken effect, and the flip is the moment to hear that, not the
-    next audit. The keys name what to do; the details are on the admin status
-    page. An absent block or field is not a failure; an older web publishes
-    none."""
+    next audit. And after a flip it is the way back itself: a full DuckDB
+    rebuild, a new `since` on the next start under postgres, the warehouse
+    group closed again — which is why the lever says so first. The keys name
+    what to do; the details are on the admin status page. An absent block or
+    field is not a failure; an older web publishes none."""
     block = (payload or {}).get("warehouse_writer_mode")
     if not isinstance(block, dict):
         return []
@@ -824,7 +826,7 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("cert_expiring", "Check certbot on the host — auto-renew broke"),
     ("cert_unreachable", "TLS handshake fails: nginx or the network, not the app"),
     ("warehouse_preconditions_unmet",
-     "Read cutover.unmet on /api/warehouse/status; meet each, or unset KS_WRITE_WAREHOUSE; recreate web"),
+     "After a flip this IS the way back (full DuckDB rebuild). Meet each cutover.unmet on /api/warehouse/status or unset KS_WRITE_WAREHOUSE; recreate web"),
     ("mirror_", "Check meta.mirror_state and web's log; the mirror re-ships itself"),
     ("dq_", "Check /api/jobs — nothing is verifying the warehouse meanwhile"),
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),

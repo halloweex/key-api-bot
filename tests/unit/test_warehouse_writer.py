@@ -71,6 +71,8 @@ def met(monkeypatch):
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
     reader = AsyncMock(return_value=REQUIRED_REVISION)
     monkeypatch.setattr(wc, "_revision_on_its_own_connection", reader)
+    # A read that failed is asked again; not across seconds in a unit test.
+    monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
     return reader
 
 
@@ -157,9 +159,10 @@ class TestTheMode:
 
         async def stuck(env, *, own_connection=False):
             release.wait(5)
-            return wc.Facts()
+            return {"revision": REQUIRED_REVISION, "revision_error": None,
+                    "unread": False}
 
-        monkeypatch.setattr(wc, "gather_facts", stuck)
+        monkeypatch.setattr(wc, "_read_postgres", stuck)
         monkeypatch.setattr(wc, "REVISION_READ_TIMEOUT_S", 0.05)
         monkeypatch.setenv(wc.ENV, "postgres")
         started = time.monotonic()
@@ -168,8 +171,43 @@ class TestTheMode:
         finally:
             release.set()
         assert time.monotonic() - started < 2
-        assert {u.key for u in wc.preconditions_unmet()} >= {
-            "pg_revision", "goals_bridge", "retired_conditions_clear"}
+        # Only what was not read: the registry and the Alert Gate are this
+        # process's own, read on the caller's thread, and nobody failed them.
+        assert [u.key for u in wc.preconditions_unmet()] == ["pg_revision"]
+
+    def test_a_read_that_failed_is_asked_again_before_the_verdict(self, met, monkeypatch):
+        """After a flip a start that runs as duckdb IS the way back — a full
+        DuckDB rebuild, a new `since`, the warehouse group closed again. A
+        Postgres a few seconds slower than web to come up must not cost that."""
+        met.side_effect = [OSError("refused"), asyncio.TimeoutError(), REQUIRED_REVISION]
+        monkeypatch.setenv(wc.ENV, "postgres")
+        assert wc.configure_mode() == wc.POSTGRES
+        assert met.await_count == 3 and wc.preconditions_unmet() == ()
+
+    def test_a_read_still_failing_after_the_last_ask_is_unmet(self, met, monkeypatch):
+        met.side_effect = OSError("refused")
+        monkeypatch.setenv(wc.ENV, "postgres")
+        assert wc.configure_mode() == wc.DUCKDB
+        assert met.await_count == wc.REVISION_READ_ATTEMPTS == 3
+        assert [u.key for u in wc.preconditions_unmet()] == ["pg_revision"]
+
+    def test_an_answer_is_not_asked_again(self, met, monkeypatch):
+        """A revision this build does not require is an answer; asking again
+        would only hold the start."""
+        met.return_value = "0032_manual_goal_ids"
+        monkeypatch.setenv(wc.ENV, "postgres")
+        assert wc.configure_mode() == wc.DUCKDB
+        met.assert_awaited_once()
+
+    def test_it_waits_between_asks_and_is_bounded(self, met, monkeypatch):
+        slept = []
+        monkeypatch.setattr("time.sleep", slept.append)
+        monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (2.0, 5.0))
+        met.side_effect = OSError("refused")
+        monkeypatch.setenv(wc.ENV, "postgres")
+        wc.configure_mode()
+        assert slept == [2.0, 5.0]
+        assert wc.start_bound_s() == 3 * 2 * wc.REVISION_READ_TIMEOUT_S + 7.0 <= 40
 
     def test_it_can_be_configured_from_inside_a_running_loop(self, met, monkeypatch):
         """Where web calls it: `startup_event` is a coroutine. The revision is
