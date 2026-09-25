@@ -1123,7 +1123,7 @@ class TestSpecsAreDerived:
             CHAIN = "pg_invented_write"
             CHAIN_TABLES = ("app.nothing_ships_this",)
 
-        with pytest.raises(LookupError, match="neither _FULL_REPLACE"):
+        with pytest.raises(LookupError, match="none of _FULL_REPLACE"):
             chain_transfer.chain_specs(_Invented)
 
     def test_the_sequences_come_from_the_boot_migration_s_own_list(self):
@@ -1138,3 +1138,17 @@ class TestSpecsAreDerived:
             assert {s.dk_sequence for s in specs} == expected
             assert all(s.dk_table in known for s in specs)
             assert all(s.pg_sequence.startswith(("app.", "bronze.")) for s in specs)
+
+    def test_every_registered_chain_carries_every_allocator_of_its_tables(self):
+        """Walked over the registry, so a fifth chain is held to it the day it
+        registers: each allocator the boot keeps for one of its DuckDB tables
+        is one its copy-back moves — chain 4's `seq_buyer_contacts_id`, whose
+        table has no id in Postgres at all, included."""
+        from core.migrations import SEQUENCE_ID_COLUMNS
+        from core.write_chains import WRITE_CHAINS
+
+        for chain in WRITE_CHAINS:
+            tables = {s.dk_table for s in chain_transfer.chain_specs(chain)}
+            expected = {seq for seq, dk, _c in SEQUENCE_ID_COLUMNS if dk in tables}
+            got = {s.dk_sequence for s in chain_transfer.chain_sequences(chain)}
+            assert got == expected, chain.__name__

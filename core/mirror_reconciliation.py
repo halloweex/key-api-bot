@@ -117,7 +117,9 @@ from core.pg_operational import (
     WEEKLY_PATTERN_COLUMNS,
     WEEKLY_SEND_COLUMNS,
 )
-from core.landing_rows import EXPENSE_COLUMNS, EXPENSE_TYPE_COLUMNS
+from core.landing_rows import (  # noqa: E402
+    BUYER_COLUMNS, CONTACT_COLUMNS, EXPENSE_COLUMNS, EXPENSE_TYPE_COLUMNS,
+)
 from core.pg_order_utm import UTM_COLUMNS
 from core import pg_order_versions as _versions
 from core.pg_dashboard_users import USER_COLUMNS
@@ -4476,36 +4478,39 @@ _BUYERS_ORIGIN = (
     "missing here was lost by the mirror, not retired by KeyCRM."
 )
 
-def _buyers_spec():
-    from core.landing_rows import BUYER_COLUMNS
+# The buyer landing, as constants rather than factories, because two readers
+# need the one description: the daily comparison below, and chain 4's
+# copy-back (`core.chain_transfer.chain_specs`), which reads these tables the
+# other way. A second description in the copy-back would be the fifth list
+# that module exists never to have.
+BUYERS_SPEC = MirroredTable(
+    pg_table="bronze.buyers",
+    dk_table="buyers",
+    columns=BUYER_COLUMNS,
+    numeric=("loyalty_discount", "loyalty_amount"),
+    key_columns=("id",),
+    synced_column="synced_at",
+    origin_note=_BUYERS_ORIGIN,
+    full_replace=True,
+)
 
-    return MirroredTable(
-        pg_table="bronze.buyers",
-        dk_table="buyers",
-        columns=BUYER_COLUMNS,
-        numeric=("loyalty_discount", "loyalty_amount"),
-        key_columns=("id",),
-        synced_column="synced_at",
-        origin_note=_BUYERS_ORIGIN,
-        full_replace=True,
-    )
+BUYER_CONTACTS_SPEC = MirroredTable(
+    pg_table="bronze.buyer_contacts",
+    dk_table="buyer_contacts",
+    columns=CONTACT_COLUMNS,
+    key_columns=("buyer_id", "contact_type", "value"),
+    # No timestamp of its own; the reader below joins the owning buyer's
+    # `synced_at`, because contacts ship in the same transaction as their
+    # buyer and are in flight exactly when the buyer is.
+    synced_column=None,
+    origin_note=_BUYERS_ORIGIN,
+    full_replace=True,
+)
 
-
-def _contacts_spec():
-    from core.landing_rows import CONTACT_COLUMNS
-
-    return MirroredTable(
-        pg_table="bronze.buyer_contacts",
-        dk_table="buyer_contacts",
-        columns=CONTACT_COLUMNS,
-        key_columns=("buyer_id", "contact_type", "value"),
-        # No timestamp of its own; the reader below joins the owning buyer's
-        # `synced_at`, because contacts ship in the same transaction as their
-        # buyer and are in flight exactly when the buyer is.
-        synced_column=None,
-        origin_note=_BUYERS_ORIGIN,
-        full_replace=True,
-    )
+# Landing tables the MIRROR ships — written in Postgres from the same parse as
+# DuckDB, never replaced out of it — for the copy-back's third source. Not
+# `MIRRORED_TABLES`, which is the catalogue `reconcile_mirror` compares.
+MIRRORED_LANDING_TABLES = (BUYERS_SPEC, BUYER_CONTACTS_SPEC)
 
 
 async def reconcile_buyers(
@@ -4545,8 +4550,8 @@ async def reconcile_buyers(
         return issues
     watermarks = await fetch_watermarks(pool)
 
-    buyers_spec = _buyers_spec()
-    contacts_spec = _contacts_spec()
+    buyers_spec = BUYERS_SPEC
+    contacts_spec = BUYER_CONTACTS_SPEC
 
     wm = watermarks.get(BUYERS_STATE)
     if wm and wm.get("last_ok_at") and not wm.get("backfilled_at"):
