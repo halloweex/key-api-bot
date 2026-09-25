@@ -257,3 +257,36 @@ class TestOperationalTablesAreUnchanged:
         b = (a[0],) + tuple("x" for _ in range(width - 1))
         issues = classify_handover(spec, {a[0]: a}, {a[0]: b}, moved_on=True)
         assert _names(issues) == {("handover_rows_differ", "INFO")}
+
+
+class TestTheRunbookTellsTheShippersApart:
+    """A mirrored table is never stamped by `replicate_operational` and never
+    listed under its `replaced`: the runbook must not send an operator there
+    to wait for chain 4's buyers."""
+
+    def test_the_mirrored_tables_are_sent_to_the_mirror(self):
+        said = " ".join(chain_transfer._runbook(
+            _fake_chain(), executed=True, released=True))
+        operational, _, mirrored = said.partition("; and ")
+        assert GENDER in operational and "replicate_operational" in operational
+        assert BUYERS not in operational and CONTACTS not in operational
+        assert BUYERS in mirrored and CONTACTS in mirrored
+        assert "buyers mirror" in mirrored
+        assert "replicate_operational" not in mirrored
+
+    def test_a_marker_without_owner_rows_names_the_reship_for_this_chain_only(self):
+        from core import pg_expenses_write
+
+        mixed = " ".join(chain_transfer._marker_steps(_fake_chain(), "fake"))
+        plain = " ".join(chain_transfer._marker_steps(pg_expenses_write, "pg_expenses_write"))
+        assert "/api/mirror/backfill/buyers" in mixed
+        assert "buyers mirror" not in plain
+
+    def test_help_offers_every_registered_chain(self):
+        from core.write_chains import WRITE_CHAINS
+        from scripts import chain_copy_back as script
+
+        names = script._short_names()
+        assert len(names) == len(WRITE_CHAINS)
+        for name, chain in zip(names, WRITE_CHAINS):
+            assert chain_transfer.resolve_chain(name) is chain
