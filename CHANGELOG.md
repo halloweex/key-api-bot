@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.255
+
+- DN-20c: say which job does not report a refusal in its result
+- DN-20c review: a job handed on by value stays an entry when a route calls it
+- DN-20c review: the walk sees the assistant's routes, and names them
+- DN-20c review: a return on the way to the raise is an exit, in both rules
+- DN-20c: under off a consumer reads a working Postgres, and answers an outage
+- DN-20c: say in CLAUDE.md what each consumer answers, and what is left
+- DN-20c: a handler that raises the refusal first passes it on, whatever follows
+- DN-20c: under KS_READ_FALLBACK=off every non-HTTP consumer answers a refusal
+
+
 ## 3.0.254
 
 
