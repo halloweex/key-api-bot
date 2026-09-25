@@ -685,6 +685,27 @@ class TestTheRecordedWriter:
         finally:
             asyncio.run(store.close())
 
+    def test_the_writer_is_recorded_before_the_group_is_resolved(
+        self, tmp_path, postgres, monkeypatch,
+    ):
+        """A resolve that raises must still leave the way back armed: the
+        record is what a later start under duckdb reads to owe a full
+        rebuild, and DuckDB has stopped deriving from this start on."""
+        store = _store(tmp_path)
+        try:
+            with patch("core.alerting.resolve_group",
+                       AsyncMock(side_effect=RuntimeError("ledger gone"))):
+                asyncio.run(wc.settle_writer(store))
+            assert _writer(store) == {**_writer(store), "writer": "postgres",
+                                      "resolved": False}
+            _restart()
+            monkeypatch.delenv(wc.ENV)
+            wc.configure_mode()
+            asyncio.run(wc.settle_writer(store))
+            assert wc.held() and _metadata(store, "warehouse_dirty")[0] == "full"
+        finally:
+            asyncio.run(store.close())
+
     def test_the_way_back_marks_a_full_rebuild_and_holds_the_checks(
         self, tmp_path, postgres, monkeypatch,
     ):
