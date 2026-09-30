@@ -2772,7 +2772,11 @@ the tick swallows a parse that raised and still reports a validated success,
 and `attribution_coverage` and `reconcile_order_utm` read what that parse
 left. Not a second full rebuild, which would rewrite Silver every two minutes
 for as long as the parser failed. The tick that completes both writes
-`duckdb` back. When DuckDB's
+`duckdb` back. A hold that does not end — a parse that keeps raising, which
+the tick logs at WARNING and reports as a validated success, or a full tick
+whose parse raised with nothing dirty after it — is published as
+`held_for_s`, and past two hours the canary warns `warehouse_hold_stuck`.
+When DuckDB's
 `silver_order_utm` is empty (a Sunday compaction ran in between) it publishes
 `reclassify_needed`; the tick's own parse refills every commented order with
 no verdict, so `POST /api/traffic/reclassify` is the lever only if that parse

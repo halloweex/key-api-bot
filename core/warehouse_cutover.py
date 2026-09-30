@@ -93,6 +93,9 @@ _value_unmet: Tuple["Unmet", ...] = ()
 # What `settle_writer` found and did, per process — see THE RECORDED WRITER.
 _settled = False
 _held = False
+# When the hold began, for its age: `/api/health` publishes it and the canary
+# warns on a hold that outlives what a way back takes (`held_for_s`).
+_held_since: Optional[datetime] = None
 # The way back's full DuckDB tick has validated — the Silver half of what the
 # hold waits for; the UTM half is a parse that finished (`note_refresh`).
 _full_validated = False
@@ -874,7 +877,7 @@ async def settle_writer(store) -> Dict[str, Any]:
     ledger would not let it close leaves the process unsettled, so the next
     caller tries that again too."""
     global _settled, _held, _full_validated, _reclassify_needed, _writer_record
-    global _value_unmet
+    global _value_unmet, _held_since
     if _settled:
         return status()
     async with _record_lock():
@@ -915,6 +918,7 @@ async def settle_writer(store) -> Dict[str, Any]:
                 logger.critical("%s; a full DuckDB rebuild is owed", _value_unmet[0].detail)
             await store.mark_warehouse_dirty(None)
             _held, _full_validated = True, False
+            _held_since = _held_since or datetime.now(timezone.utc)
             # After the mark, so a DuckDB that refuses the DELETE has still
             # been told what it owes; settling again repeats both.
             reparsed = record.get(UTM_REPARSED)
@@ -955,7 +959,7 @@ async def note_refresh(store, *, silver_mode: str, validation_passed: bool,
     The parse reads landing, not Silver, so it need not be the full tick's own;
     asking for a second full rebuild instead would rebuild Silver whole every
     two minutes for as long as the parser keeps failing."""
-    global _held, _full_validated, _reclassify_needed, _writer_record
+    global _held, _full_validated, _reclassify_needed, _writer_record, _held_since
     if not _held:
         return False
     if silver_mode == "full" and validation_passed and not _full_validated:
@@ -969,7 +973,7 @@ async def note_refresh(store, *, silver_mode: str, validation_passed: bool,
         return False
     record = {"writer": DUCKDB, "since": _now_iso()}
     await _write_writer(store, record)
-    _writer_record, _held, _full_validated = record, False, False
+    _writer_record, _held, _full_validated, _held_since = record, False, False, None
     _reclassify_needed = await _count_utm_rows(store) == 0
     logger.warning(
         "warehouse writer is duckdb again: a full DuckDB tick validated and the "
@@ -984,6 +988,20 @@ def held() -> bool:
     """The way back is owed its first validated full DuckDB tick, or the
     UTM parse that finishes after it (`note_refresh`)."""
     return _held
+
+
+def held_for_s() -> Optional[int]:
+    """How long the hold has stood, in whole seconds; None when not held.
+
+    A way back ends in its first full tick — minutes. A hold that stands for
+    hours is a DuckDB UTM parse raising tick after tick (the tick logs it at
+    WARNING and still reports success), or a full tick whose parse raised with
+    no tick after it: nothing dirty, so nothing runs. Either way the five
+    DuckDB checks and the three comparisons stay down with nothing saying so,
+    which is why `/api/health` publishes the age and the canary judges it."""
+    if not _held or _held_since is None:
+        return None
+    return max(0, int((datetime.now(timezone.utc) - _held_since).total_seconds()))
 
 
 def reclassify_needed() -> bool:
@@ -1005,6 +1023,7 @@ def status() -> Dict[str, Any]:
                                 for u in preconditions_unmet()],
         "writer": _writer_record,
         "held": _held,
+        "held_since": _held_since.isoformat() if _held and _held_since else None,
         "reclassify_needed": _reclassify_needed,
         "stood_down_duckdb_checks": sorted(stood_down_duckdb_checks()),
     }

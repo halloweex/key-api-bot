@@ -233,8 +233,9 @@ def collect_canary_keys() -> set:
     keys |= {"alerting_block_missing", "alerting_transport_failing"}
     # check_derivation_mode, check_read_fallback_mode, check_utm_parse_mode,
     # check_warehouse_writer_mode, check_warehouse_preconditions,
-    # check_write_chains, check_write_chain_latch and
+    # check_warehouse_hold, check_write_chains, check_write_chain_latch and
     # check_write_chain_precondition return their keys the same way.
+    keys.add("warehouse_hold_stuck")
     keys.add("derivation_mode_invalid")
     keys.add("read_fallback_mode_invalid")
     keys.add("utm_parse_mode_invalid")

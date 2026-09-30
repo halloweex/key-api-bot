@@ -114,7 +114,7 @@ def _restart():
     for name, value in (("_value", None), ("_mode", None), ("_mode_error", None),
                         ("_unmet", ()), ("_value_unmet", ()), ("_decided_for", None),
                         ("_settled", False),
-                        ("_held", False), ("_full_validated", False),
+                        ("_held", False), ("_held_since", None), ("_full_validated", False),
                         ("_reclassify_needed", False),
                         ("_writer_record", None), ("_settle_lock", None)):
         setattr(wc, name, value)
@@ -1029,21 +1029,28 @@ def _orders(*ids, comment=None):
     } for oid in ids]
 
 
+def _held_store(tmp_path):
+    """A DuckDB with two commented orders, `postgres` recorded, and the way
+    back settled over it: held."""
+    store = _store(tmp_path)
+    asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
+
+    async def seed():
+        async with store.connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
+                "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                [wc.WRITER_KEY, json.dumps({"writer": "postgres", "resolved": True})])
+    asyncio.run(seed())
+    asyncio.run(wc.settle_writer(store))
+    assert wc.held()
+    return store
+
+
 class TestTheHoldEndsOnAValidatedFullTick:
     @pytest.fixture
     def held_store(self, tmp_path):
-        store = _store(tmp_path)
-        asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
-
-        async def seed():
-            async with store.connection() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                    [wc.WRITER_KEY, json.dumps({"writer": "postgres", "resolved": True})])
-        asyncio.run(seed())
-        asyncio.run(wc.settle_writer(store))
-        assert wc.held()
+        store = _held_store(tmp_path)
         yield store
         asyncio.run(store.close())
 
@@ -1139,6 +1146,108 @@ class TestTheHoldEndsOnAValidatedFullTick:
             held_store, silver_mode="incremental", validation_passed=True,
             utm_parsed=True))
         assert wc.held()
+
+
+class TestAHoldThatDoesNotEndIsSaid:
+    """A way back ends in its first full tick. When the DuckDB UTM parse keeps
+    raising — the tick logs it at WARNING and still reports a validated
+    success — the hold stood for the life of the process, the five DuckDB
+    checks and the three comparisons down with it, and nothing the canary
+    read said so. `/api/health` publishes the hold's age; the canary warns."""
+
+    def _block(self):
+        from web.routes.api.health import _warehouse_writer_mode
+
+        return _warehouse_writer_mode()
+
+    def test_a_parse_that_keeps_raising_is_warned_on(self, tmp_path, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
+        from bot import canary
+
+        store = _held_store(tmp_path)
+        try:
+            monkeypatch.setattr(type(store), "_parse_utm_into_silver",
+                                AsyncMock(side_effect=RuntimeError("parse broke")))
+            for changed in (None, [1], [2]):
+                result = asyncio.run(store.refresh_warehouse_layers(
+                    trigger="dirty_flag", changed_order_ids=changed))
+                assert result["status"] == "success" and result["validation_passed"]
+            assert wc.held()
+            block = self._block()
+            assert isinstance(block["held_for_s"], int) and block["held_for_s"] < 60
+            assert canary.check_warehouse_hold({"warehouse_writer_mode": block}) == []
+
+            monkeypatch.setattr(wc, "_held_since",
+                                datetime.now(timezone.utc) - timedelta(hours=3))
+            ((key, message),) = canary.check_warehouse_hold(
+                {"warehouse_writer_mode": self._block()})
+            assert key == "warehouse_hold_stuck" and "3h" in message
+            assert wc.status()["held_since"]
+        finally:
+            asyncio.run(store.close())
+
+    def test_the_release_clears_the_age(self, tmp_path):
+        store = _held_store(tmp_path)
+        try:
+            assert self._block()["held_for_s"] is not None
+            asyncio.run(store.refresh_warehouse_layers(trigger="dirty_flag"))
+            assert not wc.held()
+            assert self._block()["held_for_s"] is None
+            assert wc.status()["held_since"] is None
+        finally:
+            asyncio.run(store.close())
+
+    def test_the_default_publishes_no_age(self):
+        block = self._block()
+        assert block["held"] is False and block["held_for_s"] is None
+
+    @pytest.mark.parametrize("block, warned", [
+        ({"held": True, "held_for_s": 2 * 3600}, True),
+        ({"held": True, "held_for_s": 2 * 3600 - 1}, False),
+        ({"held": False, "held_for_s": 9 * 3600}, False),
+        ({"held": True, "held_for_s": None}, False),
+        ({"held": True, "held_for_s": True}, False),
+        ({"held": True}, False),
+        ({}, False),
+    ])
+    def test_the_canary_judges_the_age_alone(self, block, warned):
+        from bot import canary
+
+        found = canary.check_warehouse_hold({"warehouse_writer_mode": block})
+        assert [k for k, _ in found] == (["warehouse_hold_stuck"] if warned else [])
+        assert canary.check_warehouse_hold({}) == []
+
+    @pytest.mark.asyncio
+    async def test_the_wiring_warns_and_names_its_lever(self):
+        from datetime import datetime, timedelta, timezone
+
+        import httpx
+
+        from bot import canary
+        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
+
+        payload = _healthy_payload()
+        payload["warehouse_writer_mode"] = {
+            "mode": "duckdb", "value": None, "error": None, "preconditions_unmet": [],
+            "held": True, "held_for_s": 5 * 3600, "reclassify_needed": False}
+
+        def handler(request):
+            return httpx.Response(200, json=payload)
+
+        future = datetime.now(timezone.utc) + timedelta(days=60)
+        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+        async with _mock_transport(handler) as client:
+            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
+                result = await canary.run_canary(DASHBOARD, client=client)
+        assert result.severity == "warn"
+        assert result.failure_keys == ["warehouse_hold_stuck"]
+        assert "/api/warehouse/refresh" in canary._what_to_do(result)
+
+    def test_it_is_a_registered_condition(self):
+        from core.alerting import Kind, spec_for
+
+        assert spec_for("warehouse_hold_stuck").kind is Kind.CONDITION
 
 
 # ─── The retired Gold comparison's own conditions hold the switch ────────────

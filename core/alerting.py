@@ -116,6 +116,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # runs as duckdb (DN-29, OD-09 (b)) — never a raise, web is the only syncer.
     "warehouse_preconditions_unmet": _c(
         "web restarts with every precondition met, or with KS_WRITE_WAREHOUSE unset"),
+    # The way back from KS_WRITE_WAREHOUSE=postgres holding the DuckDB checks
+    # down past the canary's limit: a UTM parse that keeps raising, or no tick
+    # after a full one whose parse raised (DN-29).
+    "warehouse_hold_stuck": _c("a validated full DuckDB tick and a finished UTM parse"),
     # KS_UTM_PARSE set to a value web did not understand, or to postgres
     # without KS_PG_DERIVE=own; ran as duckdb, the ship as before (DN-19).
     "utm_parse_mode_invalid": _c(

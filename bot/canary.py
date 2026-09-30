@@ -612,6 +612,35 @@ def check_warehouse_preconditions(payload: Optional[dict]) -> "list[tuple[str, s
              + ", ".join(str(key) for key in unmet))]
 
 
+# How long the way back from KS_WRITE_WAREHOUSE=postgres may hold the DuckDB
+# checks down before we say so. It ends in its first full DuckDB tick — a
+# rebuild and a parse, minutes even after a compaction emptied the verdicts —
+# so two hours is not a slow way back: it is a UTM parse raising tick after
+# tick, or a full tick whose parse raised with no dirty tick after it.
+WAREHOUSE_HOLD_WARN_S = 2 * 3600
+
+
+def check_warehouse_hold(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `warehouse_writer_mode` block: the way back's hold standing
+    past `WAREHOUSE_HOLD_WARN_S` (DN-29).
+
+    Warn: web serves and DuckDB derives — what is down is the five DuckDB
+    checks over Silver, Gold and UTM and the three mirror comparisons, which
+    the hold keeps down until a full tick validates and a UTM parse finishes.
+    Nothing else says so: the tick logs a failing parse at WARNING and still
+    reports success. An absent block or field is not a failure; an older web
+    publishes none."""
+    block = (payload or {}).get("warehouse_writer_mode")
+    if not isinstance(block, dict) or block.get("held") is not True:
+        return []
+    age = block.get("held_for_s")
+    if not isinstance(age, int) or isinstance(age, bool) or age < WAREHOUSE_HOLD_WARN_S:
+        return []
+    return [("warehouse_hold_stuck",
+             f"warehouse way back: the DuckDB checks over Silver, Gold and UTM "
+             f"held down for {_format_age(age)}")]
+
+
 def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
     """Judge the `utm_parse` block: a KS_UTM_PARSE web ran as `duckdb` instead
     of what was set — a value it did not understand, or `postgres` without
@@ -751,6 +780,14 @@ async def run_canary(
         if warehouse_unmet:
             severity = "critical"
 
+        # The way back holding the DuckDB checks down for hours. Warn: web
+        # serves and DuckDB derives, and the checks are what is missing.
+        hold_failures = check_warehouse_hold(payload)
+        for key, message in hold_failures:
+            fail(key, message)
+        if hold_failures and severity == "ok":
+            severity = "warn"
+
         # A KS_UTM_PARSE web ran as duckdb instead. Warn, for the same reason:
         # the copy /traffic has always had is still shipped.
         utm_mode_failures = check_utm_parse_mode(payload)
@@ -843,6 +880,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Set KS_READ_FALLBACK to duckdb or off in .env, then recreate web"),
     ("warehouse_mode_invalid",
      "Set KS_WRITE_WAREHOUSE to duckdb or postgres in .env, then recreate web"),
+    ("warehouse_hold_stuck",
+     "grep web's log for 'UTM layer refresh failed'; then POST /api/warehouse/refresh — a full tick whose parse finishes ends it"),
     ("write_chain_precondition_unmet",
      "Set the read flag the message names to postgres, then docker compose up -d web"),
     ("utm_parse_mode_invalid",
