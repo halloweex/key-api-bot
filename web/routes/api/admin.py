@@ -8,6 +8,7 @@ from datetime import date
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
+from core import read_fallback
 from web.routes.auth import require_admin
 from web.schemas import JobsResponse
 from ._deps import limiter, get_store
@@ -756,6 +757,10 @@ async def sync_buyers(
         try:
             sync_service = await get_sync_service()
             count = await sync_service.sync_missing_buyers(limit=limit)
+        except read_fallback.ReadUnavailable:
+            # The step recorded it; the 503 handler names the surface, as for
+            # every route (DN-20c). A 500 here would name nothing.
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Buyer sync failed: {str(e)}")
 

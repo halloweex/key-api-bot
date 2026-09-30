@@ -35,7 +35,7 @@ from core.pg_landing import (
     mirror_expenses,
     mirror_products,
 )
-from core import warehouse_cutover
+from core import read_fallback, warehouse_cutover
 from bot.config import DEFAULT_TIMEZONE
 
 logger = get_logger(__name__)
@@ -503,9 +503,17 @@ class SyncService:
         Fetches buyer details from KeyCRM API for orders that have buyer_id
         but no corresponding buyer record.
 
-        Never raises. A failure is recorded in `buyer_sync_state`, holds the
-        buyers watermark, and opens the retry window, so the incremental tick
-        goes on to offers and stocks and does not come back for ten minutes.
+        Never raises but for one thing. A failure is recorded in
+        `buyer_sync_state`, holds the buyers watermark, and opens the retry
+        window, so the incremental tick goes on to offers and stocks and does
+        not come back for ten minutes.
+
+        The one thing is a read refused under `KS_READ_FALLBACK=off`
+        (`read_fallback.ReadUnavailable`, DN-20c): recorded the same way, and
+        then passed on, because the caller is the one that can answer it — the
+        tick names it and skips the step, and `POST /duckdb/sync-buyers`
+        answers 503 naming the surface, as every route does. Answered here it
+        was "Synced 0 buyers" to the one and a quiet step to the other.
 
         Args:
             limit: Maximum number of buyers to sync per call
@@ -513,9 +521,8 @@ class SyncService:
         Returns:
             Number of buyers synced — 0 on any failure
         """
-        from core.landing_rows import birthday_is_unreadable
-
         from core import pg_buyers_write
+        from core.landing_rows import birthday_is_unreadable
 
         state = self.buyer_sync_state
         state.last_attempt_at = datetime.now(DEFAULT_TZ)
@@ -540,6 +547,10 @@ class SyncService:
             # inventory an hour. It used to propagate out of the whole tick.
             try:
                 missing_ids = await self.store.get_missing_buyer_ids(limit)
+            except read_fallback.ReadUnavailable as e:
+                # Recorded like any failure, then passed on (docstring).
+                self._buyer_step_failed(e)
+                raise
             except Exception as e:  # noqa: BLE001 — logged, watermark held
                 logger.error(
                     f"Buyer selection failed, buyers watermark not moved: {e}",
@@ -606,6 +617,9 @@ class SyncService:
             logger.warning(f"Buyer sync connection error (will retry): {e}")
             self._buyer_step_failed(e)
             return 0
+        except read_fallback.ReadUnavailable:
+            # Already recorded where it was raised; the caller answers it.
+            raise
         except KeyCRMAPIError as e:
             logger.error(f"Buyer sync API error: {e}")
             self._buyer_step_failed(e)
@@ -1297,6 +1311,14 @@ class SyncService:
                         read.cancel()
                     if not last_buyers_sync or (datetime.now(DEFAULT_TZ) - last_buyers_sync).total_seconds() > 3600:
                         stats["buyers"] = await self.sync_missing_buyers()
+                except read_fallback.ReadUnavailable as e:
+                    # The step recorded it and holds its watermark; the tick
+                    # skips it and goes on (DN-20c). Not in `stats`, which is
+                    # summed — the refusal shows on /api/health as buyer_sync's
+                    # error class and in read_fallback_mode.refused.
+                    read_fallback.answered(
+                        "incremental_sync", e,
+                        "skipped the buyers step; its watermark is held")
                 except Exception as e:  # noqa: BLE001 — recorded and published
                     logger.error(
                         f"Buyer step failed before it started: {type(e).__name__}",

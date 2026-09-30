@@ -2519,9 +2519,10 @@ assistant's tools return a named `data_unavailable` result, which is what
 the model reads instead of numbers. A job puts
 `{"reason": "read_unavailable", "surface"}` in its result
 (`read_fallback.answered`), so `/api/jobs` shows a refusal, not a quiet run —
-except the incremental sync, whose buyers step is still answered by
-`sync_missing_buyers`' own broad handler (chain 4's to change): its refusal
-shows only in the log and in `/api/health` `read_fallback_mode.refused`.
+except the incremental sync, whose `stats` are summed and carry no strings:
+the buyers step records the refusal and passes it on, and the tick names it
+at the call and skips the step, so it shows in the log, in `buyer_sync`'s
+error class and in `/api/health` `read_fallback_mode.refused`.
 Several of these never had a fallback — the weekly report, the training
 input, the buyers step and the index read Postgres or nothing — so for them
 a Postgres failure is still their own error, as before; `off` adds only the
@@ -2538,11 +2539,9 @@ passed by not seeing those routes — `service.chat(...)` names a method two
 classes define — so the walk types an object by the annotated factory that
 made it, and pins every call it still leaves unresolved under the name of a
 function that reaches a refusal (`UNRESOLVED_NAMESAKES`). A remembered list
-had missed the goals job. One writing route still
-does not reach the 503: `POST /api/duckdb/sync-buyers` shares the buyers
-step, whose `except Exception` answers "Synced 0 buyers" — pinned in
-`UNSWEPT_STOPS` and left to chain 4, which rebuilds that step and that
-route. An
+had missed the goals job. `POST /api/duckdb/sync-buyers` reaches the 503
+too: it shares the buyers step, which used to answer the refusal in its own
+`except Exception` and now passes it on (chain 4's PR-3). An
 unknown value **runs as `duckdb` and never raises** — web is the only syncer,
 so a crash loop over how a read degrades would stop order intake (OD-09); it
 publishes `read_fallback_mode.error` and the canary warns
