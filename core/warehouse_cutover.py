@@ -234,14 +234,49 @@ def stood_down_duckdb_checks() -> FrozenSet[str]:
 # check's would. `gold_cell_values` is also the integrity check's name.
 # `tests/unit/test_warehouse_writer.py` reads the set out of `compare_gold`'s
 # source. `gold_rollup_mismatch` is not here: `pg_gold_internal_check` goes on
-# asking it. The Silver and UTM comparisons report under the `mirror_*` names
-# every comparison in that job shares, so a page of theirs cannot be told from
-# one a comparison that stays up owns, and those names are not retired.
+# asking it.
 RETIRED_COMPARISON_CONDITIONS: FrozenSet[str] = frozenset({
     "gold_missing_cells",
     "gold_orphan_cells",
     "gold_cell_values",
 })
+
+# The comparisons in `dq_mirror_landing` that DN-29 retires, by the name the
+# job runs each under.
+RETIRED_COMPARISONS: Tuple[str, ...] = (
+    "reconcile_silver", "reconcile_order_utm", "reconcile_gold")
+
+# Their other conditions are not retired by name, and cannot be: `reconcile_
+# silver` and `reconcile_order_utm` report under the `mirror_*` names every
+# comparison in the job shares (`mirror_row_values`, `mirror_buckets_disagree`,
+# `mirror_missing_rows`, ...), and the Gate keys a page by its condition and
+# its group alone — `mirror_row_values` on `silver.orders` and on
+# `bronze.orders` is one page. Retiring the names would hold the switch over
+# every page a comparison that stays up delivers, and — worse — after a flip,
+# since those comparisons go on delivering, make a restart run as duckdb over
+# a page about `bronze.orders`: the way back, over nothing it concerns.
+#
+# So the job says whose page it is. After every run in which the retired
+# comparisons ran, it marks (`COMPARISON_MARK`) each delivered page of its
+# group they were still reporting, and takes the mark off the rest when all
+# three reached a verdict (`note_comparisons_reported`); a marked page counts
+# as retired. Only a run that compared can mark, so nothing is marked after a
+# flip, and a page a stood-down run delivers is never marked. A page
+# delivered before this was built carries no mark until the next run that
+# compares — daily, and long before `od10_doors` lets any build switch.
+COMPARISON_MARK = "warehouse_comparison"
+
+
+def note_comparisons_reported(reported, *, complete: bool) -> None:
+    """After a `dq_mirror_landing` run in which the retired comparisons ran:
+    `reported` are the CRITICAL conditions they found, `complete` whether all
+    three reached a verdict. Marks those pages of the job's group as theirs,
+    and — when complete — unmarks the rest. Local state, no I/O."""
+    from core.alerting import mark_delivered
+    from core.mirror_reconciliation import MIRROR_LAYER
+
+    mark_delivered(f"dq:{MIRROR_LAYER}", COMPARISON_MARK, sorted(reported),
+                   complete=complete)
 
 
 def retired_conditions() -> FrozenSet[str]:
@@ -261,13 +296,16 @@ def open_retired_conditions() -> Dict[str, Optional[str]]:
     delivered and not yet announced resolved, in this process's Alert Gate —
     the one `resolve_group` would announce from. Whatever group delivered it:
     DN-29 retires the mirror-landing comparisons too, and `gold_cell_values` is
-    one of theirs. Local state, no I/O; raises only if the gate cannot be
-    read, which `gather_facts` reports as unmet."""
-    from core.alerting import delivered_conditions
+    one of theirs. And every page the retired comparisons were still
+    reporting under a name they share (`COMPARISON_MARK`). Local state, no
+    I/O; raises only if the gate cannot be read, which `gather_facts` reports
+    as unmet."""
+    from core.alerting import delivered_conditions, delivered_marked
 
     retired = retired_conditions()
-    return {key: group for key, group in delivered_conditions().items()
-            if key in retired}
+    return {**{key: group for key, group in delivered_conditions().items()
+               if key in retired},
+            **delivered_marked(COMPARISON_MARK)}
 
 
 # ─── The doors OD-10 has not yet decided ─────────────────────────────────────

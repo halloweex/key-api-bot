@@ -759,6 +759,47 @@ class AlertGate:
         `take_resolved` can take. A copy; reading it changes nothing."""
         return {key: entry.get("group") for key, entry in self._delivered.items()}
 
+    def mark_delivered(
+        self, group: str, mark: str, keys: "Sequence[str]", *, complete: bool,
+        now: "float | None" = None,
+    ) -> None:
+        """Say which of `group`'s delivered conditions one emitter inside it
+        was still reporting on its last pass: `mark` goes on each of `keys`
+        delivered under `group`. With `complete` the emitter reached a verdict
+        on everything it reports, so the mark comes off the group's other
+        entries — it verified those clear; without, marks are only added.
+
+        For a group whose emitters share condition names, where the key alone
+        cannot say whose page it is. The mark lives on the entry, so it is
+        persisted with it and goes with it when `take_resolved` pops it; an
+        entry `restore_delivered` puts back carries none, correctly — it was
+        taken because nothing in the run was reporting it."""
+        now = _time.time() if now is None else now
+        wanted = set(keys)
+        changed = False
+        for key, entry in self._delivered.items():
+            if entry.get("group") != group:
+                continue
+            marks = set(entry.get("marks") or ())
+            if key in wanted:
+                marks.add(mark)
+            elif complete:
+                marks.discard(mark)
+            else:
+                continue
+            if sorted(marks) != sorted(entry.get("marks") or ()):
+                entry["marks"] = sorted(marks)
+                changed = True
+        if changed:
+            self._dirty = True
+            self._save(now, force=True)
+
+    def delivered_marked(self, mark: str) -> "Dict[str, str | None]":
+        """`{condition_key: group}` for every delivered, unresolved condition
+        carrying `mark`. A copy; reading it changes nothing."""
+        return {key: entry.get("group") for key, entry in self._delivered.items()
+                if mark in (entry.get("marks") or ())}
+
     def take_resolved(
         self, group: str, still_firing: "Sequence[str]" = (),
         *, now: "float | None" = None, only_prefix: "str | None" = None,
@@ -805,6 +846,18 @@ def delivered_conditions() -> "Dict[str, str | None]":
     each was delivered under: what a `resolve_group` could announce. Local
     state, no I/O."""
     return _gate.delivered_groups()
+
+
+def mark_delivered(group: str, mark: str, keys: "Sequence[str]", *,
+                   complete: bool) -> None:
+    """`AlertGate.mark_delivered` on this process's gate. Local state."""
+    _gate.mark_delivered(group, mark, keys, complete=complete)
+
+
+def delivered_marked(mark: str) -> "Dict[str, str | None]":
+    """This process's delivered, unresolved conditions carrying `mark`, and
+    the group each was delivered under. Local state, no I/O."""
+    return _gate.delivered_marked(mark)
 
 
 async def raise_alert(

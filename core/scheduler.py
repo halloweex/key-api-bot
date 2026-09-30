@@ -2254,14 +2254,29 @@ class BackgroundScheduler:
             # only change is that the checks that did complete are no longer
             # thrown away, and a CRITICAL among them still pages.
             raised: list = []
+            # What the comparisons DN-29 retires reported, and which reached a
+            # verdict: their Silver and UTM findings share `mirror_*` names
+            # with the comparisons that stay, so the job marks whose page is
+            # whose (`warehouse_cutover.note_comparisons_reported`).
+            from core import warehouse_cutover
+
+            retired_reported: set = set()
+            retired_verdicts: set = set()
 
             async def check(name, run):
                 nonlocal issues
                 try:
-                    issues += await run()
+                    found = await run()
                 except Exception as exc:  # noqa: BLE001 — recorded and named
                     raised.append(f"{name}: {type(exc).__name__}: {exc}")
                     logger.exception("Mirror reconciliation check %s raised", name)
+                    return
+                issues += found
+                if name in warehouse_cutover.RETIRED_COMPARISONS:
+                    retired_verdicts.add(name)
+                    retired_reported.update(
+                        i.check_name for i in found
+                        if i.severity == Severity.CRITICAL)
 
             try:
                 # The DuckDB read and the Postgres round-trips are deliberately
@@ -2286,8 +2301,6 @@ class BackgroundScheduler:
                 # found zero are the final independent proof of the parallel
                 # period; `pg_gold_internal_check` below keeps the one Gold
                 # question that needs no DuckDB.
-                from core import warehouse_cutover
-
                 duckdb_compared = not warehouse_cutover.warehouse_checks_stand_down()
                 # And the two computations of Silver. Same layer: it is the
                 # same question — do the stores agree — asked one level up.
@@ -2426,6 +2439,17 @@ class BackgroundScheduler:
                                 if i.severity == Severity.CRITICAL],
                     evidence=evidence_for_agent(MIRROR_LAYER, issues, run_id=run_id),
                 )
+            # After the page is delivered, so a page this run delivered is
+            # marked too. Only a run in which the retired comparisons ran:
+            # one where they stood down knows nothing about their pages.
+            if retired_verdicts:
+                try:
+                    warehouse_cutover.note_comparisons_reported(
+                        retired_reported,
+                        complete=retired_verdicts == set(
+                            warehouse_cutover.RETIRED_COMPARISONS))
+                except Exception as e:  # noqa: BLE001 — the next run marks again
+                    logger.warning(f"Mirror reconciliation: pages not marked: {e}")
             await self._resolve_dq_layer(MIRROR_LAYER, issues, error_message)
 
             result = {

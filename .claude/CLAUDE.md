@@ -2819,7 +2819,15 @@ waits while the DuckDB check can still clear it. It reads the Alert Gate's
 delivered map — what `resolve_group` announces from — not `app.alert_series`,
 which can miss a delivered page (its fired row is fire-and-forget).
 `gold_missing_cells` and `gold_orphan_cells` count as retired too, since
-`reconcile_gold` goes with the switch. `preconditions_met: true` is a
+`reconcile_gold` goes with the switch. `reconcile_silver` and
+`reconcile_order_utm` report under `mirror_*` names the comparisons that stay
+up share, and the Gate keys a page by condition and group alone, so those
+names cannot be retired — that would hold the switch over every
+`bronze.orders` page, and after a flip run a restart as duckdb over one.
+Instead each `dq_mirror_landing` run in which they ran marks the delivered
+pages they were still reporting (`AlertGate.mark_delivered`, persisted with
+the entry, gone when it resolves) and unmarks the rest once all three reached
+a verdict; a marked page holds the switch. `preconditions_met: true` is a
 checklist done, not a switch thrown. An exception reading any fact is
 published by its class alone and logged whole: a driver's text names the
 database user, host and port.

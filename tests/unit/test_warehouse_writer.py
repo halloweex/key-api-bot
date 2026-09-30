@@ -1003,6 +1003,189 @@ class TestTheRetiredComparisonsConditions:
         assert facts.open_retired == {"gold_missing_cells": "dq:mirror_landing"}
 
 
+# ─── The retired comparisons' shared names: marked, not retired by name ──────
+
+
+def _module_functions(path: str) -> dict:
+    tree = ast.parse((REPO / path).read_text(encoding="utf-8"))
+    return {n.name: n for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _check_names_reached(fns: dict, root: str) -> set:
+    """Every `check_name="…"` a function of the module can report, through
+    the module's own functions it calls or hands on, to a fixed point."""
+    seen, todo = set(), [root]
+    while todo:
+        name = todo.pop()
+        if name in seen or name not in fns:
+            continue
+        seen.add(name)
+        todo += [n.id for n in ast.walk(fns[name])
+                 if isinstance(n, ast.Name) and n.id in fns]
+    return {kw.value.value for name in seen for n in ast.walk(fns[name])
+            if isinstance(n, ast.Call) for kw in n.keywords
+            if kw.arg == "check_name" and isinstance(kw.value, ast.Constant)}
+
+
+def _critical(name: str, table: str = "silver.orders"):
+    from core.data_quality import IntegrityIssue, Severity
+
+    return IntegrityIssue(check_name=name, table_name=table,
+                          severity=Severity.CRITICAL, count=1)
+
+
+def _mirror_run(outcomes):
+    from tests.unit.test_mirror_landing_isolation import _run
+
+    return asyncio.run(_run(outcomes))
+
+
+class TestTheRetiredComparisonsSharedNames:
+    """R1-2/R2-4: `reconcile_silver` and `reconcile_order_utm` report under
+    `mirror_*` names the comparisons that stay up report too, and the Gate
+    keys a page by condition and group alone. A page of theirs would be
+    announced resolved by the first run after the switch — so the job marks
+    it, and a marked page holds the switch like a retired condition."""
+
+    GROUP = "dq:mirror_landing"
+
+    def test_every_name_they_report_is_retired_marked_or_asked_again(self):
+        """Derived from the source: what the three retired comparisons can
+        report is either reported by nothing that stays (retired by name), or
+        shared — and a shared name is covered by the mark, except the one
+        `pg_gold_internal_check` asks again of Postgres itself."""
+        fns = _module_functions("core/mirror_reconciliation.py")
+        retired = set().union(*(_check_names_reached(fns, name)
+                                for name in wc.RETIRED_COMPARISONS))
+        staying = set().union(*(_check_names_reached(fns, name) for name in fns
+                                if name.startswith("reconcile_")
+                                and name not in wc.RETIRED_COMPARISONS))
+        asked_again = _check_names_reached(fns, "pg_gold_internal_check")
+        assert retired - staying - asked_again == wc.RETIRED_COMPARISON_CONDITIONS
+        shared = (retired & staying) - asked_again
+        # The finding's names, so a walk that read nothing cannot pass.
+        assert {"mirror_row_values", "mirror_buckets_disagree",
+                "mirror_missing_rows"} <= shared
+        assert not shared & wc.retired_conditions(), (
+            "a shared name retired outright holds the switch over pages the "
+            "comparisons that stay deliver — and, after a flip, runs a restart "
+            "as duckdb over one")
+
+    def test_the_job_names_the_three_it_runs(self):
+        from tests.unit.test_mirror_landing_isolation import check_order
+
+        assert set(wc.RETIRED_COMPARISONS) <= set(check_order())
+
+    def test_a_page_the_silver_comparison_was_reporting_holds_the_switch(self):
+        from core.alerting import _gate
+
+        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
+        _mirror_run({"reconcile_silver": [_critical("mirror_row_values")]})
+        assert wc.open_retired_conditions() == {"mirror_row_values": self.GROUP}
+        facts = asyncio.run(wc.gather_facts({}))
+        (unmet,) = [u for u in wc.evaluate_preconditions({}, facts)
+                    if u.key == "retired_conditions_clear"]
+        assert "mirror_row_values" in unmet.detail
+
+    def test_so_does_one_of_the_utm_comparison(self):
+        from core.alerting import _gate
+
+        _gate.note_delivered_conditions(["mirror_missing_rows"], self.GROUP)
+        _mirror_run({"reconcile_order_utm": [
+            _critical("mirror_missing_rows", "silver.order_utm")]})
+        assert wc.open_retired_conditions() == {"mirror_missing_rows": self.GROUP}
+
+    def test_a_page_only_a_comparison_that_stays_reports_does_not(self):
+        """The same name, from `reconcile_orders`: the switch does not wait on
+        it — and after a flip a restart is not run as duckdb over it."""
+        from core.alerting import _gate
+
+        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
+        _mirror_run({"reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
+        assert wc.open_retired_conditions() == {}
+
+    def test_a_run_that_compares_clean_takes_the_mark_off(self):
+        from core.alerting import _gate
+
+        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
+        _mirror_run({"reconcile_silver": [_critical("mirror_row_values")],
+                     "reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
+        assert wc.open_retired_conditions() == {"mirror_row_values": self.GROUP}
+        # Silver clean; the page stays open for `bronze.orders`, and is theirs.
+        _mirror_run({"reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
+        assert wc.open_retired_conditions() == {}
+
+    def test_a_run_where_one_of_them_raised_only_adds(self):
+        """`reconcile_gold` raised, so the run has no verdict on everything
+        they report: a mark is not taken off on the strength of it."""
+        from core.alerting import _gate
+
+        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
+        _mirror_run({"reconcile_silver": [_critical("mirror_row_values")]})
+        _mirror_run({"reconcile_gold": RuntimeError("down")})
+        assert wc.open_retired_conditions() == {"mirror_row_values": self.GROUP}
+
+    def test_a_run_that_stood_them_down_marks_nothing(self, postgres):
+        from core.alerting import _gate
+
+        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
+        _mirror_run({"reconcile_silver": [_critical("mirror_row_values")],
+                     "reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
+        assert wc.open_retired_conditions() == {}
+
+    def test_the_mark_goes_with_the_page(self):
+        from core.alerting import _gate
+
+        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
+        _mirror_run({"reconcile_silver": [_critical("mirror_row_values")]})
+        _gate.take_resolved(self.GROUP)
+        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
+        assert wc.open_retired_conditions() == {}
+
+
+class TestTheGateMarks:
+    def test_only_the_group_named_and_only_its_delivered_keys(self):
+        from core.alerting import AlertGate
+
+        gate = AlertGate(state_path=None)
+        gate.note_delivered_conditions(["mirror_row_values"], "dq:mirror_landing")
+        gate.note_delivered_conditions(["mirror_missing_rows"], "dq:reconciliation_pg")
+        gate.mark_delivered("dq:mirror_landing", "m",
+                            ["mirror_row_values", "mirror_missing_rows", "mirror_failing"],
+                            complete=True)
+        assert gate.delivered_marked("m") == {"mirror_row_values": "dq:mirror_landing"}
+
+    def test_complete_takes_it_off_and_partial_does_not(self):
+        from core.alerting import AlertGate
+
+        gate = AlertGate(state_path=None)
+        gate.note_delivered_conditions(["mirror_row_values"], "g")
+        gate.mark_delivered("g", "m", ["mirror_row_values"], complete=True)
+        gate.mark_delivered("g", "m", [], complete=False)
+        assert gate.delivered_marked("m") == {"mirror_row_values": "g"}
+        gate.mark_delivered("g", "m", [], complete=True)
+        assert gate.delivered_marked("m") == {}
+
+    def test_it_survives_a_restart(self, tmp_path):
+        from core.alerting import AlertGate
+
+        path = tmp_path / "gate.json"
+        gate = AlertGate(state_path=path)
+        gate.note_delivered_conditions(["mirror_row_values"], "g")
+        gate.mark_delivered("g", "m", ["mirror_row_values"], complete=True)
+        assert AlertGate(state_path=path).delivered_marked("m") == {"mirror_row_values": "g"}
+
+    def test_a_redelivery_keeps_it(self):
+        from core.alerting import AlertGate
+
+        gate = AlertGate(state_path=None)
+        gate.note_delivered_conditions(["mirror_row_values"], "g")
+        gate.mark_delivered("g", "m", ["mirror_row_values"], complete=True)
+        gate.note_delivered_conditions(["mirror_row_values"], "g")
+        assert gate.delivered_marked("m") == {"mirror_row_values": "g"}
+
+
 # ─── Published, and judged ───────────────────────────────────────────────────
 
 
