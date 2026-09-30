@@ -834,18 +834,13 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Job: Reconciliation check (daily at 6 AM)
-        # Legacy job — preserved for backward compatibility; the new
-        # dq_reconciliation job above is the source of truth for alerts.
-        self._add_job(
-            job_id="reconciliation_check",
-            name="Reconciliation Check",
-            description="Compare DuckDB order counts with KeyCRM API",
-            func=self._run_reconciliation,
-            trigger=CronTrigger(hour=6, minute=0),
-            max_instances=1,
-            coalesce=True,
-        )
+        # The legacy 06:00 `reconciliation_check` (DuckDB order counts per day
+        # against KeyCRM, 14 days, logged to `reconciliation_log`) was retired
+        # by the owner's decision OD-10 (2026-09-30): `dq_reconciliation`
+        # compares 90 days per order against all three stores from one fetch,
+        # and `order_status_refresh` repairs the status drift it used to.
+        # `reconciliation_log` keeps its history, in DuckDB and Postgres alike;
+        # nothing writes it any more.
 
         # Job: Memory monitor (every 30 minutes)
         # Reads cgroup memory stats and alerts admin via Telegram
@@ -1852,23 +1847,6 @@ class BackgroundScheduler:
                 result = await store.backup_database(keep=2)
                 logger.info(f"DB backup job complete: {result.get('status')}")
                 return result
-
-    async def _run_reconciliation(self) -> Dict[str, Any]:
-        """Run daily reconciliation check against KeyCRM API."""
-        with correlation_context() as corr_id:
-            logger.info("Starting reconciliation check job")
-
-            from core.sync_service import get_sync_service
-            sync_service = await get_sync_service()
-            results = await sync_service.reconcile_with_api(
-                days_back=14, lock=self._heavy_job_lock)
-
-            ok = sum(1 for r in results if r["status"] == "ok")
-            drift = sum(1 for r in results if r["status"] == "drift")
-
-            result = {"checked_days": len(results), "ok": ok, "drift": drift}
-            logger.info("Reconciliation check job complete", extra=result)
-            return result
 
     # ─── Data Quality framework (Layer 1 + 2) ─────────────────────────────────
 

@@ -920,66 +920,9 @@ async def get_events(
 
 
 # ─── Reconciliation ──────────────────────────────────────────────────────────
-
-@router.get("/reconciliation")
-@limiter.limit("30/minute")
-async def get_reconciliation(
-    request: Request,
-    limit: int = Query(30, ge=1, le=200, description="Number of entries"),
-):
-    """Get recent reconciliation log entries."""
-    store = await get_store()
-    async with store.connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM reconciliation_log ORDER BY checked_at DESC LIMIT ?",
-            [limit],
-        ).fetchall()
-        columns = ["id", "check_date", "api_count", "db_count", "discrepancy",
-                    "discrepancy_pct", "status", "checked_at"]
-        return [dict(zip(columns, row)) for row in rows]
-
-
-@router.post("/reconciliation/run")
-@limiter.limit("2/minute")
-async def run_reconciliation(
-    request: Request,
-    days_back: int = Query(14, ge=1, le=90, description="Days to check"),
-    auto_resync: bool = Query(True, description="Auto-resync drifted dates"),
-    background: bool = Query(True, description="Run in background (recommended for days_back > 3)"),
-    _=Depends(require_admin),
-):
-    """Manually trigger reconciliation check."""
-    from core.scheduler import get_scheduler
-    from core.sync_service import get_sync_service
-
-    async def run_check():
-        sync_service = await get_sync_service()
-        results = await sync_service.reconcile_with_api(
-            days_back=days_back, auto_resync=auto_resync,
-            lock=get_scheduler()._heavy_job_lock,
-        )
-        ok = sum(1 for r in results if r["status"] == "ok")
-        drift = sum(1 for r in results if r["status"] == "drift")
-        logger.info(
-            f"Reconciliation complete: checked={len(results)} ok={ok} drift={drift}"
-        )
-        return {
-            "checked_days": len(results),
-            "ok": ok,
-            "drift": drift,
-            "results": results,
-        }
-
-    if background:
-        task = asyncio.create_task(run_check(), name=f"reconcile_{days_back}d")
-        task.add_done_callback(
-            lambda t: logger.error(f"Reconciliation task failed: {t.exception()}")
-            if t.exception() else None
-        )
-        return {
-            "status": "started",
-            "message": f"Reconciliation started in background ({days_back} days)",
-            "note": "Check /api/reconciliation for results or logs for progress",
-        }
-
-    return await run_check()
+#
+# GET /api/reconciliation and POST /api/reconciliation/run were retired with the
+# legacy 06:00 job by the owner's decision OD-10 (2026-09-30). The detection is
+# POST /api/reconcile (dq_reconciliation over any window, all three stores);
+# the repair is POST /api/duckdb/refresh-statuses. `reconciliation_log` keeps
+# its history in DuckDB and in `app.reconciliation_log`.

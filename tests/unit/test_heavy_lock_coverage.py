@@ -43,27 +43,6 @@ def test_the_backfill_route_passes_the_lock():
     assert "lock=get_scheduler()._heavy_job_lock" in src
 
 
-def test_every_reconciliation_caller_passes_the_lock():
-    """The daily reconciliation resyncs drifted orders through the same writer
-    as a repair, and wrote without the lock — found reviewing chain 2, where it
-    would page a false Postgres validation failure. Walks every module that
-    could call it rather than naming the two callers of today."""
-    import ast
-    import pathlib
-
-    repo = pathlib.Path(__file__).resolve().parents[2]
-    calls = []
-    for root in ("core", "web", "bot", "scripts"):
-        for path in (repo / root).rglob("*.py"):
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "reconcile_with_api"):
-                    calls.append((path.name, node))
-    assert calls, "no reconcile_with_api callers found"
-    for name, node in calls:
-        assert any(k.arg == "lock" for k in node.keywords), name
-
-
 def test_every_repair_caller_passes_the_lock():
     src = inspect.getsource(scheduler_module.BackgroundScheduler)
     calls = [line for line in src.splitlines() if "repair_orders(" in line]
@@ -255,46 +234,3 @@ async def test_the_comment_backfill_route_ships_what_it_changed_under_the_lock(t
     assert seen == {"fetch_locked": False, "ship_locked": True,
                     "shipped": [2], "kind": "backfill"}
     assert stored == {1: "kept", 2: "utm_source=tg"}
-
-
-def test_the_reconciliation_resync_writes_inside_the_lock_and_fetches_outside_it():
-    """Behavioural, because the caller test above only proves the lock is
-    handed over — not that the write happens under it, nor that the KeyCRM
-    fetch does not."""
-    import asyncio
-    from datetime import date, timedelta
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    from core.sync_service import SyncService
-
-    lock = asyncio.Lock()
-    seen = {}
-    day = date.today() - timedelta(days=1)
-    order = {"id": 7, "status_id": 1, "grand_total": 100,
-             "ordered_at": f"{day.isoformat()}T12:00:00+03:00"}
-
-    class Client:
-        async def paginate(self, *_a, **_k):
-            seen["fetch_locked"] = lock.locked()
-            yield [order]
-
-    store = MagicMock()
-    store.get_order_summaries_by_date = AsyncMock(return_value={})
-    store.log_reconciliation = AsyncMock(return_value={"status": "drift"})
-    store.mark_warehouse_dirty = AsyncMock(
-        side_effect=lambda *_a: seen.__setitem__("mark_locked", lock.locked()))
-    service = SyncService(store=store)
-
-    async def upsert(orders, force_update):
-        seen["write_locked"] = lock.locked()
-        return len(orders), 0
-
-    with patch("core.sync_service.get_async_client", AsyncMock(return_value=Client())), \
-         patch.object(service, "_upsert_orders_with_expenses", side_effect=upsert):
-        # Bounded: a lock taken and never released is a deadlock, and a test
-        # that hangs on it fails nobody in time. Found by a mutation that took
-        # the lock around the fetch and stalled the run for ten minutes.
-        asyncio.run(asyncio.wait_for(
-            service.reconcile_with_api(days_back=2, lock=lock), timeout=5))
-
-    assert seen == {"fetch_locked": False, "write_locked": True, "mark_locked": True}

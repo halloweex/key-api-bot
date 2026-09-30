@@ -38,7 +38,7 @@ from core.models import LOST_STATUS_GROUP_ID, Order, OrderStatus
 from core.exceptions import QueryTimeoutError
 from core.duckdb_constants import (
     DB_DIR, DB_PATH, DEFAULT_TZ, DEFAULT_QUERY_TIMEOUT, LONG_QUERY_TIMEOUT,
-    B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE, _date_in_kyiv,
+    B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE,
     line_window_where,
     EXHIBITION_SOURCE_ID, REVENUE_SOURCE_IDS,
 )
@@ -2671,52 +2671,6 @@ class DuckDBStore(
                 f"🚨 DB backup FAILED: {e}", "warehouse:backup_failed",
             )
             return {"status": "error", "error": str(e)}
-
-    async def get_order_summaries_by_date(
-        self, start_date: str, end_date: str,
-    ) -> dict:
-        """Get order ID → (status_id, grand_total) grouped by date (Kyiv TZ).
-
-        Returns dict[date, dict[int, dict]] where outer key is date,
-        inner key is order_id, inner value has status_id and grand_total.
-        """
-        from collections import defaultdict
-
-        async with self.connection() as conn:
-            rows = conn.execute(f"""
-                SELECT {_date_in_kyiv('ordered_at')} AS d, id, status_id, grand_total
-                FROM orders
-                WHERE {_date_in_kyiv('ordered_at')} BETWEEN ? AND ?
-            """, [start_date, end_date]).fetchall()
-
-        result: dict = defaultdict(dict)
-        for d, oid, status_id, grand_total in rows:
-            result[d][oid] = {
-                "status_id": status_id,
-                "grand_total": float(grand_total),
-            }
-        return dict(result)
-
-    async def log_reconciliation(self, check_date: str, api_count: int, db_count: int) -> dict:
-        """Log reconciliation result and return the entry."""
-        discrepancy = abs(api_count - db_count)
-        discrepancy_pct = round((discrepancy / api_count * 100) if api_count > 0 else 0, 2)
-        status = "ok" if discrepancy_pct <= 1.0 else "drift"
-
-        async with self.connection() as conn:
-            conn.execute("""
-                INSERT INTO reconciliation_log (check_date, api_count, db_count, discrepancy, discrepancy_pct, status)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, [check_date, api_count, db_count, discrepancy, discrepancy_pct, status])
-
-        return {
-            "check_date": check_date,
-            "api_count": api_count,
-            "db_count": db_count,
-            "discrepancy": discrepancy,
-            "discrepancy_pct": discrepancy_pct,
-            "status": status,
-        }
 
     async def upsert_orders(
         self,
