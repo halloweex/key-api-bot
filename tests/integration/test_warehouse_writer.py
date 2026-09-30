@@ -414,3 +414,30 @@ class TestAMissingPrecondition:
         configure_modes()
         assert len(asks) == 2
         assert wc.mode() == wc.POSTGRES and wc.preconditions_unmet() == ()
+
+    @pytest.mark.asyncio
+    async def test_a_connection_lost_during_the_read_is_asked_again(
+        self, world, monkeypatch,
+    ):
+        """Connected, then lost in the middle of the SELECT — a backend
+        terminated, a server restarting. That is a read that failed, not a
+        database never migrated: it used to be taken for the second, never
+        asked again, and after a flip that start was the way back."""
+        from core import warehouse_cutover as wc
+        from core.runtime_modes import configure_modes
+
+        real = asyncpg.connection.Connection.fetchval
+        reads = []
+
+        async def lost_once(self, *args, **kwargs):
+            reads.append(args[:1])
+            if len(reads) == 1:
+                raise asyncpg.ConnectionDoesNotExistError(
+                    "connection was closed in the middle of operation")
+            return await real(self, *args, **kwargs)
+
+        monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
+        with patch.object(asyncpg.connection.Connection, "fetchval", lost_once):
+            configure_modes()
+        assert len(reads) == 2, reads
+        assert wc.mode() == wc.POSTGRES, wc.preconditions_unmet()

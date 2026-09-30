@@ -514,14 +514,17 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
 async def _revision_on_its_own_connection(dsn: str) -> Optional[str]:
     """The Alembic revision, read on a connection opened for it and closed
     after — never the application's pool, which belongs to the loop that
-    opened it (see `_gather_facts_blocking`)."""
+    opened it (see `_gather_facts_blocking`). Strict: None only for a version
+    table that is not there, and every other failure raises, so a connection
+    lost in the middle of the SELECT is a read to ask again — never "the
+    database was never migrated", which is an answer and is not asked again."""
     import asyncpg
 
     from core.pg import current_revision
 
     conn = await asyncpg.connect(dsn=dsn)
     try:
-        return await current_revision(conn)
+        return await current_revision(conn, strict=True)
     finally:
         await conn.close()
 
@@ -544,7 +547,7 @@ async def _read_postgres(env: Mapping[str, str], *,
         from core.pg import current_revision
 
         read = (_revision_on_its_own_connection(env[PG_DSN].strip())
-                if own_connection else current_revision())
+                if own_connection else current_revision(strict=True))
         revision = await asyncio.wait_for(read, timeout=REVISION_READ_TIMEOUT_S)
     except asyncio.TimeoutError:
         return {"revision": None,

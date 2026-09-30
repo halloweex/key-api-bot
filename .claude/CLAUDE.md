@@ -2784,8 +2784,11 @@ only an operator's unset: the same full rebuild and hold, and the next start
 under `postgres` records a new `since` — the soak clock starts again — and
 closes the `warehouse` group again without a validating tick. The canary's
 lever says so first. So a Postgres read that failed (no answer in time, or an
-exception — never an answer such as a wrong revision) is asked again before
-the verdict: three asks, 2 s and 5 s apart, at most 37 s, once per process.
+exception, a connection lost in the middle of the SELECT included — never an
+answer such as a wrong revision) is asked again before the verdict: three
+asks, 2 s and 5 s apart, at most 37 s, once per process. The revision is read
+strictly (`current_revision(strict=True)`): only a version table that is not
+there reads as "never migrated", where the default reads any failure so.
 The write-chain registry and the Alert Gate are read on the caller's thread,
 outside that bound, so a start that could not reach Postgres names
 `pg_revision` alone.

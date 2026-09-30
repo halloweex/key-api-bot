@@ -672,7 +672,7 @@ class TestGatheringTheFacts:
         assert text in caplog.text   # the whole of it, where a person looks next
 
     def test_a_read_that_hangs_is_bounded(self, monkeypatch):
-        async def hang():
+        async def hang(**_kwargs):
             await asyncio.sleep(10)
 
         monkeypatch.setattr(wc, "REVISION_READ_TIMEOUT_S", 0.05)

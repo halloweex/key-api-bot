@@ -62,19 +62,25 @@ def _other_modes_put_back(monkeypatch):
 
 
 @pytest.fixture
-def met(monkeypatch):
-    """The environment with every precondition met and the revision read on
-    its own connection answering the one this build requires. Returns the
-    reader, so a test can count or change what it answers."""
+def met_env(monkeypatch):
+    """The environment with every precondition met; the revision is read
+    however the test arranges."""
     for name, value in MET_ENV.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
-    reader = AsyncMock(return_value=REQUIRED_REVISION)
-    monkeypatch.setattr(wc, "_revision_on_its_own_connection", reader)
     # A read that failed is asked again; not across seconds in a unit test.
     monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
     # A build where OD-10 has been answered; today's has not (TestTheOd10Doors).
     monkeypatch.setattr(wc, "OD10_DOORS", ())
+
+
+@pytest.fixture
+def met(met_env, monkeypatch):
+    """`met_env`, and the revision read on its own connection answering the
+    one this build requires. Returns the reader, so a test can count or change
+    what it answers."""
+    reader = AsyncMock(return_value=REQUIRED_REVISION)
+    monkeypatch.setattr(wc, "_revision_on_its_own_connection", reader)
     return reader
 
 
@@ -246,6 +252,100 @@ class TestTheMode:
 
         monkeypatch.setenv(wc.ENV, "postgres")
         assert configure_modes()[wc.ENV] == wc.POSTGRES
+
+
+class _RevisionConn:
+    """What `asyncpg.connect` hands the revision read: one answer, or one
+    raise from the SELECT — after connecting, which is the case at issue."""
+
+    def __init__(self, answer):
+        self.answer, self.asked, self.closed = answer, False, False
+
+    async def fetchval(self, _sql):
+        self.asked = True
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return self.answer
+
+    async def close(self):
+        self.closed = True
+
+
+def _connections(monkeypatch, *answers):
+    """Every `asyncpg.connect` from here hands out the next of `answers`."""
+    import asyncpg
+
+    conns = [_RevisionConn(answer) for answer in answers]
+    handed = iter(conns)
+
+    async def connect(*_args, **_kwargs):
+        return next(handed)
+
+    monkeypatch.setattr(asyncpg, "connect", connect)
+    return conns
+
+
+def _lost_mid_read():
+    import asyncpg
+
+    return asyncpg.ConnectionDoesNotExistError(
+        "connection was closed in the middle of operation")
+
+
+class TestTheRevisionReadItself:
+    """The read, not a stand-in for it. `core.pg.current_revision` answers
+    None — "never migrated" — for any exception from its SELECT, so a
+    connection lost after connecting was an answer, never asked again, and
+    after a flip one such start was the way back: a full DuckDB rebuild, the
+    checks held, a new `since`. The cutover reads it strictly."""
+
+    @pytest.fixture(autouse=True)
+    def _asked_for(self, met_env, monkeypatch):
+        monkeypatch.setenv(wc.ENV, "postgres")
+
+    def test_a_connection_lost_during_the_read_is_asked_again(self, monkeypatch):
+        conns = _connections(monkeypatch, _lost_mid_read(), REQUIRED_REVISION)
+        assert wc.configure_mode() == wc.POSTGRES, wc.preconditions_unmet()
+        assert [c.asked for c in conns] == [True, True]
+        assert all(c.closed for c in conns)
+
+    def test_lost_on_every_ask_is_unmet_by_its_class(self, monkeypatch):
+        _connections(monkeypatch, *(_lost_mid_read() for _ in range(wc.REVISION_READ_ATTEMPTS)))
+        assert wc.configure_mode() == wc.DUCKDB
+        (unmet,) = wc.preconditions_unmet()
+        assert unmet.key == "pg_revision"
+        assert "ConnectionDoesNotExistError" in unmet.detail
+        assert "no Alembic revision" not in unmet.detail
+
+    @pytest.mark.parametrize("answer", ["undefined_table", None], ids=["no_table", "empty"])
+    def test_a_database_never_migrated_is_an_answer_asked_once(self, monkeypatch, answer):
+        import asyncpg
+
+        if answer == "undefined_table":
+            answer = asyncpg.UndefinedTableError(
+                'relation "meta.alembic_version" does not exist')
+        conns = _connections(monkeypatch, answer, REQUIRED_REVISION)
+        assert wc.configure_mode() == wc.DUCKDB
+        assert [c.asked for c in conns] == [True, False]
+        (unmet,) = wc.preconditions_unmet()
+        assert "no Alembic revision" in unmet.detail
+
+    def test_the_status_page_reads_it_strictly_too(self, monkeypatch):
+        """The pool path: a lost connection is named by its class, not
+        reported as a database nobody migrated."""
+        from contextlib import asynccontextmanager
+
+        conn = _RevisionConn(_lost_mid_read())
+
+        class _Pool:
+            @asynccontextmanager
+            async def acquire(self):
+                yield conn
+
+        monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=_Pool()))
+        facts = asyncio.run(wc.gather_facts(MET_ENV))
+        assert conn.asked and facts.revision is None
+        assert facts.revision_error == "ConnectionDoesNotExistError"
 
 
 class TestWhatStandsDown:
