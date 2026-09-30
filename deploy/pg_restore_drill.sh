@@ -88,19 +88,30 @@ fail() {
 #
 #   restored <= live, and (live - restored) within max(N rows, P% of live)
 #
-# with the direction relaxed for one table. app.order_versions and
-# app.stock_movements are append-only, pinned by a test that parses the
-# repository for an UPDATE or DELETE against either; meta.chain_watermarks
-# gains keys and never loses one. For those three a restored count ABOVE live
-# means rows have disappeared from the live cluster since the dump, which is
-# the alarming direction and is reported as such. app.manual_expenses is the
-# exception: the /expenses form deletes rows, so it may legitimately shrink,
-# and there the rule is on the absolute gap in either direction.
+# with the direction relaxed where a table may shrink. Every table marked
+# `grows` only ever gains rows: app.order_versions and app.stock_movements are
+# append-only, pinned by a test that parses the repository for an UPDATE or
+# DELETE against either; meta.chain_watermarks gains keys and never loses one;
+# nothing deletes a buyer from bronze.buyers, and app.buyer_gender gains a
+# verdict per buyer and is rewritten in place, never deleted from. For those a
+# restored count ABOVE live means rows have disappeared from the live cluster
+# since the dump, which is the alarming direction and is reported as such.
+# `either` is for the tables that may legitimately shrink, and there the rule
+# is on the absolute gap in either direction: the /expenses form deletes
+# app.manual_expenses rows, and a buyer's contacts are replaced whole on every
+# write of that buyer, so a phone list that lost a number is one row fewer.
+#
+# The three buyer tables are chain 4's. Once it writes them Postgres is their
+# only store — DuckDB's copy has stopped — so this dump is the one backup of a
+# customer who arrived after the flip.
 DRILL_TABLES=(
     "app.order_versions:grows"
     "app.manual_expenses:either"
     "app.stock_movements:grows"
     "meta.chain_watermarks:grows"
+    "bronze.buyers:grows"
+    "bronze.buyer_contacts:either"
+    "app.buyer_gender:grows"
 )
 # Absolute floor first, because two of these tables are small and a percentage
 # of a small number is not a margin. app.order_versions gains ~100 rows a day
@@ -230,8 +241,8 @@ drill_from_remote() {
         [ "$allow" -lt "$DRILL_MARGIN_ROWS" ] && allow="$DRILL_MARGIN_ROWS"
         verdict=ok
         if [ "$gap" -lt 0 ] && [ "$direction" = grows ]; then
-            # Not lag: the dump holds rows live no longer does, and all three
-            # of these tables only ever gain rows.
+            # Not lag: the dump holds rows live no longer does, and every
+            # table marked `grows` only ever gains rows.
             verdict="ROWS MISSING FROM LIVE"
         elif [ "${gap#-}" -gt "$allow" ]; then
             verdict="GAP TOO LARGE (allowed $allow)"

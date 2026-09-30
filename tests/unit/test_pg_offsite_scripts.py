@@ -593,12 +593,19 @@ LIVE = {
     "FAKE_LIVE_APP_MANUAL_EXPENSES": 0,
     "FAKE_LIVE_APP_STOCK_MOVEMENTS": 50500,
     "FAKE_LIVE_META_CHAIN_WATERMARKS": 4,
+    # Chain 4's tables, at production's size on 2026-09-30.
+    "FAKE_LIVE_BRONZE_BUYERS": 20657,
+    "FAKE_LIVE_BRONZE_BUYER_CONTACTS": 34379,
+    "FAKE_LIVE_APP_BUYER_GENDER": 20656,
 }
 RESTORED = {
     "FAKE_RESTORED_APP_ORDER_VERSIONS": 52400,
     "FAKE_RESTORED_APP_MANUAL_EXPENSES": 0,
     "FAKE_RESTORED_APP_STOCK_MOVEMENTS": 50400,
     "FAKE_RESTORED_META_CHAIN_WATERMARKS": 4,
+    "FAKE_RESTORED_BRONZE_BUYERS": 20640,
+    "FAKE_RESTORED_BRONZE_BUYER_CONTACTS": 34350,
+    "FAKE_RESTORED_APP_BUYER_GENDER": 20640,
 }
 
 
@@ -679,6 +686,27 @@ class TestTheRemoteDrill:
         run = world.run("pg_restore_drill.sh", ["--from-remote"], **live, **restored)
         assert run.code != 0, run.out
         assert "ROWS MISSING FROM LIVE" in run.out
+
+    def test_chain_4s_tables_are_checked_by_their_own_rules(self, world):
+        """Once chain 4 writes them this dump is their only backup. A buyer is
+        never deleted and a verdict never is, so more in the dump than in live
+        is a loss; a buyer's contacts are replaced whole, so a shorter list in
+        live is a phone number KeyCRM no longer carries."""
+        self._shipped(world)
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **RESTORED)
+        assert run.code == 0, run.out
+        for table in ("bronze.buyers", "bronze.buyer_contacts", "app.buyer_gender"):
+            assert table in run.out, run.out
+
+        for table, var in (("bronze.buyers", "BRONZE_BUYERS"),
+                           ("app.buyer_gender", "APP_BUYER_GENDER")):
+            restored = dict(RESTORED, **{f"FAKE_RESTORED_{var}": 20700})
+            run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **restored)
+            assert run.code != 0 and "ROWS MISSING FROM LIVE" in run.out, (table, run.out)
+
+        restored = dict(RESTORED, FAKE_RESTORED_BRONZE_BUYER_CONTACTS=34400)
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **restored)
+        assert run.code == 0 and "ROWS MISSING FROM LIVE" not in run.out, run.out
 
     def test_a_table_that_may_shrink_still_has_a_margin(self, world):
         """`either` relaxes the direction, not the size: a restored copy far
