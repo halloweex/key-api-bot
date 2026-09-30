@@ -1166,6 +1166,21 @@ class TestTheRetiredComparisonsSharedNames:
         _mirror_run({"reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
         assert wc.open_retired_conditions() == {}
 
+    def test_a_finding_of_theirs_below_critical_does_not_make_it_theirs(self):
+        """Only a CRITICAL holds a page open (`_resolve_dq_layer`), so a WARN
+        from Silver leaves it open for `bronze.orders` alone — a page the
+        comparison that stays verifies, which the switch need not wait on."""
+        from core.alerting import _gate
+        from core.data_quality import IntegrityIssue, Severity
+
+        warn = IntegrityIssue(check_name="mirror_row_values", table_name="silver.orders",
+                              severity=Severity.WARN, count=1)
+        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
+        _mirror_run({"reconcile_silver": [warn],
+                     "reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
+        assert "mirror_row_values" in _gate.delivered_groups()
+        assert wc.open_retired_conditions() == {}
+
     def test_a_run_that_compares_clean_takes_the_mark_off(self):
         from core.alerting import _gate
 
