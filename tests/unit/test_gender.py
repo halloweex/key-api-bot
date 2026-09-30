@@ -245,16 +245,24 @@ class TestTheDerivationRidesTheReplicationTick:
 
         from core.scheduler import BackgroundScheduler
 
-        src = inspect.getsource(BackgroundScheduler._run_replicate_operational)
-        tree = ast.parse(src.lstrip() if src.startswith(" ") else src)
-        calls = [
-            n.func.id
-            for n in ast.walk(tree)
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        ]
-        assert "derive_gender" in calls, "the tick no longer derives gender"
-        assert "replicate_operational" in calls
-        assert calls.index("derive_gender") < calls.index("replicate_operational")
+        import textwrap
+
+        src = textwrap.dedent(
+            inspect.getsource(BackgroundScheduler._run_replicate_operational))
+        tree = ast.parse(src)
+        # By line, not by `ast.walk` order: the walk is breadth-first, and a
+        # call nested in the chain-4 branch sorts after a shallower one below.
+        lines = {}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call):
+                name = getattr(n.func, "id", getattr(n.func, "attr", None))
+                lines.setdefault(name, []).append(n.lineno)
+        assert "derive_gender" in lines, "the tick no longer derives gender"
+        # Chain 4's derivation rides the same place, in Postgres.
+        assert "derive_gender_pg" in lines, "the tick no longer follows chain 4"
+        assert "replicate_operational" in lines
+        assert max(lines["derive_gender"] + lines["derive_gender_pg"]) < min(
+            lines["replicate_operational"])
 
     def test_the_cli_and_the_tick_share_one_implementation(self):
         """Two callers, one home — charter rule 1."""

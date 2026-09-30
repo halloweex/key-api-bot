@@ -1068,9 +1068,30 @@ class BackgroundScheduler:
             # would report a difference the ordering created. Cheap on an
             # ordinary tick: the pending query returns the ~19 buyers a day
             # KeyCRM adds, and KeyCRM has no gender field for any of them.
+            #
+            # Under chain 4 the verdicts are written in Postgres
+            # (`core/pg_buyers_write.py`) and the copy below stands down for
+            # them, so the derivation follows the chain's one answer: Postgres,
+            # DuckDB, or — a KS_WRITE_BUYERS nobody can read — neither, said
+            # rather than guessed. Its own `try`: both derivations never raise,
+            # and a fault in choosing between them must not cost the copy of
+            # tables nothing can rebuild either.
+            from core import pg_buyers_write
             from core.gender_backfill import derive_gender
 
-            gender = await derive_gender(store)
+            try:
+                gender_mode = pg_buyers_write.mode()
+                if gender_mode == "postgres":
+                    gender = await pg_buyers_write.derive_gender_pg()
+                elif gender_mode == "duckdb":
+                    gender = await derive_gender(store)
+                else:
+                    gender = {"stood_down": f"{pg_buyers_write.WRITE_ENV} is not "
+                                            "understood; no verdict was derived"}
+            except Exception as exc:  # noqa: BLE001 — carried, not raised
+                logger.error("gender derivation could not be routed: %s", exc,
+                             exc_info=True)
+                gender = {"error": f"{type(exc).__name__}: {exc}"}
             result = await replicate_operational(store)
             result["gender"] = gender
             # `data/bot.db` rides the same job rather than getting one of its

@@ -223,14 +223,20 @@ class BuyerSyncState:
     last_selected: int = 0
     last_written: int = 0
     unreadable_birthdays: int = 0
+    # Buyers the last batch carried that Postgres would refuse, skipped by id
+    # under chain 4 (`pg_buyers_write.upsert_buyers`). The count only; the ids
+    # are in the log.
+    last_skipped_bad: int = 0
 
-    def succeeded(self, *, selected: int, written: int, unreadable: int = 0) -> None:
+    def succeeded(self, *, selected: int, written: int, unreadable: int = 0,
+                  skipped_bad: int = 0) -> None:
         self.last_ok_at = datetime.now(DEFAULT_TZ)
         self.consecutive_failures = 0
         self.last_error_class = None
         self.last_selected = selected
         self.last_written = written
         self.unreadable_birthdays += unreadable
+        self.last_skipped_bad = skipped_bad
 
     def failed(self, exc: BaseException) -> None:
         self.last_error_class = type(exc).__name__
@@ -253,6 +259,7 @@ class BuyerSyncState:
             "last_selected": self.last_selected,
             "last_written": self.last_written,
             "unreadable_birthdays": self.unreadable_birthdays,
+            "last_skipped_bad": self.last_skipped_bad,
             "retry_in_s": retry_in_s,
         }
 
@@ -508,8 +515,20 @@ class SyncService:
         """
         from core.landing_rows import birthday_is_unreadable
 
+        from core import pg_buyers_write
+
         state = self.buyer_sync_state
         state.last_attempt_at = datetime.now(DEFAULT_TZ)
+        # A KS_WRITE_BUYERS nobody can read has nowhere known to write to, and
+        # the write would raise only after KeyCRM had been asked for up to 500
+        # buyers. The tick's watermark getter stops first today; this is for
+        # the doors that call the step directly (`POST /duckdb/sync-buyers`).
+        if pg_buyers_write.mode() is None:
+            exc = RuntimeError(f"{pg_buyers_write.WRITE_ENV} is not understood; "
+                               "the buyers step fetches nothing until it is")
+            logger.error(str(exc))
+            self._buyer_step_failed(exc)
+            return 0
         logger.info("Syncing missing buyers...")
         try:
             # Get buyer IDs from orders that don't have buyer records.
@@ -566,14 +585,18 @@ class SyncService:
 
             if buyers:
                 # Mirrored to Postgres inside the store method, portion by
-                # portion — the one call site every buyer writer shares.
-                count = await self.store.upsert_buyers(buyers)
+                # portion — the one call site every buyer writer shares. Under
+                # chain 4 it writes Postgres alone, and a buyer Postgres would
+                # refuse is skipped by id rather than failing the batch.
+                skipped: list = []
+                count = await self.store.upsert_buyers(buyers, skipped_out=skipped)
                 await self.store.set_last_sync_time("buyers")
                 logger.info(f"Synced {count} buyers from KeyCRM")
                 self._buyer_step_ok(
                     selected=len(missing_ids), written=count,
                     unreadable=sum(1 for b in buyers
-                                   if birthday_is_unreadable(b.birthday)))
+                                   if birthday_is_unreadable(b.birthday)),
+                    skipped_bad=len(skipped))
                 return count
 
             await self.store.set_last_sync_time("buyers")

@@ -269,3 +269,34 @@ class TestTheDerivationNeverRaises:
     def test_its_clock_is_utc_and_the_web_processs(self):
         stamp = chain._now_utc()
         assert isinstance(stamp, datetime) and stamp.utcoffset().total_seconds() == 0
+
+
+class TestTheCompletenessCheckFollowsTheChain:
+    """`reconcile_buyer_completeness` is the one Postgres-side check that the
+    chain's writer is alive; it must not switch off with the landing mirror's
+    flag, which the chain does not consult (the plan critic's b2)."""
+
+    @pytest.mark.asyncio
+    async def test_mirror_off_and_chain_off_asks_nothing(self, flags, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from core.mirror_reconciliation import reconcile_buyer_completeness
+
+        monkeypatch.setenv("KS_MIRROR_LANDING", "0")
+        monkeypatch.setattr("core.pg.get_pool",
+                            AsyncMock(side_effect=AssertionError("asked Postgres")))
+        assert await reconcile_buyer_completeness() == []
+
+    @pytest.mark.asyncio
+    async def test_mirror_off_and_chain_on_still_asks(self, flags, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from core.mirror_reconciliation import reconcile_buyer_completeness
+
+        monkeypatch.setenv("KS_MIRROR_LANDING", "0")
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        asked = AsyncMock(side_effect=RuntimeError("reached Postgres"))
+        monkeypatch.setattr("core.pg.get_pool", asked)
+        with pytest.raises(RuntimeError, match="reached Postgres"):
+            await reconcile_buyer_completeness()
+        asked.assert_awaited_once()

@@ -3339,6 +3339,19 @@ class DuckDBStore(
                 ORDER BY has_return DESC, latest_order DESC, buyer_id DESC
                 LIMIT ?
             """
+        # Chain 4 first, and not the read switch: once the buyers are written
+        # in Postgres (`core/pg_buyers_write.py`) DuckDB's copy has stopped,
+        # and selecting from it would fetch the same buyers from KeyCRM every
+        # hour for ever. The chain's one answer decides, and never raises —
+        # `KS_READ_BUYER_SYNC` is not consulted at all then, so its typo
+        # cannot stop the step (decision 11). A chain nobody can read (None)
+        # reads Postgres too: that is where a latched chain's buyers are, and
+        # the step refuses before it writes anyway.
+        from core import pg_buyers_write
+        if pg_buyers_write.mode() != "duckdb":
+            rows = await pg_buyer_sync_read.fetch(render_tables(sql, POSTGRES), [limit])
+            return [row[0] for row in rows]
+
         # No fallback — `core/pg_buyer_sync_read.py` says why, and where a
         # failure is contained instead. The switch with no address is the one
         # silent route to DuckDB left, and under KS_READ_FALLBACK=off it is
@@ -3528,15 +3541,29 @@ class DuckDBStore(
             return result[0] if result and result[0] else None
 
     async def get_stats(self) -> Dict[str, Any]:
-        """Get database statistics."""
+        """Get database statistics.
+
+        The buyer counts are left out once chain 4 writes the buyers somewhere
+        else (`core/pg_buyers_write.py`, or a flag nobody can read): DuckDB's
+        copy has stopped, and a count that never moves on /health/detailed
+        reads as a sync that stopped. Never raises for that — `mode()` does not.
+        """
+        from core import pg_buyers_write
+
+        buyers_here = pg_buyers_write.mode() == "duckdb"
         async with self.connection() as conn:
             orders_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
             products_count = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
             categories_count = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
             expenses_count = conn.execute("SELECT COUNT(*) FROM expenses").fetchone()[0]
             expense_types_count = conn.execute("SELECT COUNT(*) FROM expense_types").fetchone()[0]
-            buyers_count = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
-            buyer_contacts_count = conn.execute("SELECT COUNT(*) FROM buyer_contacts").fetchone()[0]
+            buyer_counts = {}
+            if buyers_here:
+                buyer_counts = {
+                    "buyers": conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0],
+                    "buyer_contacts": conn.execute(
+                        "SELECT COUNT(*) FROM buyer_contacts").fetchone()[0],
+                }
 
             min_date = conn.execute("SELECT MIN(DATE(ordered_at)) FROM orders").fetchone()[0]
             max_date = conn.execute("SELECT MAX(DATE(ordered_at)) FROM orders").fetchone()[0]
@@ -3557,8 +3584,7 @@ class DuckDBStore(
                 "orders": orders_count,
                 "products": products_count,
                 "categories": categories_count,
-                "buyers": buyers_count,
-                "buyer_contacts": buyer_contacts_count,
+                **buyer_counts,
                 "expenses": expenses_count,
                 "expense_types": expense_types_count,
                 "date_range": {

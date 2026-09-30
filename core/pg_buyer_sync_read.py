@@ -61,3 +61,16 @@ async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(numbered(sql), *params)
     return [tuple(r) for r in rows]
+
+
+async def count_buyers() -> int:
+    """How many buyers Postgres holds — sync-all's before and after, once
+    chain 4 writes the buyers there and DuckDB's count has stopped moving.
+    Here rather than in the chain module, whose every public function reaching
+    a connection is held to the latch."""
+    from core.pg import get_pool, require_revision
+
+    pool = await get_pool()
+    await require_revision()
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval("SELECT count(*) FROM bronze.buyers"))
