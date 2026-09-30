@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.257
+
+- Chain 4 PR-1: the skip walker reads a reason built from a module constant
+- Chain 4 PR-1: say in CLAUDE.md what the buyers step does now, and what not to run
+- Chain 4 PR-1 review, signals: pages that name the right cause and point at data
+- Chain 4 PR-1 review, routes: answers that arrive, and a failed mirror that leaves a trace
+- Chain 4 PR-1 review, sync: a KeyCRM outage is a failure, and the getter's bound holds
+- Chain 4 PR-1 review, parse: DuckDB's date grammar exactly, and no contact can fail a portion
+- Chain 4 PR-1: the isolation guard counts the completeness check as the 17th
+- Chain 4 PR-1 step 5: the guards a third chain will rely on, that do not need one
+- Chain 4 PR-1 step 4: every landed buyer has a verdict, every ordered buyer lands
+- Chain 4 PR-1 step 3: every buyer writer mirrors, in portions, off the lock
+- Chain 4 PR-1 step 2: the buyers step cannot take the tick down, and is watched
+- Chain 4 PR-1 step 1: one reading of a KeyCRM buyer, for both stores
+
+
 ## 3.0.256
 
 - DN-29: a default tick records no writer, pinned without Postgres
