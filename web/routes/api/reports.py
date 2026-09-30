@@ -45,6 +45,8 @@ async def get_marketing_summary(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    category_id: Optional[int] = Query(None),
+    brand: Optional[str] = Query(None),
     _gate=Depends(require_permission("marketing")),
 ):
     """Get marketing report for any date range with previous period and YoY comparison."""
@@ -52,6 +54,8 @@ async def get_marketing_summary(
         st = validate_sales_type(sales_type)
         if period:
             validate_period(period)
+        validate_category_id(category_id)
+        brand = validate_brand_name(brand)
     except ValidationError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
 
@@ -60,7 +64,8 @@ async def get_marketing_summary(
     end_dt = _datetime.strptime(end, "%Y-%m-%d").date()
 
     store = await get_store()
-    return await store.get_marketing_report_by_dates(start_dt, end_dt, st)
+    return await store.get_marketing_report_by_dates(
+        start_dt, end_dt, st, category_id=category_id, brand=brand)
 
 
 # ─── Ukrainian month names for CSV export ────────────────────────────────
@@ -98,6 +103,8 @@ async def export_marketing_csv(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     sales_type: Optional[str] = Query("retail"),
+    category_id: Optional[int] = Query(None),
+    brand: Optional[str] = Query(None),
     _gate=Depends(require_permission("marketing")),
 ):
     """Export marketing report as CSV for the selected period."""
@@ -105,6 +112,8 @@ async def export_marketing_csv(
         st = validate_sales_type(sales_type)
         if period:
             validate_period(period)
+        validate_category_id(category_id)
+        brand = validate_brand_name(brand)
     except ValidationError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
 
@@ -113,7 +122,8 @@ async def export_marketing_csv(
     end_dt = _datetime.strptime(end, "%Y-%m-%d").date()
 
     store = await get_store()
-    report = await store.get_marketing_report_by_dates(start_dt, end_dt, st)
+    report = await store.get_marketing_report_by_dates(
+        start_dt, end_dt, st, category_id=category_id, brand=brand)
 
     def _fmt_range(sd: str, ed: str) -> str:
         if sd == ed:
@@ -129,6 +139,13 @@ async def export_marketing_csv(
 
     # Header
     writer.writerow([f"Маркетинговий звіт: {cur_label}"])
+    if report.get("product_filter"):
+        narrowed = []
+        if brand:
+            narrowed.append(f"бренд {brand}")
+        if category_id:
+            narrowed.append(f"категорія #{category_id}")
+        writer.writerow([f"Лише {', '.join(narrowed)}: виручка — сума позицій"])
     writer.writerow([])
 
     # Section 1: General Sales
