@@ -1506,9 +1506,15 @@ it does not do, both written down in the revision:
 - **It is not "no writes" for an image that checks — it is an outage.** The
   session read raises under `KS_USER_STORE=postgres` (401 for everybody) and
   the bot refuses to start. An image-only rollback therefore needs `alembic
-  downgrade 0033_derivation_signal` first, run with the new migrate image —
-  and only before the flip. After chain 4 has written Postgres the way back is
-  `scripts/chain_copy_back.py buyers`, never a downgrade below 0034.
+  downgrade 0033_derivation_signal` first, run with the new migrate image, and
+  then all three images moved back — keycrm-migrate too, or `up -d` re-runs its
+  `alembic upgrade head` and puts 0034 back. Only before the flip: after chain
+  4 has written Postgres the way back is `scripts/chain_copy_back.py buyers`,
+  never a downgrade below 0034.
+- **A locked-out image still writes DuckDB.** From v3.0.249 on, a build without
+  chain 4 cannot reach the buyer tables but its sync still commits buyers to
+  DuckDB before the mirror refuses — and after the flip `--handover` then
+  refuses on those ids. After the flip, no image rollback at all.
 
 ### The Postgres mirror of landing
 One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed

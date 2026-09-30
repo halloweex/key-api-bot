@@ -46,11 +46,13 @@ VERSION_TABLE = "alembic_version"
 # grown with every port, and is no longer "the next morning's message": under
 # `KS_USER_STORE=postgres` the session read raises, so the dashboard answers 401
 # to everybody; the bot store checks it in `initialise()` and the bot refuses to
-# start; every write chain, the buyers and order mirrors that stand down on
+# start; every write chain, the buyers mirror and the paths that stand down on
 # owner rows, the replication, the derivation and the reconciliations raise
-# `SchemaVersionError` and record it. Only the catalogue mirror of landing
-# (`pg_landing._mirror`) does not gate. Compose runs `migrate` first and makes
-# web and bot wait for it, which is what keeps a deploy out of that state.
+# `SchemaVersionError` and record it. Three writers do not gate: the catalogue
+# mirror of landing (`pg_landing._mirror`), the per-tick orders mirror
+# (`upsert_orders` → `mirror_orders` → `write_orders`) and the alert journal,
+# which stays up on purpose. Compose runs `migrate` first and makes web and bot
+# wait for it, which is what keeps a deploy out of that state.
 #
 # 0034 is chain 4's lock (owner decision 16): an image that does not know the
 # buyers chain refuses a database that does. See the revision's docstring for

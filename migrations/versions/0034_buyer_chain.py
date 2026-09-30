@@ -14,12 +14,15 @@ its buyers mirror would ship DuckDB's copy over the chain's rows. Owner rows
 stand most of that down since PR-2 (DN-22b, `chain_latch.owned_tables`), but
 an image older than those is not held by anything that reads them.
 
-`REQUIRED_REVISION` is. Every path this system uses to reach Postgres calls
-`require_revision()` — the chain's writers, the mirrors that stand down, the
-replication, the derivation, the session read under `KS_USER_STORE=postgres`,
-the bot store at `initialise()` — so an image expecting 0033 refuses a database
-at 0034. Owner decision 16: this revision exists to be that lock, and goes in
-directly before the flip.
+`REQUIRED_REVISION` is. Every path that writes these three tables calls
+`require_revision()` before it writes — the buyers mirror, the backfills and
+the hourly ids-diff, the replication that ships `app.buyer_gender`, the
+chain's own writers — and so do the session read under `KS_USER_STORE=postgres`
+and the bot store at `initialise()`. An image expecting 0033 refuses a database
+at 0034. (Not every Postgres path gates: the catalogue and orders mirrors and
+the alert journal do not, which is why the claim is about these tables.) Owner
+decision 16: this revision exists to be that lock, and goes in directly before
+the flip.
 
 What the lock does NOT cover, said where it is created:
 
@@ -31,10 +34,20 @@ What the lock does NOT cover, said where it is created:
   read raises under `KS_USER_STORE=postgres`, so the dashboard answers 401 to
   everybody, and the bot refuses to start. An image-only rollback therefore
   needs `alembic downgrade 0033_derivation_signal` first, run with the NEW
-  migrate image (the old one does not know 0034) — and only before the flip:
-  once chain 4 has written Postgres, going below 0034 hands its tables to a
-  build that will overwrite them. The way back after the flip is
-  `scripts/chain_copy_back.py buyers`, never a downgrade.
+  migrate image (the old one does not know 0034), and then all THREE images
+  moved back — keycrm-migrate with web and bot. Left new, `up -d` re-runs its
+  `alembic upgrade head` (web and bot wait on it) and puts 0034 back, locking
+  the old images out again. And only before the flip: once chain 4 has written
+  Postgres, going below 0034 hands its tables to a build that will overwrite
+  them. The way back after the flip is `scripts/chain_copy_back.py buyers`,
+  never a downgrade.
+- **A locked-out image still writes DuckDB.** An image from v3.0.249 on that
+  predates chain 4, rolled back without the downgrade, cannot reach these
+  tables, but its incremental sync still runs: `upsert_buyers` commits each
+  portion to DuckDB before the mirror's revision check refuses. DuckDB then
+  holds buyers the chain does not, and after the flip `chain_copy_back.py
+  buyers --handover` refuses on exactly those ids. So after the flip, no image
+  rollback at all — not even a brief one.
 
 The comments say who writes each table now. The downgrade puts back exactly
 what 0011 and 0024 wrote — `bronze.buyer_contacts` never had one, so it is
