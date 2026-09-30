@@ -2983,3 +2983,28 @@ class TestTheComparisonSaysWhyItStoodDown:
         spec = REGISTRY["chain_owner_unregistered"]
         assert spec.kind is Kind.CONDITION
         assert "a human, not a job" in spec.clears
+
+
+class TestEveryChainNamesItselfOnce:
+    """`CHAIN` is the string the latch, the owner rows, health and the canary
+    key on; `chain_name` is what the registry derives from the module. A chain
+    whose two disagree is held down by its owner rows while the health block
+    and the canary look for it under the other name and see nothing — found
+    reviewing chain 4's plan, before a third chain could be the first to do it.
+    """
+
+    @pytest.mark.parametrize("chain", __import__(
+        "core.write_chains", fromlist=["WRITE_CHAINS"]).WRITE_CHAINS,
+        ids=lambda c: c.__name__)
+    def test_chain_is_the_module_basename(self, chain):
+        from core.write_chains import chain_name
+        assert chain.CHAIN == chain_name(chain)
+
+    def test_the_flag_fixture_covers_every_chain(self):
+        """The autouse fixture in tests/conftest.py iterates WRITE_CHAINS; this
+        is the reading of it a new chain will rely on."""
+        import os
+
+        from core.write_chains import WRITE_CHAINS
+        assert all(os.getenv(c.WRITE_ENV) is None for c in WRITE_CHAINS)
+

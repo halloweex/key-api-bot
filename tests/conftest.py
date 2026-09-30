@@ -137,6 +137,25 @@ def _never_the_production_database(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_write_chain_flag_from_outside(monkeypatch):
+    """Every registered write chain starts each test with its KS_WRITE_* unset.
+
+    A chain's flag decides where its writers write, and a developer's shell or
+    `.env` may carry one — a test that inherited `KS_WRITE_EXPENSES=postgres`
+    would exercise a different code path than CI does and pass or fail for a
+    reason nobody can see. Thirteen test files cleared the variables of the
+    chains they knew about, by name; this clears the variable of every chain in
+    `WRITE_CHAINS`, so a chain added to the registry is covered the moment it
+    is registered rather than when somebody remembers the fixtures. Tests still
+    set the flag they mean to test, after this has run.
+    """
+    from core.write_chains import WRITE_CHAINS
+
+    for chain in WRITE_CHAINS:
+        monkeypatch.delenv(chain.WRITE_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _never_the_real_chain_latch(monkeypatch, tmp_path):
     """No test may latch a write chain in the real data directory.
 

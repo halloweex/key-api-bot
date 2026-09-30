@@ -1,8 +1,9 @@
-"""One reconciliation that raises must not silence the other fifteen.
+"""One reconciliation that raises must not silence the other sixteen.
 
-`dq_mirror_landing` runs sixteen checks in one job — landing, orders, Silver,
+`dq_mirror_landing` runs seventeen checks in one job — landing, orders, Silver,
 UTM and its completeness, expenses, Gold, the five irreplaceable tables, the
-bot's state, the order archive, buyers, SMS, dashboard users, the vitrina,
+bot's state, the order archive, buyers and their completeness, SMS, dashboard
+users, the vitrina,
 ClickHouse and its archive. It used to wrap all of them in ONE try, so an
 exception anywhere skipped every check after it, and the alert gate's
 `and not error_message` then withheld the page for any CRITICAL already found
@@ -36,7 +37,8 @@ CHECKS_BY_MODULE = {
         "reconcile_order_utm", "reconcile_order_utm_completeness",
         "reconcile_expenses", "reconcile_gold", "pg_gold_internal_check",
         "reconcile_operational", "reconcile_bot_state",
-        "reconcile_order_versions", "reconcile_buyers", "reconcile_sms",
+        "reconcile_order_versions", "reconcile_buyers",
+        "reconcile_buyer_completeness", "reconcile_sms",
         "reconcile_dashboard_users",
     ],
     "core.pg_vitrina": ["reconcile_customer_profile"],
@@ -67,11 +69,11 @@ def check_order() -> list:
 
 
 class TestEveryCheckIsIsolated:
-    def test_all_seventeen_run_through_check_and_each_exactly_once(self):
-        """Sixteen every run, and `pg_gold_internal_check` only while Postgres
-        alone derives the warehouse (DN-28) — see the class below."""
+    def test_all_eighteen_run_through_check_and_each_exactly_once(self):
+        """Seventeen every run, and `pg_gold_internal_check` only while
+        Postgres alone derives the warehouse (DN-28) — see the class below."""
         assert sorted(check_order()) == sorted(ALL_CHECKS)
-        assert len(check_order()) == len(set(check_order())) == 17
+        assert len(check_order()) == len(set(check_order())) == 18
 
 
 def _critical(name):
@@ -223,7 +225,7 @@ class TestTheGoldRollUpStandsAloneUnderPostgres:
     """DN-28: `gold_rollup_mismatch` is asked of Postgres by itself while
     Postgres alone derives, and `reconcile_gold` leaves it out on the same
     predicate. In this build the predicate is never true, so production runs
-    exactly the sixteen it ran before."""
+    exactly the seventeen it ran before."""
 
     @pytest.mark.asyncio
     async def test_while_duckdb_derives_it_is_not_asked(self, monkeypatch):

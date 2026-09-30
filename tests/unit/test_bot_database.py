@@ -163,7 +163,7 @@ def db(request, tmp_path, monkeypatch):
         return
 
     if not DSN:
-        pytest.skip("KS_PG_DSN is not set — the Postgres half needs a database")
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN — the Postgres half needs a database")
 
     from bot.store_postgres import PostgresBotStore
 

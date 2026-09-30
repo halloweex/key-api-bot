@@ -103,6 +103,19 @@ class HealthResponse(BaseModel):
             "switch on itself."
         ),
     )
+    buyer_sync: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "The buyers step of the incremental sync, in this web process: "
+            "seconds since the last attempt and the last success (floored at "
+            "the process start when it has not succeeded yet, with `ever_ok` "
+            "saying which), consecutive failures that are neither KeyCRM nor "
+            "data errors, the CLASS of the last error — never its text, which "
+            "can carry a buyer's data — and the seconds left before a failed "
+            "step retries. Null when this process has not started syncing. "
+            "Judged by the canary as `buyer_sync_stalled`."
+        ),
+    )
     write_chains: Optional[Dict[str, Any]] = Field(
         None,
         description=(

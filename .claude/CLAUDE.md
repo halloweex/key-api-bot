@@ -1288,6 +1288,42 @@ Cap what rebounds; only delete what stays deleted.
   declines to overwrite a name that is *present*). What stops tests reaching
   Telegram is the autouse fixture, never that variable.
 
+### The buyers step, before chain 4 moves its writes
+
+Chain 4 of the DuckDB exit will make the buyers step of the incremental sync
+the **only** writer of buyers, contacts and gender. Its preparation (PR-1)
+changed nothing about which store is written, and four things about how:
+
+- **One parse** (`core.landing_rows.parse_buyers`) feeds both stores. A
+  birthday reads exactly as DuckDB 1.5.5's CAST reads it — 80 shapes pinned
+  against DuckDB itself — and one it refuses becomes NULL, logged by id,
+  instead of rolling back the batch. NUL is stripped (Postgres refuses it); a
+  blank or NUL-only name is `'Unknown'` (an empty name loops the selection).
+- **The step cannot take the tick down.** It never raises; a failure holds the
+  watermark and waits ten minutes, during which it asks neither store nor
+  KeyCRM anything, and offers and stocks run regardless. A KeyCRM outage used
+  to read as "nothing to fetch" and was stamped as a success; it is a failure
+  now. `/api/health` publishes `buyer_sync` (ages, count, error *class*, never
+  text), and the canary pages `buyer_sync_stalled` (WARN) on three failures in
+  a row or no success for 90 minutes — naming "step not reached" when the
+  whole tick stops before it.
+- **Every buyer write mirrors, from one place**: `DuckDBStore.upsert_buyers`,
+  in portions of 1 000, each committed then shipped outside the store lock. A
+  portion whose ship failed is retried once at the end and then raised — the
+  next portion's success would otherwise erase the trace. `sync-all-buyers`
+  now mirrors too, and runs **detached** (the answer is `started`; the result
+  is logged as `Full buyer sync:`). **Do not run it to see whether it works**:
+  it is the only path fetching with `include=loyalty,shipping`, so it fills
+  city and region for every buyer and moves the SMS city filter.
+- **`reconcile_buyer_completeness`** (in `dq_mirror_landing`, Postgres alone):
+  `buyers_without_verdict` — landed over 90 minutes ago with no verdict of the
+  current rules — and `buyers_missing_for_orders` — named by an order over a
+  day old and never landed. Running with the flag off is the point: its false
+  positives are measured before the flip. It read zero of each on 2026-09-24.
+
+The chain itself, its rollback under the DN-06 latch and the owner's decisions
+are in `.planning/DUCKDB_EXIT_CHAIN4_PLAN.md`.
+
 ### The Postgres mirror of landing
 One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
 rows; DuckDB and Postgres each write the rows they are handed. Bookkeeping

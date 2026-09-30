@@ -599,13 +599,25 @@ class KeyCRMClient:
         self,
         buyer_ids: List[int],
         batch_size: int = 10,
+        errors_out: Optional[List[BaseException]] = None,
     ) -> List[Buyer]:
         """
         Fetch multiple buyers by their IDs.
 
+        A buyer that fails is skipped, so one bad id cannot cost the others. But
+        a skip is not silence any more: every failure other than a 404 is
+        appended to `errors_out` when the caller passes a list. Until chain 4's
+        preparation it was swallowed outright, so a KeyCRM outage, an open
+        circuit breaker, a lost API scope or a 429 run that outlasted the
+        retries all returned [] — which the buyer sync read as "nothing to
+        fetch", stamping its watermark and reporting success while fetching
+        nothing, every hour. A 404 is a buyer KeyCRM no longer has, merged or
+        deleted, and is not a failure of the fetch.
+
         Args:
-            buyer_ids: List of buyer IDs to fetch
+            buyer_ids: List of buyer IDs to fetch, fetched in the order given
             batch_size: Number of concurrent requests
+            errors_out: Collects the failures that were skipped
 
         Returns:
             List of Buyer objects (skips failed/not found)
@@ -614,7 +626,9 @@ class KeyCRMClient:
             return []
 
         buyers = []
-        unique_ids = list(set(buyer_ids))
+        # Deduplicated in the caller's order — `set` used to shuffle it, which
+        # undid the sync's sorting of the ids before the request.
+        unique_ids = list(dict.fromkeys(buyer_ids))
 
         # Fetch in batches to avoid overwhelming the API
         for i in range(0, len(unique_ids), batch_size):
@@ -625,7 +639,11 @@ class KeyCRMClient:
 
             for result in results:
                 if isinstance(result, Exception):
-                    continue  # Skip failed requests
+                    not_found = (isinstance(result, KeyCRMAPIError)
+                                 and result.status_code == 404)
+                    if errors_out is not None and not not_found:
+                        errors_out.append(result)
+                    continue
                 if result and isinstance(result, dict):
                     buyer = Buyer.from_api(result)
                     if buyer:

@@ -41,9 +41,11 @@ back because of it.
 """
 from __future__ import annotations
 
-from datetime import datetime
+import re
+from datetime import date, datetime
 from typing import (
-    Any, Dict, List, Mapping, NamedTuple, Optional, Tuple, TYPE_CHECKING,
+    Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple,
+    TYPE_CHECKING,
 )
 
 if TYPE_CHECKING:  # pragma: no cover — types only, no import cost at runtime
@@ -522,3 +524,248 @@ def landed_orders(
         if with_products:
             products.extend(order_product_rows(order))
     return LandedOrders(orders=orders, products=products)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Buyers
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The third landing table to get one reading, and the one where the two
+# readings had actually drifted. Each writer used to take the Buyer model and
+# render it for itself: DuckDB was handed the raw `birthday` string and cast it
+# on the way in, the Postgres mirror cut it with `date.fromisoformat(v[:10])`.
+# So `1990-1-5` landed in DuckDB and failed the mirror, and a value DuckDB
+# refuses — `''`, `'0000-00-00'`, `'1990-02-30'` — did worse than that: it
+# rolled back the whole buyer batch, left the watermark where it was, and the
+# next tick fetched the same batch and failed the same way, once a minute. The
+# sync tick catches only KeyCRM errors, so every one of those minutes also cost
+# the offers and stocks syncs that run after buyers. No production buyer has
+# carried such a value yet; the path was measured, not observed.
+#
+# Now both stores are handed the SAME parsed row. That makes them agree by
+# construction, whatever the parser decides; what the matrix test against
+# DuckDB's own CAST protects is that the parser changes no birthday DuckDB
+# accepted before.
+
+
+class BuyerRow(NamedTuple):
+    """A buyer as both stores hold it, bookkeeping aside. Column order is the
+    write order, and `BUYER_COLUMNS` is the contract the daily comparison reads."""
+    id: Optional[int]
+    full_name: str
+    birthday: Optional[date]
+    note: Optional[str]
+    phone: Optional[str]
+    email: Optional[str]
+    manager_id: Optional[int]
+    company_id: Optional[int]
+    company_name: Optional[str]
+    city: Optional[str]
+    region: Optional[str]
+    loyalty_program_name: Optional[str]
+    loyalty_level_name: Optional[str]
+    loyalty_discount: Optional[float]
+    loyalty_amount: Optional[float]
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+
+
+class ContactRow(NamedTuple):
+    """One phone or email. Postgres keys these on the natural triple and has no
+    surrogate id, so the triple is the whole identity."""
+    buyer_id: Optional[int]
+    contact_type: str
+    value: str
+    is_primary: bool
+
+
+BUYER_COLUMNS = BuyerRow._fields
+CONTACT_COLUMNS = ContactRow._fields
+
+# `core.models.Buyer.from_api` already writes this for a missing or empty name;
+# it is the one spelling a nameless buyer has in either store.
+UNKNOWN_NAME = "Unknown"
+
+# DuckDB 1.5.5's date grammar, as far as a birthday can reach it, measured
+# against its own CAST in the test process (80 shapes, zero differences):
+#
+# - leading whitespace is DuckDB's six ASCII characters, not str.isspace's
+#   Unicode set — a no-break space in front is refused;
+# - a year of one or more ASCII digits, leading zeros allowed; one separator out
+#   of - / \ or space, used twice; a month and a day of one or two digits;
+# - after the day, anything that does not start with another digit — so
+#   `1990-01-05T10:00`, `1990-01-05 garbage` and `1990-1-5-` are 5 January 1990,
+#   `1990-01-051` is refused, and a day-first `05-01-1990` never reads as year 5;
+# - one ASCII whitespace then `(BC)`, in any case, makes it Before Christ, which
+#   Python cannot hold; `(BC)` with no space, or two spaces, is just garbage;
+# - `epoch` alone is 1970-01-01.
+# ASCII digits only: `\d` would read an Arabic-Indic numeral DuckDB refuses.
+_DUCKDB_SPACE = " \t\n\v\f\r"
+_DATE_HEAD = re.compile(r"([0-9]+)([-/\\ ])([0-9]{1,2})\2([0-9]{1,2})(?![0-9])")
+_BC_TAIL = re.compile(r"[ \t\n\v\f\r]\(BC\)", re.IGNORECASE)
+
+
+def _clean(value: Any) -> Any:
+    """Text without U+0000.
+
+    DuckDB stores a NUL inside a string; Postgres refuses the whole statement.
+    So one such character used to land in DuckDB and fail that buyer's mirror
+    on every attempt, forever, and under chain 4 it would fail the only writer.
+    Nothing a customer meant is lost by dropping it.
+    """
+    return value.replace("\x00", "") if isinstance(value, str) else value
+
+
+def _as_date(value: Any) -> Optional[date]:
+    """A birthday as a date, or None when it cannot be one.
+
+    Every string DuckDB's CAST accepts becomes the date DuckDB would have made —
+    except a date DuckDB can hold and Python cannot (a year of 0, a BC year,
+    a year past 9999), which becomes None: asyncpg could not have written it
+    either. Everything DuckDB refuses becomes None instead of an exception, so
+    one unreadable birthday costs that birthday and nothing else.
+
+    One difference is deliberate: a LEADING run of NULs is skipped, where DuckDB
+    refuses it — the rule that strips NUL from every text value, applied where
+    it cannot change a date. A NUL after the day stays, and is DuckDB's
+    trailing garbage like any other character; stripping it there would glue
+    the digit behind it onto the day.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).lstrip(_DUCKDB_SPACE)
+    if text.startswith("\x00"):
+        text = text.lstrip(_DUCKDB_SPACE + "\x00")
+    if text[:5].lower() == "epoch" and not text[5:].strip(_DUCKDB_SPACE):
+        return date(1970, 1, 1)
+    head = _DATE_HEAD.match(text)
+    if head is None or _BC_TAIL.match(text, head.end()):
+        return None
+    try:
+        return date(int(head.group(1)), int(head.group(3)), int(head.group(4)))
+    except ValueError:  # 1990-02-30, month 13, year 0, year past 9999
+        return None
+
+
+def birthday_is_unreadable(value: Any) -> bool:
+    """True when KeyCRM sent a birthday and it could not be read.
+
+    Distinct from "no birthday": None means KeyCRM had nothing to say, and is
+    not worth a warning."""
+    return value is not None and _as_date(value) is None
+
+
+def _as_ts(value: Any) -> Optional[datetime]:
+    """A timestamp, strictly.
+
+    `Buyer.from_api` has already parsed these, so anything still a string here
+    is a value DuckDB would store and a None would contradict — raising is the
+    honest answer, and `test_an_unparseable_timestamp_raises_rather_than_writing_none`
+    pins it."""
+    if value is None or isinstance(value, datetime):
+        return value
+    # KeyCRM serialises as ISO with either 'T' or a space; both parse.
+    return datetime.fromisoformat(str(value).replace(" ", "T"))
+
+
+def _name(value: Any) -> str:
+    """A name, or `UNKNOWN_NAME` when there is nothing but whitespace.
+
+    `Buyer.from_api` already turns a missing or empty name into it. Two shapes
+    slipped past, for different reasons. A name of NULs alone becomes '' once
+    `_clean` strips them, and '' LOOPS: the buyer selection matches
+    `full_name = ''` and fetches that buyer again every hour, forever. A name of
+    spaces never matched (`'   ' = ''` is false in both engines) and never
+    looped; it goes to the placeholder with the empty one by the owner's
+    decision 4, so a stored name is either a name or the one placeholder.
+    """
+    cleaned = _clean(value)
+    if cleaned is None or not str(cleaned).strip():
+        return UNKNOWN_NAME
+    return cleaned
+
+
+def _contact(value: Any) -> Optional[str]:
+    """A phone or email as text, or None when it is not one.
+
+    KeyCRM documents these as arrays of strings. If an element ever arrives as
+    an object or a list, the dict that collapses duplicates cannot hash it and
+    the whole portion would fail before its transaction — where the old DuckDB
+    writer bound it as a parameter and DuckDB coerced it to text. So it is
+    skipped like an empty string. A number is kept as its digits, which is what
+    DuckDB's coercion made of it.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        value = str(value)
+    return _clean(value) if isinstance(value, str) else None
+
+
+def buyer_row(buyer: Any) -> BuyerRow:
+    """One Buyer model rendered as the row both stores agree on."""
+    return BuyerRow(
+        id=buyer.id,
+        full_name=_name(buyer.full_name),
+        birthday=_as_date(buyer.birthday),
+        note=_clean(buyer.note),
+        phone=_contact(buyer.phone),
+        email=_contact(buyer.email),
+        manager_id=buyer.manager_id,
+        company_id=buyer.company_id,
+        company_name=_clean(buyer.company_name),
+        city=_clean(buyer.city),
+        region=_clean(buyer.region),
+        loyalty_program_name=_clean(buyer.loyalty_program_name),
+        loyalty_level_name=_clean(buyer.loyalty_level_name),
+        loyalty_discount=buyer.loyalty_discount,
+        loyalty_amount=buyer.loyalty_amount,
+        created_at=_as_ts(buyer.created_at),
+        updated_at=_as_ts(buyer.updated_at),
+    )
+
+
+def contact_rows(buyer: Any) -> List[ContactRow]:
+    """The contact list exactly as it has always been written.
+
+    First occurrence wins and carries its own `i == 0` flag; empties are
+    skipped; duplicates collapse on the natural key. So `['', 'p', 'p']` is ONE
+    row, `p`, and NOT primary — the empty string sat in position 0. That reads
+    like a bug and is pinned as it stands: both stores have always written it
+    this way, and changing it would make every such buyer a difference the
+    daily comparison reports against the other store."""
+    rows: Dict[Tuple[Any, str, str], bool] = {}
+    for kind, values in (("phone", buyer.phones), ("email", buyer.emails)):
+        for i, value in enumerate(values or []):
+            value = _contact(value)
+            if value:
+                rows.setdefault((buyer.id, kind, value), i == 0)
+    return [ContactRow(b, k, v, p) for (b, k, v), p in rows.items()]
+
+
+class ParsedBuyers(NamedTuple):
+    """A batch, parsed once, for however many stores want it."""
+    rows: List[BuyerRow]
+    contacts: List[Tuple[Any, List[ContactRow]]]
+    # Ids only. The value itself is not logged: it is a date of birth, and
+    # where it is garbage it may be somebody's phone number typed into the
+    # wrong field.
+    unreadable_birthdays: List[Any]
+
+
+def parse_buyers(buyers: Iterable[Any]) -> ParsedBuyers:
+    """Every buyer in the batch as rows and contacts, plus which birthdays
+    could not be read. Pure: the writer decides how loudly to say so."""
+    rows: List[BuyerRow] = []
+    contacts: List[Tuple[Any, List[ContactRow]]] = []
+    unreadable: List[Any] = []
+    for buyer in buyers:
+        rows.append(buyer_row(buyer))
+        contacts.append((buyer.id, contact_rows(buyer)))
+        if birthday_is_unreadable(buyer.birthday):
+            unreadable.append(buyer.id)
+    return ParsedBuyers(rows, contacts, unreadable)
