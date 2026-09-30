@@ -165,7 +165,7 @@ class TestTheReadersComeFirst:
 
     def test_each_reader_is_the_parser_of_the_flag_it_names(self):
         """The list is what whoever removes a reader must change in the same
-        commit (OD-10's PR-C takes `KS_READ_SEARCH_INDEX` away): a parser
+        commit (should `KS_READ_SEARCH_INDEX` be retired, plan rev2 §5.4): a parser
         that no longer exists fails here, not by holding the chain on DuckDB
         for good behind a warning."""
         import ast

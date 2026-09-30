@@ -161,11 +161,13 @@ UNSWEPT_ROUTES = {
 # one taken away, which would let a refusal out as an exception — fails here
 # until somebody writes it down.
 #
-# The buyers step records a refusal and passes it on since chain 4's PR-3,
-# and the tick names it at the call (the plan's "record the failure and skip
-# that step"), so `/api/jobs` is no longer told a quiet step and the manual
-# route below reaches the 503. It used to stop in the step's own
-# `except Exception`, which answered both.
+# The buyers step records a refusal and passes it on since chain 4's PR-3:
+# the tick names it at the call (the plan's "record the failure and skip that
+# step") and the manual route below reaches the 503. It used to stop in the
+# step's own `except Exception`, which answered both. The tick's stats are
+# summed and carry no strings, so `/api/jobs` still shows a step with no
+# buyers; the refusal is in the log, in `buyer_sync`'s error class and in
+# `refusals()`.
 _BUYERS = "core/sync_service.py:SyncService.incremental_sync:named"
 _TOOLS = "core/chat_tools.py:execute_tool:named"
 ANSWERS = {

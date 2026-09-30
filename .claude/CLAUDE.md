@@ -1431,8 +1431,10 @@ raising):
   the two together.
 - A `KS_WRITE_BUYERS` nobody can read writes nowhere: the step refuses before
   KeyCRM is asked, both manual doors answer 409 before starting, the gender
-  rider reports `stood_down`, and `/health/detailed` leaves the buyer counts
-  out rather than show DuckDB's frozen ones.
+  rider reports `stood_down`, and `get_stats` — `/health/detailed`,
+  `/api/duckdb/stats` and the DuckDB block of `/api/health` — leaves the buyer
+  counts out rather than show DuckDB's frozen ones; the live count is
+  `bronze.buyers` (`pg_buyer_sync_read.count_buyers`).
 - `scripts/backfill_gender.py` writes Postgres only for a chain web has
   already latched (exit 4 otherwise): the latch is a marker web reads once and
   caches, so a script taking the first write would leave web writing DuckDB

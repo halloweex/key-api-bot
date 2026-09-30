@@ -196,9 +196,9 @@ def env_writes_postgres() -> bool:
 
 # The readers of the buyers that can still read DuckDB: `(flag, module,
 # parser)`. Imported and looked up when asked, inside that reader's own
-# `try`, so a module or a parser that is gone — OD-10's PR-C removes the
-# search index's DuckDB twin and `KS_READ_SEARCH_INDEX` with it — makes that
-# one reader unmet and says why, rather than raising out of the whole
+# `try`, so a module or a parser that is gone — should the search index's
+# DuckDB twin and `KS_READ_SEARCH_INDEX` be retired (plan rev2 §5.4, which
+# OD-10's #271 did not do) — makes that one reader unmet and says why, rather than raising out of the whole
 # question, which the registry would read as "could not be read" and hold the
 # chain on DuckDB for good. `tests/unit/test_pg_buyers_write.py` requires each
 # entry to exist and to be the parser of the flag it names, so whoever removes

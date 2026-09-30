@@ -3343,7 +3343,8 @@ class DuckDBStore(
         # No fallback — `core/pg_buyer_sync_read.py` says why, and where a
         # failure is contained instead. The switch with no address is the one
         # silent route to DuckDB left, and under KS_READ_FALLBACK=off it is
-        # refused like a failure, and contained in the same place.
+        # refused: the step records the refusal and passes it on to the tick
+        # or the route that called it (DN-20c).
         from core import read_fallback
         read_fallback.no_address("buyer_sync", pg_buyer_sync_read)
         if pg_buyer_sync_read.enabled() and pg_buyer_sync_read.available():

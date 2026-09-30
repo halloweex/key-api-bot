@@ -21,7 +21,9 @@ There is no fallback because a fallback's answer is exactly the frozen one this
 exists to escape. A failure is instead contained by the caller:
 `sync_missing_buyers` logs it and returns without moving the buyers watermark,
 so the hourly retry stands and `freshness_buyers` says so after 48 hours — and
-the offers and stocks syncs after it in the same tick still run.
+the offers and stocks syncs after it in the same tick still run. A read refused
+under `KS_READ_FALLBACK=off` is recorded the same way and then passed on: the
+tick names it and skips the step, and the manual route answers 503 (DN-20c).
 """
 from __future__ import annotations
 
