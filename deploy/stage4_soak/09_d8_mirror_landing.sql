@@ -22,6 +22,16 @@
 -- - the run carries `error_message`: it wrote a row and checked nothing.
 -- - findings on the derived tables: the two stores' Silver or Gold disagree.
 --   `app.data_quality_issues.description` names the columns.
+--
+-- A COMPARISON THAT COULD NOT LOOK IS UNKNOWN, NOT A DISAGREEMENT
+-- ClickHouse's Gold comparison files on these tables too, and three of its
+-- findings say only that it did not compare: `gold_values_unwatched` (OD-08
+-- (a): KS_CH_URL unset, a failed ship or read-back, two empty Golds) and the
+-- two WARNs about ClickHouse itself beside it. Counted as findings they read
+-- "the two stores' Silver or Gold disagree" about a run in which one engine
+-- saw nothing. So with nothing else found they make the run UNKNOWN; any real
+-- finding beside them is still a FAIL, since a disagreement outranks a blind
+-- spot. A test holds the list to every WARN `reconcile_clickhouse` files.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
@@ -60,7 +70,11 @@ runs AS (
       AND r.started_at >= slot.starts - interval '5 minutes'
       AND r.started_at <= clock.now
 ),
-findings AS (
+blind_checks AS (
+    SELECT unnest(ARRAY['gold_values_unwatched', 'ch_silver_sync_failed',
+                        'ch_silver_unreachable']) AS check_name
+),
+derived AS (
     SELECT i.run_id, i.check_name, i.table_name, i.severity, i.count
     FROM app.data_quality_issues i
     JOIN runs USING (run_id)
@@ -70,6 +84,14 @@ findings AS (
                            'gold_missing_cells', 'gold_orphan_cells',
                            'gold_cell_values', 'customer_profile_mismatch')
 ),
+findings AS (
+    SELECT d.* FROM derived d
+    WHERE d.check_name NOT IN (SELECT check_name FROM blind_checks)
+),
+blind AS (
+    SELECT d.* FROM derived d
+    WHERE d.check_name IN (SELECT check_name FROM blind_checks)
+),
 agg AS (
     SELECT (SELECT count(*) FROM runs) AS n_runs,
            (SELECT count(*) FROM runs WHERE error_message IS NOT NULL) AS errored,
@@ -78,7 +100,11 @@ agg AS (
            (SELECT count(*) FROM findings) AS n_findings,
            (SELECT string_agg(format('%s %s on %s (%s)', check_name, severity, table_name, count),
                               ', ' ORDER BY check_name, table_name)
-              FROM findings) AS listed
+              FROM findings) AS listed,
+           (SELECT count(*) FROM blind) AS n_blind,
+           (SELECT string_agg(format('%s %s', check_name, severity), ', '
+                              ORDER BY check_name)
+              FROM blind) AS blind_listed
 )
 SELECT 'D8 mirror_landing (derived)'::text AS "check",
        CASE
@@ -86,6 +112,7 @@ SELECT 'D8 mirror_landing (derived)'::text AS "check",
            WHEN dq_copy.last_ok_at < slot.starts + interval '15 minutes' THEN 'UNKNOWN'
            WHEN agg.n_runs = 0 THEN 'FAIL'
            WHEN agg.errored > 0 OR agg.n_findings > 0 THEN 'FAIL'
+           WHEN agg.n_blind > 0 THEN 'UNKNOWN'
            ELSE 'PASS'
        END AS verdict,
        CASE
@@ -100,6 +127,8 @@ SELECT 'D8 mirror_landing (derived)'::text AS "check",
            WHEN agg.errored > 0 THEN left(agg.errors, 400)
            WHEN agg.n_findings > 0 THEN left(format('%s finding(s) on the derived tables: %s',
                                                     agg.n_findings, agg.listed), 400)
+           WHEN agg.n_blind > 0 THEN left(format('ClickHouse did not compare Gold (%s): the comparisons of the two stores found nothing, and nothing re-aggregated Gold in a second engine; re-run after the next dq_mirror_landing',
+                                                 agg.blind_listed), 400)
            ELSE format('%s run(s) since %s Kyiv, no error, zero findings on the derived tables',
                        agg.n_runs, to_char(slot.starts AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
        END AS detail

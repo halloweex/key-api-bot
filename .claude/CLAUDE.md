@@ -865,7 +865,17 @@ nothing to forgive. That cost `dq_reconciliation` every Sunday.
 
 `BackgroundScheduler.start()` queues a one-off catch-up for any check whose
 last *successful* verdict is older than its cadence (`CATCHUP_CHECKS`), which
-also covers deploys landing on a cron instant.
+also covers deploys landing on a cron instant. For `dq_reconciliation` that is
+the oldest of the layers it writes in this process (`CATCHUP_SIBLING_LAYERS`:
+`reconciliation_pg` with `KS_PG_DSN`, `reconciliation_ch` with `KS_CH_URL` as
+well — a host without one never writes the layer, and would otherwise re-fetch
+KeyCRM on every start). Every layer the canary pages on is read by a catch-up
+whose limit (26 h) is under the page's (30 h), so the first probe after a
+restart pages only a layer already past 30 h; a test holds both halves. A
+catch-up cannot hold back a page that is owed: a run that compared nothing —
+the ClickHouse arm against a copy over 3 h old included — is a failed run and
+moves no age, so while ClickHouse stays down each restart past 26 h costs one
+KeyCRM fetch and the page still fires at 30 h.
 
 `weekly_report` solves the same problem a different way: it ticks **daily** and
 reports the last *complete* Monday–Sunday week, recording each delivery in
@@ -1203,7 +1213,10 @@ Cap what rebounds; only delete what stays deleted.
   зерно (silver без позиций), вотермарочное исключение считается в PG bronze
   (у клика нет `updated_at` — без этого ~1 400 force-переписанных в 05:15
   заказов были бы фантомами), копия старше 3 ч гейтится
-  (`ch_reconcile_pending`), а не обвиняется.
+  (`ch_reconcile_pending`), а не обвиняется — и пишется прогоном без
+  вердикта (`error_message`), не успехом: до ревью OD-08 такой прогон
+  сбрасывал возраст слоя, и лежащий ClickHouse пейджился не больше одного
+  раза.
 - **Агент-диагност** (трек Б): доставленный свежий инцидент кладёт задачу в
   `data/alert-tasks/pending/` (sticky 1777 — пишут контейнеры, дренит root);
   systemd path-unit на хосте запускает headless `claude -p` с ранбуком
@@ -1270,7 +1283,17 @@ Cap what rebounds; only delete what stays deleted.
   which is where its age comes from — so a DuckDB failure silences it too
   and, since DN-21, pages under both keys. Decoupling it belongs with step 13.
   A missing block or a layer that never succeeded both count as failures.
-  `reconciliation_ch` is published and digested but not paged on.
+  `reconciliation_ch` joins them at 30 h since OD-08 (a) (2026-09-30), which
+  made ClickHouse required for the parallel period: same job, same dependence
+  on the DuckDB extraction, and a web without `KS_CH_URL` never writes it and
+  pages `dq_never:reconciliation_ch`. A copy too old to reconcile (over 3 h)
+  is gated, and written with `error_message` beside its `ch_reconcile_pending`:
+  it compared nothing, so it moves no age. Written as a success, as it was
+  until the OD-08 review, it reset the age every morning ClickHouse stayed
+  down, and the page was announced resolved with ClickHouse still down. The
+  history that watch rests on is `deploy/stage4_soak/22_reconciliation_ch_history.sql`,
+  DN-21's bar for `reconciliation_pg` (20) applied to this arm, read the way
+  the canary now reads it.
 - **Every message is signed with `KS_INSTANCE`** (default `gethostname()`,
   `prod-vps` in compose on both services). Applied by the two HTTP transports
   and by the bot's Application path — three call sites, so nothing that merely
@@ -2035,8 +2058,9 @@ derived, переезд стоит одну пересборку.
 нет и TRUNCATE+INSERT по живой таблице дал бы читателю пустую), и суточная
 сверка на слое `mirror_landing`.
 
-- **Включается `KS_CH_URL`** (`http://ks-clickhouse:8123`); без него шиппер и
-  сверка молча стоят — хост без ClickHouse работает без изменений. Пароль
+- **Включается `KS_CH_URL`** (`http://ks-clickhouse:8123`); без него часовой
+  шиппер стоит, а суточная сверка с OD-08 (a) не молчит: слой
+  `mirror_landing` получает `gold_values_unwatched` (см. шаги 5–6). Пароль
   `ks_app` (пользователь уже заведён платформой с правами на `bronze/silver/
   gold.*`) — `KS_CH_PASSWORD` из `.env`; кредензии едут заголовками, не в URL.
 - **Счётчик до обмена**: короткая заливка в staging не подменяет живую
@@ -2047,8 +2071,8 @@ derived, переезд стоит одну пересборку.
   дело вотермарки (`meta.mirror_state`, строка `clickhouse.gold_daily_revenue`);
   сверка меряет верность копии. Допуск ноль **включая** `avg_order_value` —
   цент прощается двум движкам, которые считают, а не копии.
-- Недоступный ClickHouse — WARN-находка, не исключение: опциональное
-  хранилище не должно валить слой обязательных сравнений.
+- Недоступный ClickHouse — WARN-находка, не исключение: одно хранилище не
+  должно валить слой остальных сравнений. Рядом с ней — `gold_values_unwatched`.
 - Проверено против настоящего ClickHouse 24.8.14.39 (версия прода): 10 950
   синтетических ячеек — отгрузка 0.28 с, чтение 0.06 с, чистый круг — ноль
   находок; три подложенных дефекта (цент, потерянная и выдуманная ячейка)
@@ -2080,6 +2104,33 @@ PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движк
 расхождений**, включая 374 дня, где uniqExact-свёртка законно не равна сумме
 мелких строк; сверка 0.7 с; архив — 12 000 унаследовано + 40 инкрементом,
 удалённая строка поймана и находка не исчезает при повторной сверке.
+
+**ClickHouse обязателен на параллельный период** (OD-08 (a), 30.09.2026).
+После шага 13 это единственная независимая переагрегация Gold: `reconcile_gold`
+стоит, а `pg_gold_internal_check` спрашивает Postgres о нём самом. Поэтому
+прогон, в котором двух Gold не сравнили, говорит это одним именем —
+`gold_values_unwatched` на слое `mirror_landing`: без `KS_CH_URL`; при сбое
+отгрузки или деривации (своего гейта возраста у этой сверки нет — она
+отгружает то, что сравнивает, так что сбой отгрузки и есть устаревшая копия);
+при сбое чтения обратно; при двух пустых Gold; при исключении или прогоне,
+не дошедшем до сверки — эти два файлит сам джоб, сверке нечего вернуть.
+**WARN, пока Gold DuckDB ещё сравнивается с Postgres, CRITICAL — когда нет**:
+`warehouse_checks_stand_down()`, тот же предикат, на котором джоб снимает
+`reconcile_gold` (Postgres деривит один, или путь назад держит сравнения), а
+нечитаемый предикат — тоже CRITICAL. Такой прогон держит `ch_silver_roundtrip`
+и `ch_engines_gold_*` как были, а не объявляет их решёнными; и архив так же:
+прогон, не посчитавший бакеты (`ch_history_unreachable`, `[]` без
+`KS_CH_URL`, исключение), держит `ch_history_buckets`, который закрывает
+только человек (`history_unverified_conditions`). `KS_CH_URL` уже в условиях
+шага 13 (`ch_url`); `reconciliation_ch` — в канарейке. В проде сегодня сверка
+идёт каждое утро, так что находки нет, а будь она — WARN в дайджест, не
+страница; а утро, на котором ClickHouse не сверили с KeyCRM, пейджит
+канарейка через `reconciliation_ch` (см. «How a failure reaches a human»).
+Что за 14 дней такого утра не было, говорит не снимок `/api/health`, а
+`deploy/stage4_soak/22_reconciliation_ch_history.sql` — его прогоняют на хосте
+до мержа. Соак D8 читает прогон, где на производных таблицах только «ClickHouse
+не сравнивал» (`gold_values_unwatched` и WARN'ы самой сверки), как UNKNOWN, а
+не как расхождение хранилищ.
 
 **База `history` в прод-CH заведена и работает** (проверено 17.09.2026;
 до этого здесь стояло «не существует», и запись читалась как «шаг 6 ещё не
@@ -2811,7 +2862,10 @@ rebuild-silver run the Postgres derivation alone. The five DuckDB integrity
 checks over Silver, Gold and UTM stand down and the Postgres twins stand in;
 in `dq_mirror_landing` `reconcile_silver`, `reconcile_order_utm` and
 `reconcile_gold` stand down and `pg_gold_internal_check` asks
-`gold_rollup_mismatch` in `reconcile_gold`'s place. The first start records
+`gold_rollup_mismatch` in `reconcile_gold`'s place. ClickHouse's own
+derivation is then the only independent check of Gold, so a run in which it
+did not compare files `gold_values_unwatched` CRITICAL and pages (OD-08 (a)).
+The first start records
 `sync_metadata.warehouse_writer` in DuckDB and closes the `warehouse` alert
 group once — its only resolver was the DuckDB tick — without a validating
 tick. **One precondition unmet and it runs as `duckdb`** (OD-09 (b)):
@@ -3308,4 +3362,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-09-30*
+*Last updated: 2026-10-01*

@@ -185,6 +185,31 @@ async def ship_history(*, chunk: int = 50_000) -> Dict[str, Any]:
         return {"error": detail}
 
 
+# What only the comparison below re-examines. `ch_history_buckets` resolves
+# when "a human repairs the archive copy" — and until the OD-08 review, the
+# first run that could not read the copy announced it resolved instead:
+# without KS_CH_URL this returns [], and on an outage `ch_history_unreachable`
+# (WARN), neither of which is a CRITICAL, so `resolve_group` saw nothing
+# still firing. `ch_silver.GOLD_WATCH_CONDITIONS` is the same hold, one call
+# up in the same job.
+HISTORY_WATCH_CONDITIONS: Tuple[str, ...] = ("ch_history_buckets",)
+HISTORY_UNREACHABLE = "ch_history_unreachable"
+
+
+def history_unverified_conditions(
+    issues: Sequence[IntegrityIssue], *, compared: bool,
+) -> List[str]:
+    """The archive conditions a `dq_mirror_landing` run could not re-examine
+    — `_resolve_dq_layer`'s `unverified`. Held when the comparison raised or
+    was never reached (`compared` False), stood down without KS_CH_URL, or
+    could not read the copy. Only a run that counted both sides' buckets may
+    announce `ch_history_buckets` resolved."""
+    if (not compared or not configured()
+            or any(i.check_name == HISTORY_UNREACHABLE for i in issues)):
+        return list(HISTORY_WATCH_CONDITIONS)
+    return []
+
+
 async def reconcile_ch_history(*, max_samples: int = 10) -> List[IntegrityIssue]:
     """Bucketed counts below ClickHouse's own high-water mark, tolerance zero."""
     from core.pg import get_pool

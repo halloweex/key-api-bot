@@ -35,7 +35,9 @@ api_key() { grep -m1 '^ANTHROPIC_API_KEY=' "$ENV_FILE" | cut -d= -f2- | tr -d '"
 family_for() {
     case "$1" in
         warehouse:*)                          echo warehouse ;;
-        mirror_*|dq_*|ch_*|order_versions_*|freshness_*) echo mirror ;;
+        # gold_values_unwatched is the ClickHouse Gold comparison saying it
+        # did not run (OD-08 (a)): the mirror runbook knows ClickHouse.
+        mirror_*|dq_*|ch_*|gold_values_unwatched|order_versions_*|freshness_*) echo mirror ;;
         disk:*)                               echo disk ;;
         memory:*)                             echo memory ;;
         health_*|cert_*|alerting_*)           echo health ;;

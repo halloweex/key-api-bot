@@ -33,6 +33,8 @@ def _healthy_payload():
             "mirror_landing": {"last_success_at": "2026-08-08T07:30:00+03:00", "age_seconds": 43200},
             # The same 05:30 job's Postgres half (DN-21).
             "reconciliation_pg": {"last_success_at": "2026-08-08T05:30:00+03:00", "age_seconds": 50400},
+            # …and its ClickHouse half (OD-08 (a)).
+            "reconciliation_ch": {"last_success_at": "2026-08-08T05:30:00+03:00", "age_seconds": 50400},
         },
         # The Postgres copy of landing. Absent, `run_canary` reports
         # `mirror_block_missing` — that is the point of the block, and it is
@@ -148,7 +150,8 @@ def test_dq_freshness_passes_when_all_layers_recent():
     failures, ages = canary.check_dq_freshness(_healthy_payload())
     assert failures == []
     assert ages == {"integrity": 1800, "reconciliation": 52200,
-                    "mirror_landing": 43200, "reconciliation_pg": 50400}
+                    "mirror_landing": 43200, "reconciliation_pg": 50400,
+                    "reconciliation_ch": 50400}
 
 
 def test_dq_freshness_flags_stale_reconciliation():
@@ -178,7 +181,7 @@ def test_dq_freshness_missing_layer_is_a_failure():
     failures, ages = canary.check_dq_freshness(payload)
     assert sorted(k for k, _ in failures) == [
         "dq_missing:mirror_landing", "dq_missing:reconciliation",
-        "dq_missing:reconciliation_pg",
+        "dq_missing:reconciliation_ch", "dq_missing:reconciliation_pg",
     ]
     assert ages["reconciliation"] is None
 
@@ -190,11 +193,13 @@ def test_dq_freshness_never_succeeded_is_a_failure():
         reconciliation={"last_success_at": None, "age_seconds": None},
         mirror_landing={"last_success_at": None, "age_seconds": None},
         reconciliation_pg={"last_success_at": None, "age_seconds": None},
+        reconciliation_ch={"last_success_at": None, "age_seconds": None},
     )
     failures, _ = canary.check_dq_freshness(payload)
     assert sorted(k for k, _ in failures) == [
         "dq_never:integrity", "dq_never:mirror_landing",
-        "dq_never:reconciliation", "dq_never:reconciliation_pg",
+        "dq_never:reconciliation", "dq_never:reconciliation_ch",
+        "dq_never:reconciliation_pg",
     ]
 
 

@@ -103,6 +103,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "dq_missing:reconciliation_pg": _c("the layer reports freshness again"),
     "dq_never:reconciliation_pg": _c("the layer's first successful run"),
     "dq_stale:reconciliation_pg": _c("a successful run inside the age limit"),
+    # And the ClickHouse half of the same job, which pages since OD-08 (a)
+    # made ClickHouse required for the parallel period.
+    "dq_missing:reconciliation_ch": _c("the layer reports freshness again"),
+    "dq_never:reconciliation_ch": _c("the layer's first successful run"),
+    "dq_stale:reconciliation_ch": _c("a successful run inside the age limit"),
     "mirror_block_missing": _c("health payload carries a mirrors block again"),
     # KS_PG_DERIVE set to a value web did not understand (fell back to piggyback).
     "derivation_mode_invalid": _c("web restarts with a valid KS_PG_DERIVE"),
@@ -361,6 +366,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "ch_engines_gold_mismatch": _c("the engines' aggregations agree again"),
     "ch_history_unreachable": _c("ClickHouse answers again"),
     "ch_history_buckets": _c("a human repairs the archive copy"),
+    # OD-08 (a): the one independent re-aggregation of Gold did not run —
+    # KS_CH_URL unset, a failed ship or read-back, a raise. WARN while DuckDB's
+    # Gold is still compared, CRITICAL once it is not.
+    "gold_values_unwatched": _c("a mirror_landing run in which ClickHouse compares Gold again"),
 
     # ── data-quality findings: the order-version archive (report-only) ──
     "order_versions_stalled": _c("a version row lands again"),

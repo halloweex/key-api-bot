@@ -44,6 +44,11 @@ FILES = sorted(SQL_DIR.glob("*.sql"))
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
 VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on": "0"}
 RUN_AS_OWNER = "-- soak:run-as ks_app"
+# The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
+HISTORY_CHECKS = (
+    ("20_reconciliation_pg_history.sql", "reconciliation_pg"),
+    ("22_reconciliation_ch_history.sql", "reconciliation_ch"),
+)
 
 KYIV = ZoneInfo("Europe/Kyiv")
 # A Wednesday, noon in Kyiv: inside no heavy-lock window, after the 07:30 run.
@@ -110,17 +115,65 @@ class TestTheFiles:
     def test_only_documented_variables(self, path):
         render(path.name)
 
-    def test_the_history_check_measures_against_the_canarys_limit(self):
-        """20 asks whether the canary would have paged, so its limit is the
-        canary's: a copy that drifted would certify a history the page judges
-        differently."""
+    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
+    def test_the_history_check_measures_against_the_canarys_limit(self, name, layer):
+        """20 and 22 ask whether the canary would have paged, so the limit is
+        the canary's: a copy that drifted would certify a history the page
+        judges differently."""
         from bot.canary import DQ_MAX_AGE_S
 
-        sql = _uncommented(
-            (SQL_DIR / "20_reconciliation_pg_history.sql").read_text(encoding="utf-8"))
+        sql = _uncommented((SQL_DIR / name).read_text(encoding="utf-8"))
         found = re.findall(r"interval\s+'(\d+)\s+hours'\s+AS\s+canary_max_age", sql)
         assert len(found) == 1, found
-        assert int(found[0]) * 3600 == DQ_MAX_AGE_S["reconciliation_pg"]
+        assert int(found[0]) * 3600 == DQ_MAX_AGE_S[layer]
+        assert re.findall(r"r\.layer = '(\w+)'", sql) == [layer]
+
+    def test_the_two_history_checks_differ_only_in_what_a_success_is(self):
+        """22 is 20 for the ClickHouse arm (OD-08 review): one body, so a fix
+        to the silence arithmetic in one cannot leave the other behind.
+        `layer_runs` is the one CTE allowed to differ, and the label the one
+        literal. Literals are compared, not blanked: the limits live in them.
+        Mutation: change `'75 minutes'` in either file and this fails."""
+        def without_layer_runs(name, layer):
+            code = _uncommented((SQL_DIR / name).read_text(encoding="utf-8"))
+            label = f"'{layer} history'"
+            assert code.count(label) == 1, name
+            code = code.replace(label, "'<layer> history'")
+            start = code.index("layer_runs AS (")
+            depth, i = 0, code.index("(", start)
+            while True:
+                depth += {"(": 1, ")": -1}.get(code[i], 0)
+                i += 1
+                if depth == 0:
+                    break
+            assert code[i] == ",", code[i:i + 20]
+            return re.sub(r"\s+", " ", code[:start] + code[i + 1:]).strip()
+
+        assert without_layer_runs(*HISTORY_CHECKS[0]) == \
+            without_layer_runs(*HISTORY_CHECKS[1])
+
+    def test_d8s_blind_checks_are_every_warn_the_clickhouse_comparison_files(self):
+        """D8 reads a finding that only says ClickHouse did not compare as
+        UNKNOWN, not as a disagreement (OD-08 review). The list is derived:
+        `gold_values_unwatched` and every WARN `reconcile_clickhouse` files
+        itself — each is ClickHouse saying it could not look."""
+        import ast
+        import inspect
+
+        from core import ch_silver
+
+        tree = ast.parse(inspect.getsource(ch_silver.reconcile_clickhouse))
+        warns = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                kws = {k.arg: k.value for k in node.keywords}
+                name, sev = kws.get("check_name"), kws.get("severity")
+                if (isinstance(name, ast.Constant) and isinstance(sev, ast.Attribute)
+                        and sev.attr == "WARN"):
+                    warns.add(name.value)
+        sql = _uncommented((SQL_DIR / "09_d8_mirror_landing.sql").read_text(encoding="utf-8"))
+        block = re.search(r"blind_checks AS \((.*?)\n\),", sql, flags=re.S).group(1)
+        assert set(re.findall(r"'(\w+)'", block)) == warns | {ch_silver.GOLD_UNWATCHED}
 
 
 # ── against a migrated Postgres ───────────────────────────────────────────────
@@ -494,10 +547,11 @@ class TestStaleEvidenceIsUnknown:
         assert v == "UNKNOWN" and "failing" in detail, detail
 
     @pytest.mark.asyncio
-    async def test_a_copy_two_hours_old_makes_the_history_unknown(self, pool):
+    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
+    async def test_a_copy_two_hours_old_makes_the_history_unknown(self, pool, name, layer):
         async with scenario(pool) as conn:
             await mirror_state(conn, "app.data_quality_runs", ok_at=ago(hours=2))
-            v, detail = await verdict(conn, "20_reconciliation_pg_history.sql")
+            v, detail = await verdict(conn, name)
         assert v == "UNKNOWN", detail
 
     @pytest.mark.asyncio
@@ -621,7 +675,7 @@ class TestReconciliationPgHistory:
     Every scenario seeds a run on the day before the window opens, so no row
     another test committed can be the one that opens its first silence."""
 
-    FILE = "20_reconciliation_pg_history.sql"
+    FILE, LAYER = HISTORY_CHECKS[0]
     FIRST_RUN_ID = 990_000_200
 
     @staticmethod
@@ -637,10 +691,10 @@ class TestReconciliationPgHistory:
         return [s for s in starts if s is not None]
 
     async def seed(self, conn, starts, *, failed=(), copied=None):
-        """A reconciliation_pg run per start, in order, `failed` ones errored,
+        """A run of the layer per start, in order, `failed` ones errored,
         and a copy of the journal taken at `copied` (ten minutes ago)."""
         for n, started_at in enumerate(sorted(set(starts) | set(failed))):
-            await dq_run(conn, self.FIRST_RUN_ID + n, layer="reconciliation_pg",
+            await dq_run(conn, self.FIRST_RUN_ID + n, layer=self.LAYER,
                          started_at=started_at,
                          error="boom" if started_at in failed else None)
         await mirror_state(conn, "app.data_quality_runs",
@@ -717,7 +771,7 @@ class TestReconciliationPgHistory:
             await self.seed(conn, self.every_morning(moved={5: self.at(5, 11, 0)}))
             await conn.execute(
                 "UPDATE app.data_quality_runs SET ended_at = started_at + interval '45 minutes'"
-                " WHERE layer = 'reconciliation_pg' AND started_at = $1", self.at(5, 11, 0))
+                " WHERE layer = $2 AND started_at = $1", self.at(5, 11, 0), self.LAYER)
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
         assert "silent for 30.3 h, from 30.05 05:30 to 31.05 11:45 Kyiv" in detail, detail
@@ -732,7 +786,7 @@ class TestReconciliationPgHistory:
             await self.seed(conn, self.every_morning(moved={5: self.at(5, 11, 50)}))
             await conn.execute(
                 "UPDATE app.data_quality_runs SET ended_at = started_at + interval '45 minutes'"
-                " WHERE layer = 'reconciliation_pg' AND started_at = $1", self.at(6))
+                " WHERE layer = $2 AND started_at = $1", self.at(6), self.LAYER)
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
         assert "silent for 30.3 h, from 30.05 05:30 to 31.05 11:50 Kyiv" in detail, detail
@@ -802,7 +856,7 @@ class TestReconciliationPgHistory:
             await self.seed(conn, self.every_morning())
             await conn.execute(
                 "UPDATE app.data_quality_runs SET critical_count = 2"
-                " WHERE layer = 'reconciliation_pg' AND started_at = $1", self.at(10))
+                " WHERE layer = $2 AND started_at = $1", self.at(10), self.LAYER)
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
         assert "CRITICAL on 26.05" in detail, detail
@@ -818,6 +872,101 @@ class TestReconciliationPgHistory:
             v, detail = await verdict(conn, self.FILE)
         assert v == "UNKNOWN", detail
         assert "is 120 min old (limit 75)" in detail, detail
+
+
+@needs_pg
+class TestReconciliationChHistory(TestReconciliationPgHistory):
+    """Every scenario above, again, for the ClickHouse arm (OD-08 review):
+    22 is 20 with one CTE changed, and these prove the body behaves the same
+    on the other layer. Then what differs: a run that gated a stale copy."""
+
+    FILE, LAYER = HISTORY_CHECKS[1]
+
+    async def gated(self, conn, started_at, run_id):
+        """A run as the arm wrote a stale-copy gate before the review: no
+        error, and a WARN `ch_reconcile_pending` beside it."""
+        await dq_run(conn, run_id, layer=self.LAYER, started_at=started_at)
+        await dq_issue(conn, run_id, "ch_reconcile_pending")
+
+    @pytest.mark.asyncio
+    async def test_a_gated_run_does_not_end_a_silence(self, pool):
+        """05:30 on 30.05, then gated at 05:30 on 31.05 and nothing until
+        12:00: the canary shipped with this check would have paged from 11:30,
+        and 31.05 has no run that compared. Mutation: drop the NOT EXISTS
+        from 22's `layer_runs` and this reads PASS."""
+        async with scenario(pool) as conn:
+            await self.seed(conn, self.every_morning(moved={5: self.at(5, 12, 0)}))
+            await self.gated(conn, self.at(5), self.FIRST_RUN_ID + 900)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "silent for 30.5 h, from 30.05 05:30 to 31.05 12:00 Kyiv" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_day_whose_only_run_was_gated_has_none(self, pool):
+        async with scenario(pool) as conn:
+            await self.seed(conn, self.every_morning(moved={5: None}))
+            await self.gated(conn, self.at(5), self.FIRST_RUN_ID + 900)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "no successful run on 31.05" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_gate_finding_on_another_layer_is_not_this_ones(self, pool):
+        """The NOT EXISTS reads the run's own findings, not the name anywhere."""
+        async with scenario(pool) as conn:
+            await self.seed(conn, self.every_morning())
+            await dq_run(conn, self.FIRST_RUN_ID + 900, layer="mirror_landing",
+                         started_at=self.at(5, 7, 30))
+            await dq_issue(conn, self.FIRST_RUN_ID + 900, "ch_reconcile_pending")
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+
+
+@needs_pg
+class TestD8ABlindComparisonIsNotADisagreement:
+    """OD-08 review, fifth finding: `gold_values_unwatched` is filed on
+    `gold.daily_revenue`, which D8 counted as a disagreement between the two
+    stores and marked FAIL. It says only that ClickHouse did not compare; the
+    soak's rule for a check that could not see is UNKNOWN. Mutation: drop the
+    `blind` branch of the verdict and the first two read FAIL."""
+
+    TODAY_0730 = datetime(2030, 6, 5, 7, 30, tzinfo=KYIV)
+
+    async def _run_with(self, conn, *findings):
+        await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
+        for name, table in findings:
+            await dq_issue(conn, DQ_RUN_IDS[0], name, table=table)
+        await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
+
+    @pytest.mark.asyncio
+    async def test_no_ks_ch_url_is_unknown_not_a_disagreement(self, pool):
+        """The reviewer's reproduction: the one finding, on gold.daily_revenue."""
+        async with scenario(pool) as conn:
+            await self._run_with(conn, ("gold_values_unwatched", "gold.daily_revenue"))
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "UNKNOWN", detail
+        assert "ClickHouse did not compare Gold (gold_values_unwatched WARN)" in detail
+        assert "finding(s) on the derived tables" not in detail
+
+    @pytest.mark.asyncio
+    async def test_a_clickhouse_outage_is_unknown(self, pool):
+        """An outage files the WARN about ClickHouse on silver.orders beside it."""
+        async with scenario(pool) as conn:
+            await self._run_with(conn, ("ch_silver_unreachable", "silver.orders"),
+                                 ("gold_values_unwatched", "gold.daily_revenue"))
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "UNKNOWN", detail
+        assert "ch_silver_unreachable WARN, gold_values_unwatched WARN" in detail
+
+    @pytest.mark.asyncio
+    async def test_a_disagreement_beside_a_blind_spot_still_fails(self, pool):
+        async with scenario(pool) as conn:
+            await self._run_with(conn, ("gold_cell_values", "gold.daily_revenue"),
+                                 ("gold_values_unwatched", "gold.daily_revenue"))
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "FAIL", detail
+        assert "1 finding(s) on the derived tables: gold_cell_values" in detail
+        assert "gold_values_unwatched" not in detail
 
 
 @needs_pg
