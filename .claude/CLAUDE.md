@@ -2606,9 +2606,7 @@ preview, and its CRITICALs are exactly what `--execute` refuses on.
 
 ```bash
 cd /opt/key-api-bot && docker compose stop web bot
-docker run --rm --name chain-copy-back \
-    -v /opt/key-api-bot/data:/app/data --env-file /opt/key-api-bot/.env \
-    --network key-api-bot_default halloweex/keycrm-web:latest \
+docker compose run --rm --no-deps -T web \
     python /app/scripts/chain_copy_back.py inventory --handover
 # BEFORE A FLIP: first, with web still up, /api/health must show
 #   write_chains.pg_inventory_write.preflight.ok = true (DN-24). Then this:
@@ -2629,10 +2627,18 @@ docker run --rm --name chain-copy-back \
 #      shipping the chain's tables again.
 ```
 
-`--network key-api-bot_default` is observed, not derived: on 2026-09-18 web and
-ks-postgres were both on it (and on `ks-data`). Postgres has no `ports:` key
-and the DSN names the compose service alias, which the weekly-compact sidecar
-never needed. At production's size — 162,883 history rows, 56,277 movements —
+**Run it as the web service, never as a bare `docker run --env-file .env`.**
+`KS_PG_DSN` is not in `.env`: `docker-compose.yml` builds it in web's
+`environment:` block, with the password interpolated from `.env`. The first
+form of this runbook passed `--env-file .env` and a hand-picked network, and at
+chain 1's flip (2026-09-30) the handover died on `KS_PG_DSN is not set` — safely,
+exit 1 before anything was written, web back in 8 s. `docker compose run
+--rm --no-deps -T web` gives the one-off exactly web's environment, volumes and
+networks, so the DSN, `./data` and the route to Postgres are web's own and not
+a second copy that can drift. On flip day pass the flip time to the soak
+(`SOAK_INVENTORY_FLIP_AT='<latch time>' deploy/stage4_soak.sh`): without it I1
+reads the last pre-flip copy as a lapse for 75 minutes, by construction. At
+production's size — 162,883 history rows, 56,277 movements —
 the whole copy-back is ~9 s on a laptop, because rows go in 1,000 to a
 statement. `executemany` runs once per row in DuckDB's client: about eight
 minutes for the history alone with no memory limit, and under the store's own
