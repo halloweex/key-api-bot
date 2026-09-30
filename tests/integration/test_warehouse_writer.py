@@ -75,6 +75,33 @@ async def _reset(pool):
             [*DERIVED, "meta.derivation_signal", "meta.derivation_runs"])
 
 
+async def _expenses_history(pool, done):
+    """`bronze.expenses`' backfill as the switch will read it: `True` done,
+    `False` a row with none, `None` no row at all — a host the landing mirror
+    never reached."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM meta.mirror_state WHERE table_name = 'bronze.expenses'")
+        if done is not None:
+            await conn.execute(
+                "INSERT INTO meta.mirror_state (table_name, backfilled_at)"
+                " VALUES ('bronze.expenses', CASE WHEN $1 THEN now() END)", done)
+
+
+async def _put_back(pool, row):
+    """The `bronze.expenses` row as the test found it — other tests gate
+    their reads on it."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM meta.mirror_state WHERE table_name = 'bronze.expenses'")
+        if row is not None:
+            columns = list(row.keys())
+            await conn.execute(
+                f"INSERT INTO meta.mirror_state ({', '.join(columns)}) VALUES "
+                f"({', '.join(f'${i}' for i in range(1, len(columns) + 1))})",
+                *row.values())
+
+
 def _met_env(monkeypatch):
     from core import warehouse_cutover as wc
 
@@ -190,6 +217,11 @@ async def world(monkeypatch, tmp_path):
 
     pool = await asyncpg.create_pool(DSN, min_size=2, max_size=8)
     await _reset(pool)
+    # Every precondition met includes the expenses history, read for real.
+    async with pool.acquire() as conn:
+        history = await conn.fetchrow(
+            "SELECT * FROM meta.mirror_state WHERE table_name = 'bronze.expenses'")
+    await _expenses_history(pool, True)
     store = DuckDBStore(db_path=tmp_path / "dn29.duckdb")
     await store.connect()
 
@@ -230,6 +262,7 @@ async def world(monkeypatch, tmp_path):
     w.restart()
     await store.close()
     await _reset(pool)
+    await _put_back(pool, history)
     await pool.close()
 
 
@@ -353,6 +386,34 @@ class TestTheWayBack:
 
 class TestAMissingPrecondition:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("done", [False, None], ids=["not_backfilled", "no_row"])
+    async def test_expenses_without_their_history_keep_duckdb(self, world, done):
+        """`_expenses_run` routes the /expenses history statements on this
+        row whatever KS_READ_EXPENSES says, so the switch waits for it — read
+        for real, at the start on the cutover's own connection and on the
+        status page through the pool."""
+        from bot.canary import check_warehouse_preconditions
+        from core import warehouse_cutover as wc
+        from web.routes.api.health import _warehouse_writer_mode
+
+        await _expenses_history(world.pool, done)
+        await world.boot()
+
+        assert wc.mode() == wc.DUCKDB and wc.duckdb_derives()
+        block = _warehouse_writer_mode()
+        assert block["preconditions_unmet"] == ["expenses_backfilled"]
+        (unmet,) = wc.preconditions_unmet()
+        assert "backfilled_at is NULL for bronze.expenses" in unmet.detail
+        assert [k for k, _ in check_warehouse_preconditions(
+            {"warehouse_writer_mode": block})] == ["warehouse_preconditions_unmet"]
+        ready = await wc.readiness()
+        assert [u["key"] for u in ready["unmet"]] == ["expenses_backfilled"]
+
+        await _expenses_history(world.pool, True)
+        ready = await wc.readiness()
+        assert ready["unmet"] == [] and ready["mode"] == "duckdb"
+
+    @pytest.mark.asyncio
     async def test_a_revision_this_build_does_not_require_keeps_duckdb(
         self, world, monkeypatch,
     ):
@@ -441,5 +502,8 @@ class TestAMissingPrecondition:
         monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
         with patch.object(asyncpg.connection.Connection, "fetchval", lost_once):
             configure_modes()
-        assert len(reads) == 2, reads
+        # The revision twice; the expenses history once, after the answer.
+        history = (wc._EXPENSES_HISTORY_SQL,)
+        assert len([r for r in reads if r != history]) == 2, reads
+        assert reads[-1] == history and reads.count(history) == 1, reads
         assert wc.mode() == wc.POSTGRES, wc.preconditions_unmet()

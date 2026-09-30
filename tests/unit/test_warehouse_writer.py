@@ -74,6 +74,12 @@ def met_env(monkeypatch):
     # 2026-09-30; a door added later holds the switch in
     # TestTheDoorsOd10HasNotDecided, not in every test of the switch itself.
     monkeypatch.setattr(wc, "OD10_DOORS", ())
+    # `bronze.expenses` holds its history — asked after the revision, on a
+    # connection of its own at a start and on the pool for the status page.
+    # TestTheExpensesHistory reads it otherwise.
+    monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection",
+                        AsyncMock(return_value=True))
+    monkeypatch.setattr(wc, "_expenses_backfilled", AsyncMock(return_value=True))
 
 
 @pytest.fixture
@@ -293,6 +299,84 @@ def _lost_mid_read():
 
     return asyncpg.ConnectionDoesNotExistError(
         "connection was closed in the middle of operation")
+
+
+class TestTheExpensesHistory:
+    """The one read a Postgres switch cannot see: `_expenses_run` sends the
+    /expenses history statements to Postgres only once `bronze.expenses` has
+    its backfill, and a NULL `backfilled_at` is an answer — DuckDB's Silver
+    serves them, uncounted, even under `KS_READ_FALLBACK=off`. After the
+    switch that Silver is frozen, and after a compaction empty. So a start
+    asks it beside the revision, and holds the switch while it is not so."""
+
+    @pytest.fixture(autouse=True)
+    def _asked_for(self, met, monkeypatch):
+        monkeypatch.setenv(wc.ENV, "postgres")
+
+    def _history(self, monkeypatch, *answers):
+        read = AsyncMock(side_effect=list(answers))
+        monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection", read)
+        return read
+
+    def test_no_backfill_runs_as_duckdb_and_names_it(self, met, monkeypatch):
+        read = self._history(monkeypatch, False)
+        assert wc.configure_mode() == wc.DUCKDB
+        assert [u.key for u in wc.preconditions_unmet()] == ["expenses_backfilled"]
+        read.assert_awaited_once_with(MET_ENV["KS_PG_DSN"])
+        met.assert_awaited_once()     # an answer is not asked again
+
+    def test_a_backfill_is_postgres(self, monkeypatch):
+        self._history(monkeypatch, True)
+        assert wc.configure_mode() == wc.POSTGRES and wc.preconditions_unmet() == ()
+
+    def test_a_history_read_that_failed_is_asked_again_with_the_revision(
+        self, met, monkeypatch,
+    ):
+        """After a flip a start that runs as duckdb is the way back; a read
+        that failed is not an answer, whichever of the two it was."""
+        read = self._history(monkeypatch, OSError("refused"), True)
+        assert wc.configure_mode() == wc.POSTGRES, wc.preconditions_unmet()
+        assert read.await_count == 2 and met.await_count == 2
+
+    def test_still_failing_after_the_last_ask_is_unmet_by_its_class(self, monkeypatch):
+        self._history(monkeypatch, *(OSError("password for user ks_app")
+                                     for _ in range(wc.REVISION_READ_ATTEMPTS)))
+        assert wc.configure_mode() == wc.DUCKDB
+        (unmet,) = wc.preconditions_unmet()
+        assert unmet.key == "expenses_backfilled" and "OSError" in unmet.detail
+        assert "ks_app" not in unmet.detail
+
+    def test_a_revision_that_was_not_read_leaves_it_unasked(self, met, monkeypatch):
+        """A start that could not reach Postgres names `pg_revision` alone."""
+        read = self._history(monkeypatch, True)
+        met.side_effect = OSError("refused")
+        assert wc.configure_mode() == wc.DUCKDB
+        assert [u.key for u in wc.preconditions_unmet()] == ["pg_revision"]
+        read.assert_not_awaited()
+
+    def test_the_two_reads_share_one_bound(self, met, monkeypatch):
+        """The second read gets what the first left, never under a fifth of
+        the bound — so the worker's outer bound, twice the inner one, still
+        holds them both."""
+        import time
+
+        async def slow_revision(_dsn):
+            await asyncio.sleep(0.08)
+            return REQUIRED_REVISION
+
+        async def hang(_dsn):
+            await asyncio.sleep(10)
+
+        monkeypatch.setattr(wc, "REVISION_READ_TIMEOUT_S", 0.1)
+        monkeypatch.setattr(wc, "_revision_on_its_own_connection", slow_revision)
+        monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection", hang)
+        started = time.monotonic()
+        facts = wc._gather_facts_blocking(dict(MET_ENV))
+        assert facts.revision == REQUIRED_REVISION
+        assert facts.expenses_backfilled is None
+        assert "did not answer in 0.02 s" in facts.expenses_backfill_error
+        # Three asks of at most 0.08 + 0.02 s each, and no waits between them.
+        assert time.monotonic() - started < 1.0
 
 
 class TestTheRevisionReadItself:
@@ -2376,6 +2460,8 @@ class TestTheDoorsOd10HasNotDecided:
         monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
         monkeypatch.setattr(wc, "_revision_on_its_own_connection",
                             AsyncMock(return_value=REQUIRED_REVISION))
+        monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection",
+                            AsyncMock(return_value=True))
         monkeypatch.setenv(wc.ENV, "postgres")
         assert wc.configure_mode() == wc.POSTGRES, wc.preconditions_unmet()
         assert wc.preconditions_unmet() == ()
