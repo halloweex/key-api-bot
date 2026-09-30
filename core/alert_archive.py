@@ -150,6 +150,79 @@ async def _write_resolved(keys, message, delivered) -> None:
         logger.info("alert archive: writes succeeding again")
 
 
+# ─── The canary's watch (OD-07) ─────────────────────────────────────────────
+#
+# A clean week cannot be journaled by the pages alone: a page is written when a
+# problem is seen and delivered, so a week with no page reads the same whether
+# the canary looked every fifteen minutes or the bot was down for six days.
+# The watch is the other half — one row the canary rewrites on every probe that
+# read the block it watches, saying since when every such probe found it clean.
+#
+# ONE ROW, NOT A ROW PER PROBE. `app.alert_events` would have taken ~35 000 rows
+# a year to answer a question one row answers, and anything that accumulates
+# declares its bound; this is bounded at one per watch.
+#
+# In `app.alert_series`, as an `event`-kind row under a key no alert raises
+# (`watch:<block>`), because it is the alerting machinery's own record and
+# the store written here already has no revision gate and never raises.
+# Nothing that reads the series reads it: the digest, the escalator and the
+# acknowledgements all ask for `kind = 'condition'`, and the key is not in the
+# REGISTRY. The columns mean, for this row:
+#
+#   first_fired_at  since when every probe, none more than `gap` after the one
+#                   before, read the block clean. A probe that reads a fallback
+#                   restarts it at its own time; a gap restarts it at the next
+#                   clean probe.
+#   last_fired_at   the latest probe that read the block, clean or not.
+#   fired_count     clean probes since first_fired_at; 0 after a dirty probe.
+#
+# The clock is Postgres' `now()` on both sides — the writer here, the soak
+# check that judges it — so the bot's clock never enters it.
+_WATCH_SQL = """
+INSERT INTO app.alert_series
+    (condition_key, kind, state, first_fired_at, last_fired_at,
+     fired_count, suppressed_count, instance)
+VALUES ($1, 'event', 'event', now(), now(),
+        CASE WHEN $2::boolean THEN 1 ELSE 0 END, 0, $4)
+ON CONFLICT (condition_key) DO UPDATE SET
+    first_fired_at = CASE
+        WHEN NOT $2::boolean
+          OR now() - app.alert_series.last_fired_at > make_interval(secs => $3)
+        THEN now()
+        ELSE app.alert_series.first_fired_at END,
+    fired_count = CASE
+        WHEN NOT $2::boolean THEN 0
+        WHEN now() - app.alert_series.last_fired_at > make_interval(secs => $3)
+        THEN 1
+        ELSE app.alert_series.fired_count + 1 END,
+    last_fired_at = now(),
+    instance      = EXCLUDED.instance,
+    updated_at    = now()
+"""
+
+
+async def _write_watch(key: str, clean: bool, gap_s: float) -> None:
+    global _standing_down
+    from core.pg import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(_WATCH_SQL, key, bool(clean), float(gap_s), _instance())
+    if _standing_down:
+        _standing_down = False
+        logger.info("alert archive: writes succeeding again")
+
+
+def record_watch(
+    key: str, *, clean: bool, gap_s: float,
+) -> "Optional[asyncio.Task]":
+    """The canary read the block `key` watches: `clean` says whether it found
+    nothing in it. Fire-and-forget under the archive's armour — one second,
+    one warning per streak, never raises, nothing without `KS_PG_DSN` — so a
+    slow Postgres costs a probe's line in the watch and never the probe."""
+    return _spawn(_write_watch(key, clean, gap_s))
+
+
 def _spawn(coro) -> "Optional[asyncio.Task]":
     """Wrap an archive write in the standard armour: budget, one warning per
     streak, never raises, never blocks the caller."""

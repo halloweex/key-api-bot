@@ -167,6 +167,9 @@ class CanaryResult:
     dq_ages: dict[str, Optional[int]] = field(default_factory=dict)
     # mirrored table -> seconds since its last successful shipment
     mirror_ages: dict[str, Optional[int]] = field(default_factory=dict)
+    # What this probe read of web's `read_fallbacks` for the watch (OD-07):
+    # True empty, False a fallback, None no block read. See read_fallbacks_clean.
+    read_fallbacks_clean: Optional[bool] = None
 
 
 # ─── Health probe ───────────────────────────────────────────────────────────
@@ -612,6 +615,133 @@ def check_read_fallback_mode(payload: Optional[dict]) -> "list[tuple[str, str]]"
     return []
 
 
+# ─── Reads answered from DuckDB (OD-07) ─────────────────────────────────────
+#
+# KS_READ_FALLBACK=off may be set only after a covered, clean week with no read
+# answered from DuckDB (owner decision OD-07 (a), 2026-09-30). The counters that
+# say so live in web's process and `/api/health` publishes them as
+# `read_fallbacks`; every deploy recreates web, which empties them and takes its
+# log with it, so "a clean week" could not be measured across a deploy by
+# grepping. The canary is the process that outlives web's, so the evidence is
+# made here and journaled in Postgres: a page whenever the block is non-empty,
+# and a watch row saying since when every probe read it empty.
+
+# The first words of the page's line, which the soak check (deploy/stage4_soak/
+# 22_f1_read_fallbacks.sql) reads the surfaces back out of. A test holds the two
+# equal.
+READ_FALLBACK_LINE = "reads served from DuckDB: "
+READ_REFUSED_LINE = "reads refused with a 503: "
+
+# The row the canary keeps in `app.alert_series` for its watch over the block
+# (`core.alert_archive.record_watch`). An event-kind row, never a condition:
+# nothing resolves it, escalates it or digests it.
+READ_FALLBACK_WATCH_KEY = "watch:read_fallbacks"
+
+# Two probe intervals and slack. A probe lost to a deploy — web recreated, or the
+# bot restarted and probing 90 s after it — leaves a gap of about 30 min; two
+# lost in a row do not keep the watch, since the counters of a web process that
+# ended in such a gap were never read. The soak check judges the watch alive by
+# the same number, and a test holds the two equal.
+READ_FALLBACK_WATCH_GAP_S = 35 * 60
+
+# Surfaces named in one line; the rest are counted. Three details, the format rule.
+READ_SURFACES_SHOWN = 3
+
+# How recent a refusal must be to page. Two probe intervals: a refusal is seen by
+# the next probe and the one after it, and a page stands only while reads are
+# still being refused.
+READ_REFUSED_RECENT_S = 30 * 60
+
+
+def _surfaces(entries: dict) -> str:
+    """`dashboard ×2 (last …); traffic ×1 (last …)` — sorted, at most
+    `READ_SURFACES_SHOWN`, the rest counted. Tolerant of any shape inside:
+    this is a message, and a malformed entry must not cost the page."""
+    parts = []
+    for surface in sorted(entries, key=str):
+        entry = entries[surface] if isinstance(entries[surface], dict) else {}
+        count = _number(entry.get("count"))
+        last = entry.get("last_at") or "unknown"
+        parts.append(f"{surface} ×{'?' if count is None else count} (last {last})")
+    shown = parts[:READ_SURFACES_SHOWN]
+    if len(parts) > len(shown):
+        shown.append(f"+{len(parts) - len(shown)} more")
+    return "; ".join(shown)
+
+
+def check_read_fallbacks(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `read_fallbacks` block: any read this web process answered
+    from DuckDB because the engine it was sent to failed (DN-20a).
+
+    Warn, and on the block being non-empty, not on a count moving: the
+    counters are per process and only a restart empties them, so the page
+    stands until web restarts — a fallback the soak before KS_READ_FALLBACK=off
+    has to explain (OD-07) should not clear itself because nobody looked. The
+    key is the condition alone; surfaces and counts ride the message.
+
+    A refusal under `off` is not a fallback — it served nothing from DuckDB —
+    and is published elsewhere (`read_fallback_mode.refused`), judged by
+    `check_read_refusals`. An absent block is not a failure; an older web
+    publishes none.
+    """
+    block = (payload or {}).get("read_fallbacks")
+    if not isinstance(block, dict) or not block:
+        return []
+    return [("read_fallback_used", READ_FALLBACK_LINE + _surfaces(block))]
+
+
+def read_fallbacks_clean(payload: Optional[dict]) -> Optional[bool]:
+    """What this probe can say for the watch: True when it read the
+    `read_fallbacks` block empty, False when it read a fallback, None when it
+    read no block at all — web did not answer, or is older than the block —
+    which says nothing either way and is not written."""
+    block = (payload or {}).get("read_fallbacks")
+    if not isinstance(block, dict):
+        return None
+    return not block
+
+
+def _parse_instant(value: object) -> Optional[datetime]:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def check_read_refusals(
+    payload: Optional[dict], now: Optional[datetime] = None,
+) -> "list[tuple[str, str]]":
+    """Judge `read_fallback_mode.refused`: reads answered 503 under
+    KS_READ_FALLBACK=off (DN-20b).
+
+    Its own key, never `read_fallback_used`: a refusal served nothing from
+    DuckDB, which is the whole point of `off`, and counting it as a fallback
+    would fail the very soak that licenses the flip. But a refused read is a
+    page somebody could not open, and nothing else says so when the engine
+    behind it is up for everything but one query. Warn while one is recent
+    (`READ_REFUSED_RECENT_S`), so the page stands only while reads are being
+    refused — unlike a fallback, a refusal left no wrong number behind to
+    explain. A timestamp that cannot be read counts as recent. Published under
+    `off` alone; today, under `duckdb`, there is nothing to judge.
+    """
+    block = (payload or {}).get("read_fallback_mode")
+    refused = block.get("refused") if isinstance(block, dict) else None
+    if not isinstance(refused, dict) or not refused:
+        return []
+    reference = now or datetime.now(timezone.utc)
+    recent = {}
+    for surface, entry in refused.items():
+        last = _parse_instant(entry.get("last_at") if isinstance(entry, dict) else None)
+        if last is None or (reference - last).total_seconds() <= READ_REFUSED_RECENT_S:
+            recent[surface] = entry
+    if not recent:
+        return []
+    return [("read_refused", READ_REFUSED_LINE + _surfaces(recent))]
+
+
 def check_warehouse_writer_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
     """Judge the `warehouse_writer_mode` block: a KS_WRITE_WAREHOUSE web did
     not understand (DN-28).
@@ -755,6 +885,7 @@ async def run_canary(
     sync_seconds = None
     dq_ages: dict[str, Optional[int]] = {}
     mirror_ages: dict[str, Optional[int]] = {}
+    read_fallbacks_seen: Optional[bool] = None
     if payload:
         health_status = payload.get("status")
         sync_block = payload.get("sync") or {}
@@ -809,6 +940,24 @@ async def run_canary(
         for key, message in fallback_mode_failures:
             fail(key, message)
         if fallback_mode_failures and severity == "ok":
+            severity = "warn"
+
+        # A read answered from DuckDB in this web process (OD-07). Warn: the
+        # page served, with numbers from the store it was leaving.
+        fallback_failures = check_read_fallbacks(payload)
+        for key, message in fallback_failures:
+            fail(key, message)
+        if fallback_failures and severity == "ok":
+            severity = "warn"
+        read_fallbacks_seen = read_fallbacks_clean(payload)
+
+        # A read refused with a 503 under KS_READ_FALLBACK=off, recently.
+        # Warn: an outage somebody saw, which is what `off` chose over a
+        # wrong number — and a different signal from a fallback.
+        refused_failures = check_read_refusals(payload, now)
+        for key, message in refused_failures:
+            fail(key, message)
+        if refused_failures and severity == "ok":
             severity = "warn"
 
         # A KS_WRITE_WAREHOUSE web could not read. Warn, for the same reason:
@@ -903,6 +1052,7 @@ async def run_canary(
         sync_seconds_since=sync_seconds,
         dq_ages=dq_ages,
         mirror_ages=mirror_ages,
+        read_fallbacks_clean=read_fallbacks_seen,
     )
 
 
@@ -941,6 +1091,14 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Set the read flag the message names to postgres, then docker compose up -d web"),
     ("utm_parse_mode_invalid",
      "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
+    # Last: when an engine is down its own key names the cause, and a fallback
+    # or a refusal is what that cause cost the pages.
+    ("read_fallback_used",
+     "grep web's log for 'falling back to DuckDB' at each last; explain it before "
+     "KS_READ_FALLBACK=off. Clears when web restarts"),
+    ("read_refused",
+     "grep web's log for 'read refused': those pages answered 503. Fix the engine it "
+     "names; clears 30 min after the last"),
 )
 
 def _what_to_do(result: CanaryResult) -> Optional[str]:
