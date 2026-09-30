@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.261
+
+
+
 ## 3.0.260
 
 - CLAUDE.md: what the OD-08 review changed
