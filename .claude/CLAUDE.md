@@ -2736,7 +2736,9 @@ bounded at 5 s, and publishes the answer.
 the boot sync, and **production does not set it**. An unknown value runs as
 `duckdb` and publishes the error on `/api/health` (`warehouse_writer_mode`),
 where the canary warns `warehouse_mode_invalid`; it never raises, since web is
-the only syncer.
+the only syncer. After a flip the same typo is the way back, so it pages as
+one: `settle_writer`, finding `postgres` recorded, adds `value_understood` to
+the unmet preconditions, and the canary's CRITICAL carries the way-back lever.
 
 **What `postgres` does (DN-29)** — only when every precondition below holds;
 the verdict is reached once per process, the Postgres revision read on a
@@ -2808,7 +2810,8 @@ an order whose `updated_at` has not moved.
 
 `GET /api/warehouse/status` publishes `cutover`: the variable as read,
 `switch_built: true`, and every unmet precondition by name, from
-`evaluate_preconditions(env, facts)` — `KS_PG_DERIVE=own`, the twins on,
+`evaluate_preconditions(env, facts)` — a `KS_WRITE_WAREHOUSE` this build
+understands, `KS_PG_DERIVE=own`, the twins on,
 `KS_UTM_PARSE=postgres`, `KS_READ_FALLBACK=off`, a DSN and the required
 revision, the landing mirror on, every Silver/Gold/UTM read switch on
 `postgres` (a test reads every string in `core/`, `web/` and `bot/` for a

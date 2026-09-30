@@ -172,7 +172,8 @@ def _a_fresh_warehouse_writer(monkeypatch):
     from core import warehouse_cutover as wc
 
     for name, value in (("_value", None), ("_mode", None), ("_mode_error", None),
-                        ("_unmet", ()), ("_decided_for", None), ("_settled", False),
+                        ("_unmet", ()), ("_value_unmet", ()), ("_decided_for", None),
+                        ("_settled", False),
                         ("_held", False), ("_full_validated", False),
                         ("_reclassify_needed", False),
                         ("_writer_record", None), ("_settle_lock", None)):

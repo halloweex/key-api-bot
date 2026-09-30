@@ -112,7 +112,8 @@ def _metadata(store, key):
 def _restart():
     """What a new process has: nothing read, nothing settled."""
     for name, value in (("_value", None), ("_mode", None), ("_mode_error", None),
-                        ("_unmet", ()), ("_decided_for", None), ("_settled", False),
+                        ("_unmet", ()), ("_value_unmet", ()), ("_decided_for", None),
+                        ("_settled", False),
                         ("_held", False), ("_full_validated", False),
                         ("_reclassify_needed", False),
                         ("_writer_record", None), ("_settle_lock", None)):
@@ -1462,6 +1463,82 @@ class TestPublishedAndJudged:
         status = wc.status()
         assert status["held"] is True and status["writer"] == {"writer": "postgres"}
         assert status["stood_down_duckdb_checks"] == sorted(wc.STOOD_DOWN_WHEN_POSTGRES)
+
+
+class TestATypoAfterAFlipIsTheWayBack:
+    """One letter lost editing `.env` after a flip: web runs as duckdb, and
+    `settle_writer` finds `postgres` recorded — the full DuckDB rebuild, the
+    checks held, what an unmet precondition costs. It used to reach the
+    canary as the typo's WARN alone, whose lever does not say a rollback has
+    happened; it pages as the way back now. Before a flip a typo is still the
+    WARN it was (DN-28)."""
+
+    def _settled_under(self, tmp_path, monkeypatch, value, *, recorded):
+        from web.routes.api.health import _warehouse_writer_mode
+
+        store = _store(tmp_path)
+        try:
+            if recorded:
+                _seed(store, **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True,
+                                                "since": "2026-10-01T00:00:00+00:00"}})
+            if value is None:
+                monkeypatch.delenv(wc.ENV, raising=False)
+            else:
+                monkeypatch.setenv(wc.ENV, value)
+            assert wc.configure_mode() == wc.DUCKDB
+            asyncio.run(wc.settle_writer(store))
+            # The scheduler configures again after the boot's settle.
+            assert wc.configure_mode() == wc.DUCKDB
+            return _warehouse_writer_mode()
+        finally:
+            asyncio.run(store.close())
+
+    def _judged(self, block):
+        from bot import canary
+
+        payload = {"warehouse_writer_mode": block}
+        keys = [k for k, _ in canary.check_warehouse_preconditions(payload)
+                + canary.check_warehouse_writer_mode(payload)]
+        result = canary.CanaryResult(
+            ok=False, severity="critical" if "warehouse_preconditions_unmet" in keys else "warn",
+            failures=[m for _, m in canary.check_warehouse_preconditions(payload)],
+            failure_keys=keys)
+        return keys, result
+
+    def test_after_a_flip_it_pages_as_the_way_back(self, tmp_path, monkeypatch):
+        from bot import canary
+
+        block = self._settled_under(tmp_path, monkeypatch, "postgre", recorded=True)
+        assert wc.held(), "the way back was not taken"
+        assert block["preconditions_unmet"] == ["value_understood"]
+        assert block["error"]
+        keys, result = self._judged(block)
+        assert keys == ["warehouse_preconditions_unmet", "warehouse_mode_invalid"]
+        assert canary._what_to_do(result).startswith("After a flip this IS the way back")
+        assert "KS_WRITE_WAREHOUSE=postgre ran as duckdb" in result.failures[0]
+        (unmet,) = wc.status()["preconditions_unmet"]
+        assert unmet["key"] == "value_understood" and "'postgre'" in unmet["detail"]
+
+    def test_before_a_flip_it_is_the_warn_it_was(self, tmp_path, monkeypatch):
+        block = self._settled_under(tmp_path, monkeypatch, "postgre", recorded=False)
+        assert not wc.held() and block["preconditions_unmet"] == []
+        keys, _ = self._judged(block)
+        assert keys == ["warehouse_mode_invalid"]
+
+    @pytest.mark.parametrize("value", [None, "duckdb", " DuckDB "])
+    def test_the_way_back_an_operator_took_pages_nothing(self, tmp_path, monkeypatch, value):
+        block = self._settled_under(tmp_path, monkeypatch, value, recorded=True)
+        assert wc.held() and block["preconditions_unmet"] == []
+        keys, _ = self._judged(block)
+        assert keys == []
+
+    def test_the_status_page_names_it_live_too(self, met, monkeypatch):
+        monkeypatch.setenv(wc.ENV, "postgress")
+        wc.configure_mode()
+        monkeypatch.setattr("core.pg.current_revision",
+                            AsyncMock(return_value=REQUIRED_REVISION))
+        ready = asyncio.run(wc.readiness())
+        assert [u["key"] for u in ready["unmet"]] == ["value_understood"]
 
 
 class TestTheResolveNote:

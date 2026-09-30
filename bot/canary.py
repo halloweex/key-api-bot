@@ -569,12 +569,13 @@ def check_warehouse_writer_mode(payload: Optional[dict]) -> "list[tuple[str, str
     """Judge the `warehouse_writer_mode` block: a KS_WRITE_WAREHOUSE web did
     not understand (DN-28).
 
-    Warn, the read-fallback mode's reason: web runs as `duckdb`, so nothing is
-    failing. In this build nothing is failing whatever the value — the switch
-    is DN-29 — which is exactly why it is judged now: the first time a typo
-    would matter is the flip, and a canary that says nothing then leaves
-    whoever set `postgress` believing DuckDB has stopped. An absent block is
-    not a failure; an older web publishes none.
+    Warn, the read-fallback mode's reason: web runs as `duckdb`, so before a
+    flip nothing is failing — but whoever set `postgress` believes DuckDB has
+    stopped. After a flip the same typo is the way back (a full DuckDB
+    rebuild, the checks held), and web then also publishes `value_understood`
+    under `preconditions_unmet`, which `check_warehouse_preconditions` pages
+    with the way-back lever. An absent block is not a failure; an older web
+    publishes none.
     """
     block = (payload or {}).get("warehouse_writer_mode")
     if isinstance(block, dict) and block.get("error"):
@@ -593,17 +594,21 @@ def check_warehouse_preconditions(payload: Optional[dict]) -> "list[tuple[str, s
     it has not taken effect, and the flip is the moment to hear that, not the
     next audit. And after a flip it is the way back itself: a full DuckDB
     rebuild, a new `since` on the next start under postgres, the warehouse
-    group closed again — which is why the lever says so first. The keys name
-    what to do; the details are on the admin status page. An absent block or
-    field is not a failure; an older web publishes none."""
+    group closed again — which is why the lever says so first. So is a value
+    web did not understand, after a flip (`value_understood`): the same way
+    back, and the message names the value as web read it. The keys name what
+    to do; the details are on the admin status page. An absent block or field
+    is not a failure; an older web publishes none."""
     block = (payload or {}).get("warehouse_writer_mode")
     if not isinstance(block, dict):
         return []
     unmet = block.get("preconditions_unmet")
     if not isinstance(unmet, list) or not unmet:
         return []
+    value = block.get("value")
+    value = value if isinstance(value, str) and value else "postgres"
     return [("warehouse_preconditions_unmet",
-             "KS_WRITE_WAREHOUSE=postgres ran as duckdb, unmet: "
+             f"KS_WRITE_WAREHOUSE={value} ran as duckdb, unmet: "
              + ", ".join(str(key) for key in unmet))]
 
 

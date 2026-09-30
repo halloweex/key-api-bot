@@ -244,6 +244,7 @@ def _breaking(key: str):
     """`(env, facts)` with every precondition met except `key`."""
     env, facts = dict(MET_ENV), MET_FACTS
     simple = {
+        "value_understood": ("KS_WRITE_WAREHOUSE", "postgre"),
         "pg_derive_own": ("KS_PG_DERIVE", "piggyback"),
         "pg_twins_on": ("KS_DQ_PG_WAREHOUSE", None),
         "utm_parse_postgres": ("KS_UTM_PARSE", "duckdb"),
@@ -312,7 +313,8 @@ class TestTheEvaluator:
         """Both directions at once: an item the evaluator checks but the
         published list leaves out is one nobody reading the list would know
         to do, and the reverse is a list item nothing checks."""
-        unmet = wc.evaluate_preconditions({"KS_MIRROR_LANDING": "0"}, wc.Facts(
+        unmet = wc.evaluate_preconditions({"KS_MIRROR_LANDING": "0",
+                                           "KS_WRITE_WAREHOUSE": "postgress"}, wc.Facts(
             revision_error="x", bridge_owners=None, bridge_error="x",
             open_retired=None, open_retired_error="x", od10_doors=wc.OD10_DOORS))
         assert [u.key for u in unmet] == KEYS
@@ -326,8 +328,8 @@ class TestTheEvaluator:
             revision_error="not asked: KS_PG_DSN is not set", bridge_owners={}))
         assert [u.key for u in unmet] == [
             k for k in KEYS
-            if k not in ("mirror_landing", "goals_bridge", "retired_conditions_clear",
-                         "od10_doors")]
+            if k not in ("value_understood", "mirror_landing", "goals_bridge",
+                         "retired_conditions_clear", "od10_doors")]
 
     def test_a_detail_says_what_was_found_and_what_is_needed(self):
         env, facts = _breaking("utm_parse_postgres")

@@ -192,7 +192,8 @@ def _warehouse_writer_mode() -> dict:
     """KS_WRITE_WAREHOUSE as this process understood it at start (DN-28,
     DN-29): the value as read, the mode it runs, the error when the value was
     not understood and ran as duckdb, and — when `postgres` was asked for and
-    ran as duckdb — the KEYS of the preconditions that held it back. Keys, not
+    ran as duckdb, or when a value not understood took the way back after a
+    flip (`value_understood`) — the KEYS of the preconditions unmet. Keys, not
     details: this endpoint is public, and a detail quotes the environment;
     the details are on `/api/warehouse/status` and in the log. `held` is the
     way back still owed its first validated full DuckDB tick, and

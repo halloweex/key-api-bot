@@ -13,7 +13,8 @@ needed in place; DN-29 is the switch.
   `/api/health` under `warehouse_writer_mode`, where the canary warns
   `warehouse_mode_invalid` — `KS_PG_DERIVE`'s rule and OD-09's answer: web is
   the only syncer, so refusing to start over this variable would stop order
-  intake.
+  intake. After a flip the same value is the way back, so there it is also
+  published as the unmet `value_understood`, and pages as one (OD-09 (b)).
 - **`postgres` switches only when every precondition holds** —
   `evaluate_preconditions` over the environment and the facts it cannot
   hold, the Postgres revision among them. One unmet item and the process runs
@@ -45,7 +46,8 @@ needed in place; DN-29 is the switch.
   — the Silver they would read is as old as the switch, and the verdicts a
   parse that raised leaves can be partial. When DuckDB's `silver_order_utm`
   is empty (a Sunday compaction ran in between) it also flags a reclassify as
-  needed.
+  needed. A way back taken by a value nobody meant as `duckdb` publishes
+  `value_understood` among the unmet preconditions.
 - **The UTM doors** (refresh, reclassify, the `manager_comment` backfill and
   its CLI) parse in Postgres alone under `postgres`. The two that re-parse
   everything note it in the record, and the way back then empties DuckDB's
@@ -84,6 +86,10 @@ _mode_error: Optional[str] = None
 # the verdict was reached for — kept for the life of the process.
 _unmet: Tuple["Unmet", ...] = ()
 _decided_for: Optional[str] = None
+# `value_understood`, when `settle_writer` finds that a value this build does
+# not understand took the way back from a recorded `postgres` — kept apart
+# from `_unmet`, which `configure_mode` rewrites on every call.
+_value_unmet: Tuple["Unmet", ...] = ()
 # What `settle_writer` found and did, per process — see THE RECORDED WRITER.
 _settled = False
 _held = False
@@ -149,8 +155,11 @@ def mode_error() -> Optional[str]:
 
 
 def preconditions_unmet() -> Tuple["Unmet", ...]:
-    """What held `postgres` back at start; empty unless it was asked for."""
-    return _unmet
+    """What held `postgres` back at start; empty unless it was asked for —
+    or unless, after a flip, a value this build does not understand took the
+    way back (`value_understood`, found by `settle_writer`): the same full
+    DuckDB rebuild and hold an unmet precondition costs, and the same page."""
+    return _unmet + _value_unmet
 
 
 def writes_postgres() -> bool:
@@ -386,6 +395,7 @@ MIRROR_LANDING = "KS_MIRROR_LANDING"
 
 # `(key, what is required)`, in the order they are reported.
 PRECONDITIONS: Tuple[Tuple[str, str], ...] = (
+    ("value_understood", f"{ENV} unset, {DUCKDB} or {POSTGRES}"),
     ("pg_derive_own", f"{PG_DERIVE}=own"),
     ("pg_twins_on", f"{PG_TWINS}=on"),
     ("utm_parse_postgres", f"{UTM_PARSE}=postgres"),
@@ -458,6 +468,10 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
         found = _read(env, name, default) or default
         need(key, found == wanted, f"{name} is {found!r}, needs {wanted!r}")
 
+    value = _read(env, ENV, DUCKDB) or DUCKDB
+    need("value_understood", value in _VALID,
+         f"{ENV} is {value!r}, which this build does not understand: it runs as "
+         f"{DUCKDB!r}, and after a flip that is the way back")
     equals("pg_derive_own", PG_DERIVE, "own", "piggyback")
     equals("pg_twins_on", PG_TWINS, "on", "off")
     equals("utm_parse_postgres", UTM_PARSE, "postgres", "duckdb")
@@ -860,6 +874,7 @@ async def settle_writer(store) -> Dict[str, Any]:
     ledger would not let it close leaves the process unsettled, so the next
     caller tries that again too."""
     global _settled, _held, _full_validated, _reclassify_needed, _writer_record
+    global _value_unmet
     if _settled:
         return status()
     async with _record_lock():
@@ -888,6 +903,16 @@ async def settle_writer(store) -> Dict[str, Any]:
                     logger.warning("the warehouse group is not yet closed; the next "
                                    "derivation tick tries again")
         elif record is not None and record.get("writer") == POSTGRES:
+            if _mode_error:
+                # A value nobody meant as `duckdb` took the way back: the cost
+                # of an unmet precondition, so its page — not the typo's WARN,
+                # whose lever does not say a rollback already happened.
+                _value_unmet = (Unmet(
+                    "value_understood",
+                    f"{ENV}={_value!r} is not a value this build understands, "
+                    f"and {POSTGRES!r} was the recorded writer: this start took "
+                    "the way back"),)
+                logger.critical("%s; a full DuckDB rebuild is owed", _value_unmet[0].detail)
             await store.mark_warehouse_dirty(None)
             _held, _full_validated = True, False
             # After the mark, so a DuckDB that refuses the DELETE has still
@@ -976,7 +1001,8 @@ def status() -> Dict[str, Any]:
         "mode": mode(),
         "error": mode_error(),
         "switch_built": SWITCH_BUILT,
-        "preconditions_unmet": [{"key": u.key, "detail": u.detail} for u in _unmet],
+        "preconditions_unmet": [{"key": u.key, "detail": u.detail}
+                                for u in preconditions_unmet()],
         "writer": _writer_record,
         "held": _held,
         "reclassify_needed": _reclassify_needed,
