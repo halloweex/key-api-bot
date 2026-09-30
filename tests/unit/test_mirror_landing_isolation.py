@@ -84,14 +84,15 @@ def _critical(name):
     )
 
 
-async def _run(outcomes, mocks=None, held=None):
+async def _run(outcomes, mocks=None, held=None, hook=None):
     """Run the real job with every check stubbed to `outcomes[name]`.
 
     An outcome is a list of issues, or an Exception to raise. Returns what the
     job persisted, what it paged, and whether it announced a recovery. Pass a
     dict as `mocks` to get each check's stub back by name, to ask how the job
-    called it, and a list as `held` to collect the conditions each resolution
-    was told it could not re-examine (`unverified`).
+    called it, a list as `held` to collect the conditions each resolution
+    was told it could not re-examine (`unverified`), and a callable as `hook`
+    to break something after the stubs are in place and before the job runs.
     """
     from core.scheduler import BackgroundScheduler
 
@@ -145,6 +146,8 @@ async def _run(outcomes, mocks=None, held=None):
     for p_ in patches:
         p_.start()
     try:
+        if hook is not None:
+            hook()
         await scheduler._run_dq_mirror_landing()
     finally:
         for p_ in reversed(patches):

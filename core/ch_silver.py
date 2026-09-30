@@ -388,12 +388,17 @@ GOLD_WATCH_CONDITIONS: Tuple[str, ...] = (
 
 def gold_unwatched_severity() -> Severity:
     """CRITICAL exactly when the mirror-landing job does not compare DuckDB's
-    Gold with Postgres' — the predicate it stands `reconcile_gold` down on."""
-    from core import warehouse_cutover
+    Gold with Postgres' — the predicate it stands `reconcile_gold` down on.
+    A predicate that cannot be read is CRITICAL too: nothing then shows that
+    another engine looked, and the finding must still be filed."""
+    try:
+        from core import warehouse_cutover
 
-    if warehouse_cutover.warehouse_checks_stand_down():
+        stood_down = warehouse_cutover.warehouse_checks_stand_down()
+    except Exception:  # noqa: BLE001 — unknown is not "DuckDB still compares"
+        logger.exception("gold_values_unwatched: cannot tell who derives Gold")
         return Severity.CRITICAL
-    return Severity.WARN
+    return Severity.CRITICAL if stood_down else Severity.WARN
 
 
 def gold_values_unwatched(reason: str) -> IntegrityIssue:
