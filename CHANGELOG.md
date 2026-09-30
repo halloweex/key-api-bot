@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.260
+
+- CLAUDE.md: what the OD-08 review changed
+- OD-08 review: reconciliation_ch's history is asked, and D8 is not fooled by a blind run
+- OD-07 review: CLAUDE.md says what the canary now pages, holds and watches, and that F1 judges the day
+- OD-08 review: the agent diagnoses gold_values_unwatched with the mirror runbook
+- OD-07 review: tests for the blind probe, the routed reads, the unread tail and F1's day
+- OD-08 review: a blind ClickHouse run is not a success, and holds the archive
+- OD-07 review: a blind probe keeps the page, uncounted routes count, the watch reads web's start, F1 judges the day
+- OD-07: CLAUDE.md says how the 168 h is proven now; the watch writer joins the journal's exemptions
+- OD-07: tests for the canary's page, the watch row and soak F1
+- CLAUDE.md: ClickHouse is required for the parallel period (OD-08 (a))
+- OD-08 (a): tests, one per guard, and a severity that cannot be lost
+- OD-07: the canary pages read_fallback_used and keeps a durable watch; soak F1 judges the week
+- OD-08 (a): gold_values_unwatched, and reconciliation_ch joins the canary
+
+
 ## 3.0.259
 
 - OD-10 review: an /api path no route matches is a JSON 404, not the shell
