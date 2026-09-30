@@ -345,7 +345,6 @@ def open_retired_conditions() -> Dict[str, Optional[str]]:
 # checks and comparisons stand down on `warehouse_checks_stand_down()`.
 OD10_DOORS: Tuple[Tuple[str, str], ...] = (
     ("web/routes/api/admin.py:purge_orders", "POST /api/duckdb/purge-orders"),
-    ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),
 )
 
 

@@ -29,6 +29,8 @@ RETIRED_ROUTES = (
     # the second raised on every stored order since the day it was written.
     ("GET", "/api/debug/stale-returns"),
     ("GET", "/api/debug/order-status/{order_id}"),
+    # DuckDB buyer counters with no caller; "all synced" after a compaction.
+    ("GET", "/api/buyers/stats"),
 )
 
 # The assistant's tools that rode the retired detail service.

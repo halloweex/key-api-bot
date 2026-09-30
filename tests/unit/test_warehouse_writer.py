@@ -2277,10 +2277,10 @@ class TestTheDoorsOd10HasNotDecided:
 
     def test_the_reviews_four_and_the_plans_detail_endpoints_are_there(self):
         labels = " ".join(label for _, label in wc.OD10_DOORS)
-        # The three detail endpoints and their tools, and the two debug
-        # routes, were retired by OD-10 (2026-09-30);
+        # The three detail endpoints and their tools, the two debug routes
+        # and buyers/stats were retired by OD-10 (2026-09-30);
         # tests/unit/test_od10_retired_doors.py keeps them so.
-        for route in ("/api/buyers/stats", "/api/duckdb/purge-orders"):
+        for route in ("/api/duckdb/purge-orders",):
             assert route in labels
 
     @pytest.mark.parametrize("source, readers", [
@@ -2318,9 +2318,22 @@ class TestTheDoorsOd10HasNotDecided:
     def test_the_walk_reads_each_shape(self, source, readers):
         assert _frozen_readers_in(ast.parse(source)) == readers
 
-    def test_the_walk_finds_the_doors_it_names(self):
-        """A walk that found nothing would pass on a codebase it cannot read."""
-        assert "web/routes/api/admin.py:get_buyer_stats" in _unguarded_duckdb_readers()
+    def test_the_walk_reads_the_files_it_is_pointed_at(self):
+        """A walk that found nothing would pass on a codebase it cannot read.
+        `web/` names no door today, so the proof is taken from what is still
+        there: the DuckDB half of rebuild-silver names `silver_orders` behind
+        `duckdb_derives()`, which the walk must see and read as guarded, and
+        `core/`, whose readers ride the `KS_READ_*` switches the walk cannot
+        see, must yield one it can name."""
+        tree = ast.parse((REPO / "web/routes/api/admin.py").read_text(encoding="utf-8"))
+        docstrings = _docstrings(tree)
+        seen = {(guarded, fn) for _line, guarded, fn in _guarded_nodes(tree, lambda node: (
+            isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and id(node) not in docstrings and FROZEN_BY_THE_SWITCH.search(node.value)))}
+        assert (True, "rebuild_silver_from_scratch") in seen
+        assert (False, "rebuild_silver_from_scratch") not in seen
+        assert "core/repositories/expenses.py:get_profit_analysis" in \
+            _unguarded_duckdb_readers("core")
 
     def test_the_views_over_silver_are_derived_not_listed(self):
         """Read out of the view bodies: the four reading `{order_lines}`, and
@@ -2332,22 +2345,23 @@ class TestTheDoorsOd10HasNotDecided:
         assert {"v_inventory_summary", "v_abc_summary", "v_recommended_actions"} <= views
         assert "v_sku_analysis" not in views and "v_category_velocity" not in views
 
+    # A door somebody adds after OD-10: the walk would put it on the list.
+    NEW_DOOR = (("web/routes/api/example.py:a_new_door", "GET /api/a-new-door"),)
+
     def test_the_start_reads_the_list(self, met, monkeypatch):
         """`_local_facts` hands `OD10_DOORS` to the evaluator — the list is
         not a document: while it is not empty, `postgres` runs as duckdb."""
-        monkeypatch.setattr(wc, "OD10_DOORS", (
-            ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),))
+        monkeypatch.setattr(wc, "OD10_DOORS", self.NEW_DOOR)
         monkeypatch.setenv(wc.ENV, "postgres")
         assert wc.configure_mode() == wc.DUCKDB
         (unmet,) = wc.preconditions_unmet()
-        assert unmet.key == "od10_doors" and "/api/buyers/stats" in unmet.detail
+        assert unmet.key == "od10_doors" and "/api/a-new-door" in unmet.detail
 
     def test_the_status_page_reads_it_too(self, met, monkeypatch):
-        monkeypatch.setattr(wc, "OD10_DOORS", (
-            ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),))
+        monkeypatch.setattr(wc, "OD10_DOORS", self.NEW_DOOR)
         ready = asyncio.run(wc.readiness())
         (door,) = [u for u in ready["unmet"] if u["key"] == "od10_doors"]
-        assert "/api/buyers/stats" in door["detail"]
+        assert "/api/a-new-door" in door["detail"]
 
     def test_this_build_is_not_switchable_and_names_every_door(self, monkeypatch):
         """Today's list, as the walk finds it — not `met`, which stands in a

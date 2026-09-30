@@ -681,32 +681,14 @@ async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)
             "for 'Full buyer sync:'"}
 
 
-@router.get("/buyers/stats")
-@limiter.limit("60/minute")
-async def get_buyer_stats(request: Request):
-    """Get buyer sync statistics."""
-    store = await get_store()
-    async with store.connection() as conn:
-        orders_buyers = conn.execute(
-            "SELECT COUNT(DISTINCT buyer_id) FROM orders WHERE buyer_id IS NOT NULL"
-        ).fetchone()[0]
-        silver_buyers = conn.execute(
-            "SELECT COUNT(DISTINCT buyer_id) FROM silver_orders WHERE buyer_id IS NOT NULL"
-        ).fetchone()[0]
-        synced = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
-        missing = conn.execute("""
-            SELECT COUNT(DISTINCT s.buyer_id)
-            FROM silver_orders s
-            LEFT JOIN buyers b ON s.buyer_id = b.id
-            WHERE s.buyer_id IS NOT NULL AND b.id IS NULL
-        """).fetchone()[0]
-
-    return {
-        "unique_in_orders": orders_buyers,
-        "unique_in_silver_orders": silver_buyers,
-        "synced_to_buyers_table": synced,
-        "missing": missing,
-    }
+# GET /api/buyers/stats was retired by the owner's decision OD-10 (2026-09-30).
+# It counted buyers in DuckDB's `orders`, its Silver and its `buyers`, and
+# nothing called it. After step 13 its Silver count freezes, after a compaction
+# it reads "all synced" beside a full `silver.orders`, and chain 4 freezes the
+# third table too. The number that mattered, the buyers orders name and nobody
+# has fetched, is what the buyer step's own selection
+# (`get_missing_buyer_ids`, KS_READ_BUYER_SYNC) computes from Postgres; DuckDB's
+# raw counts stay at GET /api/duckdb/stats.
 
 
 # ─── Jobs & Sync ───────────────────────────────────────────────────────────────
