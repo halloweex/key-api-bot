@@ -3,7 +3,9 @@
 `core.alert_archive._WATCH_SQL` keeps one row, `watch:read_fallbacks` in
 `app.alert_series`, that says since when every probe read `/api/health`'s
 `read_fallbacks` empty (OD-07). Its arithmetic is all in the statement — a
-continuing run, a gap that restarts it, a fallback that restarts it at itself —
+continuing run, an unread tail that restarts it (from the last probe to the
+new web process's start, read from `uptime_seconds`), a fallback that restarts
+it at itself —
 so it is held here by executing it, against rows seeded where the clock can be
 set: `now()` is fixed inside a transaction, so the row is seeded relative to it
 and the statement then runs once, in the same rolled-back transaction.
@@ -65,8 +67,12 @@ async def seed(conn, *, since_min: float, last_min: float, probes: int) -> None:
         """, KEY, float(since_min), float(last_min), probes)
 
 
-async def probe(conn, clean: bool) -> dict:
-    await conn.execute(alert_archive._WATCH_SQL, KEY, clean, GAP, "bot-host")
+async def probe(conn, clean: bool, uptime_min: "float | None" = None) -> dict:
+    """One probe through the statement the bot runs. `uptime_min` is how long
+    the web process it read had been running; None is a probe that read no
+    uptime, judged by the gap alone."""
+    uptime = None if uptime_min is None else float(uptime_min) * 60
+    await conn.execute(alert_archive._WATCH_SQL, KEY, clean, GAP, "bot-host", uptime)
     row = await conn.fetchrow(
         """
         SELECT kind, state, fired_count, instance,
@@ -120,6 +126,57 @@ class TestTheRun:
         assert (row["fired_count"], row["since_s"], row["last_s"]) == (1, 0, 0)
 
     @pytest.mark.asyncio
+    async def test_the_same_process_after_any_gap_keeps_the_run(self, pool):
+        """Web started long before the last probe, so this probe read the
+        same counters, which cover everything since: the bot being away for
+        two hours lost nothing."""
+        async with tx(pool) as conn:
+            await seed(conn, since_min=170 * 60, last_min=120, probes=680)
+            row = await probe(conn, clean=True, uptime_min=48 * 60)
+        assert (row["fired_count"], row["since_s"]) == (681, 170 * 3600)
+
+    @pytest.mark.asyncio
+    async def test_a_sunday_compaction_keeps_the_run(self, pool):
+        """The review's arithmetic: last probe of the old web 15 min before
+        the stop, 5 min of compaction, then web's startup and the bot's
+        first probes failing until 16.5 min after the bot started — a 36.5
+        min gap between probes, which used to restart the week every Sunday.
+        The unread tail is 20 min: from the last probe to the new start."""
+        async with tx(pool) as conn:
+            await seed(conn, since_min=170 * 60, last_min=36.5, probes=680)
+            row = await probe(conn, clean=True, uptime_min=16.5)
+        assert (row["fired_count"], row["since_s"]) == (681, 170 * 3600)
+
+    @pytest.mark.asyncio
+    async def test_a_new_process_that_started_past_the_limit_restarts_it(self, pool):
+        """Web replaced, and its predecessor unread for 40 min before that:
+        what the old process counted in its tail was never read."""
+        async with tx(pool) as conn:
+            await seed(conn, since_min=170 * 60, last_min=50, probes=680)
+            row = await probe(conn, clean=True, uptime_min=10)
+        assert (row["fired_count"], row["since_s"], row["last_s"]) == (1, 0, 0)
+
+    @pytest.mark.asyncio
+    async def test_the_limit_is_the_tail_and_it_is_inclusive(self, pool):
+        """A tail of exactly the gap keeps the run; one second more does not."""
+        limit_min = READ_FALLBACK_WATCH_GAP_S / 60
+        async with tx(pool) as conn:
+            await seed(conn, since_min=500, last_min=limit_min + 5, probes=30)
+            row = await probe(conn, clean=True, uptime_min=5)
+        assert row["fired_count"] == 31
+        async with tx(pool) as conn:
+            await seed(conn, since_min=500, last_min=limit_min + 5, probes=30)
+            row = await probe(conn, clean=True, uptime_min=5 - 1 / 60)
+        assert row["fired_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_in_the_same_process_still_restarts_it(self, pool):
+        async with tx(pool) as conn:
+            await seed(conn, since_min=170 * 60, last_min=15, probes=680)
+            row = await probe(conn, clean=False, uptime_min=48 * 60)
+        assert (row["fired_count"], row["since_s"]) == (0, 0)
+
+    @pytest.mark.asyncio
     async def test_a_fallback_restarts_the_run_at_itself(self, pool):
         async with tx(pool) as conn:
             await seed(conn, since_min=170 * 60, last_min=15, probes=680)
@@ -167,7 +224,8 @@ class TestThroughTheArchive:
         try:
             with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
                 for clean in (True, True, False):
-                    await alert_archive.record_watch(key, clean=clean, gap_s=GAP)
+                    await alert_archive.record_watch(key, clean=clean, gap_s=GAP,
+                                                     web_uptime_s=3868)
             row = await pool.fetchrow(
                 "SELECT kind, fired_count FROM app.alert_series WHERE condition_key = $1",
                 key)

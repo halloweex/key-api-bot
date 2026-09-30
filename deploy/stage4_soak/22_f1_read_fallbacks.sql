@@ -39,7 +39,7 @@
 -- WHAT A FAIL MEANS
 -- A page is firing (however old: a web process still holds it), was paged or
 -- escalated inside the day, was resolved inside it, or the watch's latest
--- probe, inside the day, read a read served from DuckDB (which counts even
+-- probe, inside the day, found a read served from DuckDB (which counts even
 -- when the page was not delivered, and so never journaled). Each is explained
 -- and fixed before OD-07; the week starts again.
 --
@@ -151,7 +151,7 @@ SELECT 'F1 read fallbacks'::text AS "check",
                               to_char(resolved_at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
                    END,
                    CASE WHEN fail_watch THEN
-                       format('the canary''s probe at %s Kyiv read a read served from DuckDB',
+                       format('the canary''s probe at %s Kyiv found a read served from DuckDB',
                               to_char(last_probe AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
                    END)
                || '; explain each (web''s log, /api/health read_fallback_mode) before '

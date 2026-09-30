@@ -125,22 +125,33 @@ class TestTheFiles:
     def test_the_read_fallback_check_reads_what_the_canary_writes(self):
         """F1 judges two things the canary makes, so every name and number it
         shares with the canary is the canary's: the watch row's key and gap,
-        the page's key, and the words the surfaces are read back out of. The
-        week is OD-07's 168 h."""
+        the pages' keys — every key a check emits for a read served from
+        DuckDB, in both places it asks — and the words both lines begin
+        with, which the line is read back out of. The day is the report's,
+        the week OD-07's 168 h."""
+        import os.path
+
         from bot import canary
 
         sql = (SQL_DIR / "22_f1_read_fallbacks.sql").read_text(encoding="utf-8")
         code = _uncommented(sql)
         gap = re.findall(r"interval\s+'(\d+)\s+minutes'\s+AS\s+watch_gap", code)
         assert [int(m) * 60 for m in gap] == [canary.READ_FALLBACK_WATCH_GAP_S]
-        span = re.findall(r"interval\s+'(\d+)\s+hours'\s+AS\s+span", code)
-        assert span == ["168"]
+        assert re.findall(r"interval\s+'(\d+)\s+hours'\s+AS\s+span", code) == ["24"]
+        assert re.findall(r"interval\s+'(\d+)\s+hours'\s+AS\s+week", code) == ["168"]
         assert re.findall(r"condition_key = '(watch:[^']*)'", code) == [
             canary.READ_FALLBACK_WATCH_KEY]
-        assert set(re.findall(r"condition_key = '(read_[^']*)'", code)) == {
-            "read_fallback_used"}
-        [line] = re.findall(r"substring\(m\.message FROM '([^(]*)\(", code)
-        assert line == canary.READ_FALLBACK_LINE
+        served = {k for k, _ in canary.check_read_fallbacks(
+            {"read_fallbacks": {"a": {}}})}
+        served |= {k for k, _ in canary.check_read_routes(
+            {"read_fallback_mode": {"mode": "duckdb", "misconfigured": ["x"]}})}
+        lists = re.findall(r"condition_key IN \(([^)]*)\)", code)
+        assert len(lists) == 2, lists
+        for found in lists:
+            assert set(re.findall(r"'([^']*)'", found)) == served
+        [stem] = re.findall(r"substring\(m\.message FROM '\((reads [^\[]*)\[", code)
+        common = os.path.commonprefix([canary.READ_FALLBACK_LINE, canary.READ_ROUTED_LINE])
+        assert stem == common.rstrip() == "reads served from DuckDB"
 
 
 # ── against a migrated Postgres ───────────────────────────────────────────────
@@ -861,23 +872,27 @@ class TestE1ExpensesStoodDown:
 
 @needs_pg
 class TestF1ReadFallbacks:
-    """OD-07's week, from the canary's page and the canary's watch.
+    """OD-07's evidence, judged a day at a time, from the canary's pages and
+    the canary's watch.
 
-    FAIL is a read some page answered from DuckDB — paged, escalated, standing,
-    resolved inside the window, or read by the watch's latest probe even when
-    no page was delivered. UNKNOWN is a week nobody can say was watched. PASS
-    needs both: no page, and a watch clean for all 168 h."""
+    FAIL is a read some page answered from DuckDB in the day — paged,
+    escalated, standing (however old), resolved inside it, or read by the
+    watch's latest probe even when no page was delivered. UNKNOWN is a day
+    nobody can say was watched. PASS needs both, and says how much of the
+    168 h week OD-07 waits for the clean run has covered."""
 
     FILE = "22_f1_read_fallbacks.sql"
     LINE = "reads served from DuckDB: "
+    ROUTED = "reads served from DuckDB uncounted: "
+    KEYS = ("read_fallback_used", "read_routed_to_duckdb")
 
-    @staticmethod
-    async def clear(conn):
+    async def clear(self, conn):
         await conn.execute(
-            "DELETE FROM app.alert_events WHERE condition_key = 'read_fallback_used'")
+            "DELETE FROM app.alert_events WHERE condition_key = ANY($1::text[])",
+            list(self.KEYS))
         await conn.execute(
-            "DELETE FROM app.alert_series WHERE condition_key IN "
-            "('read_fallback_used', 'watch:read_fallbacks')")
+            "DELETE FROM app.alert_series WHERE condition_key = ANY($1::text[])",
+            [*self.KEYS, "watch:read_fallbacks"])
 
     @staticmethod
     async def watch(conn, *, since, last, probes):
@@ -889,14 +904,15 @@ class TestF1ReadFallbacks:
             """, since, last, probes)
 
     @staticmethod
-    async def series(conn, *, state, first, last, resolved=None):
+    async def series(conn, *, state, first, last, resolved=None,
+                     key="read_fallback_used"):
         await conn.execute(
             """
             INSERT INTO app.alert_series (condition_key, kind, state, first_fired_at,
                                           last_fired_at, fired_count, resolved_at,
                                           instance)
-            VALUES ('read_fallback_used', 'condition', $1, $2, $3, 1, $4, 'bot')
-            """, state, first, last, resolved)
+            VALUES ($5, 'condition', $1, $2, $3, 1, $4, 'bot')
+            """, state, first, last, resolved, key)
 
     @staticmethod
     async def event(conn, key, *, at, event_type="fired", message=None):
@@ -911,13 +927,42 @@ class TestF1ReadFallbacks:
         await self.watch(conn, since=ago(hours=169), last=ago(minutes=10), probes=676)
 
     @pytest.mark.asyncio
-    async def test_a_watched_clean_week_passes(self, pool):
+    async def test_a_watched_clean_week_passes_and_says_it_is_covered(self, pool):
         async with scenario(pool) as conn:
             await self.clear(conn)
             await self.clean_week(conn)
             v, detail = await verdict(conn, self.FILE)
         assert v == "PASS", detail
         assert "since 29.05 11:00 Kyiv (676 probes)" in detail, detail
+        assert "the 168 h KS_READ_FALLBACK=off waits for are covered" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_watched_clean_day_passes_and_counts_the_week(self, pool):
+        """The day after this ships, and every day of the week after a reset:
+        nothing wrong, the canary watching — a PASS, with the week's progress
+        in the detail rather than an UNKNOWN the daily report would carry for
+        seven days (review of OD-07, finding 5)."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=30), last=ago(minutes=10), probes=120)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+        assert "30 h of the 168 KS_READ_FALLBACK=off waits for" in detail, detail
+        assert "covered" not in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_the_week_is_covered_from_its_168th_hour(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=168), last=ago(minutes=10), probes=672)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS" and "are covered" in detail, detail
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=168) + timedelta(seconds=1),
+                             last=ago(minutes=10), probes=671)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS" and "167 h of the 168" in detail, detail
 
     @pytest.mark.asyncio
     async def test_no_watch_is_unknown_and_says_why(self, pool):
@@ -939,43 +984,133 @@ class TestF1ReadFallbacks:
         assert "36 min ago (limit 35)" in detail, detail
 
     @pytest.mark.asyncio
-    async def test_a_watch_younger_than_the_week_is_unknown(self, pool):
+    async def test_the_staleness_limit_is_exact(self, pool):
+        """35 min to the second is alive; one second more is not. The pin on
+        the number alone let a comparison shifted by under a minute through
+        (review of OD-07, finding 6)."""
         async with scenario(pool) as conn:
             await self.clear(conn)
-            await self.watch(conn, since=ago(hours=100), last=ago(minutes=10), probes=400)
+            await self.watch(conn, since=ago(hours=200), last=ago(minutes=35), probes=600)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=200), last=ago(minutes=35, seconds=1),
+                             probes=600)
             v, detail = await verdict(conn, self.FILE)
         assert v == "UNKNOWN", detail
-        assert "only since 01.06 08:00 Kyiv, 100.0 h of 168" in detail, detail
 
     @pytest.mark.asyncio
-    async def test_a_page_inside_the_week_fails_naming_its_surfaces(self, pool):
+    async def test_a_watch_younger_than_the_day_is_unknown(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=10), last=ago(minutes=10), probes=40)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "UNKNOWN", detail
+        assert "only since 05.06 02:00 Kyiv, 10.0 h of the 24" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_page_inside_the_day_fails_naming_its_surfaces(self, pool):
         """The body rides the first condition of a raise; this page shared
         its raise with a mirror page, so the line is found on the sibling."""
         async with scenario(pool) as conn:
             await self.clear(conn)
             await self.clean_week(conn)
-            at = ago(hours=30)
+            at = ago(hours=20)
             await self.series(conn, state="resolved", first=at, last=at,
-                              resolved=ago(hours=29))
+                              resolved=ago(hours=19))
             await self.event(conn, "mirror_failing:bronze.orders", at=at, message=(
                 "⚠️ <b>Dashboard warning</b>\n• mirror bronze.orders: failing, 4× in a row\n"
-                f"• {self.LINE}dashboard ×2 (last 2030-06-04T02:55:00+00:00)\n→ Check it"))
+                f"• {self.LINE}dashboard ×2 (last 2030-06-04T12:55:00+00:00)\n→ Check it"))
             await self.event(conn, "read_fallback_used", at=at)
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
-        assert ("paged 1 time(s) in 168 h, last 04.06 06:00 Kyiv: "
-                "dashboard ×2 (last 2030-06-04T02:55:00+00:00)") in detail, detail
+        assert ("paged 1 time(s) in 24 h, last 04.06 16:00 Kyiv: reads served from "
+                "DuckDB: dashboard ×2 (last 2030-06-04T12:55:00+00:00)") in detail, detail
 
     @pytest.mark.asyncio
-    async def test_an_escalation_inside_the_week_fails(self, pool):
+    async def test_a_route_to_duckdb_paged_inside_the_day_fails_naming_it(self, pool):
         async with scenario(pool) as conn:
             await self.clear(conn)
             await self.clean_week(conn)
-            await self.series(conn, state="resolved", first=ago(hours=200),
-                              last=ago(hours=200), resolved=ago(hours=180))
-            await self.event(conn, "read_fallback_used", at=ago(hours=190),
+            at = ago(hours=3)
+            await self.series(conn, state="resolved", first=at, last=at,
+                              resolved=ago(hours=2), key="read_routed_to_duckdb")
+            await self.event(conn, "read_routed_to_duckdb", at=at, message=(
+                f"⚠️ <b>Dashboard warning</b>\n• {self.ROUTED}"
+                "KS_READ_COHORTS=clickhouse without KS_CH_URL\n→ Give web"))
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert ("reads served from DuckDB uncounted: KS_READ_COHORTS=clickhouse "
+                "without KS_CH_URL") in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_route_still_paging_fails(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.clean_week(conn)
+            await self.series(conn, state="firing", first=ago(days=3), last=ago(days=3),
+                              key="read_routed_to_duckdb")
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "still paging (last paged 02.06 12:00 Kyiv)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_route_no_page_reached_fails_through_the_watch(self, pool):
+        """The review's case end to end: web publishing a switch with no
+        address, the canary reading it, the real statement writing the watch
+        — and F1, which used to PASS over it."""
+        from bot import canary
+        from core.alert_archive import _WATCH_SQL
+
+        payload = {"read_fallbacks": {},
+                   "read_fallback_mode": {"mode": "duckdb", "error": None,
+                                          "misconfigured": [
+                                              "KS_READ_COHORTS=clickhouse without KS_CH_URL"],
+                                          "no_engine": []}}
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await conn.execute(
+                """
+                INSERT INTO app.alert_series (condition_key, kind, state, first_fired_at,
+                                              last_fired_at, fired_count, instance)
+                VALUES ('watch:read_fallbacks', 'event', 'event',
+                        now() - interval '170 hours', now() - interval '14 minutes',
+                        680, 'bot')
+                """)
+            await conn.execute(_WATCH_SQL, canary.READ_FALLBACK_WATCH_KEY,
+                               canary.read_fallbacks_clean(payload),
+                               float(canary.READ_FALLBACK_WATCH_GAP_S), "bot", 3600.0)
+            v, detail = await verdict(conn, self.FILE, now=None)
+        assert v == "FAIL", detail
+        assert "found a read served from DuckDB" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_a_day_old_is_the_week_restarting_not_a_fail(self, pool):
+        """One fallback is one day's FAIL, not seven: a page 30 h ago, web
+        restarted an hour later, the watch clean since — the daily question
+        passes, and the week counts from the restart."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=29), last=ago(minutes=10), probes=116)
+            await self.series(conn, state="resolved", first=ago(hours=30),
+                              last=ago(hours=30), resolved=ago(hours=29))
+            await self.event(conn, "read_fallback_used", at=ago(hours=30),
                              message=f"• {self.LINE}goals ×1")
-            await self.event(conn, "read_fallback_used", at=ago(hours=160),
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+        assert "29 h of the 168" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_an_escalation_inside_the_day_fails(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.clean_week(conn)
+            await self.series(conn, state="resolved", first=ago(hours=40),
+                              last=ago(hours=40), resolved=ago(hours=30))
+            await self.event(conn, "read_fallback_used", at=ago(hours=40),
+                             message=f"• {self.LINE}goals ×1")
+            await self.event(conn, "read_fallback_used", at=ago(hours=23),
                              event_type="escalated")
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
@@ -991,18 +1126,18 @@ class TestF1ReadFallbacks:
             await self.series(conn, state="firing", first=ago(days=10), last=ago(days=10))
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
-        assert "still firing (last paged 26.05 12:00 Kyiv)" in detail, detail
+        assert "still paging (last paged 26.05 12:00 Kyiv)" in detail, detail
 
     @pytest.mark.asyncio
-    async def test_a_page_that_stood_into_the_week_fails(self, pool):
+    async def test_a_page_that_stood_into_the_day_fails(self, pool):
         async with scenario(pool) as conn:
             await self.clear(conn)
             await self.clean_week(conn)
             await self.series(conn, state="resolved", first=ago(days=9),
-                              last=ago(days=9), resolved=ago(hours=100))
+                              last=ago(days=9), resolved=ago(hours=10))
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
-        assert "stood until 01.06 08:00 Kyiv, inside the window" in detail, detail
+        assert "stood until 05.06 02:00 Kyiv, inside the window" in detail, detail
 
     @pytest.mark.asyncio
     async def test_a_fallback_no_page_reached_still_fails(self, pool):
@@ -1013,15 +1148,33 @@ class TestF1ReadFallbacks:
             await self.watch(conn, since=ago(minutes=10), last=ago(minutes=10), probes=0)
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
-        assert "the canary's probe at 05.06 11:50 Kyiv read a fallback" in detail, detail
+        assert "the canary's probe at 05.06 11:50 Kyiv found a read served" in detail, detail
 
     @pytest.mark.asyncio
-    async def test_a_fallback_before_the_week_does_not_count(self, pool):
+    async def test_a_dirty_probe_counts_inside_the_day_only(self, pool):
+        """The watch's latest probe read a fallback two hours ago and nothing
+        has read since: a FAIL, inside the day. The same probe before the day
+        began is a watch nobody wrote: UNKNOWN — the pin the review's
+        mutation removed survived because nothing sat on that side."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=2), last=ago(hours=2), probes=0)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=30), last=ago(hours=30), probes=0)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "UNKNOWN", detail
+        assert "min ago (limit 35)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_before_the_day_does_not_count(self, pool):
         async with scenario(pool) as conn:
             await self.clear(conn)
             await self.clean_week(conn)
             await self.series(conn, state="resolved", first=ago(days=9),
-                              last=ago(days=9), resolved=ago(hours=170))
+                              last=ago(days=9), resolved=ago(hours=25))
             await self.event(conn, "read_fallback_used", at=ago(days=9),
                              message=f"• {self.LINE}goals ×1")
             await self.event(conn, "read_fallback_mode_invalid", at=ago(hours=5),
@@ -1033,7 +1186,7 @@ class TestF1ReadFallbacks:
     async def test_the_real_writer_and_the_real_clock_agree(self, pool):
         """The watch as `core.alert_archive` writes it, judged on the real
         clock: a run seeded 170 h long, then one probe through the statement
-        the bot runs."""
+        the bot runs, of the same web process."""
         from bot.canary import READ_FALLBACK_WATCH_GAP_S, READ_FALLBACK_WATCH_KEY
         from core.alert_archive import _WATCH_SQL
 
@@ -1048,7 +1201,7 @@ class TestF1ReadFallbacks:
                         680, 'bot')
                 """)
             await conn.execute(_WATCH_SQL, READ_FALLBACK_WATCH_KEY, True,
-                               float(READ_FALLBACK_WATCH_GAP_S), "bot")
+                               float(READ_FALLBACK_WATCH_GAP_S), "bot", 86400.0)
             v, detail = await verdict(conn, self.FILE, now=None)
         assert v == "PASS", detail
-        assert "(681 probes)" in detail, detail
+        assert "(681 probes)" in detail and "are covered" in detail, detail
