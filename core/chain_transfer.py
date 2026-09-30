@@ -1649,7 +1649,7 @@ def _soak_without_a_check(chain: ModuleType) -> str:
         parts.append(
             f"read meta.mirror_state for this chain's tables "
             f"({', '.join(operational)}) — deploy/stage4_soak.sh has no "
-            "check of its own for it yet — and see failures_since_ok at 0 and "
+            "check that applies after a release — and see failures_since_ok at 0 and "
             "last_ok_at moved by the next replicate_operational (POST "
             "/api/jobs/replicate_operational/trigger runs it now; its web-log "
             "line must list them under `replaced` again, not `stood_down`)"

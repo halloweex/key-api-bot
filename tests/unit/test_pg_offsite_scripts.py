@@ -687,6 +687,17 @@ class TestTheRemoteDrill:
         assert run.code != 0, run.out
         assert "ROWS MISSING FROM LIVE" in run.out
 
+    def test_a_released_chain_is_not_a_loss_of_watermarks(self, world):
+        """The copy-back deletes a chain's owner: and last_sync_* keys when it
+        releases the chain; a rollback between the dump and the drill must
+        not page 'rows missing from live' (review of PR-3)."""
+        self._shipped(world)
+        live = dict(LIVE, FAKE_LIVE_META_CHAIN_WATERMARKS=1)
+        restored = dict(RESTORED, FAKE_RESTORED_META_CHAIN_WATERMARKS=5)
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **live, **restored)
+        assert run.code == 0, run.out
+        assert "ROWS MISSING FROM LIVE" not in run.out
+
     def test_chain_4s_tables_are_checked_by_their_own_rules(self, world):
         """Once chain 4 writes them this dump is their only backup. A buyer is
         never deleted and a verdict never is, so more in the dump than in live

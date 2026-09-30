@@ -24,7 +24,11 @@
 -- The handover is the chain's own owner rows when they exist (written in the
 -- first writing transaction, on Postgres's clock — the clock the shippers
 -- stamp with), else the operator's flip time, else the last 75 minutes. A
--- stamp, or a failure, after that is a shipper that did not stand down.
+-- stamp, or a failure, after that is a shipper that did not stand down —
+-- except in that last case, which is UNKNOWN: the hourly copy stamps
+-- app.buyer_gender every run until the flip, so with neither an owner row
+-- nor a flip time a healthy flip reads a stamp inside the window until the
+-- chain's first write (review of PR-3). Pass SOAK_BUYERS_FLIP_AT.
 --
 -- WHAT A FAIL MEANS
 -- - held: the flip did not move the chain. Set the named reader to postgres,
@@ -52,7 +56,8 @@ since AS (
     SELECT COALESCE(owner.at, flag.flip_at, clock.now - interval '75 minutes') AS at,
            CASE WHEN owner.at IS NOT NULL THEN 'since the handover'
                 WHEN flag.flip_at IS NOT NULL THEN 'since the flip'
-                ELSE 'in the last 75 min (no owner row and no flip time given)' END AS said
+                ELSE 'in the last 75 min (no owner row and no flip time: pass SOAK_BUYERS_FLIP_AT)' END AS said,
+           owner.at IS NULL AND flag.flip_at IS NULL AS guessed
     FROM owner CROSS JOIN flag CROSS JOIN clock
 ),
 wanted (table_name) AS (
@@ -81,14 +86,16 @@ agg AS (
 SELECT 'B1 buyers copies stood down'::text AS "check",
        CASE flag.state
            WHEN '0' THEN 'PASS'
-           WHEN '1' THEN CASE WHEN agg.n > 0 THEN 'FAIL' ELSE 'PASS' END
+           WHEN '1' THEN CASE WHEN agg.n = 0 THEN 'PASS'
+                              WHEN since.guessed THEN 'UNKNOWN'
+                              ELSE 'FAIL' END
            WHEN 'held' THEN 'FAIL'
            WHEN 'invalid' THEN 'FAIL'
            ELSE 'UNKNOWN'
        END AS verdict,
        CASE flag.state
            WHEN '0' THEN 'not applicable: chain 4 still writes DuckDB (KS_WRITE_BUYERS is not postgres and no latch marker)'
-           WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed, 500)
+           WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed || ' ' || since.said, 500)
                               ELSE 'none of the three tables written by a copy ' || since.said END
            WHEN 'held' THEN format(
                'KS_WRITE_BUYERS=postgres, but the chain is held on DuckDB: %s is not postgres, '

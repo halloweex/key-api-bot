@@ -972,6 +972,16 @@ class TestB1BuyersCopiesStoodDown:
         assert v == "PASS" and "since the flip" in detail, detail
 
     @pytest.mark.asyncio
+    async def test_with_neither_owner_row_nor_flip_time_a_recent_stamp_is_unknown(self, pool):
+        """The hourly copy stamps app.buyer_gender every run until the flip,
+        so a healthy flip reads one inside the window until the first write."""
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await mirror_state(conn, "app.buyer_gender", ok_at=ago(minutes=30))
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "UNKNOWN" and "SOAK_BUYERS_FLIP_AT" in detail, detail
+
+    @pytest.mark.asyncio
     async def test_held_and_invalid_fail_with_their_reason(self, pool):
         async with scenario(pool) as conn:
             v, detail = await verdict(conn, self.FILE, buyers_on="held",
@@ -1088,6 +1098,16 @@ class TestB5BuyersIntegrity:
             await clean_buyers(conn)
             await buyer(conn, BUYER_IDS[0], phone="+380500000001")
             await verdict_row(conn, BUYER_IDS[0])
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "PASS", detail
+
+    @pytest.mark.asyncio
+    async def test_an_empty_phone_is_the_parse_not_a_lost_contact(self, pool):
+        """KeyCRM's list starting with '' is stored as '' and gets no contact
+        row: the shared parse, reproduced by every rewrite."""
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await buyer(conn, BUYER_IDS[0], phone="", contact=False)
             v, detail = await verdict(conn, self.FILE, buyers_on="1")
         assert v == "PASS", detail
 

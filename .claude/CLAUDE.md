@@ -1368,7 +1368,10 @@ read, where the canary warns `write_chain_precondition_unmet`.
 **Every buyer's verdict is written with its name.** `upsert_buyers` classifies
 the names it writes and writes the verdicts in the same transaction, in a
 savepoint caught on `asyncpg.PostgresError` only, so the buyers land whatever
-the gender does. `derive_gender_pg` (the hourly rider, and
+the gender does — and when that savepoint fails, the portion's verdicts are
+marked stale (`rules_version = 0`, never over a human's) so the hourly
+derivation re-decides them: a renamed buyer's old verdict at the current
+version is one nothing would select again. `derive_gender_pg` (the hourly rider, and
 `scripts/backfill_gender.py`) reads what is pending **before** it latches — an
 hour with nothing to decide takes nothing — then share-locks the portion's
 buyers and drops a verdict whose name moved. That closes a race the hourly
@@ -1382,12 +1385,20 @@ clock DuckDB's `CURRENT_TIMESTAMP` is and the one the copy-back orders by.
 DuckDB never re-derives on a rename; this does, on purpose.
 
 **A buyer Postgres would refuse is skipped, not raised.** Refused before the
-latch where it can be seen (`_refusal`: a loyalty figure over its `NUMERIC`, a
-missing id — `core/pg_numeric.py`, shared with chain 7a), and retried buyer by
-buyer on a `DataError` it could not foresee (a lone surrogate, say). Either
-way the id is logged and counted in `buyer_sync.last_skipped_bad`; a batch
-refused whole leaves no marker. A cancelled statement is not bad data and
-raises at once. A statement timeout and a two-minute deadline bound the write.
+latch where it can be seen (`_refusal`: an id missing or outside INTEGER, text
+that is not UTF-8 — a lone surrogate — a value of the wrong type, a loyalty
+figure over its `NUMERIC` via `core/pg_numeric.py`, shared with chain 7a), and
+retried buyer by buyer on a `DataError` it could not foresee. Either way the
+id is logged and counted in `buyer_sync.last_skipped_bad`. A batch `_refusal`
+rejects whole leaves no marker; one Postgres refuses buyer by buyer has
+already latched the chain, and the marker stands without an owner row until
+the next write lands — `chain_latch_disagrees` the next morning if none does,
+which is why `_refusal` asks everything the driver would refuse. A batch in
+which every fetched buyer was refused is **not a success**: the step raises
+`BuyersRefused`, a data error, so the watermark and the canary's clock stay
+where they were. A cancelled statement is not bad data and raises at once. A
+statement timeout and a two-minute deadline — counted from the latch, and
+never before the first portion — bound the write.
 
 **Every path asks the chain's one answer** (`pg_buyers_write.mode()`, never
 raising):
@@ -1417,7 +1428,10 @@ to pass through a function that asks.
 
 **Watched from three sides.** The canary pages `buyer_sync_stalled_chain`
 (CRITICAL) when the step has not succeeded for three hours under the chain —
-the WARN at 90 minutes stays. The standing watch (`core/pg_chain_invariants.py`)
+the WARN at 90 minutes stays — judged by the older of the step's own clock and
+`buyer_sync.watermark_age_s`, the age of the stamp it writes to Postgres: the
+first is floored at web's start, so on its own every recreate reset a stall
+and announced it resolved. The standing watch (`core/pg_chain_invariants.py`)
 files `chain_buyer_orphan_rows` (CRITICAL, from the handover on),
 `chain_required_column_null` for a NULL `full_name` (DuckDB's is NOT NULL, so
 the copy-back could not carry it back) and `chain_buyer_contact_missing` (WARN):
@@ -1426,7 +1440,9 @@ canary, which pages on the step's own state. `deploy/stage4_soak.sh` reads
 B1–B5 — copies stood down, the watermark's stored value at 90 minutes,
 verdicts and the override floor, the selection's backlog, integrity — and
 knows a fifth state for this chain, `held`: flagged, unlatched and a reader
-not on postgres, reported by B1 as the flip that did not move. The restore
+not on postgres, reported by B1 as the flip that did not move. B1 dates the
+handover by the owner rows, then by `SOAK_BUYERS_FLIP_AT`, and with neither
+reads UNKNOWN rather than FAIL a stamp inside its 75-minute window. The restore
 drill counts all three tables, because once the chain writes them the nightly
 dump is their only backup.
 

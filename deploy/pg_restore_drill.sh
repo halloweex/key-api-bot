@@ -91,15 +91,17 @@ fail() {
 # with the direction relaxed where a table may shrink. Every table marked
 # `grows` only ever gains rows: app.order_versions and app.stock_movements are
 # append-only, pinned by a test that parses the repository for an UPDATE or
-# DELETE against either; meta.chain_watermarks gains keys and never loses one;
-# nothing deletes a buyer from bronze.buyers, and app.buyer_gender gains a
+# DELETE against either; nothing deletes a buyer from bronze.buyers, and app.buyer_gender gains a
 # verdict per buyer and is rewritten in place, never deleted from. For those a
 # restored count ABOVE live means rows have disappeared from the live cluster
 # since the dump, which is the alarming direction and is reported as such.
 # `either` is for the tables that may legitimately shrink, and there the rule
 # is on the absolute gap in either direction: the /expenses form deletes
-# app.manual_expenses rows, and a buyer's contacts are replaced whole on every
-# write of that buyer, so a phone list that lost a number is one row fewer.
+# app.manual_expenses rows, a buyer's contacts are replaced whole on every
+# write of that buyer, so a phone list that lost a number is one row fewer,
+# and scripts/chain_copy_back.py deletes a chain's owner: and last_sync_* keys
+# from meta.chain_watermarks when it releases the chain — a rollback between
+# the dump and the drill is a few keys fewer, not keys lost.
 #
 # The three buyer tables are chain 4's. Once it writes them Postgres is their
 # only store — DuckDB's copy has stopped — so this dump is the one backup of a
@@ -108,7 +110,7 @@ DRILL_TABLES=(
     "app.order_versions:grows"
     "app.manual_expenses:either"
     "app.stock_movements:grows"
-    "meta.chain_watermarks:grows"
+    "meta.chain_watermarks:either"
     "bronze.buyers:grows"
     "bronze.buyer_contacts:either"
     "app.buyer_gender:grows"

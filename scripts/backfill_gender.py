@@ -49,7 +49,10 @@ the chain is already latched. The latch is a marker file read once per process
 and cached (`core/chain_latch.py`): a script that took the first write would
 latch a chain web still believes is on DuckDB, and web would go on writing
 DuckDB until it restarted. So a chain flagged and not yet latched is refused
-(exit 4): let web make the first write — its hourly tick, or the trigger above.
+(exit 4): let web make the first write. The trigger above makes it only when
+a verdict is pending (its result's `gender.pending` above 0); with nothing
+pending, the first write is the buyers step's, on the next new buyer an order
+names — and until then this script would have nothing to write either.
 A `KS_WRITE_BUYERS` nobody can read is refused the same way, rather than
 guessing which store it meant.
 
@@ -112,8 +115,12 @@ Nothing was written.
 Its first write latches the chain, and the latch is a marker web reads once
 and caches: taken here, it would move a chain web still believes is on DuckDB,
 and web would keep writing DuckDB until it restarted. Let web make the first
-write — the hourly replicate_operational tick, or
-POST /api/jobs/replicate_operational/trigger as an admin — then rerun."""
+write, then rerun:
+  - POST /api/jobs/replicate_operational/trigger as an admin writes it when a
+    verdict is pending — its result's gender.pending is above 0;
+  - with nothing pending, the buyers step writes it on the next new buyer an
+    order names, and until then there is nothing for this script to write
+    either. --dry-run shows what is pending."""
 
 
 def held_by_another_process(exc: BaseException) -> bool:
