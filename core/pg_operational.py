@@ -572,11 +572,13 @@ _APPEND_ABOVE: Tuple[_Append, ...] = (
     # ── the two forensic logs (revision 0027) ──
     #
     # `warehouse_refreshes` is 74 388 rows, more than every other stage-3 table
-    # together, and gains ~400-700 a day. `reconciliation_log` gains ~14. Both
-    # are INSERT-only with no retention anywhere — established by searching the
-    # repository, which is also what disqualified the three watchdogs from this
-    # shape: a watermark can only ever add rows, so a table that sweeps by age
-    # would grow here without bound.
+    # together, and gains ~400-700 a day. `reconciliation_log` gained ~14 a day
+    # until OD-10 retired its writer, the legacy 06:00 comparator (2026-09-30);
+    # it is history now, and copied like any other. Both are INSERT-only with
+    # no retention anywhere — established by searching the repository, which
+    # is also what disqualified the three watchdogs from this shape: a
+    # watermark can only ever add rows, so a table that sweeps by age would
+    # grow here without bound.
     _Append(
         pg_table=REFRESHES_TABLE, dk_table="warehouse_refreshes",
         columns=REFRESH_COLUMNS, watermark="id", order_by="id", keys=("id",),

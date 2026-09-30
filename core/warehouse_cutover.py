@@ -55,7 +55,10 @@ needed in place; DN-29 is the switch.
   the rules in force — see THE UTM DOORS.
 - **`evaluate_preconditions(env, facts)`** names every unmet precondition of
   the switch, one entry each, so the readiness a person reads is a list of
-  things to do rather than a "no". Pure over what it is handed.
+  things to do rather than a "no". Pure over what it is handed. Postgres is
+  asked two things inside one bound: its revision, and whether
+  `bronze.expenses` holds its history — the /expenses read gate no read
+  switch covers (`EXPENSES_HISTORY`).
   `readiness()` gathers the facts and is what `GET /api/warehouse/status`
   publishes under `cutover`.
 """
@@ -280,7 +283,8 @@ RETIRED_COMPARISONS: Tuple[str, ...] = (
 # as retired. Only a run that compared can mark, so nothing is marked after a
 # flip, and a page a stood-down run delivers is never marked. A page
 # delivered before this was built carries no mark until the next run that
-# compares — daily, and long before `od10_doors` lets any build switch.
+# compares — daily; every build that carried this ran that comparison while
+# `od10_doors` still held the switch, until OD-10 was answered on 2026-09-30.
 COMPARISON_MARK = "warehouse_comparison"
 
 
@@ -328,33 +332,25 @@ def open_retired_conditions() -> Dict[str, Optional[str]]:
 # ─── The doors OD-10 has not yet decided ─────────────────────────────────────
 #
 # Doors in `web/` that read DuckDB's Silver with no read switch and no
-# stand-down. After the switch each serves numbers as old as the flip, and
-# after the first Sunday compaction none — `/api/buyers/stats` would report
-# `unique_in_silver_orders = 0` beside a full `silver.orders`. OD-10 decides
-# each, port or retire, and blocks step 13; until it is answered for all of
-# them the switch waits (`od10_doors`), and this list is what is left to do.
-# It is not a list anybody keeps: `tests/unit/test_warehouse_writer.py` walks
-# `web/` for every function naming a table the switch freezes —
-# `silver_orders`, the `silver_order_lines` view over it, `gold_daily_revenue`,
-# `silver_order_utm`, an inventory view reading one of them (derived from
-# `core.sql_dialect._INVENTORY_VIEWS`), or a dialect hole that could render
-# to one, `{views}` included — without
-# asking `duckdb_derives()`, and requires exactly these: a door retired or
-# ported, or put behind the predicate, leaves the list, and a door added joins
-# it. The readers in `core/` ride the `KS_READ_*` switches below, and the
-# checks and comparisons stand down on `warehouse_checks_stand_down()`.
-OD10_DOORS: Tuple[Tuple[str, str], ...] = (
-    ("web/routes/api/admin.py:purge_orders", "POST /api/duckdb/purge-orders"),
-    ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),
-    ("web/routes/api/admin.py:debug_stale_returns", "GET /api/debug/stale-returns"),
-    ("web/routes/api/admin.py:debug_order_status", "GET /api/debug/order-status/{id}"),
-    ("web/services/search_service.py:get_buyer_details",
-     "GET /api/buyers/{id} and the assistant's get_buyer_details"),
-    ("web/services/search_service.py:get_order_details",
-     "GET /api/orders/{id} and the assistant's get_order_details"),
-    ("web/services/search_service.py:get_product_details",
-     "GET /api/products/{id}"),
-)
+# stand-down. After the switch each would serve numbers as old as the flip,
+# and after the first Sunday compaction none. OD-10 decided each, port or
+# retire, and blocked step 13 until it had: the owner retired all seven on
+# 2026-09-30 — buyers/stats, the two debug routes, purge-orders and the three
+# detail cards (`tests/unit/test_od10_retired_doors.py` keeps them retired).
+# The list is empty and `od10_doors` is met.
+#
+# It stays, because it is not a list anybody keeps:
+# `tests/unit/test_warehouse_writer.py` walks `web/` for every function naming
+# a table the switch freezes — `silver_orders`, the `silver_order_lines` view
+# over it, `gold_daily_revenue`, `silver_order_utm`, an inventory view reading
+# one of them (derived from `core.sql_dialect._INVENTORY_VIEWS`), or a dialect
+# hole that could render to one, `{views}` included — without asking
+# `duckdb_derives()`, and requires exactly these. A door added after OD-10
+# joins the list and holds the switch until it is ported, retired or put
+# behind the predicate. The readers in `core/` ride the `KS_READ_*` switches
+# below, and the checks and comparisons stand down on
+# `warehouse_checks_stand_down()`.
+OD10_DOORS: Tuple[Tuple[str, str], ...] = ()
 
 
 # ─── The preconditions ───────────────────────────────────────────────────────
@@ -407,6 +403,8 @@ PRECONDITIONS: Tuple[Tuple[str, str], ...] = (
     ("read_fallback_off", f"{READ_FALLBACK}=off"),
     ("pg_dsn", f"{PG_DSN} set"),
     ("pg_revision", "Postgres at the revision this build requires"),
+    ("expenses_backfilled", "meta.mirror_state.backfilled_at set for "
+                            "bronze.expenses (the /expenses history gate)"),
     ("mirror_landing", f"{MIRROR_LANDING} on"),
     *((f"reader:{name}", f"{name}=postgres") for name in WAREHOUSE_READERS),
     ("cohorts_clickhouse", f"{COHORTS}=clickhouse"),
@@ -422,6 +420,19 @@ PRECONDITIONS: Tuple[Tuple[str, str], ...] = (
 # How long the readiness waits for Postgres to say its revision. A status page
 # reports; it does not hang on a database that has stopped answering.
 REVISION_READ_TIMEOUT_S = 5.0
+
+# The one read a Postgres switch cannot see. `_expenses_run`
+# (`core/repositories/expenses.py`) sends the two statements over
+# `{expenses}` to Postgres only once `pg_expenses_read.backfilled()` says
+# `bronze.expenses` holds its history, whatever KS_READ_EXPENSES says — and a
+# NULL `backfilled_at` is an answer, not a failure, so DuckDB's Silver serves
+# the /expenses summary and profit analysis uncounted and unrefused even
+# under KS_READ_FALLBACK=off. Production has it set; a fresh host, or a
+# restore older than the backfill, would not. So the switch asks it too, of
+# the same Postgres and inside the same bound as the revision.
+EXPENSES_HISTORY = "bronze.expenses"
+_EXPENSES_HISTORY_SQL = ("SELECT backfilled_at IS NOT NULL FROM meta.mirror_state "
+                         "WHERE table_name = $1")
 
 # How many times a start asks Postgres before its verdict, and how long it
 # waits between asks — only after a read that failed, never after an answer.
@@ -443,10 +454,18 @@ class Facts:
     `bridge_owners` is None with `bridge_error` when the registry could not be
     read; `open_retired` likewise with `open_retired_error` when the Alert
     Gate could not. `od10_doors` is `OD10_DOORS`, handed in so the evaluator
-    stays pure over what it is given."""
+    stays pure over what it is given. `expenses_backfilled` is whether
+    `bronze.expenses` has its history (`EXPENSES_HISTORY`), None with
+    `expenses_backfill_error` when it was not asked or not answered — asked
+    only of a Postgres that said its revision. `expenses_history_row` tells
+    the two ways it can be False apart: a `meta.mirror_state` row whose
+    `backfilled_at` is NULL, or no row at all."""
     revision: Optional[str] = None
     revision_error: Optional[str] = None
     required_revision: Optional[str] = None
+    expenses_backfilled: Optional[bool] = None
+    expenses_backfill_error: Optional[str] = None
+    expenses_history_row: bool = True
     bridge_owners: Optional[Mapping[str, Tuple[str, ...]]] = field(default_factory=dict)
     bridge_error: Optional[str] = None
     open_retired: Optional[Mapping[str, Optional[str]]] = field(default_factory=dict)
@@ -490,6 +509,26 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
     else:
         need("pg_revision", required is not None and facts.revision == required,
              f"Postgres is at {facts.revision!r}, this build requires {required!r}")
+        # Asked only of a Postgres that answered: one that did not is
+        # `pg_revision`'s, and a start that could not reach it names that alone.
+        if facts.expenses_backfilled is None:
+            need("expenses_backfilled", False,
+                 f"whether {EXPENSES_HISTORY} holds its history is unknown: "
+                 f"{facts.expenses_backfill_error or 'not asked'}")
+        else:
+            found = (f"meta.mirror_state.backfilled_at is NULL for {EXPENSES_HISTORY}"
+                     if facts.expenses_history_row else
+                     f"meta.mirror_state has no row for {EXPENSES_HISTORY}: nothing "
+                     "has shipped it to this Postgres, neither the landing mirror "
+                     "nor a backfill")
+            need("expenses_backfilled", facts.expenses_backfilled,
+                 f"{found}. Until its backfill completes, the /expenses summary "
+                 "and the profit analysis read DuckDB's Silver whatever "
+                 "KS_READ_EXPENSES says — frozen after the switch, empty after "
+                 "a compaction, and never counted as a fallback. POST "
+                 "/api/mirror/backfill/expenses (it writes the row), or let the "
+                 "hourly ids-diff finish it (it runs while "
+                 f"{MIRROR_LANDING} is on).")
 
     need("mirror_landing", mirror_on(env.get(MIRROR_LANDING)),
          f"{MIRROR_LANDING} is {env.get(MIRROR_LANDING)!r}: the landing mirror "
@@ -548,12 +587,73 @@ async def _revision_on_its_own_connection(dsn: str) -> Optional[str]:
         await conn.close()
 
 
+async def _expenses_backfilled(conn=None) -> Optional[bool]:
+    """Whether `meta.mirror_state.backfilled_at` is set for `bronze.expenses`
+    — the question `pg_expenses_read.backfilled()` asks before it lets a
+    history read reach Postgres, which reads both False and None as "not
+    yet". Kept apart here only so the precondition can say which: False is a
+    row whose `backfilled_at` is NULL, None is no row at all. On `conn`, or
+    on the application's pool. Raises what the read raises."""
+    if conn is None:
+        from core.pg import get_pool
+
+        pool = await get_pool()
+        async with pool.acquire() as acquired:
+            return await _expenses_backfilled(acquired)
+    answer = await conn.fetchval(_EXPENSES_HISTORY_SQL, EXPENSES_HISTORY)
+    return None if answer is None else bool(answer)
+
+
+async def _expenses_backfilled_on_its_own_connection(dsn: str) -> Optional[bool]:
+    """`_expenses_backfilled` on a connection opened for it and closed after —
+    `_revision_on_its_own_connection`'s reason: the start reads from a loop
+    that is not the application's."""
+    import asyncpg
+
+    conn = await asyncpg.connect(dsn=dsn)
+    try:
+        return await _expenses_backfilled(conn)
+    finally:
+        await conn.close()
+
+
+async def _read_expenses_history(env: Mapping[str, str], *, own_connection: bool,
+                                 timeout: float) -> Dict[str, Any]:
+    """`{"expenses_backfilled", "expenses_backfill_error", "unread"}`, plus
+    `expenses_history_row` with an answer, by `_read_postgres`'s rules: a
+    read that failed is unread and by its class alone, an answer is not.
+    Never raises."""
+    try:
+        read = (_expenses_backfilled_on_its_own_connection(env[PG_DSN].strip())
+                if own_connection else _expenses_backfilled())
+        done = await asyncio.wait_for(read, timeout=timeout)
+    except asyncio.TimeoutError:
+        return {"expenses_backfilled": None,
+                "expenses_backfill_error": f"Postgres did not answer in {timeout:g} s",
+                "unread": True}
+    except Exception as exc:  # noqa: BLE001 — reported as unmet, by class
+        logger.error("cutover readiness: whether %s holds its history could not "
+                     "be read: %s: %s", EXPENSES_HISTORY, type(exc).__name__, exc)
+        return {"expenses_backfilled": None,
+                "expenses_backfill_error": type(exc).__name__, "unread": True}
+    return {"expenses_backfilled": bool(done), "expenses_backfill_error": None,
+            "expenses_history_row": done is not None, "unread": False}
+
+
 async def _read_postgres(env: Mapping[str, str], *,
                          own_connection: bool) -> Dict[str, Any]:
     """What `gather_facts` asks Postgres: `{"revision", "revision_error",
-    "unread"}`. `unread` is a read that failed — no answer in time, or an
-    exception — as against an answer: a revision, a database never migrated,
-    or no DSN to ask. Only an unread fact is worth asking again. Never raises.
+    "unread"}`, and — of a Postgres that said its revision — whether
+    `bronze.expenses` holds its history (`expenses_backfilled`,
+    `expenses_backfill_error`). `unread` is a read that failed — no answer in
+    time, or an exception — as against an answer: a revision, a database
+    never migrated, a backfill done or not, or no DSN to ask. Only an unread
+    fact is worth asking again, and the two are asked again together. Never
+    raises.
+
+    One bound for both: the second read gets what the first left of
+    `REVISION_READ_TIMEOUT_S`, and never less than a fifth of it, so the two
+    stay inside the bound `_read_postgres_in_a_worker` holds them to.
 
     An exception is published by its class alone and logged whole at ERROR:
     a driver's text names the database user, the host and the port, and a
@@ -562,6 +662,8 @@ async def _read_postgres(env: Mapping[str, str], *,
     if not (env.get(PG_DSN) or "").strip():
         return {"revision": None, "revision_error": f"not asked: {PG_DSN} is not set",
                 "unread": False}
+    loop = asyncio.get_running_loop()
+    started = loop.time()
     try:
         from core.pg import current_revision
 
@@ -579,7 +681,11 @@ async def _read_postgres(env: Mapping[str, str], *,
     if revision is None:
         return {"revision": None, "revision_error": "Postgres recorded no Alembic revision",
                 "unread": False}
-    return {"revision": revision, "revision_error": None, "unread": False}
+    left = REVISION_READ_TIMEOUT_S - (loop.time() - started)
+    history = await _read_expenses_history(
+        env, own_connection=own_connection,
+        timeout=max(left, REVISION_READ_TIMEOUT_S / 5))
+    return {"revision": revision, "revision_error": None, **history}
 
 
 def _local_facts() -> Dict[str, Any]:
@@ -689,8 +795,9 @@ def _gather_facts_blocking(env: Mapping[str, str]) -> Facts:
             break
         delay = REVISION_RETRY_DELAYS_S[min(attempt - 1, len(REVISION_RETRY_DELAYS_S) - 1)]
         logger.warning("cutover preconditions: Postgres was not read (%s); asking "
-                       "again in %g s, %d of %d", read["revision_error"], delay,
-                       attempt + 1, REVISION_READ_ATTEMPTS)
+                       "again in %g s, %d of %d",
+                       read.get("revision_error") or read.get("expenses_backfill_error"),
+                       delay, attempt + 1, REVISION_READ_ATTEMPTS)
         time.sleep(delay)
         read = _read_postgres_in_a_worker(env)
     read.pop("unread")

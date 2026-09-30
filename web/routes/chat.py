@@ -251,37 +251,9 @@ async def search_products(
     return await service.search_products(q, limit, brand)
 
 
-@router.get("/buyers/{buyer_id}")
-async def get_buyer_details(
-    buyer_id: int,
-):
-    """Get full buyer profile with order history."""
-    service = get_search_service()
-    result = await service.get_buyer_details(buyer_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Buyer not found")
-    return result
-
-
-@router.get("/orders/{order_id}")
-async def get_order_details(
-    order_id: int,
-):
-    """Get full order details with products."""
-    service = get_search_service()
-    result = await service.get_order_details(order_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Order not found")
-    return result
-
-
-@router.get("/products/{product_id}")
-async def get_product_details(
-    product_id: int,
-):
-    """Get product details with sales stats."""
-    service = get_search_service()
-    result = await service.get_product_details(product_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Product not found")
-    return result
+# The buyer, order and product cards that stood here — GET /api/buyers/{id},
+# /api/orders/{id} and /api/products/{id} — were retired by the owner's
+# decision OD-10 (2026-09-30). They read DuckDB's Silver, which step 13
+# freezes, and had answered 404 for every real id since 2026-02-06
+# (`dict()` of a DuckDB tuple). A customer card, if one is wanted, is built new
+# on Postgres behind a read switch — not a port of that code.

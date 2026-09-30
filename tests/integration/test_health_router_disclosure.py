@@ -66,9 +66,12 @@ from web.routes.auth import (
 METRICS_PATH = "/api/metrics"
 
 # Invented ids, chosen long enough that they cannot collide with a latency
-# reading or a counter in the payload the assertions search.
-BUYER_ID = "4242424"
-ORDER_ID = "9090909"
+# reading or a counter in the payload the assertions search. The buyer and order
+# cards these first probed (`/api/buyers/<id>`, `/api/orders/<id>`) were retired
+# by OD-10 on 2026-09-30; an admin read of one user and an admin write to one
+# manager carry the same shape of identifier.
+USER_ID = "4242424"
+MANAGER_ID = "9090909"
 TELEGRAM_ID = "770001112"
 CAMPAIGN = "not-a-real-campaign"
 PRESET = "not-a-real-preset"
@@ -77,8 +80,12 @@ PRESET = "not-a-real-preset"
 # they are admin-only or permission-gated — which is the point: the metric
 # recorded them anyway.
 ID_BEARING_REQUESTS = [
-    ("GET", f"/api/buyers/{BUYER_ID}", "/api/buyers/{buyer_id}"),
-    ("GET", f"/api/orders/{ORDER_ID}", "/api/orders/{order_id}"),
+    ("GET", f"/api/admin/users/{USER_ID}", "/api/admin/users/{user_id}"),
+    (
+        "POST",
+        f"/api/managers/{MANAGER_ID}/retail-status",
+        "/api/managers/{manager_id}/retail-status",
+    ),
     ("PATCH", f"/api/admin/users/{TELEGRAM_ID}/role", "/api/admin/users/{user_id}/role"),
     (
         "PUT",
@@ -92,7 +99,7 @@ ID_BEARING_REQUESTS = [
     ),
 ]
 
-SECRET_FRAGMENTS = [BUYER_ID, ORDER_ID, TELEGRAM_ID, CAMPAIGN, PRESET]
+SECRET_FRAGMENTS = [USER_ID, MANAGER_ID, TELEGRAM_ID, CAMPAIGN, PRESET]
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -204,11 +211,11 @@ class TestMetricsDoesNotEchoIdentifiers:
         may not read still writes a key, so the key must carry no id."""
         headers = _login(monkeypatch, "viewer")
 
-        assert client.get(f"/api/buyers/{BUYER_ID}", headers=headers).status_code == 403
+        assert client.get(f"/api/admin/users/{USER_ID}", headers=headers).status_code == 403
 
         body = client.get(METRICS_PATH, headers=headers).json()
-        assert body["requests"].get("GET /api/buyers/{buyer_id}") == 1
-        assert BUYER_ID not in json.dumps(body)
+        assert body["requests"].get("GET /api/admin/users/{user_id}") == 1
+        assert USER_ID not in json.dumps(body)
 
 
 class TestMetricKeysAreBoundedByTheRouteTable:
@@ -217,14 +224,14 @@ class TestMetricKeysAreBoundedByTheRouteTable:
     def test_many_ids_collapse_to_one_key(self, client, monkeypatch):
         headers = _login(monkeypatch, "viewer")
 
-        for buyer_id in range(9_100_000, 9_100_050):
-            client.get(f"/api/buyers/{buyer_id}", headers=headers)
+        for user_id in range(9_100_000, 9_100_050):
+            client.get(f"/api/admin/users/{user_id}", headers=headers)
 
         body = client.get(METRICS_PATH, headers=headers).json()
-        buyer_keys = [k for k in body["requests"] if "/api/buyers/" in k]
-        assert buyer_keys == ["GET /api/buyers/{buyer_id}"], \
-            f"50 ids produced {len(buyer_keys)} keys — the dictionary still grows with traffic"
-        assert body["requests"]["GET /api/buyers/{buyer_id}"] == 50
+        user_keys = [k for k in body["requests"] if "/api/admin/users/" in k]
+        assert user_keys == ["GET /api/admin/users/{user_id}"], \
+            f"50 ids produced {len(user_keys)} keys — the dictionary still grows with traffic"
+        assert body["requests"]["GET /api/admin/users/{user_id}"] == 50
 
     def test_static_assets_share_one_key(self, client, monkeypatch):
         """nginx proxies /static/ here, so every hashed filename ever built used
@@ -296,7 +303,7 @@ class TestMetricsStaysViewerReadable:
     def test_route_templates_are_public_anyway(self, client):
         schema = client.get("/openapi.json")
         assert schema.status_code == 200
-        assert "/api/buyers/{buyer_id}" in schema.json()["paths"]
+        assert "/api/admin/users/{user_id}" in schema.json()["paths"]
 
 
 # ─── The public endpoint ──────────────────────────────────────────────────────

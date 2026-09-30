@@ -4,7 +4,7 @@ Page routes for serving HTML templates and React SPA.
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from web.config import STATIC_V2_DIR
 from web.routes.auth import require_auth
@@ -101,7 +101,16 @@ async def admin_spa(request: Request, path: str):
 
 @router.get("/{path:path}", response_class=HTMLResponse)
 async def catch_all_spa(request: Request, path: str):
-    """Catch-all: serve React SPA for any unmatched route (client-side routing)."""
+    """Catch-all: serve React SPA for any unmatched route (client-side routing).
+
+    Except under /api/. A GET there that reached this route matched no API
+    route, and the SPA shell with a 200 would read as success to a script, a
+    saved curl or the diagnostic agent. The doors OD-10 retired are exactly
+    such paths. Such a GET is a JSON 404, answered before the session check:
+    it says only that no such API route exists, and `/openapi.json` names
+    every route that does."""
+    if path == "api" or path.startswith("api/"):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
     return await _serve_spa_route(request, path)
 
 

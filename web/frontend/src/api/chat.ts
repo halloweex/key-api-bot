@@ -200,30 +200,4 @@ export const searchApi = {
 
     return response.json()
   },
-
-  /**
-   * Get buyer details.
-   */
-  async getBuyerDetails(buyerId: number): Promise<Record<string, unknown>> {
-    const response = await fetch(`${API_BASE}/buyers/${buyerId}`, {
-      credentials: 'include',
-    })
-    if (!response.ok) {
-      throw ApiError.fromResponse(response)
-    }
-    return response.json()
-  },
-
-  /**
-   * Get order details.
-   */
-  async getOrderDetails(orderId: number): Promise<Record<string, unknown>> {
-    const response = await fetch(`${API_BASE}/orders/${orderId}`, {
-      credentials: 'include',
-    })
-    if (!response.ok) {
-      throw ApiError.fromResponse(response)
-    }
-    return response.json()
-  },
 }

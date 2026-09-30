@@ -834,18 +834,18 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
-        # Job: Reconciliation check (daily at 6 AM)
-        # Legacy job — preserved for backward compatibility; the new
-        # dq_reconciliation job above is the source of truth for alerts.
-        self._add_job(
-            job_id="reconciliation_check",
-            name="Reconciliation Check",
-            description="Compare DuckDB order counts with KeyCRM API",
-            func=self._run_reconciliation,
-            trigger=CronTrigger(hour=6, minute=0),
-            max_instances=1,
-            coalesce=True,
-        )
+        # The legacy 06:00 `reconciliation_check` (DuckDB order counts per day
+        # against KeyCRM, 14 days, logged to `reconciliation_log`) was retired
+        # by the owner's decision OD-10 (2026-09-30): `dq_reconciliation`
+        # compares 90 days per order against all three stores from one fetch.
+        # The one repair only the legacy job made — a status or total that
+        # moved on a backdated order (created before `order_status_refresh`'s
+        # 30-day window, ordered inside it; the legacy fetch was padded by 30
+        # days for it) — is now `order_status_refresh`'s: it re-fetches those
+        # by id at 05:15, before `dq_reconciliation` looks at 05:30.
+        # `dq_reconciliation` itself still repairs only orders we do not hold.
+        # `reconciliation_log` keeps its history, in DuckDB and Postgres alike;
+        # nothing writes it any more.
 
         # Job: Memory monitor (every 30 minutes)
         # Reads cgroup memory stats and alerts admin via Telegram
@@ -1243,8 +1243,10 @@ class BackgroundScheduler:
         Re-fetch recent orders to catch status changes.
 
         KeyCRM doesn't update updated_at when order status changes (e.g., cancellations),
-        so the incremental sync misses these. This job re-fetches the last 30 days
-        of orders to ensure all status changes are captured.
+        so the incremental sync misses these. This job re-fetches the orders
+        created in the last 30 days, and by id those dated into the last 30
+        days but created before them (backdated B2B orders), so that every
+        status change is captured.
         """
         async with self._heavy_job_lock:
             with correlation_context() as corr_id:
@@ -1852,23 +1854,6 @@ class BackgroundScheduler:
                 result = await store.backup_database(keep=2)
                 logger.info(f"DB backup job complete: {result.get('status')}")
                 return result
-
-    async def _run_reconciliation(self) -> Dict[str, Any]:
-        """Run daily reconciliation check against KeyCRM API."""
-        with correlation_context() as corr_id:
-            logger.info("Starting reconciliation check job")
-
-            from core.sync_service import get_sync_service
-            sync_service = await get_sync_service()
-            results = await sync_service.reconcile_with_api(
-                days_back=14, lock=self._heavy_job_lock)
-
-            ok = sum(1 for r in results if r["status"] == "ok")
-            drift = sum(1 for r in results if r["status"] == "drift")
-
-            result = {"checked_days": len(results), "ok": ok, "drift": drift}
-            logger.info("Reconciliation check job complete", extra=result)
-            return result
 
     # ─── Data Quality framework (Layer 1 + 2) ─────────────────────────────────
 

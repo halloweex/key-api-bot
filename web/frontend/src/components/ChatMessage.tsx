@@ -149,8 +149,6 @@ function getToolInfo(toolName: string) {
     search_buyer: { icon: '🔍', label: 'Searching customers', bgColor: 'bg-cyan-100' },
     search_order: { icon: '📦', label: 'Finding orders', bgColor: 'bg-orange-100' },
     search_product: { icon: '🛍️', label: 'Searching products', bgColor: 'bg-indigo-100' },
-    get_buyer_details: { icon: '👤', label: 'Loading customer profile', bgColor: 'bg-teal-100' },
-    get_order_details: { icon: '📋', label: 'Loading order details', bgColor: 'bg-rose-100' },
   }
   return tools[toolName] || { icon: '⚡', label: toolName.replace(/_/g, ' '), bgColor: 'bg-slate-100' }
 }
