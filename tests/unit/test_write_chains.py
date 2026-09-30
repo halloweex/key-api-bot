@@ -2672,6 +2672,70 @@ class TestTheAdminBuyerReship:
         assert res.json()["status"] == "started"
         assert pool.only_asked_who_owns()
 
+    @pytest.mark.asyncio
+    async def test_two_requests_at_once_start_one_reship(self, flags, pool, reship):
+        """The review's double click: both requests used to pass the "already
+        running" check while the first sat in the owner read, before any task
+        existed. Two requests in flight at once, the first held in that read;
+        exactly one may start."""
+        import asyncio
+        import time as _time
+
+        import httpx
+
+        from core.permissions import ADMIN_USER_IDS
+        from web.main import app
+        from web.routes.api import admin
+        from web.routes.api._deps import limiter
+        from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
+
+        limiter.reset()
+        flags.setattr(admin, "_RESHIP_SLOT", {"claimed": False})
+        admin_id = sorted(ADMIN_USER_IDS)[0]
+
+        async def _resolve(session):
+            return {"user_id": admin_id, "role": "admin"}
+
+        flags.setattr("web.routes.auth._resolve_session", _resolve)
+        release = asyncio.Event()
+        real = __import__("core.pg_landing", fromlist=["x"]).tables_stood_down_or_owned
+
+        async def held(pool_, unit):
+            await release.wait()
+            return await real(pool_, unit)
+
+        flags.setattr("core.pg_landing.tables_stood_down_or_owned", held)
+        cookie = session_serializer.dumps(create_session_data(
+            {"id": str(admin_id), "first_name": "T", "last_name": "U",
+             "username": "t", "auth_date": str(int(_time.time()))}, role="admin"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t",
+                                     cookies={SESSION_COOKIE: cookie}) as client:
+            first = asyncio.ensure_future(client.post("/api/mirror/backfill/buyers"))
+            await asyncio.sleep(0.05)                   # the first is in the owner read
+            try:
+                # Bounded: without the slot the second request also waits in
+                # the held read, and the test would hang rather than fail.
+                second = await asyncio.wait_for(
+                    client.post("/api/mirror/backfill/buyers"), 5)
+            finally:
+                release.set()
+            first = await asyncio.wait_for(first, 5)
+        assert second.status_code == 409, second.json()
+        assert "already running" in second.json()["detail"]
+        assert first.status_code == 200 and first.json()["status"] == "started"
+
+    def test_a_refused_request_gives_the_slot_back(self, flags, pool, landing_chain, reship):
+        """A 503 or a 409 from the owner read must not leave the slot claimed,
+        or every later reship would be refused as "already running"."""
+        from web.routes.api import admin
+
+        flags.setattr(admin, "_RESHIP_SLOT", {"claimed": False})
+        landing_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        assert self._post(flags).status_code == 503
+        assert admin._RESHIP_SLOT["claimed"] is False
+
 
 # ─── DN-22b: the daily comparisons stand down with their shippers ───────────
 

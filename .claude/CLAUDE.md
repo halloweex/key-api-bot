@@ -156,7 +156,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/warehouse/status` | Last refresh, checksums, validation_passed; `cutover` — step 13's unmet preconditions (DN-28) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/mirror/backfill/orders` | Ship the orders Postgres is missing; idempotent (POST, admin) |
-| `/api/mirror/backfill/buyers` | Re-ship every buyer and contact DuckDB holds, detached; chain 4's pre-flip lever (POST, admin) |
+| `/api/mirror/backfill/buyers` | Re-ship every buyer DuckDB holds, with its contacts, detached; chain 4's pre-flip lever (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
 
@@ -2606,16 +2606,25 @@ are shipped by the buyers mirror from the same parse as DuckDB and nothing
 replaces them whole. Their handover is stricter because it can be — Postgres
 dates every write of a buyer (`mirrored_at = now()`), and the owner row's
 `updated_at` is `now()` in the latching transaction, one clock. Before a flip
-any difference, either side, is CRITICAL and names its lever:
-`POST /api/mirror/backfill/buyers`, which re-ships every buyer DuckDB holds
-(detached, heavy lock per portion; it moves every `mirrored_at`, so the
-search index re-indexes everything and `buyers_without_verdict` is blind for
-90 minutes). After the latch a difference, or a contact only DuckDB holds, is
-INFO only for a buyer the chain rewrote since the latch, CRITICAL otherwise
-(decision 6); a buyer only DuckDB holds always refuses — the chain never
-deletes one. For every chain, a Postgres row with NULL where DuckDB declares
-NOT NULL (read from DuckDB's catalogue) is a handover CRITICAL, so `--handover`
-refuses what `--execute` would otherwise have died on at its first INSERT. The two big tables are
+any difference, either side, is CRITICAL. A buyer or contact DuckDB holds that
+Postgres lacks or holds differently, and a contact only Postgres holds of a
+buyer DuckDB holds, name `POST /api/mirror/backfill/buyers`, which re-ships
+every buyer DuckDB holds with its contacts (detached, heavy lock per portion;
+it moves every `mirrored_at`, so the search index re-indexes everything and
+`buyers_without_verdict` is blind for 90 minutes). A buyer only Postgres holds
+is a per-id decision — nothing deletes one. After the latch a difference, or
+a row on one side only, is INFO only for a buyer the chain rewrote since the
+latch and CRITICAL otherwise (decision 6); a buyer only DuckDB holds always
+refuses — the chain never deletes one — and so does a buyer DuckDB holds in a
+version KeyCRM's own `updated_at` dates later, with its contacts: a DuckDB
+write after the latch (the marker lost with the flag back at duckdb) that the
+rewrite clock alone would take for the chain's. Contacts are read in both
+stores through a join to their own buyers, as the daily check reads DuckDB's,
+so an orphan on either side is outside the landing rather than a refusal the
+reship could never clear. For every chain, a Postgres row with NULL where
+DuckDB declares NOT NULL (read from DuckDB's catalogue) is a handover CRITICAL
+whose lever is correcting it in Postgres, so `--handover` refuses what
+`--execute` would otherwise have died on at its first INSERT. The two big tables are
 compared row by row rather than by fingerprint, because the fingerprint's one
 blind spot — a text column rewritten to the same length — is affordable every
 morning and not affordable in the comparison that releases a latch.
