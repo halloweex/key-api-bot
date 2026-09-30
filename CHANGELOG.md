@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.258
+
+- The chain handover runs as the web service, not a bare docker run
+
+
 ## 3.0.257
 
 - Chain 4 PR-1: the skip walker reads a reason built from a module constant
