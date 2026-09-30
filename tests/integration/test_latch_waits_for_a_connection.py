@@ -41,8 +41,8 @@ import pytest
 import pytest_asyncio
 
 from core import (
-    chain_latch, pg_expense_types_write, pg_expenses_write, pg_goals_write,
-    pg_inventory_write, write_chains,
+    chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
+    pg_goals_write, pg_inventory_write, write_chains,
 )
 
 DSN = os.getenv("KS_PG_DSN")
@@ -52,7 +52,8 @@ pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_P
 # after each test, with the owner rows — left behind, an owner row reads in the
 # next module as a chain owning a table with no local marker.
 _WRITTEN = ("bronze.offers", "app.manual_expenses", "app.revenue_goals",
-            "bronze.expense_types")
+            "bronze.expense_types", "bronze.buyer_contacts", "app.buyer_gender",
+            "bronze.buyers")
 
 STOCK = {"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
          "quantity": 40, "reserve": 0}
@@ -178,6 +179,33 @@ class _RollsBackTheWriter:
         return getattr(self._live, name)
 
 
+def _buyer(buyer_id: int = 1):
+    from core.models import Buyer
+
+    return Buyer.from_api({"id": buyer_id, "full_name": "Олена Петренко",
+                           "phone": ["+380500000001"]})
+
+
+async def _derive(_store):
+    """Chain 4's derivation, with one buyer waiting for a verdict — without
+    one it returns before the latch, which is the point of reading first.
+    Seeded through the pool the test hands out, which serves anybody but the
+    writer's module the live pool."""
+    from core.pg import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO bronze.buyers (id, full_name) VALUES (2, 'Олена Петренко') "
+            "ON CONFLICT (id) DO NOTHING")
+    return await pg_buyers_write.derive_gender_pg()
+
+
+# Writers that return their failure rather than raise it — chain 4's
+# derivation, `derive_gender`'s contract. A cancellation still goes through.
+NEVER_RAISES = {"derive_gender_pg"}
+
+
 # (chain module, the repository call that reaches the writer). Every public
 # writer the latch guard's walk finds, and nothing else — a test below checks
 # the two lists against each other.
@@ -198,6 +226,8 @@ WRITERS = {
     "set_goal": (pg_goals_write, lambda s: s.set_goal("daily", 60_000.0)),
     "upsert_expense_types": (pg_expense_types_write, lambda s: s.upsert_expense_types(
         [{"id": 1, "name": "Delivery"}])),
+    "upsert_buyers": (pg_buyers_write, lambda s: s.upsert_buyers([_buyer()])),
+    "derive_gender_pg": (pg_buyers_write, _derive),
 }
 
 
@@ -207,7 +237,8 @@ async def stores(tmp_path, monkeypatch):
 
     `KS_READ_EXPENSES=postgres` because chain 6a moves nothing without it
     (`pg_expense_types_write.unmet_precondition`); it routes reads only, and
-    no test here reads expenses.
+    no test here reads expenses. The three buyer readers for chain 4's, for
+    the same reason: none of them is read here.
     """
     from core.duckdb_store import DuckDBStore
 
@@ -215,6 +246,8 @@ async def stores(tmp_path, monkeypatch):
         monkeypatch.delenv(chain.WRITE_ENV, raising=False)
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
+    for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
+        monkeypatch.setenv(reader, "postgres")
     store = DuckDBStore(db_path=tmp_path / "latch-acquire.duckdb")
     await store.connect()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
@@ -341,8 +374,13 @@ class TestAnAcquireThatFailsLeavesTheChainUnlatched:
                 assert not chain_latch.marker_path(chain.CHAIN).exists(), (
                     f"{writer}: latched while it waited for a connection")
                 await refusing.refuse(task)
-                with pytest.raises(refusing.raised):
-                    await asyncio.wait_for(task, 10)
+                if (writer in NEVER_RAISES
+                        and refusing.raised is not asyncio.CancelledError):
+                    result = await asyncio.wait_for(task, 10)
+                    assert result["error"] and result["written"] == 0, result
+                else:
+                    with pytest.raises(refusing.raised):
+                        await asyncio.wait_for(task, 10)
             finally:
                 waiting.cancel()
                 if not task.done():
@@ -377,8 +415,12 @@ class TestAClaimRollsBackWithItsWrite:
         pool = _RollsBackTheWriter(live, chain.__name__)
 
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
-            with pytest.raises(_RolledBack):
-                await call(store)
+            if writer in NEVER_RAISES:
+                result = await call(store)
+                assert result["error_class"] == "_RolledBack", result
+            else:
+                with pytest.raises(_RolledBack):
+                    await call(store)
 
         assert pool.handed == 1 and pool.rolled_back == 1, (
             f"{writer}: expected one connection and one rolled-back "
@@ -397,6 +439,7 @@ FIRST_WRITES = {
     "pg_expenses_write": ("add_expense", "app.manual_expenses", None, None),
     "pg_goals_write": ("set_goal", "app.revenue_goals", "period_type", "daily"),
     "pg_expense_types_write": ("upsert_expense_types", "bronze.expense_types", "id", 1),
+    "pg_buyers_write": ("upsert_buyers", "bronze.buyers", "id", 1),
 }
 
 

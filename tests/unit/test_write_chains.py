@@ -570,9 +570,13 @@ class _Walk:
         return bool(reached) and reached <= helpers
 
     def covered(self, key, seen=None) -> bool:
-        """It asks, or it is reached only from functions that do."""
+        """It asks, or it is reached only from functions that do — or it is
+        a registered chain's own function, which is the destination and not a
+        shipper: chain 4's writer runs the buyers' row writer the mirror runs
+        (`core.pg_buyer_rows`), and the question it would ask is answered by
+        being the chain."""
         seen = set() if seen is None else seen
-        if key in self.consulting:
+        if key in self.consulting or key[0] in _chain_modules():
             return True
         if key in seen:
             return False

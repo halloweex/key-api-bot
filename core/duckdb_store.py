@@ -3170,8 +3170,18 @@ class DuckDBStore(
     # be atomic.
     BUYER_WRITE_PORTION = 1000
 
-    async def upsert_buyers(self, buyers: List["Buyer"]) -> int:
+    async def upsert_buyers(self, buyers: List["Buyer"], *,
+                            skipped_out: Optional[List[int]] = None) -> int:
         """Write buyers to DuckDB in portions, mirroring each portion to Postgres.
+
+        UNDER CHAIN 4 NONE OF THIS RUNS. Once `KS_WRITE_BUYERS` has moved the
+        buyers (`core/pg_buyers_write.py`), the first statement hands the batch
+        to the chain's writer, which writes Postgres alone — before the portion
+        loop, so DuckDB's copy stops and the mirror has nothing to ship. The
+        answer is `writes_postgres()`, which raises on a flag nobody can read
+        while the chain is unlatched: a batch with nowhere known to go is not
+        written anywhere. `skipped_out` is filled only there — the buyers
+        Postgres would refuse, which the chain skips rather than raising for.
 
         THE MIRROR LIVES HERE NOW, AND ONLY HERE. It used to be a separate line
         at one caller, `sync_missing_buyers`, so the other caller — the admin
@@ -3190,7 +3200,12 @@ class DuckDBStore(
         Returns:
             Number of buyers upserted
         """
+        from core import pg_buyers_write
         from core.pg_buyers import mirror_buyers
+
+        if pg_buyers_write.writes_postgres():
+            return await pg_buyers_write.upsert_buyers(
+                buyers or [], skipped_out=skipped_out)
 
         written, unshipped = 0, []
         for start in range(0, len(buyers or []), self.BUYER_WRITE_PORTION):

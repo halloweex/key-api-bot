@@ -146,6 +146,13 @@ class _Recorder:
             return {"recorded_at": 0, "source": 0}
         if "created_at" in sql:
             return {"created_at": 0}
+        # Chain 4's three reads (`_read_buyers`).
+        if "full_name IS NULL" in sql:
+            return {"buyers": 0, "full_name": 0}
+        if "AS missing" in sql:
+            return {"missing": 0, "sample": []}
+        if "WITH orphans" in sql:
+            return {"contacts": 0, "verdicts": 0, "sample": []}
         raise AssertionError(f"unexpected fetchrow: {sql}")
 
     async def fetch(self, sql, *_a):
@@ -309,7 +316,7 @@ class TestAChainWithNoInvariants:
                    if chain_name(c) not in readers]
         assert not missing, f"no chain invariants for {missing}"
         assert set(readers.values()) <= {"expenses", "inventory", "goals",
-                                         "expense_types"}
+                                         "expense_types", "buyers"}
         # And each names a field `Facts` actually carries — a reader whose
         # group the verdict never looks at is read and then judged by nothing.
         import dataclasses
@@ -425,6 +432,120 @@ class TestChain7aGoals:
         assert [i.check_name for i in issues] == [inv.UNWATCHED]
         assert "pg_goals_write" in issues[0].description
         assert inv.unverified_conditions(issues) == sorted(inv.CONDITIONS)
+
+
+class TestChain4Buyers:
+    """Chain 4. What is true of the three buyer tables on their own: no
+    orphaned contact or verdict once the chain has written, no NULL name
+    (DuckDB's column is NOT NULL, so the copy-back could not carry it back),
+    and every buyer's phone and email in its contact list."""
+
+    READERS = ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD")
+
+    @pytest.fixture
+    def flagged(self, monkeypatch):
+        monkeypatch.setenv("KS_WRITE_BUYERS", "postgres")
+        for env in self.READERS:
+            monkeypatch.setenv(env, "postgres")
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS",
+                    "KS_WRITE_EXPENSE_TYPES"):
+            monkeypatch.delenv(env, raising=False)
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
+
+    def test_the_flag_with_its_readers_makes_it_watched(self, flagged):
+        assert inv.watched_chains() == {"pg_buyers_write": None}
+
+    def test_a_flag_whose_readers_lag_is_not_watched(self, flagged, monkeypatch):
+        """Held on DuckDB by its precondition, the chain writes nothing here —
+        the registry's one answer, which this module reads and does not
+        re-derive."""
+        monkeypatch.setenv("KS_READ_DASHBOARD", "duckdb")
+        assert inv.watched_chains() == {}
+
+    @pytest.mark.asyncio
+    async def test_before_the_first_write_it_reads_no_orphans(self, flagged):
+        conn = _Recorder()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(conn))
+        assert facts.watched == ("pg_buyers_write",) and facts.whole is None
+        assert isinstance(facts.buyers, inv.Buyers)
+        assert facts.buyers.latched_at is None
+        assert facts.expenses is None and facts.goals is None
+        read = "\n".join(conn.sql)
+        assert "FROM bronze.buyers" in read and "bronze.buyer_contacts" in read
+        assert "WITH orphans" not in read
+        for other in ("manual_expenses", "stock_movements", "revenue_goals",
+                      "expense_types"):
+            assert other not in read, other
+        assert inv.check_chain_invariants(facts) == []
+
+    @pytest.mark.asyncio
+    async def test_after_the_first_write_it_reads_them_with_the_stamp(self, flagged):
+        _latch("pg_buyers_write")
+        conn = _Recorder()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(conn))
+        assert facts.buyers.latched_at == UTC_NOW
+        assert "WITH orphans" in "\n".join(conn.sql)
+
+    @staticmethod
+    def _facts(latched_at=None, **kw):
+        nulls = inv.Nulls("bronze.buyers", {"full_name": kw.pop("null_names", 0)})
+        return inv.Facts(watched=("pg_buyers_write",), now=UTC_NOW,
+                         buyers=inv.Buyers(nulls=nulls, latched_at=latched_at,
+                                           buyers=100, **kw))
+
+    def test_an_orphan_after_the_handover_is_critical(self):
+        from core.data_quality import Severity
+
+        facts = self._facts(UTC_NOW, orphan_contacts=2, orphan_verdicts=1,
+                            orphan_sample=(7, 9))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert issue.check_name == inv.BUYER_ORPHANS
+        assert issue.severity is Severity.CRITICAL and issue.count == 3
+        assert issue.sample_ids == (7, 9)
+        assert "pg_buyers_write" in issue.description
+
+    def test_before_the_handover_an_orphan_is_not_judged(self):
+        """The verdicts arrive by the hourly replace and the buyers by the
+        per-tick mirror, so a verdict ahead of its buyer is lag, not a defect.
+        Only the chain's own writes make it one."""
+        facts = self._facts(None, orphan_contacts=2, orphan_verdicts=1,
+                            orphan_sample=(7,))
+        assert inv.check_chain_invariants(facts) == []
+
+    def test_a_contact_list_missing_its_column_is_a_warn(self):
+        from core.data_quality import Severity
+
+        facts = self._facts(None, contact_missing=4, contact_missing_sample=(3,))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert issue.check_name == inv.CONTACT_MISSING
+        assert issue.severity is Severity.WARN and issue.count == 4
+        assert issue.table_name == "bronze.buyer_contacts"
+
+    def test_a_null_name_names_the_copy_back_it_blocks(self):
+        facts = self._facts(UTC_NOW, null_names=1)
+        (issue,) = inv.check_chain_invariants(facts)
+        assert issue.check_name == inv.COLUMN_NULL
+        assert issue.table_name == "bronze.buyers"
+        assert "chain_copy_back.py" in issue.description
+        assert "landing_rows.buyer_row" in issue.description
+        assert "recorded_at" not in issue.description
+
+    def test_before_the_handover_the_null_came_with_the_mirror(self):
+        """The landing tables arrive by the per-tick mirror, not by the
+        hourly replication the other chains' tables did."""
+        facts = self._facts(None, null_names=1)
+        (issue,) = inv.check_chain_invariants(facts)
+        assert "carried across by the buyers mirror" in issue.description
+        assert "by the replication" not in issue.description
+
+    def test_an_unreadable_buyers_group_is_blindness_not_silence(self):
+        facts = inv.Facts(watched=("pg_buyers_write",), now=UTC_NOW,
+                          buyers=inv.Unwatched("relation does not exist"))
+        issues = inv.check_chain_invariants(facts)
+        assert [i.check_name for i in issues] == [inv.UNWATCHED]
+        assert "pg_buyers_write" in issues[0].description
 
 
 class TestWhoIsWatched:

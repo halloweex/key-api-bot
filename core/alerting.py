@@ -288,6 +288,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "chain_dictionary_empty": _c("a full sync lands the dictionary again"),
     "chain_name_unresolved": _c(
         "a full sync rewrites the names through the shared parse"),
+    # Chain 4's buyers. Orphans stay until a human corrects the rows; a
+    # contact list is rewritten by the next write of its buyer.
+    "chain_buyer_orphan_rows": _c(
+        "the orphaned rows are corrected or their buyers land — a human, not a job"),
+    "chain_buyer_contact_missing": _c(
+        "the next write of each buyer rewrites its contacts"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 

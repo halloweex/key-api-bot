@@ -45,10 +45,15 @@ logger = logging.getLogger(__name__)
 # transaction is how the SMS tab went from 124 to 38 req/s once already.
 CHUNK = 2000
 
+# One body per question, two engines (charter rule 1): the table names are
+# the only thing the renderings differ in, and they come from the same
+# `Dialect` fields the SMS audience uses. Postgres runs them through
+# `sql_dialect.numbered`, which turns the one `?` into `$1` — chain 4's writer
+# (`core/pg_buyers_write.py`) asks the same question of `bronze.buyers`.
 _PENDING_NEW = """
     SELECT b.id, b.full_name
-    FROM buyers b
-    LEFT JOIN buyer_gender g ON g.buyer_id = b.id
+    FROM {buyers} b
+    LEFT JOIN {buyer_gender} g ON g.buyer_id = b.id
     WHERE g.buyer_id IS NULL
        OR (g.override_by_human = FALSE AND g.rules_version < ?)
     ORDER BY b.id
@@ -60,11 +65,24 @@ _PENDING_NEW = """
 # ₴3.1M into the wrong bucket before anyone noticed.
 _PENDING_ALL = """
     SELECT b.id, b.full_name
-    FROM buyers b
-    LEFT JOIN buyer_gender g ON g.buyer_id = b.id
+    FROM {buyers} b
+    LEFT JOIN {buyer_gender} g ON g.buyer_id = b.id
     WHERE g.buyer_id IS NULL OR g.override_by_human = FALSE
     ORDER BY b.id
 """
+
+
+def pending_sql(buyers: str, buyer_gender: str, *,
+                rebuild_all: bool = False) -> Tuple[str, List[int]]:
+    """`(sql, params)` selecting the buyers that need a verdict, for one engine.
+
+    The params are `[RULES_VERSION]` for the ordinary question and nothing for
+    `--all`, in `?` form; Postgres numbers them."""
+    if rebuild_all:
+        return _PENDING_ALL.format(buyers=buyers, buyer_gender=buyer_gender), []
+    return (_PENDING_NEW.format(buyers=buyers, buyer_gender=buyer_gender),
+            [RULES_VERSION])
+
 
 _INSERT = """
     INSERT INTO buyer_gender
@@ -75,8 +93,8 @@ _INSERT = """
 
 async def pending(store, *, rebuild_all: bool = False) -> List[Tuple[int, str]]:
     """Buyers with no verdict, or one derived by an older RULES_VERSION."""
-    sql = _PENDING_ALL if rebuild_all else _PENDING_NEW
-    params = [] if rebuild_all else [RULES_VERSION]
+    sql, params = pending_sql(DUCKDB.buyers, DUCKDB.buyer_gender,
+                              rebuild_all=rebuild_all)
     async with store.connection() as conn:
         return [tuple(r) for r in conn.execute(sql, params).fetchall()]
 

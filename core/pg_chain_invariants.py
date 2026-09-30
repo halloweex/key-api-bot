@@ -102,6 +102,29 @@ The expense-type dictionary (chain 6a):
   until the first full sync under the flag writes one there
   (`CHAIN_WATERMARK_INHERITS_DUCKDB`).
 
+The buyers (chain 4):
+
+* **No orphans, once the chain has written.** A contact or a verdict whose
+  buyer `bronze.buyers` does not hold. Every writer of the three tables writes
+  a buyer's row, its contacts and its verdict in one transaction, and nothing
+  deletes a buyer, so after the handover an orphan is a write that went round
+  them. Before it, the verdicts arrive by the hourly full replace out of
+  DuckDB and the buyers by the per-tick mirror, and a buyer the mirror has not
+  shipped yet is not a defect — so it is judged from the latch on. Production
+  held none of either on 2026-09-30.
+* **`full_name`.** Postgres allows NULL there and DuckDB does not, so a NULL
+  is a buyer `scripts/chain_copy_back.py` refuses to carry back
+  (`handover_rows_unwritable`). The shared parse writes `'Unknown'` for a
+  blank name; a NULL is a write that went round `landing_rows.buyer_row`.
+* **Every buyer's phone and email are in its contact list.** The parse takes
+  the buyer's `phone`/`email` columns and its contact rows from the same
+  KeyCRM list, so one without the other is a contact list that was deleted and
+  not written again — what the SMS audience reads phone numbers from. WARN:
+  the buyer is still there. Production held none on 2026-09-30.
+* **Not its watermark.** `buyer_sync_stalled` pages on the step's own state at
+  90 minutes, and a second limit on the stamp the same step writes would say
+  one stall twice (`pg_buyers_write.CHAIN_WATERMARK_MAX_AGE_MIN`).
+
 WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
 
 A chain is watched when `core.write_chains.chain_modes()` says its writes go to
@@ -318,7 +341,21 @@ class Inventory:
     window_end: Optional[date] = None
 
 
-Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Unwatched, None]
+@dataclass(frozen=True)
+class Buyers:
+    """What is true of the three buyer tables on their own. The orphan counts
+    are read only once the chain has written here (`latched_at`)."""
+    nulls: Nulls
+    latched_at: Optional[datetime] = None
+    buyers: int = 0
+    orphan_contacts: int = 0
+    orphan_verdicts: int = 0
+    orphan_sample: Tuple[int, ...] = ()
+    contact_missing: int = 0
+    contact_missing_sample: Tuple[int, ...] = ()
+
+
+Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -337,6 +374,7 @@ class Facts:
     inventory: Group = None
     goals: Group = None
     expense_types: Group = None
+    buyers: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
@@ -359,6 +397,8 @@ SNAPSHOT_SHORT = "chain_snapshot_rows_short"
 WATERMARK_STALE = "chain_watermark_stale"
 DICTIONARY_EMPTY = "chain_dictionary_empty"
 NAME_UNRESOLVED = "chain_name_unresolved"
+BUYER_ORPHANS = "chain_buyer_orphan_rows"
+CONTACT_MISSING = "chain_buyer_contact_missing"
 UNWATCHED = "chain_invariants_unwatched"
 
 # What a blind run holds rather than resolves — `data_quality`'s
@@ -366,7 +406,7 @@ UNWATCHED = "chain_invariants_unwatched"
 CONDITIONS: Tuple[str, ...] = (
     SEQUENCE_BEHIND, COLUMN_NULL, INITIAL_BURST, FIRST_SEEN_RESET,
     ROLLUP_MISSING, SNAPSHOT_SHORT, WATERMARK_STALE,
-    DICTIONARY_EMPTY, NAME_UNRESOLVED,
+    DICTIONARY_EMPTY, NAME_UNRESOLVED, BUYER_ORPHANS, CONTACT_MISSING,
 )
 
 # The family name every condition above carries, and the key the integrity
@@ -420,14 +460,15 @@ def _reader_groups() -> Dict[str, str]:
     before it shows at 01:00.
     """
     from core import (
-        pg_expense_types_write, pg_expenses_write, pg_goals_write,
-        pg_inventory_write,
+        pg_buyers_write, pg_expense_types_write, pg_expenses_write,
+        pg_goals_write, pg_inventory_write,
     )
 
     return {pg_expenses_write.CHAIN: "expenses",
             pg_inventory_write.CHAIN: "inventory",
             pg_goals_write.CHAIN: "goals",
-            pg_expense_types_write.CHAIN: "expense_types"}
+            pg_expense_types_write.CHAIN: "expense_types",
+            pg_buyers_write.CHAIN: "buyers"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -555,6 +596,50 @@ WHERE s.first_seen_at >= $1
   AND f.day < s.first_seen_at
 """
 
+# `full_name` only: the one column of the three tables DuckDB declares NOT
+# NULL and Postgres does not. Every other NOT NULL of DuckDB's is NOT NULL here
+# too, so the server refuses it before this could see it.
+_BUYER_NULLS_SQL = """
+SELECT count(*) AS buyers,
+       count(*) FILTER (WHERE full_name IS NULL) AS full_name
+FROM bronze.buyers
+"""
+
+# A buyer's `phone`/`email` column and its contact rows come from one KeyCRM
+# list (`landing_rows.buyer_row` / `contact_rows`), so a column value with no
+# contact row is a contact list deleted and not written again. 20 657 buyers
+# and 34 379 contacts on 2026-09-30, both anti-joins on the contacts' key.
+_CONTACT_MISSING_SQL = """
+SELECT count(*) AS missing,
+       COALESCE((array_agg(b.id ORDER BY b.id))[1:10], '{}'::int[]) AS sample
+FROM bronze.buyers b
+WHERE (b.phone IS NOT NULL AND NOT EXISTS (
+           SELECT 1 FROM bronze.buyer_contacts c
+           WHERE c.buyer_id = b.id AND c.contact_type = 'phone'
+             AND c.value = b.phone))
+   OR (b.email IS NOT NULL AND NOT EXISTS (
+           SELECT 1 FROM bronze.buyer_contacts c
+           WHERE c.buyer_id = b.id AND c.contact_type = 'email'
+             AND c.value = b.email))
+"""
+
+_BUYER_ORPHANS_SQL = """
+WITH orphans AS (
+    SELECT c.buyer_id, 'contact' AS kind
+    FROM bronze.buyer_contacts c
+    WHERE NOT EXISTS (SELECT 1 FROM bronze.buyers b WHERE b.id = c.buyer_id)
+    UNION ALL
+    SELECT g.buyer_id, 'verdict'
+    FROM app.buyer_gender g
+    WHERE NOT EXISTS (SELECT 1 FROM bronze.buyers b WHERE b.id = g.buyer_id)
+)
+SELECT count(*) FILTER (WHERE kind = 'contact') AS contacts,
+       count(*) FILTER (WHERE kind = 'verdict') AS verdicts,
+       COALESCE((array_agg(DISTINCT buyer_id ORDER BY buyer_id))[1:10],
+                '{}'::int[]) AS sample
+FROM orphans
+"""
+
 _KYIV_DAY_SQL = "SELECT ($1::timestamptz AT TIME ZONE 'Europe/Kyiv')::date"
 
 _ROLLUP_SQL = """
@@ -617,6 +702,24 @@ async def _read_expense_types(conn) -> ExpenseTypes:
     return ExpenseTypes(
         rows=int(row["rows"]), unresolved=int(row["unresolved"]),
         unresolved_sample=tuple(int(i) for i in row["sample"]))
+
+
+async def _read_buyers(conn, latched_at: Optional[datetime] = None) -> Buyers:
+    nulls_row = await conn.fetchrow(_BUYER_NULLS_SQL)
+    missing = await conn.fetchrow(_CONTACT_MISSING_SQL)
+    nulls = Nulls(table="bronze.buyers",
+                  counts={"full_name": int(nulls_row["full_name"])})
+    common = dict(nulls=nulls, latched_at=latched_at,
+                  buyers=int(nulls_row["buyers"]),
+                  contact_missing=int(missing["missing"]),
+                  contact_missing_sample=tuple(int(i) for i in missing["sample"]))
+    if latched_at is None:
+        return Buyers(**common)
+    orphans = await conn.fetchrow(_BUYER_ORPHANS_SQL)
+    return Buyers(**common,
+                  orphan_contacts=int(orphans["contacts"]),
+                  orphan_verdicts=int(orphans["verdicts"]),
+                  orphan_sample=tuple(int(i) for i in orphans["sample"]))
 
 
 async def _read_inventory(conn, latched_at: Optional[datetime],
@@ -755,7 +858,9 @@ async def read_facts(*, pool=None) -> Facts:
     except Exception as e:  # noqa: BLE001 — becomes the blindness reason
         return Facts.blind(names, f"{type(e).__name__}: {e}")
 
-    from core import pg_expenses_write, pg_goals_write, pg_inventory_write
+    from core import (
+        pg_buyers_write, pg_expenses_write, pg_goals_write, pg_inventory_write,
+    )
 
     groups: Dict[str, Group] = {}
     watermarks_unread: Optional[Unwatched] = None
@@ -775,6 +880,8 @@ async def read_facts(*, pool=None) -> Facts:
                     "goals": lambda c: _read_goals(
                         c, _stamp(watched.get(pg_goals_write.CHAIN))),
                     "expense_types": _read_expense_types,
+                    "buyers": lambda c: _read_buyers(
+                        c, _stamp(watched.get(pg_buyers_write.CHAIN))),
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -811,6 +918,7 @@ async def read_facts(*, pool=None) -> Facts:
                  inventory=groups.get("inventory"),
                  goals=groups.get("goals"),
                  expense_types=groups.get("expense_types"),
+                 buyers=groups.get("buyers"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
                  unread=unread)
 
@@ -905,11 +1013,15 @@ def _null_issues(nulls: Nulls, chain: str,
              + ". These columns have no database default — they were built to "
              "receive the value from the writer, and DuckDB's defaults do not "
              "travel")
+    # How the rows arrived before the handover: the landing tables by the
+    # per-tick mirror, the rest by the hourly replication.
+    carrier = ("the buyers mirror" if nulls.table.startswith("bronze.")
+               else "the replication")
     if latched_at is None:
         cause = (f" — and {chain} has not written this table yet: it is "
                  "watched from its flag, before its first write, so the NULL "
                  "has been present since before the handover, carried across "
-                 "by the replication out of DuckDB. Correct the row before "
+                 f"by {carrier} out of DuckDB. Correct the row before "
                  "the chain's first write.")
     else:
         cause = f" — so {chain} is not supplying one."
@@ -917,6 +1029,13 @@ def _null_issues(nulls: Nulls, chain: str,
         cause += (" A NULL recorded_at is also invisible to every "
                   "time-windowed read of this table, this check's own "
                   "included.")
+    if nulls.table == "bronze.buyers":
+        cause += (" DuckDB declares full_name NOT NULL, so "
+                  "scripts/chain_copy_back.py refuses to carry such a buyer "
+                  "back (handover_rows_unwritable) and the chain cannot be "
+                  "rolled back until the row is corrected. The shared parse "
+                  "writes 'Unknown' for a blank name, so a NULL is a write "
+                  "that went round core.landing_rows.buyer_row.")
     return [_issue(
         check_name=COLUMN_NULL, table_name=nulls.table,
         severity=Severity.CRITICAL, count=sum(offenders.values()),
@@ -1038,6 +1157,44 @@ def _expense_type_issues(et: ExpenseTypes, chain: str) -> List:
     return issues
 
 
+def _buyer_issues(b: Buyers, chain: str) -> List:
+    from core.data_quality import Severity
+
+    issues: List = []
+    orphans = b.orphan_contacts + b.orphan_verdicts
+    if b.latched_at is not None and orphans:
+        shown = ", ".join(str(i) for i in b.orphan_sample)
+        issues.append(_issue(
+            check_name=BUYER_ORPHANS, table_name="bronze.buyers",
+            severity=Severity.CRITICAL, count=orphans,
+            sample_ids=b.orphan_sample,
+            description=(
+                f"{b.orphan_contacts} contact row(s) and {b.orphan_verdicts} "
+                f"gender verdict(s) name a buyer bronze.buyers does not hold "
+                f"(e.g. buyer {shown}). {chain} writes a buyer's row, its "
+                "contacts and its verdict in one transaction and nothing "
+                "deletes a buyer, so these were written round it — or a buyer "
+                "was deleted by hand. The SMS audience joins contacts to "
+                "buyers, so an orphaned phone number is in no audience; the "
+                "copy-back refuses what DuckDB could not hold.")))
+    if b.contact_missing:
+        shown = ", ".join(str(i) for i in b.contact_missing_sample)
+        issues.append(_issue(
+            check_name=CONTACT_MISSING, table_name="bronze.buyer_contacts",
+            severity=Severity.WARN, count=b.contact_missing,
+            sample_ids=b.contact_missing_sample,
+            description=(
+                f"{b.contact_missing} of {b.buyers} buyer(s) carry a phone or "
+                "an email in bronze.buyers that their contact list does not "
+                f"hold (e.g. buyer {shown}). Both come from one KeyCRM list in "
+                "the shared parse, so this is a contact list deleted and not "
+                "written again — and the SMS audience reads phone numbers from "
+                "the contact list, not the column. The next write of that "
+                "buyer rewrites both; POST /api/duckdb/sync-all-buyers rewrites "
+                "every buyer KeyCRM has.")))
+    return issues
+
+
 def _watermark_issues(marks: Tuple[WatermarkAge, ...]) -> List:
     from core.data_quality import Severity
 
@@ -1083,8 +1240,8 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     reported rather than assumed harmless.
     """
     from core import (
-        pg_expense_types_write, pg_expenses_write, pg_goals_write,
-        pg_inventory_write,
+        pg_buyers_write, pg_expense_types_write, pg_expenses_write,
+        pg_goals_write, pg_inventory_write,
     )
 
     if facts is None:
@@ -1136,6 +1293,14 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     elif isinstance(facts.expense_types, ExpenseTypes):
         issues += _expense_type_issues(facts.expense_types,
                                        pg_expense_types_write.CHAIN)
+
+    if isinstance(facts.buyers, Unwatched):
+        issues.append(unwatched_issue(facts.buyers.reason,
+                                      (pg_buyers_write.CHAIN,)))
+    elif isinstance(facts.buyers, Buyers):
+        issues += _null_issues(facts.buyers.nulls, pg_buyers_write.CHAIN,
+                               facts.buyers.latched_at)
+        issues += _buyer_issues(facts.buyers, pg_buyers_write.CHAIN)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(
