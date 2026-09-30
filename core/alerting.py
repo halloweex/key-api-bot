@@ -143,6 +143,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # The buyers step stopped succeeding: no success for 90 min, or three
     # failures in a row that are neither KeyCRM nor data errors (chain 4 PR-1).
     "buyer_sync_stalled": _c("a buyers step that completes"),
+    # Chain 4: the same step as the only writer of buyers, paged.
+    "buyer_sync_stalled_chain": _c("a buyers step that completes"),
     "mirror_missing:bronze.orders": _c("the table reports freshness again"),
     "mirror_never:bronze.orders": _c("the table's first successful shipment"),
     "mirror_stale:bronze.orders": _c("a shipment inside the age limit"),
