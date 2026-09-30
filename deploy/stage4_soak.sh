@@ -3,7 +3,9 @@
 #
 # The soak checks are the only detectors for a lost derivation mark (D4, D5),
 # stale Silver rows (D7), the chain-8 stand-down (E1) and a halted order intake
-# (S0), and they have to run every day for weeks. Run by hand from a checklist
+# (S0), and the only daily verdict on reads served from DuckDB, whose PASS
+# counts the week KS_READ_FALLBACK=off waits for (F1), and they have to run
+# every day for weeks. Run by hand from a checklist
 # they drift: a query pasted from yesterday's terminal, a precondition skipped
 # on a busy morning. So each check is a file under deploy/stage4_soak/ that
 # returns its own verdict, and this script only runs them and adds them up.

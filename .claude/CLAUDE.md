@@ -2442,6 +2442,85 @@ exc)`: one uniform ERROR line carrying that phrase, and a per-surface counter
 exception text, the endpoint is public. **Under the default, nothing a read
 returns changed.**
 
+**The week `off` waits for is proven by the canary, not by the log** (OD-07
+(a), 2026-09-30). The condition for `KS_READ_FALLBACK=off` is a covered, clean
+168 h with no read answered from DuckDB. The plan measured it by grepping web's
+log from its oldest surviving line, but every deploy recreates web and loses
+the counters and the log together, so a week that spans a deploy could not be
+called covered at all. The evidence is now made by the process that outlives
+web's and kept in Postgres. The canary pages two keys, both WARN, and the
+Alert Gate journals a delivered page in `app.alert_series`/`alert_events`:
+
+- **`read_fallback_used`** whenever `read_fallbacks` is non-empty — an engine
+  failed and DuckDB answered — naming the surfaces and each `last_at`. The key
+  is the condition alone, and the page stands until web restarts, because
+  only a restart empties the counters.
+- **`read_routed_to_duckdb`** whenever `read_fallback_mode.misconfigured` or
+  `no_engine` is non-empty, under `duckdb` only. Those reads are served from
+  DuckDB on every request and **counted by nothing**, so `read_fallbacks`
+  stays empty over them, and `off` refuses every one. The review of OD-07
+  reproduced the week passing over a lost `KS_CH_URL` while cohorts read
+  ClickHouse. `no_engine` is the cohorts' switch not naming ClickHouse, their
+  only engine under `off` — a route no missing address names, published by
+  `read_fallback.no_engine_routes()` from `ENGINE_ONLY`. A test holds the two
+  lists to exactly what `off` would refuse, for every switch and address.
+
+**A probe that read nothing clears nothing.** The canary calls `resolve_group`
+on every tick, and a probe that got no payload — a first-time blip the canary
+holds back, the 05:15 freeze, a 10 s timeout — used to announce a standing
+`read_fallback_used` resolved and page it again as a new incident on the next
+probe, agent and all. `CanaryResult.unjudged_keys` names the OD-07 keys a
+probe could not judge for want of their block, and `canary_job` keeps them in
+`still_firing`. Every other payload-derived key keeps today's behaviour,
+though they share the flaw.
+
+A page proves a fallback, but it cannot prove that a quiet week was looked at.
+So every probe that read the block also rewrites one row,
+`watch:read_fallbacks` in `app.alert_series` (`core.alert_archive.record_watch`).
+It is event-kind, not in the REGISTRY, and read by nothing else that reads the
+series. `first_fired_at` is the moment since which every probe read no read
+served from DuckDB. A probe that reads one restarts it at its own time.
+**What can restart it otherwise is the unread tail of a replaced web process,
+not the gap between probes.** The counters cover a process from its start, so
+a probe of the same process reads everything since the last one, however long
+the bot was away. Only a process replaced in between loses its counts after
+the last probe, and that tail ends at the latest at the new process's start,
+`now() - uptime_seconds`. Over 35 min restarts the run at the next clean
+probe. The first form judged the gap, and the Sunday compaction alone —
+last probe, stop, compaction, web's startup, the bot's first probe failing
+before web answers — could pass 35 min every week. One row, so it declares
+its own bound. `deploy/stage4_soak/22_f1_read_fallbacks.sql` (F1) judges the
+page journal and the watch **a day at a time**, like every check in the
+report:
+
+- **FAIL**: a page of either key fired, escalated or resolved in the last
+  24 h, or is still standing however old, or the watch's latest probe, inside
+  the day, found a read served from DuckDB. The last one counts because the
+  Gate journals only a delivered page.
+- **UNKNOWN**: no watch row, a watch not written for 35 min, or one clean for
+  less than the day.
+- **PASS**: otherwise, and its detail says how many of the week's 168 h the
+  clean run has covered. "Covered" is the licence for `off`. It was 168 h
+  deep at first, which made F1 UNKNOWN for a week after every deploy and every
+  reset, and one fallback a week of FAIL, in the daily report chain 1's soak
+  reads too.
+
+What it cannot see is a fallback in a web process after the canary's last
+probe of it and before it was replaced: at most the tail above. **A refusal
+under `off` is never paged as a fallback.** It served nothing from DuckDB, and
+counting it would fail the soak that licenses the flip. It is `read_refused`
+(WARN), judged on recency: a refusal in the last 30 minutes. A refusal left no
+wrong number behind, only a 503 somebody saw, so the page stands while reads
+are being refused, not until a restart. Production on 2026-09-30 published
+`read_fallbacks: {}` and `misconfigured: []` under `duckdb`, with cohorts on
+ClickHouse and its address, so the merge pages nothing at the deploy, and F1
+reads UNKNOWN on the first report, before the watch holds a day. What happens
+over a web process's life was not measured: both reads of `/api/health`
+caught a process under two hours old, and the fallbacks of older ones went
+with their logs. So a routine fallback — a Postgres timeout under a heavy
+job — would page after the merge and hold F1's week at zero until explained.
+The plan's grep over the oldest surviving log line answers it on the host.
+
 `KS_READ_FALLBACK` (`duckdb` default | `off`) is read in `configure_modes()`,
 before the boot sync. **Under `off`, `fall_back` raises `ReadUnavailable`**
 (DN-20b) instead of letting its caller read DuckDB, and one exception handler
@@ -2449,7 +2528,7 @@ in `web/main.py` answers it, from any route, with a 503 carrying `surface` —
 the cause stays in the log. One raise, so it refuses every router an HTTP
 route reaches, the filter bar's lookups included, not only the tabs the plan
 named. A refusal is not a fallback: counted apart, logged without the phrase
-the soak greps for, published as `read_fallback_mode.refused` under `off`
+a fallback is grepped by, published as `read_fallback_mode.refused` under `off`
 alone, so `read_fallbacks` stays empty there and the block keeps its shape
 under `duckdb`. `off` refuses a *failure*, never a switch left at `duckdb` —
 except the cohorts, which have no Postgres body: under `off` a live
@@ -2514,6 +2593,9 @@ publishes `read_fallback_mode.error` and the canary warns
 `KS_PG_DSN` and `=clickhouse` without `KS_CH_URL` — found by prefix in the
 environment, not listed: under `duckdb` those reads serve DuckDB with nothing
 failing to count, and under `off` exactly those are refused, by the same rule.
+Beside it, `no_engine` names the cohorts when their switch does not name
+ClickHouse: no address is missing, and `off` refuses them all the same. Under
+`duckdb` the canary pages both as `read_routed_to_duckdb`.
 
 `tests/unit/test_read_fallback_sites.py` walks `core/` and `web/` for the
 shapes, never a list of routers: a "falling back to DuckDB" log; an
