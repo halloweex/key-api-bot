@@ -107,7 +107,8 @@ def _restart():
     """What a new process has: nothing read, nothing settled."""
     for name, value in (("_value", None), ("_mode", None), ("_mode_error", None),
                         ("_unmet", ()), ("_decided_for", None), ("_settled", False),
-                        ("_held", False), ("_reclassify_needed", False),
+                        ("_held", False), ("_full_validated", False),
+                        ("_reclassify_needed", False),
                         ("_writer_record", None), ("_settle_lock", None)):
         setattr(wc, name, value)
 
@@ -975,8 +976,68 @@ class TestTheHoldEndsOnAValidatedFullTick:
 
     def test_a_tick_that_fails_validation_does_not(self, held_store):
         released = asyncio.run(wc.note_refresh(
-            held_store, silver_mode="full", validation_passed=False))
+            held_store, silver_mode="full", validation_passed=False, utm_parsed=True))
         assert released is False and wc.held()
+
+    def test_a_full_tick_whose_utm_parse_raised_does_not(self, held_store, monkeypatch):
+        """R1-3: the tick swallows the parse's error and still reports a
+        validated success — and `attribution_coverage` and
+        `reconcile_order_utm` read the table that parse left behind."""
+        monkeypatch.setattr(type(held_store), "_parse_utm_into_silver",
+                            AsyncMock(side_effect=RuntimeError("parse broke")))
+        result = asyncio.run(held_store.refresh_warehouse_layers(trigger="dirty_flag"))
+        assert result["status"] == "success" and result["validation_passed"] is True
+        assert wc.held() and wc.warehouse_checks_stand_down()
+        assert _writer(held_store)["writer"] == "postgres"
+
+    def test_then_the_next_tick_whose_parse_finishes_does(self, held_store, monkeypatch):
+        """Without a second full rebuild: the parse reads landing, not Silver,
+        and a full rebuild every two minutes while the parser keeps failing
+        is the cost that would buy nothing."""
+        parse = type(held_store)._parse_utm_into_silver
+        monkeypatch.setattr(type(held_store), "_parse_utm_into_silver",
+                            AsyncMock(side_effect=RuntimeError("parse broke")))
+        asyncio.run(held_store.refresh_warehouse_layers(trigger="dirty_flag"))
+        assert wc.held()
+        monkeypatch.setattr(type(held_store), "_parse_utm_into_silver", parse)
+        result = asyncio.run(held_store.refresh_warehouse_layers(
+            trigger="dirty_flag", changed_order_ids=[1]))
+        assert result["validation_passed"] is True
+        assert not wc.held() and _writer(held_store)["writer"] == "duckdb"
+
+    def test_a_parse_before_the_full_tick_is_not_enough(self, held_store):
+        assert not asyncio.run(wc.note_refresh(
+            held_store, silver_mode="incremental", validation_passed=True,
+            utm_parsed=True))
+        assert not asyncio.run(wc.note_refresh(
+            held_store, silver_mode="full", validation_passed=True, utm_parsed=False))
+        assert wc.held()
+        assert asyncio.run(wc.note_refresh(
+            held_store, silver_mode="incremental", validation_passed=True,
+            utm_parsed=True))
+        assert not wc.held()
+
+    def test_the_releasing_tick_must_validate_too(self, held_store):
+        asyncio.run(wc.note_refresh(
+            held_store, silver_mode="full", validation_passed=True, utm_parsed=False))
+        assert not asyncio.run(wc.note_refresh(
+            held_store, silver_mode="incremental", validation_passed=False,
+            utm_parsed=True))
+        assert wc.held()
+
+    def test_a_new_hold_starts_both_halves_again(self, held_store, monkeypatch):
+        """A settle that re-arms the hold owes a full tick of its own — here
+        one asked again in the same process, which is what a settle that
+        raised half-way gets: the id list it marked is the one it owes."""
+        asyncio.run(wc.note_refresh(
+            held_store, silver_mode="full", validation_passed=True, utm_parsed=False))
+        monkeypatch.setattr(wc, "_settled", False)
+        asyncio.run(wc.settle_writer(held_store))
+        assert wc.held()
+        assert not asyncio.run(wc.note_refresh(
+            held_store, silver_mode="incremental", validation_passed=True,
+            utm_parsed=True))
+        assert wc.held()
 
 
 # ─── The retired Gold comparison's own conditions hold the switch ────────────

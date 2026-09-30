@@ -2121,9 +2121,11 @@ class DuckDBStore(
 
             # ── UTM/Traffic layers (after main refresh completes) ──
             utm_count = 0
+            utm_parsed = False
             try:
                 utm_order_ids = await self.refresh_utm_silver_layer()
                 utm_count = len(utm_order_ids)
+                utm_parsed = True
 
                 # The traffic Gold is gone, and only the UTM Silver above
                 # remains. That layer is read — `/traffic` folds it against
@@ -2149,15 +2151,17 @@ class DuckDBStore(
                     f"copy until a parse succeeds: {utm_error}"
                 )
 
-            # The way back from `KS_WRITE_WAREHOUSE=postgres` (DN-29): the
-            # first full tick that validates ends the hold on the DuckDB
-            # checks and records DuckDB as the writer again. Nothing at all
-            # unless this process is holding.
+            # The way back from `KS_WRITE_WAREHOUSE=postgres` (DN-29): a full
+            # tick that validates, and a UTM parse that finished — in it or in
+            # a later tick — end the hold on the DuckDB checks and record
+            # DuckDB as the writer again. Nothing at all unless this process
+            # is holding.
             try:
                 from core import warehouse_cutover
 
                 await warehouse_cutover.note_refresh(
-                    self, silver_mode=silver_mode, validation_passed=validation_passed)
+                    self, silver_mode=silver_mode, validation_passed=validation_passed,
+                    utm_parsed=utm_parsed)
             except Exception as e:
                 # Held a little longer, never a failed tick. Later ticks are
                 # incremental once this one's flag is cleared, so another full

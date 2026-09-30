@@ -2762,7 +2762,12 @@ CRITICAL.
 warehouse dirty in full, before any job exists, and holds the stood-down
 checks and the three comparisons down until a full tick validates — the Silver
 they would read is as old as the switch, and an incremental rebuild over it
-would validate. That tick writes `duckdb` back. When DuckDB's
+would validate — and a UTM parse has finished, in that tick or a later one:
+the tick swallows a parse that raised and still reports a validated success,
+and `attribution_coverage` and `reconcile_order_utm` read what that parse
+left. Not a second full rebuild, which would rewrite Silver every two minutes
+for as long as the parser failed. The tick that completes both writes
+`duckdb` back. When DuckDB's
 `silver_order_utm` is empty (a Sunday compaction ran in between) it publishes
 `reclassify_needed`; the tick's own parse refills every commented order with
 no verdict, so `POST /api/traffic/reclassify` is the lever only if that parse

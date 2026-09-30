@@ -41,9 +41,11 @@ needed in place; DN-29 is the switch.
   recorded, so a second restart does not announce it again.
 - **The way back.** A start under `duckdb` that finds `postgres` recorded owes
   DuckDB a full rebuild: it marks the warehouse dirty in full, and holds the
-  stood-down checks down until a full tick validates — the Silver they would
-  read is as old as the switch. When DuckDB's `silver_order_utm` is empty (a
-  Sunday compaction ran in between) it also flags a reclassify as needed.
+  stood-down checks down until a full tick validates and a UTM parse finishes
+  — the Silver they would read is as old as the switch, and the verdicts a
+  parse that raised leaves can be partial. When DuckDB's `silver_order_utm`
+  is empty (a Sunday compaction ran in between) it also flags a reclassify as
+  needed.
 - **The UTM doors** (refresh, reclassify, the `manager_comment` backfill and
   its CLI) parse in Postgres alone under `postgres`. The two that re-parse
   everything note it in the record, and the way back then empties DuckDB's
@@ -85,6 +87,9 @@ _decided_for: Optional[str] = None
 # What `settle_writer` found and did, per process — see THE RECORDED WRITER.
 _settled = False
 _held = False
+# The way back's full DuckDB tick has validated — the Silver half of what the
+# hold waits for; the UTM half is a parse that finished (`note_refresh`).
+_full_validated = False
 _reclassify_needed = False
 _writer_record: Optional[Dict[str, Any]] = None
 
@@ -712,7 +717,8 @@ def start_bound_s() -> float:
 #   would validate. So a start under `duckdb` that finds `postgres` recorded
 #   marks the warehouse dirty in full, before anything registers, and holds the
 #   stood-down checks and the three mirror comparisons down until a full tick
-#   validates. That tick writes `duckdb` back.
+#   validates and a UTM parse has finished (`note_refresh`). The tick that
+#   completes both writes `duckdb` back.
 
 WRITER_KEY = "warehouse_writer"
 # Appended to the resolve the first start under `postgres` announces.
@@ -850,7 +856,7 @@ async def settle_writer(store) -> Dict[str, Any]:
     catches it, and the next caller tries again. Under `postgres` a group the
     ledger would not let it close leaves the process unsettled, so the next
     caller tries that again too."""
-    global _settled, _held, _reclassify_needed, _writer_record
+    global _settled, _held, _full_validated, _reclassify_needed, _writer_record
     if _settled:
         return status()
     async with _record_lock():
@@ -880,7 +886,7 @@ async def settle_writer(store) -> Dict[str, Any]:
                                    "derivation tick tries again")
         elif record is not None and record.get("writer") == POSTGRES:
             await store.mark_warehouse_dirty(None)
-            _held = True
+            _held, _full_validated = True, False
             # After the mark, so a DuckDB that refuses the DELETE has still
             # been told what it owes; settling again repeats both.
             reparsed = record.get(UTM_REPARSED)
@@ -890,7 +896,8 @@ async def settle_writer(store) -> Dict[str, Any]:
             logger.warning(
                 "warehouse writer back to duckdb from postgres (since %s): a full "
                 "DuckDB rebuild is owed and marked; the DuckDB checks over Silver, "
-                "Gold and UTM stay down until a full tick validates%s%s",
+                "Gold and UTM stay down until a full tick validates and a UTM "
+                "parse finishes%s%s",
                 record.get("since"),
                 f"; the UTM verdicts were re-parsed in Postgres alone at {reparsed}, "
                 "so DuckDB's silver_order_utm is emptied and the owed full tick "
@@ -903,27 +910,51 @@ async def settle_writer(store) -> Dict[str, Any]:
     return status()
 
 
-async def note_refresh(store, *, silver_mode: str, validation_passed: bool) -> bool:
-    """Called by `refresh_warehouse_layers` after every successful tick: a full
-    one that validated ends the way back's hold, and writes `duckdb` back as
-    the recorded writer. Whether it did. Nothing at all unless held."""
-    global _held, _reclassify_needed, _writer_record
-    if not _held or silver_mode != "full" or not validation_passed:
+async def note_refresh(store, *, silver_mode: str, validation_passed: bool,
+                       utm_parsed: bool) -> bool:
+    """Called by `refresh_warehouse_layers` after every successful tick, with
+    whether the tick's UTM parse finished. Ends the way back's hold, and
+    writes `duckdb` back as the recorded writer, on the first tick that
+    validated and parsed once a full tick has validated since the hold began:
+    the full tick itself, or a later one when the full one's parse raised.
+    Whether it did. Nothing at all unless held.
+
+    Both halves, because the checks the hold keeps down read both: the arc,
+    the Gold cells, headline and goods read Silver and Gold, which only a full
+    rebuild answers for, and `attribution_coverage` and `reconcile_order_utm`
+    read `silver_order_utm`, which a parse that raised can leave partial —
+    between two write batches, or after the way back emptied it for a re-parse.
+    The parse reads landing, not Silver, so it need not be the full tick's own;
+    asking for a second full rebuild instead would rebuild Silver whole every
+    two minutes for as long as the parser keeps failing."""
+    global _held, _full_validated, _reclassify_needed, _writer_record
+    if not _held:
+        return False
+    if silver_mode == "full" and validation_passed and not _full_validated:
+        _full_validated = True
+        if not utm_parsed:
+            logger.warning(
+                "the way back's full DuckDB tick validated, but its UTM parse "
+                "raised: the DuckDB checks over Silver, Gold and UTM stay down "
+                "until a tick's parse finishes")
+    if not (_full_validated and validation_passed and utm_parsed):
         return False
     record = {"writer": DUCKDB, "since": _now_iso()}
     await _write_writer(store, record)
-    _writer_record, _held = record, False
+    _writer_record, _held, _full_validated = record, False, False
     _reclassify_needed = await _count_utm_rows(store) == 0
     logger.warning(
-        "warehouse writer is duckdb again: a full DuckDB tick validated, and the "
-        "DuckDB checks over Silver, Gold and UTM resume%s",
+        "warehouse writer is duckdb again: a full DuckDB tick validated and the "
+        "UTM verdicts parsed, and the DuckDB checks over Silver, Gold and UTM "
+        "resume%s",
         "; silver_order_utm is still empty — POST /api/traffic/reclassify"
         if _reclassify_needed else "")
     return True
 
 
 def held() -> bool:
-    """The way back is owed its first validated full DuckDB tick."""
+    """The way back is owed its first validated full DuckDB tick, or the
+    UTM parse that finishes after it (`note_refresh`)."""
     return _held
 
 
