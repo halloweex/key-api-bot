@@ -271,6 +271,9 @@ def _breaking(key: str):
         facts = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
                          bridge_owners={},
                          open_retired={"silver_missing_rows": "dq:integrity"})
+    elif key == "od10_doors":
+        facts = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
+                         bridge_owners={}, od10_doors=wc.OD10_DOORS[:1])
     else:
         raise AssertionError(f"no way to break {key!r} — add one here")
     return env, facts
@@ -311,7 +314,7 @@ class TestTheEvaluator:
         to do, and the reverse is a list item nothing checks."""
         unmet = wc.evaluate_preconditions({"KS_MIRROR_LANDING": "0"}, wc.Facts(
             revision_error="x", bridge_owners=None, bridge_error="x",
-            open_retired=None, open_retired_error="x"))
+            open_retired=None, open_retired_error="x", od10_doors=wc.OD10_DOORS))
         assert [u.key for u in unmet] == KEYS
 
     def test_it_reads_values_as_the_modules_do(self):
@@ -323,7 +326,8 @@ class TestTheEvaluator:
             revision_error="not asked: KS_PG_DSN is not set", bridge_owners={}))
         assert [u.key for u in unmet] == [
             k for k in KEYS
-            if k not in ("mirror_landing", "goals_bridge", "retired_conditions_clear")]
+            if k not in ("mirror_landing", "goals_bridge", "retired_conditions_clear",
+                         "od10_doors")]
 
     def test_a_detail_says_what_was_found_and_what_is_needed(self):
         env, facts = _breaking("utm_parse_postgres")
@@ -650,6 +654,12 @@ class TestGatheringTheFacts:
 
 
 class TestReadiness:
+    @pytest.fixture(autouse=True)
+    def _od10_answered(self, monkeypatch):
+        """The readiness of a build where OD-10 has been answered — today's
+        is not, and `od10_doors` has tests of its own."""
+        monkeypatch.setattr(wc, "OD10_DOORS", ())
+
     def test_it_publishes_the_mode_and_every_unmet_item(self, fresh, monkeypatch):
         monkeypatch.setenv(wc.ENV, "postgres")
         fresh.configure_mode()

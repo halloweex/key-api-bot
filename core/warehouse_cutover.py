@@ -270,6 +270,36 @@ def open_retired_conditions() -> Dict[str, Optional[str]]:
             if key in retired}
 
 
+# ─── The doors OD-10 has not yet decided ─────────────────────────────────────
+#
+# Doors in `web/` that read DuckDB's Silver with no read switch and no
+# stand-down. After the switch each serves numbers as old as the flip, and
+# after the first Sunday compaction none — `/api/buyers/stats` would report
+# `unique_in_silver_orders = 0` beside a full `silver.orders`. OD-10 decides
+# each, port or retire, and blocks step 13; until it is answered for all of
+# them the switch waits (`od10_doors`), and this list is what is left to do.
+# It is not a list anybody keeps: `tests/unit/test_warehouse_writer.py` walks
+# `web/` for every function naming a table the switch freezes —
+# `silver_orders`, the `silver_order_lines` view over it, `gold_daily_revenue`,
+# `silver_order_utm`, or a dialect hole that could render to one — without
+# asking `duckdb_derives()`, and requires exactly these: a door retired or
+# ported, or put behind the predicate, leaves the list, and a door added joins
+# it. The readers in `core/` ride the `KS_READ_*` switches below, and the
+# checks and comparisons stand down on `warehouse_checks_stand_down()`.
+OD10_DOORS: Tuple[Tuple[str, str], ...] = (
+    ("web/routes/api/admin.py:purge_orders", "POST /api/duckdb/purge-orders"),
+    ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),
+    ("web/routes/api/admin.py:debug_stale_returns", "GET /api/debug/stale-returns"),
+    ("web/routes/api/admin.py:debug_order_status", "GET /api/debug/order-status/{id}"),
+    ("web/services/search_service.py:get_buyer_details",
+     "GET /api/buyers/{id} and the assistant's get_buyer_details"),
+    ("web/services/search_service.py:get_order_details",
+     "GET /api/orders/{id} and the assistant's get_order_details"),
+    ("web/services/search_service.py:get_product_details",
+     "GET /api/products/{id}"),
+)
+
+
 # ─── The preconditions ───────────────────────────────────────────────────────
 #
 # Every read switch whose answer comes out of Silver, Gold or the UTM verdicts,
@@ -325,6 +355,8 @@ PRECONDITIONS: Tuple[Tuple[str, str], ...] = (
     ("ch_url", f"{CH_URL} set"),
     ("goals_bridge", "no write chain owns a table the goal calculators' "
                      "bridge reads from DuckDB (DN-12)"),
+    ("od10_doors", "every DuckDB-only door reading Silver ported or retired "
+                   "(OD-10)"),
     ("retired_conditions_clear", "no delivered page open under a condition "
                                  "only a stood-down check re-examines"),
 )
@@ -352,7 +384,8 @@ class Facts:
     None with `revision_error` when it could not be asked or did not answer.
     `bridge_owners` is None with `bridge_error` when the registry could not be
     read; `open_retired` likewise with `open_retired_error` when the Alert
-    Gate could not."""
+    Gate could not. `od10_doors` is `OD10_DOORS`, handed in so the evaluator
+    stays pure over what it is given."""
     revision: Optional[str] = None
     revision_error: Optional[str] = None
     required_revision: Optional[str] = None
@@ -360,6 +393,7 @@ class Facts:
     bridge_error: Optional[str] = None
     open_retired: Optional[Mapping[str, Optional[str]]] = field(default_factory=dict)
     open_retired_error: Optional[str] = None
+    od10_doors: Tuple[Tuple[str, str], ...] = ()
 
 
 def _read(env: Mapping[str, str], name: str, default: str = "") -> str:
@@ -414,6 +448,12 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
         need("goals_bridge", not facts.bridge_owners,
              f"write chain(s) own tables the goal calculators still read from "
              f"DuckDB — {owned}. Port chain 7b first.")
+
+    need("od10_doors", not facts.od10_doors,
+         f"{len(facts.od10_doors)} door(s) still read DuckDB's Silver with no "
+         f"switch — {'; '.join(label for _where, label in facts.od10_doors)}. "
+         "Port or retire each (OD-10): after the switch they answer from a "
+         "Silver as old as the flip, and after a compaction from none.")
 
     if facts.open_retired is None:
         need("retired_conditions_clear", False,
@@ -503,7 +543,8 @@ def _local_facts() -> Dict[str, Any]:
         open_retired, open_retired_error = None, type(exc).__name__
 
     return {"bridge_owners": owners, "bridge_error": bridge_error,
-            "open_retired": open_retired, "open_retired_error": open_retired_error}
+            "open_retired": open_retired, "open_retired_error": open_retired_error,
+            "od10_doors": OD10_DOORS}
 
 
 async def gather_facts(env: Optional[Mapping[str, str]] = None, *,

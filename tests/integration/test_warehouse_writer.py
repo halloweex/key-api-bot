@@ -94,6 +94,9 @@ def _met_env(monkeypatch):
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
+    # A build where OD-10 has been answered — today's has not, and the switch
+    # waits for it (`od10_doors`); what is proved here is the switch itself.
+    monkeypatch.setattr(wc, "OD10_DOORS", ())
 
 
 class _Client:

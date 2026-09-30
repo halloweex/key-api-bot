@@ -73,6 +73,8 @@ def met(monkeypatch):
     monkeypatch.setattr(wc, "_revision_on_its_own_connection", reader)
     # A read that failed is asked again; not across seconds in a unit test.
     monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
+    # A build where OD-10 has been answered; today's has not (TestTheOd10Doors).
+    monkeypatch.setattr(wc, "OD10_DOORS", ())
     return reader
 
 
@@ -599,10 +601,11 @@ def _returns(body) -> bool:
 def _guarded_calls(tree: ast.Module, callee: str):
     """`(lineno, guarded)` for every call of `callee` in the module.
 
-    Guarded is one of two shapes, and only these: the call sits in the body
-    of an `if <...>.duckdb_derives():` (never its else), or the function it
-    sits in returns under `if not <...>.duckdb_derives():` in a statement of
-    its own body that comes before the one holding the call."""
+    Guarded is one of three shapes, and only these: the call sits in the
+    body of an `if <...>.duckdb_derives():` (never its else), or in the else
+    of an `if not <...>.duckdb_derives():`, or the function it sits in
+    returns under `if not <...>.duckdb_derives():` in a statement of its own
+    body that comes before the one holding the call."""
     return [(line, guarded) for line, guarded, _fn in _guarded_nodes(
         tree, lambda node: isinstance(node, ast.Call) and _name(node.func) == callee)]
 
@@ -619,7 +622,9 @@ def _guarded_nodes(tree: ast.Module, match):
                 if not isinstance(child, ast.AST):
                     continue
                 inner_ifs = ifs
-                if isinstance(node, ast.If) and field == "body" and _asks(node.test):
+                if isinstance(node, ast.If) and (
+                        (field == "body" and _asks(node.test))
+                        or (field == "orelse" and _asks_not(node.test))):
                     inner_ifs = ifs + (node,)
                 inner_fn = child if isinstance(child, (ast.FunctionDef,
                                                        ast.AsyncFunctionDef)) else fn
@@ -688,6 +693,10 @@ class TestEveryRefreshStandsBehindThePredicate:
          "        await s.refresh_warehouse_layers()\n", False),
         ("async def f(s):\n    if wc.duckdb_derives():\n"
          "        async def g():\n            await s.refresh_warehouse_layers()\n", False),
+        ("async def f(s):\n    if not wc.duckdb_derives():\n        pass\n"
+         "    else:\n        await s.refresh_warehouse_layers()\n", True),
+        ("async def f(s):\n    if not wc.duckdb_derives():\n"
+         "        await s.refresh_warehouse_layers()\n", False),
     ])
     def test_the_walk_reads_each_shape(self, source, guarded):
         ((_line, found),) = _guarded_calls(ast.parse(source), "refresh_warehouse_layers")
@@ -1581,3 +1590,139 @@ class TestTheWayBackReparsesWhatPostgresAloneReclassified:
             assert wc.held() and _utm_rows(store) == 1
         finally:
             asyncio.run(store.close())
+
+
+# ─── The doors OD-10 has not decided ─────────────────────────────────────────
+
+import re  # noqa: E402
+
+# What the switch freezes in DuckDB, as SQL names it: Silver, the order-lines
+# view over it, Gold and the UTM verdicts — and the dialect holes that render
+# to one of them, which count because the walk cannot tell which engine a
+# rendering is for.
+FROZEN_BY_THE_SWITCH = re.compile(
+    r"\b(silver_orders|silver_order_lines|gold_daily_revenue|silver_order_utm)\b"
+    r"|\{(silver_orders|order_lines|gold_daily_revenue|order_utm)\}")
+
+
+def _docstrings(tree: ast.Module) -> set:
+    return {id(node.body[0].value) for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef))
+            and node.body and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)}
+
+
+def _frozen_readers_in(tree: ast.Module) -> set:
+    """Every function in `tree` holding a string — SQL, an f-string's text,
+    never a docstring — that names a table the switch freezes, where the
+    string does not stand behind `duckdb_derives()` in one of the shapes the
+    refresh walk accepts. A module-level string counts under None."""
+    docstrings = _docstrings(tree)
+    return {fn for _line, guarded, fn in _guarded_nodes(tree, lambda node: (
+        isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and id(node) not in docstrings and FROZEN_BY_THE_SWITCH.search(node.value)))
+        if not guarded}
+
+
+def _unguarded_duckdb_readers(root: str = "web") -> set:
+    """`path:function` for every such function under `root`."""
+    found = set()
+    for path in sorted((REPO / root).rglob("*.py")):
+        for fn in _frozen_readers_in(ast.parse(path.read_text(encoding="utf-8"))):
+            found.add(f"{path.relative_to(REPO)}:{fn}")
+    return found
+
+
+class TestTheDoorsOd10HasNotDecided:
+    """The review's reading: admin doors read DuckDB's Silver with no switch,
+    so after the flip they answer from a Silver as old as it, and after a
+    compaction from none. OD-10 blocks step 13, and the switch waits on it:
+    `od10_doors` is unmet while `OD10_DOORS` is not empty, and the list is
+    what a walk of `web/` finds — nobody keeps it."""
+
+    def test_the_list_is_exactly_what_the_walk_finds(self):
+        """A door retired, ported or put behind the predicate must leave the
+        list, and a door added must join it — either way this fails until it
+        does."""
+        found = _unguarded_duckdb_readers()
+        listed = {where for where, _label in wc.OD10_DOORS}
+        assert found == listed, (
+            f"read DuckDB's frozen Silver with no switch and not listed: "
+            f"{sorted(found - listed)}; listed and no longer found: "
+            f"{sorted(listed - found)}")
+
+    def test_the_reviews_four_and_the_plans_detail_endpoints_are_there(self):
+        labels = " ".join(label for _, label in wc.OD10_DOORS)
+        for route in ("/api/buyers/stats", "/api/debug/stale-returns",
+                      "/api/debug/order-status", "/api/duckdb/purge-orders",
+                      "/api/buyers/{id}", "/api/orders/{id}", "/api/products/{id}"):
+            assert route in labels
+
+    @pytest.mark.parametrize("source, readers", [
+        # SQL counts; a docstring naming the table does not.
+        ('def f(conn):\n    """Reads silver_orders."""\n'
+         '    conn.execute("SELECT 1 FROM silver_orders")\n', {"f"}),
+        ('def f(conn):\n    """Reads silver_orders."""\n    return 1\n', set()),
+        # The view over Silver is Silver; so is an f-string's text.
+        ('def f(conn, i):\n    conn.execute(f"SELECT * FROM silver_order_lines '
+         'WHERE id = {i}")\n', {"f"}),
+        ('def f(conn):\n    conn.execute("SELECT 1 FROM gold_daily_revenue")\n', {"f"}),
+        ('def f(conn):\n    conn.execute("DELETE FROM silver_order_utm")\n', {"f"}),
+        # A dialect hole could render to DuckDB; the walk cannot tell.
+        ('def f(conn):\n    conn.execute("SELECT 1 FROM {silver_orders}")\n', {"f"}),
+        # Postgres names another table, and landing is not frozen.
+        ('def f(conn):\n    conn.execute("SELECT 1 FROM silver.orders")\n', set()),
+        ('def f(conn):\n    conn.execute("SELECT 1 FROM orders")\n', set()),
+        # Behind the predicate, in each shape the refresh walk accepts.
+        ('def f(conn):\n    if not wc.duckdb_derives():\n        raise X()\n'
+         '    conn.execute("SELECT 1 FROM silver_orders")\n', set()),
+        ('def f(conn):\n    if wc.duckdb_derives():\n'
+         '        conn.execute("SELECT 1 FROM silver_orders")\n', set()),
+        ('def f(conn):\n    if wc.duckdb_derives():\n        pass\n    else:\n'
+         '        conn.execute("SELECT 1 FROM silver_orders")\n', {"f"}),
+        ('def f(conn):\n    if not wc.duckdb_derives():\n        log()\n'
+         '    conn.execute("SELECT 1 FROM silver_orders")\n', {"f"}),
+    ])
+    def test_the_walk_reads_each_shape(self, source, readers):
+        assert _frozen_readers_in(ast.parse(source)) == readers
+
+    def test_the_walk_finds_the_doors_it_names(self):
+        """A walk that found nothing would pass on a codebase it cannot read."""
+        assert "web/routes/api/admin.py:get_buyer_stats" in _unguarded_duckdb_readers()
+
+    def test_the_start_reads_the_list(self, met, monkeypatch):
+        """`_local_facts` hands `OD10_DOORS` to the evaluator — the list is
+        not a document: while it is not empty, `postgres` runs as duckdb."""
+        monkeypatch.setattr(wc, "OD10_DOORS", (
+            ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),))
+        monkeypatch.setenv(wc.ENV, "postgres")
+        assert wc.configure_mode() == wc.DUCKDB
+        (unmet,) = wc.preconditions_unmet()
+        assert unmet.key == "od10_doors" and "/api/buyers/stats" in unmet.detail
+
+    def test_the_status_page_reads_it_too(self, met, monkeypatch):
+        monkeypatch.setattr(wc, "OD10_DOORS", (
+            ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),))
+        ready = asyncio.run(wc.readiness())
+        (door,) = [u for u in ready["unmet"] if u["key"] == "od10_doors"]
+        assert "/api/buyers/stats" in door["detail"]
+
+    def test_this_build_is_not_switchable_and_names_every_door(self, monkeypatch):
+        """Today's list, as the walk finds it — not `met`, which stands in a
+        build where OD-10 is answered: `postgres` runs as duckdb, and the one
+        unmet item names every door, so the page is the list of what is left
+        to do."""
+        for name, value in MET_ENV.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
+        monkeypatch.setattr(wc, "_revision_on_its_own_connection",
+                            AsyncMock(return_value=REQUIRED_REVISION))
+        assert wc.OD10_DOORS, "OD-10 answered: this test has done its job — delete it"
+        monkeypatch.setenv(wc.ENV, "postgres")
+        assert wc.configure_mode() == wc.DUCKDB
+        (unmet,) = wc.preconditions_unmet()
+        assert unmet.key == "od10_doors"
+        for _where, label in wc.OD10_DOORS:
+            assert label in unmet.detail
+        assert f"{len(wc.OD10_DOORS)} door(s)" in unmet.detail
