@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.256
+
+- DN-29: a default tick records no writer, pinned without Postgres
+- DN-29: the OD-10 walk sees the inventory views over Silver
+- DN-29: a hold re-armed after a release starts its own age
+- DN-29: a way back whose hold does not end is published and warned on
+- DN-29: after a flip, a KS_WRITE_WAREHOUSE web does not understand pages as the way back
+- DN-29: a connection lost in the middle of the revision read is asked again
+- DN-29: a retired comparison's WARN does not make a shared page its own
+- DN-29 on DN-20c: read_fallback_off is met exactly when DN-20c's own mode says off
+- DN-29: an unmet warehouse precondition is not titled Dashboard DOWN
+- DN-29: the way back's hold waits for a UTM parse that finished, not only a validated full tick
+- DN-29: a page the retired Silver or UTM comparison was still reporting holds the switch
+- DN-29: the switch waits for OD-10, and the doors it waits on are what a walk of web/ finds
+- DN-29: a start whose Postgres worker was left stuck asks again too
+- DN-29: a Postgres read that failed is asked again before the verdict, because after a flip that verdict is the way back
+- DN-29: under postgres the UTM doors parse Postgres alone, and the way back re-parses what they reclassified
+- DN-29: under postgres the status page leads with Postgres, and DuckDB's refresh is duckdb_frozen
+- DN-29: an open warehouse page is closed under postgres, and a settle that could not finish is asked again
+- DN-29: four comments that still said the switch was not in this build
+- DN-29: the start-up precondition read cannot hold web past twice its bound
+- DN-29: a resolve that raises still leaves the way back armed
+- DN-29: CLAUDE.md — what KS_WRITE_WAREHOUSE=postgres does, what the way back costs
+- DN-29: the Gold comparison's own conditions hold the switch too
+- DN-29: the switch against a real Postgres, through the real boot
+- DN-29: unit tests for the switch, the stand-downs, the record and the way back
+- DN-29: KS_WRITE_WAREHOUSE=postgres stops DuckDB deriving, when every precondition holds
+
+
 ## 3.0.255
 
 - DN-20c: say which job does not report a refusal in its result
