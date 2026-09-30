@@ -194,17 +194,20 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
-def _readers():
-    """`(name, parser)` for each reader of the buyers that can still read
-    DuckDB. Named through each reader's own module, so no flag is spelled twice
-    — `KS_SMS_STORE` has no constant, and its parser's message names it."""
-    from core import pg_dashboard_read, pg_search_index_read, pg_sms
-
-    return (
-        ("KS_SMS_STORE", pg_sms.sms_store_is_postgres),
-        (pg_search_index_read.ENV, pg_search_index_read.enabled),
-        (pg_dashboard_read.ENV, pg_dashboard_read.enabled),
-    )
+# The readers of the buyers that can still read DuckDB: `(flag, module,
+# parser)`. Imported and looked up when asked, inside that reader's own
+# `try`, so a module or a parser that is gone — OD-10's PR-C removes the
+# search index's DuckDB twin and `KS_READ_SEARCH_INDEX` with it — makes that
+# one reader unmet and says why, rather than raising out of the whole
+# question, which the registry would read as "could not be read" and hold the
+# chain on DuckDB for good. `tests/unit/test_pg_buyers_write.py` requires each
+# entry to exist and to be the parser of the flag it names, so whoever removes
+# one changes this list in the same commit.
+READERS: Tuple[Tuple[str, str, str], ...] = (
+    ("KS_SMS_STORE", "core.pg_sms", "sms_store_is_postgres"),
+    ("KS_READ_SEARCH_INDEX", "core.pg_search_index_read", "enabled"),
+    ("KS_READ_DASHBOARD", "core.pg_dashboard_read", "enabled"),
+)
 
 
 def unmet_precondition() -> Optional[str]:
@@ -213,11 +216,13 @@ def unmet_precondition() -> Optional[str]:
     Never raises and never asks Postgres: `/api/health` reads it through the
     registry, and must still answer with Postgres down. A reader flag nobody
     can parse is unmet, because nobody can then say that reader follows the
-    writes."""
+    writes; so is a reader whose parser cannot be found."""
+    import importlib
+
     lagging: List[str] = []
-    for name, parser in _readers():
+    for name, module, parser in READERS:
         try:
-            if not parser():
+            if not getattr(importlib.import_module(module), parser)():
                 lagging.append(f"{name} is not postgres")
         except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
             lagging.append(f"{name} is not understood ({exc})")

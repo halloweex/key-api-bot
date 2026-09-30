@@ -163,6 +163,39 @@ class TestTheReadersComeFirst:
         flags.setenv("KS_READ_DASHBOARD", "duckdb")
         assert chain.unmet_precondition()
 
+    def test_each_reader_is_the_parser_of_the_flag_it_names(self):
+        """The list is what whoever removes a reader must change in the same
+        commit (OD-10's PR-C takes `KS_READ_SEARCH_INDEX` away): a parser
+        that no longer exists fails here, not by holding the chain on DuckDB
+        for good behind a warning."""
+        import ast
+        import importlib
+        import inspect
+        import textwrap
+
+        assert [r[0] for r in chain.READERS] == list(READERS)
+        for name, module, parser in chain.READERS:
+            mod = importlib.import_module(module)
+            fn = getattr(mod, parser)
+            assert callable(fn), (module, parser)
+            if hasattr(mod, "ENV"):
+                assert mod.ENV == name, (module, mod.ENV)
+            else:
+                strings = {n.value for n in ast.walk(ast.parse(
+                    textwrap.dedent(inspect.getsource(fn))))
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+                assert name in strings, f"{module}.{parser} does not read {name}"
+
+    def test_a_reader_that_is_gone_holds_the_chain_and_says_so(self, flags, monkeypatch):
+        """Not a raise out of the whole question: one reader unmet, named."""
+        monkeypatch.setattr(chain, "READERS", chain.READERS[:1] + (
+            ("KS_READ_SEARCH_INDEX", "core.no_such_module", "enabled"),))
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        state = write_chains.chain_modes()[chain.CHAIN]
+        assert state["mode"] == "duckdb"
+        assert "KS_READ_SEARCH_INDEX is not understood" in state["unmet_precondition"]
+        assert "could not be read" not in state["unmet_precondition"]
+
     def test_a_latched_chain_keeps_writing_and_says_its_readers_lag(self, flags):
         chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
         flags.setenv(chain.WRITE_ENV, "postgres")
