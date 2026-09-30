@@ -312,9 +312,13 @@ class TestAWriteThatNeverReachesPostgres:
                            if failing == "get_pool" else
                            RuntimeError("schema revision 0032, expected 0033"))
 
-        with patch(f"core.pg.{failing}", new=broken):
+        # The revision case needs a pool to get past, or `get_pool` raises on
+        # the missing DSN first and the case proves nothing (review of PR-3).
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
+                patch(f"core.pg.{failing}", new=broken):
             with pytest.raises((OSError, RuntimeError)):
                 await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 10)
+        broken.assert_awaited_once()
 
         assert not chain_latch.latched("pg_expenses_write"), (
             "a write that never reached Postgres latched the chain")
@@ -396,9 +400,11 @@ class TestAWriteThatNeverReachesPostgres:
         broken = AsyncMock(side_effect=OSError("connection refused")
                            if failing == "get_pool" else
                            RuntimeError("schema revision 0032, expected 0033"))
-        with patch(f"core.pg.{failing}", new=broken):
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
+                patch(f"core.pg.{failing}", new=broken):
             with pytest.raises((OSError, RuntimeError)):
                 await store.upsert_buyers([Buyer.from_api({"id": 1, "full_name": "Олена"})])
+        broken.assert_awaited_once()
 
         assert not chain_latch.latched("pg_buyers_write")
         assert not chain_latch.marker_path("pg_buyers_write").exists()

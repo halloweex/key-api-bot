@@ -221,6 +221,24 @@ class TestChainFourTypo:
         assert "orders" in stats and "buyers" not in stats
         assert "buyer_contacts" not in stats
 
+    @pytest.mark.parametrize("how", ["flagged", "latched"])
+    @pytest.mark.asyncio
+    async def test_with_the_chain_on_postgres_the_stats_leave_them_out(
+            self, flags, store, how):
+        """DuckDB's counts stop there, and a count that never moves reads as
+        a sync that stopped (review of PR-3)."""
+        from core import chain_latch, pg_buyers_write
+
+        if how == "flagged":
+            flags.setenv("KS_WRITE_BUYERS", "postgres")
+            for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
+                flags.setenv(reader, "postgres")
+        else:
+            chain_latch.latch(pg_buyers_write.CHAIN, pg_buyers_write.WRITE_ENV)
+        stats = await store.get_stats()
+        assert "orders" in stats
+        assert "buyers" not in stats and "buyer_contacts" not in stats
+
     @pytest.mark.asyncio
     async def test_with_the_chain_on_duckdb_the_stats_carry_them(self, flags, store):
         """The control: nothing moved, nothing left out."""
