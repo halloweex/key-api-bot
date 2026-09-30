@@ -362,6 +362,47 @@ class TestTheEvaluator:
             assert ("mirror_landing" not in unmet) is pg_landing.enabled(), value
 
 
+class TestTheModesAreReadAsTheirOwnModulesReadThem:
+    """R1-4: the preconditions name other modules' switches by value — the
+    variable and the value that module acts on. After DN-20c (#264) is under
+    this branch, `read_fallback_off` must be met exactly when DN-20c's own
+    `configure_mode` answers `off`, or the switch could wait on a refusal mode
+    that is on, or run beside one that is not."""
+
+    @pytest.fixture(autouse=True)
+    def _put_back(self, monkeypatch):
+        from core import read_fallback
+
+        for name in ("_mode", "_mode_error", "_misconfigured"):
+            monkeypatch.setattr(read_fallback, name, getattr(read_fallback, name))
+
+    def test_the_names_and_values_are_the_modules_own(self):
+        from core import pg_derivation, pg_utm_parse, pg_warehouse_dq, read_fallback
+
+        assert (wc.READ_FALLBACK, "off") == (read_fallback.ENV, read_fallback.OFF)
+        assert (wc.UTM_PARSE, "postgres") == (pg_utm_parse.ENV, pg_utm_parse.POSTGRES)
+        assert (wc.PG_DERIVE, "own") == (pg_derivation.ENV, pg_derivation.OWN)
+        assert wc.PG_TWINS == pg_warehouse_dq.ENV and "on" in pg_warehouse_dq._VALID
+        assert dict(wc.PRECONDITIONS)["read_fallback_off"] == f"{read_fallback.ENV}=off"
+
+    @pytest.mark.parametrize("value", [None, "off", " OFF ", "Off", "duckdb", "",
+                                       "of", "0"])
+    def test_read_fallback_off_is_met_exactly_when_dn20c_refuses(self, value,
+                                                                  monkeypatch):
+        from core import read_fallback
+
+        env = dict(MET_ENV)
+        if value is None:
+            env.pop(read_fallback.ENV)
+            monkeypatch.delenv(read_fallback.ENV, raising=False)
+        else:
+            env[read_fallback.ENV] = value
+            monkeypatch.setenv(read_fallback.ENV, value)
+        met = "read_fallback_off" not in [
+            u.key for u in wc.evaluate_preconditions(env, MET_FACTS)]
+        assert met is (read_fallback.configure_mode() == read_fallback.OFF)
+
+
 class TestEveryReadSwitchIsDecided:
     """A read switch added later must be put on the list or excluded by name —
     the walk, not the list, is what finds it.
