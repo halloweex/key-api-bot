@@ -9,9 +9,12 @@ CRITICAL once it is not. And `reconciliation_ch`, the ClickHouse arm of the
 05:30 comparison against KeyCRM, is paged on by the canary like its Postgres
 sibling, with a catch-up that reads its age.
 
-Every guard here has a named mutation in the test that catches it; the
-production-shaped payload at the bottom is what says nothing new pages the
-day this ships.
+Every guard here has a named mutation in the test that catches it. The
+production payload at the bottom proves one point in time, the evening of
+2026-09-30, and nothing more: whether the canary would have paged over the
+last fourteen days is a question about history, which
+`deploy/stage4_soak/22_reconciliation_ch_history.sql` answers on the host
+(DN-21's bar), and which the OD-08 review found unasked.
 """
 from __future__ import annotations
 
@@ -832,12 +835,15 @@ class TestTheReconciliationCatchUpReadsItsArms:
         assert queued == {"dq_reconciliation_catchup"}
 
 
-# ─── Production, the day this ships ─────────────────────────────────────────
+# ─── Production, one evening ────────────────────────────────────────────────
 #
 # /api/health as production published it on 2026-09-30 (correlation id
 # dropped; the endpoint is public and carries no host, user or text). KS_CH_URL
-# is set there and reconciliation_ch passes every morning: its last success is
-# the same 05:30 run as the DuckDB and Postgres halves.
+# is set there, and that evening reconciliation_ch's last success was the same
+# 05:30 run as the DuckDB and Postgres halves. One snapshot: it shows the
+# canary's shape agrees with production's payload, not that no morning of the
+# last fourteen would have paged. That is the history check's question, and
+# `TestTheHistoryIsAskedForEveryPagedArm` holds that it exists.
 
 PRODUCTION_HEALTH_2026_09_30 = {
     "status": "healthy",
@@ -947,8 +953,11 @@ class TestNothingNewPagesInProduction:
         self, duckdb_derives,
     ):
         """Production runs DuckDB's derivation (`warehouse_writer_mode.mode`
-        above), so even a ClickHouse outage on the day this ships files a
-        WARN for the 09:00 digest and pages nobody."""
+        above), so the mirror-landing job files a ClickHouse outage as a WARN
+        for the 09:00 digest and pages nobody over it. An outage that costs
+        the 05:30 comparison against KeyCRM pages, but through the canary's
+        `reconciliation_ch` watch, 30 h after the last run that compared
+        (`TestADeadClickHouseKeepsPaging`)."""
         from tests.unit.test_mirror_landing_isolation import _run
 
         assert PRODUCTION_HEALTH_2026_09_30["warehouse_writer_mode"]["mode"] == "duckdb"
@@ -956,3 +965,36 @@ class TestNothingNewPagesInProduction:
             {"reconcile_clickhouse": [ch_silver.gold_values_unwatched("down")]})
         assert _unwatched(persisted["issues"]).severity is Severity.WARN
         assert paged == []
+
+
+class TestTheHistoryIsAskedForEveryPagedArm:
+    """The OD-08 review's second finding: DN-21 put `reconciliation_pg` under
+    the canary only on a history read over fourteen days, and nothing asked
+    the same of `reconciliation_ch`. Every arm of the 05:30 job the canary
+    pages on has a stage-4 soak check that reads its history against the
+    canary's own limit. Mutation: delete 22_reconciliation_ch_history.sql and
+    this fails."""
+
+    def test_every_paged_arm_has_its_history_check(self):
+        import re
+        from pathlib import Path
+
+        from bot.canary import DQ_MAX_AGE_S
+        from core.scheduler import CATCHUP_SIBLING_LAYERS
+
+        soak = Path(__file__).resolve().parents[2] / "deploy/stage4_soak"
+        judged = {}
+        for path in sorted(soak.glob("*.sql")):
+            code = re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8"))
+            if "canary_max_age" not in code:
+                continue
+            m = re.search(r"layer_runs AS \(.*?r\.layer = '(\w+)'", code, flags=re.S)
+            if m:
+                judged[m.group(1)] = path.name
+        arms = [a for a in CATCHUP_SIBLING_LAYERS["dq_reconciliation"]
+                if a in DQ_MAX_AGE_S]
+        assert arms == ["reconciliation_pg", "reconciliation_ch"]
+        assert {a: judged.get(a) for a in arms} == {
+            "reconciliation_pg": "20_reconciliation_pg_history.sql",
+            "reconciliation_ch": "22_reconciliation_ch_history.sql",
+        }

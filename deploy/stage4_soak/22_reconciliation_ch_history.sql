@@ -1,47 +1,39 @@
--- reconciliation_pg — would the canary have stayed quiet? (precondition for DN-21)
+-- reconciliation_ch — would the canary have stayed quiet? (OD-08 (a))
 --
 -- WHY IT EXISTS
--- Reconciliation A proves Postgres agrees with DuckDB; `reconciliation_pg`
--- proves it agrees with KeyCRM, the half meant to stay true once DuckDB is
--- gone. DN-21 puts it under the canary, and a detector that pages from its
--- first day on a history nobody looked at would be switched off by the second.
--- So the history is read first, over a window from midnight Kyiv fourteen days
--- ago up to now.
+-- OD-08 (a) (2026-09-30) put `reconciliation_ch`, the ClickHouse arm of the
+-- 05:30 comparison against KeyCRM, under the canary at 30 h. DN-21 set the
+-- bar for doing that to `reconciliation_pg`: a successful run on each of the
+-- last 14 days and no silence past the limit, read from the history rather
+-- than from one /api/health — a detector that pages from its first day on a
+-- history nobody looked at would be switched off by the second. The same bar
+-- applies here, and the one snapshot of 30.09 did not meet it: the ClickHouse
+-- arm fails on its own (a ClickHouse query or the Postgres exclusion set
+-- raising while the copy is fresh), and how often it did is what this reads.
+-- Run it on the host before the change that pages on the layer is merged.
+-- Until then the host's checkout does not have this file: feed it from a
+-- checkout on stdin to the same psql `deploy/stage4_soak.sh` runs, as
+-- `ks_readonly` with `default_transaction_read_only=on`.
 --
--- THREE QUESTIONS, BECAUSE NONE OF THEM IMPLIES ANOTHER
--- 1. A successful run on each of the 14 Kyiv days before today.
--- 2. No silence longer than the canary allows. The canary counts no days: it
---    pages when the newest successful run is more than `canary_max_age` old
---    (bot/canary.py, DQ_MAX_AGE_S["reconciliation_pg"]; a test holds the two
---    equal). So every silence that ends inside the window is measured — from
---    one success's `started_at`, which is what /api/health's age counts from,
---    to the `ended_at` of the next, the moment `persist_run` made it visible —
---    and so is the silence still running, from the newest success to now.
---    Runs at 00:10 and at 23:50 the next day cover both days and leave 47.7 h
---    unwatched; runs 25 h apart can straddle a day that has none. Hence 1 and
---    2 both. The first silence may have begun before the window, and is
---    measured whole: the canary would have been paging when the window opened.
--- 3. No CRITICAL on any run in the window, failed or not.
--- "Successful" is `error_message IS NULL`. `persist_run` writes status FAILED
--- exactly when it sets `error_message`, so this is the set /api/health takes
--- its age over, and it is the only kind of run the detail counts: a failed
--- run writes a row too, and checked nothing.
+-- THE SAME QUESTIONS AS 20, ONE DIFFERENCE IN WHAT COUNTS AS A SUCCESS
+-- Everything but `layer_runs` and the label is
+-- 20_reconciliation_pg_history.sql, held identical by a test, so the three questions, the silence arithmetic and
+-- the treatment of a stale copy are the ones documented there. What differs
+-- is `ok`: the arm gates a ClickHouse copy more than 3 h old instead of
+-- comparing it, and until the OD-08 review wrote that run as a success —
+-- error NULL, a WARN `ch_reconcile_pending` beside it. The canary no longer
+-- counts such a run (it is written with `error_message` now), so neither does
+-- this: the history is judged as the canary that ships with it would judge it.
 --
 -- THE EVIDENCE IS A COPY
--- As in D8: the journal reaches Postgres through the hourly
--- `replicate_operational`, and a failed replication freezes it silently. A copy
--- 75 min old or more, or failing, makes this UNKNOWN.
--- The copy also cannot see past the moment it was taken. A silence already
--- past the limit when the copy was taken is a FAIL; one that crossed the limit
--- only after it is UNKNOWN, because a run may have landed since and not been
--- copied yet — as D8 treats a copy taken before its run could be in it.
+-- As in 20: the journal reaches Postgres through the hourly
+-- `replicate_operational`; a copy 75 min old or more, or failing, is UNKNOWN.
 --
 -- WHAT A FAIL MEANS
--- A day with no successful run or a silence past the limit (the 05:30 job did
--- not run, or every run errored — CLAUDE.md's Sunday 05:00 trap is the known
--- cause), or a CRITICAL finding. Any of them restarts the 14-day count for
--- DN-21, and once DN-21 is live, a silence past the limit is a page that went
--- out. Today needs no run of its own, only a silence within the limit.
+-- A day with no run that compared, a silence past the limit, or a CRITICAL
+-- finding (a discrepancy between ClickHouse's Silver and KeyCRM). Before the
+-- canary watches this layer, a FAIL is a page it would have sent; after, it
+-- is a page that went out.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
@@ -78,12 +70,17 @@ wanted AS (
 ),
 layer_runs AS (
     -- Every run of the layer, and whether it produced a verdict. With the
-    -- label, the one place this file and 22_reconciliation_ch_history.sql
-    -- differ; a test holds the rest of the two identical.
+    -- label, the one place this file and 20_reconciliation_pg_history.sql
+    -- differ; a test holds the rest of the two identical. A run that gated a stale copy
+    -- compared nothing, whether it was written before the review (error
+    -- NULL, a `ch_reconcile_pending` beside it) or after (error set).
     SELECT r.run_id, r.started_at, r.ended_at, r.critical_count,
-           r.error_message IS NULL AS ok
+           r.error_message IS NULL
+           AND NOT EXISTS (SELECT 1 FROM app.data_quality_issues i
+                           WHERE i.run_id = r.run_id
+                             AND i.check_name = 'ch_reconcile_pending') AS ok
     FROM app.data_quality_runs r
-    WHERE r.layer = 'reconciliation_pg'
+    WHERE r.layer = 'reconciliation_ch'
 ),
 runs AS (
     SELECT (r.started_at AT TIME ZONE 'Europe/Kyiv')::date AS kday,
@@ -145,7 +142,7 @@ judged AS (
          CROSS JOIN limits CROSS JOIN newest
          LEFT JOIN longest ON true
 )
-SELECT 'reconciliation_pg history'::text AS "check",
+SELECT 'reconciliation_ch history'::text AS "check",
        CASE
            WHEN stale IS NOT NULL THEN 'UNKNOWN'
            WHEN days_without_ok IS NOT NULL OR max_critical > 0
