@@ -1198,6 +1198,24 @@ class TestAHoldThatDoesNotEndIsSaid:
         finally:
             asyncio.run(store.close())
 
+    def test_a_new_hold_starts_its_own_age(self, tmp_path, monkeypatch):
+        """A hold re-armed in the same process after a release is a new one:
+        the age of the last must not make it read as hours old."""
+        from datetime import datetime, timedelta, timezone
+
+        store = _held_store(tmp_path)
+        try:
+            monkeypatch.setattr(wc, "_held_since",
+                                datetime.now(timezone.utc) - timedelta(hours=3))
+            asyncio.run(store.refresh_warehouse_layers(trigger="dirty_flag"))
+            assert not wc.held()
+            _seed(store, **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True}})
+            monkeypatch.setattr(wc, "_settled", False)
+            asyncio.run(wc.settle_writer(store))
+            assert wc.held() and wc.held_for_s() < 60
+        finally:
+            asyncio.run(store.close())
+
     def test_the_default_publishes_no_age(self):
         block = self._block()
         assert block["held"] is False and block["held_for_s"] is None
