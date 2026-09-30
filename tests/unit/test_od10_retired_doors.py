@@ -163,3 +163,9 @@ def test_nothing_writes_reconciliation_log_any_more():
 ])
 def test_the_pattern_reads_each_shape(sql, writes):
     assert bool(_WRITES_THE_LOG.search(sql)) is writes
+
+
+def test_the_sqlite_to_duckdb_user_copy_is_gone():
+    """Its source froze on 2026-08-27, its target has not been read in
+    production since 2026-09-07, and it wrote roles from two hardcoded ids."""
+    assert not (REPO / "scripts" / "migrate_sqlite_to_duckdb.py").exists()
