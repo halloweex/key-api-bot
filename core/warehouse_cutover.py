@@ -346,8 +346,6 @@ def open_retired_conditions() -> Dict[str, Optional[str]]:
 OD10_DOORS: Tuple[Tuple[str, str], ...] = (
     ("web/routes/api/admin.py:purge_orders", "POST /api/duckdb/purge-orders"),
     ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),
-    ("web/routes/api/admin.py:debug_stale_returns", "GET /api/debug/stale-returns"),
-    ("web/routes/api/admin.py:debug_order_status", "GET /api/debug/order-status/{id}"),
 )
 
 

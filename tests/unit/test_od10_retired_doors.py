@@ -25,6 +25,10 @@ RETIRED_ROUTES = (
     ("GET", "/api/buyers/{buyer_id}"),
     ("GET", "/api/orders/{order_id}"),
     ("GET", "/api/products/{product_id}"),
+    # DuckDB Bronze against DuckDB Silver, with no caller; the KeyCRM half of
+    # the second raised on every stored order since the day it was written.
+    ("GET", "/api/debug/stale-returns"),
+    ("GET", "/api/debug/order-status/{order_id}"),
 )
 
 # The assistant's tools that rode the retired detail service.
