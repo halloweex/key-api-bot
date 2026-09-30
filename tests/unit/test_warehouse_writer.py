@@ -675,6 +675,9 @@ class _FullSyncStore:
     async def get_latest_order_time(self):
         return None
 
+    async def find_backdated_order_ids(self, since, limit=200):
+        return []
+
     async def checkpoint(self):
         return None
 

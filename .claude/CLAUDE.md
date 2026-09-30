@@ -847,8 +847,11 @@ whole reason the group is read from the source now.
 | `bot_memory_watch` | every 30 min (bot) | бот сторожит свои 512 МБ тем же evaluator'ом; предыдущий сэмпл — в `data/memory-bot-last.json` (OOM-счётчик ядра сбрасывается при recreate) |
 
 The legacy 06:00 `reconciliation_check` is gone (OD-10, 2026-09-30):
-`dq_reconciliation` is the reconciliation, and `order_status_refresh` (05:15)
-the status repair it duplicated.
+`dq_reconciliation` is the reconciliation. It repairs only the orders we do
+not hold. The one repair only the legacy job made now belongs to
+`order_status_refresh` (05:15): an order dated into the last 30 days but
+created before them, whose status or total moved without `updated_at`
+changing. That job re-fetches these orders by id, before 05:30 looks at them.
 
 **Never schedule anything at 05:00–05:05 Kyiv.** The host cron
 `0 2 * * 0 weekly_compact.sh` is 02:00 UTC — the same instant — and it stops
@@ -2936,6 +2939,18 @@ change** — none had a caller, and most had stopped working long before:
   hourly copy and its daily comparison stay; a test fails if anything writes
   it again. The manual levers are `POST /api/reconcile` (detection) and
   `POST /api/duckdb/refresh-statuses` (repair).
+  **The legacy job made one repair nothing else made, and it was kept.** A
+  B2B order's `ordered_at` can sit weeks after its `created_at`, and KeyCRM
+  does not bump `updated_at` on a status change. So a moved status on an
+  order created more than 30 days ago and ordered inside them was re-fetched
+  by nothing else. `order_status_refresh` fetches by creation date, the
+  weekly full sync skips the order as unchanged, and `dq_reconciliation`
+  filed it as STATUS_DRIFT (CRITICAL) every morning but repairs only
+  MISSING_IN_DK. The legacy fetch was padded by 30 days for exactly this.
+  `refresh_order_statuses` now finishes by re-fetching those orders by id
+  (`find_backdated_order_ids`, Kyiv dates): 156 ids over 183 daily runs on
+  the 2026-08-31 copy, 0.85 a day and at most 5, each one API call
+  (`tests/unit/test_status_refresh_backdated.py`).
 - **`scripts/migrate_sqlite_to_duckdb.py`**: dead at both ends since the bot
   and the user list moved to Postgres, and it wrote roles from two hardcoded
   ids.

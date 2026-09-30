@@ -1401,7 +1401,9 @@ class SyncService:
 
         KeyCRM does NOT update the `updated_at` field when order status changes,
         so the incremental sync (which relies on updated_between) misses these.
-        This method re-fetches orders by created_between to refresh all statuses.
+        This method re-fetches orders by created_between to refresh all statuses,
+        then by id the backdated orders that fetch cannot return: dated into
+        the window, created before it (`_refresh_backdated_orders`).
 
         Args:
             days_back: Number of days to look back (default 30)
@@ -1473,12 +1475,52 @@ class SyncService:
                 # both stores, Silver through the ClickHouse arm — and files a
                 # moved status as STATUS_DRIFT where somebody reads it.
 
+            # The orders the fetch above cannot return: dated into the window,
+            # created before it. By id, before dq_reconciliation looks at 05:30.
+            stats["backdated"] = await self._refresh_backdated_orders(start_date.date())
+
         except KeyCRMConnectionError as e:
             logger.warning(f"Status refresh connection error (will retry): {e}")
         except KeyCRMError as e:
             logger.error(f"Status refresh error: {e}")
 
         return stats
+
+    async def _refresh_backdated_orders(self, since) -> Dict[str, Any]:
+        """Re-fetch by id the orders dated on or after `since` but created
+        before it (`find_backdated_order_ids`). Never raises: the refresh
+        above has already committed, and this is one step after it.
+
+        KeyCRM lets a B2B order's `ordered_at` sit weeks after its
+        `created_at`, and does not move `updated_at` when a status changes. A
+        `created_between` fetch misses such an order once its creation date
+        has left the window. The weekly full sync skips it as unchanged, and
+        `dq_reconciliation` repairs only orders we do not hold. So a status
+        that moved on one of these was filed as STATUS_DRIFT (CRITICAL) every
+        morning until its order date left the 90-day window. Until OD-10 the
+        legacy 06:00 `reconciliation_check` fixed it, by padding its fetch by
+        30 days. This is that repair, kept after the job was retired.
+
+        The caller holds the heavy-job lock (the 05:15 job and the manual
+        route both do), so it is not passed on: `repair_orders` does not
+        re-enter it.
+        """
+        try:
+            ids = await self.store.find_backdated_order_ids(
+                since, limit=self.REPAIR_BATCH_LIMIT)
+            if not ids:
+                return {"found": 0}
+            result = await self.repair_orders(ids)
+            logger.info("Status refresh: re-fetched %d of %d backdated order(s) by id",
+                        result["repaired"], len(ids))
+            return {"found": len(ids), "repaired": result["repaired"],
+                    "failed": result["failed"]}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the refresh itself is done
+            logger.error("Status refresh: backdated orders were not re-fetched: %s: %s",
+                         type(exc).__name__, exc, exc_info=True)
+            return {"error": type(exc).__name__}
 
     # An order-by-order repair is one API call each, so a run is bounded and the
     # remainder is picked up on the next one rather than fired off in a burst
