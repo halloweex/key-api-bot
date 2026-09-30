@@ -165,7 +165,10 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 `/api/orders/{id}`, `/api/products/{id}`, `/api/buyers/stats`,
 `/api/debug/stale-returns`, `/api/debug/order-status/{id}`,
 `/api/reconciliation`, and `POST /api/reconciliation/run`,
-`/api/duckdb/purge-orders`. See "OD-10: the DuckDB-only doors".
+`/api/duckdb/purge-orders`. See "OD-10: the DuckDB-only doors". A retired
+GET answers a JSON 404, as does any `/api/` GET no route matches. The SPA
+catch-all used to serve those the shell with a 200, which a script reads as
+success.
 
 **Query params**: `period` (today/yesterday/week/last_week/month/last_month) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
 
