@@ -255,6 +255,12 @@ class BackgroundScheduler:
 
         configure_modes()
 
+        # What a change of warehouse writer owes (DN-29), settled before a job
+        # is registered — web's boot sync has already done it, so this is a
+        # no-op there; a scheduler started elsewhere, or a boot whose settle
+        # raised, gets it here. Never fatal: the next derivation tick tries again.
+        await self._settle_warehouse_writer()
+
         # Register jobs
         await self._register_jobs()
 
@@ -265,6 +271,18 @@ class BackgroundScheduler:
 
         await self._schedule_catchup_runs()
         await self._replicate_classification_once()
+
+    @staticmethod
+    async def _settle_warehouse_writer() -> None:
+        """`warehouse_cutover.settle_writer`, never raising."""
+        from core import warehouse_cutover
+
+        try:
+            from core.duckdb_store import get_store
+
+            await warehouse_cutover.settle_writer(await get_store())
+        except Exception as e:
+            logger.error("Warehouse writer not settled: %s", e, exc_info=True)
 
     async def _replicate_classification_once(self) -> None:
         """Copy the manager classification to Postgres, once, at startup.
@@ -554,16 +572,27 @@ class BackgroundScheduler:
 
         # Job: Warehouse refresh (every 2 minutes, picks up dirty flag)
         # Decoupled from sync — sync writes Bronze + sets dirty flag,
-        # this job rebuilds Silver/Gold independently
-        self._add_job(
-            job_id="warehouse_refresh",
-            name="Warehouse Refresh",
-            description="Rebuild Silver/Gold layers when dirty flag is set",
-            func=self._run_warehouse_refresh,
-            trigger=IntervalTrigger(minutes=2),
-            max_instances=1,
-            coalesce=True,
-        )
+        # this job rebuilds Silver/Gold independently.
+        #
+        # DuckDB's derivation, so not registered while Postgres alone derives
+        # (KS_WRITE_WAREHOUSE=postgres, DN-29). The mode is cached before this
+        # runs, and never changes in a process.
+        from core import warehouse_cutover
+
+        if warehouse_cutover.duckdb_derives():
+            self._add_job(
+                job_id="warehouse_refresh",
+                name="Warehouse Refresh",
+                description="Rebuild Silver/Gold layers when dirty flag is set",
+                func=self._run_warehouse_refresh,
+                trigger=IntervalTrigger(minutes=2),
+                max_instances=1,
+                coalesce=True,
+            )
+        else:
+            logger.warning(
+                "warehouse_refresh not registered: KS_WRITE_WAREHOUSE=postgres — "
+                "Postgres alone derives Silver and Gold")
 
         # Job: Daily DuckDB backup (A9-1) at a low-traffic hour.
         # Holds the store lock briefly for a consistent CHECKPOINT+copy.
@@ -1289,6 +1318,16 @@ class BackgroundScheduler:
 
     async def _run_warehouse_refresh(self) -> Dict[str, Any]:
         """Check dirty flag and rebuild Silver/Gold if needed."""
+        from core import warehouse_cutover
+
+        # Not registered under KS_WRITE_WAREHOUSE=postgres; this is the second
+        # half of that, for a call that finds its way here anyway. Before the
+        # peek: nothing of DuckDB's flag is read or cleared.
+        if not warehouse_cutover.duckdb_derives():
+            return {"skipped": True, "reason": "KS_WRITE_WAREHOUSE=postgres"}
+        # A no-op once settled; the retry for a boot whose settle raised, before
+        # the first rebuild could run over a flag the way back had to mark.
+        await self._settle_warehouse_writer()
         async with self._heavy_job_lock:
             from core.duckdb_store import get_store
             store = await get_store()
@@ -1525,6 +1564,12 @@ class BackgroundScheduler:
 
         if not derivation.owns():
             return {"skipped": True, "reason": "KS_PG_DERIVE is not own"}
+        # The warehouse writer, once more (DN-29): under KS_WRITE_WAREHOUSE=
+        # postgres this is the only job that ticks, so a boot and a start whose
+        # settle raised — or whose resolve the ledger refused — are retried
+        # here rather than at the next restart, which, if it is the way back,
+        # would find no record and owe DuckDB nothing. A no-op once settled.
+        await self._settle_warehouse_writer()
 
         async def read_signal():
             pool = await get_pool()
@@ -1959,7 +2004,7 @@ class BackgroundScheduler:
             # Postgres alone derives them (DN-28). Read once, so the scan and
             # `duckdb_looked` below agree on one answer: a check the scan
             # skipped is one the twins must stand in for, not compare against.
-            # Empty in this build — the switch is DN-29.
+            # Empty unless Postgres alone derives, or the way back holds (DN-29).
             from core.warehouse_cutover import stood_down_duckdb_checks
 
             stood_down = stood_down_duckdb_checks()
@@ -2209,14 +2254,29 @@ class BackgroundScheduler:
             # only change is that the checks that did complete are no longer
             # thrown away, and a CRITICAL among them still pages.
             raised: list = []
+            # What the comparisons DN-29 retires reported, and which reached a
+            # verdict: their Silver and UTM findings share `mirror_*` names
+            # with the comparisons that stay, so the job marks whose page is
+            # whose (`warehouse_cutover.note_comparisons_reported`).
+            from core import warehouse_cutover
+
+            retired_reported: set = set()
+            retired_verdicts: set = set()
 
             async def check(name, run):
                 nonlocal issues
                 try:
-                    issues += await run()
+                    found = await run()
                 except Exception as exc:  # noqa: BLE001 — recorded and named
                     raised.append(f"{name}: {type(exc).__name__}: {exc}")
                     logger.exception("Mirror reconciliation check %s raised", name)
+                    return
+                issues += found
+                if name in warehouse_cutover.RETIRED_COMPARISONS:
+                    retired_verdicts.add(name)
+                    retired_reported.update(
+                        i.check_name for i in found
+                        if i.severity == Severity.CRITICAL)
 
             try:
                 # The DuckDB read and the Postgres round-trips are deliberately
@@ -2232,16 +2292,28 @@ class BackgroundScheduler:
                 # and that interleaves the two stores — so it takes the store
                 # and manages its own short acquisitions.
                 await check("reconcile_orders", lambda: reconcile_orders(store))
+                # The three comparisons that set DuckDB's Silver, Gold and UTM
+                # against Postgres' stand down while Postgres alone derives
+                # them (KS_WRITE_WAREHOUSE=postgres, DN-29) — DuckDB's copies
+                # are as old as the switch, and after a Sunday compaction
+                # empty — and while the way back is still owed its first
+                # validated full DuckDB tick. The last run ids where they
+                # found zero are the final independent proof of the parallel
+                # period; `pg_gold_internal_check` below keeps the one Gold
+                # question that needs no DuckDB.
+                duckdb_compared = not warehouse_cutover.warehouse_checks_stand_down()
                 # And the two computations of Silver. Same layer: it is the
                 # same question — do the stores agree — asked one level up.
-                await check("reconcile_silver", lambda: reconcile_silver(store))
+                if duckdb_compared:
+                    await check("reconcile_silver", lambda: reconcile_silver(store))
                 # And the UTM classification beside it — the one Silver object
                 # Postgres is shipped rather than computes, so a difference is
                 # a defect in the shipper and not in a projection. Read whole
                 # rather than fingerprinted: the table is almost all text, and
                 # a campaign renamed to another name of the same length moves
                 # no number and no length. Revision 0018.
-                await check("reconcile_order_utm", lambda: reconcile_order_utm(store))
+                if duckdb_compared:
+                    await check("reconcile_order_utm", lambda: reconcile_order_utm(store))
                 # And whether every order the parser reads has a current
                 # verdict at all (DN-16). The comparison above cannot see an
                 # order both copies lack, and has nothing to compare once the
@@ -2266,15 +2338,13 @@ class BackgroundScheduler:
                 # own. (An exception here used to skip every check below it;
                 # see `check` — the layer still has one age and the run is still
                 # failed, but the checks below still run and still page.)
-                await check("reconcile_gold", lambda: reconcile_gold(store))
-                # And, while Postgres alone derives the warehouse, the roll-up
-                # question asked of Postgres by itself (DN-28): `reconcile_gold`
-                # leaves it out on the same predicate, so it is asked once and
-                # needs no DuckDB read. Never true in this build — the switch
-                # is DN-29 — so production runs exactly the checks above.
-                from core import warehouse_cutover
-
-                if warehouse_cutover.writes_postgres():
+                if duckdb_compared:
+                    await check("reconcile_gold", lambda: reconcile_gold(store))
+                else:
+                    # And, while the comparison stands down, the roll-up
+                    # question asked of Postgres by itself (DN-28): it rode
+                    # `compare_gold`, so it is asked once a run either way and
+                    # needs no DuckDB read.
                     from core.mirror_reconciliation import pg_gold_internal_check
                     await check("pg_gold_internal_check", lambda: pg_gold_internal_check())
                 # And the five tables that are neither landing nor computed —
@@ -2369,6 +2439,17 @@ class BackgroundScheduler:
                                 if i.severity == Severity.CRITICAL],
                     evidence=evidence_for_agent(MIRROR_LAYER, issues, run_id=run_id),
                 )
+            # After the page is delivered, so a page this run delivered is
+            # marked too. Only a run in which the retired comparisons ran:
+            # one where they stood down knows nothing about their pages.
+            if retired_verdicts:
+                try:
+                    warehouse_cutover.note_comparisons_reported(
+                        retired_reported,
+                        complete=retired_verdicts == set(
+                            warehouse_cutover.RETIRED_COMPARISONS))
+                except Exception as e:  # noqa: BLE001 — the next run marks again
+                    logger.warning(f"Mirror reconciliation: pages not marked: {e}")
             await self._resolve_dq_layer(MIRROR_LAYER, issues, error_message)
 
             result = {

@@ -112,27 +112,43 @@ async def close_pool() -> None:
         logger.info("Postgres pool closed")
 
 
-async def current_revision(conn=None) -> Optional[str]:
+async def current_revision(conn=None, *, strict: bool = False) -> Optional[str]:
     """The revision Alembic has recorded, or None if it has never run.
 
     None and "a revision we do not recognise" are different answers and are
     kept apart: the first means nobody has migrated this database, the second
     means somebody migrated it to something else.
+
+    By default None also stands for a read that failed — any exception from
+    the SELECT. `strict=True` keeps None for the one thing it says, the
+    version table absent (or empty), and lets every other failure raise: a
+    connection lost in the middle of the read is not a database nobody
+    migrated, and a caller that asks again must be able to tell them apart
+    (`core.warehouse_cutover`, where after a flip that reading is the way
+    back).
     """
     sql = (
         f"SELECT version_num FROM {VERSION_TABLE_SCHEMA}.{VERSION_TABLE} LIMIT 1"
     )
     if conn is not None:
+        return await _fetch_revision(conn, sql, strict)
+    pool = await get_pool()
+    async with pool.acquire() as acquired:
+        return await _fetch_revision(acquired, sql, strict)
+
+
+async def _fetch_revision(conn, sql: str, strict: bool) -> Optional[str]:
+    if not strict:
         try:
             return await conn.fetchval(sql)
         except Exception:
             return None
-    pool = await get_pool()
-    async with pool.acquire() as acquired:
-        try:
-            return await acquired.fetchval(sql)
-        except Exception:
-            return None
+    import asyncpg
+
+    try:
+        return await conn.fetchval(sql)
+    except (asyncpg.UndefinedTableError, asyncpg.InvalidSchemaNameError):
+        return None
 
 
 async def require_revision(expected: str = REQUIRED_REVISION, conn=None) -> None:

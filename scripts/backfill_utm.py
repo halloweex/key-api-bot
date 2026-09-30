@@ -189,14 +189,31 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
             "Ids: %s", len(pg_failed_ids), pg_failed_ids,
         )
 
-    # Now refresh UTM layers
-    logger.info("Clearing silver_order_utm to re-parse all comments...")
-    async with store.connection() as conn:
-        conn.execute("DELETE FROM silver_order_utm")
+    # Now refresh UTM layers — in DuckDB only while it derives. Under
+    # KS_WRITE_WAREHOUSE=postgres (DN-29) the parse below is Postgres' alone,
+    # and the recorded writer notes it, so the way back re-parses DuckDB's
+    # verdicts too; a DuckDB that refuses the note is logged and never in the
+    # way of the table /traffic reads.
+    from core import warehouse_cutover
 
-    logger.info("Refreshing UTM silver layer...")
-    utm_count = len(await store.refresh_utm_silver_layer())
-    logger.info(f"Parsed UTM for {utm_count} orders")
+    if warehouse_cutover.duckdb_derives():
+        logger.info("Clearing silver_order_utm to re-parse all comments...")
+        async with store.connection() as conn:
+            conn.execute("DELETE FROM silver_order_utm")
+
+        logger.info("Refreshing UTM silver layer...")
+        utm_count = len(await store.refresh_utm_silver_layer())
+        logger.info(f"Parsed UTM for {utm_count} orders")
+    else:
+        logger.info("KS_WRITE_WAREHOUSE=postgres: DuckDB's silver_order_utm is "
+                    "left as it is; the comments are re-parsed in Postgres alone")
+        try:
+            await warehouse_cutover.note_utm_reparsed_in_postgres(store)
+        except Exception as note_error:
+            logger.error(
+                "DuckDB did not take the note that its UTM verdicts are now "
+                "older than the rules; the way back will not re-parse them: %s",
+                note_error)
 
     logger.info("Refreshing traffic gold layer...")
 
@@ -222,7 +239,9 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
         await reparse_router(store, full=True, force=force_ship),
     )
 
-    # Show results
+    # Show results — DuckDB's, which under postgres are as old as the switch.
+    if not warehouse_cutover.duckdb_derives():
+        return
     async with store.connection() as conn:
         row = conn.execute(
             "SELECT traffic_type, platform, COUNT(*) FROM silver_order_utm "

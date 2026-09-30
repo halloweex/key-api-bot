@@ -569,18 +569,76 @@ def check_warehouse_writer_mode(payload: Optional[dict]) -> "list[tuple[str, str
     """Judge the `warehouse_writer_mode` block: a KS_WRITE_WAREHOUSE web did
     not understand (DN-28).
 
-    Warn, the read-fallback mode's reason: web runs as `duckdb`, so nothing is
-    failing. In this build nothing is failing whatever the value — the switch
-    is DN-29 — which is exactly why it is judged now: the first time a typo
-    would matter is the flip, and a canary that says nothing then leaves
-    whoever set `postgress` believing DuckDB has stopped. An absent block is
-    not a failure; an older web publishes none.
+    Warn, the read-fallback mode's reason: web runs as `duckdb`, so before a
+    flip nothing is failing — but whoever set `postgress` believes DuckDB has
+    stopped. After a flip the same typo is the way back (a full DuckDB
+    rebuild, the checks held), and web then also publishes `value_understood`
+    under `preconditions_unmet`, which `check_warehouse_preconditions` pages
+    with the way-back lever. An absent block is not a failure; an older web
+    publishes none.
     """
     block = (payload or {}).get("warehouse_writer_mode")
     if isinstance(block, dict) and block.get("error"):
         return [("warehouse_mode_invalid",
                  f"warehouse writer: {block['error']}")]
     return []
+
+
+def check_warehouse_preconditions(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `warehouse_writer_mode` block: KS_WRITE_WAREHOUSE=postgres
+    with a precondition of the switch unmet (DN-29).
+
+    Pages, unlike the typo: web runs as duckdb (OD-09 (b) — never a raise, it
+    is the only syncer), so the numbers keep coming — but somebody deployed
+    the switch that retires DuckDB's derivation, the owner's decision behind
+    it has not taken effect, and the flip is the moment to hear that, not the
+    next audit. And after a flip it is the way back itself: a full DuckDB
+    rebuild, a new `since` on the next start under postgres, the warehouse
+    group closed again — which is why the lever says so first. So is a value
+    web did not understand, after a flip (`value_understood`): the same way
+    back, and the message names the value as web read it. The keys name what
+    to do; the details are on the admin status page. An absent block or field
+    is not a failure; an older web publishes none."""
+    block = (payload or {}).get("warehouse_writer_mode")
+    if not isinstance(block, dict):
+        return []
+    unmet = block.get("preconditions_unmet")
+    if not isinstance(unmet, list) or not unmet:
+        return []
+    value = block.get("value")
+    value = value if isinstance(value, str) and value else "postgres"
+    return [("warehouse_preconditions_unmet",
+             f"KS_WRITE_WAREHOUSE={value} ran as duckdb, unmet: "
+             + ", ".join(str(key) for key in unmet))]
+
+
+# How long the way back from KS_WRITE_WAREHOUSE=postgres may hold the DuckDB
+# checks down before we say so. It ends in its first full DuckDB tick — a
+# rebuild and a parse, minutes even after a compaction emptied the verdicts —
+# so two hours is not a slow way back: it is a UTM parse raising tick after
+# tick, or a full tick whose parse raised with no dirty tick after it.
+WAREHOUSE_HOLD_WARN_S = 2 * 3600
+
+
+def check_warehouse_hold(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `warehouse_writer_mode` block: the way back's hold standing
+    past `WAREHOUSE_HOLD_WARN_S` (DN-29).
+
+    Warn: web serves and DuckDB derives — what is down is the five DuckDB
+    checks over Silver, Gold and UTM and the three mirror comparisons, which
+    the hold keeps down until a full tick validates and a UTM parse finishes.
+    Nothing else says so: the tick logs a failing parse at WARNING and still
+    reports success. An absent block or field is not a failure; an older web
+    publishes none."""
+    block = (payload or {}).get("warehouse_writer_mode")
+    if not isinstance(block, dict) or block.get("held") is not True:
+        return []
+    age = block.get("held_for_s")
+    if not isinstance(age, int) or isinstance(age, bool) or age < WAREHOUSE_HOLD_WARN_S:
+        return []
+    return [("warehouse_hold_stuck",
+             f"warehouse way back: the DuckDB checks over Silver, Gold and UTM "
+             f"held down for {_format_age(age)}")]
 
 
 def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
@@ -714,6 +772,22 @@ async def run_canary(
         if warehouse_mode_failures and severity == "ok":
             severity = "warn"
 
+        # KS_WRITE_WAREHOUSE=postgres held back by an unmet precondition.
+        # Pages: the switch somebody deployed did not happen (OD-09 (b)).
+        warehouse_unmet = check_warehouse_preconditions(payload)
+        for key, message in warehouse_unmet:
+            fail(key, message)
+        if warehouse_unmet:
+            severity = "critical"
+
+        # The way back holding the DuckDB checks down for hours. Warn: web
+        # serves and DuckDB derives, and the checks are what is missing.
+        hold_failures = check_warehouse_hold(payload)
+        for key, message in hold_failures:
+            fail(key, message)
+        if hold_failures and severity == "ok":
+            severity = "warn"
+
         # A KS_UTM_PARSE web ran as duckdb instead. Warn, for the same reason:
         # the copy /traffic has always had is still shipped.
         utm_mode_failures = check_utm_parse_mode(payload)
@@ -793,6 +867,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("health_status", "/api/health names what degraded; a restart won't fix a migration"),
     ("cert_expiring", "Check certbot on the host — auto-renew broke"),
     ("cert_unreachable", "TLS handshake fails: nginx or the network, not the app"),
+    ("warehouse_preconditions_unmet",
+     "After a flip this IS the way back (full DuckDB rebuild). Meet each cutover.unmet on /api/warehouse/status or unset KS_WRITE_WAREHOUSE; recreate web"),
     ("mirror_", "Check meta.mirror_state and web's log; the mirror re-ships itself"),
     ("dq_", "Check /api/jobs — nothing is verifying the warehouse meanwhile"),
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),
@@ -804,6 +880,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Set KS_READ_FALLBACK to duckdb or off in .env, then recreate web"),
     ("warehouse_mode_invalid",
      "Set KS_WRITE_WAREHOUSE to duckdb or postgres in .env, then recreate web"),
+    ("warehouse_hold_stuck",
+     "grep web's log for 'UTM layer refresh failed'; then POST /api/warehouse/refresh — a full tick whose parse finishes ends it"),
     ("write_chain_precondition_unmet",
      "Set the read flag the message names to postgres, then docker compose up -d web"),
     ("utm_parse_mode_invalid",
@@ -818,10 +896,36 @@ def _what_to_do(result: CanaryResult) -> Optional[str]:
     return None
 
 
+# "DOWN" only when it is: the three keys that mean web did not answer, or
+# answered that it is not healthy. Every other CRITICAL — a certificate about
+# to expire, a write chain whose flag web cannot read, a warehouse switch held
+# back — is a site that serves, and a title saying it does not sends the reader
+# to the wrong lever before they reach the right one. A result with no keys is
+# read as an outage, as every CRITICAL was before keys existed.
+_OUTAGE_KEYS: tuple[str, ...] = ("health_unreachable", "health_http", "health_status")
+
+# A CRITICAL that is not an outage, named for what it is. First match wins.
+_CRITICAL_TITLES: tuple[tuple[str, str], ...] = (
+    ("warehouse_preconditions_unmet", "Warehouse switch held back"),
+)
+
+
+def _title(result: CanaryResult) -> str:
+    if result.severity != "critical":
+        return "Dashboard warning"
+    keys = result.failure_keys
+    if not keys or any(key in _OUTAGE_KEYS for key in keys):
+        return "Dashboard DOWN"
+    for prefix, title in _CRITICAL_TITLES:
+        if any(key.startswith(prefix) for key in keys):
+            return title
+    return "Dashboard critical"
+
+
 def format_alert(result: CanaryResult, dashboard_url: str) -> str:
     """Build a Telegram HTML message for a failing result."""
     icon = "\U0001f6a8" if result.severity == "critical" else "⚠️"
-    title = "Dashboard DOWN" if result.severity == "critical" else "Dashboard warning"
+    title = _title(result)
 
     lines = [f"{icon} <b>{title}</b>"]
     for failure in result.failures:

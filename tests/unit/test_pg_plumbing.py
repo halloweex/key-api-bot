@@ -98,6 +98,27 @@ class TestTheVersionGateFailsClosed:
     async def test_current_revision_reports_none_rather_than_raising(self):
         assert await pg.current_revision(conn=_Conn(raises=True)) is None
 
+    @pytest.mark.asyncio
+    async def test_strict_keeps_none_for_a_missing_table_alone(self):
+        """A connection lost mid-read is not a database nobody migrated; a
+        caller that asks a failed read again needs the two apart."""
+        import asyncpg
+
+        class _Raising:
+            def __init__(self, exc):
+                self.exc = exc
+
+            async def fetchval(self, _sql):
+                raise self.exc
+
+        missing = asyncpg.UndefinedTableError('relation "meta.alembic_version" does not exist')
+        assert await pg.current_revision(conn=_Raising(missing), strict=True) is None
+        assert await pg.current_revision(conn=_Conn(None), strict=True) is None
+        lost = asyncpg.ConnectionDoesNotExistError("connection was closed")
+        with pytest.raises(asyncpg.ConnectionDoesNotExistError):
+            await pg.current_revision(conn=_Raising(lost), strict=True)
+        assert await pg.current_revision(conn=_Raising(lost)) is None
+
 
 def _revisions() -> dict[str, str | None]:
     """{revision: down_revision} parsed from the migration files themselves."""

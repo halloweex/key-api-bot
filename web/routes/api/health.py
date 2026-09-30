@@ -189,16 +189,26 @@ async def _write_chains_block() -> dict:
 
 
 def _warehouse_writer_mode() -> dict:
-    """KS_WRITE_WAREHOUSE as this process understood it at start (DN-28): the
-    value as read, the mode it runs, and the error when the value was not
-    understood and ran as duckdb. Local state, no I/O, and nothing but the
-    variable's own value in the error. Judged by the canary: in this build the
-    variable switches nothing, so a typo costs nothing today — the day it
-    would is the DN-29 flip, and that is not the day to learn of it."""
+    """KS_WRITE_WAREHOUSE as this process understood it at start (DN-28,
+    DN-29): the value as read, the mode it runs, the error when the value was
+    not understood and ran as duckdb, and — when `postgres` was asked for and
+    ran as duckdb, or when a value not understood took the way back after a
+    flip (`value_understood`) — the KEYS of the preconditions unmet. Keys, not
+    details: this endpoint is public, and a detail quotes the environment;
+    the details are on `/api/warehouse/status` and in the log. `held` is the
+    way back still owed its first validated full DuckDB tick, or the UTM parse
+    that finishes after it, and `held_for_s` how long that has stood (None
+    when not held) — the canary warns on a hold that outlives what a way back
+    takes. `reclassify_needed` says DuckDB's UTM verdicts were found empty on
+    it. Local state, no I/O. Judged by the canary."""
     from core import warehouse_cutover
 
     return {"mode": warehouse_cutover.mode(), "value": warehouse_cutover.value(),
-            "error": warehouse_cutover.mode_error()}
+            "error": warehouse_cutover.mode_error(),
+            "preconditions_unmet": [u.key for u in warehouse_cutover.preconditions_unmet()],
+            "held": warehouse_cutover.held(),
+            "held_for_s": warehouse_cutover.held_for_s(),
+            "reclassify_needed": warehouse_cutover.reclassify_needed()}
 
 
 def _derivation_mode() -> dict:
