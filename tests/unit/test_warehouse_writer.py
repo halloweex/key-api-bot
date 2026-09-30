@@ -70,8 +70,16 @@ def met_env(monkeypatch):
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
     # A read that failed is asked again; not across seconds in a unit test.
     monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
-    # A build where OD-10 has been answered; today's has not (TestTheOd10Doors).
+    # A build with no door OD-10 would have to decide — this one, since
+    # 2026-09-30; a door added later holds the switch in
+    # TestTheDoorsOd10HasNotDecided, not in every test of the switch itself.
     monkeypatch.setattr(wc, "OD10_DOORS", ())
+    # `bronze.expenses` holds its history — asked after the revision, on a
+    # connection of its own at a start and on the pool for the status page.
+    # TestTheExpensesHistory reads it otherwise.
+    monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection",
+                        AsyncMock(return_value=True))
+    monkeypatch.setattr(wc, "_expenses_backfilled", AsyncMock(return_value=True))
 
 
 @pytest.fixture
@@ -291,6 +299,84 @@ def _lost_mid_read():
 
     return asyncpg.ConnectionDoesNotExistError(
         "connection was closed in the middle of operation")
+
+
+class TestTheExpensesHistory:
+    """The one read a Postgres switch cannot see: `_expenses_run` sends the
+    /expenses history statements to Postgres only once `bronze.expenses` has
+    its backfill, and a NULL `backfilled_at` is an answer — DuckDB's Silver
+    serves them, uncounted, even under `KS_READ_FALLBACK=off`. After the
+    switch that Silver is frozen, and after a compaction empty. So a start
+    asks it beside the revision, and holds the switch while it is not so."""
+
+    @pytest.fixture(autouse=True)
+    def _asked_for(self, met, monkeypatch):
+        monkeypatch.setenv(wc.ENV, "postgres")
+
+    def _history(self, monkeypatch, *answers):
+        read = AsyncMock(side_effect=list(answers))
+        monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection", read)
+        return read
+
+    def test_no_backfill_runs_as_duckdb_and_names_it(self, met, monkeypatch):
+        read = self._history(monkeypatch, False)
+        assert wc.configure_mode() == wc.DUCKDB
+        assert [u.key for u in wc.preconditions_unmet()] == ["expenses_backfilled"]
+        read.assert_awaited_once_with(MET_ENV["KS_PG_DSN"])
+        met.assert_awaited_once()     # an answer is not asked again
+
+    def test_a_backfill_is_postgres(self, monkeypatch):
+        self._history(monkeypatch, True)
+        assert wc.configure_mode() == wc.POSTGRES and wc.preconditions_unmet() == ()
+
+    def test_a_history_read_that_failed_is_asked_again_with_the_revision(
+        self, met, monkeypatch,
+    ):
+        """After a flip a start that runs as duckdb is the way back; a read
+        that failed is not an answer, whichever of the two it was."""
+        read = self._history(monkeypatch, OSError("refused"), True)
+        assert wc.configure_mode() == wc.POSTGRES, wc.preconditions_unmet()
+        assert read.await_count == 2 and met.await_count == 2
+
+    def test_still_failing_after_the_last_ask_is_unmet_by_its_class(self, monkeypatch):
+        self._history(monkeypatch, *(OSError("password for user ks_app")
+                                     for _ in range(wc.REVISION_READ_ATTEMPTS)))
+        assert wc.configure_mode() == wc.DUCKDB
+        (unmet,) = wc.preconditions_unmet()
+        assert unmet.key == "expenses_backfilled" and "OSError" in unmet.detail
+        assert "ks_app" not in unmet.detail
+
+    def test_a_revision_that_was_not_read_leaves_it_unasked(self, met, monkeypatch):
+        """A start that could not reach Postgres names `pg_revision` alone."""
+        read = self._history(monkeypatch, True)
+        met.side_effect = OSError("refused")
+        assert wc.configure_mode() == wc.DUCKDB
+        assert [u.key for u in wc.preconditions_unmet()] == ["pg_revision"]
+        read.assert_not_awaited()
+
+    def test_the_two_reads_share_one_bound(self, met, monkeypatch):
+        """The second read gets what the first left, never under a fifth of
+        the bound — so the worker's outer bound, twice the inner one, still
+        holds them both."""
+        import time
+
+        async def slow_revision(_dsn):
+            await asyncio.sleep(0.08)
+            return REQUIRED_REVISION
+
+        async def hang(_dsn):
+            await asyncio.sleep(10)
+
+        monkeypatch.setattr(wc, "REVISION_READ_TIMEOUT_S", 0.1)
+        monkeypatch.setattr(wc, "_revision_on_its_own_connection", slow_revision)
+        monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection", hang)
+        started = time.monotonic()
+        facts = wc._gather_facts_blocking(dict(MET_ENV))
+        assert facts.revision == REQUIRED_REVISION
+        assert facts.expenses_backfilled is None
+        assert "did not answer in 0.02 s" in facts.expenses_backfill_error
+        # Three asks of at most 0.08 + 0.02 s each, and no waits between them.
+        assert time.monotonic() - started < 1.0
 
 
 class TestTheRevisionReadItself:
@@ -588,6 +674,9 @@ class _FullSyncStore:
 
     async def get_latest_order_time(self):
         return None
+
+    async def find_backdated_order_ids(self, since, limit=200):
+        return []
 
     async def checkpoint(self):
         return None
@@ -2260,9 +2349,11 @@ def _unguarded_duckdb_readers(root: str = "web") -> set:
 class TestTheDoorsOd10HasNotDecided:
     """The review's reading: admin doors read DuckDB's Silver with no switch,
     so after the flip they answer from a Silver as old as it, and after a
-    compaction from none. OD-10 blocks step 13, and the switch waits on it:
-    `od10_doors` is unmet while `OD10_DOORS` is not empty, and the list is
-    what a walk of `web/` finds — nobody keeps it."""
+    compaction from none. OD-10 blocked step 13 until each was ported or
+    retired, and the switch waits on the list: `od10_doors` is unmet while
+    `OD10_DOORS` is not empty. The owner retired all seven on 2026-09-30, so
+    the list is empty — and it is still what a walk of `web/` finds, so a door
+    added later joins it and holds the switch again. Nobody keeps it."""
 
     def test_the_list_is_exactly_what_the_walk_finds(self):
         """A door retired, ported or put behind the predicate must leave the
@@ -2275,12 +2366,12 @@ class TestTheDoorsOd10HasNotDecided:
             f"{sorted(found - listed)}; listed and no longer found: "
             f"{sorted(listed - found)}")
 
-    def test_the_reviews_four_and_the_plans_detail_endpoints_are_there(self):
-        labels = " ".join(label for _, label in wc.OD10_DOORS)
-        for route in ("/api/buyers/stats", "/api/debug/stale-returns",
-                      "/api/debug/order-status", "/api/duckdb/purge-orders",
-                      "/api/buyers/{id}", "/api/orders/{id}", "/api/products/{id}"):
-            assert route in labels
+    def test_od10_is_answered(self):
+        """Every door the review and the plan named — buyers/stats, the two
+        debug routes, purge-orders and the three detail cards — was retired
+        by the owner on 2026-09-30; tests/unit/test_od10_retired_doors.py keeps
+        them so. Nothing is left to port or retire."""
+        assert wc.OD10_DOORS == ()
 
     @pytest.mark.parametrize("source, readers", [
         # SQL counts; a docstring naming the table does not.
@@ -2317,9 +2408,22 @@ class TestTheDoorsOd10HasNotDecided:
     def test_the_walk_reads_each_shape(self, source, readers):
         assert _frozen_readers_in(ast.parse(source)) == readers
 
-    def test_the_walk_finds_the_doors_it_names(self):
-        """A walk that found nothing would pass on a codebase it cannot read."""
-        assert "web/routes/api/admin.py:get_buyer_stats" in _unguarded_duckdb_readers()
+    def test_the_walk_reads_the_files_it_is_pointed_at(self):
+        """A walk that found nothing would pass on a codebase it cannot read.
+        `web/` names no door today, so the proof is taken from what is still
+        there: the DuckDB half of rebuild-silver names `silver_orders` behind
+        `duckdb_derives()`, which the walk must see and read as guarded, and
+        `core/`, whose readers ride the `KS_READ_*` switches the walk cannot
+        see, must yield one it can name."""
+        tree = ast.parse((REPO / "web/routes/api/admin.py").read_text(encoding="utf-8"))
+        docstrings = _docstrings(tree)
+        seen = {(guarded, fn) for _line, guarded, fn in _guarded_nodes(tree, lambda node: (
+            isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and id(node) not in docstrings and FROZEN_BY_THE_SWITCH.search(node.value)))}
+        assert (True, "rebuild_silver_from_scratch") in seen
+        assert (False, "rebuild_silver_from_scratch") not in seen
+        assert "core/repositories/expenses.py:get_profit_analysis" in \
+            _unguarded_duckdb_readers("core")
 
     def test_the_views_over_silver_are_derived_not_listed(self):
         """Read out of the view bodies: the four reading `{order_lines}`, and
@@ -2331,38 +2435,36 @@ class TestTheDoorsOd10HasNotDecided:
         assert {"v_inventory_summary", "v_abc_summary", "v_recommended_actions"} <= views
         assert "v_sku_analysis" not in views and "v_category_velocity" not in views
 
+    # A door somebody adds after OD-10: the walk would put it on the list.
+    NEW_DOOR = (("web/routes/api/example.py:a_new_door", "GET /api/a-new-door"),)
+
     def test_the_start_reads_the_list(self, met, monkeypatch):
         """`_local_facts` hands `OD10_DOORS` to the evaluator — the list is
         not a document: while it is not empty, `postgres` runs as duckdb."""
-        monkeypatch.setattr(wc, "OD10_DOORS", (
-            ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),))
+        monkeypatch.setattr(wc, "OD10_DOORS", self.NEW_DOOR)
         monkeypatch.setenv(wc.ENV, "postgres")
         assert wc.configure_mode() == wc.DUCKDB
         (unmet,) = wc.preconditions_unmet()
-        assert unmet.key == "od10_doors" and "/api/buyers/stats" in unmet.detail
+        assert unmet.key == "od10_doors" and "/api/a-new-door" in unmet.detail
 
     def test_the_status_page_reads_it_too(self, met, monkeypatch):
-        monkeypatch.setattr(wc, "OD10_DOORS", (
-            ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),))
+        monkeypatch.setattr(wc, "OD10_DOORS", self.NEW_DOOR)
         ready = asyncio.run(wc.readiness())
         (door,) = [u for u in ready["unmet"] if u["key"] == "od10_doors"]
-        assert "/api/buyers/stats" in door["detail"]
+        assert "/api/a-new-door" in door["detail"]
 
-    def test_this_build_is_not_switchable_and_names_every_door(self, monkeypatch):
-        """Today's list, as the walk finds it — not `met`, which stands in a
-        build where OD-10 is answered: `postgres` runs as duckdb, and the one
-        unmet item names every door, so the page is the list of what is left
-        to do."""
+    def test_this_builds_own_list_holds_nothing(self, monkeypatch):
+        """This build's list, as the walk finds it — not `met`, which stands
+        in a build with no door whatever the walk says: with every other
+        precondition met, `postgres` is `postgres`. The test that stood here
+        until OD-10 was answered asserted the opposite and named every door."""
         for name, value in MET_ENV.items():
             monkeypatch.setenv(name, value)
         monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
         monkeypatch.setattr(wc, "_revision_on_its_own_connection",
                             AsyncMock(return_value=REQUIRED_REVISION))
-        assert wc.OD10_DOORS, "OD-10 answered: this test has done its job — delete it"
+        monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection",
+                            AsyncMock(return_value=True))
         monkeypatch.setenv(wc.ENV, "postgres")
-        assert wc.configure_mode() == wc.DUCKDB
-        (unmet,) = wc.preconditions_unmet()
-        assert unmet.key == "od10_doors"
-        for _where, label in wc.OD10_DOORS:
-            assert label in unmet.detail
-        assert f"{len(wc.OD10_DOORS)} door(s)" in unmet.detail
+        assert wc.configure_mode() == wc.POSTGRES, wc.preconditions_unmet()
+        assert wc.preconditions_unmet() == ()

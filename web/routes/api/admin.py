@@ -552,92 +552,13 @@ async def rebuild_silver_from_scratch(
     return result
 
 
-@router.post("/duckdb/purge-orders")
-@limiter.limit("2/minute")
-async def purge_orders(
-    request: Request,
-    ids: str = Query(..., description="Comma-separated order IDs to purge"),
-    admin: dict = Depends(require_admin),
-):
-    """
-    Purge poisoned orders from DuckDB and CHECKPOINT to clear MVCC state.
-
-    Use for DuckDB 1.5 rows stuck in write-write conflict or PK violation.
-    Next incremental_sync will re-create them as clean INSERTs.
-    """
-    try:
-        order_ids = [int(x.strip()) for x in ids.split(",") if x.strip()]
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid ids (must be comma-separated ints)")
-
-    if not order_ids or len(order_ids) > 100:
-        raise HTTPException(status_code=400, detail="Provide 1-100 IDs")
-
-    store = await get_store()
-    placeholders = ",".join("?" * len(order_ids))
-    result = {"requested": order_ids, "deleted": {}}
-
-    async with store.connection() as conn:
-        # Count before
-        before_orders = conn.execute(
-            f"SELECT COUNT(*) FROM orders WHERE id IN ({placeholders})", order_ids
-        ).fetchone()[0]
-        before_silver = conn.execute(
-            f"SELECT COUNT(*) FROM silver_orders WHERE id IN ({placeholders})", order_ids
-        ).fetchone()[0]
-
-        # Each DELETE in its own autocommit statement (no explicit BEGIN) —
-        # DuckDB 1.5 DELETE+INSERT in a transaction has visibility bugs.
-        try:
-            conn.execute(
-                f"DELETE FROM order_products WHERE order_id IN ({placeholders})", order_ids
-            )
-        except Exception as e:
-            logger.warning(f"order_products delete failed: {e}")
-
-        try:
-            conn.execute(
-                f"DELETE FROM expenses WHERE order_id IN ({placeholders})", order_ids
-            )
-        except Exception as e:
-            logger.warning(f"expenses delete failed: {e}")
-
-        try:
-            conn.execute(
-                f"DELETE FROM silver_orders WHERE id IN ({placeholders})", order_ids
-            )
-        except Exception as e:
-            logger.warning(f"silver_orders delete failed: {e}")
-
-        try:
-            conn.execute(
-                f"DELETE FROM orders WHERE id IN ({placeholders})", order_ids
-            )
-        except Exception as e:
-            logger.warning(f"orders delete failed: {e}")
-
-        # Force WAL flush + MVCC cleanup
-        conn.execute("CHECKPOINT")
-
-        # Count after
-        after_orders = conn.execute(
-            f"SELECT COUNT(*) FROM orders WHERE id IN ({placeholders})", order_ids
-        ).fetchone()[0]
-        after_silver = conn.execute(
-            f"SELECT COUNT(*) FROM silver_orders WHERE id IN ({placeholders})", order_ids
-        ).fetchone()[0]
-
-    result["deleted"] = {
-        "orders": before_orders - after_orders,
-        "silver_orders": before_silver - after_silver,
-    }
-    result["remaining"] = {
-        "orders": after_orders,
-        "silver_orders": after_silver,
-    }
-    result["checkpoint"] = "done"
-    logger.info(f"Purged orders: {result}")
-    return result
+# POST /api/duckdb/purge-orders was retired by the owner's decision OD-10
+# (2026-09-30). It deleted orders from DuckDB's landing and Silver and ran a
+# CHECKPOINT — a one-shot for the April 2026 DuckDB 1.5 MVCC incident — and
+# nothing called it. It never reached Postgres, so it had already stopped
+# removing anything from the numbers every tab reads, and the order it let
+# the next sync re-insert came back with the payload's NULL `manager_comment`
+# in DuckDB alone. Deleting an order from Postgres is chain 3's to design.
 
 
 # ─── Buyer Sync ────────────────────────────────────────────────────────────────
@@ -788,32 +709,14 @@ async def sync_all_buyers(request: Request, admin: dict = Depends(require_admin)
             "for 'Full buyer sync:'"}
 
 
-@router.get("/buyers/stats")
-@limiter.limit("60/minute")
-async def get_buyer_stats(request: Request):
-    """Get buyer sync statistics."""
-    store = await get_store()
-    async with store.connection() as conn:
-        orders_buyers = conn.execute(
-            "SELECT COUNT(DISTINCT buyer_id) FROM orders WHERE buyer_id IS NOT NULL"
-        ).fetchone()[0]
-        silver_buyers = conn.execute(
-            "SELECT COUNT(DISTINCT buyer_id) FROM silver_orders WHERE buyer_id IS NOT NULL"
-        ).fetchone()[0]
-        synced = conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0]
-        missing = conn.execute("""
-            SELECT COUNT(DISTINCT s.buyer_id)
-            FROM silver_orders s
-            LEFT JOIN buyers b ON s.buyer_id = b.id
-            WHERE s.buyer_id IS NOT NULL AND b.id IS NULL
-        """).fetchone()[0]
-
-    return {
-        "unique_in_orders": orders_buyers,
-        "unique_in_silver_orders": silver_buyers,
-        "synced_to_buyers_table": synced,
-        "missing": missing,
-    }
+# GET /api/buyers/stats was retired by the owner's decision OD-10 (2026-09-30).
+# It counted buyers in DuckDB's `orders`, its Silver and its `buyers`, and
+# nothing called it. After step 13 its Silver count freezes, after a compaction
+# it reads "all synced" beside a full `silver.orders`, and chain 4 freezes the
+# third table too. The number that mattered, the buyers orders name and nobody
+# has fetched, is what the buyer step's own selection
+# (`get_missing_buyer_ids`, KS_READ_BUYER_SYNC) computes from Postgres; DuckDB's
+# raw counts stay at GET /api/duckdb/stats.
 
 
 # ─── Jobs & Sync ───────────────────────────────────────────────────────────────
@@ -1088,143 +991,13 @@ async def reconcile_on_demand(
     }
 
 
-@router.get("/debug/stale-returns")
-@limiter.limit("30/minute")
-async def debug_stale_returns(
-    request: Request,
-    days: int = Query(30, ge=1, le=90, description="Days to check"),
-    admin: dict = Depends(require_admin),
-):
-    """
-    Compare Bronze vs Silver for return-status orders and optionally verify against KeyCRM API.
-
-    Returns orders where Bronze or Silver disagree with each other on return status.
-    """
-    store = await get_store()
-
-    async with store.connection() as conn:
-        # Find orders where Bronze has return status but Silver doesn't (or vice versa)
-        rows = conn.execute(f"""
-            SELECT
-                o.id,
-                o.status_id AS bronze_status,
-                o.grand_total,
-                o.source_id,
-                s.status_id AS silver_status,
-                s.is_return AS silver_is_return,
-                s.order_date
-            FROM orders o
-            LEFT JOIN silver_orders s ON o.id = s.id
-            WHERE o.ordered_at >= CURRENT_DATE - INTERVAL '{int(days)} days'
-              AND (
-                  -- Bronze says return but Silver says active
-                  (o.status_id IN (19, 21, 22, 23) AND (s.status_id IS NULL OR s.status_id NOT IN (19, 21, 22, 23)))
-                  OR
-                  -- Silver says return but Bronze says active
-                  (o.status_id NOT IN (19, 21, 22, 23) AND s.status_id IN (19, 21, 22, 23))
-              )
-            ORDER BY o.id DESC
-            LIMIT 50
-        """).fetchall()
-
-        # Also count total returns in Bronze vs Silver
-        bronze_returns = conn.execute(f"""
-            SELECT COUNT(*) FROM orders
-            WHERE status_id IN (19, 21, 22, 23)
-              AND ordered_at >= CURRENT_DATE - INTERVAL '{int(days)} days'
-        """).fetchone()[0]
-        silver_returns = conn.execute(f"""
-            SELECT COUNT(*) FROM silver_orders
-            WHERE is_return = TRUE
-              AND order_date >= CURRENT_DATE - INTERVAL '{int(days)} days'
-        """).fetchone()[0]
-
-    mismatches = [
-        {
-            "order_id": r[0],
-            "bronze_status": r[1],
-            "grand_total": float(r[2]),
-            "source_id": r[3],
-            "silver_status": r[4],
-            "silver_is_return": r[5],
-            "order_date": str(r[6]) if r[6] else None,
-        }
-        for r in rows
-    ]
-
-    return {
-        "days_checked": days,
-        "bronze_return_count": bronze_returns,
-        "silver_return_count": silver_returns,
-        "mismatches": mismatches,
-        "mismatch_count": len(mismatches),
-    }
-
-
-@router.get("/debug/order-status/{order_id}")
-@limiter.limit("60/minute")
-async def debug_order_status(
-    request: Request,
-    order_id: int,
-    fetch_api: bool = Query(False, description="Also fetch current status from KeyCRM API"),
-    admin: dict = Depends(require_admin),
-):
-    """Compare a single order's status across Bronze, Silver, and optionally KeyCRM API."""
-    store = await get_store()
-
-    result = {"order_id": order_id}
-
-    async with store.connection() as conn:
-        bronze = conn.execute(
-            "SELECT id, status_id, source_id, grand_total, ordered_at, updated_at, synced_at "
-            "FROM orders WHERE id = ?", [order_id]
-        ).fetchone()
-        if bronze:
-            result["bronze"] = {
-                "status_id": bronze[1], "source_id": bronze[2],
-                "grand_total": float(bronze[3]),
-                "ordered_at": str(bronze[4]) if bronze[4] else None,
-                "updated_at": str(bronze[5]) if bronze[5] else None,
-                "synced_at": str(bronze[6]) if bronze[6] else None,
-            }
-        else:
-            result["bronze"] = None
-
-        silver = conn.execute(
-            "SELECT id, status_id, is_return, sales_type, order_date "
-            "FROM silver_orders WHERE id = ?", [order_id]
-        ).fetchone()
-        if silver:
-            result["silver"] = {
-                "status_id": silver[1], "is_return": silver[2],
-                "sales_type": silver[3], "order_date": str(silver[4]) if silver[4] else None,
-            }
-        else:
-            result["silver"] = None
-
-    if fetch_api:
-        try:
-            from core.keycrm import get_async_client
-            client = await get_async_client()
-            api_order = await client.get(f"order/{order_id}", params={"include": "manager"})
-            result["api"] = {
-                "status_id": api_order.get("status_id"),
-                "source_id": api_order.get("source_id"),
-                "grand_total": api_order.get("grand_total"),
-                "updated_at": api_order.get("updated_at"),
-            }
-        except Exception as e:
-            result["api"] = {"error": str(e)}
-
-    # Highlight discrepancies
-    if result["bronze"] and result.get("api"):
-        if result["bronze"]["status_id"] != result["api"]["status_id"]:
-            result["discrepancy"] = (
-                f"Bronze status_id={result['bronze']['status_id']} "
-                f"!= API status_id={result['api']['status_id']}"
-            )
-
-    return result
+# GET /api/debug/stale-returns and /api/debug/order-status/{id} were retired by
+# the owner's decision OD-10 (2026-09-30). They compared DuckDB's Bronze with
+# its Silver, which step 13 freezes, and nothing called them: the first checked
+# four of the six return statuses, the second's KeyCRM half had raised on every
+# stored order since it was written. The Postgres twin `pg_silver_row_values`
+# asks the same question, on every column, of the store every tab reads — in
+# `dq_integrity_check` (01, 07, 13, 19) under KS_DQ_PG_WAREHOUSE=on.
 
 
 @router.get("/events")
@@ -1254,66 +1027,9 @@ async def get_events(
 
 
 # ─── Reconciliation ──────────────────────────────────────────────────────────
-
-@router.get("/reconciliation")
-@limiter.limit("30/minute")
-async def get_reconciliation(
-    request: Request,
-    limit: int = Query(30, ge=1, le=200, description="Number of entries"),
-):
-    """Get recent reconciliation log entries."""
-    store = await get_store()
-    async with store.connection() as conn:
-        rows = conn.execute(
-            "SELECT * FROM reconciliation_log ORDER BY checked_at DESC LIMIT ?",
-            [limit],
-        ).fetchall()
-        columns = ["id", "check_date", "api_count", "db_count", "discrepancy",
-                    "discrepancy_pct", "status", "checked_at"]
-        return [dict(zip(columns, row)) for row in rows]
-
-
-@router.post("/reconciliation/run")
-@limiter.limit("2/minute")
-async def run_reconciliation(
-    request: Request,
-    days_back: int = Query(14, ge=1, le=90, description="Days to check"),
-    auto_resync: bool = Query(True, description="Auto-resync drifted dates"),
-    background: bool = Query(True, description="Run in background (recommended for days_back > 3)"),
-    _=Depends(require_admin),
-):
-    """Manually trigger reconciliation check."""
-    from core.scheduler import get_scheduler
-    from core.sync_service import get_sync_service
-
-    async def run_check():
-        sync_service = await get_sync_service()
-        results = await sync_service.reconcile_with_api(
-            days_back=days_back, auto_resync=auto_resync,
-            lock=get_scheduler()._heavy_job_lock,
-        )
-        ok = sum(1 for r in results if r["status"] == "ok")
-        drift = sum(1 for r in results if r["status"] == "drift")
-        logger.info(
-            f"Reconciliation complete: checked={len(results)} ok={ok} drift={drift}"
-        )
-        return {
-            "checked_days": len(results),
-            "ok": ok,
-            "drift": drift,
-            "results": results,
-        }
-
-    if background:
-        task = asyncio.create_task(run_check(), name=f"reconcile_{days_back}d")
-        task.add_done_callback(
-            lambda t: logger.error(f"Reconciliation task failed: {t.exception()}")
-            if t.exception() else None
-        )
-        return {
-            "status": "started",
-            "message": f"Reconciliation started in background ({days_back} days)",
-            "note": "Check /api/reconciliation for results or logs for progress",
-        }
-
-    return await run_check()
+#
+# GET /api/reconciliation and POST /api/reconciliation/run were retired with the
+# legacy 06:00 job by the owner's decision OD-10 (2026-09-30). The detection is
+# POST /api/reconcile (dq_reconciliation over any window, all three stores);
+# the repair is POST /api/duckdb/refresh-statuses. `reconciliation_log` keeps
+# its history in DuckDB and in `app.reconciliation_log`.

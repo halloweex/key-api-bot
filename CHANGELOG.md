@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.259
+
+- OD-10 review: an /api path no route matches is a JSON 404, not the shell
+- OD-10 review: keep the one repair only the legacy reconciliation made
+- OD-10 review: the expenses precondition names a missing row as a missing row
+- OD-10: say in CLAUDE.md that the doors were retired, and what stays
+- OD-10 (7/7): step 13 waits for bronze.expenses to hold its history
+- OD-10 (6/7): delete scripts/migrate_sqlite_to_duckdb.py
+- OD-10 (5/7): retire the legacy 06:00 reconciliation and its two routes
+- OD-10 (4/7): retire POST /api/duckdb/purge-orders; the door list is empty
+- OD-10 (3/7): retire GET /api/buyers/stats
+- OD-10 (2/7): retire the two debug routes
+- OD-10 (1/7): retire the buyer, order and product cards and their two tools
+
+
+## 3.0.258
+
+- The chain handover runs as the web service, not a bare docker run
+
+
+## 3.0.257
+
+- Chain 4 PR-1: the skip walker reads a reason built from a module constant
+- Chain 4 PR-1: say in CLAUDE.md what the buyers step does now, and what not to run
+- Chain 4 PR-1 review, signals: pages that name the right cause and point at data
+- Chain 4 PR-1 review, routes: answers that arrive, and a failed mirror that leaves a trace
+- Chain 4 PR-1 review, sync: a KeyCRM outage is a failure, and the getter's bound holds
+- Chain 4 PR-1 review, parse: DuckDB's date grammar exactly, and no contact can fail a portion
+- Chain 4 PR-1: the isolation guard counts the completeness check as the 17th
+- Chain 4 PR-1 step 5: the guards a third chain will rely on, that do not need one
+- Chain 4 PR-1 step 4: every landed buyer has a verdict, every ordered buyer lands
+- Chain 4 PR-1 step 3: every buyer writer mirrors, in portions, off the lock
+- Chain 4 PR-1 step 2: the buyers step cannot take the tick down, and is watched
+- Chain 4 PR-1 step 1: one reading of a KeyCRM buyer, for both stores
+
+
 ## 3.0.256
 
 - DN-29: a default tick records no writer, pinned without Postgres

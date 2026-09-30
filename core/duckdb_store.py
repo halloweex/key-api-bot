@@ -38,8 +38,8 @@ from core.models import LOST_STATUS_GROUP_ID, Order, OrderStatus
 from core.exceptions import QueryTimeoutError
 from core.duckdb_constants import (
     DB_DIR, DB_PATH, DEFAULT_TZ, DEFAULT_QUERY_TIMEOUT, LONG_QUERY_TIMEOUT,
-    B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE, _date_in_kyiv,
-    line_window_where,
+    B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE,
+    line_window_where, _date_in_kyiv,
     EXHIBITION_SOURCE_ID, REVENUE_SOURCE_IDS,
 )
 from core.repositories import (
@@ -1718,8 +1718,9 @@ class DuckDBStore(
                     """, ids + ids).fetchall()]
                     # Scope = changed_ids ∪ all orders of affected buyers (cascade).
                     # UNION over BOTH orders and silver_orders so DELETE catches
-                    # orphan silver rows (orders deleted via admin/purge or H3
-                    # bronze promotion). Without the silver-side branch, an
+                    # orphan silver rows (orders deleted via the admin purge,
+                    # retired by OD-10, or H3 bronze promotion). Without the
+                    # silver-side branch, an
                     # orphan tied to an affected buyer would never get cleaned —
                     # full rebuild used to wipe these implicitly via DELETE *.
                     if silver_affected_buyers:
@@ -2476,6 +2477,39 @@ class DuckDBStore(
             """, [int(limit)]).fetchall()
         return [int(r[0]) for r in rows]
 
+    async def find_backdated_order_ids(self, since: "date", limit: int = 200) -> List[int]:
+        """Orders dated on or after `since` but created on or before it, by
+        their Kyiv dates — the ones a `created_between` fetch starting at
+        `since` does not return, although their order date is inside it.
+
+        That is the backdated B2B order: KeyCRM lets `ordered_at` sit weeks
+        after `created_at`. The 05:15 status refresh fetches by creation date,
+        so without this such an order's status moved in KeyCRM, with
+        `updated_at` untouched as ever, and nothing re-fetched it —
+        `dq_reconciliation` filed STATUS_DRIFT every morning and repaired only
+        what was missing. The legacy 06:00 job padded its fetch by 30 days for
+        exactly this until OD-10 retired it.
+
+        Created *on* `since` counts only when ordered on a later day: the
+        refresh's window starts at midnight in KeyCRM's clock, not Kyiv's, and
+        taking every order created that day would re-fetch fifty orders the
+        fetch already returned to cover an hour at the edge. Measured on the
+        2026-08-31 copy with a 30-day window: 156 ids over 183 daily runs
+        (0.85 a day, at most 5), each one API call.
+        """
+        date_ordered = _date_in_kyiv("ordered_at")
+        date_created = _date_in_kyiv("created_at")
+        async with self.connection() as conn:
+            rows = conn.execute(f"""
+                SELECT id FROM orders
+                WHERE {date_ordered} >= ?
+                  AND {date_created} <= ?
+                  AND {date_ordered} > {date_created}
+                ORDER BY id
+                LIMIT ?
+            """, [since, since, int(limit)]).fetchall()
+        return [int(r[0]) for r in rows]
+
     async def record_backfill_misses(self, misses: "Dict[int, str]") -> int:
         """Remember ids KeyCRM could not supply, so they are not retried."""
         if not misses:
@@ -2670,52 +2704,6 @@ class DuckDBStore(
                 f"🚨 DB backup FAILED: {e}", "warehouse:backup_failed",
             )
             return {"status": "error", "error": str(e)}
-
-    async def get_order_summaries_by_date(
-        self, start_date: str, end_date: str,
-    ) -> dict:
-        """Get order ID → (status_id, grand_total) grouped by date (Kyiv TZ).
-
-        Returns dict[date, dict[int, dict]] where outer key is date,
-        inner key is order_id, inner value has status_id and grand_total.
-        """
-        from collections import defaultdict
-
-        async with self.connection() as conn:
-            rows = conn.execute(f"""
-                SELECT {_date_in_kyiv('ordered_at')} AS d, id, status_id, grand_total
-                FROM orders
-                WHERE {_date_in_kyiv('ordered_at')} BETWEEN ? AND ?
-            """, [start_date, end_date]).fetchall()
-
-        result: dict = defaultdict(dict)
-        for d, oid, status_id, grand_total in rows:
-            result[d][oid] = {
-                "status_id": status_id,
-                "grand_total": float(grand_total),
-            }
-        return dict(result)
-
-    async def log_reconciliation(self, check_date: str, api_count: int, db_count: int) -> dict:
-        """Log reconciliation result and return the entry."""
-        discrepancy = abs(api_count - db_count)
-        discrepancy_pct = round((discrepancy / api_count * 100) if api_count > 0 else 0, 2)
-        status = "ok" if discrepancy_pct <= 1.0 else "drift"
-
-        async with self.connection() as conn:
-            conn.execute("""
-                INSERT INTO reconciliation_log (check_date, api_count, db_count, discrepancy, discrepancy_pct, status)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, [check_date, api_count, db_count, discrepancy, discrepancy_pct, status])
-
-        return {
-            "check_date": check_date,
-            "api_count": api_count,
-            "db_count": db_count,
-            "discrepancy": discrepancy,
-            "discrepancy_pct": discrepancy_pct,
-            "status": status,
-        }
 
     async def upsert_orders(
         self,
