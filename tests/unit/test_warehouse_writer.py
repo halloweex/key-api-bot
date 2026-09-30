@@ -70,7 +70,9 @@ def met_env(monkeypatch):
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
     # A read that failed is asked again; not across seconds in a unit test.
     monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
-    # A build where OD-10 has been answered; today's has not (TestTheOd10Doors).
+    # A build with no door OD-10 would have to decide — this one, since
+    # 2026-09-30; a door added later holds the switch in
+    # TestTheDoorsOd10HasNotDecided, not in every test of the switch itself.
     monkeypatch.setattr(wc, "OD10_DOORS", ())
 
 
@@ -2260,9 +2262,11 @@ def _unguarded_duckdb_readers(root: str = "web") -> set:
 class TestTheDoorsOd10HasNotDecided:
     """The review's reading: admin doors read DuckDB's Silver with no switch,
     so after the flip they answer from a Silver as old as it, and after a
-    compaction from none. OD-10 blocks step 13, and the switch waits on it:
-    `od10_doors` is unmet while `OD10_DOORS` is not empty, and the list is
-    what a walk of `web/` finds — nobody keeps it."""
+    compaction from none. OD-10 blocked step 13 until each was ported or
+    retired, and the switch waits on the list: `od10_doors` is unmet while
+    `OD10_DOORS` is not empty. The owner retired all seven on 2026-09-30, so
+    the list is empty — and it is still what a walk of `web/` finds, so a door
+    added later joins it and holds the switch again. Nobody keeps it."""
 
     def test_the_list_is_exactly_what_the_walk_finds(self):
         """A door retired, ported or put behind the predicate must leave the
@@ -2275,13 +2279,12 @@ class TestTheDoorsOd10HasNotDecided:
             f"{sorted(found - listed)}; listed and no longer found: "
             f"{sorted(listed - found)}")
 
-    def test_the_reviews_four_and_the_plans_detail_endpoints_are_there(self):
-        labels = " ".join(label for _, label in wc.OD10_DOORS)
-        # The three detail endpoints and their tools, the two debug routes
-        # and buyers/stats were retired by OD-10 (2026-09-30);
-        # tests/unit/test_od10_retired_doors.py keeps them so.
-        for route in ("/api/duckdb/purge-orders",):
-            assert route in labels
+    def test_od10_is_answered(self):
+        """Every door the review and the plan named — buyers/stats, the two
+        debug routes, purge-orders and the three detail cards — was retired
+        by the owner on 2026-09-30; tests/unit/test_od10_retired_doors.py keeps
+        them so. Nothing is left to port or retire."""
+        assert wc.OD10_DOORS == ()
 
     @pytest.mark.parametrize("source, readers", [
         # SQL counts; a docstring naming the table does not.
@@ -2363,21 +2366,16 @@ class TestTheDoorsOd10HasNotDecided:
         (door,) = [u for u in ready["unmet"] if u["key"] == "od10_doors"]
         assert "/api/a-new-door" in door["detail"]
 
-    def test_this_build_is_not_switchable_and_names_every_door(self, monkeypatch):
-        """Today's list, as the walk finds it — not `met`, which stands in a
-        build where OD-10 is answered: `postgres` runs as duckdb, and the one
-        unmet item names every door, so the page is the list of what is left
-        to do."""
+    def test_this_builds_own_list_holds_nothing(self, monkeypatch):
+        """This build's list, as the walk finds it — not `met`, which stands
+        in a build with no door whatever the walk says: with every other
+        precondition met, `postgres` is `postgres`. The test that stood here
+        until OD-10 was answered asserted the opposite and named every door."""
         for name, value in MET_ENV.items():
             monkeypatch.setenv(name, value)
         monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
         monkeypatch.setattr(wc, "_revision_on_its_own_connection",
                             AsyncMock(return_value=REQUIRED_REVISION))
-        assert wc.OD10_DOORS, "OD-10 answered: this test has done its job — delete it"
         monkeypatch.setenv(wc.ENV, "postgres")
-        assert wc.configure_mode() == wc.DUCKDB
-        (unmet,) = wc.preconditions_unmet()
-        assert unmet.key == "od10_doors"
-        for _where, label in wc.OD10_DOORS:
-            assert label in unmet.detail
-        assert f"{len(wc.OD10_DOORS)} door(s)" in unmet.detail
+        assert wc.configure_mode() == wc.POSTGRES, wc.preconditions_unmet()
+        assert wc.preconditions_unmet() == ()

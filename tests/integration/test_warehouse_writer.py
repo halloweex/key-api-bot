@@ -94,8 +94,9 @@ def _met_env(monkeypatch):
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
-    # A build where OD-10 has been answered — today's has not, and the switch
-    # waits for it (`od10_doors`); what is proved here is the switch itself.
+    # A build with no door OD-10 would have to decide — this one since
+    # 2026-09-30, pinned so a door added later does not hold the switch this
+    # file proves; `od10_doors` has tests of its own.
     monkeypatch.setattr(wc, "OD10_DOORS", ())
 
 

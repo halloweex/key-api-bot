@@ -280,7 +280,8 @@ RETIRED_COMPARISONS: Tuple[str, ...] = (
 # as retired. Only a run that compared can mark, so nothing is marked after a
 # flip, and a page a stood-down run delivers is never marked. A page
 # delivered before this was built carries no mark until the next run that
-# compares — daily, and long before `od10_doors` lets any build switch.
+# compares — daily; every build that carried this ran that comparison while
+# `od10_doors` still held the switch, until OD-10 was answered on 2026-09-30.
 COMPARISON_MARK = "warehouse_comparison"
 
 
@@ -328,24 +329,25 @@ def open_retired_conditions() -> Dict[str, Optional[str]]:
 # ─── The doors OD-10 has not yet decided ─────────────────────────────────────
 #
 # Doors in `web/` that read DuckDB's Silver with no read switch and no
-# stand-down. After the switch each serves numbers as old as the flip, and
-# after the first Sunday compaction none — `/api/buyers/stats` would report
-# `unique_in_silver_orders = 0` beside a full `silver.orders`. OD-10 decides
-# each, port or retire, and blocks step 13; until it is answered for all of
-# them the switch waits (`od10_doors`), and this list is what is left to do.
-# It is not a list anybody keeps: `tests/unit/test_warehouse_writer.py` walks
-# `web/` for every function naming a table the switch freezes —
-# `silver_orders`, the `silver_order_lines` view over it, `gold_daily_revenue`,
-# `silver_order_utm`, an inventory view reading one of them (derived from
-# `core.sql_dialect._INVENTORY_VIEWS`), or a dialect hole that could render
-# to one, `{views}` included — without
-# asking `duckdb_derives()`, and requires exactly these: a door retired or
-# ported, or put behind the predicate, leaves the list, and a door added joins
-# it. The readers in `core/` ride the `KS_READ_*` switches below, and the
-# checks and comparisons stand down on `warehouse_checks_stand_down()`.
-OD10_DOORS: Tuple[Tuple[str, str], ...] = (
-    ("web/routes/api/admin.py:purge_orders", "POST /api/duckdb/purge-orders"),
-)
+# stand-down. After the switch each would serve numbers as old as the flip,
+# and after the first Sunday compaction none. OD-10 decided each, port or
+# retire, and blocked step 13 until it had: the owner retired all seven on
+# 2026-09-30 — buyers/stats, the two debug routes, purge-orders and the three
+# detail cards (`tests/unit/test_od10_retired_doors.py` keeps them retired).
+# The list is empty and `od10_doors` is met.
+#
+# It stays, because it is not a list anybody keeps:
+# `tests/unit/test_warehouse_writer.py` walks `web/` for every function naming
+# a table the switch freezes — `silver_orders`, the `silver_order_lines` view
+# over it, `gold_daily_revenue`, `silver_order_utm`, an inventory view reading
+# one of them (derived from `core.sql_dialect._INVENTORY_VIEWS`), or a dialect
+# hole that could render to one, `{views}` included — without asking
+# `duckdb_derives()`, and requires exactly these. A door added after OD-10
+# joins the list and holds the switch until it is ported, retired or put
+# behind the predicate. The readers in `core/` ride the `KS_READ_*` switches
+# below, and the checks and comparisons stand down on
+# `warehouse_checks_stand_down()`.
+OD10_DOORS: Tuple[Tuple[str, str], ...] = ()
 
 
 # ─── The preconditions ───────────────────────────────────────────────────────

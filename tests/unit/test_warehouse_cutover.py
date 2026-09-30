@@ -240,6 +240,11 @@ MET_FACTS = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVI
                      bridge_owners={})
 
 
+# A door somebody adds after OD-10 retired every one there was (2026-09-30):
+# `OD10_DOORS` is empty in this build, so `od10_doors` is broken with this.
+A_DOOR = (("web/routes/api/example.py:a_new_door", "GET /api/a-new-door"),)
+
+
 def _breaking(key: str):
     """`(env, facts)` with every precondition met except `key`."""
     env, facts = dict(MET_ENV), MET_FACTS
@@ -274,13 +279,14 @@ def _breaking(key: str):
                          open_retired={"silver_missing_rows": "dq:integrity"})
     elif key == "od10_doors":
         facts = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
-                         bridge_owners={}, od10_doors=wc.OD10_DOORS[:1])
+                         bridge_owners={}, od10_doors=A_DOOR)
     else:
         raise AssertionError(f"no way to break {key!r} — add one here")
     return env, facts
 
 
 KEYS = [key for key, _ in wc.PRECONDITIONS]
+
 
 
 class TestTheEvaluator:
@@ -316,7 +322,7 @@ class TestTheEvaluator:
         unmet = wc.evaluate_preconditions({"KS_MIRROR_LANDING": "0",
                                            "KS_WRITE_WAREHOUSE": "postgress"}, wc.Facts(
             revision_error="x", bridge_owners=None, bridge_error="x",
-            open_retired=None, open_retired_error="x", od10_doors=wc.OD10_DOORS))
+            open_retired=None, open_retired_error="x", od10_doors=A_DOOR))
         assert [u.key for u in unmet] == KEYS
 
     def test_it_reads_values_as_the_modules_do(self):
@@ -699,8 +705,9 @@ class TestGatheringTheFacts:
 class TestReadiness:
     @pytest.fixture(autouse=True)
     def _od10_answered(self, monkeypatch):
-        """The readiness of a build where OD-10 has been answered — today's
-        is not, and `od10_doors` has tests of its own."""
+        """The readiness of a build with no door OD-10 would have to decide —
+        this one since 2026-09-30, pinned here so a door added later is
+        `od10_doors`' own tests' business, not every readiness test's."""
         monkeypatch.setattr(wc, "OD10_DOORS", ())
 
     def test_it_publishes_the_mode_and_every_unmet_item(self, fresh, monkeypatch):

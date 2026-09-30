@@ -1790,7 +1790,9 @@ async def force_resync(days_back: int = 730) -> dict:
     overwritten by the fetched payload, and an interrupted run can simply be
     run again. The one thing the DELETE bought — dropping orders KeyCRM has
     since deleted — is something the reconciliation deliberately refuses to do
-    automatically and the purge endpoint does by id.
+    automatically. The purge endpoint that did it by id, in DuckDB alone, was
+    retired by OD-10 (2026-09-30); removing an order from Postgres, which every
+    tab reads, is chain 3's to design.
 
     Args:
         days_back: Number of days of historical data to sync

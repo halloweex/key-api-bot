@@ -1718,8 +1718,9 @@ class DuckDBStore(
                     """, ids + ids).fetchall()]
                     # Scope = changed_ids ∪ all orders of affected buyers (cascade).
                     # UNION over BOTH orders and silver_orders so DELETE catches
-                    # orphan silver rows (orders deleted via admin/purge or H3
-                    # bronze promotion). Without the silver-side branch, an
+                    # orphan silver rows (orders deleted via the admin purge,
+                    # retired by OD-10, or H3 bronze promotion). Without the
+                    # silver-side branch, an
                     # orphan tied to an affected buyer would never get cleaned —
                     # full rebuild used to wipe these implicitly via DELETE *.
                     if silver_affected_buyers:

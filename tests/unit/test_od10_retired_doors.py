@@ -31,6 +31,9 @@ RETIRED_ROUTES = (
     ("GET", "/api/debug/order-status/{order_id}"),
     # DuckDB buyer counters with no caller; "all synced" after a compaction.
     ("GET", "/api/buyers/stats"),
+    # Deleted orders from DuckDB alone, for the April 2026 MVCC incident;
+    # never reached the Postgres every tab reads.
+    ("POST", "/api/duckdb/purge-orders"),
 )
 
 # The assistant's tools that rode the retired detail service.
