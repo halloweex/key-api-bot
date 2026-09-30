@@ -41,16 +41,22 @@ VERSION_TABLE = "alembic_version"
 # The revision this code requires. Bumped in the same commit as the migration
 # that introduces it.
 #
-# `require_revision` is called by each Postgres operation, **not at startup** —
-# the comment here used to claim otherwise, and `web/main.py` does not import
-# this module at all. So a deploy carrying new reads against an un-migrated
-# database starts normally and then: the mirror of landing keeps working (it
-# does not gate), while `rebuild_silver`, `rebuild_gold`, the backfill and all
-# three reconciliations raise `SchemaVersionError`. The rebuilds are swallowed
-# and logged, the checks persist failed runs, and the layer ages go stale —
-# which is what the digest and the canary read. It fails closed and it is not
-# silent, but it is the next morning's message, not a crash loop.
-REQUIRED_REVISION = "0033_derivation_signal"
+# `require_revision` is called by each Postgres operation, not by web at
+# startup (`web/main.py` does not import this module). What a mismatch costs has
+# grown with every port, and is no longer "the next morning's message": under
+# `KS_USER_STORE=postgres` the session read raises, so the dashboard answers 401
+# to everybody; the bot store checks it in `initialise()` and the bot refuses to
+# start; every write chain, the buyers and order mirrors that stand down on
+# owner rows, the replication, the derivation and the reconciliations raise
+# `SchemaVersionError` and record it. Only the catalogue mirror of landing
+# (`pg_landing._mirror`) does not gate. Compose runs `migrate` first and makes
+# web and bot wait for it, which is what keeps a deploy out of that state.
+#
+# 0034 is chain 4's lock (owner decision 16): an image that does not know the
+# buyers chain refuses a database that does. See the revision's docstring for
+# what the lock does not cover — images below v3.0.249 — and why an image-only
+# rollback after it needs `alembic downgrade` first, and none after the flip.
+REQUIRED_REVISION = "0034_buyer_chain"
 
 _pool: Optional[Any] = None
 _pool_lock = asyncio.Lock()
