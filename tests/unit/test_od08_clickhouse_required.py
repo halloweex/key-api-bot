@@ -567,6 +567,73 @@ class TestItsAlert:
         assert len(lines) == 2
 
 
+# ─── The diagnostic agent reads the ClickHouse runbook ──────────────────────
+
+def _family_for(*conditions):
+    """`family_for` from deploy/agent/run_agent.sh, run by bash as the host
+    runs it — the function only, extracted the way the review did."""
+    import subprocess
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[2] / "deploy/agent/run_agent.sh"
+    body = subprocess.run(
+        ["sed", "-n", "/^family_for()/,/^}/p", str(script)],
+        capture_output=True, text=True, check=True).stdout
+    assert body.startswith("family_for()"), body
+    out = subprocess.run(
+        ["bash", "-c", body + '\nfor c in "$@"; do family_for "$c"; done', "_",
+         *conditions], capture_output=True, text=True, check=True).stdout
+    return dict(zip(conditions, out.split()))
+
+
+class TestTheAgentReadsTheClickHouseRunbook:
+    """The review's fourth finding: `gold_values_unwatched` went to the
+    'default' runbook, which knows nothing of ClickHouse, and the mirror
+    runbook it belongs to still called KS_CH_URL optional. After step 13 a
+    CRITICAL `gold_values_unwatched` would have been diagnosed with no
+    ClickHouse guidance at all. Mutation: drop `gold_values_unwatched` from
+    the mirror line of `family_for` and the first test fails."""
+
+    @staticmethod
+    def _emitted_by_the_clickhouse_comparisons():
+        import ast
+        import inspect
+        from core import ch_history
+
+        names = set()
+        for module in (ch_silver, ch_history):
+            for node in ast.walk(ast.parse(inspect.getsource(module))):
+                if isinstance(node, ast.Call):
+                    for kw in node.keywords:
+                        if kw.arg == "check_name" and isinstance(kw.value, ast.Constant):
+                            names.add(kw.value.value)
+        return names
+
+    def test_every_clickhouse_condition_reaches_the_mirror_runbook(self):
+        """Derived: every check name the two ClickHouse comparisons file, and
+        the canary's three keys for the arm."""
+        emitted = self._emitted_by_the_clickhouse_comparisons()
+        assert UNWATCHED in emitted and "ch_history_buckets" in emitted
+        keys = sorted(emitted | {f"dq_{kind}:reconciliation_ch"
+                                 for kind in ("stale", "never", "missing")}
+                      | {"ch_reconcile_pending"})
+        families = _family_for(*keys)
+        assert {k: f for k, f in families.items() if f != "mirror"} == {}
+
+    def test_the_mirror_runbook_no_longer_calls_clickhouse_optional(self):
+        from pathlib import Path
+
+        text = (Path(__file__).resolve().parents[2]
+                / "deploy/agent/runbooks/mirror.md").read_text(encoding="utf-8")
+        header = text.splitlines()[0]
+        assert UNWATCHED in header
+        optional = [line for line in text.splitlines()
+                    if "KS_CH_URL" in line and "опционал" in line]
+        assert optional == []
+        assert "OD-08 (a)" in text
+        assert "table_name LIKE 'clickhouse.%'" in text
+
+
 # ─── reconciliation_ch joins the canary ─────────────────────────────────────
 
 def _ch_layer_aged(age_seconds):
