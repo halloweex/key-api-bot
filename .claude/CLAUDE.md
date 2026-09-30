@@ -1326,7 +1326,7 @@ PR-2 made the way back ready, still with no chain registered and nothing
 routed differently:
 
 - **One writer of buyer rows**, `core.pg_buyer_rows._write_buyer_rows` — the
-  mirror runs it now and the chain will. The rows go on the caller's
+  mirror and, since PR-3, the chain both run it. The rows go on the caller's
   transaction (the chain proves its first write by the owner row sharing an
   `xmin` with the row) and it never touches `meta.mirror_state`, which stays
   the mirror's. It lives outside the chain module on purpose: the registry
@@ -1345,6 +1345,90 @@ routed differently:
 The chain itself, its rollback under the DN-06 latch and the owner's decisions
 are in `.planning/DUCKDB_EXIT_CHAIN4_PLAN.md`, revised against today's main in
 `.planning/DUCKDB_EXIT_CHAIN4_PLAN_REV2.md`.
+
+### Chain 4: the buyers, written where they are read
+
+`core/pg_buyers_write.py` is the fifth registered write chain (PR-3):
+`bronze.buyers`, `bronze.buyer_contacts` and `app.buyer_gender`, moved together
+by `KS_WRITE_BUYERS=postgres`. **Off in production.** The flip needs the
+owner's own yes, not before 2026-09-30, Tuesday to Thursday 10:30–12:30 Kyiv.
+
+**Held on DuckDB until its readers follow.** Three readers show buyers — the
+SMS audience (`KS_SMS_STORE`), the search index (`KS_READ_SEARCH_INDEX`) and
+the dashboard's buyer reads (`KS_READ_DASHBOARD`) — and each could still read
+DuckDB, whose buyers stop the moment the chain writes Postgres.
+`unmet_precondition()` names any of the three not on postgres (a typo in one is
+unmet), and until all are an unlatched chain runs as duckdb whatever its flag
+says: DN-26's hook, made generic in the registry for this chain. Production had
+all three on postgres on 2026-09-25, so the hook is met there and changes
+nothing. The warning is rate-limited to once an hour per reason — this chain's
+key is read every incremental tick — and `/api/health` publishes it on every
+read, where the canary warns `write_chain_precondition_unmet`.
+
+**Every buyer's verdict is written with its name.** `upsert_buyers` classifies
+the names it writes and writes the verdicts in the same transaction, in a
+savepoint caught on `asyncpg.PostgresError` only, so the buyers land whatever
+the gender does. `derive_gender_pg` (the hourly rider, and
+`scripts/backfill_gender.py`) reads what is pending **before** it latches — an
+hour with nothing to decide takes nothing — then share-locks the portion's
+buyers and drops a verdict whose name moved. That closes a race the hourly
+derivation alone would leave open: a derivation that read an old name and
+wrote after a rename committed would store the old name's verdict at the
+current rules version, and nothing would ever select that buyer again. Proved
+by running it: without `FOR SHARE` the old verdict lands. A human override is
+never overwritten; an equal verdict is not rewritten, so `decided_at` is when
+the answer last changed — the web process's UTC clock, passed in, which is the
+clock DuckDB's `CURRENT_TIMESTAMP` is and the one the copy-back orders by.
+DuckDB never re-derives on a rename; this does, on purpose.
+
+**A buyer Postgres would refuse is skipped, not raised.** Refused before the
+latch where it can be seen (`_refusal`: a loyalty figure over its `NUMERIC`, a
+missing id — `core/pg_numeric.py`, shared with chain 7a), and retried buyer by
+buyer on a `DataError` it could not foresee (a lone surrogate, say). Either
+way the id is logged and counted in `buyer_sync.last_skipped_bad`; a batch
+refused whole leaves no marker. A cancelled statement is not bad data and
+raises at once. A statement timeout and a two-minute deadline bound the write.
+
+**Every path asks the chain's one answer** (`pg_buyers_write.mode()`, never
+raising):
+
+- `DuckDBStore.upsert_buyers` hands the batch to the chain first, before the
+  portion loop — so DuckDB's copy stops and the mirror has nothing to ship.
+- `get_missing_buyer_ids` selects from Postgres whenever the chain is off
+  DuckDB, before and regardless of `KS_READ_BUYER_SYNC` — a selection from a
+  DuckDB that stopped would fetch the same buyers every hour. A latched chain
+  with its flag set back routes both the selection and the write to Postgres;
+  the copy-back's post-latch levers depend on exactly that, and one test pins
+  the two together.
+- A `KS_WRITE_BUYERS` nobody can read writes nowhere: the step refuses before
+  KeyCRM is asked, both manual doors answer 409 before starting, the gender
+  rider reports `stood_down`, and `/health/detailed` leaves the buyer counts
+  out rather than show DuckDB's frozen ones.
+- `scripts/backfill_gender.py` writes Postgres only for a chain web has
+  already latched (exit 4 otherwise): the latch is a marker web reads once and
+  caches, so a script taking the first write would leave web writing DuckDB
+  until it restarted.
+- `reconcile_buyer_completeness` also runs under the chain with the landing
+  mirror off — it is the one Postgres check that the writer is alive.
+
+`tests/unit/test_buyer_paths_consult_registry.py` walks the tree for every
+DuckDB statement that writes the three tables and requires each path into it
+to pass through a function that asks.
+
+**Watched from three sides.** The canary pages `buyer_sync_stalled_chain`
+(CRITICAL) when the step has not succeeded for three hours under the chain —
+the WARN at 90 minutes stays. The standing watch (`core/pg_chain_invariants.py`)
+files `chain_buyer_orphan_rows` (CRITICAL, from the handover on),
+`chain_required_column_null` for a NULL `full_name` (DuckDB's is NOT NULL, so
+the copy-back could not carry it back) and `chain_buyer_contact_missing` (WARN):
+all three read zero on production on 2026-09-30. Its watermark is left to the
+canary, which pages on the step's own state. `deploy/stage4_soak.sh` reads
+B1–B5 — copies stood down, the watermark's stored value at 90 minutes,
+verdicts and the override floor, the selection's backlog, integrity — and
+knows a fifth state for this chain, `held`: flagged, unlatched and a reader
+not on postgres, reported by B1 as the flip that did not move. The restore
+drill counts all three tables, because once the chain writes them the nightly
+dump is their only backup.
 
 ### The Postgres mirror of landing
 One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
@@ -2502,7 +2586,9 @@ Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
 variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVENTORY`
 (chain 1, off), `KS_WRITE_GOALS` (chain 7a, off — `app.revenue_goals`, the three
 goal amounts typed on /goals, whose POST wrote DuckDB while the GET read an
-hourly copy in Postgres), `KS_WRITE_EXPENSE_TYPES` (chain 6a, off). Putting one
+hourly copy in Postgres), `KS_WRITE_EXPENSE_TYPES` (chain 6a, off),
+`KS_WRITE_BUYERS` (chain 4, off — the buyers, their contacts and their gender;
+see "Chain 4: the buyers, written where they are read"). Putting one
 back to `duckdb` reads like an undo and is not one:
 once rows have landed in Postgres, it starts a **second writer beside the
 first** — a typed expense in the store the page does not read, DuckDB's
@@ -2674,7 +2760,11 @@ docker run --rm --name chain-copy-back \
 #   3. at +2 min: deploy/stage4_soak.sh — E1/E2 for chain 8, I1/I2/I3 for
 #      chain 1; chains 7a and 6a have no soak check yet, so meta.mirror_state
 #      for app.revenue_goals or bronze.expense_types. The hourly copy must be
-#      shipping the chain's tables again.
+#      shipping the chain's tables again. Chain 4's B1-B5 read "not
+#      applicable" once it is released, so read meta.mirror_state for its
+#      three tables: the buyers mirror stamps the bronze two on its next
+#      batch (POST /api/mirror/backfill/buyers now), replicate_operational
+#      stamps app.buyer_gender within the hour.
 ```
 
 `--network key-api-bot_default` is observed, not derived: on 2026-09-18 web and
