@@ -4513,6 +4513,23 @@ BUYER_CONTACTS_SPEC = MirroredTable(
 # `MIRRORED_TABLES`, which is the catalogue `reconcile_mirror` compares.
 MIRRORED_LANDING_TABLES = (BUYERS_SPEC, BUYER_CONTACTS_SPEC)
 
+# A contact is part of the landing only with its buyer. Neither store declares
+# a foreign key, and this check has always read DuckDB's contacts through a
+# join to `buyers`; the copy-back reads both stores the same way, so an orphan
+# contact is outside the landing on either side instead of a refusal whose
+# lever (the reship, which walks buyers) could never clear it — the chain 4
+# PR-2 review reproduced that. `{engine: FROM clause}`, aliased `c` and `b`.
+BUYER_CONTACTS_FROM = {
+    "duckdb": "buyer_contacts c JOIN buyers b ON b.id = c.buyer_id",
+    "postgres": "bronze.buyer_contacts c JOIN bronze.buyers b ON b.id = c.buyer_id",
+}
+
+
+def buyer_contacts_select(engine: str) -> str:
+    """The contact columns, read through the join, for `engine`."""
+    return (f"SELECT {', '.join('c.' + col for col in CONTACT_COLUMNS)} "
+            f"FROM {BUYER_CONTACTS_FROM[engine]}")
+
 
 async def reconcile_buyers(
     store,
@@ -4573,11 +4590,8 @@ async def reconcile_buyers(
         dk_buyers, dk_buyers_synced = fetch_duckdb_rows(conn, buyers_spec)
         # Contacts, with the owning buyer's clock attached.
         contact_rows = conn.execute(
-            """
-            SELECT c.buyer_id, c.contact_type, c.value, c.is_primary, b.synced_at
-            FROM buyer_contacts c
-            JOIN buyers b ON b.id = c.buyer_id
-            """
+            buyer_contacts_select("duckdb").replace(
+                " FROM ", ", b.synced_at FROM ", 1)
         ).fetchall()
 
     dk_contacts: Dict[Any, Tuple[Any, ...]] = {}

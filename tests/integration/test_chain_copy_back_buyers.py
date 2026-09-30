@@ -368,3 +368,62 @@ class TestTheReship:
         await _latch_and_write(pool, [_buyer(1)])
         with pytest.raises(RuntimeError, match="is written by a write chain"):
             await reship_buyers(store)
+
+
+class TestTheReviewsCases:
+    """What the PR-2 review found the rewrite clock alone could not see."""
+
+    @pytest.mark.asyncio
+    async def test_a_newer_duckdb_version_after_the_marker_was_lost_refuses(self, stores):
+        """The chain wrote buyer 5 after the latch; then the marker was lost
+        with the flag at duckdb, and the DuckDB buyers step fetched a later
+        version of it from KeyCRM. Buyer 5 reads as rewritten by the chain,
+        yet DuckDB's copy is the newer one: overwriting it, and deleting its
+        new number as a contact the chain "dropped", would lose KeyCRM's
+        latest. KeyCRM's own updated_at says so."""
+        from core import chain_latch
+        from core.chain_transfer import CopyBackRefused, copy_back, handover_check
+
+        store, pool, chain, _env = stores
+        await _mirrored(store, pool, [_buyer(5, phones=["+380501"])])
+        await _latch_and_write(pool, [_buyer(5, phones=["+380501"])])
+        chain_latch.release(NAME)                       # the marker is lost
+        newer = Buyer.from_api({
+            "id": 5, "full_name": "Покупець 5", "phone": ["+380502"], "email": [],
+            "created_at": "2026-09-01 10:00:00+00:00",
+            "updated_at": "2026-09-24T09:00:00Z"})
+        await store.upsert_buyers([newer])              # DuckDB only: the mirror stands down
+
+        found = _critical(await handover_check(store, chain))
+        assert ("handover_rows_newer_in_duckdb", BUYERS) in found, found
+        assert ("handover_rows_missing", CONTACTS) in found, found
+        with pytest.raises(CopyBackRefused):
+            await copy_back(store, chain, dry_run=False)
+        assert [r[0] for r in await _duck(
+            store, "SELECT value FROM buyer_contacts WHERE buyer_id = 5")] == ["+380502"]
+
+    @pytest.mark.asyncio
+    async def test_an_orphan_contact_in_either_store_blocks_nothing(self, stores):
+        """A contact whose buyer its own store does not hold is outside the
+        landing: the daily check never read DuckDB's, the reship cannot ship
+        it, and so the copy-back neither refuses on it nor carries it."""
+        from core.chain_transfer import copy_back, handover_check
+
+        store, pool, chain, _env = stores
+        await _mirrored(store, pool, [_buyer(1)])
+        async with store.connection() as conn:
+            conn.execute("INSERT INTO buyer_contacts (buyer_id, contact_type, value, "
+                         "is_primary) VALUES (77, 'phone', '+380577', FALSE)")
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO bronze.buyer_contacts (buyer_id, "
+                               "contact_type, value, is_primary) "
+                               "VALUES (78, 'phone', '+380578', FALSE)")
+
+        assert await handover_check(store, chain) == []
+
+        await _latch_and_write(pool, [_buyer(1)])
+        plan = await copy_back(store, chain, dry_run=False)
+
+        assert plan["released"], plan
+        assert await _duck(store, "SELECT buyer_id FROM buyer_contacts "
+                                  "WHERE buyer_id IN (77, 78)") == []

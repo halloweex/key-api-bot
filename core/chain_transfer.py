@@ -120,7 +120,10 @@ from core.mirror_reconciliation import (
     OPERATIONAL_TABLES,
     BucketedTable,
     MirroredTable,
+    _normalise_row,
+    _row_key,
     _sample,
+    buyer_contacts_select,
     compare_table,
     fetch_duckdb_rows,
     fetch_pg_rows,
@@ -181,6 +184,12 @@ class TableTransfer:
     # A mirrored table only: the column naming the buyer whose
     # `bronze.buyers.mirrored_at` dates this row's last write in Postgres.
     rewritten_by: Optional[str] = None
+    # The row set to read, where it is not the whole table: chain 4's contacts
+    # are read through a join to their own buyers in each store, as the daily
+    # check reads DuckDB's (`mirror_reconciliation.BUYER_CONTACTS_FROM`).
+    # None reads the table whole.
+    dk_select: Optional[str] = None
+    pg_select: Optional[str] = None
 
     @property
     def is_append(self) -> bool:
@@ -205,7 +214,18 @@ class TableTransfer:
 # table missing here rather than guessing, the rule the rest of this module
 # keeps for the shipping shapes.
 _REWRITE_CLOCK_TABLE = "bronze.buyers"
+BUYER_CONTACTS_SPEC_TABLE = "bronze.buyer_contacts"
 _REWRITTEN_BY = {"bronze.buyers": "id", "bronze.buyer_contacts": "buyer_id"}
+
+# Which version of a buyer is later, when both stores hold one: KeyCRM's own
+# `updated_at`, carried by both stores as a value from the one parse. Declared
+# rather than derived from the daily spec's clock, which is DuckDB's
+# bookkeeping `synced_at` and orders nothing across the stores. What it
+# catches is a DuckDB write after the latch — the marker lost with the flag
+# back at duckdb, or an image older than the chain — which the rewrite clock
+# alone would read as the chain's own and let the copy-back overwrite (the PR-2
+# review's scenario). A missing or equal stamp proves nothing, `_later_in_duckdb`.
+_SOURCE_CLOCK = {"bronze.buyers": ("updated_at",)}
 
 
 def _compare_spec(source: MirroredTable | BucketedTable,
@@ -343,12 +363,16 @@ def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
                     "_REWRITTEN_BY; the copy-back cannot tell a row the chain "
                     "rewrote from one it never touched"
                 )
+            joined = table == BUYER_CONTACTS_SPEC_TABLE
             out.append(TableTransfer(
                 pg_table=table, dk_table=source.dk_table,
                 columns=tuple(source.columns),
                 order_by=", ".join(source.key_columns),
                 compare=_compare_spec(source, (), source.columns),
+                clock=_SOURCE_CLOCK.get(table, ()),
                 kind="mirrored", rewritten_by=owner,
+                dk_select=buyer_contacts_select("duckdb") if joined else None,
+                pg_select=buyer_contacts_select("postgres") if joined else None,
             ))
             continue
         raise LookupError(
@@ -562,7 +586,7 @@ def classify_handover(
                 "moment this chain routes to Postgres, so a flip now strands "
                 "them. Bring web back with the flag unchanged, run "
                 "POST /api/mirror/backfill/buyers — it re-ships every buyer "
-                "and contact DuckDB holds — and check again."
+                "DuckDB holds, with its contacts — and check again."
             )
         elif moved_on:
             why = (
@@ -609,8 +633,8 @@ def classify_handover(
     elif differing and not moved_on:
         lever = (
             " Bring web back with the flag unchanged, run "
-            "POST /api/mirror/backfill/buyers — it re-ships every buyer and "
-            "contact DuckDB holds — and check again."
+            "POST /api/mirror/backfill/buyers — it re-ships every buyer "
+            "DuckDB holds, with its contacts — and check again."
             if spec.is_mirrored else ""
         )
         critical("handover_rows_differ", differing, (
@@ -621,6 +645,24 @@ def classify_handover(
             f"would freeze these values in Postgres.{lever}"
         ))
     elif differing and spec.is_mirrored:
+        # First the source's own clock: a version DuckDB holds that KeyCRM
+        # dated later is an edit written to DuckDB after the latch, which the
+        # rewrite clock alone would read as the chain's and let the copy-back
+        # overwrite — the marker lost with the flag back at duckdb.
+        newer = [k for k in differing if _later_in_duckdb(spec, dk_rows[k], pg_rows[k])]
+        if newer:
+            critical("handover_rows_newer_in_duckdb", newer, (
+                f"{len(newer)} row(s) differ and DuckDB's version is the later "
+                f"one by KeyCRM's own {', '.join(spec.clock)}, which both "
+                "stores carry. Nothing should have written DuckDB since the "
+                "latch, so a writer did that should not have run — the local "
+                "marker lost with the flag back at duckdb, or an image older "
+                "than the chain — and a copy-back would overwrite these with "
+                "the older values. Restore the marker (or set the flag to "
+                "postgres) so the chain writes again, re-fetch these buyers "
+                "through it, and ask again."
+            ))
+        differing = [k for k in differing if k not in set(newer)]
         carried = [k for k in differing if owned_by_rewritten(pg_rows[k])]
         unexplained = [k for k in differing if k not in set(carried)]
         if carried:
@@ -715,6 +757,28 @@ def classify_handover(
             "nothing replaces this table whole, so they would stay in the "
             f"store a flip makes the source of truth. {lever} Then ask again."
         ))
+    elif ahead and spec.is_mirrored:
+        # After the latch, decided by data like the other two branches: a row
+        # only Postgres holds is the chain's only for a buyer it rewrote.
+        written = [k for k in ahead if owned_by_rewritten(pg_rows[k])]
+        older = [k for k in ahead if k not in set(written)]
+        if written:
+            info("handover_rows_ahead", written, (
+                f"{len(written)} row(s) in {table} are not in DuckDB's "
+                f"{dk_table}, and the chain's writer wrote their buyer since "
+                "the latch — the size of the copy-back."
+            ))
+        if older:
+            critical("handover_rows_ahead", older, (
+                f"{len(older)} row(s) in {table} are not in DuckDB's "
+                f"{dk_table}, and the chain's writer has not written their "
+                "buyer since the latch: Postgres held them before the flip "
+                "and DuckDB did not, which a clean pre-flip handover would "
+                "have refused. A copy-back would carry them into DuckDB as if "
+                "they were the chain's. Decide per id — delete them from "
+                "Postgres if they are stale, or re-fetch the buyer through the "
+                "chain — and ask again."
+            ))
     elif ahead:
         info("handover_rows_ahead", ahead, (
             f"{len(ahead)} row(s) in {table} are not in DuckDB's "
@@ -748,16 +812,55 @@ async def _handover_issues(
     issues: List[IntegrityIssue] = []
     rewritten = (await _rewritten_since_latch(pool)
                  if moved_on and any(s.is_mirrored for s in specs) else None)
-    for spec in specs:
+    # The buyers first, whatever the chain's order: a buyer DuckDB holds in a
+    # later version is not the chain's, and its contacts must be judged so.
+    ordered = sorted(specs, key=lambda s: s.pg_table != _REWRITE_CLOCK_TABLE)
+    for spec in ordered:
         async with store.connection() as conn:
-            dk_rows, _synced = fetch_duckdb_rows(conn, spec.compare)
+            dk_rows = _fetch_dk(conn, spec)
             required = _not_null_columns(conn, spec)
-        pg_rows = await fetch_pg_rows(pool, spec.compare)
+        pg_rows = await _fetch_pg(pool, spec)
         issues += classify_handover(
             spec, dk_rows, pg_rows, moved_on=moved_on, max_samples=max_samples,
             required=required, rewritten=rewritten,
         )
+        if rewritten and spec.pg_table == _REWRITE_CLOCK_TABLE:
+            rewritten = rewritten - {
+                key for key in dk_rows.keys() & pg_rows.keys()
+                if _later_in_duckdb(spec, dk_rows[key], pg_rows[key])
+            }
     return issues
+
+
+def _fetch_dk(conn, spec: TableTransfer) -> Dict[Any, Tuple[Any, ...]]:
+    """DuckDB's side of one table, keyed and normalised as the comparison reads
+    it — through `spec.dk_select` when the table's row set is not the whole
+    table (chain 4's contacts), else as the daily check reads it."""
+    if spec.dk_select is None:
+        rows, _synced = fetch_duckdb_rows(conn, spec.compare)
+        return rows
+    return _keyed(spec, conn.execute(spec.dk_select).fetchall())
+
+
+async def _fetch_pg(pool, spec: TableTransfer) -> Dict[Any, Tuple[Any, ...]]:
+    """Postgres's side, the same way round."""
+    if spec.pg_select is None:
+        return await fetch_pg_rows(pool, spec.compare)
+    async with pool.acquire() as conn:
+        records = await conn.fetch(spec.pg_select)
+    return _keyed(spec, [tuple(r[c] for c in spec.compare.columns) for r in records])
+
+
+def _keyed(spec: TableTransfer, rows) -> Dict[Any, Tuple[Any, ...]]:
+    compare = spec.compare
+    out: Dict[Any, Tuple[Any, ...]] = {}
+    for row in rows:
+        row = tuple(row)
+        if any(row[compare.columns.index(c)] is None for c in compare.key_columns):
+            continue
+        out[_row_key(compare, row)] = _normalise_row(
+            row, compare.columns, compare.numeric, compare.ignore_columns)
+    return out
 
 
 def _not_null_columns(conn, spec: TableTransfer) -> Tuple[str, ...]:
@@ -1285,7 +1388,13 @@ async def _read_pg(pool, spec: TableTransfer, floor: Any) -> List[Tuple[Any, ...
     """
     columns = ", ".join(spec.columns)
     async with pool.acquire() as conn:
-        if spec.append is None or floor is None:
+        if spec.pg_select is not None:
+            # Only the rows the comparison reads: a contact whose buyer
+            # Postgres does not hold is outside the landing, and copying it
+            # would put an orphan into DuckDB the verify below cannot see.
+            records = await conn.fetch(
+                f"{spec.pg_select} ORDER BY {spec.order_by}")
+        elif spec.append is None or floor is None:
             records = await conn.fetch(
                 f"SELECT {columns} FROM {spec.pg_table} ORDER BY {spec.order_by}"
             )
@@ -1449,10 +1558,10 @@ async def verify(
     watermark = {"last_ok_at": now, "failures_since_ok": 0}
     issues: List[IntegrityIssue] = []
     for spec in specs:
-        dk_rows, dk_synced = fetch_duckdb_rows(conn, spec.compare)
-        pg_rows = await fetch_pg_rows(pool, spec.compare)
+        dk_rows = _fetch_dk(conn, spec)
+        pg_rows = await _fetch_pg(pool, spec)
         issues += compare_table(
-            spec.compare, dk_rows, dk_synced, pg_rows, watermark,
+            spec.compare, dk_rows, {key: None for key in dk_rows}, pg_rows, watermark,
             now=now, grace_minutes=COPY_BACK_GRACE_MINUTES,
             max_samples=max_samples,
         )
@@ -1593,9 +1702,13 @@ def _runbook(chain: ModuleType, *, executed: bool, released: bool = False) -> Li
         "longer latched, so this variable decides again — and the next write "
         "re-latches the chain if it still says postgres.",
         "2. docker compose up -d web bot",
-        f"3. At +2 min {soak}: the hourly "
-        "copy must be shipping this chain's tables again, and its watermarks "
-        "must be moving.",
+        f"3. At +2 min {soak}: "
+        + ("each of this chain's tables must be shipped again by its own "
+           "shipper — the hourly copy for the replicated ones, the buyers "
+           "mirror for the rest — and its watermark moving."
+           if _mirrored_tables(chain) else
+           "the hourly copy must be shipping this chain's tables again, and "
+           "its watermarks must be moving."),
         "4. The `owner:` rows and the local marker are gone. /api/health's "
         "write_chains block should show latched: false and mismatch: false.",
     ]

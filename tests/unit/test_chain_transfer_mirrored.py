@@ -77,10 +77,23 @@ class TestTheThirdSource:
             "buyer_id", "contact_type", "value")
         assert "id" not in specs[CONTACTS].columns
 
-    def test_the_copy_back_compares_with_no_clock_and_no_grace(self, specs):
+    def test_the_copy_back_compares_with_no_grace(self, specs):
         for table in (BUYERS, CONTACTS):
             assert specs[table].compare.synced_column is None
-            assert specs[table].clock == ()
+
+    def test_a_buyer_is_ordered_by_keycrms_own_clock_and_a_contact_by_none(self, specs):
+        """The PR-2 review: the rewrite clock alone read a buyer DuckDB holds
+        in a later version as the chain's. KeyCRM's `updated_at`, carried by
+        both stores from the one parse, says which version is later."""
+        assert specs[BUYERS].clock == ("updated_at",)
+        assert specs[CONTACTS].clock == ()
+
+    def test_contacts_are_read_through_their_buyers_in_both_stores(self, specs):
+        """As the daily check reads DuckDB's, so an orphan is outside the
+        landing on either side rather than a refusal nothing can clear."""
+        s = specs[CONTACTS]
+        assert "JOIN buyers b" in s.dk_select and "JOIN bronze.buyers b" in s.pg_select
+        assert specs[BUYERS].dk_select is None and specs[BUYERS].pg_select is None
 
     def test_each_mirrored_table_says_which_buyer_dates_it(self, specs):
         assert specs[BUYERS].rewritten_by == "id"
@@ -206,6 +219,70 @@ class TestAfterTheLatch:
         assert _names(issues) == {("handover_rows_differ", "CRITICAL")}
 
 
+class TestTheReviewsCases:
+    """The three after-latch shapes the PR-2 review found the rewrite clock
+    alone could not tell apart."""
+
+    def test_a_buyer_duckdb_holds_in_a_later_version_refuses_though_rewritten(self, specs):
+        s = specs[BUYERS]
+        pos = s.compare.columns.index("updated_at")
+        base = _buyer(s, 5)
+        pg = base[:pos] + (datetime(2026, 9, 20, tzinfo=timezone.utc),) + base[pos + 1:]
+        dk = base[:pos] + (datetime(2026, 9, 24, tzinfo=timezone.utc),) + base[pos + 1:]
+        dk = dk[:1] + ("Нова",) + dk[2:]
+        issues = classify_handover(s, {5: dk}, {5: pg}, moved_on=True,
+                                   rewritten=frozenset({5}))
+        assert _names(issues) == {("handover_rows_newer_in_duckdb", "CRITICAL")}
+
+    def test_an_older_duckdb_version_of_a_rewritten_buyer_is_carried(self, specs):
+        """The control: KeyCRM dated Postgres's later, so it is the chain's."""
+        s = specs[BUYERS]
+        pos = s.compare.columns.index("updated_at")
+        base = _buyer(s, 5)
+        dk = base[:pos] + (datetime(2026, 9, 20, tzinfo=timezone.utc),) + base[pos + 1:]
+        pg = base[:pos] + (datetime(2026, 9, 24, tzinfo=timezone.utc),) + base[pos + 1:]
+        pg = pg[:1] + ("Нова",) + pg[2:]
+        issues = classify_handover(s, {5: dk}, {5: pg}, moved_on=True,
+                                   rewritten=frozenset({5}))
+        assert _names(issues) == {("handover_rows_differ", "INFO")}
+
+    def test_a_postgres_only_contact_of_a_buyer_never_rewritten_refuses(self, specs):
+        s = specs[CONTACTS]
+        key = (5, "phone", "+380500")
+        issues = classify_handover(s, {}, {key: _contact(s, 5, "+380500")},
+                                   moved_on=True, rewritten=frozenset({6}))
+        assert _names(issues) == {("handover_rows_ahead", "CRITICAL")}
+
+    def test_a_postgres_only_contact_of_a_rewritten_buyer_is_the_copy(self, specs):
+        s = specs[CONTACTS]
+        key = (5, "phone", "+380500")
+        issues = classify_handover(s, {}, {key: _contact(s, 5, "+380500")},
+                                   moved_on=True, rewritten=frozenset({5}))
+        assert _names(issues) == {("handover_rows_ahead", "INFO")}
+
+    def test_an_orphan_duckdb_contact_is_not_read(self, specs, tmp_path):
+        """A contact whose buyer DuckDB does not hold: the daily check has
+        never read it, and now neither does the copy-back."""
+        import asyncio
+
+        from core.duckdb_store import DuckDBStore
+
+        async def read():
+            store = DuckDBStore(db_path=tmp_path / "o.duckdb")
+            await store.connect()
+            try:
+                async with store.connection() as conn:
+                    conn.execute("INSERT INTO buyers (id, full_name) VALUES (1, 'А')")
+                    conn.execute("INSERT INTO buyer_contacts (buyer_id, contact_type, "
+                                 "value, is_primary) VALUES (1, 'phone', '+1', TRUE), "
+                                 "(77, 'phone', '+77', TRUE)")
+                    return chain_transfer._fetch_dk(conn, specs[CONTACTS])
+            finally:
+                await store.close()
+
+        assert set(asyncio.run(read())) == {(1, "phone", "+1")}
+
+
 class TestARowTheCopyCouldNotWrite:
     @pytest.mark.parametrize("moved_on", [False, True])
     def test_a_null_name_is_critical_in_the_handover_itself(self, specs, moved_on):
@@ -273,6 +350,19 @@ class TestTheRunbookTellsTheShippersApart:
         assert BUYERS in mirrored and CONTACTS in mirrored
         assert "buyers mirror" in mirrored
         assert "replicate_operational" not in mirrored
+
+    def test_step_three_does_not_wait_on_the_hourly_copy_for_a_mirrored_table(self):
+        """The review: the soak sentence was split, but step 3 still closed on
+        "the hourly copy must be shipping this chain's tables again", which the
+        buyers' tables never are. A chain of replicated tables alone keeps the
+        sentence word for word."""
+        from core import pg_expenses_write
+
+        mixed = " ".join(chain_transfer._runbook(_fake_chain(), executed=True, released=True))
+        plain = " ".join(chain_transfer._runbook(pg_expenses_write, executed=True, released=True))
+        tail = "the hourly copy must be shipping this chain's tables again"
+        assert tail not in mixed and "by its own shipper" in mixed
+        assert tail in plain
 
     def test_a_marker_without_owner_rows_names_the_reship_for_this_chain_only(self):
         from core import pg_expenses_write
