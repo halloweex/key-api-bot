@@ -2124,9 +2124,11 @@ class DuckDBStore(
 
             # ── UTM/Traffic layers (after main refresh completes) ──
             utm_count = 0
+            utm_parsed = False
             try:
                 utm_order_ids = await self.refresh_utm_silver_layer()
                 utm_count = len(utm_order_ids)
+                utm_parsed = True
 
                 # The traffic Gold is gone, and only the UTM Silver above
                 # remains. That layer is read — `/traffic` folds it against
@@ -2151,6 +2153,27 @@ class DuckDBStore(
                     f"UTM layer refresh failed — Postgres keeps its previous "
                     f"copy until a parse succeeds: {utm_error}"
                 )
+
+            # The way back from `KS_WRITE_WAREHOUSE=postgres` (DN-29): a full
+            # tick that validates, and a UTM parse that finished — in it or in
+            # a later tick — end the hold on the DuckDB checks and record
+            # DuckDB as the writer again. Nothing at all unless this process
+            # is holding.
+            try:
+                from core import warehouse_cutover
+
+                await warehouse_cutover.note_refresh(
+                    self, silver_mode=silver_mode, validation_passed=validation_passed,
+                    utm_parsed=utm_parsed)
+            except Exception as e:
+                # Held a little longer, never a failed tick. Later ticks are
+                # incremental once this one's flag is cleared, so another full
+                # one is asked for, or the hold would outlive the reason for it.
+                logger.error(f"Warehouse writer hold not released: {e}")
+                try:
+                    await self.mark_warehouse_dirty(None)
+                except Exception as mark_err:
+                    logger.error(f"Warehouse writer hold: full re-mark failed: {mark_err}")
 
             return {
                 "status": "success",
@@ -2314,7 +2337,18 @@ class DuckDBStore(
             """, [full_key, timestamp.isoformat()])
 
     async def mark_warehouse_dirty(self, changed_order_ids: list[int] | None = None) -> None:
-        """Set dirty flag so the warehouse refresh job picks it up."""
+        """Set dirty flag so the warehouse refresh job picks it up.
+
+        A no-op while Postgres alone derives (`KS_WRITE_WAREHOUSE=postgres`,
+        DN-29): nothing peeks or clears the flag then — the job is not
+        registered — so every mark would only grow a list nobody reads. The
+        list pending at the switch is abandoned as it stands, and the way back
+        marks the warehouse dirty in full (`warehouse_cutover.settle_writer`).
+        """
+        from core import warehouse_cutover
+
+        if not warehouse_cutover.duckdb_derives():
+            return
         import json
         value = json.dumps(changed_order_ids) if changed_order_ids else "full"
         async with self.connection() as conn:

@@ -36,18 +36,31 @@ it stays empty.
 One place raises, so every consumer of a router refuses at once — and a
 gate whose switch names an engine with no address refuses through
 `no_address`, below, for the same reason. The HTTP routes answer 503 here.
-Everything else that can receive a refusal is DN-20c's, which gives each its
-own named answer: the sync and its search index, training, the Monday goals
-job (which writes `seasonal_indices` before the read that refuses), the two
-weekly reports, the boot sync and the assistant. That list is derived, not
-remembered — `tests/unit/test_read_fallback_consumers.py` walks up from every
-refusal to the entry points that can receive one and pins them as
-`NON_HTTP_CONSUMERS`. Until DN-20c lands, a refusal that reaches one of them
-is an exception like any other, and nothing ships `off` before it does.
-Cohorts go one step
-further, because they have no Postgres body: under `off` they are answered
-by a live ClickHouse or not at all (`no_engine`), whatever `KS_READ_COHORTS`
-says.
+Cohorts go one step further, because they have no Postgres body: under
+`off` they are answered by a live ClickHouse or not at all (`no_engine`),
+whatever `KS_READ_COHORTS` says.
+
+WHAT NO HTTP REQUEST WAITS FOR ANSWERS ITSELF (DN-20c)
+
+Everything else that can receive a refusal gives it an answer of its own,
+and never a DuckDB number: the two weekly reports defer with no ledger row;
+the Monday goals job asks its one routed read before it writes anything, so
+it defers whole; training is skipped and the previous model stands; the
+search index and the buyers step skip their step for the tick with the
+watermark held, and the tick goes on; the boot contains each of those; and
+the assistant's tools return a named `data_unavailable` result. A job says
+so in its result through `answered`, below, so `/api/jobs` shows a refusal
+rather than a quiet run — all but the incremental sync, whose buyers step
+is still answered by `sync_missing_buyers`' broad handler and so shows its
+refusal only in the log and in `refusals()`. The consumers are derived, not remembered —
+`tests/unit/test_read_fallback_consumers.py` walks up from every refusal to
+the entry points nothing in the repository calls (`NON_HTTP_CONSUMERS`), then
+back down through the `try` each call sits in, and pins where every
+consumer's refusal stops (`ANSWERS`): a refusal that could leave one as an
+exception, or a new handler on the way, fails it. A handler that answers
+rather than raises may live only in a function no HTTP route reaches but
+the assistant's two (`POST /api/chat`, `GET /api/chat/stream`), which answer
+inside the conversation; anywhere else it would take that route's 503 away.
 
 AN UNKNOWN VALUE DOES NOT STOP WEB
 
@@ -296,6 +309,29 @@ def no_address(surface: str, switch: Any) -> None:
     line = _unaddressed(switch.ENV)
     if line:
         _refuse(surface, line, None)
+
+
+READ_UNAVAILABLE = "read_unavailable"
+
+
+def answered(consumer: str, exc: ReadUnavailable, answer: str) -> Dict[str, str]:
+    """`consumer` received a refusal the 503 handler will not answer — no
+    HTTP request is waiting for it, or (the assistant) the request is a
+    conversation and the answer goes inside it — and answered it itself
+    (DN-20c). Returns the fields its result carries.
+
+    `consumer` names the caller as a reader of the job list would —
+    `weekly_report`, `revenue_prediction` — and `answer` says in words what
+    it did instead of reading DuckDB: deferred, kept the previous model,
+    skipped the step. The refusal itself was logged at ERROR and counted
+    where it was raised (`read_fallback_mode.refused`), so this line says
+    only what became of it, at WARNING, and never the phrase the soak greps
+    for. The returned `{"reason", "surface"}` goes into the consumer's own
+    result, so `/api/jobs` history shows a refusal rather than a quiet run.
+    """
+    logger.warning("refused read answered by %s (%s): %s",
+                   consumer, exc.surface, answer)
+    return {"reason": READ_UNAVAILABLE, "surface": exc.surface}
 
 
 def counts() -> Dict[str, Dict[str, object]]:

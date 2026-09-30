@@ -112,6 +112,14 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_WAREHOUSE set to a value web did not understand (ran as duckdb,
     # DN-28). Not a stop: web is the only syncer.
     "warehouse_mode_invalid": _c("web restarts with a valid KS_WRITE_WAREHOUSE"),
+    # KS_WRITE_WAREHOUSE=postgres with a precondition of the switch unmet: web
+    # runs as duckdb (DN-29, OD-09 (b)) — never a raise, web is the only syncer.
+    "warehouse_preconditions_unmet": _c(
+        "web restarts with every precondition met, or with KS_WRITE_WAREHOUSE unset"),
+    # The way back from KS_WRITE_WAREHOUSE=postgres holding the DuckDB checks
+    # down past the canary's limit: a UTM parse that keeps raising, or no tick
+    # after a full one whose parse raised (DN-29).
+    "warehouse_hold_stuck": _c("a validated full DuckDB tick and a finished UTM parse"),
     # KS_UTM_PARSE set to a value web did not understand, or to postgres
     # without KS_PG_DERIVE=own; ran as duckdb, the ship as before (DN-19).
     "utm_parse_mode_invalid": _c(
@@ -761,6 +769,47 @@ class AlertGate:
         `take_resolved` can take. A copy; reading it changes nothing."""
         return {key: entry.get("group") for key, entry in self._delivered.items()}
 
+    def mark_delivered(
+        self, group: str, mark: str, keys: "Sequence[str]", *, complete: bool,
+        now: "float | None" = None,
+    ) -> None:
+        """Say which of `group`'s delivered conditions one emitter inside it
+        was still reporting on its last pass: `mark` goes on each of `keys`
+        delivered under `group`. With `complete` the emitter reached a verdict
+        on everything it reports, so the mark comes off the group's other
+        entries — it verified those clear; without, marks are only added.
+
+        For a group whose emitters share condition names, where the key alone
+        cannot say whose page it is. The mark lives on the entry, so it is
+        persisted with it and goes with it when `take_resolved` pops it; an
+        entry `restore_delivered` puts back carries none, correctly — it was
+        taken because nothing in the run was reporting it."""
+        now = _time.time() if now is None else now
+        wanted = set(keys)
+        changed = False
+        for key, entry in self._delivered.items():
+            if entry.get("group") != group:
+                continue
+            marks = set(entry.get("marks") or ())
+            if key in wanted:
+                marks.add(mark)
+            elif complete:
+                marks.discard(mark)
+            else:
+                continue
+            if sorted(marks) != sorted(entry.get("marks") or ()):
+                entry["marks"] = sorted(marks)
+                changed = True
+        if changed:
+            self._dirty = True
+            self._save(now, force=True)
+
+    def delivered_marked(self, mark: str) -> "Dict[str, str | None]":
+        """`{condition_key: group}` for every delivered, unresolved condition
+        carrying `mark`. A copy; reading it changes nothing."""
+        return {key: entry.get("group") for key, entry in self._delivered.items()
+                if mark in (entry.get("marks") or ())}
+
     def take_resolved(
         self, group: str, still_firing: "Sequence[str]" = (),
         *, now: "float | None" = None, only_prefix: "str | None" = None,
@@ -807,6 +856,18 @@ def delivered_conditions() -> "Dict[str, str | None]":
     each was delivered under: what a `resolve_group` could announce. Local
     state, no I/O."""
     return _gate.delivered_groups()
+
+
+def mark_delivered(group: str, mark: str, keys: "Sequence[str]", *,
+                   complete: bool) -> None:
+    """`AlertGate.mark_delivered` on this process's gate. Local state."""
+    _gate.mark_delivered(group, mark, keys, complete=complete)
+
+
+def delivered_marked(mark: str) -> "Dict[str, str | None]":
+    """This process's delivered, unresolved conditions carrying `mark`, and
+    the group each was delivered under. Local state, no I/O."""
+    return _gate.delivered_marked(mark)
 
 
 async def raise_alert(
@@ -937,7 +998,7 @@ def _age(seconds: float) -> str:
 
 async def resolve_group(
     group: str, still_firing: "Sequence[str]" = (),
-    *, only_prefix: "str | None" = None,
+    *, only_prefix: "str | None" = None, note: "str | None" = None,
 ) -> int:
     """Announce that a group's delivered conditions have cleared.
 
@@ -947,6 +1008,10 @@ async def resolve_group(
     only conditions whose fired notice reached someone are in the map, so
     "✅ resolved" can never be the first a human hears of a condition. One
     notice per fired-cycle: taking a key out of the map is the idempotence.
+
+    `note` is one more line under the list, for a resolve whose reason is not
+    a healthy pass — the warehouse group closed by the switch that retires its
+    only resolver (`core.warehouse_cutover.settle_writer`).
 
     Returns admins reached (0: nothing to resolve, or nothing deliverable).
     """
@@ -963,6 +1028,8 @@ async def resolve_group(
         for key, first in sorted(taken.items())
     ]
     text = "✅ Resolved:\n" + "\n".join(lines)
+    if note:
+        text += "\n" + note
 
     # The ledger first, the notice second. A resolve whose fire-and-forget
     # write missed its one-second budget left the series firing for good —

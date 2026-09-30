@@ -174,3 +174,26 @@ def _never_the_real_chain_latch(monkeypatch, tmp_path):
 
     monkeypatch.setattr(chain_latch, "MARKER_DIR", tmp_path / "write-chain-owners")
     monkeypatch.setattr(chain_latch, "_latched", None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _a_fresh_warehouse_writer(monkeypatch):
+    """Every test starts as a process that has read nothing and settled
+    nothing about the warehouse writer (DN-29).
+
+    `core/warehouse_cutover.py` caches, per process, the mode, the verdict on
+    its preconditions and what `settle_writer` found — including the hold that
+    stands the DuckDB checks down on the way back from Postgres. One test that
+    reached `init_and_sync` over a store recording `postgres` would otherwise
+    leave every later integrity scan in the session standing down. Put back
+    afterwards by monkeypatch, so a test's own setattr still wins inside it.
+    """
+    from core import warehouse_cutover as wc
+
+    for name, value in (("_value", None), ("_mode", None), ("_mode_error", None),
+                        ("_unmet", ()), ("_value_unmet", ()), ("_decided_for", None),
+                        ("_settled", False),
+                        ("_held", False), ("_held_since", None), ("_full_validated", False),
+                        ("_reclassify_needed", False),
+                        ("_writer_record", None), ("_settle_lock", None)):
+        monkeypatch.setattr(wc, name, value)

@@ -1509,7 +1509,8 @@ def check_internal_integrity(
     theirs "✅ Resolved" with nobody looking, so the switch does not happen
     while one is open (`retired_conditions_clear` in
     `core.warehouse_cutover`, which says why holding them was the worse
-    answer). Empty in this build.
+    answer). Empty unless `KS_WRITE_WAREHOUSE=postgres` switched with every
+    precondition met, or the way back is still holding (DN-29).
 
     Cheap by design: only DB scans, no external I/O. Suitable for running
     every few hours alongside the heavier reconciliation job.

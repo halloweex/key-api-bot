@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
+from core import warehouse_cutover
 from core.pg_utm_parse import reparse_router
 from web.services import dashboard_service
 from web.routes.auth import require_admin
@@ -207,6 +208,12 @@ async def refresh_traffic_data(
     """Force refresh UTM and traffic layers (admin only)."""
     store = await get_store()
 
+    if not warehouse_cutover.duckdb_derives():
+        # KS_WRITE_WAREHOUSE=postgres (DN-29): Postgres alone parses.
+        parsed = await _parse_in_postgres_alone(store, full=False, door="Refresh")
+        return {"success": True, "utm_orders_parsed": int(parsed.get("parsed") or 0),
+                "engine": "postgres"}
+
     try:
         utm_count = len(await store.refresh_utm_silver_layer())
         # And on to Postgres, which is what the tab reads. These endpoints do
@@ -264,8 +271,17 @@ async def reclassify_traffic(
     the end: shipped from DuckDB by `ship_after_reparse`, or under
     KS_UTM_PARSE=postgres re-parsed by `parse_full` in one transaction. So the
     window is invisible from the screen rather than merely short.
+
+    Under KS_WRITE_WAREHOUSE=postgres (DN-29) DuckDB is neither emptied nor
+    re-parsed: `parse_full` is the whole of the work, and the record notes it
+    so the way back re-parses DuckDB's verdicts too.
     """
     store = await get_store()
+
+    if not warehouse_cutover.duckdb_derives():
+        parsed = await _parse_in_postgres_alone(store, full=True, door="Reclassify")
+        return {"success": True, "utm_records": int(parsed.get("rows") or 0),
+                "engine": "postgres"}
 
     try:
         async with store.connection() as conn:
@@ -288,6 +304,35 @@ async def reclassify_traffic(
     except Exception as e:
         logger.error(f"Traffic reclassify failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Reclassify failed: {e}")
+
+
+async def _parse_in_postgres_alone(store, *, full: bool, door: str) -> dict:
+    """A door's re-parse under KS_WRITE_WAREHOUSE=postgres (DN-29): Postgres
+    alone, because DuckDB derives no UTM verdict there and a DuckDB failure
+    must not stand between the operator and the table /traffic reads. The
+    router's answer is then the door's answer — there is no DuckDB half that
+    succeeded for it to report instead — so an error is a 500 and a refused
+    full parse a 409. `full` is the reclassify's: noted in the recorded writer
+    first (`warehouse_cutover.note_utm_reparsed_in_postgres`), a note DuckDB
+    fails to take logged and never in the way."""
+    if full:
+        try:
+            await warehouse_cutover.note_utm_reparsed_in_postgres(store)
+        except Exception as exc:  # noqa: BLE001 — the retired engine; logged
+            logger.error(
+                "%s: DuckDB did not take the note that its UTM verdicts are now "
+                "older than the rules; the way back will not re-parse them: %s",
+                door, exc, exc_info=True)
+    parsed = await reparse_router(store, full=full)
+    if "error" in parsed or "skipped" in parsed:
+        raise HTTPException(
+            status_code=500,
+            detail=f"{door} failed in Postgres: "
+                   f"{parsed.get('error') or parsed.get('skipped')}")
+    if "refused" in parsed:
+        raise HTTPException(status_code=409,
+                            detail=f"{door} refused in Postgres: {parsed['refused']}")
+    return parsed
 
 
 _backfill_status: dict = {"running": False, "result": None}
@@ -491,15 +536,26 @@ async def _run_backfill_inner(days: int):
             ).fetchone()[0]
         logger.info(f"UTM backfill: {remaining_null} orders still have NULL mc (was {null_count})")
 
-        utm_count = len(await store.refresh_utm_silver_layer())
-        # And on to Postgres, which is what the tab reads. These endpoints do
-        # not mark the warehouse dirty, so without this the reclassification
-        # sits in DuckDB until the next dirty tick while the page keeps
-        # rendering the previous one. Not `full`: this run only adds comments,
-        # and under KS_UTM_PARSE=postgres the incremental parse reads them
-        # out of `bronze.orders`, where `ship_orders_by_id` put them above.
-        # Never raises — see `core/pg_utm_parse.py`.
-        await reparse_router(store)
+        pg_parse_error = None
+        if warehouse_cutover.duckdb_derives():
+            utm_count = len(await store.refresh_utm_silver_layer())
+            # And on to Postgres, which is what the tab reads. These endpoints
+            # do not mark the warehouse dirty, so without this the
+            # reclassification sits in DuckDB until the next dirty tick while
+            # the page keeps rendering the previous one. Not `full`: this run
+            # only adds comments, and under KS_UTM_PARSE=postgres the
+            # incremental parse reads them out of `bronze.orders`, where
+            # `ship_orders_by_id` put them above. Never raises — see
+            # `core/pg_utm_parse.py`.
+            await reparse_router(store)
+        else:
+            # KS_WRITE_WAREHOUSE=postgres (DN-29): Postgres alone parses what
+            # the chunks above shipped; DuckDB derives no verdict. Its answer
+            # is this run's, and a parse that failed makes the run partial —
+            # the next derivation's own parse picks the comments up anyway.
+            parsed = await reparse_router(store)
+            utm_count = int(parsed.get("parsed") or 0)
+            pg_parse_error = parsed.get("error") or parsed.get("skipped")
 
         logger.info(f"UTM backfill complete: {utm_count} UTM records")
 
@@ -507,7 +563,8 @@ async def _run_backfill_inner(days: int):
             # `partial` rather than `success` when anything failed to ship:
             # DuckDB and Postgres disagree about those orders until somebody
             # re-ships them, and a green status is how that gets forgotten.
-            "status": "partial" if pg_failed_ids else "success",
+            "status": "partial" if pg_failed_ids or pg_parse_error else "success",
+            **({"pg_parse_error": pg_parse_error} if pg_parse_error else {}),
             "orders_missing_before": null_count,
             "orders_remaining_null": remaining_null,
             "api_fetched": api_fetched_total,

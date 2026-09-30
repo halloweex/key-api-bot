@@ -291,18 +291,28 @@ async def backfill_mirror_expenses(
 async def get_warehouse_status(request: Request):
     """Get warehouse layer (Silver/Gold) status and last refresh info."""
     store = await get_store()
-    status = await store.get_warehouse_status()
-    # Under KS_PG_DERIVE=own Postgres derives on its own signal, and a status
-    # page that showed only DuckDB's refreshes would describe the engine the
-    # dashboard is leaving.
     from core import pg_derivation, warehouse_cutover
 
-    if pg_derivation.owns():
-        status = {**status, "postgres": await _pg_derivation_status()}
-    # Step 13's readiness (DN-28): KS_WRITE_WAREHOUSE as this process read it,
-    # and every precondition of the switch still unmet, each by name. Published
-    # whatever the mode — the list is what a person reads before the flip, and
-    # the switch itself is not in this build.
+    if warehouse_cutover.writes_postgres():
+        # Postgres alone derives (KS_WRITE_WAREHOUSE=postgres, DN-29): the
+        # Postgres block leads, and DuckDB's last refresh — as old as the
+        # switch — is nested and named for what it is, never the top-level
+        # answer an operator reads as the warehouse's state.
+        status = {"writer": warehouse_cutover.POSTGRES,
+                  "postgres": await _pg_derivation_status(),
+                  "duckdb_frozen": await store.get_warehouse_status()}
+    else:
+        status = await store.get_warehouse_status()
+        # Under KS_PG_DERIVE=own Postgres derives on its own signal, and a
+        # status page that showed only DuckDB's refreshes would describe the
+        # engine the dashboard is leaving.
+        if pg_derivation.owns():
+            status = {**status, "postgres": await _pg_derivation_status()}
+    # Step 13's readiness (DN-28, DN-29): KS_WRITE_WAREHOUSE as this process
+    # read it, what settling the writer found, and every precondition of the
+    # switch still unmet, each by name. Published whatever the mode — the list
+    # is what a person reads before the flip, and after it what a restart
+    # would need to stay switched.
     try:
         cutover = await warehouse_cutover.readiness()
     except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
@@ -360,16 +370,24 @@ async def refresh_warehouse(
     admin: dict = Depends(require_admin),
 ):
     """Manually trigger warehouse layer refresh (Silver -> Gold). Requires admin."""
+    from core import warehouse_cutover
     from core.scheduler import get_scheduler
 
-    store = await get_store()
-    # Under the heavy-job lock, like the two-minute job that runs the same
-    # code. Without it a manual refresh interleaved with the scheduled one:
-    # a validation reading Bronze/Silver across the other's commits reported
-    # a correct rebuild as failed, and the two raced each other's fired and
-    # resolved notices for the same alert group.
-    async with get_scheduler()._heavy_job_lock:
-        result = await store.refresh_warehouse_layers(trigger="manual")
+    if warehouse_cutover.duckdb_derives():
+        store = await get_store()
+        # Under the heavy-job lock, like the two-minute job that runs the same
+        # code. Without it a manual refresh interleaved with the scheduled one:
+        # a validation reading Bronze/Silver across the other's commits reported
+        # a correct rebuild as failed, and the two raced each other's fired and
+        # resolved notices for the same alert group.
+        async with get_scheduler()._heavy_job_lock:
+            result = await store.refresh_warehouse_layers(trigger="manual")
+    else:
+        # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB no longer derives, and
+        # the lever is the Postgres derivation below — own is a precondition
+        # of the switch, so it always runs here.
+        result = {"status": "skipped", "trigger": "manual",
+                  "reason": "KS_WRITE_WAREHOUSE=postgres: DuckDB does not derive"}
     # The lever every Silver/Gold alert names. Under KS_PG_DERIVE=own it
     # rebuilds the Postgres layers too — otherwise it would repair the engine
     # the dashboard no longer reads and leave the one it does as it was.
@@ -390,28 +408,36 @@ async def rebuild_silver_from_scratch(
     DROP + CREATE + INSERT silver_orders from bronze. Bypasses MVCC —
     use when silver has corrupted rows blocking DELETE+INSERT rebuild.
     """
+    from core import warehouse_cutover
     from core.duckdb_store import (
         SILVER_ORDERS_DDL, silver_select_sql, silver_pass2_sql,
     )
 
-    store = await get_store()
+    if not warehouse_cutover.duckdb_derives():
+        # KS_WRITE_WAREHOUSE=postgres (DN-29): DuckDB's Silver is frozen on
+        # purpose, and rebuilding it would hand no tick anything to validate —
+        # the refresh job is not registered. The Postgres half below still runs.
+        result = {"status": "skipped",
+                  "reason": "KS_WRITE_WAREHOUSE=postgres: DuckDB does not derive"}
+    else:
+        store = await get_store()
 
-    async with store.connection() as conn:
-        conn.execute("DROP TABLE IF EXISTS silver_orders")
-        conn.execute(SILVER_ORDERS_DDL)
-        conn.execute(f"INSERT INTO silver_orders SELECT {silver_select_sql()} FROM orders o")
-        conn.execute(silver_pass2_sql())
-        count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
-        max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
+        async with store.connection() as conn:
+            conn.execute("DROP TABLE IF EXISTS silver_orders")
+            conn.execute(SILVER_ORDERS_DDL)
+            conn.execute(f"INSERT INTO silver_orders SELECT {silver_select_sql()} FROM orders o")
+            conn.execute(silver_pass2_sql())
+            count = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
+            max_date = conn.execute("SELECT MAX(order_date) FROM silver_orders").fetchone()[0]
 
-    logger.info(f"Rebuilt silver_orders from scratch: {count} rows, max_date={max_date}")
-    # DROP/CREATE/INSERT are autocommit statements on purpose (this endpoint
-    # exists to bypass the transactional path when Silver is already
-    # misbehaving), so an INSERT that dies leaves Silver empty. Marking dirty
-    # hands the result to the next refresh tick, which validates it and, if it
-    # is half-done, rebuilds it.
-    await store.mark_warehouse_dirty(None)
-    result = {"status": "ok", "silver_rows": count, "max_order_date": str(max_date)}
+        logger.info(f"Rebuilt silver_orders from scratch: {count} rows, max_date={max_date}")
+        # DROP/CREATE/INSERT are autocommit statements on purpose (this endpoint
+        # exists to bypass the transactional path when Silver is already
+        # misbehaving), so an INSERT that dies leaves Silver empty. Marking dirty
+        # hands the result to the next refresh tick, which validates it and, if it
+        # is half-done, rebuilds it.
+        await store.mark_warehouse_dirty(None)
+        result = {"status": "ok", "silver_rows": count, "max_order_date": str(max_date)}
     from core import pg_derivation
 
     if pg_derivation.owns():

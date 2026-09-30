@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
+from core import read_fallback
 from core.duckdb_store import get_store
 from core.meilisearch_client import get_meili_client
 from core.observability import get_logger
@@ -14,6 +15,11 @@ from core.observability import get_logger
 logger = get_logger(__name__)
 
 DEFAULT_TZ = ZoneInfo("Europe/Kyiv")
+
+# The tool result a refused read becomes (DN-20c): `error` carries this name,
+# so the model — and a reader of the stream — can tell "the store could not
+# be read" from a tool that failed for any other reason.
+DATA_UNAVAILABLE = "data_unavailable"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -573,6 +579,22 @@ async def execute_tool(name: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             return {"error": f"Unknown tool: {name}"}
 
+    except read_fallback.ReadUnavailable as exc:
+        # Under KS_READ_FALLBACK=off a read DuckDB would have answered is
+        # refused instead (DN-20c). A tool runs inside a conversation, where
+        # a 503 cannot be sent, so the model is told in a result of its own
+        # — named, so it says the numbers are unavailable rather than
+        # retrying or estimating them, and never a store's older figures.
+        answer = read_fallback.answered(
+            "assistant", exc, f"tool {name} returned data_unavailable")
+        return {
+            "error": DATA_UNAVAILABLE,
+            "surface": answer["surface"],
+            "message": (
+                "These numbers cannot be read right now: the analytics "
+                "store is unavailable. Tell the user so. Do not estimate "
+                "them or use figures from earlier in the conversation."),
+        }
     except Exception as e:
         logger.error(f"Tool execution error ({name}): {e}")
         return {"error": str(e)}

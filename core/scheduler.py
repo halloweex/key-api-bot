@@ -255,6 +255,12 @@ class BackgroundScheduler:
 
         configure_modes()
 
+        # What a change of warehouse writer owes (DN-29), settled before a job
+        # is registered — web's boot sync has already done it, so this is a
+        # no-op there; a scheduler started elsewhere, or a boot whose settle
+        # raised, gets it here. Never fatal: the next derivation tick tries again.
+        await self._settle_warehouse_writer()
+
         # Register jobs
         await self._register_jobs()
 
@@ -265,6 +271,18 @@ class BackgroundScheduler:
 
         await self._schedule_catchup_runs()
         await self._replicate_classification_once()
+
+    @staticmethod
+    async def _settle_warehouse_writer() -> None:
+        """`warehouse_cutover.settle_writer`, never raising."""
+        from core import warehouse_cutover
+
+        try:
+            from core.duckdb_store import get_store
+
+            await warehouse_cutover.settle_writer(await get_store())
+        except Exception as e:
+            logger.error("Warehouse writer not settled: %s", e, exc_info=True)
 
     async def _replicate_classification_once(self) -> None:
         """Copy the manager classification to Postgres, once, at startup.
@@ -554,16 +572,27 @@ class BackgroundScheduler:
 
         # Job: Warehouse refresh (every 2 minutes, picks up dirty flag)
         # Decoupled from sync — sync writes Bronze + sets dirty flag,
-        # this job rebuilds Silver/Gold independently
-        self._add_job(
-            job_id="warehouse_refresh",
-            name="Warehouse Refresh",
-            description="Rebuild Silver/Gold layers when dirty flag is set",
-            func=self._run_warehouse_refresh,
-            trigger=IntervalTrigger(minutes=2),
-            max_instances=1,
-            coalesce=True,
-        )
+        # this job rebuilds Silver/Gold independently.
+        #
+        # DuckDB's derivation, so not registered while Postgres alone derives
+        # (KS_WRITE_WAREHOUSE=postgres, DN-29). The mode is cached before this
+        # runs, and never changes in a process.
+        from core import warehouse_cutover
+
+        if warehouse_cutover.duckdb_derives():
+            self._add_job(
+                job_id="warehouse_refresh",
+                name="Warehouse Refresh",
+                description="Rebuild Silver/Gold layers when dirty flag is set",
+                func=self._run_warehouse_refresh,
+                trigger=IntervalTrigger(minutes=2),
+                max_instances=1,
+                coalesce=True,
+            )
+        else:
+            logger.warning(
+                "warehouse_refresh not registered: KS_WRITE_WAREHOUSE=postgres — "
+                "Postgres alone derives Silver and Gold")
 
         # Job: Daily DuckDB backup (A9-1) at a low-traffic hour.
         # Holds the store lock briefly for a consistent CHECKPOINT+copy.
@@ -1139,10 +1168,21 @@ class BackgroundScheduler:
             with correlation_context() as corr_id:
                 logger.info("Starting revenue prediction training job")
 
+                from core import read_fallback
                 from core.prediction_service import get_prediction_service
                 service = get_prediction_service()
 
-                result = await service.train(sales_type="retail")
+                # Under KS_READ_FALLBACK=off the training input may be refused
+                # rather than read from DuckDB (DN-20c). The refusal is the
+                # first read `train` makes, so nothing was fitted, saved or
+                # predicted: the previous model keeps serving, and tomorrow's
+                # 03:30 run asks again.
+                try:
+                    result = await service.train(sales_type="retail")
+                except read_fallback.ReadUnavailable as exc:
+                    return {"status": "skipped", **read_fallback.answered(
+                        "revenue_prediction", exc,
+                        "training skipped, the previous model is kept")}
 
                 logger.info(
                     "Revenue prediction job complete",
@@ -1167,8 +1207,25 @@ class BackgroundScheduler:
             # falls back to a hard-coded 0.10). Nothing read the b2b rows as
             # b2b: a b2b caller got the same shared rows. Until sales_type is
             # part of the keys, the shared rows mean retail.
+            #
+            # The suggestions come FIRST, and that order is the whole of
+            # DN-20c here. They are the only read in this job that goes
+            # through a router (`/goals`' own), so under KS_READ_FALLBACK=off
+            # they are the only one that can be refused — and they write
+            # nothing and read neither table the other two write. Asked
+            # after `calculate_seasonality_indices`, a refusal left the new
+            # `seasonal_indices` beside last week's `growth_metrics`; asked
+            # first, it defers the whole job with nothing written.
+            from core import read_fallback
+            try:
+                retail_goals = await store.calculate_suggested_goals(
+                    sales_type="retail", growth_factor=1.10)
+            except read_fallback.ReadUnavailable as exc:
+                return {"skipped": True, **read_fallback.answered(
+                    "seasonality_calc", exc,
+                    "nothing written; seasonal_indices and growth_metrics "
+                    "keep their previous values")}
             retail_indices = await store.calculate_seasonality_indices("retail")
-            retail_goals = await store.calculate_suggested_goals(sales_type="retail", growth_factor=1.10)
             await store.calculate_yoy_growth("retail")
 
             result = {
@@ -1220,7 +1277,17 @@ class BackgroundScheduler:
                     return {"skipped": True, "reason": "Meilisearch not available"}
 
                 sync_service = await get_sync_service()
-                stats = await sync_service.sync_to_meilisearch()
+                # Under KS_READ_FALLBACK=off the index's read may be refused
+                # rather than served from DuckDB (DN-20c). The refusal comes
+                # before anything is indexed or the watermark moves, so the
+                # step is skipped whole and the next tick asks again.
+                from core import read_fallback
+                try:
+                    stats = await sync_service.sync_to_meilisearch()
+                except read_fallback.ReadUnavailable as exc:
+                    return {"skipped": True, **read_fallback.answered(
+                        "meilisearch_sync", exc,
+                        "index not refreshed this tick, watermark held")}
 
                 logger.debug(
                     "Meilisearch sync job complete",
@@ -1251,6 +1318,16 @@ class BackgroundScheduler:
 
     async def _run_warehouse_refresh(self) -> Dict[str, Any]:
         """Check dirty flag and rebuild Silver/Gold if needed."""
+        from core import warehouse_cutover
+
+        # Not registered under KS_WRITE_WAREHOUSE=postgres; this is the second
+        # half of that, for a call that finds its way here anyway. Before the
+        # peek: nothing of DuckDB's flag is read or cleared.
+        if not warehouse_cutover.duckdb_derives():
+            return {"skipped": True, "reason": "KS_WRITE_WAREHOUSE=postgres"}
+        # A no-op once settled; the retry for a boot whose settle raised, before
+        # the first rebuild could run over a flag the way back had to mark.
+        await self._settle_warehouse_writer()
         async with self._heavy_job_lock:
             from core.duckdb_store import get_store
             store = await get_store()
@@ -1487,6 +1564,12 @@ class BackgroundScheduler:
 
         if not derivation.owns():
             return {"skipped": True, "reason": "KS_PG_DERIVE is not own"}
+        # The warehouse writer, once more (DN-29): under KS_WRITE_WAREHOUSE=
+        # postgres this is the only job that ticks, so a boot and a start whose
+        # settle raised — or whose resolve the ledger refused — are retried
+        # here rather than at the next restart, which, if it is the way back,
+        # would find no record and owe DuckDB nothing. A no-op once settled.
+        await self._settle_warehouse_writer()
 
         async def read_signal():
             pool = await get_pool()
@@ -1921,7 +2004,7 @@ class BackgroundScheduler:
             # Postgres alone derives them (DN-28). Read once, so the scan and
             # `duckdb_looked` below agree on one answer: a check the scan
             # skipped is one the twins must stand in for, not compare against.
-            # Empty in this build — the switch is DN-29.
+            # Empty unless Postgres alone derives, or the way back holds (DN-29).
             from core.warehouse_cutover import stood_down_duckdb_checks
 
             stood_down = stood_down_duckdb_checks()
@@ -2171,14 +2254,29 @@ class BackgroundScheduler:
             # only change is that the checks that did complete are no longer
             # thrown away, and a CRITICAL among them still pages.
             raised: list = []
+            # What the comparisons DN-29 retires reported, and which reached a
+            # verdict: their Silver and UTM findings share `mirror_*` names
+            # with the comparisons that stay, so the job marks whose page is
+            # whose (`warehouse_cutover.note_comparisons_reported`).
+            from core import warehouse_cutover
+
+            retired_reported: set = set()
+            retired_verdicts: set = set()
 
             async def check(name, run):
                 nonlocal issues
                 try:
-                    issues += await run()
+                    found = await run()
                 except Exception as exc:  # noqa: BLE001 — recorded and named
                     raised.append(f"{name}: {type(exc).__name__}: {exc}")
                     logger.exception("Mirror reconciliation check %s raised", name)
+                    return
+                issues += found
+                if name in warehouse_cutover.RETIRED_COMPARISONS:
+                    retired_verdicts.add(name)
+                    retired_reported.update(
+                        i.check_name for i in found
+                        if i.severity == Severity.CRITICAL)
 
             try:
                 # The DuckDB read and the Postgres round-trips are deliberately
@@ -2194,16 +2292,28 @@ class BackgroundScheduler:
                 # and that interleaves the two stores — so it takes the store
                 # and manages its own short acquisitions.
                 await check("reconcile_orders", lambda: reconcile_orders(store))
+                # The three comparisons that set DuckDB's Silver, Gold and UTM
+                # against Postgres' stand down while Postgres alone derives
+                # them (KS_WRITE_WAREHOUSE=postgres, DN-29) — DuckDB's copies
+                # are as old as the switch, and after a Sunday compaction
+                # empty — and while the way back is still owed its first
+                # validated full DuckDB tick. The last run ids where they
+                # found zero are the final independent proof of the parallel
+                # period; `pg_gold_internal_check` below keeps the one Gold
+                # question that needs no DuckDB.
+                duckdb_compared = not warehouse_cutover.warehouse_checks_stand_down()
                 # And the two computations of Silver. Same layer: it is the
                 # same question — do the stores agree — asked one level up.
-                await check("reconcile_silver", lambda: reconcile_silver(store))
+                if duckdb_compared:
+                    await check("reconcile_silver", lambda: reconcile_silver(store))
                 # And the UTM classification beside it — the one Silver object
                 # Postgres is shipped rather than computes, so a difference is
                 # a defect in the shipper and not in a projection. Read whole
                 # rather than fingerprinted: the table is almost all text, and
                 # a campaign renamed to another name of the same length moves
                 # no number and no length. Revision 0018.
-                await check("reconcile_order_utm", lambda: reconcile_order_utm(store))
+                if duckdb_compared:
+                    await check("reconcile_order_utm", lambda: reconcile_order_utm(store))
                 # And whether every order the parser reads has a current
                 # verdict at all (DN-16). The comparison above cannot see an
                 # order both copies lack, and has nothing to compare once the
@@ -2228,15 +2338,13 @@ class BackgroundScheduler:
                 # own. (An exception here used to skip every check below it;
                 # see `check` — the layer still has one age and the run is still
                 # failed, but the checks below still run and still page.)
-                await check("reconcile_gold", lambda: reconcile_gold(store))
-                # And, while Postgres alone derives the warehouse, the roll-up
-                # question asked of Postgres by itself (DN-28): `reconcile_gold`
-                # leaves it out on the same predicate, so it is asked once and
-                # needs no DuckDB read. Never true in this build — the switch
-                # is DN-29 — so production runs exactly the checks above.
-                from core import warehouse_cutover
-
-                if warehouse_cutover.writes_postgres():
+                if duckdb_compared:
+                    await check("reconcile_gold", lambda: reconcile_gold(store))
+                else:
+                    # And, while the comparison stands down, the roll-up
+                    # question asked of Postgres by itself (DN-28): it rode
+                    # `compare_gold`, so it is asked once a run either way and
+                    # needs no DuckDB read.
                     from core.mirror_reconciliation import pg_gold_internal_check
                     await check("pg_gold_internal_check", lambda: pg_gold_internal_check())
                 # And the five tables that are neither landing nor computed —
@@ -2338,6 +2446,17 @@ class BackgroundScheduler:
                                 if i.severity == Severity.CRITICAL],
                     evidence=evidence_for_agent(MIRROR_LAYER, issues, run_id=run_id),
                 )
+            # After the page is delivered, so a page this run delivered is
+            # marked too. Only a run in which the retired comparisons ran:
+            # one where they stood down knows nothing about their pages.
+            if retired_verdicts:
+                try:
+                    warehouse_cutover.note_comparisons_reported(
+                        retired_reported,
+                        complete=retired_verdicts == set(
+                            warehouse_cutover.RETIRED_COMPARISONS))
+                except Exception as e:  # noqa: BLE001 — the next run marks again
+                    logger.warning(f"Mirror reconciliation: pages not marked: {e}")
             await self._resolve_dq_layer(MIRROR_LAYER, issues, error_message)
 
             result = {
@@ -3441,6 +3560,7 @@ class BackgroundScheduler:
         """
         from datetime import datetime as _datetime
 
+        from core import read_fallback
         from core.config import ADMIN_USER_IDS, DASHBOARD_URL
         from core.duckdb_store import get_store
         from core.weekly_report import (
@@ -3471,15 +3591,26 @@ class BackgroundScheduler:
                     logger.debug("Weekly report for %s already sent", week)
                     return {"sent": False, "week": week, "reason": "already_sent"}
 
-            max_date = await warehouse_max_date(store)
-            if max_date is None or max_date < week_end:
-                logger.info(
-                    "Weekly report deferred: warehouse at %s, week ends %s",
-                    max_date, week_end,
-                )
-                return {"sent": False, "week": week, "reason": "warehouse_behind"}
+            # Under KS_READ_FALLBACK=off a read DuckDB would have answered is
+            # refused instead (DN-20c). Both reads come before the ledger
+            # write, so a refusal defers exactly like `warehouse_behind`: no
+            # row, and tomorrow's tick asks again. A report built from a store
+            # that has stopped being written cannot be recalled from anybody's
+            # phone.
+            try:
+                max_date = await warehouse_max_date(store)
+                if max_date is None or max_date < week_end:
+                    logger.info(
+                        "Weekly report deferred: warehouse at %s, week ends %s",
+                        max_date, week_end,
+                    )
+                    return {"sent": False, "week": week, "reason": "warehouse_behind"}
 
-            report = await build_report(store, today, sales_type)
+                report = await build_report(store, today, sales_type)
+            except read_fallback.ReadUnavailable as exc:
+                return {"sent": False, "week": week, **read_fallback.answered(
+                    "weekly_report", exc,
+                    f"week {week} deferred to tomorrow's tick, no ledger row")}
 
             if report.current.orders == 0:
                 logger.warning("Weekly report skipped: no orders in %s", week)
@@ -3628,6 +3759,7 @@ class BackgroundScheduler:
         """
         from datetime import datetime as _datetime
 
+        from core import read_fallback
         from core.config import DASHBOARD_URL
         from core.duckdb_store import get_store
         from core.traffic_report import (
@@ -3667,15 +3799,23 @@ class BackgroundScheduler:
 
             # Outside the block, for the weekly job's reason: the gate is
             # routed now and its DuckDB path takes the same non-reentrant lock.
-            max_date = await warehouse_max_date(store)
-            if max_date is None or max_date < week_end:
-                logger.info(
-                    "Traffic report deferred: warehouse at %s, week ends %s",
-                    max_date, week_end,
-                )
-                return {"sent": False, "week": week, "reason": "warehouse_behind"}
+            # A refusal under KS_READ_FALLBACK=off defers, as in the sales
+            # report: the tab's router would otherwise answer from DuckDB, and
+            # the ledger is written only after a delivery (DN-20c).
+            try:
+                max_date = await warehouse_max_date(store)
+                if max_date is None or max_date < week_end:
+                    logger.info(
+                        "Traffic report deferred: warehouse at %s, week ends %s",
+                        max_date, week_end,
+                    )
+                    return {"sent": False, "week": week, "reason": "warehouse_behind"}
 
-            report = await build_report(store, today, sales_type)
+                report = await build_report(store, today, sales_type)
+            except read_fallback.ReadUnavailable as exc:
+                return {"sent": False, "week": week, **read_fallback.answered(
+                    "traffic_report", exc,
+                    f"week {week} deferred to tomorrow's tick, no ledger row")}
 
             if report.orders == 0:
                 logger.warning("Traffic report skipped: no orders in %s", week)

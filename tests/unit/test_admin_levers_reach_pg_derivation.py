@@ -108,7 +108,7 @@ class TestStatus:
 class TestTheCutoverReadiness:
     """DN-28: step 13's readiness on the status page an admin already reads
     before a warehouse lever — the mode as read, and every unmet precondition
-    by name. Nothing is switched."""
+    by name. A readiness switches nothing."""
 
     def test_it_is_the_evaluators_answer(self, mode):
         mode(None)
@@ -118,7 +118,7 @@ class TestTheCutoverReadiness:
             body = TestStatus()._status(readiness=warehouse_cutover.readiness)
         cutover = body["cutover"]
         assert cutover["variable"] == "KS_WRITE_WAREHOUSE"
-        assert cutover["mode"] == "duckdb" and cutover["switch_built"] is False
+        assert cutover["mode"] == "duckdb" and cutover["switch_built"] is True
         keys = [u["key"] for u in cutover["unmet"]]
         assert keys and set(keys) <= set(cutover["preconditions"])
 

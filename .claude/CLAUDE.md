@@ -826,7 +826,7 @@ whole reason the group is read from the source now.
 
 | Job | Trigger | What it does |
 |---|---|---|
-| `warehouse_refresh` | every 2 min | Silver + Gold rebuild, validation, cell guard |
+| `warehouse_refresh` | every 2 min | Silver + Gold rebuild, validation, cell guard; not registered under `KS_WRITE_WAREHOUSE=postgres` |
 | `halfwritten_repair` | every 2 h | re-fetch orders with revenue and no line items |
 | `dq_integrity_check` | 01, 07, 13, 19 | DB-only scans: PK/FK/NULL/domain, cross-metric |
 | `dq_reconciliation` | 05:30 | compare 90 days against KeyCRM, per order — **all three stores** (DuckDB, PG, ClickHouse), one fetch; слои `reconciliation`, `reconciliation_pg`, `reconciliation_ch` |
@@ -2396,18 +2396,47 @@ somebody read the page. The trend's forecast
 overlay, which already degrades to "no forecast" on any failure, drops under
 a refusal and the chart answers; the forecast's own endpoint,
 `/api/revenue/forecast`, is not an overlay and answers 503 — it used to read
-an outage as "Forecast not available yet", a model nobody had trained. Everything else a refusal can reach is DN-20c's:
-the sync and its search index, training, the Monday goals job
-(`seasonality_calc`, which writes `seasonal_indices` before the read that
-refuses, so it must defer whole rather than half-write), the two weekly
-reports, the boot sync and the assistant. **That list is derived, not
-remembered** — `tests/unit/test_read_fallback_consumers.py` walks up from
-every `fall_back`/`no_address`/`no_engine` to the entry points nothing in the
-repository calls, and pins the ones no swept route answers (`NON_HTTP_CONSUMERS`,
-plus the five writing routes the sweep does not run); a new consumer fails it
-until somebody decides what it answers. A remembered list had missed the
-goals job. Until DN-20c lands a refusal reaching one of them is an exception
-like any other, so **`off` is not set before DN-20c ships**. An
+an outage as "Forecast not available yet", a model nobody had trained.
+
+**Everything else a refusal can reach answers it itself** (DN-20c), and
+never with a DuckDB number. The two weekly reports defer: no message, no
+ledger row, and tomorrow's tick asks again. The Monday goals job
+(`seasonality_calc`) asks its one routed read — the suggestions — *before*
+it writes `seasonal_indices`, so a refusal defers it whole instead of
+leaving new indices beside last week's `growth_metrics`. Training is skipped
+and the previous model stands; `_train_impl` lets the refusal through its
+`except Exception`, so `POST /api/revenue/forecast/train` answers 503 like
+every route rather than 200 `"status": "error"`. The search index and the
+buyers step skip their step for the tick with the watermark held, and the
+tick goes on to offers and stocks; the boot contains each of them. The
+assistant's tools return a named `data_unavailable` result, which is what
+the model reads instead of numbers. A job puts
+`{"reason": "read_unavailable", "surface"}` in its result
+(`read_fallback.answered`), so `/api/jobs` shows a refusal, not a quiet run —
+except the incremental sync, whose buyers step is still answered by
+`sync_missing_buyers`' own broad handler (chain 4's to change): its refusal
+shows only in the log and in `/api/health` `read_fallback_mode.refused`.
+Several of these never had a fallback — the weekly report, the training
+input, the buyers step and the index read Postgres or nothing — so for them
+a Postgres failure is still their own error, as before; `off` adds only the
+switch with no address. **That list is derived, not remembered** —
+`tests/unit/test_read_fallback_consumers.py` walks up from every
+`fall_back`/`no_address`/`no_engine` to the entry points nothing in the
+repository calls (`NON_HTTP_CONSUMERS`), then back down through the `try`
+each call sits in, and pins where every consumer's refusal stops
+(`ANSWERS`): a refusal that could leave one as an exception fails it, and a
+handler that answers rather than raises may sit only where no HTTP route
+reaches but the assistant's two, `POST /api/chat` and `GET /api/chat/stream`,
+which answer inside the conversation (`IN_BAND_ROUTES`). That rule first
+passed by not seeing those routes — `service.chat(...)` names a method two
+classes define — so the walk types an object by the annotated factory that
+made it, and pins every call it still leaves unresolved under the name of a
+function that reaches a refusal (`UNRESOLVED_NAMESAKES`). A remembered list
+had missed the goals job. One writing route still
+does not reach the 503: `POST /api/duckdb/sync-buyers` shares the buyers
+step, whose `except Exception` answers "Synced 0 buyers" — pinned in
+`UNSWEPT_STOPS` and left to chain 4, which rebuilds that step and that
+route. An
 unknown value **runs as `duckdb` and never raises** — web is the only syncer,
 so a crash loop over how a read degrades would stop order intake (OD-09); it
 publishes `read_fallback_mode.error` and the canary warns
@@ -2440,7 +2469,10 @@ return {}` was invisible to the static walk and to a hand-kept list of
 thirteen routes; the sweep finds it by the route. The static half checks
 every module `web/` imports: a handler that names `ReadUnavailable` must end
 in a bare `raise` or `raise <its name>` — `raise HTTPException(500)` turns a
-503 naming the surface into a 500 naming nothing.
+503 naming the surface into a 500 naming nothing. DN-20c's answers are the
+one exemption, by function: those pinned, each proved reached from the
+non-HTTP consumers and the assistant's routes alone, and each required to
+exist.
 
 ### A write flag is no longer a rollback
 
@@ -2733,38 +2765,107 @@ bounded at 5 s, and publishes the answer.
   KeyCRM once a minute. The DuckDB path is unchanged, a failure escaping it
   included.
 
-### Step 13 is published, not switched (DN-28)
+### Step 13: the switch is built, and not switched (DN-28, DN-29)
 
-`KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts once
-DuckDB stops: `duckdb` (default) or `postgres`. It is read in
-`configure_modes()`, before the boot sync, and **nothing in this build acts on
-it**: `postgres` is published and still runs as `duckdb`, because the switch
-itself — no DuckDB refresh, no dirty marks — is DN-29, and half of it would
-stand DuckDB's checks down while DuckDB went on deriving. An unknown value runs
-as `duckdb` and publishes the error on `/api/health` (`warehouse_writer_mode`),
-where the canary warns `warehouse_mode_invalid` — a typo costs nothing in this
-build, and the day it would is the flip; it never raises, since web is the only
-syncer.
+`KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts:
+`duckdb` (default) or `postgres`. It is read in `configure_modes()`, before
+the boot sync, and **production does not set it**. An unknown value runs as
+`duckdb` and publishes the error on `/api/health` (`warehouse_writer_mode`),
+where the canary warns `warehouse_mode_invalid`; it never raises, since web is
+the only syncer. After a flip the same typo is the way back, so it pages as
+one: `settle_writer`, finding `postgres` recorded, adds `value_understood` to
+the unmet preconditions, and the canary's CRITICAL carries the way-back lever.
 
-What the switch will need is in place and idle. `stood_down_duckdb_checks()`
-(`core/warehouse_cutover.py`) names the five DuckDB integrity checks over
-Silver, Gold and UTM; the scan skips them and `duckdb_looked` leaves them out,
-so the Postgres twins stand in — at the counts the DN-14 pairing record has
-been giving in shadow. `pg_gold_internal_check` asks `gold_rollup_mismatch` of
-Postgres alone in `dq_mirror_landing`, and `reconcile_gold` leaves it out on the
-same predicate, so it is asked once a run. Both are empty or unregistered while
-the mode is `duckdb`, which today is always.
+**What `postgres` does (DN-29)** — only when every precondition below holds;
+the verdict is reached once per process, the Postgres revision read on a
+connection of its own. DuckDB stops deriving: `warehouse_refresh` is not
+registered, every production call of `refresh_warehouse_layers` stands behind
+`duckdb_derives()` (a test walks `core/`, `web/`, `bot/`, `scripts/` and
+`deploy/` for one that does not), `mark_warehouse_dirty` is a no-op and the id
+list pending at the switch is abandoned, `POST /api/warehouse/refresh` and
+rebuild-silver run the Postgres derivation alone. The five DuckDB integrity
+checks over Silver, Gold and UTM stand down and the Postgres twins stand in;
+in `dq_mirror_landing` `reconcile_silver`, `reconcile_order_utm` and
+`reconcile_gold` stand down and `pg_gold_internal_check` asks
+`gold_rollup_mismatch` in `reconcile_gold`'s place. The first start records
+`sync_metadata.warehouse_writer` in DuckDB and closes the `warehouse` alert
+group once — its only resolver was the DuckDB tick — without a validating
+tick. **One precondition unmet and it runs as `duckdb`** (OD-09 (b)):
+`/api/health` lists the unmet keys under `warehouse_writer_mode` (keys only,
+the endpoint is public) and the canary pages `warehouse_preconditions_unmet`,
+CRITICAL — titled "Warehouse switch held back", since web serves throughout:
+a canary title says "Dashboard DOWN" only for the three keys that mean web
+did not answer or said it is unhealthy, and any other CRITICAL reads
+"Dashboard critical".
+
+**The way back costs a full DuckDB rebuild.** Unset the variable and
+`up -d web`: a start under `duckdb` that finds `postgres` recorded marks the
+warehouse dirty in full, before any job exists, and holds the stood-down
+checks and the three comparisons down until a full tick validates — the Silver
+they would read is as old as the switch, and an incremental rebuild over it
+would validate — and a UTM parse has finished, in that tick or a later one:
+the tick swallows a parse that raised and still reports a validated success,
+and `attribution_coverage` and `reconcile_order_utm` read what that parse
+left. Not a second full rebuild, which would rewrite Silver every two minutes
+for as long as the parser failed. The tick that completes both writes
+`duckdb` back. A hold that does not end — a parse that keeps raising, which
+the tick logs at WARNING and reports as a validated success, or a full tick
+whose parse raised with nothing dirty after it — is published as
+`held_for_s`, and past two hours the canary warns `warehouse_hold_stuck`.
+When DuckDB's
+`silver_order_utm` is empty (a Sunday compaction ran in between) it publishes
+`reclassify_needed`; the tick's own parse refills every commented order with
+no verdict, so `POST /api/traffic/reclassify` is the lever only if that parse
+fails. Every day spent under `postgres` is a day no independent derivation
+proves Postgres Silver/Gold, and that cannot be re-verified afterwards. The
+gate-stack rehearsal on the production backups — a container killed mid
+Postgres rebuild, the owed state surviving — runs on the host before any flip.
+
+**After a flip, a start with any precondition unmet IS the way back**, not
+only an operator's unset: the same full rebuild and hold, and the next start
+under `postgres` records a new `since` — the soak clock starts again — and
+closes the `warehouse` group again without a validating tick. The canary's
+lever says so first. So a Postgres read that failed (no answer in time, or an
+exception, a connection lost in the middle of the SELECT included — never an
+answer such as a wrong revision) is asked again before the verdict: three
+asks, 2 s and 5 s apart, at most 37 s, once per process. The revision is read
+strictly (`current_revision(strict=True)`): only a version table that is not
+there reads as "never migrated", where the default reads any failure so.
+The write-chain registry and the Alert Gate are read on the caller's thread,
+outside that bound, so a start that could not reach Postgres names
+`pg_revision` alone.
+
+**The UTM doors parse Postgres alone under `postgres`.** `POST
+/api/traffic/refresh`, `/traffic/reclassify`, the `manager_comment` backfill
+and `scripts/backfill_utm.py` neither empty nor re-parse DuckDB's
+`silver_order_utm`: a DuckDB parse that raised used to leave the Postgres
+reclassify — what /traffic reads — unrun behind a 500, and after a compaction
+each door re-parsed every order in DuckDB first. The Postgres answer is the
+door's (an error is a 500, a refused full parse a 409, a failed parse makes
+the backfill `partial`). The reclassify and the CLI note the re-parse in the
+recorded writer (`utm_reparsed_at`), and the way back then empties DuckDB's
+`silver_order_utm`, so the full tick it owes re-parses every verdict under
+the rules in force — an incremental parse would never notice a rule change on
+an order whose `updated_at` has not moved.
 
 `GET /api/warehouse/status` publishes `cutover`: the variable as read,
-`switch_built: false`, and every unmet precondition by name, from
-`evaluate_preconditions(env, facts)` — `KS_PG_DERIVE=own`, the twins on,
+`switch_built: true`, and every unmet precondition by name, from
+`evaluate_preconditions(env, facts)` — a `KS_WRITE_WAREHOUSE` this build
+understands, `KS_PG_DERIVE=own`, the twins on,
 `KS_UTM_PARSE=postgres`, `KS_READ_FALLBACK=off`, a DSN and the required
 revision, the landing mirror on, every Silver/Gold/UTM read switch on
 `postgres` (a test reads every string in `core/`, `web/` and `bot/` for a
 `KS_READ_*` or `KS_*_STORE` name, so a new one has to be put on the list or
 excluded by name — `KS_SMS_STORE` is read inline and the first walk missed
 it), cohorts on ClickHouse with `KS_CH_URL`, no write chain owning a table
-the goals bridge reads (DN-12), and **no delivered page open under a condition
+the goals bridge reads (DN-12), **no door OD-10 has not answered**
+(`od10_doors`: `OD10_DOORS` is every function in `web/` naming DuckDB's
+Silver, its order-lines view, Gold, UTM or an inventory view over them (the
+set is derived from the view bodies, `{views}` hole included) without asking
+`duckdb_derives()`
+— buyers/stats, the two debug routes, purge-orders and the three detail
+endpoints today — and a test walks `web/` and requires exactly that list, so
+this build cannot switch), and **no delivered page open under a condition
 only a stood-down check reports** (`retired_conditions_clear`). A stood-down
 check is not a raised one, so the integrity job does not hold its conditions,
 and the first run after the switch would announce such a page "✅ Resolved"
@@ -2773,9 +2874,19 @@ Postgres derives, since nothing re-examines a retired check; so the switch
 waits while the DuckDB check can still clear it. It reads the Alert Gate's
 delivered map — what `resolve_group` announces from — not `app.alert_series`,
 which can miss a delivered page (its fired row is fire-and-forget).
-`preconditions_met: true` is a checklist done, not a switch thrown. An
-exception reading any fact is published by its class alone and logged whole:
-a driver's text names the database user, host and port.
+`gold_missing_cells` and `gold_orphan_cells` count as retired too, since
+`reconcile_gold` goes with the switch. `reconcile_silver` and
+`reconcile_order_utm` report under `mirror_*` names the comparisons that stay
+up share, and the Gate keys a page by condition and group alone, so those
+names cannot be retired — that would hold the switch over every
+`bronze.orders` page, and after a flip run a restart as duckdb over one.
+Instead each `dq_mirror_landing` run in which they ran marks the delivered
+pages they were still reporting (`AlertGate.mark_delivered`, persisted with
+the entry, gone when it resolves) and unmarks the rest once all three reached
+a verdict; a marked page holds the switch. `preconditions_met: true` is a
+checklist done, not a switch thrown. An exception reading any fact is
+published by its class alone and logged whole: a driver's text names the
+database user, host and port.
 
 ### The order write path asks the registry too (DN-22a)
 

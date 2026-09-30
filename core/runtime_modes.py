@@ -59,11 +59,12 @@ def configure_modes() -> Dict[str, str]:
     # display evaluates in order, so the order of these lines is the order
     # of the reads. Never raises either — see `core/pg_utm_parse.py`.
     #
-    # `KS_WRITE_WAREHOUSE` (DN-28): read and published, never acted on in this
-    # build — the switch is DN-29, and it must find the mode cached before the
-    # boot sync, whose empty-DuckDB path runs a full warehouse rebuild. Last,
-    # because the switch's preconditions name the modes above it. Never
-    # raises, for `KS_READ_FALLBACK`'s reason — see `core/warehouse_cutover.py`.
+    # `KS_WRITE_WAREHOUSE` (DN-28, DN-29): `postgres` stops DuckDB deriving
+    # when every precondition of the switch holds, so it must be cached before
+    # the boot sync, whose empty-DuckDB path runs a full warehouse rebuild.
+    # Last, because the switch's preconditions name the modes above it. Never
+    # raises, for `KS_READ_FALLBACK`'s reason — an unmet precondition runs as
+    # `duckdb` and is published; see `core/warehouse_cutover.py`.
     return {
         pg_derivation.ENV: pg_derivation.configure_mode(),
         read_fallback.ENV: read_fallback.configure_mode(),
