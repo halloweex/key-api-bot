@@ -111,13 +111,25 @@ class TestMonotone:
 
     def test_fewer_buyer_contacts_is_a_buyer_who_dropped_a_number(self):
         """Both writers replace a buyer's contacts wholesale, and chain 4's
-        copy-back writes back whatever Postgres holds — one fewer contact is
-        not a lost row, and rejecting it would reject every night after."""
+        copy-back writes back whatever Postgres holds — a few fewer contacts
+        is not a lost row, and rejecting it would reject every night after."""
         v = validate_snapshot(
             _healthy(buyer_contacts=32_700),
             previous_counts=_healthy(),
         )
         assert v.ok, v.errors
+
+    @pytest.mark.parametrize("contacts", [0, 10, 32_000])
+    def test_but_a_contacts_table_that_fell_a_lot_is_rejected(self, contacts):
+        """What leaving MONOTONE must not cost: an export down to nothing, to
+        ten, or by 2% still fails — the review of that change showed the first
+        two shipping as the new baseline."""
+        v = validate_snapshot(
+            _healthy(buyer_contacts=contacts),
+            previous_counts=_healthy(),
+        )
+        assert not v.ok
+        assert any("buyer_contacts" in e for e in v.errors), v.errors
 
     def test_buyers_still_may_not_be_empty(self):
         v = validate_snapshot(_healthy(buyers=0), previous_counts=_healthy())

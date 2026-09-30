@@ -176,7 +176,10 @@ async def test_the_signal_rises_once_for_a_batch_and_never_for_an_empty_one(pg):
     from core.pg_buyer_rows import _write_buyer_rows
     from core.pg_buyers import _write
 
-    parsed = parse_buyers([_buyer(6)])
+    # Two buyers with two contacts each: a mark raised per buyer or per
+    # contact would pass a batch of one (the review's mutation).
+    parsed = parse_buyers([_buyer(6, phones=["+380561", "+380562"]),
+                           _buyer(10, phones=["+380563", "+380564"])])
 
     before = await _requested(pg)
     async with pg.acquire() as conn:
