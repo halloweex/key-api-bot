@@ -769,8 +769,8 @@ def _m0028_drop_bot_owned_duplicates(self) -> None:
     # declared in both stores. The live rows are in `data/bot.db` — the bot
     # writes them, and it cannot write this file at all, because DuckDB allows a
     # single writer and the web container holds it. So the direction
-    # scripts/migrate_sqlite_to_duckdb.py imagined was never available, and the
-    # copies here stayed empty for their whole life while the backup routine's
+    # scripts/migrate_sqlite_to_duckdb.py imagined (retired by OD-10 on
+    # 2026-09-30) was never available, and the copies here stayed empty for their whole life while the backup routine's
     # docstring named two of them as protected data. That is how `bot.db` sat in
     # no backup at all without anyone noticing.
     #

@@ -2996,9 +2996,10 @@ async def reconcile_order_utm(
 # not always. The Postgres upsert keeps a stored `manager_comment` when the
 # payload carries NULL (`COALESCE` on conflict), while DuckDB applies that rule
 # only on its UPDATE path: an order it INSERTs afresh — the next sync after
-# `POST /api/duckdb/purge-orders` — stores whatever the payload carries, NULL
-# included, and a restore from an export taken before a backfill brings the
-# NULL back with it. A resync does neither; it updates rows that exist. Such
+# `POST /api/duckdb/purge-orders`, retired by OD-10 on 2026-09-30 but not
+# before it ran — stores whatever the payload carries, NULL included, and a
+# restore from an export taken before a backfill brings the NULL back with
+# it. A resync does neither; it updates rows that exist. Such
 # an order has its comment here and none in DuckDB, so the parser never reads
 # it and no parse or ship can clear the finding: it would page CRITICAL every
 # morning with a lever that cannot move it. So the findings and the

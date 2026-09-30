@@ -450,9 +450,23 @@ class TestPageRoutesRequireASession:
         """The pages router is included last and owns `/{path:path}`. An /api
         path must still reach `api_gate` and be refused as JSON, not fall
         through to the SPA shell with a 200."""
-        response = client.get("/api/buyers/1")
+        response = client.get("/api/admin/users/1")
         assert response.status_code == 401
         assert response.json()["detail"] == "Authentication required"
+
+    @pytest.mark.parametrize("headers", [{}, "session"], ids=["anonymous", "viewer"])
+    def test_an_api_path_no_route_matches_is_a_json_404(self, client, store, headers):
+        """The catch-all takes every GET no API route matched, including
+        /api paths: a retired door or a typo. It used to redirect an
+        anonymous caller to /login and serve a session the SPA shell with a
+        200, which a script reads as success. Now either caller gets a JSON
+        404, answered before the session check. That discloses nothing
+        `/openapi.json` does not already say."""
+        headers = _cookie_header() if headers == "session" else headers
+        response = client.get("/api/buyers/stats", headers=headers,
+                              follow_redirects=False)
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Not Found"}
 
     def test_the_admin_shell_is_the_same_html_as_every_other_route(
         self, client, store

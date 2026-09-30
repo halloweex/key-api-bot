@@ -194,20 +194,6 @@ TOOLS = [
         }
     },
     {
-        "name": "get_buyer_details",
-        "description": "Get detailed information about a specific buyer including order history. Use after finding a buyer with search_buyer.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "buyer_id": {
-                    "type": "integer",
-                    "description": "Buyer ID"
-                }
-            },
-            "required": ["buyer_id"]
-        }
-    },
-    {
         "name": "search_order",
         "description": "Search for an order by ID or buyer name. Use for questions like 'Show order #12345', 'Find orders by Maria'",
         "input_schema": {
@@ -224,20 +210,6 @@ TOOLS = [
                 }
             },
             "required": ["query"]
-        }
-    },
-    {
-        "name": "get_order_details",
-        "description": "Get detailed information about a specific order including products. Use after finding an order.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "order_id": {
-                    "type": "integer",
-                    "description": "Order ID"
-                }
-            },
-            "required": ["order_id"]
         }
     },
     {
@@ -530,18 +502,10 @@ async def execute_tool(name: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
                 query=input_data.get("query", ""),
                 limit=input_data.get("limit", 5)
             )
-        elif name == "get_buyer_details":
-            return await _get_buyer_details(
-                buyer_id=input_data.get("buyer_id")
-            )
         elif name == "search_order":
             return await _search_order(
                 query=input_data.get("query", ""),
                 limit=input_data.get("limit", 5)
-            )
-        elif name == "get_order_details":
-            return await _get_order_details(
-                order_id=input_data.get("order_id")
             )
         elif name == "search_product":
             return await _search_product(
@@ -816,17 +780,6 @@ async def _search_buyer(query: str, limit: int) -> Dict[str, Any]:
     }
 
 
-async def _get_buyer_details(buyer_id: int) -> Dict[str, Any]:
-    """Get detailed buyer information."""
-    from web.services.search_service import get_search_service
-    service = get_search_service()
-    result = await service.get_buyer_details(buyer_id)
-
-    if not result:
-        return {"error": f"Buyer {buyer_id} not found"}
-    return result
-
-
 async def _search_order(query: str, limit: int) -> Dict[str, Any]:
     """Search for orders using Meilisearch."""
     meili = get_meili_client()
@@ -837,17 +790,6 @@ async def _search_order(query: str, limit: int) -> Dict[str, Any]:
         "count": len(results),
         "orders": results
     }
-
-
-async def _get_order_details(order_id: int) -> Dict[str, Any]:
-    """Get detailed order information."""
-    from web.services.search_service import get_search_service
-    service = get_search_service()
-    result = await service.get_order_details(order_id)
-
-    if not result:
-        return {"error": f"Order {order_id} not found"}
-    return result
 
 
 async def _search_product(query: str, limit: int) -> Dict[str, Any]:

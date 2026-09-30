@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import dataclasses
 import logging
 import pathlib
 import re
@@ -237,7 +238,12 @@ MET_ENV = {
     "KS_CH_URL": "http://ch:8123",
 }
 MET_FACTS = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
-                     bridge_owners={})
+                     bridge_owners={}, expenses_backfilled=True)
+
+
+# A door somebody adds after OD-10 retired every one there was (2026-09-30):
+# `OD10_DOORS` is empty in this build, so `od10_doors` is broken with this.
+A_DOOR = (("web/routes/api/example.py:a_new_door", "GET /api/a-new-door"),)
 
 
 def _breaking(key: str):
@@ -263,24 +269,24 @@ def _breaking(key: str):
     elif key.startswith("reader:"):
         env[key[len("reader:"):]] = "duckdb"
     elif key == "pg_revision":
-        facts = wc.Facts(revision="0032_manual_goal_ids",
-                         required_revision=REQUIRED_REVISION, bridge_owners={})
+        facts = dataclasses.replace(MET_FACTS, revision="0032_manual_goal_ids")
+    elif key == "expenses_backfilled":
+        facts = dataclasses.replace(MET_FACTS, expenses_backfilled=False)
     elif key == "goals_bridge":
-        facts = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
-                         bridge_owners={"pg_managers_write": ("bronze.managers",)})
+        facts = dataclasses.replace(
+            MET_FACTS, bridge_owners={"pg_managers_write": ("bronze.managers",)})
     elif key == "retired_conditions_clear":
-        facts = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
-                         bridge_owners={},
-                         open_retired={"silver_missing_rows": "dq:integrity"})
+        facts = dataclasses.replace(
+            MET_FACTS, open_retired={"silver_missing_rows": "dq:integrity"})
     elif key == "od10_doors":
-        facts = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
-                         bridge_owners={}, od10_doors=wc.OD10_DOORS[:1])
+        facts = dataclasses.replace(MET_FACTS, od10_doors=A_DOOR)
     else:
         raise AssertionError(f"no way to break {key!r} — add one here")
     return env, facts
 
 
 KEYS = [key for key, _ in wc.PRECONDITIONS]
+
 
 
 class TestTheEvaluator:
@@ -313,10 +319,13 @@ class TestTheEvaluator:
         """Both directions at once: an item the evaluator checks but the
         published list leaves out is one nobody reading the list would know
         to do, and the reverse is a list item nothing checks."""
+        # A revision that answered, and wrongly: the expenses history is asked
+        # only of a Postgres that said one.
         unmet = wc.evaluate_preconditions({"KS_MIRROR_LANDING": "0",
                                            "KS_WRITE_WAREHOUSE": "postgress"}, wc.Facts(
-            revision_error="x", bridge_owners=None, bridge_error="x",
-            open_retired=None, open_retired_error="x", od10_doors=wc.OD10_DOORS))
+            revision="0000_somebody_elses", required_revision=REQUIRED_REVISION,
+            expenses_backfilled=False, bridge_owners=None, bridge_error="x",
+            open_retired=None, open_retired_error="x", od10_doors=A_DOOR))
         assert [u.key for u in unmet] == KEYS
 
     def test_it_reads_values_as_the_modules_do(self):
@@ -329,7 +338,9 @@ class TestTheEvaluator:
         assert [u.key for u in unmet] == [
             k for k in KEYS
             if k not in ("value_understood", "mirror_landing", "goals_bridge",
-                         "retired_conditions_clear", "od10_doors")]
+                         "retired_conditions_clear", "od10_doors",
+                         # not asked: no DSN, so `pg_revision` names it
+                         "expenses_backfilled")]
 
     def test_a_detail_says_what_was_found_and_what_is_needed(self):
         env, facts = _breaking("utm_parse_postgres")
@@ -344,8 +355,8 @@ class TestTheEvaluator:
         assert u.key == "pg_revision" and "SchemaVersionError" in u.detail
 
     def test_an_unreadable_registry_is_unmet_not_green(self):
-        facts = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
-                         bridge_owners=None, bridge_error="ImportError: gone")
+        facts = dataclasses.replace(MET_FACTS, bridge_owners=None,
+                                    bridge_error="ImportError: gone")
         (u,) = wc.evaluate_preconditions(MET_ENV, facts)
         assert u.key == "goals_bridge" and "ImportError" in u.detail
 
@@ -687,6 +698,106 @@ class TestGatheringTheFacts:
             facts = asyncio.run(wc.gather_facts({"KS_PG_DSN": "postgresql://x"}))
         assert "no Alembic revision" in facts.revision_error
 
+    # ── the expenses history, asked of a Postgres that said its revision ──
+
+    DSN = {"KS_PG_DSN": "postgresql://x"}
+
+    def _gather(self, history, revision=REQUIRED_REVISION):
+        with patch("core.pg.current_revision", AsyncMock(return_value=revision)), \
+                patch.object(wc, "_expenses_backfilled", history):
+            return asyncio.run(wc.gather_facts(self.DSN))
+
+    def test_with_a_revision_it_asks_whether_the_expenses_hold_history(self):
+        history = AsyncMock(return_value=True)
+        facts = self._gather(history)
+        history.assert_awaited_once_with()   # on the pool, not a connection of its own
+        assert facts.expenses_backfilled is True and facts.expenses_backfill_error is None
+
+    def test_no_backfill_is_an_answer_and_unmet_with_its_levers(self):
+        facts = self._gather(AsyncMock(return_value=False))
+        assert facts.expenses_backfilled is False and facts.expenses_history_row
+        (u,) = [u for u in wc.evaluate_preconditions(MET_ENV, facts)
+                if u.key == "expenses_backfilled"]
+        assert "backfilled_at is NULL for bronze.expenses" in u.detail
+        assert "KS_READ_EXPENSES" in u.detail
+        assert "/api/mirror/backfill/expenses" in u.detail
+
+    def test_no_row_at_all_is_the_same_verdict_and_says_so(self):
+        """The read gate treats a missing row as no history, and so does the
+        switch — but the detail names the state it found: nothing has shipped
+        the table here yet, which is not a backfill left half done."""
+        facts = self._gather(AsyncMock(return_value=None))
+        assert facts.expenses_backfilled is False and not facts.expenses_history_row
+        assert facts.expenses_backfill_error is None
+        (u,) = [u for u in wc.evaluate_preconditions(MET_ENV, facts)
+                if u.key == "expenses_backfilled"]
+        assert "no row for bronze.expenses" in u.detail
+        assert "is NULL" not in u.detail
+        assert "/api/mirror/backfill/expenses" in u.detail
+
+    def test_a_postgres_that_did_not_say_its_revision_is_not_asked(self):
+        """That is `pg_revision`'s, and names it alone."""
+        history = AsyncMock(return_value=True)
+        with patch("core.pg.current_revision", AsyncMock(side_effect=OSError("down"))), \
+                patch.object(wc, "_expenses_backfilled", history):
+            facts = asyncio.run(wc.gather_facts(self.DSN))
+        history.assert_not_awaited()
+        assert [u.key for u in wc.evaluate_preconditions(MET_ENV, facts)] == ["pg_revision"]
+        history.reset_mock()
+        facts = self._gather(history, revision=None)       # never migrated
+        history.assert_not_awaited()
+        assert [u.key for u in wc.evaluate_preconditions(MET_ENV, facts)] == ["pg_revision"]
+
+    @pytest.mark.parametrize("text", DRIVER_TEXT)
+    def test_a_history_read_that_raises_is_unmet_by_its_class(self, text, caplog):
+        with caplog.at_level(logging.ERROR, logger="core.warehouse_cutover"):
+            facts = self._gather(AsyncMock(side_effect=OSError(text)))
+        assert facts.revision == REQUIRED_REVISION
+        assert facts.expenses_backfilled is None and facts.expenses_backfill_error == "OSError"
+        (u,) = wc.evaluate_preconditions(MET_ENV, facts)
+        assert u.key == "expenses_backfilled"
+        assert "OSError" in u.detail and text not in u.detail
+        assert text in caplog.text
+
+    def test_a_history_read_that_hangs_is_bounded(self, monkeypatch):
+        async def hang():
+            await asyncio.sleep(10)
+
+        monkeypatch.setattr(wc, "REVISION_READ_TIMEOUT_S", 0.05)
+        facts = self._gather(hang)
+        assert facts.expenses_backfilled is None
+        assert "did not answer" in facts.expenses_backfill_error
+
+    def test_the_read_itself(self):
+        """What it asks, and that no row is told apart from a NULL."""
+        class Conn:
+            def __init__(self, answer):
+                self.answer, self.asked = answer, None
+
+            async def fetchval(self, sql, *args):
+                self.asked = (sql, args)
+                return self.answer
+
+        # None is no row; the read gate reads it as False, and the switch
+        # does too (`expenses_backfilled`), only saying which it found.
+        for answer, expected in ((True, True), (False, False), (None, None)):
+            conn = Conn(answer)
+            assert asyncio.run(wc._expenses_backfilled(conn)) is expected
+            assert conn.asked == (wc._EXPENSES_HISTORY_SQL, (wc.EXPENSES_HISTORY,))
+
+    def test_it_asks_what_the_read_gate_asks(self):
+        """One question, two askers: the switch must not be satisfied by a
+        different column or table than the one `_expenses_run` routes on."""
+        from core.pg_expense_backfill import EXPENSES_TABLE
+
+        assert wc.EXPENSES_HISTORY == EXPENSES_TABLE
+        tree = ast.parse((REPO / "core/pg_expenses_read.py").read_text(encoding="utf-8"))
+        (fn,) = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.AsyncFunctionDef) and n.name == "backfilled"]
+        statements = {" ".join(n.value.split()) for n in ast.walk(fn)
+                      if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        assert " ".join(wc._EXPENSES_HISTORY_SQL.split()) in statements
+
     def test_a_registry_that_raises_is_a_reason_by_its_class(self, caplog):
         with caplog.at_level(logging.ERROR, logger="core.warehouse_cutover"), \
                 patch("core.repositories.goals.sales_type_bridge_owners",
@@ -699,9 +810,13 @@ class TestGatheringTheFacts:
 class TestReadiness:
     @pytest.fixture(autouse=True)
     def _od10_answered(self, monkeypatch):
-        """The readiness of a build where OD-10 has been answered — today's
-        is not, and `od10_doors` has tests of its own."""
+        """The readiness of a build with no door OD-10 would have to decide —
+        this one since 2026-09-30, pinned here so a door added later is
+        `od10_doors`' own tests' business, not every readiness test's."""
         monkeypatch.setattr(wc, "OD10_DOORS", ())
+        # The expenses history, asked on the pool beside the revision; read
+        # for real in TestGatheringTheFacts and against a live Postgres.
+        monkeypatch.setattr(wc, "_expenses_backfilled", AsyncMock(return_value=True))
 
     def test_it_publishes_the_mode_and_every_unmet_item(self, fresh, monkeypatch):
         monkeypatch.setenv(wc.ENV, "postgres")

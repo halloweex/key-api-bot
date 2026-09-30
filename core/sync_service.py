@@ -1458,7 +1458,9 @@ class SyncService:
 
         KeyCRM does NOT update the `updated_at` field when order status changes,
         so the incremental sync (which relies on updated_between) misses these.
-        This method re-fetches orders by created_between to refresh all statuses.
+        This method re-fetches orders by created_between to refresh all statuses,
+        then by id the backdated orders that fetch cannot return: dated into
+        the window, created before it (`_refresh_backdated_orders`).
 
         Args:
             days_back: Number of days to look back (default 30)
@@ -1530,12 +1532,52 @@ class SyncService:
                 # both stores, Silver through the ClickHouse arm — and files a
                 # moved status as STATUS_DRIFT where somebody reads it.
 
+            # The orders the fetch above cannot return: dated into the window,
+            # created before it. By id, before dq_reconciliation looks at 05:30.
+            stats["backdated"] = await self._refresh_backdated_orders(start_date.date())
+
         except KeyCRMConnectionError as e:
             logger.warning(f"Status refresh connection error (will retry): {e}")
         except KeyCRMError as e:
             logger.error(f"Status refresh error: {e}")
 
         return stats
+
+    async def _refresh_backdated_orders(self, since) -> Dict[str, Any]:
+        """Re-fetch by id the orders dated on or after `since` but created
+        before it (`find_backdated_order_ids`). Never raises: the refresh
+        above has already committed, and this is one step after it.
+
+        KeyCRM lets a B2B order's `ordered_at` sit weeks after its
+        `created_at`, and does not move `updated_at` when a status changes. A
+        `created_between` fetch misses such an order once its creation date
+        has left the window. The weekly full sync skips it as unchanged, and
+        `dq_reconciliation` repairs only orders we do not hold. So a status
+        that moved on one of these was filed as STATUS_DRIFT (CRITICAL) every
+        morning until its order date left the 90-day window. Until OD-10 the
+        legacy 06:00 `reconciliation_check` fixed it, by padding its fetch by
+        30 days. This is that repair, kept after the job was retired.
+
+        The caller holds the heavy-job lock (the 05:15 job and the manual
+        route both do), so it is not passed on: `repair_orders` does not
+        re-enter it.
+        """
+        try:
+            ids = await self.store.find_backdated_order_ids(
+                since, limit=self.REPAIR_BATCH_LIMIT)
+            if not ids:
+                return {"found": 0}
+            result = await self.repair_orders(ids)
+            logger.info("Status refresh: re-fetched %d of %d backdated order(s) by id",
+                        result["repaired"], len(ids))
+            return {"found": len(ids), "repaired": result["repaired"],
+                    "failed": result["failed"]}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the refresh itself is done
+            logger.error("Status refresh: backdated orders were not re-fetched: %s: %s",
+                         type(exc).__name__, exc, exc_info=True)
+            return {"error": type(exc).__name__}
 
     # An order-by-order repair is one API call each, so a run is bounded and the
     # remainder is picked up on the next one rather than fired off in a burst
@@ -1616,142 +1658,6 @@ class SyncService:
             {**result, "failures": dict(list(failures.items())[:10])},
         )
         return result
-
-    async def reconcile_with_api(
-        self, days_back: int = 14, auto_resync: bool = True,
-        *, lock: "asyncio.Lock | None" = None,
-    ) -> list[dict]:
-        """Compare orders between DuckDB and KeyCRM API per day.
-
-        Fetches actual orders from API, groups by ordered_at in Kyiv TZ,
-        and compares with DuckDB per-order (count, status, revenue).
-        When auto_resync=True, re-fetches stale orders individually.
-        Returns list of per-day results with status 'ok' or 'drift'.
-
-        `lock` is the scheduler's heavy-job lock, held around the resync write
-        and the dirty mark only — `repair_orders`' contract, for its reasons:
-        a write landing between a derivation's Silver commit and its validation
-        read reports a correct rebuild as failed, in DuckDB and — under
-        KS_PG_DERIVE=own — in Postgres. The KeyCRM fetch stays outside it.
-        """
-        from collections import defaultdict
-        from datetime import date
-
-        KYIV_TZ = ZoneInfo("Europe/Kyiv")
-
-        client = await get_async_client()
-        results = []
-        today = date.today()
-        start_date = today - timedelta(days=days_back)
-
-        # ── 1. Fetch all API orders for the window (one batch) ──
-        # Pad start by 30 days to catch backdated B2B orders
-        # (ordered_at may be weeks after created_at).
-        # Include full data so we can upsert stale orders without refetching.
-        api_start = (start_date - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
-        api_end = today.strftime("%Y-%m-%d 23:59:59")
-
-        # api_by_date: summary for comparison; api_full: full order dict for resync
-        api_by_date: dict[date, dict[int, dict]] = defaultdict(dict)
-        api_full: dict[int, dict] = {}
-        params = {
-            "include": "products.offer,manager,buyer,expenses",
-            "filter[created_between]": f"{api_start}, {api_end}",
-        }
-        total_fetched = 0
-        async for batch in client.paginate("order", params=params, page_size=50):
-            for order in batch:
-                ordered_at_str = order.get("ordered_at")
-                if not ordered_at_str:
-                    continue
-                try:
-                    dt = datetime.fromisoformat(ordered_at_str)
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=ZoneInfo("Etc/GMT-4"))
-                    d = dt.astimezone(KYIV_TZ).date()
-                except (ValueError, TypeError):
-                    continue
-                if start_date <= d < today:
-                    oid = order["id"]
-                    api_by_date[d][oid] = {
-                        "status_id": order.get("status_id"),
-                        "grand_total": float(order.get("grand_total", 0)),
-                    }
-                    api_full[oid] = order
-            total_fetched += len(batch)
-
-        logger.info(f"Reconciliation: fetched {total_fetched} API orders for {days_back} days")
-
-        # ── 2. Get DB order summaries for the whole window ──
-        db_by_date = await self.store.get_order_summaries_by_date(
-            start_date.isoformat(), (today - timedelta(days=1)).isoformat(),
-        )
-
-        # ── 3. Compare per day ──
-        stale_order_ids: list[int] = []
-        for offset in range(days_back):
-            check_date = today - timedelta(days=offset + 1)
-            if check_date < start_date:
-                break
-            date_str = check_date.isoformat()
-
-            api_orders = api_by_date.get(check_date, {})
-            db_orders = db_by_date.get(check_date, {})
-
-            api_count = len(api_orders)
-            db_count = len(db_orders)
-
-            # Find order-level mismatches
-            day_stale: list[int] = []
-            # Orders in API but missing from DB
-            for oid in api_orders.keys() - db_orders.keys():
-                day_stale.append(oid)
-            # Orders in both but with status or revenue drift
-            for oid in api_orders.keys() & db_orders.keys():
-                api_o = api_orders[oid]
-                db_o = db_orders[oid]
-                if (api_o["status_id"] != db_o["status_id"]
-                        or abs(api_o["grand_total"] - db_o["grand_total"]) > 0.01):
-                    day_stale.append(oid)
-
-            stale_order_ids.extend(day_stale)
-
-            entry = await self.store.log_reconciliation(date_str, api_count, db_count)
-            results.append(entry)
-
-            if entry["status"] == "drift" or day_stale:
-                detail = f" ({len(day_stale)} stale orders)" if day_stale else ""
-                logger.warning(
-                    f"Reconciliation drift on {date_str}: API={api_count} DB={db_count}{detail}"
-                )
-
-        # ── 4. Auto-resync stale orders from already-fetched data ──
-        # CRITICAL: force_update=True here. We arrived at this branch
-        # specifically because reconciliation detected drift (status or
-        # grand_total mismatch). KeyCRM does not bump updated_at on status
-        # changes, so the skip-if-unchanged guard in upsert_orders would
-        # otherwise refuse to write — defeating the whole point of
-        # reconciliation.
-        resync_count = 0
-        if stale_order_ids and auto_resync:
-            stale_orders = [api_full[oid] for oid in set(stale_order_ids) if oid in api_full]
-            if stale_orders:
-                held = lock if lock is not None else contextlib.nullcontext()
-                async with held:
-                    resync_count, _ = await self._upsert_orders_with_expenses(
-                        stale_orders, force_update=True,
-                    )
-                    await self.store.mark_warehouse_dirty(None)
-                logger.info(f"Resynced {resync_count} stale orders (force_update=True)")
-
-        ok_count = sum(1 for r in results if r["status"] == "ok")
-        drift_count = sum(1 for r in results if r["status"] == "drift")
-        logger.info(
-            f"Reconciliation complete: {ok_count} ok, {drift_count} drift, "
-            f"{resync_count} orders resynced"
-        )
-        return results
-
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1847,7 +1753,9 @@ async def force_resync(days_back: int = 730) -> dict:
     overwritten by the fetched payload, and an interrupted run can simply be
     run again. The one thing the DELETE bought — dropping orders KeyCRM has
     since deleted — is something the reconciliation deliberately refuses to do
-    automatically and the purge endpoint does by id.
+    automatically. The purge endpoint that did it by id, in DuckDB alone, was
+    retired by OD-10 (2026-09-30); removing an order from Postgres, which every
+    tab reads, is chain 3's to design.
 
     Args:
         days_back: Number of days of historical data to sync
