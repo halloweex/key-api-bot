@@ -2,11 +2,7 @@
 """Release a latched write chain: copy its tables back to DuckDB, then unlatch.
 
     cd /opt/key-api-bot && docker compose stop web bot
-    docker run --rm --name chain-copy-back \
-        -v /opt/key-api-bot/data:/app/data \
-        --env-file /opt/key-api-bot/.env \
-        --network key-api-bot_default \
-        halloweex/keycrm-web:latest \
+    docker compose run --rm --no-deps -T web \
         python /app/scripts/chain_copy_back.py inventory --handover   # 1
     ... the same command without --handover (or with --dry-run)        # 2
     ... the same command with --execute                                # 3
@@ -26,14 +22,15 @@ It needs no latch and writes nothing, but it does need the database file to
 itself: DuckDB will not let a second process open a file a writer holds, not
 even read-only. So it runs in the same stopped window as the copy-back.
 
-The one-off-container shape is `scripts/weekly_compact.sh`'s: the image already
-carries every module this needs, `./data` is the one directory both containers
-mount, and `--env-file` supplies `KS_PG_DSN`. The network is the one thing that
-script does not need and this one does. Postgres has no `ports:` key by charter
-rule 12, so it is reachable only from a network it is on, and the DSN in `.env`
-names the host `postgres` — the compose service alias. `key-api-bot_default` is
-observed, not derived: on 2026-09-18 both the web container and ks-postgres
-were on it (and on `ks-data`).
+It runs as a one-off of the web service (`docker compose run --no-deps web`),
+not as a bare `docker run --env-file .env`: `KS_PG_DSN` is not in `.env` —
+`docker-compose.yml` builds it in web's `environment:` block with the password
+interpolated from `.env` — and Postgres has no `ports:` key by charter rule 12,
+so it is reachable only from a network web is on. The first form of this
+docstring used `--env-file` and a hand-picked network; at chain 1's flip
+(2026-09-30) the handover died on `KS_PG_DSN is not set`, before writing
+anything. The compose form hands the one-off web's own environment, `./data`
+and networks, so none of them is a second copy that can drift.
 
 WHY A DRY RUN IS THE DEFAULT
 
