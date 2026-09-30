@@ -336,7 +336,9 @@ def open_retired_conditions() -> Dict[str, Optional[str]]:
 # It is not a list anybody keeps: `tests/unit/test_warehouse_writer.py` walks
 # `web/` for every function naming a table the switch freezes —
 # `silver_orders`, the `silver_order_lines` view over it, `gold_daily_revenue`,
-# `silver_order_utm`, or a dialect hole that could render to one — without
+# `silver_order_utm`, an inventory view reading one of them (derived from
+# `core.sql_dialect._INVENTORY_VIEWS`), or a dialect hole that could render
+# to one, `{views}` included — without
 # asking `duckdb_derives()`, and requires exactly these: a door retired or
 # ported, or put behind the predicate, leaves the list, and a door added joins
 # it. The readers in `core/` ride the `KS_READ_*` switches below, and the

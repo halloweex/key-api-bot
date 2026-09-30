@@ -2177,9 +2177,37 @@ import re  # noqa: E402
 # view over it, Gold and the UTM verdicts — and the dialect holes that render
 # to one of them, which count because the walk cannot tell which engine a
 # rendering is for.
-FROZEN_BY_THE_SWITCH = re.compile(
+FROZEN_TABLES = (
     r"\b(silver_orders|silver_order_lines|gold_daily_revenue|silver_order_utm)\b"
     r"|\{(silver_orders|order_lines|gold_daily_revenue|order_utm)\}")
+
+
+def _inventory_views_over_silver() -> frozenset:
+    """The DuckDB inventory views that read what the switch freezes: a body
+    naming `{order_lines}` (DuckDB's `silver_order_lines`) or a frozen table,
+    or another such view through the `{views}` hole — to a fixed point, out of
+    `core.sql_dialect._INVENTORY_VIEWS` itself, so a view that starts reading
+    Silver joins without anybody listing it. A door reading one of these reads
+    a Silver as old as the flip as surely as one naming `silver_orders`."""
+    from core.sql_dialect import _INVENTORY_VIEWS
+
+    frozen: set = set()
+    grew = True
+    while grew:
+        grew = False
+        for name, body in _INVENTORY_VIEWS:
+            if name not in frozen and (re.search(FROZEN_TABLES, body) or
+                                       set(re.findall(r"\{views\}(\w+)", body)) & frozen):
+                frozen.add(name)
+                grew = True
+    return frozenset(frozen)
+
+
+# Plus those views by name, and the `{views}` hole, which renders to one of
+# them in DuckDB and the walk cannot tell which.
+FROZEN_BY_THE_SWITCH = re.compile(
+    FROZEN_TABLES + r"|\{views\}"
+    + r"|\b(" + "|".join(sorted(_inventory_views_over_silver())) + r")\b")
 
 
 def _docstrings(tree: ast.Module) -> set:
@@ -2251,6 +2279,13 @@ class TestTheDoorsOd10HasNotDecided:
         # Postgres names another table, and landing is not frozen.
         ('def f(conn):\n    conn.execute("SELECT 1 FROM silver.orders")\n', set()),
         ('def f(conn):\n    conn.execute("SELECT 1 FROM orders")\n', set()),
+        # An inventory view over Silver's order lines is Silver; the `{views}`
+        # hole could render to one; the root view reads landing alone.
+        ('def f(conn):\n    conn.execute("SELECT COUNT(*) FROM v_sku_sell_through")\n',
+         {"f"}),
+        ('def f(conn):\n    conn.execute("SELECT * FROM v_inventory_summary")\n', {"f"}),
+        ('def f(conn):\n    conn.execute("SELECT 1 FROM {views}v_sku_analysis")\n', {"f"}),
+        ('def f(conn):\n    conn.execute("SELECT 1 FROM v_sku_analysis")\n', set()),
         # Behind the predicate, in each shape the refresh walk accepts.
         ('def f(conn):\n    if not wc.duckdb_derives():\n        raise X()\n'
          '    conn.execute("SELECT 1 FROM silver_orders")\n', set()),
@@ -2267,6 +2302,16 @@ class TestTheDoorsOd10HasNotDecided:
     def test_the_walk_finds_the_doors_it_names(self):
         """A walk that found nothing would pass on a codebase it cannot read."""
         assert "web/routes/api/admin.py:get_buyer_stats" in _unguarded_duckdb_readers()
+
+    def test_the_views_over_silver_are_derived_not_listed(self):
+        """Read out of the view bodies: the four reading `{order_lines}`, and
+        the three reading one of those — never the root, which reads the SKU
+        status table, rebuilt from landing."""
+        views = _inventory_views_over_silver()
+        assert {"v_sku_status", "v_sku_sell_through", "v_abc_classification",
+                "v_sku_dead_stock_v2"} <= views
+        assert {"v_inventory_summary", "v_abc_summary", "v_recommended_actions"} <= views
+        assert "v_sku_analysis" not in views and "v_category_velocity" not in views
 
     def test_the_start_reads_the_list(self, met, monkeypatch):
         """`_local_facts` hands `OD10_DOORS` to the evaluator — the list is

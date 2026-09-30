@@ -2824,7 +2824,9 @@ excluded by name — `KS_SMS_STORE` is read inline and the first walk missed
 it), cohorts on ClickHouse with `KS_CH_URL`, no write chain owning a table
 the goals bridge reads (DN-12), **no door OD-10 has not answered**
 (`od10_doors`: `OD10_DOORS` is every function in `web/` naming DuckDB's
-Silver, its order-lines view, Gold or UTM without asking `duckdb_derives()`
+Silver, its order-lines view, Gold, UTM or an inventory view over them (the
+set is derived from the view bodies, `{views}` hole included) without asking
+`duckdb_derives()`
 — buyers/stats, the two debug routes, purge-orders and the three detail
 endpoints today — and a test walks `web/` and requires exactly that list, so
 this build cannot switch), and **no delivered page open under a condition
