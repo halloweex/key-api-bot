@@ -348,12 +348,6 @@ OD10_DOORS: Tuple[Tuple[str, str], ...] = (
     ("web/routes/api/admin.py:get_buyer_stats", "GET /api/buyers/stats"),
     ("web/routes/api/admin.py:debug_stale_returns", "GET /api/debug/stale-returns"),
     ("web/routes/api/admin.py:debug_order_status", "GET /api/debug/order-status/{id}"),
-    ("web/services/search_service.py:get_buyer_details",
-     "GET /api/buyers/{id} and the assistant's get_buyer_details"),
-    ("web/services/search_service.py:get_order_details",
-     "GET /api/orders/{id} and the assistant's get_order_details"),
-    ("web/services/search_service.py:get_product_details",
-     "GET /api/products/{id}"),
 )
 
 

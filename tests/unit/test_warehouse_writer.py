@@ -2277,9 +2277,10 @@ class TestTheDoorsOd10HasNotDecided:
 
     def test_the_reviews_four_and_the_plans_detail_endpoints_are_there(self):
         labels = " ".join(label for _, label in wc.OD10_DOORS)
+        # The three detail endpoints and their tools were retired by OD-10
+        # (2026-09-30); tests/unit/test_od10_retired_doors.py keeps them so.
         for route in ("/api/buyers/stats", "/api/debug/stale-returns",
-                      "/api/debug/order-status", "/api/duckdb/purge-orders",
-                      "/api/buyers/{id}", "/api/orders/{id}", "/api/products/{id}"):
+                      "/api/debug/order-status", "/api/duckdb/purge-orders"):
             assert route in labels
 
     @pytest.mark.parametrize("source, readers", [

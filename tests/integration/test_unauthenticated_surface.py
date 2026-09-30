@@ -450,7 +450,7 @@ class TestPageRoutesRequireASession:
         """The pages router is included last and owns `/{path:path}`. An /api
         path must still reach `api_gate` and be refused as JSON, not fall
         through to the SPA shell with a 200."""
-        response = client.get("/api/buyers/1")
+        response = client.get("/api/admin/users/1")
         assert response.status_code == 401
         assert response.json()["detail"] == "Authentication required"
 

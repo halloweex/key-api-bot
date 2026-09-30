@@ -220,19 +220,18 @@ class TestAuthorizationStructure:
 # ─── Customer PII is admin-only ───────────────────────────────────────────────
 
 # Every path that answers with a named customer — full_name, phone, email, city,
-# manager, and that person's order history. The ids are small sequential
-# integers, so one of these losing its admin dependency does not leak a record,
-# it leaks the customer base by counting up.
+# manager. The buyer and order cards (`/api/buyers/{buyer_id}`,
+# `/api/orders/{order_id}`) were retired by OD-10 on 2026-09-30; they stood here
+# because their ids are small sequential integers, so one of them losing its
+# admin dependency would have leaked the customer base by counting up.
 CUSTOMER_PII_PATHS = [
-    "/api/buyers/{buyer_id}",
-    "/api/orders/{order_id}",
     "/api/search",
     "/api/search/buyers",
     "/api/search/orders",
 ]
 
 # The two accessors that reach buyer and order rows: the search service reads
-# them straight out of DuckDB, the chat service through its tools. Naming the
+# them out of Meilisearch, the chat service through its tools. Naming the
 # readers rather than the routes is what lets the scan below survive an endpoint
 # moving to another module — it follows the data, not the URL.
 #
@@ -296,7 +295,7 @@ class TestCustomerPiiIsAdminOnly:
         assert not leaked, \
             "customer PII readable without require_admin:\n  " + "\n  ".join(leaked)
 
-    def test_approved_viewer_is_forbidden_from_buyer_details(self, client, monkeypatch):
+    def test_approved_viewer_is_forbidden_from_customer_search(self, client, monkeypatch):
         """The structural checks read the route table; this reads the answer.
 
         A dependency present in the tree but never reached — a handler that
@@ -316,7 +315,8 @@ class TestCustomerPiiIsAdminOnly:
         monkeypatch.setattr("core.duckdb_store.get_store", _fake_get_store)
 
         headers = _cookie_header(_make_cookie(viewer_id, role="viewer"))
-        for path in ("/api/buyers/1", "/api/orders/1", "/api/search?q=ab"):
+        for path in ("/api/search/buyers?q=ab", "/api/search/orders?q=1",
+                     "/api/search?q=ab"):
             r = client.get(path, headers=headers)
             assert r.status_code == 403, f"{path} answered a viewer with {r.status_code}"
 
