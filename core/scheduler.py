@@ -84,6 +84,43 @@ CATCHUP_CHECKS = {
     "dq_mirror_landing": ("mirror_landing", 26 * 3600, 180),
 }
 
+# Layers a job above writes besides its own, whose age decides its catch-up
+# too. `dq_reconciliation` writes three: the DuckDB half, and the Postgres and
+# ClickHouse arms against the same snapshot, each a layer of its own so that
+# an arm that stopped cannot hide behind a fresh sibling — and the canary
+# pages each at 30 h. Keyed on `reconciliation` alone, an arm that failed its
+# last run while the DuckDB half succeeded got no catch-up, so a restart
+# inside the 26–30 h window left it to page at 30 h although one run would
+# have cleared it. The 26 h limit is what keeps the canary's first probe,
+# 90 s after a start, from paging a layer the catch-up is about to refresh.
+#
+# An arm counts only where this process would write it — `_reconcile_postgres`
+# and `_reconcile_clickhouse` return None without their store, and a host
+# without ClickHouse would otherwise queue a KeyCRM re-fetch on every start
+# for a layer it can never write. And only an age the reader reported: an
+# absent entry is no evidence either way.
+CATCHUP_SIBLING_LAYERS = {
+    "dq_reconciliation": ("reconciliation_pg", "reconciliation_ch"),
+}
+
+
+def _writes_layer(layer: str) -> bool:
+    """Whether this process's `dq_reconciliation` writes the sibling `layer`
+    — the gates its two arms return None on. Never raises: the catch-up must
+    not be able to stop the scheduler starting."""
+    try:
+        from core import ch_common
+        from core.mirror_reconciliation import configured as postgres_configured
+
+        if layer == "reconciliation_pg":
+            return postgres_configured()
+        if layer == "reconciliation_ch":
+            return postgres_configured() and ch_common.configured()
+    except Exception as e:  # noqa: BLE001 — the job's own layer still decides
+        logger.warning(f"Catch-up: cannot tell whether {layer} is written: {e}")
+    return False
+
+
 # Where the digest remembers its last delivery. In `sync_metadata` and not on
 # the scheduler object, because the weekly restatement beat has to outlive a
 # deploy — otherwise every release re-announces the same standing WARN.
@@ -402,6 +439,15 @@ class BackgroundScheduler:
         for job_id, (layer, max_age_s, delay_s) in CATCHUP_CHECKS.items():
             entry = ages.get(layer) or {}
             age = entry.get("age_seconds")
+            # The oldest arm the job writes decides, when it is older than its
+            # own layer (`CATCHUP_SIBLING_LAYERS`). Null is overdue there too.
+            for sibling in CATCHUP_SIBLING_LAYERS.get(job_id, ()):
+                sibling_entry = ages.get(sibling)
+                if not isinstance(sibling_entry, dict) or not _writes_layer(sibling):
+                    continue
+                sibling_age = sibling_entry.get("age_seconds")
+                if age is not None and (sibling_age is None or sibling_age > age):
+                    layer, age = sibling, sibling_age
             # A layer that has never succeeded is exactly the case worth
             # catching up, so a null age counts as overdue, not as unknown.
             if age is not None and age <= max_age_s:
@@ -424,8 +470,9 @@ class BackgroundScheduler:
                     replace_existing=True,
                 )
                 logger.warning(
-                    "%s last succeeded %s ago (limit %dh) — catch-up run queued for %s",
-                    job_id,
+                    "%s (layer %s) last succeeded %s ago (limit %dh) — catch-up "
+                    "run queued for %s",
+                    job_id, layer,
                     f"{age / 3600:.1f}h" if age is not None else "never",
                     max_age_s // 3600,
                     run_at.isoformat(timespec="seconds"),
@@ -2248,20 +2295,28 @@ class BackgroundScheduler:
             retired_reported: set = set()
             retired_verdicts: set = set()
 
-            async def check(name, run):
+            async def check(name, run) -> bool:
+                """Run one check; True when it returned a verdict."""
                 nonlocal issues
                 try:
                     found = await run()
                 except Exception as exc:  # noqa: BLE001 — recorded and named
                     raised.append(f"{name}: {type(exc).__name__}: {exc}")
                     logger.exception("Mirror reconciliation check %s raised", name)
-                    return
+                    return False
                 issues += found
                 if name in warehouse_cutover.RETIRED_COMPARISONS:
                     retired_verdicts.add(name)
                     retired_reported.update(
                         i.check_name for i in found
                         if i.severity == Severity.CRITICAL)
+                return True
+
+            # Whether ClickHouse re-aggregated Gold this run (OD-08). The
+            # comparison files `gold_values_unwatched` itself for every cause
+            # it can return from; a raise, or a job that never reached it,
+            # leaves it nothing to return, so those two are filed below.
+            gold_compared = False
 
             try:
                 # The DuckDB read and the Postgres round-trips are deliberately
@@ -2378,18 +2433,36 @@ class BackgroundScheduler:
                 # And the third engine — steps 5–6. Silver round-trips, then
                 # the two engines' independent Gold aggregations are set
                 # against each other («сверка навсегда»), then the archive's
-                # buckets. Stands down when KS_CH_URL is unset; an unreachable
-                # ClickHouse is a WARN finding rather than an exception — an
-                # optional store being down must not silence the comparisons
-                # of the mandatory ones.
+                # buckets. An unreachable ClickHouse is a WARN finding rather
+                # than an exception — one store being down must not silence
+                # the comparisons of the others. And never silent: without
+                # KS_CH_URL, or on any run that did not compare, the Gold half
+                # files `gold_values_unwatched` — CRITICAL once it is the only
+                # independent check of Gold left (OD-08 (a)). The archive half
+                # still stands down without KS_CH_URL.
                 from core.ch_history import reconcile_ch_history
                 from core.ch_silver import reconcile_clickhouse
-                await check("reconcile_clickhouse", lambda: reconcile_clickhouse())
+                gold_compared = await check(
+                    "reconcile_clickhouse", lambda: reconcile_clickhouse())
                 await check("reconcile_ch_history", lambda: reconcile_ch_history())
             except Exception as e:
                 # Only the imports between the checks can land here now.
                 raised.append(f"setup: {type(e).__name__}: {e}")
                 logger.exception("Mirror reconciliation raised outside a check")
+            if not gold_compared:
+                try:
+                    from core.ch_silver import gold_values_unwatched
+
+                    cause = next(
+                        (r for r in raised if r.startswith("reconcile_clickhouse:")),
+                        None)
+                    issues.append(gold_values_unwatched(
+                        f"the comparison raised — {cause}" if cause else
+                        "the job never reached the comparison — "
+                        + (" | ".join(raised) or "no cause recorded")))
+                except Exception:  # noqa: BLE001 — the run still persists
+                    logger.exception("Mirror reconciliation: could not file "
+                                     "gold_values_unwatched")
             if raised:
                 error_message = f"{len(raised)} check(s) raised — " + " | ".join(raised)
 
@@ -2442,7 +2515,18 @@ class BackgroundScheduler:
                             warehouse_cutover.RETIRED_COMPARISONS))
                 except Exception as e:  # noqa: BLE001 — the next run marks again
                     logger.warning(f"Mirror reconciliation: pages not marked: {e}")
-            await self._resolve_dq_layer(MIRROR_LAYER, issues, error_message)
+            # A run in which ClickHouse did not compare cannot announce what
+            # only that comparison re-examines as resolved (OD-08).
+            try:
+                from core.ch_silver import gold_unverified_conditions
+
+                unverified = gold_unverified_conditions(issues)
+            except Exception:  # noqa: BLE001 — then nothing is announced
+                logger.exception("Mirror reconciliation: unverified set unknown")
+                unverified = None
+            if unverified is not None:
+                await self._resolve_dq_layer(
+                    MIRROR_LAYER, issues, error_message, unverified=unverified)
 
             result = {
                 "run_id": run_id,
