@@ -645,7 +645,8 @@ class TestBuyerSync:
     def test_under_chain_4_three_hours_without_a_success_pages(self):
         stale = canary.BUYER_SYNC_CHAIN_STALE_S + 1
         [(key, message)] = canary.check_buyer_sync_chain(
-            self._chain(last_ok_age_s=stale, last_error_class="OSError"))
+            self._chain(last_ok_age_s=stale, last_attempt_age_s=300,
+                        last_error_class="OSError"))
         assert key == "buyer_sync_stalled_chain"
         assert "only writer of buyers" in message and "OSError" in message
         assert canary.check_buyer_sync_chain(
@@ -661,6 +662,33 @@ class TestBuyerSync:
             self._chain(mode=None, last_ok_age_s=stale)) == []
         assert canary.check_buyer_sync_chain(self._block(last_ok_age_s=stale)) == []
         assert canary.check_buyer_sync_chain(None) == []
+
+    def test_a_restart_does_not_reset_the_stall(self):
+        """A recreate floors `last_ok_age_s` at the new process's start; the
+        watermark the step stamps in Postgres does not move with it, so the
+        older of the two is what is judged (review of PR-3)."""
+        stale = canary.BUYER_SYNC_CHAIN_STALE_S + 600
+        [(key, _)] = canary.check_buyer_sync_chain(self._chain(
+            last_ok_age_s=120, watermark_age_s=stale, last_attempt_age_s=60))
+        assert key == "buyer_sync_stalled_chain"
+        assert canary.check_buyer_sync_chain(self._chain(
+            last_ok_age_s=120, watermark_age_s=600, last_attempt_age_s=60)) == []
+
+    def test_an_unreadable_watermark_falls_back_to_the_local_clock(self):
+        stale = canary.BUYER_SYNC_CHAIN_STALE_S + 1
+        assert canary.check_buyer_sync_chain(self._chain(
+            last_ok_age_s=stale, watermark_age_s=None, last_attempt_age_s=60))
+
+    def test_a_step_never_reached_says_so_and_its_lever_follows(self):
+        """The WARN's distinction, kept for the page: with no recent attempt
+        the tick stops before the step, and the lever must say where."""
+        stale = canary.BUYER_SYNC_CHAIN_STALE_S + 60
+        for attempt in (None, stale):
+            [(key, message)] = canary.check_buyer_sync_chain(self._chain(
+                last_ok_age_s=stale, last_attempt_age_s=attempt))
+            assert "step not reached" in message and "incremental tick" in message
+        action = dict(canary._ACTIONS)["buyer_sync_stalled_chain"]
+        assert "Incremental sync" in action and "step not reached" in action
 
     @pytest.mark.asyncio
     async def test_it_pages_through_run_canary_as_critical(self):

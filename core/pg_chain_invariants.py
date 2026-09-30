@@ -609,15 +609,20 @@ FROM bronze.buyers
 # list (`landing_rows.buyer_row` / `contact_rows`), so a column value with no
 # contact row is a contact list deleted and not written again. 20 657 buyers
 # and 34 379 contacts on 2026-09-30, both anti-joins on the contacts' key.
+#
+# An EMPTY column is not a value: `Buyer.from_api` keeps a list that starts
+# with '' as it is and takes `phone = phones[0]`, the parse stores that '' in
+# the column, and `contact_rows` skips falsy values — so '' with no contact
+# row is the shared parse working, and a rewrite would reproduce it.
 _CONTACT_MISSING_SQL = """
 SELECT count(*) AS missing,
        COALESCE((array_agg(b.id ORDER BY b.id))[1:10], '{}'::int[]) AS sample
 FROM bronze.buyers b
-WHERE (b.phone IS NOT NULL AND NOT EXISTS (
+WHERE (NULLIF(b.phone, '') IS NOT NULL AND NOT EXISTS (
            SELECT 1 FROM bronze.buyer_contacts c
            WHERE c.buyer_id = b.id AND c.contact_type = 'phone'
              AND c.value = b.phone))
-   OR (b.email IS NOT NULL AND NOT EXISTS (
+   OR (NULLIF(b.email, '') IS NOT NULL AND NOT EXISTS (
            SELECT 1 FROM bronze.buyer_contacts c
            WHERE c.buyer_id = b.id AND c.contact_type = 'email'
              AND c.value = b.email))
@@ -1013,15 +1018,20 @@ def _null_issues(nulls: Nulls, chain: str,
              + ". These columns have no database default — they were built to "
              "receive the value from the writer, and DuckDB's defaults do not "
              "travel")
-    # How the rows arrived before the handover: the landing tables by the
-    # per-tick mirror, the rest by the hourly replication.
-    carrier = ("the buyers mirror" if nulls.table.startswith("bronze.")
-               else "the replication")
-    if latched_at is None:
+    if latched_at is None and nulls.table == "bronze.buyers":
+        # Nothing before the handover can have put it there: DuckDB's
+        # full_name is NOT NULL, and the mirror ships the shared parse, which
+        # writes 'Unknown' for a blank name.
+        cause = (f" — and {chain} has not written this table yet, while "
+                 "neither DuckDB (NOT NULL there) nor the buyers mirror (the "
+                 "shared parse writes 'Unknown') can produce one: it is a hand "
+                 "edit or a writer that went round the parse. Correct the row "
+                 "before the chain's first write.")
+    elif latched_at is None:
         cause = (f" — and {chain} has not written this table yet: it is "
                  "watched from its flag, before its first write, so the NULL "
                  "has been present since before the handover, carried across "
-                 f"by {carrier} out of DuckDB. Correct the row before "
+                 "by the replication out of DuckDB. Correct the row before "
                  "the chain's first write.")
     else:
         cause = f" — so {chain} is not supplying one."
@@ -1033,9 +1043,11 @@ def _null_issues(nulls: Nulls, chain: str,
         cause += (" DuckDB declares full_name NOT NULL, so "
                   "scripts/chain_copy_back.py refuses to carry such a buyer "
                   "back (handover_rows_unwritable) and the chain cannot be "
-                  "rolled back until the row is corrected. The shared parse "
-                  "writes 'Unknown' for a blank name, so a NULL is a write "
-                  "that went round core.landing_rows.buyer_row.")
+                  "rolled back until the row is corrected.")
+        if latched_at is not None:
+            cause += (" The shared parse writes 'Unknown' for a blank name, "
+                      "so a NULL is a write that went round "
+                      "core.landing_rows.buyer_row.")
     return [_issue(
         check_name=COLUMN_NULL, table_name=nulls.table,
         severity=Severity.CRITICAL, count=sum(offenders.values()),
@@ -1175,8 +1187,11 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
                 "contacts and its verdict in one transaction and nothing "
                 "deletes a buyer, so these were written round it — or a buyer "
                 "was deleted by hand. The SMS audience joins contacts to "
-                "buyers, so an orphaned phone number is in no audience; the "
-                "copy-back refuses what DuckDB could not hold.")))
+                "buyers, so an orphaned phone number is in no audience. "
+                "scripts/chain_copy_back.py does not refuse them: it reads "
+                "contacts through their buyers and leaves an orphaned one "
+                "behind, and carries an orphaned verdict into DuckDB — so "
+                "--handover will not name them. Correct them before a rollback.")))
     if b.contact_missing:
         shown = ", ".join(str(i) for i in b.contact_missing_sample)
         issues.append(_issue(

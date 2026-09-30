@@ -96,6 +96,40 @@ def _buyer_sync() -> "dict | None":
         return None
 
 
+_buyer_watermark_cache: dict = {"age": None, "expires_at": 0.0}
+
+
+async def _buyer_sync_block() -> "dict | None":
+    """`_buyer_sync()`, plus — under chain 4 — `watermark_age_s`: the age of
+    the stamp the step writes to Postgres on every completion. The canary's
+    chain CRITICAL judges the older of the two, because the local clock is
+    floored at the process start and every recreate would otherwise reset a
+    stall and announce it resolved (review of PR-3). Read at most once a
+    minute; a store that cannot be read publishes None, and the canary falls
+    back to the local clock."""
+    from core import pg_buyer_sync_read, pg_buyers_write
+
+    block = _buyer_sync()
+    if block is None or pg_buyers_write.mode() != "postgres":
+        return block
+    now = time.time()
+    if now >= _buyer_watermark_cache["expires_at"]:
+        try:
+            _buyer_watermark_cache["age"] = await pg_buyer_sync_read.watermark_age_s()
+        except Exception as e:  # noqa: BLE001 — a health probe never fails on this
+            logger.debug(f"buyers watermark unavailable: {type(e).__name__}")
+            _buyer_watermark_cache["age"] = None
+        _buyer_watermark_cache["expires_at"] = now + _STATS_CACHE_TTL
+        age = _buyer_watermark_cache["age"]
+    else:
+        # Aged by the time since it was read, so a cached value never reads
+        # younger than the stamp it came from.
+        cached = _buyer_watermark_cache["age"]
+        read_at = _buyer_watermark_cache["expires_at"] - _STATS_CACHE_TTL
+        age = None if cached is None else cached + int(now - read_at)
+    return {**block, "watermark_age_s": age}
+
+
 def _write_chains() -> dict:
     """Each write chain's KS_WRITE_* as understood now, and whether the chain
     has already written Postgres. Local state: the environment, plus the latch,
@@ -464,7 +498,7 @@ async def health_check(request: Request):
         "read_fallback_mode": _read_fallback_mode(),
         "warehouse_writer_mode": _warehouse_writer_mode(),
         "utm_parse": _utm_parse_mode(),
-        "buyer_sync": _buyer_sync(),
+        "buyer_sync": await _buyer_sync_block(),
     }
 
 

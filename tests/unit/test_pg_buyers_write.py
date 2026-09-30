@@ -227,9 +227,18 @@ class TestTheReadersComeFirst:
 
 
 def _row(**kw):
-    base = dict(id=1, loyalty_discount=None, loyalty_amount=None)
+    from core.landing_rows import BuyerRow
+
+    base = {f: None for f in BuyerRow._fields}
+    base.update(id=1, full_name="Олена")
     base.update(kw)
-    return SimpleNamespace(**base)
+    return BuyerRow(**base)
+
+
+def _contact(buyer_id=1, value="+380500000001", kind="phone"):
+    from core.landing_rows import ContactRow
+
+    return ContactRow(buyer_id, kind, value, True)
 
 
 class TestWhatIsRefusedBeforeTheLatch:
@@ -248,8 +257,32 @@ class TestWhatIsRefusedBeforeTheLatch:
         assert chain._refusal(_row(id=True), ()) is not None
 
     def test_a_contact_naming_another_buyer(self):
-        contact = SimpleNamespace(buyer_id=2)
-        assert chain._refusal(_row(id=1), (contact,)) is not None
+        assert chain._refusal(_row(id=1), (_contact(buyer_id=2),)) is not None
+        assert chain._refusal(_row(id=1), (_contact(),)) is None
+
+    @pytest.mark.parametrize("field,value", [
+        ("id", 2 ** 31), ("manager_id", -2 ** 31 - 1), ("company_id", "7"),
+        ("full_name", "Олена \ud800"), ("note", 5), ("city", b"Kyiv"),
+        ("birthday", "1990-01-05"), ("updated_at", "2026-09-30"),
+    ])
+    def test_what_the_driver_would_refuse(self, field, value):
+        """Everything asyncpg or the table refuses as a DataError, which after
+        the latch would leave a first batch with the marker and no owner row
+        (review of PR-3). The reason names the column, never the value."""
+        why = chain._refusal(_row(**{field: value}), ())
+        assert why and field in why, why
+        assert str(value) not in why
+
+    def test_a_contact_that_is_not_utf8(self):
+        assert "UTF-8" in chain._refusal(_row(), (_contact(value="+380 \ud800"),))
+
+    def test_an_ordinary_buyer_passes(self):
+        from datetime import date
+
+        assert chain._refusal(_row(
+            manager_id=4, company_id=None, birthday=date(1990, 1, 5),
+            updated_at=datetime(2026, 9, 30, 12, 0), loyalty_discount=5.0,
+            loyalty_amount=120.5, city="Київ"), (_contact(),)) is None
 
     @pytest.mark.asyncio
     async def test_a_batch_refused_whole_never_reaches_the_latch(self, flags, monkeypatch):
@@ -333,3 +366,111 @@ class TestTheCompletenessCheckFollowsTheChain:
         with pytest.raises(RuntimeError, match="reached Postgres"):
             await reconcile_buyer_completeness()
         asked.assert_awaited_once()
+
+
+class TestTheHealthBlockCarriesAClockThatSurvivesARestart:
+    @pytest.mark.asyncio
+    async def test_under_the_chain_it_publishes_the_watermarks_age(self, flags, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from core import pg_buyer_sync_read
+        from web.routes.api import health
+
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        monkeypatch.setattr(health, "_buyer_sync", lambda: {"last_ok_age_s": 60})
+        monkeypatch.setattr(health, "_buyer_watermark_cache", {"age": None, "expires_at": 0.0})
+        monkeypatch.setattr(pg_buyer_sync_read, "watermark_age_s", AsyncMock(return_value=12_000))
+        block = await health._buyer_sync_block()
+        assert block == {"last_ok_age_s": 60, "watermark_age_s": 12_000}
+
+    @pytest.mark.asyncio
+    async def test_on_duckdb_it_asks_postgres_nothing(self, flags, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from core import pg_buyer_sync_read
+        from web.routes.api import health
+
+        monkeypatch.setattr(health, "_buyer_sync", lambda: {"last_ok_age_s": 60})
+        monkeypatch.setattr(pg_buyer_sync_read, "watermark_age_s",
+                            AsyncMock(side_effect=AssertionError("asked Postgres")))
+        assert await health._buyer_sync_block() == {"last_ok_age_s": 60}
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_store_publishes_none(self, flags, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from core import pg_buyer_sync_read
+        from web.routes.api import health
+
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        monkeypatch.setattr(health, "_buyer_sync", lambda: {"last_ok_age_s": 60})
+        monkeypatch.setattr(health, "_buyer_watermark_cache", {"age": None, "expires_at": 0.0})
+        monkeypatch.setattr(pg_buyer_sync_read, "watermark_age_s",
+                            AsyncMock(side_effect=OSError("down")))
+        assert (await health._buyer_sync_block())["watermark_age_s"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_age_is_read_from_the_stored_value(self, monkeypatch):
+        from datetime import timezone
+
+        from core import pg_buyer_sync_read
+        from unittest.mock import AsyncMock
+
+        now = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+        for raw, age in (("2026-09-30T14:00:00+03:00", 3600), ("", None), ("junk", None)):
+            monkeypatch.setattr("core.pg_chain_watermarks.read_values",
+                                AsyncMock(return_value={"last_sync_buyers": raw} if raw else {}))
+            assert await pg_buyer_sync_read.watermark_age_s(now=now) == age, raw
+
+
+class TestTheHourlyRiderDerivesWhereTheChainWrites:
+    """`_run_replicate_operational` chooses the derivation by `mode()`. The
+    structural test in test_gender.py sees both calls in the source; this
+    runs them, so swapping the two branches fails (review of PR-3)."""
+
+    async def _run(self):
+        from unittest.mock import AsyncMock, patch
+
+        from core.scheduler import BackgroundScheduler
+
+        store = object()
+        duck = AsyncMock(return_value={"written": 0})
+        pg = AsyncMock(return_value={"written": 0})
+        with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
+             patch("core.gender_backfill.derive_gender", new=duck), \
+             patch("core.pg_buyers_write.derive_gender_pg", new=pg), \
+             patch("core.pg_operational.replicate_operational",
+                   new=AsyncMock(return_value={})), \
+             patch("core.pg_bot_state.replicate_bot_state",
+                   new=AsyncMock(return_value={})):
+            await BackgroundScheduler()._run_replicate_operational()
+        return store, duck, pg
+
+    @pytest.mark.asyncio
+    async def test_on_duckdb_it_derives_in_duckdb(self, flags):
+        store, duck, pg = await self._run()
+        duck.assert_awaited_once_with(store)
+        pg.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_flagged_with_its_readers_it_derives_in_postgres(self, flags):
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        _store, duck, pg = await self._run()
+        pg.assert_awaited_once_with()
+        duck.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_latched_with_the_flag_back_it_still_derives_in_postgres(self, flags):
+        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
+        flags.setenv(chain.WRITE_ENV, "duckdb")
+        _store, duck, pg = await self._run()
+        pg.assert_awaited_once_with()
+        duck.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_held_by_a_reader_it_derives_in_duckdb(self, flags):
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        flags.setenv("KS_SMS_STORE", "duckdb")
+        store, duck, pg = await self._run()
+        duck.assert_awaited_once_with(store)
+        pg.assert_not_awaited()

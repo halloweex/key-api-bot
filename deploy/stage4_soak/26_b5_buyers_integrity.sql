@@ -12,7 +12,9 @@
 --   - no NULL `full_name` (DuckDB's is NOT NULL, so the copy-back could not
 --     carry such a buyer back — the one rollback there is);
 --   - every buyer's phone and email in its contact list (both come from one
---     KeyCRM list; the SMS audience reads the list).
+--     KeyCRM list; the SMS audience reads the list). An empty column is not
+--     a value: the parse stores '' when KeyCRM's list starts with one, and
+--     writes no contact for it.
 -- All three read zero on production on 2026-09-30.
 --
 -- WHAT A FAIL MEANS
@@ -32,11 +34,11 @@ facts AS (
             AS orphan_verdicts,
         (SELECT count(*) FROM bronze.buyers WHERE full_name IS NULL) AS null_names,
         (SELECT count(*) FROM bronze.buyers b
-         WHERE (b.phone IS NOT NULL AND NOT EXISTS (
+         WHERE (NULLIF(b.phone, '') IS NOT NULL AND NOT EXISTS (
                     SELECT 1 FROM bronze.buyer_contacts c
                     WHERE c.buyer_id = b.id AND c.contact_type = 'phone'
                       AND c.value = b.phone))
-            OR (b.email IS NOT NULL AND NOT EXISTS (
+            OR (NULLIF(b.email, '') IS NOT NULL AND NOT EXISTS (
                     SELECT 1 FROM bronze.buyer_contacts c
                     WHERE c.buyer_id = b.id AND c.contact_type = 'email'
                       AND c.value = b.email))) AS contact_missing

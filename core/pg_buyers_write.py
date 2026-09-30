@@ -295,17 +295,67 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# What `bronze.buyers` (revision 0011) and `bronze.buyer_contacts` hold, by
+# the type asyncpg must be able to send: INTEGER columns take an int in int32,
+# TEXT columns a str that encodes as UTF-8, and the date and timestamps their
+# Python types. The column lists are the shared parse's, never restated.
+_INT_COLUMNS = frozenset({"id", "manager_id", "company_id"})
+_TEXT_COLUMNS = frozenset({"full_name", "note", "phone", "email", "company_name",
+                           "city", "region", "loyalty_program_name",
+                           "loyalty_level_name"})
+_INT32 = (-2 ** 31, 2 ** 31 - 1)
+
+
+def _value_refusal(column: str, value) -> Optional[str]:
+    """Why the driver or the server would refuse `value` in `column`, or None.
+    Names the column and the kind of value, never the value itself: it may be
+    somebody's phone number typed into the wrong field."""
+    from datetime import date
+
+    if value is None:
+        return "id is NULL" if column == "id" else None
+    if column in _INT_COLUMNS:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return f"{column} is a {type(value).__name__}, not an integer"
+        if not _INT32[0] <= value <= _INT32[1]:
+            return f"{column} is outside INTEGER's range"
+    elif column in _TEXT_COLUMNS:
+        if not isinstance(value, str):
+            return f"{column} is a {type(value).__name__}, not text"
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            # A lone surrogate — what a JSON "\ud800" escape decodes to. The
+            # parse passes it through; asyncpg refuses it as a DataError.
+            return f"{column} is not valid UTF-8"
+    elif column == "birthday":
+        if not isinstance(value, date) or isinstance(value, datetime):
+            return f"birthday is a {type(value).__name__}, not a date"
+    elif column in ("created_at", "updated_at"):
+        if not isinstance(value, datetime):
+            return f"{column} is a {type(value).__name__}, not a timestamp"
+    return None
+
+
 def _refusal(row, contacts) -> Optional[str]:
     """Why Postgres would refuse this buyer, or None. Asked before the latch.
 
-    Only what the parse can hand over and the table cannot hold: an id that is
-    not a number (the key, NOT NULL) and a loyalty figure outside its NUMERIC.
-    Everything else the parse already makes safe — NUL stripped, a blank name
-    'Unknown', a birthday DuckDB would refuse read as NULL."""
+    Everything the driver or the table would refuse, column by column: an id
+    that is missing or not an int32, text that is not UTF-8 (a lone
+    surrogate), a value of the wrong type, a loyalty figure outside its
+    NUMERIC, a contact naming another buyer or carrying such text. The parse
+    already strips NUL, writes 'Unknown' for a blank name and reads a birthday
+    DuckDB would refuse as NULL. A first batch the server refused whole after
+    the latch would leave the marker with no owner row behind it — CRITICAL
+    `chain_latch_disagrees` the next morning and a copy-back that refuses — so
+    what can be foreseen is refused here; what cannot is retried buyer by
+    buyer and skipped (`upsert_buyers`)."""
     from core.pg_numeric import refusal
 
-    if not isinstance(row.id, int) or isinstance(row.id, bool):
-        return f"id={row.id!r} is not an integer"
+    for column in type(row)._fields:
+        why = _value_refusal(column, getattr(row, column))
+        if why:
+            return why
     for column, (precision, scale) in NUMERIC_COLUMNS.items():
         why = refusal(column, getattr(row, column), precision, scale, nullable=True)
         if why:
@@ -313,6 +363,14 @@ def _refusal(row, contacts) -> Optional[str]:
     for contact in contacts:
         if contact.buyer_id != row.id:
             return f"a contact names buyer {contact.buyer_id!r}"
+        for field in ("contact_type", "value"):
+            value = getattr(contact, field)
+            if not isinstance(value, str) or not value:
+                return f"a contact's {field} is not text"
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                return f"a contact's {field} is not valid UTF-8"
     return None
 
 
@@ -428,7 +486,6 @@ async def upsert_buyers(buyers: Sequence[Any], *,
         return 0
     verdicts = {v[0]: v for v in _verdicts(rows)}
     decided_at = _now_utc()
-    deadline = time.monotonic() + WRITE_DEADLINE_S
 
     def _portion_of(portion):
         return ([tuple(r) for r in portion],
@@ -441,8 +498,13 @@ async def upsert_buyers(buyers: Sequence[Any], *,
         # Inside the acquire, not before it: an acquire that ends without a
         # connection is a write that never reached Postgres (`_latch`).
         stamp = _latch()
+        # From the latch, not from the call: the wait for the pool and the
+        # revision check are unbounded above it, and a deadline spent there
+        # would expire with the marker on disk and nothing sent. The first
+        # portion is always attempted.
+        deadline = time.monotonic() + WRITE_DEADLINE_S
         for start in range(0, len(rows), WRITE_PORTION):
-            if time.monotonic() > deadline:
+            if start and time.monotonic() > deadline:
                 raise TimeoutError(
                     f"buyers: the write phase passed {WRITE_DEADLINE_S:.0f}s with "
                     f"{len(rows) - start} buyer(s) unwritten")
@@ -487,10 +549,26 @@ async def upsert_buyers(buyers: Sequence[Any], *,
     return written
 
 
+# A verdict that nothing will select again unless it is marked: decided by no
+# rules at all, so `gender_backfill`'s pending question (`rules_version <
+# RULES_VERSION`) takes it on the next hourly derivation. An UPDATE, never a
+# DELETE, and never over a human's decision.
+_STALE_VERDICTS = """
+UPDATE app.buyer_gender SET rules_version = 0
+WHERE buyer_id = ANY($1::int[]) AND NOT override_by_human
+"""
+
+
 async def _write_verdicts(conn, verdicts, decided_at: datetime) -> None:
     """The portion's verdicts in a savepoint, given up on any Postgres error:
-    the buyers must land whatever the gender does, and the hourly derivation
-    picks up a buyer with none. `asyncpg.PostgresError` and nothing wider."""
+    the buyers must land whatever the gender does. `asyncpg.PostgresError`
+    and nothing wider.
+
+    Given up is not left alone. This portion may have renamed a buyer, and the
+    old name's verdict at the current rules version is one the hourly
+    derivation would never select again — so the portion's verdicts are
+    marked stale instead, and the derivation decides them within the hour
+    (review of PR-3). If that fails too, the portion rolls back with it."""
     import asyncpg
 
     try:
@@ -498,8 +576,10 @@ async def _write_verdicts(conn, verdicts, decided_at: datetime) -> None:
             await _write_gender_rows(conn, verdicts, decided_at)
     except asyncpg.PostgresError as exc:
         logger.error("gender derivation failed inline for %d buyer(s): %s; "
-                     "the hourly derivation will decide them",
+                     "their verdicts are marked stale for the hourly derivation",
                      len(verdicts), type(exc).__name__)
+        async with conn.transaction():
+            await conn.execute(_STALE_VERDICTS, [v[0] for v in verdicts])
 
 
 async def _pending(conn, rebuild_all: bool) -> List[Tuple[int, str]]:

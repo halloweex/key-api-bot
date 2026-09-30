@@ -198,8 +198,16 @@ BUYER_WATERMARK_TIMEOUT_S = 10
 # times an hour says nothing the growing age of `last_ok` does not.
 _DATA_ERROR_NAMES = frozenset({
     "ConversionException", "ConstraintException", "InvalidInputException",
-    "DataError", "CharacterNotInRepertoireError",
+    "DataError", "CharacterNotInRepertoireError", "BuyersRefused",
 })
+
+
+class BuyersRefused(ValueError):
+    """Every buyer a batch fetched was one Postgres would refuse (chain 4 skips
+    them by id rather than failing the batch). Not a success: a step that
+    landed nothing must not refresh the clock the canary judges it by — with
+    chain 4 there is no other writer of buyers. A data error, so it does not
+    count toward `consecutive_failures`; the age still pages."""
 
 
 def _is_data_error(exc: BaseException) -> bool:
@@ -601,6 +609,10 @@ class SyncService:
                 # refuse is skipped by id rather than failing the batch.
                 skipped: list = []
                 count = await self.store.upsert_buyers(buyers, skipped_out=skipped)
+                if not count and skipped:
+                    raise BuyersRefused(
+                        f"all {len(skipped)} buyer(s) fetched were refused by "
+                        "Postgres; their ids are in the log above")
                 await self.store.set_last_sync_time("buyers")
                 logger.info(f"Synced {count} buyers from KeyCRM")
                 self._buyer_step_ok(

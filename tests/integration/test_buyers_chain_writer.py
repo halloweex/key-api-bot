@@ -222,9 +222,9 @@ class TestAVerdictLandsOnlyBesideItsName:
 class TestABuyerPostgresRefuses:
     @pytest.mark.asyncio
     async def test_it_is_skipped_by_id_and_the_rest_land(self, stores, caplog):
-        """A lone surrogate passes every check the parse makes and is refused
-        by the driver as a DataError — the shape a check before the latch
-        cannot foresee. The portion is retried buyer by buyer."""
+        """A lone surrogate passes every check the parse makes, and asyncpg
+        refuses it as a DataError. Refused before the latch now (review of
+        PR-3); the rest of the batch lands."""
         store, pool, _env = stores
         skipped = []
         poisoned = _buyer(2, "Олена \ud800 Петренко")
@@ -239,14 +239,44 @@ class TestABuyerPostgresRefuses:
         assert set(await _verdicts(pool)) == {1, 3}
         assert "\ud800" not in caplog.text, "a value reached the log"
 
+    @pytest.mark.parametrize("poison", ["numeric", "surrogate"])
     @pytest.mark.asyncio
-    async def test_a_first_batch_of_only_refused_buyers_leaves_no_marker(self, stores):
+    async def test_a_first_batch_of_only_refused_buyers_leaves_no_marker(
+            self, stores, poison):
+        """What the driver would refuse whole is refused before the latch, so
+        the flip is not spent on a batch that writes nothing."""
         store, _pool, _env = stores
         skipped = []
-        huge = _buyer(1, loyalty=[{"discount": 5000}])
-        assert await store.upsert_buyers([huge], skipped_out=skipped) == 0
+        bad = (_buyer(1, loyalty=[{"discount": 5000}]) if poison == "numeric"
+               else _buyer(1, "Олена \ud800"))
+        assert await store.upsert_buyers([bad], skipped_out=skipped) == 0
         assert skipped == [1]
         assert not chain_latch.marker_path(chain.CHAIN).exists()
+
+    @pytest.mark.asyncio
+    async def test_what_nobody_foresaw_is_retried_buyer_by_buyer(self, stores):
+        """A DataError the pre-check could not see: the portion is retried one
+        buyer at a time, the refused one skipped, the rest committed with
+        their owner rows."""
+        from core import pg_buyer_rows
+
+        store, pool, _env = stores
+        real = pg_buyer_rows._write_buyer_rows
+
+        async def refusing_666(conn, rows, contacts):
+            if any(r[0] == 666 for r in rows):
+                raise asyncpg.DataError("invalid input for query argument $1")
+            return await real(conn, rows, contacts)
+
+        skipped = []
+        with patch("core.pg_buyer_rows._write_buyer_rows", new=refusing_666):
+            written = await store.upsert_buyers(
+                [_buyer(1), _buyer(666), _buyer(3)], skipped_out=skipped)
+        assert written == 2 and skipped == [666]
+        async with pool.acquire() as conn:
+            assert [r["id"] for r in await conn.fetch(
+                "SELECT id FROM bronze.buyers ORDER BY id")] == [1, 3]
+        assert await chain_latch.read_owners(pool)
 
     @pytest.mark.asyncio
     async def test_a_cancelled_statement_is_not_retried(self, stores):
@@ -279,3 +309,55 @@ class TestAVerdictThatFailsCostsNoBuyer:
         assert await _verdicts(pool) == {}
         out = await chain.derive_gender_pg()
         assert out["written"] == 1 and set(await _verdicts(pool)) == {1}
+
+
+class TestTheStandingWatchReadsRealRows:
+    """`pg_chain_invariants._read_buyers` against a real Postgres, each fact
+    seeded once — the unit recorder answers zeros whatever the SQL (review of
+    PR-3)."""
+
+    @pytest.mark.asyncio
+    async def test_each_fact_lands_in_its_field_and_its_finding(self, stores):
+        from core import pg_chain_invariants as inv
+
+        store, pool, _env = stores
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO bronze.buyers (id, full_name, phone, email) VALUES "
+                "(1, 'Олена', '+380500000001', NULL), "      # clean
+                "(2, NULL, NULL, NULL), "                     # NULL name
+                "(3, 'Іван', NULL, 'x@example.com'), "        # email, no contact
+                "(4, 'Марія', '', NULL)")                     # '' is the parse
+            await conn.execute(
+                "INSERT INTO bronze.buyer_contacts (buyer_id, contact_type, value, "
+                "is_primary) VALUES (1, 'phone', '+380500000001', true), "
+                "(99, 'phone', '+380500000099', true)")        # orphan contact
+            await conn.execute(
+                "INSERT INTO app.buyer_gender (buyer_id, gender, method, "
+                "rules_version) VALUES (1, 'f', 'given', 1), (98, 'm', 'given', 1), "
+                "(97, 'm', 'given', 1)")                       # two orphan verdicts
+            stamp = datetime(2026, 9, 30, 12, 0, tzinfo=timezone.utc)
+            facts = await inv._read_buyers(conn, stamp)
+        assert facts.buyers == 4
+        assert facts.nulls.counts == {"full_name": 1}
+        assert (facts.contact_missing, facts.contact_missing_sample) == (1, (3,))
+        assert (facts.orphan_contacts, facts.orphan_verdicts) == (1, 2)
+        assert facts.orphan_sample == (97, 98, 99)
+        issues = {i.check_name: i for i in inv.check_chain_invariants(inv.Facts(
+            watched=(chain.CHAIN,), now=stamp, buyers=facts))}
+        assert set(issues) == {inv.BUYER_ORPHANS, inv.CONTACT_MISSING, inv.COLUMN_NULL}
+        assert issues[inv.BUYER_ORPHANS].count == 3
+
+    @pytest.mark.asyncio
+    async def test_before_the_handover_orphans_are_not_read(self, stores):
+        from core import pg_chain_invariants as inv
+
+        _store, pool, _env = stores
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO app.buyer_gender (buyer_id, gender, method, "
+                "rules_version) VALUES (98, 'm', 'given', 1)")
+            facts = await inv._read_buyers(conn, None)
+        assert (facts.orphan_contacts, facts.orphan_verdicts) == (0, 0)
+        assert inv.check_chain_invariants(inv.Facts(
+            watched=(chain.CHAIN,), buyers=facts)) == []

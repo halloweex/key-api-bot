@@ -532,13 +532,24 @@ class TestChain4Buyers:
         assert "landing_rows.buyer_row" in issue.description
         assert "recorded_at" not in issue.description
 
-    def test_before_the_handover_the_null_came_with_the_mirror(self):
-        """The landing tables arrive by the per-tick mirror, not by the
-        hourly replication the other chains' tables did."""
+    def test_before_the_handover_nothing_could_have_carried_the_null(self):
+        """DuckDB's full_name is NOT NULL and the mirror ships the parse,
+        which writes 'Unknown': a NULL before the first write came from
+        neither, and saying it was carried across would send the reader to a
+        copy that cannot have made it (review of PR-3)."""
         facts = self._facts(None, null_names=1)
         (issue,) = inv.check_chain_invariants(facts)
-        assert "carried across by the buyers mirror" in issue.description
-        assert "by the replication" not in issue.description
+        assert "hand edit or a writer that went round the parse" in issue.description
+        assert "carried across" not in issue.description
+        assert "chain_copy_back.py" in issue.description
+
+    def test_an_orphan_says_the_copy_back_leaves_it_behind(self):
+        """It does not refuse them: contacts are read through their buyers and
+        an orphaned verdict is carried into DuckDB (review of PR-3)."""
+        facts = self._facts(UTC_NOW, orphan_contacts=1, orphan_sample=(7,))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert "does not refuse them" in issue.description
+        assert "refuses what DuckDB could not hold" not in issue.description
 
     def test_an_unreadable_buyers_group_is_blindness_not_silence(self):
         facts = inv.Facts(watched=("pg_buyers_write",), now=UTC_NOW,

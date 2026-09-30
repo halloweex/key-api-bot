@@ -539,7 +539,14 @@ def check_buyer_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
     Only when the same payload says chain 4 writes Postgres — the registry's
     `mode`, which a latch sets whatever the flag says — so a web still on
     DuckDB, or one publishing no chain block, is judged by `check_buyer_sync`
-    alone. The age is the step's own, floored at web's start like the WARN's.
+    alone.
+
+    The age is the OLDER of two clocks. `last_ok_age_s` is the process's own
+    and is floored at web's start, so on its own every recreate reset a stall
+    — a writer dead across deploys under three hours apart never paged, and
+    each recreate announced the page resolved. `watermark_age_s` is the stamp
+    the step writes to Postgres on every completion and survives the restart;
+    when it cannot be read the local clock is all there is (review of PR-3).
     """
     block = (payload or {}).get("buyer_sync")
     chain = ((payload or {}).get("write_chains") or {}).get(BUYER_CHAIN)
@@ -547,9 +554,20 @@ def check_buyer_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
         return []
     if chain.get("mode") != "postgres":
         return []
-    age = _number(block.get("last_ok_age_s"))
-    if age is None or age <= BUYER_SYNC_CHAIN_STALE_S:
+    ages = [a for a in (_number(block.get("watermark_age_s")),
+                        _number(block.get("last_ok_age_s"))) if a is not None]
+    if not ages or max(ages) <= BUYER_SYNC_CHAIN_STALE_S:
         return []
+    age = max(ages)
+    # The WARN's distinction, kept: with no attempt as recent as the stale
+    # bound the tick never reached the step, and the error class would send
+    # the reader to a buyers log line that was never written.
+    attempt = _number(block.get("last_attempt_age_s"))
+    if attempt is None or attempt > BUYER_SYNC_STALE_S:
+        return [("buyer_sync_stalled_chain",
+                 f"buyer sync: step not reached for {age // 60} min — the "
+                 "incremental tick stops before it — and chain 4 makes it the "
+                 "only writer of buyers")]
     return [("buyer_sync_stalled_chain",
              f"buyer sync: no success for {age // 60} min, and chain 4 makes it "
              f"the only writer of buyers ({block.get('last_error_class') or 'no error recorded'})")]
@@ -967,7 +985,7 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("derivation_marks_",
      "Read meta.derivation_signal's last_error in meta.mirror_state, then meta.derivation_runs"),
     ("buyer_sync_stalled_chain",
-     "Chain 4: nothing else writes buyers. buyer_sync in /api/health names the error class; grep web's log for 'Buyer' and 'buyers:'"),
+     "Chain 4: nothing else writes buyers. 'step not reached' means the tick stops first: grep 'Incremental sync'; else buyer_sync names the error class, grep 'Buyer'"),
     ("buyer_sync_",
      "grep web's log for 'Buyer' and 'Incremental sync'; 'step not reached' means the whole tick stops"),
     ("write_chain_flag_mismatch",

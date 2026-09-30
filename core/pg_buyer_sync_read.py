@@ -74,3 +74,27 @@ async def count_buyers() -> int:
     await require_revision()
     async with pool.acquire() as conn:
         return int(await conn.fetchval("SELECT count(*) FROM bronze.buyers"))
+
+
+async def watermark_age_s(now=None) -> "int | None":
+    """Seconds since the buyers step last completed, from the stamp it writes
+    to `meta.chain_watermarks` under chain 4 — a clock that survives a web
+    restart, where `buyer_sync.last_ok_age_s` is floored at the process start
+    and so reads young after every recreate. None when the key is not there
+    yet or holds no timestamp. Raises on a store that cannot be read; the
+    health block publishes None then."""
+    from datetime import datetime, timezone
+
+    from core.pg_chain_watermarks import read_values
+
+    raw = (await read_values(["last_sync_buyers"])).get("last_sync_buyers")
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return max(0, int((now - stamp).total_seconds()))
