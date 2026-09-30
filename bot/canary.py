@@ -104,12 +104,19 @@ DQ_MAX_AGE_S = {
     # and the same consequence of a web with nowhere to compare: without
     # KS_CH_URL `_reconcile_clickhouse` returns None, no run is written, and
     # the host pages `dq_never:reconciliation_ch` — which is what "required"
-    # means. A copy too old to reconcile is a successful run with a WARN
-    # (`ch_reconcile_pending`), so a lagging ship does not page here; the
-    # mirror-landing layer says that Gold went unchecked
-    # (`gold_values_unwatched`). After a restart the dq_reconciliation
-    # catch-up reads this layer's age too (`CATCHUP_SIBLING_LAYERS`), so the
-    # first probe pages only a layer already past 30 h, as for the others.
+    # means. A copy too old to reconcile (over 3 h) is gated, not blamed —
+    # and not a success either: it compared nothing, so it is written with
+    # `error_message` set beside its `ch_reconcile_pending` and does not reset
+    # this age. It was once written as a success, and a ClickHouse that stayed
+    # down then paged here at most once: the next morning's gated run reset
+    # the age and the page was announced resolved with ClickHouse still down.
+    # So any morning without a comparison — an arm that raised, a stale copy
+    # — pages here 30 h after the last one that compared. After a restart the
+    # dq_reconciliation catch-up reads this layer's age too
+    # (`CATCHUP_SIBLING_LAYERS`), so the first probe pages only a layer
+    # already past 30 h; a catch-up against a copy still stale is a failed
+    # run as well, so it cannot hold the page back — it costs one KeyCRM
+    # fetch per restart while ClickHouse stays down.
     "reconciliation_ch": 30 * 3600,  # 24h cycle + 6h grace
     "integrity": 12 * 3600,       # 6h cycle + 6h grace
     # Daily at 07:30 Kyiv, same shape as reconciliation. Added 28.08 after the

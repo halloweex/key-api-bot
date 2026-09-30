@@ -93,10 +93,15 @@ CATCHUP_CHECKS = {
 # inside the 26–30 h window left it to page at 30 h although one run would
 # have cleared it. The 26 h limit is what keeps the canary's first probe,
 # 90 s after a start, from paging a layer the catch-up is about to refresh.
+# It cannot hold a page back that is owed: a run that compared nothing — the
+# ClickHouse arm against a copy over 3 h old included — is a failed run and
+# moves no age, so while ClickHouse stays down each restart past 26 h costs
+# one KeyCRM fetch and the page still fires at 30 h.
 #
 # An arm counts only where this process would write it — `_reconcile_postgres`
-# and `_reconcile_clickhouse` return None without their store, and a host
-# without ClickHouse would otherwise queue a KeyCRM re-fetch on every start
+# and `_reconcile_clickhouse` return None without their store (the ClickHouse
+# arm without Postgres too: its watermark and exclusion set live there), and
+# a host without one would otherwise queue a KeyCRM re-fetch on every start
 # for a layer it can never write. And only an age the reader reported: an
 # absent entry is no evidence either way.
 CATCHUP_SIBLING_LAYERS = {
@@ -2317,6 +2322,9 @@ class BackgroundScheduler:
             # it can return from; a raise, or a job that never reached it,
             # leaves it nothing to return, so those two are filed below.
             gold_compared = False
+            # And whether the archive's buckets were counted: a run that did
+            # not count them cannot clear `ch_history_buckets` either.
+            history_compared = False
 
             try:
                 # The DuckDB read and the Postgres round-trips are deliberately
@@ -2444,7 +2452,8 @@ class BackgroundScheduler:
                 from core.ch_silver import reconcile_clickhouse
                 gold_compared = await check(
                     "reconcile_clickhouse", lambda: reconcile_clickhouse())
-                await check("reconcile_ch_history", lambda: reconcile_ch_history())
+                history_compared = await check(
+                    "reconcile_ch_history", lambda: reconcile_ch_history())
             except Exception as e:
                 # Only the imports between the checks can land here now.
                 raised.append(f"setup: {type(e).__name__}: {e}")
@@ -2516,11 +2525,14 @@ class BackgroundScheduler:
                 except Exception as e:  # noqa: BLE001 — the next run marks again
                     logger.warning(f"Mirror reconciliation: pages not marked: {e}")
             # A run in which ClickHouse did not compare cannot announce what
-            # only that comparison re-examines as resolved (OD-08).
+            # only that comparison re-examines as resolved (OD-08) — the Gold
+            # half's or the archive's.
             try:
+                from core.ch_history import history_unverified_conditions
                 from core.ch_silver import gold_unverified_conditions
 
-                unverified = gold_unverified_conditions(issues)
+                unverified = gold_unverified_conditions(issues) + \
+                    history_unverified_conditions(issues, compared=history_compared)
             except Exception:  # noqa: BLE001 — then nothing is announced
                 logger.exception("Mirror reconciliation: unverified set unknown")
                 unverified = None
@@ -3100,6 +3112,14 @@ class BackgroundScheduler:
                 or (datetime.now(timezone.utc) - last_ok) > timedelta(hours=3)
             )
             if stale:
+                # Gated, not blamed — and not a verdict either. The run
+                # compared nothing against KeyCRM, so it is written the way
+                # a run that raised is: `error` set, which is what keeps it
+                # out of the layer's last-success age, the resolution of its
+                # conditions and the digest. Written as a success it reset
+                # the age every morning ClickHouse stayed down, so the canary
+                # paged a dead ClickHouse at most once and then announced it
+                # resolved while it was still down (OD-08 review).
                 issues.append(IntegrityIssue(
                     check_name="ch_reconcile_pending",
                     table_name="silver.orders",
@@ -3112,7 +3132,19 @@ class BackgroundScheduler:
                         "lag and call it a lie. The hourly ch_sync is the fix."
                     ),
                 ))
-                return {"issues": issues, "discrepancies": [], "error": None}
+                shipped = (
+                    "has never shipped" if last_ok is None else
+                    "last shipped "
+                    f"{(datetime.now(timezone.utc) - last_ok).total_seconds() / 3600:.1f} h ago"
+                )
+                return {
+                    "issues": issues, "discrepancies": [],
+                    "error": (
+                        f"ch_reconcile_pending: the ClickHouse copy {shipped} "
+                        f"(gate 3 h), so nothing was compared with KeyCRM — "
+                        f"read meta.mirror_state 'clickhouse.silver_orders'"
+                    ),
+                }
 
             exclude = set(inflight_ids or ())
             exclude |= await pg_ids_updated_since(

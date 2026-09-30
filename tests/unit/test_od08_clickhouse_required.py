@@ -252,18 +252,24 @@ class TestABlindRunResolvesNothingItDidNotSee:
     that could not look."""
 
     @pytest.mark.asyncio
-    async def test_blind_run_holds_the_comparisons_conditions(self, duckdb_derives):
+    async def test_blind_run_holds_the_comparisons_conditions(
+        self, monkeypatch, duckdb_derives,
+    ):
+        """KS_CH_URL set, so the archive half counted its buckets and only
+        the Gold half's conditions are held."""
         from tests.unit.test_mirror_landing_isolation import _run
 
+        monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
         held = []
         await _run({"reconcile_clickhouse": [ch_silver.gold_values_unwatched("x")]},
                    held=held)
         assert held == [list(ch_silver.GOLD_WATCH_CONDITIONS)]
 
     @pytest.mark.asyncio
-    async def test_a_run_that_compared_holds_nothing(self, duckdb_derives):
+    async def test_a_run_that_compared_holds_nothing(self, monkeypatch, duckdb_derives):
         from tests.unit.test_mirror_landing_isolation import _run
 
+        monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
         held = []
         await _run({}, held=held)
         assert held == [[]]
@@ -291,6 +297,238 @@ class TestABlindRunResolvesNothingItDidNotSee:
                      "ch_engines_gold_extra", "ch_engines_gold_mismatch"}
         assert criticals <= emitted
         assert set(ch_silver.GOLD_WATCH_CONDITIONS) == criticals
+
+
+class TestABlindArchiveRunResolvesNothingEither:
+    """The OD-08 review's third finding: the same outage one call further
+    down. `reconcile_ch_history` answers `ch_history_unreachable` (WARN), or
+    [] without KS_CH_URL, and neither is a CRITICAL — so a delivered
+    `ch_history_buckets`, which resolves only when "a human repairs the
+    archive copy", was announced resolved by a run that could not read the
+    copy. Mutation: drop `history_unverified_conditions` from the job's
+    `unverified` and the first two fail."""
+
+    OUTAGE = {
+        "reconcile_clickhouse": [
+            IntegrityIssue(check_name="ch_silver_unreachable",
+                           table_name="silver.orders", severity=Severity.WARN,
+                           count=1, description="ConnectError"),
+        ],
+        "reconcile_ch_history": [
+            IntegrityIssue(check_name="ch_history_unreachable",
+                           table_name="history.order_versions",
+                           severity=Severity.WARN, count=1,
+                           description="ConnectError"),
+        ],
+    }
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_copy_holds_the_archive_page(
+        self, monkeypatch, postgres_alone,
+    ):
+        """The reviewer's scenario, after step 13."""
+        from tests.unit.test_mirror_landing_isolation import _run
+
+        monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
+        outage = dict(self.OUTAGE)
+        outage["reconcile_clickhouse"] = outage["reconcile_clickhouse"] + [
+            ch_silver.gold_values_unwatched("a read-back failed (ConnectError)")]
+        held = []
+        await _run(outage, held=held)
+        assert "ch_history_buckets" in held[0]
+        assert set(ch_silver.GOLD_WATCH_CONDITIONS) <= set(held[0])
+
+    @pytest.mark.asyncio
+    async def test_without_ks_ch_url_the_archive_page_is_held(
+        self, monkeypatch, duckdb_derives,
+    ):
+        """No KS_CH_URL: the archive half returns [], which is not a count."""
+        from tests.unit.test_mirror_landing_isolation import _run
+
+        monkeypatch.delenv("KS_CH_URL", raising=False)
+        held = []
+        await _run({"reconcile_clickhouse": [
+            ch_silver.gold_values_unwatched("KS_CH_URL is not set")]}, held=held)
+        assert "ch_history_buckets" in held[0]
+
+    @pytest.mark.asyncio
+    async def test_a_counted_archive_holds_nothing_of_its_own(
+        self, monkeypatch, duckdb_derives,
+    ):
+        """KS_CH_URL set and the buckets counted: a delivered
+        `ch_history_buckets` that the count no longer finds does resolve.
+        Mutation: hold it unconditionally and this fails."""
+        from tests.unit.test_mirror_landing_isolation import _run
+
+        monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
+        held = []
+        await _run({"reconcile_ch_history": []}, held=held)
+        assert "ch_history_buckets" not in held[0]
+
+    def test_a_comparison_that_raised_or_was_never_reached_holds(self, monkeypatch):
+        """`compared` False: the job's `check` caught a raise, or the job never
+        got that far. Mutation: drop `not compared` and this fails."""
+        from core import ch_history
+
+        monkeypatch.setenv("KS_CH_URL", "http://127.0.0.1:1")
+        assert ch_history.history_unverified_conditions([], compared=False) == [
+            "ch_history_buckets"]
+        assert ch_history.history_unverified_conditions([], compared=True) == []
+
+    @pytest.mark.asyncio
+    async def test_the_unreachable_name_is_the_one_the_comparison_files(
+        self, monkeypatch,
+    ):
+        """The hold reads a check name; this proves it is the name the
+        comparison actually files when ClickHouse does not answer."""
+        from core import ch_history
+
+        monkeypatch.setattr(ch_history, "configured", lambda: True)
+        monkeypatch.setattr(ch_history, "_ch_max_id", AsyncMock(
+            side_effect=httpx.ConnectError("connection refused")))
+        issues = await ch_history.reconcile_ch_history()
+        assert _names(issues) == [ch_history.HISTORY_UNREACHABLE]
+        assert ch_history.history_unverified_conditions(issues, compared=True) == [
+            "ch_history_buckets"]
+
+    def test_the_held_conditions_are_every_critical_the_archive_files(self):
+        """Derived from what `reconcile_ch_history` emits, so a CRITICAL
+        added there cannot be left unheld."""
+        import ast
+        import inspect
+        from core import ch_history
+
+        tree = ast.parse(inspect.getsource(ch_history.reconcile_ch_history))
+        critical = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                kws = {k.arg: k.value for k in node.keywords}
+                name, sev = kws.get("check_name"), kws.get("severity")
+                if (isinstance(name, ast.Constant) and isinstance(sev, ast.Attribute)
+                        and sev.attr == "CRITICAL"):
+                    critical.add(name.value)
+        assert critical == {"ch_history_buckets"}
+        assert set(ch_history.HISTORY_WATCH_CONDITIONS) == critical
+
+
+# ─── A ClickHouse that stays down keeps paging (OD-08 review) ───────────────
+#
+# The 05:30 arm gates a copy more than 3 h old instead of blaming it. That run
+# compared nothing against KeyCRM, and it was written as a success — status
+# WARN, error_message NULL — which `fetch_last_success_ages` counts. So a
+# ClickHouse that stayed down paged `dq_stale:reconciliation_ch` at most once,
+# and the next morning's gated run reset the age: the canary announced the
+# page resolved while ClickHouse was still down.
+
+async def _arm(copy_age, *, ch_down=True):
+    """The real `_reconcile_clickhouse`, ClickHouse refusing every query."""
+    from core.scheduler import BackgroundScheduler
+
+    now = datetime.now(timezone.utc)
+    query = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+    with patch("core.ch_common.configured", return_value=True), \
+         patch("core.mirror_reconciliation.configured", return_value=True), \
+         patch("core.pg.get_pool", new=AsyncMock()), \
+         patch("core.mirror_reconciliation.fetch_watermarks", new=AsyncMock(
+             return_value={"clickhouse.silver_orders": {
+                 "last_ok_at": now - copy_age}})), \
+         patch("core.reconciliation_io.pg_ids_updated_since",
+               new=AsyncMock(return_value=set())), \
+         patch("core.reconciliation_io.clickhouse_orders_in_window", new=query):
+        scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
+        result = await scheduler._reconcile_clickhouse(
+            {}, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
+            as_of=now, inflight_ids=set())
+    return result, query.await_count
+
+
+class TestADeadClickHouseKeepsPaging:
+    """Mutation: return `"error": None` from the stale gate again and all
+    three fail — the gated run is a success, the second morning reads green,
+    and it announces the layer's pages resolved."""
+
+    @pytest.mark.asyncio
+    async def test_a_stale_copy_compares_nothing_and_says_so(self):
+        result, queried = await _arm(timedelta(hours=25, minutes=30))
+        assert queried == 0                        # gated, not blamed
+        assert result["discrepancies"] == []
+        assert _names(result["issues"]) == ["ch_reconcile_pending"]
+        assert result["error"].startswith("ch_reconcile_pending: ")
+        assert "25.5 h ago" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_the_second_morning_of_an_outage_still_pages(self, tmp_path):
+        """The reviewer's two mornings, persisted through the real
+        `_persist_ch_reconciliation` into a real store and judged by the real
+        canary. Day 1: ClickHouse died at 04:00, the copy is 1.5 h old, the
+        comparison raises. Day 2: still down, the copy is 25.5 h old."""
+        from bot import canary
+        from core.data_quality import fetch_last_success_ages, persist_run
+        from core.duckdb_store import DuckDBStore
+        from core.scheduler import BackgroundScheduler
+
+        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
+        await store.connect()
+        try:
+            now = datetime.now(timezone.utc)
+            async with store.connection() as conn:   # the last good morning
+                persist_run(conn, started_at=now - timedelta(hours=54),
+                            ended_at=now - timedelta(hours=54), as_of=now,
+                            window_start=date(2026, 7, 1),
+                            window_end=date(2026, 9, 30),
+                            layer="reconciliation_ch", issues=[],
+                            discrepancies=[])
+
+            scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
+            resolve = AsyncMock()
+            with patch("core.duckdb_store.get_store",
+                       new=AsyncMock(return_value=store)), \
+                 patch("core.alerting.resolve_group", new=resolve):
+                for copy_age, started in (
+                    (timedelta(hours=1, minutes=30), now - timedelta(hours=30)),
+                    (timedelta(hours=25, minutes=30), now - timedelta(minutes=5)),
+                ):
+                    result, _ = await _arm(copy_age)
+                    assert result["error"], result
+                    await scheduler._persist_ch_reconciliation(
+                        result, started_at=started, as_of=started,
+                        window_start=date(2026, 7, 1),
+                        window_end=date(2026, 9, 30))
+
+            async with store.connection() as conn:
+                ages = fetch_last_success_ages(conn)
+            failures, _ = canary.check_dq_freshness(
+                {"data_quality": ages},
+                {"reconciliation_ch": canary.DQ_MAX_AGE_S["reconciliation_ch"]})
+            assert [k for k, _ in failures] == ["dq_stale:reconciliation_ch"]
+            assert ages["reconciliation_ch"]["age_seconds"] >= 54 * 3600 - 60
+            # Neither blind morning announced anything resolved.
+            resolve.assert_not_awaited()
+        finally:
+            await store.close()
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_copy_that_compares_is_still_a_success(self):
+        """The gate did not become a blanket failure: a copy under 3 h is
+        compared, and a clean comparison carries no error."""
+        from core.scheduler import BackgroundScheduler
+
+        now = datetime.now(timezone.utc)
+        with patch("core.ch_common.configured", return_value=True), \
+             patch("core.mirror_reconciliation.configured", return_value=True), \
+             patch("core.pg.get_pool", new=AsyncMock()), \
+             patch("core.mirror_reconciliation.fetch_watermarks", new=AsyncMock(
+                 return_value={"clickhouse.silver_orders": {
+                     "last_ok_at": now - timedelta(minutes=40)}})), \
+             patch("core.reconciliation_io.pg_ids_updated_since",
+                   new=AsyncMock(return_value=set())), \
+             patch("core.reconciliation_io.clickhouse_orders_in_window",
+                   new=AsyncMock(return_value={})):
+            scheduler = BackgroundScheduler.__new__(BackgroundScheduler)
+            result = await scheduler._reconcile_clickhouse(
+                {}, window_start=date(2026, 7, 1), window_end=date(2026, 9, 30),
+                as_of=now, inflight_ids=set())
+        assert result == {"issues": [], "discrepancies": [], "error": None}
 
 
 # ─── Its alert names a lever ────────────────────────────────────────────────
@@ -484,6 +722,22 @@ class TestTheReconciliationCatchUpReadsItsArms:
         a KeyCRM re-fetch on every start. Mutation: drop the `_writes_layer`
         condition and this queues."""
         monkeypatch.delenv("KS_CH_URL")
+        queued = await self._queued(monkeypatch, _ages(
+            reconciliation=3 * 3600, integrity=3600, reconciliation_ch=None))
+        assert queued == set()
+
+    @pytest.mark.asyncio
+    async def test_clickhouse_without_postgres_does_not_loop(self, monkeypatch, stores):
+        """KS_CH_URL but no KS_PG_DSN: `_reconcile_clickhouse` returns None on
+        the Postgres half of its gate as well (its watermark and exclusion set
+        live in Postgres), so the layer is never written here either. The
+        review's surviving mutation: gate `reconciliation_ch` on
+        `ch_common.configured()` alone and this queues a KeyCRM re-fetch on
+        every start."""
+        from core.scheduler import _writes_layer
+
+        monkeypatch.delenv("KS_PG_DSN")
+        assert not _writes_layer("reconciliation_ch")
         queued = await self._queued(monkeypatch, _ages(
             reconciliation=3 * 3600, integrity=3600, reconciliation_ch=None))
         assert queued == set()
