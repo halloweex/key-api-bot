@@ -156,8 +156,16 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/warehouse/status` | Last refresh, checksums, validation_passed; `cutover` — step 13's unmet preconditions (DN-28) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/mirror/backfill/orders` | Ship the orders Postgres is missing; idempotent (POST, admin) |
+| `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
+
+**Retired by the owner's decision OD-10 (2026-09-30)**, and kept retired by
+`tests/unit/test_od10_retired_doors.py`: `GET /api/buyers/{id}`,
+`/api/orders/{id}`, `/api/products/{id}`, `/api/buyers/stats`,
+`/api/debug/stale-returns`, `/api/debug/order-status/{id}`,
+`/api/reconciliation`, and `POST /api/reconciliation/run`,
+`/api/duckdb/purge-orders`. See "OD-10: the DuckDB-only doors".
 
 **Query params**: `period` (today/yesterday/week/last_week/month/last_month) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
 
@@ -837,6 +845,10 @@ whole reason the group is read from the source now.
 | `weekly_report` | daily 09:30 | last complete week's numbers to every approved user — sends once, then quiet |
 | `traffic_report` | daily 09:45 | last complete week's attribution to the admins — sends once, then quiet |
 | `bot_memory_watch` | every 30 min (bot) | бот сторожит свои 512 МБ тем же evaluator'ом; предыдущий сэмпл — в `data/memory-bot-last.json` (OOM-счётчик ядра сбрасывается при recreate) |
+
+The legacy 06:00 `reconciliation_check` is gone (OD-10, 2026-09-30):
+`dq_reconciliation` is the reconciliation, and `order_status_refresh` (05:15)
+the status repair it duplicated.
 
 **Never schedule anything at 05:00–05:05 Kyiv.** The host cron
 `0 2 * * 0 weekly_compact.sh` is 02:00 UTC — the same instant — and it stops
@@ -2858,15 +2870,16 @@ revision, the landing mirror on, every Silver/Gold/UTM read switch on
 `KS_READ_*` or `KS_*_STORE` name, so a new one has to be put on the list or
 excluded by name — `KS_SMS_STORE` is read inline and the first walk missed
 it), cohorts on ClickHouse with `KS_CH_URL`, no write chain owning a table
-the goals bridge reads (DN-12), **no door OD-10 has not answered**
-(`od10_doors`: `OD10_DOORS` is every function in `web/` naming DuckDB's
-Silver, its order-lines view, Gold, UTM or an inventory view over them (the
-set is derived from the view bodies, `{views}` hole included) without asking
-`duckdb_derives()`
-— buyers/stats, the two debug routes, purge-orders and the three detail
-endpoints today — and a test walks `web/` and requires exactly that list, so
-this build cannot switch), and **no delivered page open under a condition
-only a stood-down check reports** (`retired_conditions_clear`). A stood-down
+the goals bridge reads (DN-12), **`bronze.expenses` holding its history**
+(`expenses_backfilled` — see "OD-10: the DuckDB-only doors"), **no door OD-10
+has not answered** (`od10_doors`: `OD10_DOORS` is every function in `web/`
+naming DuckDB's Silver, its order-lines view, Gold, UTM or an inventory view
+over them (the set is derived from the view bodies, `{views}` hole included)
+without asking `duckdb_derives()`, and a test walks `web/` and requires
+exactly that list. It is **empty since 2026-09-30**, when the owner retired
+all seven doors; a door added later joins it and holds the switch again),
+and **no delivered page open under a condition only a stood-down check
+reports** (`retired_conditions_clear`). A stood-down
 check is not a raised one, so the integrity job does not hold its conditions,
 and the first run after the switch would announce such a page "✅ Resolved"
 with no check looking. Holding them instead would keep it open for as long as
@@ -2887,6 +2900,66 @@ a verdict; a marked page holds the switch. `preconditions_met: true` is a
 checklist done, not a switch thrown. An exception reading any fact is
 published by its class alone and logged whole: a driver's text names the
 database user, host and port.
+
+### OD-10: the DuckDB-only doors, retired (2026-09-30)
+
+Step 13 waited on every door in `web/` that read DuckDB's Silver, Gold or UTM
+with no read switch: after the flip each would have answered from a Silver as
+old as the switch, and after the first Sunday compaction from none. OD-10 was
+"port or retire", door by door. **The owner retired all of them, in one
+change** — none had a caller, and most had stopped working long before:
+
+- **The buyer, order and product cards** (`GET /api/buyers/{id}`,
+  `/api/orders/{id}`, `/api/products/{id}`) and the assistant's
+  `get_buyer_details` / `get_order_details`. `dict()` of a DuckDB tuple
+  answered 404 for every real id from 2026-02-06 on, and the order card's
+  `op.sku` named a column `order_products` never had. The model was being
+  told real customers did not exist. The Meilisearch searches stay; a customer
+  card, if one is wanted, is built new on Postgres behind a read switch.
+- **The two debug routes** (`/api/debug/stale-returns`,
+  `/api/debug/order-status/{id}`): DuckDB's Bronze against its Silver. The
+  first checked four of the six return statuses; the second's KeyCRM half
+  called a method the client never had. `pg_silver_row_values` asks the same
+  question of the store the tabs read.
+- **`/api/buyers/stats`**: counters that read "all synced" after a
+  compaction. The number that mattered is the buyer step's own selection from
+  Postgres; DuckDB's raw counts stay at `/api/duckdb/stats`.
+- **`POST /api/duckdb/purge-orders`**: the April 2026 DuckDB 1.5 MVCC
+  one-shot. It never reached Postgres, so it had stopped changing any number;
+  deleting an order from Postgres is chain 3's to design.
+- **The legacy 06:00 `reconciliation_check`**, `GET /api/reconciliation` and
+  `POST /api/reconciliation/run`, with the comparator only they used
+  (`reconcile_with_api`, `get_order_summaries_by_date`,
+  `log_reconciliation`). `dq_reconciliation` compares 90 days per order
+  against all three stores from one fetch. `reconciliation_log` had no other
+  writer, so it is **history now** — OD-13's freeze — and the table, its
+  hourly copy and its daily comparison stay; a test fails if anything writes
+  it again. The manual levers are `POST /api/reconcile` (detection) and
+  `POST /api/duckdb/refresh-statuses` (repair).
+- **`scripts/migrate_sqlite_to_duckdb.py`**: dead at both ends since the bot
+  and the user list moved to Postgres, and it wrote roles from two hardcoded
+  ids.
+
+**Kept on purpose**: the DuckDB half of `POST /api/warehouse/rebuild-silver`
+(DN-29 already stands it down, and the way back needs it; it goes with step
+14's code deletion), the assistant's revenue tools (behind `KS_READ_CHAT`),
+and `POST /api/duckdb/sync-all-buyers` (the only `include=loyalty,shipping`
+fetch; chain 4 routes it). No table was dropped and none was touched in
+`_init_schema` or the compaction's lists — OD-11 is still open.
+
+**The sweep that closed OD-10 found one more reader**, and it is a
+precondition now rather than a door. `_expenses_run` sends the /expenses
+summary and profit analysis to Postgres only once
+`meta.mirror_state.backfilled_at` is set for `bronze.expenses`, whatever
+`KS_READ_EXPENSES` says — and a NULL there is an answer, not a failure, so
+DuckDB's Silver serves them uncounted and unrefused even under
+`KS_READ_FALLBACK=off`. Production has it set; a fresh host or a restore older
+than the backfill would not, and after the switch that page would read HTTP
+200 and zero expenses. So `expenses_backfilled` is read in the revision's
+path — the cutover's own connection at a start, the pool for the status page,
+one bound for both, retried with the revision, published by class — and only
+of a Postgres that said its revision, so a start that cannot reach Postgres
+still names `pg_revision` alone.
 
 ### The order write path asks the registry too (DN-22a)
 
@@ -3211,4 +3284,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-09-08*
+*Last updated: 2026-09-30*
