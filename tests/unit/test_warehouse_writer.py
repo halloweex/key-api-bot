@@ -880,6 +880,24 @@ class TestTheRecordedWriter:
         finally:
             asyncio.run(store.close())
 
+    @pytest.mark.parametrize("changed", [None, [1]], ids=["full", "incremental"])
+    def test_a_default_tick_records_nothing_either(self, tmp_path, changed):
+        """The default path writes no `warehouse_writer`, and every validated
+        full tick passes through `note_refresh`: its `if not _held` is what
+        keeps it so. Until now only the Postgres-backed integration test saw
+        that guard go."""
+        store = _store(tmp_path)
+        try:
+            asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
+            asyncio.run(wc.settle_writer(store))
+            result = asyncio.run(store.refresh_warehouse_layers(
+                trigger="dirty_flag", changed_order_ids=changed))
+            assert result["status"] == "success" and result["validation_passed"]
+            assert _writer(store) is None
+            assert not wc.held() and wc.status()["writer"] is None
+        finally:
+            asyncio.run(store.close())
+
     def test_the_first_start_under_postgres_records_it_and_closes_the_group(
         self, tmp_path, postgres,
     ):
