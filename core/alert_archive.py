@@ -169,12 +169,24 @@ async def _write_resolved(keys, message, delivered) -> None:
 # acknowledgements all ask for `kind = 'condition'`, and the key is not in the
 # REGISTRY. The columns mean, for this row:
 #
-#   first_fired_at  since when every probe, none more than `gap` after the one
-#                   before, read the block clean. A probe that reads a fallback
-#                   restarts it at its own time; a gap restarts it at the next
-#                   clean probe.
+#   first_fired_at  since when every probe read the block clean, and no web
+#                   process went unread for more than `gap` before it was
+#                   replaced. A probe that reads a fallback restarts it at its
+#                   own time; an unread tail over `gap` restarts it at the
+#                   next clean probe.
 #   last_fired_at   the latest probe that read the block, clean or not.
 #   fired_count     clean probes since first_fired_at; 0 after a dirty probe.
+#
+# THE UNREAD TAIL, NOT THE GAP. The counters cover a web process from its
+# start, so a probe that reads the same process as the last one has read
+# everything in between, however long the bot was away. What a gap can lose
+# is the end of a process that was replaced in it: its counts after the last
+# probe. That tail ends at the latest by the new process's start, which the
+# probe reads as `uptime_seconds` ($5): `now() - uptime`, or `now()` when no
+# uptime was read (the gap alone, as before). A start at or before the last
+# probe is the same process, and nothing was unread. The estimate errs one
+# way only: the payload is a moment older than this write, so the start
+# reads a little late and the tail a little long — never a restart missed.
 #
 # The clock is Postgres' `now()` on both sides — the writer here, the soak
 # check that judges it — so the bot's clock never enters it.
@@ -187,12 +199,14 @@ VALUES ($1, 'event', 'event', now(), now(),
 ON CONFLICT (condition_key) DO UPDATE SET
     first_fired_at = CASE
         WHEN NOT $2::boolean
-          OR now() - app.alert_series.last_fired_at > make_interval(secs => $3)
+          OR COALESCE(now() - make_interval(secs => $5::float8), now())
+             - app.alert_series.last_fired_at > make_interval(secs => $3)
         THEN now()
         ELSE app.alert_series.first_fired_at END,
     fired_count = CASE
         WHEN NOT $2::boolean THEN 0
-        WHEN now() - app.alert_series.last_fired_at > make_interval(secs => $3)
+        WHEN COALESCE(now() - make_interval(secs => $5::float8), now())
+             - app.alert_series.last_fired_at > make_interval(secs => $3)
         THEN 1
         ELSE app.alert_series.fired_count + 1 END,
     last_fired_at = now(),
@@ -201,13 +215,18 @@ ON CONFLICT (condition_key) DO UPDATE SET
 """
 
 
-async def _write_watch(key: str, clean: bool, gap_s: float) -> None:
+async def _write_watch(
+    key: str, clean: bool, gap_s: float, web_uptime_s: "Optional[float]",
+) -> None:
     global _standing_down
     from core.pg import get_pool
 
+    uptime = None if web_uptime_s is None else float(web_uptime_s)
     pool = await get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(_WATCH_SQL, key, bool(clean), float(gap_s), _instance())
+        await conn.execute(
+            _WATCH_SQL, key, bool(clean), float(gap_s), _instance(), uptime,
+        )
     if _standing_down:
         _standing_down = False
         logger.info("alert archive: writes succeeding again")
@@ -215,12 +234,15 @@ async def _write_watch(key: str, clean: bool, gap_s: float) -> None:
 
 def record_watch(
     key: str, *, clean: bool, gap_s: float,
+    web_uptime_s: "Optional[float]" = None,
 ) -> "Optional[asyncio.Task]":
     """The canary read the block `key` watches: `clean` says whether it found
-    nothing in it. Fire-and-forget under the archive's armour — one second,
-    one warning per streak, never raises, nothing without `KS_PG_DSN` — so a
-    slow Postgres costs a probe's line in the watch and never the probe."""
-    return _spawn(_write_watch(key, clean, gap_s))
+    nothing in it, and `web_uptime_s` how long the process it read had been
+    running (None: unknown, and the gap between probes is judged instead).
+    Fire-and-forget under the archive's armour — one second, one warning per
+    streak, never raises, nothing without `KS_PG_DSN` — so a slow Postgres
+    costs a probe's line in the watch and never the probe."""
+    return _spawn(_write_watch(key, clean, gap_s, web_uptime_s))
 
 
 def _spawn(coro) -> "Optional[asyncio.Task]":

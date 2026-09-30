@@ -167,9 +167,16 @@ class CanaryResult:
     dq_ages: dict[str, Optional[int]] = field(default_factory=dict)
     # mirrored table -> seconds since its last successful shipment
     mirror_ages: dict[str, Optional[int]] = field(default_factory=dict)
-    # What this probe read of web's `read_fallbacks` for the watch (OD-07):
-    # True empty, False a fallback, None no block read. See read_fallbacks_clean.
+    # What this probe read for the watch over reads served from DuckDB
+    # (OD-07): True none, False one, None no block read. See read_fallbacks_clean.
     read_fallbacks_clean: Optional[bool] = None
+    # How long the web process this probe read had been running, from
+    # `uptime_seconds`; None when no payload said. The watch uses it to tell
+    # the process it read last time from a new one (see record_watch).
+    web_uptime_s: Optional[float] = None
+    # Keys this probe could not judge, because it read no block to judge them
+    # by: the resolve keeps them firing (see unjudged_keys).
+    unjudged_keys: list[str] = field(default_factory=list)
 
 
 # ─── Health probe ───────────────────────────────────────────────────────────
@@ -625,11 +632,19 @@ def check_read_fallback_mode(payload: Optional[dict]) -> "list[tuple[str, str]]"
 # grepping. The canary is the process that outlives web's, so the evidence is
 # made here and journaled in Postgres: a page whenever the block is non-empty,
 # and a watch row saying since when every probe read it empty.
+#
+# A counter is not the only way a read reaches DuckDB. A read switch naming an
+# engine web has no address for (`read_fallback_mode.misconfigured`), or the
+# cohorts' switch not naming ClickHouse (`no_engine`), serves DuckDB on every
+# request and counts nothing — and `off` refuses every such read. So under
+# `duckdb` those page too, as `read_routed_to_duckdb`, and the watch reads them
+# as not clean.
 
-# The first words of the page's line, which the soak check (deploy/stage4_soak/
-# 22_f1_read_fallbacks.sql) reads the surfaces back out of. A test holds the two
-# equal.
+# The first words of the pages' lines. The soak check (deploy/stage4_soak/
+# 22_f1_read_fallbacks.sql) reads the line back out of a page by the words the
+# two share; a test holds the two equal.
 READ_FALLBACK_LINE = "reads served from DuckDB: "
+READ_ROUTED_LINE = "reads served from DuckDB uncounted: "
 READ_REFUSED_LINE = "reads refused with a 503: "
 
 # The row the canary keeps in `app.alert_series` for its watch over the block
@@ -637,11 +652,16 @@ READ_REFUSED_LINE = "reads refused with a 503: "
 # nothing resolves it, escalates it or digests it.
 READ_FALLBACK_WATCH_KEY = "watch:read_fallbacks"
 
-# Two probe intervals and slack. A probe lost to a deploy — web recreated, or the
-# bot restarted and probing 90 s after it — leaves a gap of about 30 min; two
-# lost in a row do not keep the watch, since the counters of a web process that
-# ended in such a gap were never read. The soak check judges the watch alive by
-# the same number, and a test holds the two equal.
+# The longest a web process may go unread before it is replaced, and the watch
+# still hold. The counters cover a process from its start, so a probe that reads
+# the SAME process as the last one reads everything since, however long the bot
+# was away; only a process that ended between two probes loses what it counted
+# after the last. That tail is at most the time from the last probe to the new
+# process's start (`uptime_seconds`, core.alert_archive): up to one probe
+# interval plus the stop-to-start of a deploy, or of the Sunday compaction —
+# neither the bot's own restart nor web's startup before it answers counts.
+# The soak check also calls the watch dead when nobody has written it for this
+# long, and a test holds the two equal.
 READ_FALLBACK_WATCH_GAP_S = 35 * 60
 
 # Surfaces named in one line; the rest are counted. Three details, the format rule.
@@ -690,15 +710,88 @@ def check_read_fallbacks(payload: Optional[dict]) -> "list[tuple[str, str]]":
     return [("read_fallback_used", READ_FALLBACK_LINE + _surfaces(block))]
 
 
+def _routed_to_duckdb(payload: Optional[dict]) -> "list[str]":
+    """Every read web routes to DuckDB with nothing to count, as web names
+    them: `read_fallback_mode.misconfigured` (a switch naming an engine with
+    no address) and `no_engine` (the cohorts' switch not naming ClickHouse).
+
+    Under `duckdb` only. Under `off` those reads are refused, not served —
+    each refusal is counted and paged as `read_refused` — so they are not
+    reads from DuckDB. An absent or malformed list is none; an older web
+    publishes no `no_engine`."""
+    block = (payload or {}).get("read_fallback_mode")
+    if not isinstance(block, dict) or block.get("mode") == "off":
+        return []
+    lines = []
+    for field in ("misconfigured", "no_engine"):
+        entries = block.get(field)
+        if isinstance(entries, list):
+            lines.extend(str(entry) for entry in entries if entry)
+    return lines
+
+
+def check_read_routes(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the reads web serves from DuckDB by configuration: every one of
+    them, on every request, with nothing counted (`_routed_to_duckdb`).
+
+    Warn, its own key: a fallback is an engine that failed and a log line to
+    read; this is a switch whose address is missing — or the cohorts' switch
+    not naming ClickHouse, their only engine under `off` — and the lever is
+    `.env`. Both are what the week before KS_READ_FALLBACK=off must not
+    contain (OD-07), since `off` would answer every such read with a 503. It
+    stands until web restarts with the address, the one moment web reads
+    the environment again."""
+    lines = _routed_to_duckdb(payload)
+    if not lines:
+        return []
+    shown = lines[:READ_SURFACES_SHOWN]
+    if len(lines) > len(shown):
+        shown.append(f"+{len(lines) - len(shown)} more")
+    return [("read_routed_to_duckdb", READ_ROUTED_LINE + "; ".join(shown))]
+
+
 def read_fallbacks_clean(payload: Optional[dict]) -> Optional[bool]:
-    """What this probe can say for the watch: True when it read the
-    `read_fallbacks` block empty, False when it read a fallback, None when it
-    read no block at all — web did not answer, or is older than the block —
-    which says nothing either way and is not written."""
+    """What this probe can say for the watch: True when no read was served
+    from DuckDB, False when one was — a counted fallback, or a read the
+    configuration routes there uncounted (`_routed_to_duckdb`) — and None
+    when it read no `read_fallbacks` block at all (web did not answer, or is
+    older than the block), which says nothing either way and is not
+    written."""
     block = (payload or {}).get("read_fallbacks")
     if not isinstance(block, dict):
         return None
-    return not block
+    return not block and not _routed_to_duckdb(payload)
+
+
+def unjudged_keys(payload: Optional[dict]) -> "list[str]":
+    """The OD-07 keys this probe could not judge, because it read no block to
+    judge them by — web did not answer, or answered without the block.
+
+    The resolve must keep them firing: `resolve_group` clears every
+    delivered key a probe did not report, and a probe that read nothing
+    cannot say a condition cleared. `read_fallback_used` stands for days by
+    design, until web restarts, so a first-time blip the canary holds back
+    (`defer_flaky` — the 05:15 freeze, an nginx reload, a 10 s timeout)
+    would announce it resolved and the next probe page it again as a new
+    incident, agent and all. Only these keys: every other payload-derived
+    key keeps today's behaviour."""
+    payload = payload or {}
+    keys = []
+    if not isinstance(payload.get("read_fallbacks"), dict):
+        keys.append("read_fallback_used")
+    if not isinstance(payload.get("read_fallback_mode"), dict):
+        keys += ["read_routed_to_duckdb", "read_refused"]
+    return keys
+
+
+def web_uptime_s(payload: Optional[dict]) -> Optional[float]:
+    """`uptime_seconds` as a number, or None: how long the web process this
+    probe read had been running. A bool, a negative or anything else is
+    None — the watch then judges the gap alone, as it did before."""
+    value = (payload or {}).get("uptime_seconds")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value >= 0 else None
 
 
 def _parse_instant(value: object) -> Optional[datetime]:
@@ -886,6 +979,7 @@ async def run_canary(
     dq_ages: dict[str, Optional[int]] = {}
     mirror_ages: dict[str, Optional[int]] = {}
     read_fallbacks_seen: Optional[bool] = None
+    uptime_seen: Optional[float] = None
     if payload:
         health_status = payload.get("status")
         sync_block = payload.get("sync") or {}
@@ -950,6 +1044,15 @@ async def run_canary(
         if fallback_failures and severity == "ok":
             severity = "warn"
         read_fallbacks_seen = read_fallbacks_clean(payload)
+        uptime_seen = web_uptime_s(payload)
+
+        # A read the configuration serves from DuckDB, uncounted (OD-07).
+        # Warn: the page served, and `off` would refuse it.
+        routed_failures = check_read_routes(payload)
+        for key, message in routed_failures:
+            fail(key, message)
+        if routed_failures and severity == "ok":
+            severity = "warn"
 
         # A read refused with a 503 under KS_READ_FALLBACK=off, recently.
         # Warn: an outage somebody saw, which is what `off` chose over a
@@ -1053,6 +1156,8 @@ async def run_canary(
         dq_ages=dq_ages,
         mirror_ages=mirror_ages,
         read_fallbacks_clean=read_fallbacks_seen,
+        web_uptime_s=uptime_seen,
+        unjudged_keys=unjudged_keys(payload),
     )
 
 
@@ -1092,7 +1197,11 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("utm_parse_mode_invalid",
      "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
     # Last: when an engine is down its own key names the cause, and a fallback
-    # or a refusal is what that cause cost the pages.
+    # or a refusal is what that cause cost the pages. A route is a cause of
+    # its own, and its lever is `.env`, so it goes first of the three.
+    ("read_routed_to_duckdb",
+     "Give web the address the line names in .env (cohorts: KS_READ_COHORTS="
+     "clickhouse and KS_CH_URL), then up -d web; off would 503 these reads"),
     ("read_fallback_used",
      "grep web's log for 'falling back to DuckDB' at each last; explain it before "
      "KS_READ_FALLBACK=off. Clears when web restarts"),

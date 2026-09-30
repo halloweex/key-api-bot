@@ -127,6 +127,12 @@ def _read_fallback_mode() -> dict:
     it was not understood, and every read switch naming an engine this process
     has no address for. Local state, no I/O.
 
+    `no_engine` lists the surfaces only one engine may answer under `off`
+    whose switch does not name it — the cohorts at `KS_READ_COHORTS=duckdb`:
+    served from DuckDB uncounted today, refused under `off`. With
+    `misconfigured` it is what the canary pages as `read_routed_to_duckdb`
+    (OD-07).
+
     Under `off`, also `refused` — `{surface: {count, last_at}}`, the reads
     answered 503 rather than from DuckDB (DN-20b). Only under `off`: nothing
     can be refused under `duckdb`, and the block keeps the shape it has
@@ -137,6 +143,7 @@ def _read_fallback_mode() -> dict:
         "mode": read_fallback.mode(),
         "error": read_fallback.mode_error(),
         "misconfigured": read_fallback.misconfigured(),
+        "no_engine": read_fallback.no_engine_routes(),
     }
     if read_fallback.refusing():
         block["refused"] = read_fallback.refusals()
