@@ -1615,6 +1615,12 @@ async def release_chain(pool, chain: ModuleType) -> bool:
 # under `replaced` in its log line. Looked up, not an if/else: a third chain
 # used to fall into the inventory branch and be sent to read checks about
 # somebody else's six tables.
+#
+# Chain 4 has B1–B5 and is deliberately not listed. Its checks judge the chain
+# while it writes Postgres; after a release `buyers_on` is 0 and every one of
+# them reads "not applicable" — a PASS that proves nothing about the way back.
+# What does is its two shippers stamping again, and `_soak_without_a_check`
+# already names each table's own shipper.
 _SOAK_AFTER_RELEASE = {
     "KS_WRITE_EXPENSES": "run deploy/stage4_soak.sh and read E1 (expenses "
                          "copy stood down) and E2",

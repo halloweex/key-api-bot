@@ -28,7 +28,10 @@
 # Usage, on the host:
 #   deploy/stage4_soak.sh
 #   SOAK_INVENTORY_FLIP_AT='2026-10-01 10:00+03' deploy/stage4_soak.sh
+#   SOAK_BUYERS_FLIP_AT='2026-10-01 10:30+03' SOAK_BUYERS_OVERRIDE_FLOOR=0 deploy/stage4_soak.sh
 # The second form is for chain 1's flip day; see 15_i1_inventory_copy_stood_down.sql.
+# The third is chain 4's: the flip time, and how many human overrides of a
+# gender verdict there were that day (24_b3_gender_coverage.sql).
 #
 # Exit: 0 when every check passes, 1 on any FAIL, 2 when nothing failed but at
 # least one check is UNKNOWN.
@@ -113,6 +116,34 @@ INVENTORY_LATCHED="$(latch_state pg_inventory_write)"
 DQ_PG_WAREHOUSE_ON="$(flag_state KS_DQ_PG_WAREHOUSE on off)"
 INVENTORY_FLIP_AT="${SOAK_INVENTORY_FLIP_AT:-}"
 
+# Chain 4 (`pg_buyers_write`) has one more state than chain 1: its flag moves
+# the writes only once every reader of the buyers reads Postgres
+# (`unmet_precondition`), so "postgres, not latched, a reader on duckdb" is a
+# chain HELD on DuckDB. Reported as `held` rather than 1, or B2–B5 would judge
+# a chain that never moved and B1 would pass it. The readers are asked by exact
+# name, like every flag here, and trimmed and lower-cased the way their parsers
+# read them.
+BUYERS_ON="$(flag_state KS_WRITE_BUYERS postgres duckdb)"
+BUYERS_LATCHED="$(latch_state pg_buyers_write)"
+BUYERS_FLIP_AT="${SOAK_BUYERS_FLIP_AT:-}"
+BUYERS_OVERRIDE_FLOOR="${SOAK_BUYERS_OVERRIDE_FLOOR:-}"
+BUYERS_HELD_BY=""
+BUYERS_NOTE=""
+if [ "$BUYERS_LATCHED" = "1" ] && [ "$BUYERS_ON" != "1" ]; then
+    BUYERS_NOTE=" (latched: chain 4 owns its tables in Postgres, and KS_WRITE_BUYERS says otherwise — only scripts/chain_copy_back.py undoes that)"
+    BUYERS_ON=1
+elif [ "$BUYERS_ON" = "1" ] && [ "$BUYERS_LATCHED" = "0" ]; then
+    for reader in KS_SMS_STORE KS_READ_SEARCH_INDEX KS_READ_DASHBOARD; do
+        if [ "$(flag_state "$reader" postgres duckdb)" != "1" ]; then
+            BUYERS_ON=held
+            BUYERS_HELD_BY="$reader"
+            break
+        fi
+    done
+elif [ "$BUYERS_ON" = "1" ] && [ "$BUYERS_LATCHED" = "unknown" ]; then
+    BUYERS_ON=unknown
+fi
+
 # The latch wins, exactly as `writes_postgres()` resolves it — including over
 # `invalid`, because a latched chain with a misspelt variable goes on writing
 # Postgres and its stand-down still has to hold. The typo does not disappear
@@ -165,6 +196,10 @@ run_check() {
             -v inventory_on="$INVENTORY_ON" \
             -v inventory_flip_at="$INVENTORY_FLIP_AT" \
             -v dq_pg_warehouse_on="$DQ_PG_WAREHOUSE_ON" \
+            -v buyers_on="$BUYERS_ON" \
+            -v buyers_flip_at="$BUYERS_FLIP_AT" \
+            -v buyers_held_by="$BUYERS_HELD_BY" \
+            -v buyers_override_floor="$BUYERS_OVERRIDE_FLOOR" \
             < "$file" 2>&1)"; then
         rc=0
     else
@@ -200,6 +235,7 @@ fi
 # ── the table ─────────────────────────────────────────────────────────────────
 echo "Stage 4 soak report · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC')"
 echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}, dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
+echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
 echo
 printf '%s' "$ROWS" | awk '
     { lines[NR] = $0; c = $0; sub(/\|.*/, "", c); if (length(c) > w) w = length(c) }

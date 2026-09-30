@@ -49,12 +49,17 @@ case "$1" in
                 # `test -f <marker>`: the latch, read the way the script reads it.
                 case "$5" in
                     */pg_inventory_write) [ -n "${FAKE_INVENTORY_LATCHED:-}" ] && exit 0 ;;
+                    */pg_buyers_write) [ -n "${FAKE_BUYERS_LATCHED:-}" ] && exit 0 ;;
                 esac
                 exit 1
             fi
             case "$4" in
                 KS_WRITE_INVENTORY) v="${FAKE_KS_WRITE_INVENTORY-__unset__}" ;;
                 KS_DQ_PG_WAREHOUSE) v="${FAKE_KS_DQ_PG_WAREHOUSE-__unset__}" ;;
+                KS_WRITE_BUYERS) v="${FAKE_KS_WRITE_BUYERS-__unset__}" ;;
+                KS_SMS_STORE) v="${FAKE_KS_SMS_STORE-__unset__}" ;;
+                KS_READ_SEARCH_INDEX) v="${FAKE_KS_READ_SEARCH_INDEX-__unset__}" ;;
+                KS_READ_DASHBOARD) v="${FAKE_KS_READ_DASHBOARD-__unset__}" ;;
                 *) v="__unset__" ;;
             esac
             [ "$v" = "__unset__" ] && exit 1
@@ -270,3 +275,53 @@ class TestWhatTheScriptPromises:
             copies = re.findall(r"^COPY\s+(?:--\S+\s+)?(\S+)", dockerfile.read_text(), flags=re.M)
             assert not [c for c in copies if c.rstrip("/") in {"deploy", "."}], (
                 dockerfile.name, copies)
+
+
+class TestChain4:
+    """`pg_buyers_write` has a state chain 1 has not: its flag moves the writes
+    only once every buyer reader reads Postgres. "postgres, unlatched, a reader
+    on duckdb" is a chain HELD on DuckDB, and the report must say so rather
+    than judge a chain that never moved."""
+
+    READERS = {"FAKE_KS_SMS_STORE": "postgres", "FAKE_KS_READ_SEARCH_INDEX": "postgres",
+               "FAKE_KS_READ_DASHBOARD": "postgres"}
+
+    def test_unset_is_zero(self, healthy):
+        assert all("buyers_on=0 " in c for c in healthy.psql), healthy.psql
+
+    def test_the_flag_with_every_reader_is_one(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_BUYERS=" Postgres ", **self.READERS)
+        assert all("buyers_on=1 " in c and "buyers_held_by= " in c for c in run.psql)
+
+    @pytest.mark.parametrize("reader", ["FAKE_KS_SMS_STORE", "FAKE_KS_READ_SEARCH_INDEX",
+                                        "FAKE_KS_READ_DASHBOARD"])
+    def test_a_reader_on_duckdb_holds_it(self, tmp_path, reader):
+        readers = {**self.READERS, reader: "duckdb"}
+        run = _run(tmp_path, FAKE_KS_WRITE_BUYERS="postgres", **readers)
+        name = reader[len("FAKE_"):]
+        assert all("buyers_on=held " in c and f"buyers_held_by={name} " in c
+                   for c in run.psql), run.psql
+        assert f"held by {name}" in run.out
+
+    def test_an_unset_reader_holds_it_too(self, tmp_path):
+        readers = {k: v for k, v in self.READERS.items() if k != "FAKE_KS_READ_DASHBOARD"}
+        run = _run(tmp_path, FAKE_KS_WRITE_BUYERS="postgres", **readers)
+        assert all("buyers_held_by=KS_READ_DASHBOARD " in c for c in run.psql)
+
+    def test_the_latch_outranks_the_flag_and_the_readers(self, tmp_path):
+        """Latched, the chain writes Postgres whatever the flag or the readers
+        say (OD-19 (a)), so every B-check must judge it."""
+        run = _run(tmp_path, FAKE_KS_WRITE_BUYERS="duckdb", FAKE_BUYERS_LATCHED="1",
+                   FAKE_KS_SMS_STORE="duckdb")
+        assert all("buyers_on=1 " in c for c in run.psql), run.psql
+        assert "latched: chain 4" in run.out
+
+    def test_a_value_nobody_understands_is_invalid(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_BUYERS="postgress", **self.READERS)
+        assert all("buyers_on=invalid " in c for c in run.psql)
+
+    def test_the_flip_time_and_the_floor_are_passed(self, tmp_path):
+        run = _run(tmp_path, SOAK_BUYERS_FLIP_AT="2026-10-01 10:30+03",
+                   SOAK_BUYERS_OVERRIDE_FLOOR="3")
+        assert all("buyers_flip_at=2026-10-01 10:30+03 " in c
+                   and "buyers_override_floor=3" in c for c in run.psql), run.psql
