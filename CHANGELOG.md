@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.259
+
+- OD-10 review: an /api path no route matches is a JSON 404, not the shell
+- OD-10 review: keep the one repair only the legacy reconciliation made
+- OD-10 review: the expenses precondition names a missing row as a missing row
+- OD-10: say in CLAUDE.md that the doors were retired, and what stays
+- OD-10 (7/7): step 13 waits for bronze.expenses to hold its history
+- OD-10 (6/7): delete scripts/migrate_sqlite_to_duckdb.py
+- OD-10 (5/7): retire the legacy 06:00 reconciliation and its two routes
+- OD-10 (4/7): retire POST /api/duckdb/purge-orders; the door list is empty
+- OD-10 (3/7): retire GET /api/buyers/stats
+- OD-10 (2/7): retire the two debug routes
+- OD-10 (1/7): retire the buyer, order and product cards and their two tools
+
+
 ## 3.0.258
 
 - The chain handover runs as the web service, not a bare docker run
