@@ -2391,6 +2391,45 @@ exc)`: one uniform ERROR line carrying that phrase, and a per-surface counter
 exception text, the endpoint is public. **Under the default, nothing a read
 returns changed.**
 
+**The week `off` waits for is proven by the canary, not by the log** (OD-07
+(a), 2026-09-30). The condition for `KS_READ_FALLBACK=off` is a covered, clean
+168 h with no read answered from DuckDB. The plan measured it by grepping web's
+log from its oldest surviving line, but every deploy recreates web and loses
+the counters and the log together, so a week that spans a deploy could not be
+called covered at all. The evidence is now made by the process that outlives
+web's and kept in Postgres. The canary pages `read_fallback_used` (WARN)
+whenever `read_fallbacks` is non-empty, naming the surfaces and each
+`last_at`. The key is the condition alone, and the page stands until web
+restarts, because only a restart empties the counters. The Alert Gate journals
+the delivered page in `app.alert_series`/`alert_events`. A page proves a
+fallback, but it cannot prove that a quiet week was looked at. So every probe
+that read the block also rewrites one row, `watch:read_fallbacks` in
+`app.alert_series` (`core.alert_archive.record_watch`). It is event-kind, not
+in the REGISTRY, and read by nothing else that reads the series.
+`first_fired_at` is the moment since which every probe read the block empty,
+none more than 35 min after the one before. A probe that reads a fallback
+restarts it at its own time, and a longer gap restarts it at the next clean
+probe. One row, so it declares its own bound. `deploy/stage4_soak/22_f1_read_fallbacks.sql`
+(F1) judges the two:
+
+- **FAIL**: a page fired, escalated, still standing, or resolved inside the
+  window, or a watch whose latest probe read a fallback. The last one counts
+  because the Gate journals only a delivered page.
+- **UNKNOWN**: no watch row, a watch not written for 35 min, or one clean for
+  less than 168 h.
+- **PASS**: otherwise.
+
+What it cannot see is a fallback in the last minutes of a web process, after
+the canary's last probe of it and before a recreate: at most the 35-minute gap
+per recreate. **A refusal under `off` is never paged as a fallback.** It served
+nothing from DuckDB, and counting it would fail the soak that licenses the flip.
+It is `read_refused` (WARN), judged on recency: a refusal in the last 30
+minutes. A refusal left no wrong number behind, only a 503 somebody saw, so the
+page stands while reads are being refused, not until a restart. Production on
+the day this shipped published `read_fallbacks: {}` under `duckdb` with no
+`refused`, so the merge pages nothing. What it adds is the watch row, one write
+per probe.
+
 `KS_READ_FALLBACK` (`duckdb` default | `off`) is read in `configure_modes()`,
 before the boot sync. **Under `off`, `fall_back` raises `ReadUnavailable`**
 (DN-20b) instead of letting its caller read DuckDB, and one exception handler
@@ -2398,7 +2437,7 @@ in `web/main.py` answers it, from any route, with a 503 carrying `surface` —
 the cause stays in the log. One raise, so it refuses every router an HTTP
 route reaches, the filter bar's lookups included, not only the tabs the plan
 named. A refusal is not a fallback: counted apart, logged without the phrase
-the soak greps for, published as `read_fallback_mode.refused` under `off`
+a fallback is grepped by, published as `read_fallback_mode.refused` under `off`
 alone, so `read_fallbacks` stays empty there and the block keeps its shape
 under `duckdb`. `off` refuses a *failure*, never a switch left at `duckdb` —
 except the cohorts, which have no Postgres body: under `off` a live

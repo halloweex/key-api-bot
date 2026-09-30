@@ -28,10 +28,13 @@ works; a 503 is an outage somebody can see. The frontend already reads a
 503 as "temporarily unavailable" and retries it (`ApiErrorState`).
 
 A refusal is not a fallback, so it is counted apart (`refusals()`), logged
-without the phrase the soak greps for, and published only beside the mode
-that produces it (`read_fallback_mode.refused` on `/api/health`, under `off`
-alone). `read_fallbacks` keeps meaning "answered from DuckDB", and under `off`
-it stays empty.
+without the phrase a fallback is grepped by (the canary's `read_fallback_used`
+lever), and published only beside the mode that produces it
+(`read_fallback_mode.refused` on `/api/health`, under `off` alone).
+`read_fallbacks` keeps meaning "answered from DuckDB", and under `off` it
+stays empty — the canary pages it `read_fallback_used` and pages a recent
+refusal apart, as `read_refused`, so the week OD-07 waits for stays clean
+under a refusal (bot/canary.py).
 
 One place raises, so every consumer of a router refuses at once — and a
 gate whose switch names an engine with no address refuses through
@@ -243,7 +246,7 @@ def _refuse(surface: str, why: str, exc: Optional[BaseException]) -> NoReturn:
     """Count one refusal on `surface`, say why, and raise `ReadUnavailable`.
 
     The line deliberately does not say "falling back to DuckDB": nothing
-    fell back, and that phrase is what the soak before the flip greps for.
+    fell back, and that phrase is what a fallback is grepped by.
     """
     count = _tally(_refused, surface)
     logger.error(
@@ -325,8 +328,8 @@ def answered(consumer: str, exc: ReadUnavailable, answer: str) -> Dict[str, str]
     it did instead of reading DuckDB: deferred, kept the previous model,
     skipped the step. The refusal itself was logged at ERROR and counted
     where it was raised (`read_fallback_mode.refused`), so this line says
-    only what became of it, at WARNING, and never the phrase the soak greps
-    for. The returned `{"reason", "surface"}` goes into the consumer's own
+    only what became of it, at WARNING, and never the phrase a fallback is
+    grepped by. The returned `{"reason", "surface"}` goes into the consumer's own
     result, so `/api/jobs` history shows a refusal rather than a quiet run.
     """
     logger.warning("refused read answered by %s (%s): %s",
