@@ -715,10 +715,24 @@ class TestGatheringTheFacts:
 
     def test_no_backfill_is_an_answer_and_unmet_with_its_levers(self):
         facts = self._gather(AsyncMock(return_value=False))
-        assert facts.expenses_backfilled is False
+        assert facts.expenses_backfilled is False and facts.expenses_history_row
         (u,) = [u for u in wc.evaluate_preconditions(MET_ENV, facts)
                 if u.key == "expenses_backfilled"]
-        assert "bronze.expenses" in u.detail and "KS_READ_EXPENSES" in u.detail
+        assert "backfilled_at is NULL for bronze.expenses" in u.detail
+        assert "KS_READ_EXPENSES" in u.detail
+        assert "/api/mirror/backfill/expenses" in u.detail
+
+    def test_no_row_at_all_is_the_same_verdict_and_says_so(self):
+        """The read gate treats a missing row as no history, and so does the
+        switch — but the detail names the state it found: nothing has shipped
+        the table here yet, which is not a backfill left half done."""
+        facts = self._gather(AsyncMock(return_value=None))
+        assert facts.expenses_backfilled is False and not facts.expenses_history_row
+        assert facts.expenses_backfill_error is None
+        (u,) = [u for u in wc.evaluate_preconditions(MET_ENV, facts)
+                if u.key == "expenses_backfilled"]
+        assert "no row for bronze.expenses" in u.detail
+        assert "is NULL" not in u.detail
         assert "/api/mirror/backfill/expenses" in u.detail
 
     def test_a_postgres_that_did_not_say_its_revision_is_not_asked(self):
@@ -755,7 +769,7 @@ class TestGatheringTheFacts:
         assert "did not answer" in facts.expenses_backfill_error
 
     def test_the_read_itself(self):
-        """What it asks, and that no row is no history."""
+        """What it asks, and that no row is told apart from a NULL."""
         class Conn:
             def __init__(self, answer):
                 self.answer, self.asked = answer, None
@@ -764,7 +778,9 @@ class TestGatheringTheFacts:
                 self.asked = (sql, args)
                 return self.answer
 
-        for answer, expected in ((True, True), (False, False), (None, False)):
+        # None is no row; the read gate reads it as False, and the switch
+        # does too (`expenses_backfilled`), only saying which it found.
+        for answer, expected in ((True, True), (False, False), (None, None)):
             conn = Conn(answer)
             assert asyncio.run(wc._expenses_backfilled(conn)) is expected
             assert conn.asked == (wc._EXPENSES_HISTORY_SQL, (wc.EXPENSES_HISTORY,))

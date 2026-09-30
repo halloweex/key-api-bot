@@ -403,7 +403,8 @@ class TestAMissingPrecondition:
         block = _warehouse_writer_mode()
         assert block["preconditions_unmet"] == ["expenses_backfilled"]
         (unmet,) = wc.preconditions_unmet()
-        assert "backfilled_at is NULL for bronze.expenses" in unmet.detail
+        assert ("backfilled_at is NULL for bronze.expenses" if done is False
+                else "no row for bronze.expenses") in unmet.detail
         assert [k for k, _ in check_warehouse_preconditions(
             {"warehouse_writer_mode": block})] == ["warehouse_preconditions_unmet"]
         ready = await wc.readiness()

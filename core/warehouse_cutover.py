@@ -457,12 +457,15 @@ class Facts:
     stays pure over what it is given. `expenses_backfilled` is whether
     `bronze.expenses` has its history (`EXPENSES_HISTORY`), None with
     `expenses_backfill_error` when it was not asked or not answered — asked
-    only of a Postgres that said its revision."""
+    only of a Postgres that said its revision. `expenses_history_row` tells
+    the two ways it can be False apart: a `meta.mirror_state` row whose
+    `backfilled_at` is NULL, or no row at all."""
     revision: Optional[str] = None
     revision_error: Optional[str] = None
     required_revision: Optional[str] = None
     expenses_backfilled: Optional[bool] = None
     expenses_backfill_error: Optional[str] = None
+    expenses_history_row: bool = True
     bridge_owners: Optional[Mapping[str, Tuple[str, ...]]] = field(default_factory=dict)
     bridge_error: Optional[str] = None
     open_retired: Optional[Mapping[str, Optional[str]]] = field(default_factory=dict)
@@ -513,14 +516,19 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
                  f"whether {EXPENSES_HISTORY} holds its history is unknown: "
                  f"{facts.expenses_backfill_error or 'not asked'}")
         else:
+            found = (f"meta.mirror_state.backfilled_at is NULL for {EXPENSES_HISTORY}"
+                     if facts.expenses_history_row else
+                     f"meta.mirror_state has no row for {EXPENSES_HISTORY}: nothing "
+                     "has shipped it to this Postgres, neither the landing mirror "
+                     "nor a backfill")
             need("expenses_backfilled", facts.expenses_backfilled,
-                 f"meta.mirror_state.backfilled_at is NULL for {EXPENSES_HISTORY}: "
-                 "until its backfill completes, the /expenses summary and the "
-                 "profit analysis read DuckDB's Silver whatever "
+                 f"{found}. Until its backfill completes, the /expenses summary "
+                 "and the profit analysis read DuckDB's Silver whatever "
                  "KS_READ_EXPENSES says — frozen after the switch, empty after "
                  "a compaction, and never counted as a fallback. POST "
-                 "/api/mirror/backfill/expenses, or let the hourly ids-diff "
-                 "finish it.")
+                 "/api/mirror/backfill/expenses (it writes the row), or let the "
+                 "hourly ids-diff finish it (it runs while "
+                 f"{MIRROR_LANDING} is on).")
 
     need("mirror_landing", mirror_on(env.get(MIRROR_LANDING)),
          f"{MIRROR_LANDING} is {env.get(MIRROR_LANDING)!r}: the landing mirror "
@@ -579,21 +587,24 @@ async def _revision_on_its_own_connection(dsn: str) -> Optional[str]:
         await conn.close()
 
 
-async def _expenses_backfilled(conn=None) -> bool:
+async def _expenses_backfilled(conn=None) -> Optional[bool]:
     """Whether `meta.mirror_state.backfilled_at` is set for `bronze.expenses`
     — the question `pg_expenses_read.backfilled()` asks before it lets a
-    history read reach Postgres. No row is False: nothing was carried across.
-    On `conn`, or on the application's pool. Raises what the read raises."""
+    history read reach Postgres, which reads both False and None as "not
+    yet". Kept apart here only so the precondition can say which: False is a
+    row whose `backfilled_at` is NULL, None is no row at all. On `conn`, or
+    on the application's pool. Raises what the read raises."""
     if conn is None:
         from core.pg import get_pool
 
         pool = await get_pool()
         async with pool.acquire() as acquired:
             return await _expenses_backfilled(acquired)
-    return bool(await conn.fetchval(_EXPENSES_HISTORY_SQL, EXPENSES_HISTORY))
+    answer = await conn.fetchval(_EXPENSES_HISTORY_SQL, EXPENSES_HISTORY)
+    return None if answer is None else bool(answer)
 
 
-async def _expenses_backfilled_on_its_own_connection(dsn: str) -> bool:
+async def _expenses_backfilled_on_its_own_connection(dsn: str) -> Optional[bool]:
     """`_expenses_backfilled` on a connection opened for it and closed after —
     `_revision_on_its_own_connection`'s reason: the start reads from a loop
     that is not the application's."""
@@ -608,9 +619,10 @@ async def _expenses_backfilled_on_its_own_connection(dsn: str) -> bool:
 
 async def _read_expenses_history(env: Mapping[str, str], *, own_connection: bool,
                                  timeout: float) -> Dict[str, Any]:
-    """`{"expenses_backfilled", "expenses_backfill_error", "unread"}`, by
-    `_read_postgres`'s rules: a read that failed is unread and by its class
-    alone, an answer is not. Never raises."""
+    """`{"expenses_backfilled", "expenses_backfill_error", "unread"}`, plus
+    `expenses_history_row` with an answer, by `_read_postgres`'s rules: a
+    read that failed is unread and by its class alone, an answer is not.
+    Never raises."""
     try:
         read = (_expenses_backfilled_on_its_own_connection(env[PG_DSN].strip())
                 if own_connection else _expenses_backfilled())
@@ -625,7 +637,7 @@ async def _read_expenses_history(env: Mapping[str, str], *, own_connection: bool
         return {"expenses_backfilled": None,
                 "expenses_backfill_error": type(exc).__name__, "unread": True}
     return {"expenses_backfilled": bool(done), "expenses_backfill_error": None,
-            "unread": False}
+            "expenses_history_row": done is not None, "unread": False}
 
 
 async def _read_postgres(env: Mapping[str, str], *,
