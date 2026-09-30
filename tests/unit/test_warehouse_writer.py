@@ -1321,6 +1321,20 @@ class TestPublishedAndJudged:
         assert result.severity == "critical"
         assert result.failure_keys == ["warehouse_preconditions_unmet"]
         assert "cutover.unmet" in canary._what_to_do(result)
+        # R1-6: web serves — it runs as duckdb — so the page must not say
+        # the dashboard is down.
+        message = canary.format_alert(result, DASHBOARD)
+        assert "DOWN" not in message
+        assert message.splitlines()[0] == "\U0001f6a8 <b>Warehouse switch held back</b>"
+
+    def test_beside_an_outage_the_outage_is_the_title(self):
+        from bot import canary
+
+        result = canary.CanaryResult(
+            ok=False, severity="critical",
+            failures=["health request failed: x", "KS_WRITE_WAREHOUSE=postgres ran as duckdb"],
+            failure_keys=["health_unreachable", "warehouse_preconditions_unmet"])
+        assert "Dashboard DOWN" in canary.format_alert(result, "https://d")
 
     def test_it_is_a_registered_condition(self):
         from core.alerting import Kind, spec_for

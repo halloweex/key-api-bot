@@ -504,6 +504,28 @@ def test_format_alert_includes_failures_and_extras():
     # sync-возраст из тела убран тем же коротким форматом — он в /api/health
 
 
+@pytest.mark.parametrize("keys, title", [
+    (["health_unreachable"], "Dashboard DOWN"),
+    (["health_http"], "Dashboard DOWN"),
+    (["health_status"], "Dashboard DOWN"),
+    ([], "Dashboard DOWN"),
+    (["cert_expiring"], "Dashboard critical"),
+    (["write_chain_flag_invalid"], "Dashboard critical"),
+    (["warehouse_preconditions_unmet"], "Warehouse switch held back"),
+    (["cert_expiring", "health_status"], "Dashboard DOWN"),
+])
+def test_a_critical_title_says_down_only_for_an_outage(keys, title):
+    result = canary.CanaryResult(ok=False, severity="critical",
+                                 failures=["x"] * max(len(keys), 1), failure_keys=keys)
+    assert canary.format_alert(result, DASHBOARD).splitlines()[0].endswith(f"<b>{title}</b>")
+
+
+def test_a_warning_is_titled_a_warning():
+    result = canary.CanaryResult(ok=False, severity="warn", failures=["x"],
+                                 failure_keys=["health_status"])
+    assert "Dashboard warning" in canary.format_alert(result, DASHBOARD)
+
+
 def test_format_alert_includes_dq_ages():
     from bot.canary import CanaryResult, format_alert
     """Перевёрнут правкой владельца 30.08: детальные возрасты слоёв — шум в

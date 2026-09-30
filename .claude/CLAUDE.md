@@ -2755,7 +2755,10 @@ group once — its only resolver was the DuckDB tick — without a validating
 tick. **One precondition unmet and it runs as `duckdb`** (OD-09 (b)):
 `/api/health` lists the unmet keys under `warehouse_writer_mode` (keys only,
 the endpoint is public) and the canary pages `warehouse_preconditions_unmet`,
-CRITICAL.
+CRITICAL — titled "Warehouse switch held back", since web serves throughout:
+a canary title says "Dashboard DOWN" only for the three keys that mean web
+did not answer or said it is unhealthy, and any other CRITICAL reads
+"Dashboard critical".
 
 **The way back costs a full DuckDB rebuild.** Unset the variable and
 `up -d web`: a start under `duckdb` that finds `postgres` recorded marks the

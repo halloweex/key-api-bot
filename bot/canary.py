@@ -852,10 +852,36 @@ def _what_to_do(result: CanaryResult) -> Optional[str]:
     return None
 
 
+# "DOWN" only when it is: the three keys that mean web did not answer, or
+# answered that it is not healthy. Every other CRITICAL — a certificate about
+# to expire, a write chain whose flag web cannot read, a warehouse switch held
+# back — is a site that serves, and a title saying it does not sends the reader
+# to the wrong lever before they reach the right one. A result with no keys is
+# read as an outage, as every CRITICAL was before keys existed.
+_OUTAGE_KEYS: tuple[str, ...] = ("health_unreachable", "health_http", "health_status")
+
+# A CRITICAL that is not an outage, named for what it is. First match wins.
+_CRITICAL_TITLES: tuple[tuple[str, str], ...] = (
+    ("warehouse_preconditions_unmet", "Warehouse switch held back"),
+)
+
+
+def _title(result: CanaryResult) -> str:
+    if result.severity != "critical":
+        return "Dashboard warning"
+    keys = result.failure_keys
+    if not keys or any(key in _OUTAGE_KEYS for key in keys):
+        return "Dashboard DOWN"
+    for prefix, title in _CRITICAL_TITLES:
+        if any(key.startswith(prefix) for key in keys):
+            return title
+    return "Dashboard critical"
+
+
 def format_alert(result: CanaryResult, dashboard_url: str) -> str:
     """Build a Telegram HTML message for a failing result."""
     icon = "\U0001f6a8" if result.severity == "critical" else "⚠️"
-    title = "Dashboard DOWN" if result.severity == "critical" else "Dashboard warning"
+    title = _title(result)
 
     lines = [f"{icon} <b>{title}</b>"]
     for failure in result.failures:
