@@ -51,9 +51,10 @@ needs_pg = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_
 
 CHECK_SCRIPT = REPO / "deploy" / "duckdb_table_fates_check.py"
 
-# Where the DuckDB file's DDL can be written. `bot/` is not here because it
-# never opens DuckDB — `test_the_bot_never_opens_duckdb` holds that — and its
-# CREATE TABLEs are bot.db's.
+# Where the DuckDB file's DDL can be written. Nothing outside these opens
+# DuckDB — `test_nothing_outside_the_walked_trees_opens_duckdb` walks every
+# other Python file in the repository for a way in — so `bot/`'s CREATE TABLEs
+# are bot.db's and `migrations/` is Postgres's.
 DUCKDB_TREES = ("core", "web", "scripts", "deploy")
 
 # DDL whose table name is only known at run time. Each says where the names
@@ -309,6 +310,92 @@ def duckdb_names(sites: List[DdlSite]) -> Dict[str, str]:
     return out
 
 
+# ── who can open DuckDB at all ──
+
+_OPENER_MODULES = ("duckdb", "core.duckdb_store")
+_OPENER_NAMES = frozenset({"DuckDBStore", "get_store"})
+
+
+def _names_opener(module: str) -> bool:
+    return any(module == m or module.startswith(m + ".") for m in _OPENER_MODULES)
+
+
+def duckdb_openers(rel: str, source: str) -> List[str]:
+    """Every way one module can reach DuckDB, as `line: what`.
+
+    Any import of `duckdb` or `core.duckdb_store` — `from core import
+    duckdb_store` included, which the first walk missed by reading only the
+    module of an ImportFrom and never its names — a relative import resolved
+    against the file's package, `importlib.import_module`/`__import__` of
+    either, and of a name computed at run time (it could be either), and the
+    store's two doors, `DuckDBStore` and `get_store`, by name wherever they
+    were imported from."""
+    tree = ast.parse(source)
+    package = rel.split("/")[:-1]
+    found = []
+    for node in ast.walk(tree):
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Import):
+            found += [f"{line}: import {a.name}" for a in node.names
+                      if _names_opener(a.name)]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                parts = package[:len(package) - node.level + 1]
+                base = ".".join(parts + ([node.module] if node.module else []))
+            else:
+                base = node.module or ""
+            for a in node.names:
+                full = f"{base}.{a.name}" if base else a.name
+                if _names_opener(base) or _names_opener(full) or a.name in _OPENER_NAMES:
+                    found.append(f"{line}: from {base or '.'} import {a.name}")
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            called = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+            if called in ("import_module", "__import__"):
+                arg = node.args[0] if node.args else None
+                if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                    found.append(f"{line}: {called}() of a name computed at run time")
+                elif _names_opener(arg.value):
+                    found.append(f"{line}: {called}({arg.value!r})")
+        elif isinstance(node, ast.Name) and node.id in _OPENER_NAMES:
+            found.append(f"{line}: {node.id}")
+        elif (isinstance(node, ast.Attribute)
+                and node.attr in _OPENER_NAMES | {"duckdb_store"}):
+            found.append(f"{line}: .{node.attr}")
+    return found
+
+
+def _gitignored_dirs() -> Set[str]:
+    """Directory names `.gitignore` excludes outright (`data/`, `venv/`)."""
+    names = {"__pycache__", "node_modules"}
+    for line in (REPO / ".gitignore").read_text(encoding="utf-8").splitlines():
+        m = re.fullmatch(r"/?([\w.-]+)/?", line.strip())
+        if m:
+            names.add(m.group(1))
+    return names
+
+
+def repo_python() -> List[Tuple[str, Path]]:
+    """Every Python file of the repository outside `tests/`: tracked, or new
+    and not ignored — a fresh module or a probe is exactly what this is for.
+    From `git ls-files` where git answers; without it (the py3.14 container
+    has none), every `.py` under no hidden directory and no directory
+    `.gitignore` names, which keeps out the untracked `data/` scripts."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "ls-files", "-z", "--cached", "--others",
+             "--exclude-standard", "--", "*.py"],
+            capture_output=True, text=True, timeout=60, check=True).stdout
+        rels = [r for r in out.split("\0") if r]
+    except (OSError, subprocess.SubprocessError):
+        ignored = _gitignored_dirs()
+        rels = [p.relative_to(REPO).as_posix() for p in REPO.rglob("*.py")
+                if not any(part.startswith(".") or part in ignored
+                           for part in p.relative_to(REPO).parts[:-1])]
+    return sorted((r, REPO / r) for r in set(rels)
+                  if not r.startswith("tests/") and (REPO / r).is_file())
+
+
 @pytest.fixture(scope="module")
 def fresh_file(tmp_path_factory) -> Path:
     """A database built by today's code, exactly as web builds one: the schema,
@@ -476,21 +563,65 @@ class TestEveryNameHasAFate:
 
         assert _catalog() == "analytics" == DB_PATH.stem
 
-    def test_the_bot_never_opens_duckdb(self):
-        """What lets `bot/` stay out of the walk."""
-        offenders = []
-        for path in _py_files(("bot",)):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                names = []
-                if isinstance(node, ast.Import):
-                    names = [a.name for a in node.names]
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    names = [node.module]
-                if any(n == "duckdb" or n.startswith("core.duckdb_store")
-                       for n in names):
-                    offenders.append(path.relative_to(REPO).as_posix())
-        assert not offenders, f"bot/ opens DuckDB in {offenders}; walk it too"
+    def test_nothing_outside_the_walked_trees_opens_duckdb(self):
+        """What lets the DDL walk read `DUCKDB_TREES` alone. It used to be a
+        check of `bot/` only, reading only `import duckdb` and the module of a
+        `from ... import`, so `from core import duckdb_store` in bot/, an
+        `importlib.import_module("duckdb")` there, and a `tools/` directory
+        nobody walked all passed (review, finding 3). Mutation: keep
+        `DUCKDB_TREES` files in the scan — every opener there then fails."""
+        files = repo_python()
+        tops = {rel.split("/")[0] for rel, _ in files}
+        # The family: a scan that listed nothing outside the trees passes.
+        assert {"bot", "migrations"} <= tops and set(DUCKDB_TREES) <= tops
+        offenders = {}
+        for rel, path in files:
+            if rel.split("/")[0] in DUCKDB_TREES:
+                continue
+            found = duckdb_openers(rel, path.read_text(encoding="utf-8"))
+            if found:
+                offenders[rel] = found
+        assert not offenders, (
+            f"DuckDB is reached from outside {DUCKDB_TREES}: {offenders}. Move "
+            f"the code into one of them, or add its directory to DUCKDB_TREES "
+            f"so the DDL walk reads it")
+
+    def test_the_opener_walk_sees_every_tree_open_duckdb(self):
+        """The scan above is only as good as `duckdb_openers`: each walked
+        tree opens DuckDB somewhere, and the walk must see it there."""
+        seen = {rel.split("/")[0] for rel, path in repo_python()
+                if duckdb_openers(rel, path.read_text(encoding="utf-8"))}
+        assert set(DUCKDB_TREES) <= seen, set(DUCKDB_TREES) - seen
+
+    @pytest.mark.parametrize("rel, source", [
+        ("bot/x.py", "import duckdb"),
+        ("bot/x.py", "import duckdb as dk"),
+        ("bot/x.py", "from duckdb import connect"),
+        ("bot/x.py", "import core.duckdb_store"),
+        ("bot/x.py", "from core.duckdb_store import get_store"),
+        # The three reproductions of finding 3.
+        ("bot/x.py", "from core import duckdb_store\n"
+                     "async def f():\n    s = duckdb_store.DuckDBStore()"),
+        ("bot/x.py", 'import importlib\nimportlib.import_module("duckdb").connect("x")'),
+        ("tools/ledger.py", 'import duckdb\nduckdb.connect("data/analytics.duckdb")'),
+        ("bot/x.py", '__import__("core.duckdb_store")'),
+        ("bot/x.py", "import importlib\ndef f(n): return importlib.import_module(n)"),
+        ("bot/x.py", "from core.sync_service import get_store"),
+        ("bot/x.py", "import core\ncore.duckdb_store"),
+        ("core/x.py", "from . import duckdb_store"),
+        ("core/repositories/x.py", "from ..duckdb_store import DuckDBStore"),
+    ])
+    def test_the_opener_walk_reads_every_way_in(self, rel, source):
+        assert duckdb_openers(rel, source)
+
+    @pytest.mark.parametrize("source", [
+        "from core import duckdb_constants",
+        "# import duckdb",
+        'MODE = "duckdb"',
+        "from core.pg_sms import sms_store_is_postgres",
+    ])
+    def test_the_opener_walk_does_not_read_prose(self, source):
+        assert duckdb_openers("bot/x.py", source) == []
 
     def test_every_table_a_validator_names_has_a_fate(self):
         tiers = _validator_tiers()
