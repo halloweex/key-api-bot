@@ -3,7 +3,9 @@
 #
 # The soak checks are the only detectors for a lost derivation mark (D4, D5),
 # stale Silver rows (D7), the chain-8 stand-down (E1) and a halted order intake
-# (S0), and they have to run every day for weeks. Run by hand from a checklist
+# (S0), and the only daily verdict on reads served from DuckDB, whose PASS
+# counts the week KS_READ_FALLBACK=off waits for (F1), and they have to run
+# every day for weeks. Run by hand from a checklist
 # they drift: a query pasted from yesterday's terminal, a precondition skipped
 # on a busy morning. So each check is a file under deploy/stage4_soak/ that
 # returns its own verdict, and this script only runs them and adds them up.
@@ -31,7 +33,7 @@
 #   SOAK_BUYERS_FLIP_AT='2026-10-01 10:30+03' SOAK_BUYERS_OVERRIDE_FLOOR=0 deploy/stage4_soak.sh
 # The second form is for chain 1's flip day; see 15_i1_inventory_copy_stood_down.sql.
 # The third is chain 4's: the flip time, and how many human overrides of a
-# gender verdict there were that day (24_b3_gender_coverage.sql).
+# gender verdict there were that day (25_b3_gender_coverage.sql).
 #
 # Exit: 0 when every check passes, 1 on any FAIL, 2 when nothing failed but at
 # least one check is UNKNOWN.

@@ -348,11 +348,94 @@ async def _fetch_pg_gold_cells() -> List[Tuple[Any, ...]]:
     return [tuple(r) for r in records]
 
 
+# ─── Whether anything is re-aggregating Gold (OD-08) ─────────────────────────
+#
+# The comparison below is the one independent re-aggregation of Gold that
+# outlives DuckDB: once Postgres alone derives (step 13), `reconcile_gold`
+# stands down and nothing else recomputes a cell from Silver in another
+# engine. It used to stand down in silence without `KS_CH_URL`, and a failed
+# ship or read-back was a WARN about ClickHouse, not a statement that Gold's
+# values went unchecked that day. The owner made ClickHouse required for the
+# parallel period (OD-08 (a), 2026-09-30), so a run that did not compare says
+# so under one name, whatever the cause:
+#
+# - `KS_CH_URL` unset;
+# - the ship or the Gold derivation failed — ClickHouse then holds the copy
+#   the last good ship left, and there is no age at which comparing that copy
+#   would be honest: Postgres Gold moves every tick. This comparison has no
+#   age gate of its own because it ships the copy it compares, so a failed
+#   ship IS the stale copy;
+# - a read-back failed;
+# - the comparison raised, or the job never reached it (`_run_dq_mirror_landing`
+#   files those two, since a raise leaves nothing to return here);
+# - both engines' Gold came back empty, which compares nothing.
+#
+# WARN while DuckDB's own Gold is still compared against Postgres', CRITICAL
+# once it is not (`warehouse_checks_stand_down`: Postgres alone derives, or the
+# way back is still holding DuckDB's comparisons down) — then this is the only
+# independent check left, and a day without it is a day nobody checked Gold.
+GOLD_UNWATCHED = "gold_values_unwatched"
+
+# What only this comparison re-examines. A run that did not compare cannot
+# announce any of them resolved; `_run_dq_mirror_landing` holds them.
+GOLD_WATCH_CONDITIONS: Tuple[str, ...] = (
+    "ch_silver_roundtrip",
+    "ch_engines_gold_missing",
+    "ch_engines_gold_extra",
+    "ch_engines_gold_mismatch",
+)
+
+
+def gold_unwatched_severity() -> Severity:
+    """CRITICAL exactly when the mirror-landing job does not compare DuckDB's
+    Gold with Postgres' — the predicate it stands `reconcile_gold` down on.
+    A predicate that cannot be read is CRITICAL too: nothing then shows that
+    another engine looked, and the finding must still be filed."""
+    try:
+        from core import warehouse_cutover
+
+        stood_down = warehouse_cutover.warehouse_checks_stand_down()
+    except Exception:  # noqa: BLE001 — unknown is not "DuckDB still compares"
+        logger.exception("gold_values_unwatched: cannot tell who derives Gold")
+        return Severity.CRITICAL
+    return Severity.CRITICAL if stood_down else Severity.WARN
+
+
+def gold_values_unwatched(reason: str) -> IntegrityIssue:
+    """The finding for a run in which ClickHouse did not re-aggregate Gold."""
+    severity = gold_unwatched_severity()
+    alone = (
+        "Postgres alone derives Gold and DuckDB's comparison stands down, so "
+        "no second engine checked a single Gold value this run"
+        if severity is Severity.CRITICAL else
+        "DuckDB's Gold was still compared against Postgres'; after step 13 "
+        "this would be the only independent check"
+    )
+    return IntegrityIssue(
+        check_name="gold_values_unwatched",
+        table_name=GOLD_TABLE, severity=severity, count=1,
+        description=(
+            f"ClickHouse did not re-aggregate Gold this run: {reason}. {alone}. "
+            f"{', '.join(GOLD_WATCH_CONDITIONS)} are held as they were, not "
+            f"cleared"
+        ),
+    )
+
+
+def gold_unverified_conditions(issues: Sequence[IntegrityIssue]) -> List[str]:
+    """The conditions a run could not re-examine because the comparison did
+    not run — `_resolve_dq_layer`'s `unverified`."""
+    if any(i.check_name == GOLD_UNWATCHED for i in issues):
+        return list(GOLD_WATCH_CONDITIONS)
+    return []
+
+
 async def reconcile_clickhouse(*, max_samples: int = 10) -> List[IntegrityIssue]:
     """The daily ClickHouse verdict: ship, round-trip silver, then set the two
     engines' Gold against each other. `ch_gold.reconcile_ch_gold`'s contract:
-    stands down unconfigured, WARNs instead of raising — an optional store
-    must not silence the mandatory comparisons in this layer.
+    WARNs instead of raising — an unreachable store must not silence the other
+    comparisons in this layer. Not silently any more: every run that did not
+    compare files `gold_values_unwatched` beside its cause (OD-08).
 
     The whole body runs under PG_LAYER_LOCK, and the reason is the review's
     sharpest finding: without it, a silver rebuild committing between "fetch
@@ -365,7 +448,7 @@ async def reconcile_clickhouse(*, max_samples: int = 10) -> List[IntegrityIssue]
     from core.pg_silver import PG_LAYER_LOCK
 
     if not configured():
-        return []
+        return [gold_values_unwatched(f"{URL_ENV} is not set")]
 
     async with PG_LAYER_LOCK:
         try:
@@ -385,6 +468,9 @@ async def reconcile_clickhouse(*, max_samples: int = 10) -> List[IntegrityIssue]
                     f"Both tables keep their previous copy; freshness is in "
                     f"meta.mirror_state"
                 ),
+            ), gold_values_unwatched(
+                f"the ship before the comparison failed ({type(e).__name__}), "
+                f"so ClickHouse holds only the copy the last good ship left"
             )]
 
         try:
@@ -403,9 +489,16 @@ async def reconcile_clickhouse(*, max_samples: int = 10) -> List[IntegrityIssue]
                 check_name="ch_silver_unreachable",
                 table_name=SILVER_TABLE, severity=Severity.WARN, count=1,
                 description=f"shipped, but a read-back failed: {type(e).__name__}: {e}",
+            ), gold_values_unwatched(
+                f"a read-back failed ({type(e).__name__})"
             )]
 
     issues: List[IntegrityIssue] = []
+    if not pg_gold_cells and not ch_gold_cells:
+        # Zero cells against zero cells agree perfectly and check nothing.
+        issues.append(gold_values_unwatched(
+            "both engines' Gold came back empty, so there was nothing to compare"
+        ))
 
     want = {r[0]: r for r in shipped}
     got = {r[0]: r for r in readback}

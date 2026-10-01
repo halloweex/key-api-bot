@@ -184,7 +184,10 @@ class HealthResponse(BaseModel):
             "by the canary. `misconfigured` lists every KS_READ_* naming an "
             "engine without its address (KS_PG_DSN, KS_CH_URL): under duckdb "
             "each of those reads is served by DuckDB with nothing failing to "
-            "count, and under off each is refused. Under off only, `refused` "
+            "count, and under off each is refused. `no_engine` lists the "
+            "surfaces only one engine may answer under off whose switch does "
+            "not name it (the cohorts at KS_READ_COHORTS=duckdb): the same, "
+            "with no address missing. Under off only, `refused` "
             "is `{surface: {count, last_at}}` for the reads refused since the "
             "process started."
         ),

@@ -103,12 +103,29 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "dq_missing:reconciliation_pg": _c("the layer reports freshness again"),
     "dq_never:reconciliation_pg": _c("the layer's first successful run"),
     "dq_stale:reconciliation_pg": _c("a successful run inside the age limit"),
+    # And the ClickHouse half of the same job, which pages since OD-08 (a)
+    # made ClickHouse required for the parallel period.
+    "dq_missing:reconciliation_ch": _c("the layer reports freshness again"),
+    "dq_never:reconciliation_ch": _c("the layer's first successful run"),
+    "dq_stale:reconciliation_ch": _c("a successful run inside the age limit"),
     "mirror_block_missing": _c("health payload carries a mirrors block again"),
     # KS_PG_DERIVE set to a value web did not understand (fell back to piggyback).
     "derivation_mode_invalid": _c("web restarts with a valid KS_PG_DERIVE"),
     # KS_READ_FALLBACK set to a value web did not understand (ran as duckdb,
     # DN-20a). Not a stop: web is the only syncer.
     "read_fallback_mode_invalid": _c("web restarts with a valid KS_READ_FALLBACK"),
+    # A read this web process answered from DuckDB because its engine failed
+    # (OD-07). The counters are per process, so only a restart empties them;
+    # the page stands until then, and the soak before KS_READ_FALLBACK=off
+    # reads it back out of the journal (deploy/stage4_soak/22_f1_*).
+    "read_fallback_used": _c("web restarts and answers no read from DuckDB"),
+    # A read switch web serves from DuckDB on every request with nothing to
+    # count: an engine named without its address, or the cohorts' switch not
+    # naming ClickHouse (OD-07). `off` would refuse each one.
+    "read_routed_to_duckdb": _c("web restarts with every read switch addressed"),
+    # A read refused with a 503 under KS_READ_FALLBACK=off (DN-20b), recently.
+    # Not a fallback — nothing came from DuckDB — so never under that key.
+    "read_refused": _c("no read refused for thirty minutes"),
     # KS_WRITE_WAREHOUSE set to a value web did not understand (ran as duckdb,
     # DN-28). Not a stop: web is the only syncer.
     "warehouse_mode_invalid": _c("web restarts with a valid KS_WRITE_WAREHOUSE"),
@@ -369,6 +386,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "ch_engines_gold_mismatch": _c("the engines' aggregations agree again"),
     "ch_history_unreachable": _c("ClickHouse answers again"),
     "ch_history_buckets": _c("a human repairs the archive copy"),
+    # OD-08 (a): the one independent re-aggregation of Gold did not run —
+    # KS_CH_URL unset, a failed ship or read-back, a raise. WARN while DuckDB's
+    # Gold is still compared, CRITICAL once it is not.
+    "gold_values_unwatched": _c("a mirror_landing run in which ClickHouse compares Gold again"),
 
     # ── data-quality findings: the order-version archive (report-only) ──
     "order_versions_stalled": _c("a version row lands again"),

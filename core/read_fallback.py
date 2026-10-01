@@ -28,10 +28,13 @@ works; a 503 is an outage somebody can see. The frontend already reads a
 503 as "temporarily unavailable" and retries it (`ApiErrorState`).
 
 A refusal is not a fallback, so it is counted apart (`refusals()`), logged
-without the phrase the soak greps for, and published only beside the mode
-that produces it (`read_fallback_mode.refused` on `/api/health`, under `off`
-alone). `read_fallbacks` keeps meaning "answered from DuckDB", and under `off`
-it stays empty.
+without the phrase a fallback is grepped by (the canary's `read_fallback_used`
+lever), and published only beside the mode that produces it
+(`read_fallback_mode.refused` on `/api/health`, under `off` alone).
+`read_fallbacks` keeps meaning "answered from DuckDB", and under `off` it
+stays empty — the canary pages it `read_fallback_used` and pages a recent
+refusal apart, as `read_refused`, so the week OD-07 waits for stays clean
+under a refusal (bot/canary.py).
 
 One place raises, so every consumer of a router refuses at once — and a
 gate whose switch names an engine with no address refuses through
@@ -99,6 +102,17 @@ in `tests/unit/test_read_fallback_sites.py` requires that of every
 that is published as misconfigured is exactly a switch that is refused.
 Chosen over having the canary page `misconfigured` under `off`: a page would
 still have served DuckDB until somebody read it.
+
+The cohorts are the one route `off` refuses that no misconfiguration names:
+they have no Postgres body, so under `off` a live ClickHouse answers them or
+nobody does (`no_engine`), and `KS_READ_COHORTS=duckdb` — or unset — is a
+routing choice under `duckdb` and a 503 on every cohort read under `off`.
+`no_engine_routes()` publishes it beside `misconfigured` (`no_engine`), from
+`ENGINE_ONLY`, so the two lists together are every read a configuration sends
+to DuckDB uncounted today and `off` would refuse tomorrow. The canary pages
+them under `duckdb` as `read_routed_to_duckdb` (OD-07): nothing counts such a
+read, so without that the week `off` waits for would read clean while every
+one of them was served from DuckDB.
 """
 from __future__ import annotations
 
@@ -226,6 +240,32 @@ def misconfigured() -> List[str]:
     return list(_misconfigured)
 
 
+# Surfaces only one engine besides DuckDB can answer, and the switch that must
+# name it: under `off` that engine answers them or nobody does (`no_engine`).
+# Today the cohorts alone (`CustomersMixin._analytics_rows`); a test holds this
+# row to `core.ch_cohorts`' own gate, so the two cannot drift.
+ENGINE_ONLY: Dict[str, "tuple[str, str]"] = {
+    "cohorts": ("KS_READ_COHORTS", "clickhouse"),
+}
+
+
+def no_engine_routes() -> List[str]:
+    """`"surface: SWITCH=value, …"` for every `ENGINE_ONLY` surface whose
+    switch does not name its engine — served from DuckDB with nothing to
+    count under `duckdb`, refused on every read under `off`.
+
+    A switch that names the engine without its address is left out: that is
+    `misconfigured`, and one cause gets one line. Read per call, like the
+    gate it describes; a dict lookup and no I/O."""
+    found = []
+    for surface, (name, engine) in sorted(ENGINE_ONLY.items()):
+        value = os.getenv(name, "").strip().lower() or DUCKDB
+        if value != engine:
+            found.append(f"{surface}: {name}={value}, and only {engine} may "
+                         f"answer it under {ENV}={OFF}")
+    return found
+
+
 def refusing() -> bool:
     """Whether a read that would be answered by DuckDB is refused instead."""
     return mode() == OFF
@@ -244,7 +284,7 @@ def _refuse(surface: str, why: str, exc: Optional[BaseException]) -> NoReturn:
     """Count one refusal on `surface`, say why, and raise `ReadUnavailable`.
 
     The line deliberately does not say "falling back to DuckDB": nothing
-    fell back, and that phrase is what the soak before the flip greps for.
+    fell back, and that phrase is what a fallback is grepped by.
     """
     count = _tally(_refused, surface)
     logger.error(
@@ -326,8 +366,8 @@ def answered(consumer: str, exc: ReadUnavailable, answer: str) -> Dict[str, str]
     it did instead of reading DuckDB: deferred, kept the previous model,
     skipped the step. The refusal itself was logged at ERROR and counted
     where it was raised (`read_fallback_mode.refused`), so this line says
-    only what became of it, at WARNING, and never the phrase the soak greps
-    for. The returned `{"reason", "surface"}` goes into the consumer's own
+    only what became of it, at WARNING, and never the phrase a fallback is
+    grepped by. The returned `{"reason", "surface"}` goes into the consumer's own
     result, so `/api/jobs` history shows a refusal rather than a quiet run.
     """
     logger.warning("refused read answered by %s (%s): %s",

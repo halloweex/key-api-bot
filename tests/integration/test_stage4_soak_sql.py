@@ -46,6 +46,11 @@ VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on":
              "buyers_on": "0", "buyers_flip_at": "", "buyers_held_by": "",
              "buyers_override_floor": ""}
 RUN_AS_OWNER = "-- soak:run-as ks_app"
+# The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
+HISTORY_CHECKS = (
+    ("20_reconciliation_pg_history.sql", "reconciliation_pg"),
+    ("22_reconciliation_ch_history.sql", "reconciliation_ch"),
+)
 
 KYIV = ZoneInfo("Europe/Kyiv")
 # A Wednesday, noon in Kyiv: inside no heavy-lock window, after the 07:30 run.
@@ -112,17 +117,96 @@ class TestTheFiles:
     def test_only_documented_variables(self, path):
         render(path.name)
 
-    def test_the_history_check_measures_against_the_canarys_limit(self):
-        """20 asks whether the canary would have paged, so its limit is the
-        canary's: a copy that drifted would certify a history the page judges
-        differently."""
+    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
+    def test_the_history_check_measures_against_the_canarys_limit(self, name, layer):
+        """20 and 22 ask whether the canary would have paged, so the limit is
+        the canary's: a copy that drifted would certify a history the page
+        judges differently."""
         from bot.canary import DQ_MAX_AGE_S
 
-        sql = _uncommented(
-            (SQL_DIR / "20_reconciliation_pg_history.sql").read_text(encoding="utf-8"))
+        sql = _uncommented((SQL_DIR / name).read_text(encoding="utf-8"))
         found = re.findall(r"interval\s+'(\d+)\s+hours'\s+AS\s+canary_max_age", sql)
         assert len(found) == 1, found
-        assert int(found[0]) * 3600 == DQ_MAX_AGE_S["reconciliation_pg"]
+        assert int(found[0]) * 3600 == DQ_MAX_AGE_S[layer]
+        assert re.findall(r"r\.layer = '(\w+)'", sql) == [layer]
+
+    def test_the_two_history_checks_differ_only_in_what_a_success_is(self):
+        """22 is 20 for the ClickHouse arm (OD-08 review): one body, so a fix
+        to the silence arithmetic in one cannot leave the other behind.
+        `layer_runs` is the one CTE allowed to differ, and the label the one
+        literal. Literals are compared, not blanked: the limits live in them.
+        Mutation: change `'75 minutes'` in either file and this fails."""
+        def without_layer_runs(name, layer):
+            code = _uncommented((SQL_DIR / name).read_text(encoding="utf-8"))
+            label = f"'{layer} history'"
+            assert code.count(label) == 1, name
+            code = code.replace(label, "'<layer> history'")
+            start = code.index("layer_runs AS (")
+            depth, i = 0, code.index("(", start)
+            while True:
+                depth += {"(": 1, ")": -1}.get(code[i], 0)
+                i += 1
+                if depth == 0:
+                    break
+            assert code[i] == ",", code[i:i + 20]
+            return re.sub(r"\s+", " ", code[:start] + code[i + 1:]).strip()
+
+        assert without_layer_runs(*HISTORY_CHECKS[0]) == \
+            without_layer_runs(*HISTORY_CHECKS[1])
+
+    def test_d8s_blind_checks_are_every_warn_the_clickhouse_comparison_files(self):
+        """D8 reads a finding that only says ClickHouse did not compare as
+        UNKNOWN, not as a disagreement (OD-08 review). The list is derived:
+        `gold_values_unwatched` and every WARN `reconcile_clickhouse` files
+        itself — each is ClickHouse saying it could not look."""
+        import ast
+        import inspect
+
+        from core import ch_silver
+
+        tree = ast.parse(inspect.getsource(ch_silver.reconcile_clickhouse))
+        warns = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                kws = {k.arg: k.value for k in node.keywords}
+                name, sev = kws.get("check_name"), kws.get("severity")
+                if (isinstance(name, ast.Constant) and isinstance(sev, ast.Attribute)
+                        and sev.attr == "WARN"):
+                    warns.add(name.value)
+        sql = _uncommented((SQL_DIR / "09_d8_mirror_landing.sql").read_text(encoding="utf-8"))
+        block = re.search(r"blind_checks AS \((.*?)\n\),", sql, flags=re.S).group(1)
+        assert set(re.findall(r"'(\w+)'", block)) == warns | {ch_silver.GOLD_UNWATCHED}
+
+    def test_the_read_fallback_check_reads_what_the_canary_writes(self):
+        """F1 judges two things the canary makes, so every name and number it
+        shares with the canary is the canary's: the watch row's key and gap,
+        the pages' keys — every key a check emits for a read served from
+        DuckDB, in both places it asks — and the words both lines begin
+        with, which the line is read back out of. The day is the report's,
+        the week OD-07's 168 h."""
+        import os.path
+
+        from bot import canary
+
+        sql = (SQL_DIR / "22_f1_read_fallbacks.sql").read_text(encoding="utf-8")
+        code = _uncommented(sql)
+        gap = re.findall(r"interval\s+'(\d+)\s+minutes'\s+AS\s+watch_gap", code)
+        assert [int(m) * 60 for m in gap] == [canary.READ_FALLBACK_WATCH_GAP_S]
+        assert re.findall(r"interval\s+'(\d+)\s+hours'\s+AS\s+span", code) == ["24"]
+        assert re.findall(r"interval\s+'(\d+)\s+hours'\s+AS\s+week", code) == ["168"]
+        assert re.findall(r"condition_key = '(watch:[^']*)'", code) == [
+            canary.READ_FALLBACK_WATCH_KEY]
+        served = {k for k, _ in canary.check_read_fallbacks(
+            {"read_fallbacks": {"a": {}}})}
+        served |= {k for k, _ in canary.check_read_routes(
+            {"read_fallback_mode": {"mode": "duckdb", "misconfigured": ["x"]}})}
+        lists = re.findall(r"condition_key IN \(([^)]*)\)", code)
+        assert len(lists) == 2, lists
+        for found in lists:
+            assert set(re.findall(r"'([^']*)'", found)) == served
+        [stem] = re.findall(r"substring\(m\.message FROM '\((reads [^\[]*)\[", code)
+        common = os.path.commonprefix([canary.READ_FALLBACK_LINE, canary.READ_ROUTED_LINE])
+        assert stem == common.rstrip() == "reads served from DuckDB"
 
 
 # ── against a migrated Postgres ───────────────────────────────────────────────
@@ -295,7 +379,7 @@ class TestEveryCheckRuns:
             async with scenario(pool) as conn:
                 verdicts[path.name[:2]] = await verdict(
                     conn, path.name, buyers_on="held", buyers_held_by="KS_READ_DASHBOARD")
-        assert verdicts.pop("22")[0] == "FAIL"
+        assert verdicts.pop("23")[0] == "FAIL"
         assert all(v == "PASS" and "held on DuckDB" in d for v, d in verdicts.values()), verdicts
 
     @pytest.mark.asyncio
@@ -523,10 +607,11 @@ class TestStaleEvidenceIsUnknown:
         assert v == "UNKNOWN" and "failing" in detail, detail
 
     @pytest.mark.asyncio
-    async def test_a_copy_two_hours_old_makes_the_history_unknown(self, pool):
+    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
+    async def test_a_copy_two_hours_old_makes_the_history_unknown(self, pool, name, layer):
         async with scenario(pool) as conn:
             await mirror_state(conn, "app.data_quality_runs", ok_at=ago(hours=2))
-            v, detail = await verdict(conn, "20_reconciliation_pg_history.sql")
+            v, detail = await verdict(conn, name)
         assert v == "UNKNOWN", detail
 
     @pytest.mark.asyncio
@@ -650,7 +735,7 @@ class TestReconciliationPgHistory:
     Every scenario seeds a run on the day before the window opens, so no row
     another test committed can be the one that opens its first silence."""
 
-    FILE = "20_reconciliation_pg_history.sql"
+    FILE, LAYER = HISTORY_CHECKS[0]
     FIRST_RUN_ID = 990_000_200
 
     @staticmethod
@@ -666,10 +751,10 @@ class TestReconciliationPgHistory:
         return [s for s in starts if s is not None]
 
     async def seed(self, conn, starts, *, failed=(), copied=None):
-        """A reconciliation_pg run per start, in order, `failed` ones errored,
+        """A run of the layer per start, in order, `failed` ones errored,
         and a copy of the journal taken at `copied` (ten minutes ago)."""
         for n, started_at in enumerate(sorted(set(starts) | set(failed))):
-            await dq_run(conn, self.FIRST_RUN_ID + n, layer="reconciliation_pg",
+            await dq_run(conn, self.FIRST_RUN_ID + n, layer=self.LAYER,
                          started_at=started_at,
                          error="boom" if started_at in failed else None)
         await mirror_state(conn, "app.data_quality_runs",
@@ -746,7 +831,7 @@ class TestReconciliationPgHistory:
             await self.seed(conn, self.every_morning(moved={5: self.at(5, 11, 0)}))
             await conn.execute(
                 "UPDATE app.data_quality_runs SET ended_at = started_at + interval '45 minutes'"
-                " WHERE layer = 'reconciliation_pg' AND started_at = $1", self.at(5, 11, 0))
+                " WHERE layer = $2 AND started_at = $1", self.at(5, 11, 0), self.LAYER)
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
         assert "silent for 30.3 h, from 30.05 05:30 to 31.05 11:45 Kyiv" in detail, detail
@@ -761,7 +846,7 @@ class TestReconciliationPgHistory:
             await self.seed(conn, self.every_morning(moved={5: self.at(5, 11, 50)}))
             await conn.execute(
                 "UPDATE app.data_quality_runs SET ended_at = started_at + interval '45 minutes'"
-                " WHERE layer = 'reconciliation_pg' AND started_at = $1", self.at(6))
+                " WHERE layer = $2 AND started_at = $1", self.at(6), self.LAYER)
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
         assert "silent for 30.3 h, from 30.05 05:30 to 31.05 11:50 Kyiv" in detail, detail
@@ -831,7 +916,7 @@ class TestReconciliationPgHistory:
             await self.seed(conn, self.every_morning())
             await conn.execute(
                 "UPDATE app.data_quality_runs SET critical_count = 2"
-                " WHERE layer = 'reconciliation_pg' AND started_at = $1", self.at(10))
+                " WHERE layer = $2 AND started_at = $1", self.at(10), self.LAYER)
             v, detail = await verdict(conn, self.FILE)
         assert v == "FAIL", detail
         assert "CRITICAL on 26.05" in detail, detail
@@ -847,6 +932,101 @@ class TestReconciliationPgHistory:
             v, detail = await verdict(conn, self.FILE)
         assert v == "UNKNOWN", detail
         assert "is 120 min old (limit 75)" in detail, detail
+
+
+@needs_pg
+class TestReconciliationChHistory(TestReconciliationPgHistory):
+    """Every scenario above, again, for the ClickHouse arm (OD-08 review):
+    22 is 20 with one CTE changed, and these prove the body behaves the same
+    on the other layer. Then what differs: a run that gated a stale copy."""
+
+    FILE, LAYER = HISTORY_CHECKS[1]
+
+    async def gated(self, conn, started_at, run_id):
+        """A run as the arm wrote a stale-copy gate before the review: no
+        error, and a WARN `ch_reconcile_pending` beside it."""
+        await dq_run(conn, run_id, layer=self.LAYER, started_at=started_at)
+        await dq_issue(conn, run_id, "ch_reconcile_pending")
+
+    @pytest.mark.asyncio
+    async def test_a_gated_run_does_not_end_a_silence(self, pool):
+        """05:30 on 30.05, then gated at 05:30 on 31.05 and nothing until
+        12:00: the canary shipped with this check would have paged from 11:30,
+        and 31.05 has no run that compared. Mutation: drop the NOT EXISTS
+        from 22's `layer_runs` and this reads PASS."""
+        async with scenario(pool) as conn:
+            await self.seed(conn, self.every_morning(moved={5: self.at(5, 12, 0)}))
+            await self.gated(conn, self.at(5), self.FIRST_RUN_ID + 900)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "silent for 30.5 h, from 30.05 05:30 to 31.05 12:00 Kyiv" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_day_whose_only_run_was_gated_has_none(self, pool):
+        async with scenario(pool) as conn:
+            await self.seed(conn, self.every_morning(moved={5: None}))
+            await self.gated(conn, self.at(5), self.FIRST_RUN_ID + 900)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "no successful run on 31.05" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_gate_finding_on_another_layer_is_not_this_ones(self, pool):
+        """The NOT EXISTS reads the run's own findings, not the name anywhere."""
+        async with scenario(pool) as conn:
+            await self.seed(conn, self.every_morning())
+            await dq_run(conn, self.FIRST_RUN_ID + 900, layer="mirror_landing",
+                         started_at=self.at(5, 7, 30))
+            await dq_issue(conn, self.FIRST_RUN_ID + 900, "ch_reconcile_pending")
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+
+
+@needs_pg
+class TestD8ABlindComparisonIsNotADisagreement:
+    """OD-08 review, fifth finding: `gold_values_unwatched` is filed on
+    `gold.daily_revenue`, which D8 counted as a disagreement between the two
+    stores and marked FAIL. It says only that ClickHouse did not compare; the
+    soak's rule for a check that could not see is UNKNOWN. Mutation: drop the
+    `blind` branch of the verdict and the first two read FAIL."""
+
+    TODAY_0730 = datetime(2030, 6, 5, 7, 30, tzinfo=KYIV)
+
+    async def _run_with(self, conn, *findings):
+        await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
+        for name, table in findings:
+            await dq_issue(conn, DQ_RUN_IDS[0], name, table=table)
+        await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
+
+    @pytest.mark.asyncio
+    async def test_no_ks_ch_url_is_unknown_not_a_disagreement(self, pool):
+        """The reviewer's reproduction: the one finding, on gold.daily_revenue."""
+        async with scenario(pool) as conn:
+            await self._run_with(conn, ("gold_values_unwatched", "gold.daily_revenue"))
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "UNKNOWN", detail
+        assert "ClickHouse did not compare Gold (gold_values_unwatched WARN)" in detail
+        assert "finding(s) on the derived tables" not in detail
+
+    @pytest.mark.asyncio
+    async def test_a_clickhouse_outage_is_unknown(self, pool):
+        """An outage files the WARN about ClickHouse on silver.orders beside it."""
+        async with scenario(pool) as conn:
+            await self._run_with(conn, ("ch_silver_unreachable", "silver.orders"),
+                                 ("gold_values_unwatched", "gold.daily_revenue"))
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "UNKNOWN", detail
+        assert "ch_silver_unreachable WARN, gold_values_unwatched WARN" in detail
+
+    @pytest.mark.asyncio
+    async def test_a_disagreement_beside_a_blind_spot_still_fails(self, pool):
+        async with scenario(pool) as conn:
+            await self._run_with(conn, ("gold_cell_values", "gold.daily_revenue"),
+                                 ("gold_values_unwatched", "gold.daily_revenue"))
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "FAIL", detail
+        assert "1 finding(s) on the derived tables: gold_cell_values" in detail
+        assert "gold_values_unwatched" not in detail
 
 
 @needs_pg
@@ -919,7 +1099,7 @@ async def silver_order(conn, oid, *, buyer_id, ordered_at):
 
 @needs_pg
 class TestB1BuyersCopiesStoodDown:
-    FILE = "22_b1_buyers_copies_stood_down.sql"
+    FILE = "23_b1_buyers_copies_stood_down.sql"
 
     @pytest.mark.asyncio
     async def test_a_copy_after_the_handover_fails(self, pool):
@@ -993,7 +1173,7 @@ class TestB1BuyersCopiesStoodDown:
 
 @needs_pg
 class TestB2BuyersWatermark:
-    FILE = "23_b2_buyers_watermark.sql"
+    FILE = "24_b2_buyers_watermark.sql"
 
     async def mark(self, conn, value):
         await conn.execute(
@@ -1038,7 +1218,7 @@ class TestB2BuyersWatermark:
 
 @needs_pg
 class TestB3BuyersVerdicts:
-    FILE = "24_b3_gender_coverage.sql"
+    FILE = "25_b3_gender_coverage.sql"
 
     @pytest.mark.asyncio
     async def test_a_buyer_past_the_grace_with_no_verdict_fails(self, pool):
@@ -1064,7 +1244,7 @@ class TestB3BuyersVerdicts:
 
 @needs_pg
 class TestB4SelectionBacklog:
-    FILE = "25_b4_selection_backlog.sql"
+    FILE = "26_b4_selection_backlog.sql"
 
     @pytest.mark.asyncio
     async def test_a_buyer_owed_for_a_day_fails(self, pool):
@@ -1090,7 +1270,7 @@ class TestB4SelectionBacklog:
 
 @needs_pg
 class TestB5BuyersIntegrity:
-    FILE = "26_b5_buyers_integrity.sql"
+    FILE = "27_b5_buyers_integrity.sql"
 
     @pytest.mark.asyncio
     async def test_a_clean_set_passes(self, pool):
@@ -1124,3 +1304,340 @@ class TestB5BuyersIntegrity:
                 await buyer(conn, BUYER_IDS[0], phone="+380500000001", contact=False)
             v, detail = await verdict(conn, self.FILE, buyers_on="1")
         assert v == "FAIL", (defect, detail)
+
+
+@needs_pg
+class TestF1ReadFallbacks:
+    """OD-07's evidence, judged a day at a time, from the canary's pages and
+    the canary's watch.
+
+    FAIL is a read some page answered from DuckDB in the day — paged,
+    escalated, standing (however old), resolved inside it, or read by the
+    watch's latest probe even when no page was delivered. UNKNOWN is a day
+    nobody can say was watched. PASS needs both, and says how much of the
+    168 h week OD-07 waits for the clean run has covered."""
+
+    FILE = "22_f1_read_fallbacks.sql"
+    LINE = "reads served from DuckDB: "
+    ROUTED = "reads served from DuckDB uncounted: "
+    KEYS = ("read_fallback_used", "read_routed_to_duckdb")
+
+    async def clear(self, conn):
+        await conn.execute(
+            "DELETE FROM app.alert_events WHERE condition_key = ANY($1::text[])",
+            list(self.KEYS))
+        await conn.execute(
+            "DELETE FROM app.alert_series WHERE condition_key = ANY($1::text[])",
+            [*self.KEYS, "watch:read_fallbacks"])
+
+    @staticmethod
+    async def watch(conn, *, since, last, probes):
+        await conn.execute(
+            """
+            INSERT INTO app.alert_series (condition_key, kind, state, first_fired_at,
+                                          last_fired_at, fired_count, instance)
+            VALUES ('watch:read_fallbacks', 'event', 'event', $1, $2, $3, 'bot')
+            """, since, last, probes)
+
+    @staticmethod
+    async def series(conn, *, state, first, last, resolved=None,
+                     key="read_fallback_used"):
+        await conn.execute(
+            """
+            INSERT INTO app.alert_series (condition_key, kind, state, first_fired_at,
+                                          last_fired_at, fired_count, resolved_at,
+                                          instance)
+            VALUES ($5, 'condition', $1, $2, $3, 1, $4, 'bot')
+            """, state, first, last, resolved, key)
+
+    @staticmethod
+    async def event(conn, key, *, at, event_type="fired", message=None):
+        await conn.execute(
+            """
+            INSERT INTO app.alert_events (condition_key, event_type, at, instance,
+                                          delivered_to, message)
+            VALUES ($1, $2, $3, 'bot', 1, $4)
+            """, key, event_type, at, message)
+
+    async def clean_week(self, conn):
+        await self.watch(conn, since=ago(hours=169), last=ago(minutes=10), probes=676)
+
+    @pytest.mark.asyncio
+    async def test_a_watched_clean_week_passes_and_says_it_is_covered(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.clean_week(conn)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+        assert "since 29.05 11:00 Kyiv (676 probes)" in detail, detail
+        assert "the 168 h KS_READ_FALLBACK=off waits for are covered" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_watched_clean_day_passes_and_counts_the_week(self, pool):
+        """The day after this ships, and every day of the week after a reset:
+        nothing wrong, the canary watching — a PASS, with the week's progress
+        in the detail rather than an UNKNOWN the daily report would carry for
+        seven days (review of OD-07, finding 5)."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=30), last=ago(minutes=10), probes=120)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+        assert "30 h of the 168 KS_READ_FALLBACK=off waits for" in detail, detail
+        assert "covered" not in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_the_week_is_covered_from_its_168th_hour(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=168), last=ago(minutes=10), probes=672)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS" and "are covered" in detail, detail
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=168) + timedelta(seconds=1),
+                             last=ago(minutes=10), probes=671)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS" and "167 h of the 168" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_no_watch_is_unknown_and_says_why(self, pool):
+        """No page and no watch is the state production is in the day this
+        ships: a quiet journal proves nothing without somebody looking."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "UNKNOWN", detail
+        assert "nothing durable says the canary read" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_watch_nobody_wrote_for_the_gap_is_unknown(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=200), last=ago(minutes=36), probes=600)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "UNKNOWN", detail
+        assert "36 min ago (limit 35)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_the_staleness_limit_is_exact(self, pool):
+        """35 min to the second is alive; one second more is not. The pin on
+        the number alone let a comparison shifted by under a minute through
+        (review of OD-07, finding 6)."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=200), last=ago(minutes=35), probes=600)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=200), last=ago(minutes=35, seconds=1),
+                             probes=600)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "UNKNOWN", detail
+
+    @pytest.mark.asyncio
+    async def test_a_watch_younger_than_the_day_is_unknown(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=10), last=ago(minutes=10), probes=40)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "UNKNOWN", detail
+        assert "only since 05.06 02:00 Kyiv, 10.0 h of the 24" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_page_inside_the_day_fails_naming_its_surfaces(self, pool):
+        """The body rides the first condition of a raise; this page shared
+        its raise with a mirror page, so the line is found on the sibling."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.clean_week(conn)
+            at = ago(hours=20)
+            await self.series(conn, state="resolved", first=at, last=at,
+                              resolved=ago(hours=19))
+            await self.event(conn, "mirror_failing:bronze.orders", at=at, message=(
+                "⚠️ <b>Dashboard warning</b>\n• mirror bronze.orders: failing, 4× in a row\n"
+                f"• {self.LINE}dashboard ×2 (last 2030-06-04T12:55:00+00:00)\n→ Check it"))
+            await self.event(conn, "read_fallback_used", at=at)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert ("paged 1 time(s) in 24 h, last 04.06 16:00 Kyiv: reads served from "
+                "DuckDB: dashboard ×2 (last 2030-06-04T12:55:00+00:00)") in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_route_to_duckdb_paged_inside_the_day_fails_naming_it(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.clean_week(conn)
+            at = ago(hours=3)
+            await self.series(conn, state="resolved", first=at, last=at,
+                              resolved=ago(hours=2), key="read_routed_to_duckdb")
+            await self.event(conn, "read_routed_to_duckdb", at=at, message=(
+                f"⚠️ <b>Dashboard warning</b>\n• {self.ROUTED}"
+                "KS_READ_COHORTS=clickhouse without KS_CH_URL\n→ Give web"))
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert ("reads served from DuckDB uncounted: KS_READ_COHORTS=clickhouse "
+                "without KS_CH_URL") in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_route_still_paging_fails(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.clean_week(conn)
+            await self.series(conn, state="firing", first=ago(days=3), last=ago(days=3),
+                              key="read_routed_to_duckdb")
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "still paging (last paged 02.06 12:00 Kyiv)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_route_no_page_reached_fails_through_the_watch(self, pool):
+        """The review's case end to end: web publishing a switch with no
+        address, the canary reading it, the real statement writing the watch
+        — and F1, which used to PASS over it."""
+        from bot import canary
+        from core.alert_archive import _WATCH_SQL
+
+        payload = {"read_fallbacks": {},
+                   "read_fallback_mode": {"mode": "duckdb", "error": None,
+                                          "misconfigured": [
+                                              "KS_READ_COHORTS=clickhouse without KS_CH_URL"],
+                                          "no_engine": []}}
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await conn.execute(
+                """
+                INSERT INTO app.alert_series (condition_key, kind, state, first_fired_at,
+                                              last_fired_at, fired_count, instance)
+                VALUES ('watch:read_fallbacks', 'event', 'event',
+                        now() - interval '170 hours', now() - interval '14 minutes',
+                        680, 'bot')
+                """)
+            await conn.execute(_WATCH_SQL, canary.READ_FALLBACK_WATCH_KEY,
+                               canary.read_fallbacks_clean(payload),
+                               float(canary.READ_FALLBACK_WATCH_GAP_S), "bot", 3600.0)
+            v, detail = await verdict(conn, self.FILE, now=None)
+        assert v == "FAIL", detail
+        assert "found a read served from DuckDB" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_a_day_old_is_the_week_restarting_not_a_fail(self, pool):
+        """One fallback is one day's FAIL, not seven: a page 30 h ago, web
+        restarted an hour later, the watch clean since — the daily question
+        passes, and the week counts from the restart."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=29), last=ago(minutes=10), probes=116)
+            await self.series(conn, state="resolved", first=ago(hours=30),
+                              last=ago(hours=30), resolved=ago(hours=29))
+            await self.event(conn, "read_fallback_used", at=ago(hours=30),
+                             message=f"• {self.LINE}goals ×1")
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+        assert "29 h of the 168" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_an_escalation_inside_the_day_fails(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.clean_week(conn)
+            await self.series(conn, state="resolved", first=ago(hours=40),
+                              last=ago(hours=40), resolved=ago(hours=30))
+            await self.event(conn, "read_fallback_used", at=ago(hours=40),
+                             message=f"• {self.LINE}goals ×1")
+            await self.event(conn, "read_fallback_used", at=ago(hours=23),
+                             event_type="escalated")
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "paged 1 time(s)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_page_still_standing_fails_however_old(self, pool):
+        """Paged ten days ago, the reminders never delivered: a web process
+        that has not restarted still holds that fallback."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.clean_week(conn)
+            await self.series(conn, state="firing", first=ago(days=10), last=ago(days=10))
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "still paging (last paged 26.05 12:00 Kyiv)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_page_that_stood_into_the_day_fails(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.clean_week(conn)
+            await self.series(conn, state="resolved", first=ago(days=9),
+                              last=ago(days=9), resolved=ago(hours=10))
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "stood until 05.06 02:00 Kyiv, inside the window" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_no_page_reached_still_fails(self, pool):
+        """A page is journaled only when delivered. The watch's latest probe
+        read the fallback anyway, and that is a fallback."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(minutes=10), last=ago(minutes=10), probes=0)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        assert "the canary's probe at 05.06 11:50 Kyiv found a read served" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_dirty_probe_counts_inside_the_day_only(self, pool):
+        """The watch's latest probe read a fallback two hours ago and nothing
+        has read since: a FAIL, inside the day. The same probe before the day
+        began is a watch nobody wrote: UNKNOWN — the pin the review's
+        mutation removed survived because nothing sat on that side."""
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=2), last=ago(hours=2), probes=0)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.watch(conn, since=ago(hours=30), last=ago(hours=30), probes=0)
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "UNKNOWN", detail
+        assert "min ago (limit 35)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_before_the_day_does_not_count(self, pool):
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await self.clean_week(conn)
+            await self.series(conn, state="resolved", first=ago(days=9),
+                              last=ago(days=9), resolved=ago(hours=25))
+            await self.event(conn, "read_fallback_used", at=ago(days=9),
+                             message=f"• {self.LINE}goals ×1")
+            await self.event(conn, "read_fallback_mode_invalid", at=ago(hours=5),
+                             message="• read fallback: KS_READ_FALLBACK='of'")
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "PASS", detail
+
+    @pytest.mark.asyncio
+    async def test_the_real_writer_and_the_real_clock_agree(self, pool):
+        """The watch as `core.alert_archive` writes it, judged on the real
+        clock: a run seeded 170 h long, then one probe through the statement
+        the bot runs, of the same web process."""
+        from bot.canary import READ_FALLBACK_WATCH_GAP_S, READ_FALLBACK_WATCH_KEY
+        from core.alert_archive import _WATCH_SQL
+
+        async with scenario(pool) as conn:
+            await self.clear(conn)
+            await conn.execute(
+                """
+                INSERT INTO app.alert_series (condition_key, kind, state, first_fired_at,
+                                              last_fired_at, fired_count, instance)
+                VALUES ('watch:read_fallbacks', 'event', 'event',
+                        now() - interval '170 hours', now() - interval '14 minutes',
+                        680, 'bot')
+                """)
+            await conn.execute(_WATCH_SQL, READ_FALLBACK_WATCH_KEY, True,
+                               float(READ_FALLBACK_WATCH_GAP_S), "bot", 86400.0)
+            v, detail = await verdict(conn, self.FILE, now=None)
+        assert v == "PASS", detail
+        assert "(681 probes)" in detail and "are covered" in detail, detail
