@@ -272,7 +272,12 @@ async def _backfill_utm_postgres(days_back: int, *, force_ship: bool = False):
     from core.duckdb_store import get_store
     from core.keycrm import get_async_client
     from core.pg_utm_parse import reparse_router
+    from core.runtime_modes import configure_modes
 
+    # Idempotent, and asked again here because this function is the one that
+    # writes: the latch and KS_PG_DERIVE must be loaded before the chain's
+    # writer runs, whoever called it.
+    configure_modes()
     null_count = await pg_orders_read.null_comment_count()
     logger.info(f"Orders with NULL manager_comment in Postgres: {null_count}")
     if null_count == 0:
