@@ -852,7 +852,10 @@ _SPEC_TYPES = {"MirroredTable", "BucketedTable"}
 # Reading a spec's Postgres copy, or comparing the two: what makes a function
 # a comparison rather than a reader of DuckDB's side.
 _PG_COMPARE = {"fetch_pg_rows", "pg_fingerprints", "_read_pg_bucket",
-               "compare_table", "compare_bucket"}
+               "compare_table", "compare_bucket",
+               # The shadow chains' comparison, facing Postgres→DuckDB
+               # (OD-02 (c)) — a comparison of the same copies all the same.
+               "fetch_pg_rows_with_clock", "compare_shadow"}
 
 
 def _spec_tables(modules) -> dict:

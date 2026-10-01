@@ -231,6 +231,17 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # what matters — a sweep that suddenly takes far more than usual is the
     # one thing this cannot tell apart from a loss.
     "mirror_pruned_rows": _c("the next full replace removes them"),
+    # The shadow chains' comparison (OD-02 (c)): Postgres writes, DuckDB is
+    # handed each row after the commit. Nothing re-ships these tables, so
+    # none clears by a job running again — each clears when the rows on the
+    # two sides agree, which for a failed shadow is the copy-back.
+    "shadow_duckdb_only_rows": _c(
+        "the writer that went round the chain is found and its rows decided "
+        "— a human, not a job"),
+    "shadow_missing_in_duckdb": _c(
+        "scripts/chain_copy_back.py carries the rows, or they age out"),
+    "shadow_row_values": _c("the two stores agree on the row again"),
+    "shadow_pruned_rows": _c("the next shadow prune removes them"),
     # Not a data defect: the writer moved and its watchdog did not. It
     # clears when the check is ported or the flag goes back to duckdb.
     "inventory_continuity_unwatched": _c(

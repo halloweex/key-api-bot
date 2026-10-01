@@ -190,6 +190,12 @@ class TableTransfer:
     # None reads the table whole.
     dk_select: Optional[str] = None
     pg_select: Optional[str] = None
+    # A table both stores sweep by age (the watchdog samples): the column the
+    # sweep keys on, so a row only DuckDB holds that is older than everything
+    # Postgres still holds reads as retention — DuckDB's prune lagging the
+    # writer's — and not as a stranded row. Derived from the daily spec's
+    # `prunes_by_age` and its clock; None everywhere else.
+    prune_clock: Optional[str] = None
 
     @property
     def is_append(self) -> bool:
@@ -304,6 +310,20 @@ def _shared_clock(source: MirroredTable | BucketedTable) -> Tuple[str, ...]:
     return ()
 
 
+def _prune_clock(source: MirroredTable, columns: Sequence[str]) -> Optional[str]:
+    """The column a by-age sweep keys on, for a spec that declares one.
+
+    Only a plain column both the daily spec and the copy carry: the rule
+    compares a DuckDB row's value with Postgres's oldest, so it needs the
+    value on both sides of the handover, not an expression one store reads.
+    """
+    stamp = source.synced_column
+    if (source.prunes_by_age and stamp and _IDENTIFIER.fullmatch(stamp)
+            and stamp in source.columns and stamp in columns):
+        return stamp
+    return None
+
+
 def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
     """Every table of one chain, in the order the copy-back writes them.
 
@@ -352,6 +372,7 @@ def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
                 pg_table=table, dk_table=dk_table, columns=columns,
                 order_by=order_by, compare=_compare_spec(source, (), columns),
                 clock=_shared_clock(source),
+                prune_clock=_prune_clock(source, columns),
             ))
             continue
         if table in mirrored:
@@ -547,6 +568,29 @@ def classify_handover(
             ))
 
     missing = sorted(dk_rows.keys() - pg_rows.keys(), key=_sortable)
+    # A table both stores sweep by age (the watchdog samples, chain 10): the
+    # writer prunes in its own transaction and DuckDB's shadow prune follows,
+    # so DuckDB can hold rows older than anything Postgres still does. Those
+    # are retention, not stranded rows — the copy-back's full replace deletes
+    # them exactly as the next prune would — and refusing on them would
+    # refuse every flip and every way back whose shadow prune lagged.
+    # Derived like `_pruned_by_age`: older than Postgres's oldest, no
+    # retention period restated. A row newer than that stays a refusal.
+    if missing and spec.prune_clock:
+        at = spec.compare.columns.index(spec.prune_clock)
+        floor = min((v for v in (_as_utc(r[at]) for r in pg_rows.values())
+                     if v is not None), default=None)
+        aged = [k for k in missing if floor is not None
+                and (_as_utc(dk_rows[k][at]) or floor) < floor]
+        if aged:
+            info("handover_rows_pruned", aged, (
+                f"{len(aged)} row(s) in DuckDB's {dk_table} are older than "
+                f"anything {table} holds, on a table both stores sweep by "
+                f"age by {spec.prune_clock}: the writer pruned them and "
+                "DuckDB's prune has not yet. A copy-back deletes them, as "
+                "retention would."
+            ))
+            missing = [k for k in missing if k not in set(aged)]
     if missing and spec.is_mirrored and moved_on:
         dropped = [k for k in missing if owned_by_rewritten(dk_rows[k])]
         stranded = [k for k in missing if k not in set(dropped)]
@@ -1418,8 +1462,25 @@ async def _read_sync_keys(pool, chain: ModuleType) -> Dict[str, str]:
     """
     from core.pg_chain_watermarks import read_values
 
-    keys = tuple(getattr(chain, "CHAIN_SYNC_KEYS", ()))
+    keys = _carried_keys(chain)
     return await read_values(keys) if keys else {}
+
+
+def _carried_keys(chain: ModuleType) -> Tuple[str, ...]:
+    """Every `meta.chain_watermarks` value the chain keeps, which the way back
+    carries into DuckDB's `sync_metadata` and the release deletes.
+
+    `CHAIN_SYNC_KEYS` — the `last_sync_*` watermarks a sync resumes from —
+    and `CHAIN_MARKER_KEYS`, a value that is not a sync watermark and must
+    not be judged as one (`_freshness_check` reads every `last_sync_*` key as
+    a stale sync), but lives in the same table for the same reason: the
+    hourly full replace of `app.sync_metadata` would wipe it. Chain 9's
+    digest beat, `dq_digest_last_sent`, is the first. One helper for the
+    three sites, so a key cannot be carried back and then left standing for
+    the next flip to inherit.
+    """
+    return tuple(getattr(chain, "CHAIN_SYNC_KEYS", ())) + tuple(
+        getattr(chain, "CHAIN_MARKER_KEYS", ()))
 
 
 async def _read_pg_sequences(
@@ -1591,7 +1652,7 @@ async def release_chain(pool, chain: ModuleType) -> bool:
     from core.write_chains import chain_name
 
     keys = [chain_latch.owner_key(t) for t in chain.CHAIN_TABLES]
-    keys += list(getattr(chain, "CHAIN_SYNC_KEYS", ()))
+    keys += list(_carried_keys(chain))
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(

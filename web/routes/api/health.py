@@ -246,7 +246,32 @@ async def _write_chains_block() -> dict:
     if isinstance(entry, dict):
         entry["preflight"] = await _inventory_preflight()
         entry["sync_step"] = await _inventory_sync_step()
+    _shadow_entries(block)
     return block
+
+
+def _shadow_entries(block: dict) -> None:
+    """Under every shadow chain's entry (OD-02 (c)), `shadow_failures`: the
+    DuckDB halves of its writes that failed since this process started —
+    count, when, and the error class, never the text (this endpoint is
+    public). Postgres held each of those rows; the daily comparison finds
+    them as `shadow_missing_in_duckdb`, and this says when to look in the
+    log. A chain that declares `pending()` — the report ledgers' spool —
+    also publishes what is waiting to be recorded. Local state, no I/O."""
+    from core import shadow_writes
+    from core.write_chains import WRITE_CHAINS, chain_name, is_shadow
+
+    for chain in WRITE_CHAINS:
+        entry = block.get(chain_name(chain))
+        if not isinstance(entry, dict) or not is_shadow(chain):
+            continue
+        entry["shadow_failures"] = shadow_writes.failures_of(chain_name(chain))
+        pending = getattr(chain, "pending", None)
+        if callable(pending):
+            try:
+                entry["pending"] = pending()
+            except Exception as exc:  # noqa: BLE001 — published by class
+                entry["pending"] = {"error_class": type(exc).__name__}
 
 
 def _warehouse_writer_mode() -> dict:
