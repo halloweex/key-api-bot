@@ -25,9 +25,9 @@ half, and it has exactly one rule set:
   reentrant (`core/weekly_report.py` names the hang), so a caller holding it
   would wait on itself. `tests/unit/test_shadow_writes.py` walks every caller.
 
-It never says "falling back to DuckDB". A shadow is not a fallback — the soak
-greps for that phrase (`core/read_fallback.py`), and a log line here that said
-it would read as a read port failing.
+It never uses the phrase `core/read_fallback.py` logs. A shadow is not a
+fallback — the soak greps for that phrase, and a log line here carrying it
+would read as a read port failing (`tests/unit/test_shadow_state.py`).
 """
 from __future__ import annotations
 
