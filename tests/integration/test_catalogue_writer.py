@@ -185,6 +185,48 @@ class TestTheWriter:
         assert inv.check_chain_invariants(await _facts(pool)) == []
 
     @pytest.mark.asyncio
+    async def test_a_write_takes_its_row_locks_in_id_order(self, stores):
+        """Why two overlapping full writes cannot deadlock, shown without
+        relying on a race (the test above can finish one write before the
+        other starts): a write handed the catalogue in reverse still locks
+        row 1 first. A session holding row 1 stops it there, before it has
+        locked anything else — so the highest id is still free to take."""
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        many = [_product(i) for i in range(1, 51)]
+        await store.upsert_categories(CATS)
+        await store.upsert_products(many)            # the latch, out of the way
+
+        async with pool.acquire() as holder:
+            tx = holder.transaction()
+            await tx.start()
+            write = None
+            try:
+                await holder.execute("SELECT 1 FROM bronze.products WHERE id = 1 FOR UPDATE")
+                write = asyncio.ensure_future(
+                    chain.upsert_products(list(reversed(product_rows(many)))))
+                for _ in range(200):
+                    (waiting,) = await _pg(
+                        pool, "SELECT count(*) AS n FROM pg_stat_activity "
+                              "WHERE datname = current_database() "
+                              "AND wait_event_type = 'Lock'")
+                    if waiting["n"]:
+                        break
+                    await asyncio.sleep(0.05)
+                else:
+                    pytest.fail("the write never came to wait on row 1")
+                free = await holder.fetchval(
+                    "SELECT count(*) FROM (SELECT 1 FROM bronze.products "
+                    "WHERE id = 50 FOR UPDATE SKIP LOCKED) s")
+                assert free == 1, (
+                    "the write locked id 50 before id 1: two writes handed one "
+                    "catalogue in different orders can deadlock")
+            finally:
+                await tx.rollback()
+                if write is not None:
+                    assert await asyncio.wait_for(write, timeout=30) == 50
+
+    @pytest.mark.asyncio
     async def test_the_watermarks_move_with_the_chain(self, stores):
         store, pool, env = stores
         env.setenv(chain.WRITE_ENV, "postgres")
