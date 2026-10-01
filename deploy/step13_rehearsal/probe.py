@@ -66,17 +66,21 @@ def _app_path() -> None:
 # ─── HTTP into the process under test ────────────────────────────────────────
 
 def _admin_id() -> int:
-    raw = os.environ.get("ADMIN_USER_IDS", "")
-    for part in raw.split(","):
-        part = part.strip()
-        if part.isdigit():
-            return int(part)
-    raise SystemExit("ADMIN_USER_IDS has no id: the rehearsal sets one in reh-web's env")
+    """An id `_resolve_session` short-circuits as a hardcoded admin —
+    `core.permissions.ADMIN_USER_IDS`, a literal in the code, not the
+    environment's ADMIN_USER_IDS (which the rehearsal sets to a recipient
+    nobody is, and which decides alert recipients, not sessions)."""
+    _app_path()
+    from core.permissions import ADMIN_USER_IDS
+
+    return min(int(i) for i in ADMIN_USER_IDS)
 
 
 def _session() -> str:
     """A session for the hardcoded admin `_resolve_session` short-circuits,
-    signed by this run's key. Never printed."""
+    signed by this run's key — which exists only in reh-web's environment, so
+    no other process accepts it. Never printed, and sent only to localhost
+    inside reh-web, which publishes no port."""
     from itsdangerous import URLSafeTimedSerializer
 
     return URLSafeTimedSerializer(os.environ["DASHBOARD_SECRET_KEY"]).dumps(
@@ -199,27 +203,25 @@ def _job(job_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _runs(job: Optional[Mapping[str, Any]]) -> int:
-    return int((job or {}).get("run_count") or 0) + int((job or {}).get("error_count") or 0)
-
-
 def trigger_and_wait(job_id: str, timeout: float) -> Dict[str, Any]:
     """`POST /api/jobs/{id}/trigger`, then wait until the scheduler has
     recorded one more execution of it — success or error. The trigger only
-    moves `next_run_time`, so completion is read back from `/api/jobs`."""
+    moves `next_run_time`, so completion is read back from `/api/jobs`, whose
+    schema carries `last_run` (stamped by the execution listener, success or
+    error) and not the run counters."""
     before = _job(job_id)
     if before is None:
         return {"job": job_id, "done": False, "why": "not registered"}
-    status, body = api("POST", f"/api/jobs/{job_id}/trigger", timeout=60)
+    status, _body = api("POST", f"/api/jobs/{job_id}/trigger", timeout=60)
     if status != 200:
         return {"job": job_id, "done": False, "why": f"trigger answered {status}"}
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         time.sleep(3)
-        now = _job(job_id)
-        if _runs(now) > _runs(before):
-            return {"job": job_id, "done": True, "last_status": (now or {}).get("last_status"),
-                    "last_error": ((now or {}).get("last_error") or None) and "error"}
+        now = _job(job_id) or {}
+        if now.get("last_run") and now.get("last_run") != before.get("last_run"):
+            return {"job": job_id, "done": True, "last_status": now.get("last_status"),
+                    "last_run": now.get("last_run")}
     return {"job": job_id, "done": False, "why": f"no execution within {timeout:g} s"}
 
 
@@ -813,6 +815,8 @@ def judge_p8(ev: Mapping[str, Any]) -> Verdict:
 
 def judge_k0(ev: Mapping[str, Any]) -> Verdict:
     """KeyCRM never called."""
+    if not ev:
+        return UNKNOWN, "no evidence was collected"
     bad: List[str] = []
     if ev.get("internal") is not True:
         bad.append(f"reh-net internal={ev.get('internal')}")

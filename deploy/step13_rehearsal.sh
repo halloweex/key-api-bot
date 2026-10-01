@@ -62,10 +62,11 @@ set -Eeuo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$SELF_DIR/.." && pwd)"
+# probe.py, keycrm_stub.py and seed_synthetic.py, mounted read-only at /reh as
+# a directory: a single-file bind mount keeps the inode it was given, and an
+# editor or a `git pull` that replaces the file leaves the container reading
+# a deleted one — seen on the first local run.
 HELPER_DIR="$SELF_DIR/step13_rehearsal"
-PROBE="$HELPER_DIR/probe.py"
-STUB="$HELPER_DIR/keycrm_stub.py"
-SEEDER="$HELPER_DIR/seed_synthetic.py"
 SQL_DIR="$HELPER_DIR/sql"
 PROD_ENV="$REPO/.env"
 
@@ -416,7 +417,7 @@ start_web() {
         --memory "$WEB_MEM" --memory-swap "$WEB_MEM" --cpus 1.0 \
         --log-opt max-size=50m --log-opt max-file=2 \
         -v "$DATA_DIR:/app/data" \
-        -v "$PROBE:/reh/probe.py:ro" \
+        -v "$HELPER_DIR:/reh:ro" \
         "${WEB_ENV[@]}" "${READER_ENV[@]}" ${CHAIN_ENV[@]+"${CHAIN_ENV[@]}"} "$@" \
         "$REH_IMAGE" >/dev/null
 }
@@ -426,7 +427,7 @@ probe_offline() {
     docker run --rm --name "$REH_PROBE" --network none --pull never \
         --memory 1g --memory-swap 1g --log-opt max-size=10m \
         -v "$DATA_DIR:/app/data" \
-        -v "$PROBE:/reh/probe.py:ro" \
+        -v "$HELPER_DIR:/reh:ro" \
         --entrypoint python "$REH_IMAGE" /reh/probe.py "$@"
 }
 
@@ -435,7 +436,7 @@ probe_keycrm_dir() {
     docker run --rm --name "$REH_PROBE" --network none --pull never \
         --memory 128m --memory-swap 128m --log-opt max-size=10m \
         -v "$KEYCRM_DIR:/keycrm" \
-        -v "$PROBE:/reh/probe.py:ro" \
+        -v "$HELPER_DIR:/reh:ro" \
         --entrypoint python "$REH_IMAGE" /reh/probe.py "$@"
 }
 
@@ -484,7 +485,7 @@ fi
 image_names() {
     # The reader switches or the chain flags, as the image under test declares them.
     docker run --rm --network none --pull never --memory 256m --memory-swap 256m \
-        --log-opt max-size=10m -v "$PROBE:/reh/probe.py:ro" \
+        --log-opt max-size=10m -v "$HELPER_DIR:/reh:ro" \
         --entrypoint python "$REH_IMAGE" /reh/probe.py readers --list "$1"
 }
 READER_ENV=()
@@ -551,7 +552,7 @@ start_stub() {
     docker run -d --name "$REH_KEYCRM" --network "$REH_NET" --pull never --restart no \
         --memory "$STUB_MEM" --memory-swap "$STUB_MEM" --cpus 0.2 \
         --log-opt max-size=20m --log-opt max-file=2 \
-        -v "$STUB:/reh/keycrm_stub.py:ro" \
+        -v "$HELPER_DIR:/reh:ro" \
         -v "$KEYCRM_DIR:/keycrm:ro" \
         --entrypoint python "$REH_IMAGE" /reh/keycrm_stub.py 8080 >/dev/null
 }
@@ -569,7 +570,7 @@ seed_local() {
     migrate
     docker run --rm --name "$REH_PROBE" --network none --pull never \
         --memory 256m --memory-swap 256m --log-opt max-size=10m \
-        -v "$KEYCRM_DIR:/out" -v "$SEEDER:/reh/seed_synthetic.py:ro" \
+        -v "$KEYCRM_DIR:/out" -v "$HELPER_DIR:/reh:ro" \
         --entrypoint python "$REH_IMAGE" /reh/seed_synthetic.py /out \
         > "$LOG_DIR/seed-generate.log" 2>&1 || die "synthetic generation failed"
     start_stub
@@ -659,7 +660,7 @@ docker run --rm --name "$REH_PROBE" --network "$REH_NET" --pull never \
     --memory 512m --memory-swap 512m --log-opt max-size=10m \
     -e "KS_PG_DSN=$APP_DSN" \
     -v "$DATA_DIR:/app/data" \
-    -v "$PROBE:/reh/probe.py:ro" \
+    -v "$HELPER_DIR:/reh:ro" \
     --entrypoint python "$REH_IMAGE" /reh/probe.py derive-latches > "$EV/latches.json" 2>"$LOG_DIR/latches.err" \
     || die "the latch markers could not be derived from the copy's owner rows"
 
@@ -994,7 +995,7 @@ printf '{"before": %s, "after": %s, "min_mem_available_mib": %s}\n' \
 ROWS="$(docker run --rm --name "$REH_PROBE" --network none --pull never \
     --memory 256m --memory-swap 256m --log-opt max-size=10m \
     -v "$EV:/ev:ro" \
-    -v "$PROBE:/reh/probe.py:ro" \
+    -v "$HELPER_DIR:/reh:ro" \
     --entrypoint python "$REH_IMAGE" /reh/probe.py judge --evidence /ev --floor "$FLOOR_S" 2>>"$LOG_DIR/probe.err" || true)"
 if [ -z "$ROWS" ]; then
     ROWS="ALL|UNKNOWN|the judge did not run (see $LOG_DIR/probe.err)"
