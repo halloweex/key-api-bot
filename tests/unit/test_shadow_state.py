@@ -612,16 +612,27 @@ class TestTheShadowIsNeverNestedInTheStoreLock:
 
     def test_no_shadow_module_says_falling_back(self):
         """A shadow is not a fallback, and the soak greps that phrase.
-        Mutation: log it in `core/shadow_writes.py` or a chain router."""
+        Mutation: log it in `core/shadow_writes.py` or a chain router.
+
+        The module itself never names itself, so a filter on the text alone
+        skipped the one file the docstring names first — that mutation passed.
+        It is taken from the import, not spelled."""
+        from core import shadow_writes
+
+        primitive = pathlib.Path(shadow_writes.__file__).resolve()
         offenders = []
+        walked = set()
         for path in _py_files("core"):
             text = path.read_text(encoding="utf-8")
-            if "shadow_writes" not in text and "CHAIN_SHADOW" not in text:
+            if path.resolve() != primitive and "shadow_writes" not in text \
+                    and "CHAIN_SHADOW" not in text:
                 continue
+            walked.add(path.resolve())
             for n in ast.walk(ast.parse(text)):
                 if isinstance(n, ast.Constant) and isinstance(n.value, str) \
                         and "falling back to duckdb" in n.value.lower():
                     offenders.append(str(path.relative_to(ROOT)))
+        assert primitive in walked, "the shadow primitive itself was not read"
         assert not offenders, offenders
 
 

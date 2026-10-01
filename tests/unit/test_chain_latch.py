@@ -207,8 +207,13 @@ class TestTheOneAnswerEveryConsumerReads:
         published = set().union(*(set(state) for state in
                                   write_chains.chain_modes().values()))
         assert published >= {"latched", "latched_at", "mismatch"}
+        import re
+
+        # A whole word, not a substring: `shadow` was "described" by
+        # `shadow_failures` alone, and a mutation renaming it survived.
         for field in sorted(published - {"env", "mode", "error"}):
-            assert field in described, f"{field} is published and undescribed"
+            assert re.search(rf"\b{re.escape(field)}\b", described), \
+                f"{field} is published and undescribed"
         assert "chain_copy_back" in described, "the way back is not named"
 
     def test_the_health_block_answers_without_postgres(self, flags):
