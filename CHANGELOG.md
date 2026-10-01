@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.265
+
+- /marketing: the monthly report honours the brand and category filters
+
+
 ## 3.0.264
 
 - Chain 4 PR-4 review: the pin a test held, and the rollback said whole
