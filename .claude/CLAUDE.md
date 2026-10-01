@@ -3104,10 +3104,12 @@ syncs it the way production once synced the real one, and the rehearsal
 proper then restores that dump and that backup by the host's path. The
 floor (`KS_PG_SILVER_INTERVAL_S`) is 120 s on the host and 60 s locally
 instead of 600 s; every property is "within floor plus a tick", so its size
-changes nothing proved. What the local run cannot answer is production's
-own readiness — whether the copy's preconditions hold, the way back's full
-rebuild inside 1.5 GB, and the timings at 47 k orders — which is what the
-host run is for.
+changes nothing proved. On 2026-10-01 the local run passed all eight
+points, K0 and Z0 against an image of main at 3.0.264 (revision 0034), in
+about 20 minutes over 400 orders. What the local run cannot answer is
+production's own readiness — whether the copy's preconditions hold, the way
+back's full rebuild inside 1.5 GB, and the timings at 47 k orders — which is
+what the host run is for.
 
 **The first local run found two things outside the rehearsal.** With a
 Silver row deleted and a Gold row bumped in one window, ClickHouse's
