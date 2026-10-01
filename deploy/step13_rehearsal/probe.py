@@ -191,6 +191,88 @@ def dq_last(layer: str) -> Optional[Dict[str, Any]]:
                                     "error_message", "critical_count", "warn_count")}
 
 
+def _job(job_id: str) -> Optional[Dict[str, Any]]:
+    body = _get("/api/jobs") or {}
+    for job in body.get("jobs") or []:
+        if isinstance(job, Mapping) and job.get("id") == job_id:
+            return dict(job)
+    return None
+
+
+def _runs(job: Optional[Mapping[str, Any]]) -> int:
+    return int((job or {}).get("run_count") or 0) + int((job or {}).get("error_count") or 0)
+
+
+def trigger_and_wait(job_id: str, timeout: float) -> Dict[str, Any]:
+    """`POST /api/jobs/{id}/trigger`, then wait until the scheduler has
+    recorded one more execution of it — success or error. The trigger only
+    moves `next_run_time`, so completion is read back from `/api/jobs`."""
+    before = _job(job_id)
+    if before is None:
+        return {"job": job_id, "done": False, "why": "not registered"}
+    status, body = api("POST", f"/api/jobs/{job_id}/trigger", timeout=60)
+    if status != 200:
+        return {"job": job_id, "done": False, "why": f"trigger answered {status}"}
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(3)
+        now = _job(job_id)
+        if _runs(now) > _runs(before):
+            return {"job": job_id, "done": True, "last_status": (now or {}).get("last_status"),
+                    "last_error": ((now or {}).get("last_error") or None) and "error"}
+    return {"job": job_id, "done": False, "why": f"no execution within {timeout:g} s"}
+
+
+def wait_dq(layer: str, after: int, timeout: float) -> Optional[Dict[str, Any]]:
+    """The first run of `layer` with an id above `after` that has ended."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        run = dq_last(layer)
+        if run and isinstance(run.get("run_id"), int) and run["run_id"] > after \
+                and run.get("ended_at"):
+            return run
+        time.sleep(5)
+    return None
+
+
+# The rehearsal's one order: four versions of it, each a status KeyCRM really
+# uses with its group (core.data_quality.KNOWN_STATUS_IDS), so every version is
+# an ordinary order to every check and only its content moves.
+FIXTURE_VERSIONS = {1: (1, 1), 2: (2, 1), 3: (8, 4), 4: (9, 4)}
+
+
+def fixture(order_id: int, version: int, out_dir: str, product_id: Optional[int]) -> Dict[str, Any]:
+    """Write the one order the stub serves, as version `version`: same id, a new
+    status and a new `updated_at`, so the next incremental sync lands a real
+    change. Atomic, so the stub never reads half a file. Invented, never a
+    customer: no buyer, no phone, no name."""
+    from datetime import timedelta
+
+    status_id, group = FIXTURE_VERSIONS[version]
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    ordered = now - timedelta(hours=1)
+    line = {"id": order_id * 10 + 1, "name": "reh-step13 fixture", "quantity": 1,
+            "price_sold": "120.00"}
+    if product_id:
+        line["offer"] = {"product_id": product_id, "sku": None}
+    payload = {
+        "id": order_id, "source_id": 1, "status_id": status_id, "status_group_id": group,
+        "grand_total": "120.00",
+        "ordered_at": ordered.isoformat(), "created_at": ordered.isoformat(),
+        "updated_at": (now + timedelta(seconds=version)).isoformat(),
+        "buyer": None, "manager": None,
+        "manager_comment": "utm_source=instagram&utm_medium=cpc&utm_campaign=reh_step13",
+        "promocode": None, "products": [line], "expenses": [],
+    }
+    path = Path(out_dir) / "order.json"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps([payload]))
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    return {"id": order_id, "version": version, "status_id": status_id,
+            "updated_at": payload["updated_at"]}
+
+
 def readers() -> Dict[str, Any]:
     """The env names the image itself declares, so the env list cannot drift
     from the code under test."""
@@ -802,6 +884,20 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
     ids = L("f4_runs.json") or {}
     restarts = [r for r in (L("p6_restart1.json"), L("p6_restart2.json")) if r]
     p3 = L("p3.json") or {}
+    # Every snapshot taken while the flipped process ran says what
+    # `/api/warehouse/status` showed of DuckDB's last refresh: P2's samples.
+    frozen = L("frozen_samples.json")
+    if frozen is None:
+        frozen = [((s.get("status") or {}).get("frozen_last_refresh"))
+                  for s in (L(p.name) for p in sorted(ev_dir.glob("flip_snap_*.json")))
+                  if isinstance(s, Mapping) and s.get("health_code") == 200]
+    # P8's conditional branch: the reclassify door under postgres noted a
+    # Postgres-only re-parse in the record, so the way back must empty DuckDB's
+    # verdicts and say a reclassify is needed.
+    record = (d1 or {}).get("writer") or {}
+    p8 = L("p8.json") or {}
+    if "expect_reclassify" not in p8:
+        p8 = {**p8, "expect_reclassify": bool(record.get("utm_reparsed_at"))}
     return {
         "P7": {"snapshot": L("p7_snapshot.json"), "canary": L("p7_canary.json"),
                "log_unmet": (L("p7_log.json") or {}).get("unmet"), "d0": d0},
@@ -809,7 +905,7 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
                "log": L("f1_log.json"), "resolved_events": (L("f1_pg.json") or {}).get("resolved_events"),
                "d1": d1},
         "P2": {"flipped": is_flipped, "d0": d0, "d1": d1,
-               "frozen_samples": L("frozen_samples.json"),
+               "frozen_samples": frozen,
                "runs_ok": (L("p2_pg.json") or {}).get("runs_ok"),
                "refreshing_lines": (L("p2_log.json") or {}).get("refreshing"),
                "sync_ticks": (L("p2_log.json") or {}).get("sync_ticks")},
@@ -824,7 +920,7 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
                "stood_down": ((L("f4_snapshot.json") or {}).get("status") or {}).get("cutover", {}).get("stood_down_duckdb_checks")},
         "P6": {"flipped": is_flipped, "resolved_at": (_cut(f1).get("writer") or {}).get("resolved_at"),
                "restarts": restarts, "gate_delivered": (d1 or {}).get("gate_delivered")},
-        "P8": {**(L("p8.json") or {}), "flipped": is_flipped, "dk": dz,
+        "P8": {**p8, "flipped": is_flipped, "dk": dz,
                "r0": ((d0 or {}).get("refreshes") or {}).get("max_refreshed_at")},
         "K0": L("k0.json") or {},
         "Z0": L("z0.json") or {},
@@ -879,7 +975,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--timeout", type=float, default=600.0)
     p = sub.add_parser("dq-last")
     p.add_argument("layer")
-    sub.add_parser("readers")
+    p = sub.add_parser("trigger-wait")
+    p.add_argument("job")
+    p.add_argument("--timeout", type=float, default=900.0)
+    p = sub.add_parser("wait-dq")
+    p.add_argument("layer")
+    p.add_argument("--after", type=int, default=0)
+    p.add_argument("--timeout", type=float, default=900.0)
+    p = sub.add_parser("fixture")
+    p.add_argument("--id", type=int, required=True)
+    p.add_argument("--version", type=int, required=True, choices=sorted(FIXTURE_VERSIONS))
+    p.add_argument("--out", required=True)
+    p.add_argument("--product-id", type=int, default=None)
+    p = sub.add_parser("readers")
+    p.add_argument("--list", choices=("readers", "chains"))
     sub.add_parser("keycrm-url")
     p = sub.add_parser("duckdb-facts")
     p.add_argument("--db", required=True)
@@ -906,8 +1015,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0 if wait_health(args.timeout) else 1
     elif args.cmd == "dq-last":
         out = dq_last(args.layer)
+    elif args.cmd == "trigger-wait":
+        out = trigger_and_wait(args.job, args.timeout)
+        print(json.dumps(out, default=str))
+        return 0 if out.get("done") else 1
+    elif args.cmd == "wait-dq":
+        out = wait_dq(args.layer, args.after, args.timeout)
+        print(json.dumps(out, default=str))
+        return 0 if out else 1
+    elif args.cmd == "fixture":
+        out = fixture(args.id, args.version, args.out, args.product_id)
     elif args.cmd == "readers":
         out = readers()
+        if args.list:
+            # One name per line, for a shell with no JSON parser: the reader
+            # switches, or the write chains' flags.
+            names = out["readers"] if args.list == "readers" else out["chain_envs"]
+            print("\n".join(names))
+            return 0
     elif args.cmd == "keycrm-url":
         print(keycrm_url())
         return 0
