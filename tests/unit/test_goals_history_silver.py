@@ -37,7 +37,7 @@ import re
 import subprocess
 import sys
 from contextlib import asynccontextmanager
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -223,6 +223,50 @@ class TestTheAnswersAreTheSame:
         for key in ("seasonal", "yoy"):
             assert silver[key] == bridge[key], key
         assert _settled(silver["weekly_rows"]) == _settled(bridge["weekly_rows"])
+
+    @pytest.mark.asyncio
+    async def test_the_bounds_read_every_order_every_status(self, store, monkeypatch):
+        """`growth_metrics.period_start`/`period_end` are the first and last
+        order of the whole history — a return, a b2b order and a source that
+        is not a revenue source included. The history's own extremes are
+        retail and not returns, so they cannot tell; these two outlie it.
+
+        Mutation (review MXb2): `_SILVER_BOUNDS_SQL` narrowed to
+        `WHERE NOT s.is_return AND s.sales_type = 'retail'` — the first bound
+        becomes the history's own first day, and this fails under `silver`.
+        """
+        from tests.unit.test_goals_off_duckdb_silver import (
+            B2B_MANAGER_ID,
+            HISTORY_END,
+            HISTORY_START,
+            _kyiv_noon,
+        )
+
+        first = HISTORY_START - timedelta(days=40)
+        last = HISTORY_END + timedelta(days=40)
+        await _seed_history(store)
+        async with store.connection() as conn:
+            conn.executemany(
+                "INSERT INTO orders (id, source_id, status_id, grand_total, "
+                "ordered_at, buyer_id, manager_id) VALUES (?, ?, ?, ?, ?, 1, ?)",
+                [
+                    # A retail return: status 19 is on the list.
+                    (990_001, 1, 19, 400.0, _kyiv_noon(first), None),
+                    # A b2b order on Opencart, which is not a revenue source.
+                    (990_002, 3, 1, 600.0, _kyiv_noon(last), B2B_MANAGER_ID),
+                ])
+        await store.refresh_warehouse_layers(trigger="manual")
+        async with store.connection() as conn:
+            row = conn.execute(
+                "SELECT is_return, sales_type, is_active_source FROM silver_orders "
+                "WHERE id IN (990001, 990002) ORDER BY id").fetchall()
+        assert row == [(True, "retail", True), (False, "b2b", False)], row
+
+        for mode in ("bridge", "silver"):
+            _history(monkeypatch, mode)
+            assert await store._history_bounds() == (first, last), mode
+            tables = await store._compute_goal_tables(include_weekly=False)
+            assert tables["history_bounds"] == (first, last), mode
 
 
 class TestSilverIsWhatIsRead:
