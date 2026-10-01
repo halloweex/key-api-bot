@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.262
+
+- Chain 4 PR-2: CLAUDE.md says what the contacts bound is, and that the canary pages mirror_landing
+- Chain 4 PR-2 review: one reship at a time, and the docs promise what the levers do
+- Chain 4 PR-2 review: the copy-back reads contacts as the daily check does, and trusts KeyCRM's clock
+- Chain 4 PR-2 review: the transaction owner is guarded, and contacts keep a floor
+- Chain 4 PR-2: say in CLAUDE.md what the way back now knows, and the reship's costs
+- Chain 4 PR-2: the buyers' way back, end to end on a real Postgres and DuckDB
+- Chain 4 PR-2: the copy-back's runbook tells each table's shipper apart
+- Chain 4 PR-2: POST /api/mirror/backfill/buyers re-ships every buyer DuckDB holds
+- Chain 4 PR-2: the copy-back learns the tables the mirror ships
+- Chain 4 PR-2: a stood-down backfill or hourly diff never opens DuckDB
+- Chain 4 PR-2: one writer of buyer rows, for the mirror now and the chain next
+- Chain 4 PR-2: app.buyer_gender.decided_at is compared every morning
+- Chain 4 PR-2: a chain's disagreement is stamped only on the tables this job ships
+- Chain 4 PR-2: buyer_contacts leaves MONOTONE, a shrinking list is not a loss
+
+
 ## 3.0.261
 
 
