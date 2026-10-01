@@ -35,7 +35,7 @@ from core.pg_landing import (
     mirror_expenses,
     mirror_products,
 )
-from core import warehouse_cutover
+from core import read_fallback, warehouse_cutover
 from bot.config import DEFAULT_TIMEZONE
 
 logger = get_logger(__name__)
@@ -198,8 +198,16 @@ BUYER_WATERMARK_TIMEOUT_S = 10
 # times an hour says nothing the growing age of `last_ok` does not.
 _DATA_ERROR_NAMES = frozenset({
     "ConversionException", "ConstraintException", "InvalidInputException",
-    "DataError", "CharacterNotInRepertoireError",
+    "DataError", "CharacterNotInRepertoireError", "BuyersRefused",
 })
+
+
+class BuyersRefused(ValueError):
+    """Every buyer a batch fetched was one Postgres would refuse (chain 4 skips
+    them by id rather than failing the batch). Not a success: a step that
+    landed nothing must not refresh the clock the canary judges it by — with
+    chain 4 there is no other writer of buyers. A data error, so it does not
+    count toward `consecutive_failures`; the age still pages."""
 
 
 def _is_data_error(exc: BaseException) -> bool:
@@ -223,14 +231,20 @@ class BuyerSyncState:
     last_selected: int = 0
     last_written: int = 0
     unreadable_birthdays: int = 0
+    # Buyers the last batch carried that Postgres would refuse, skipped by id
+    # under chain 4 (`pg_buyers_write.upsert_buyers`). The count only; the ids
+    # are in the log.
+    last_skipped_bad: int = 0
 
-    def succeeded(self, *, selected: int, written: int, unreadable: int = 0) -> None:
+    def succeeded(self, *, selected: int, written: int, unreadable: int = 0,
+                  skipped_bad: int = 0) -> None:
         self.last_ok_at = datetime.now(DEFAULT_TZ)
         self.consecutive_failures = 0
         self.last_error_class = None
         self.last_selected = selected
         self.last_written = written
         self.unreadable_birthdays += unreadable
+        self.last_skipped_bad = skipped_bad
 
     def failed(self, exc: BaseException) -> None:
         self.last_error_class = type(exc).__name__
@@ -253,6 +267,7 @@ class BuyerSyncState:
             "last_selected": self.last_selected,
             "last_written": self.last_written,
             "unreadable_birthdays": self.unreadable_birthdays,
+            "last_skipped_bad": self.last_skipped_bad,
             "retry_in_s": retry_in_s,
         }
 
@@ -496,9 +511,17 @@ class SyncService:
         Fetches buyer details from KeyCRM API for orders that have buyer_id
         but no corresponding buyer record.
 
-        Never raises. A failure is recorded in `buyer_sync_state`, holds the
-        buyers watermark, and opens the retry window, so the incremental tick
-        goes on to offers and stocks and does not come back for ten minutes.
+        Never raises but for one thing. A failure is recorded in
+        `buyer_sync_state`, holds the buyers watermark, and opens the retry
+        window, so the incremental tick goes on to offers and stocks and does
+        not come back for ten minutes.
+
+        The one thing is a read refused under `KS_READ_FALLBACK=off`
+        (`read_fallback.ReadUnavailable`, DN-20c): recorded the same way, and
+        then passed on, because the caller is the one that can answer it — the
+        tick names it and skips the step, and `POST /duckdb/sync-buyers`
+        answers 503 naming the surface, as every route does. Answered here it
+        was "Synced 0 buyers" to the one and a quiet step to the other.
 
         Args:
             limit: Maximum number of buyers to sync per call
@@ -506,10 +529,21 @@ class SyncService:
         Returns:
             Number of buyers synced — 0 on any failure
         """
+        from core import pg_buyers_write
         from core.landing_rows import birthday_is_unreadable
 
         state = self.buyer_sync_state
         state.last_attempt_at = datetime.now(DEFAULT_TZ)
+        # A KS_WRITE_BUYERS nobody can read has nowhere known to write to, and
+        # the write would raise only after KeyCRM had been asked for up to 500
+        # buyers. The tick's watermark getter stops first today; this is for
+        # the doors that call the step directly (`POST /duckdb/sync-buyers`).
+        if pg_buyers_write.mode() is None:
+            exc = RuntimeError(f"{pg_buyers_write.WRITE_ENV} is not understood; "
+                               "the buyers step fetches nothing until it is")
+            logger.error(str(exc))
+            self._buyer_step_failed(exc)
+            return 0
         logger.info("Syncing missing buyers...")
         try:
             # Get buyer IDs from orders that don't have buyer records.
@@ -521,6 +555,10 @@ class SyncService:
             # inventory an hour. It used to propagate out of the whole tick.
             try:
                 missing_ids = await self.store.get_missing_buyer_ids(limit)
+            except read_fallback.ReadUnavailable as e:
+                # Recorded like any failure, then passed on (docstring).
+                self._buyer_step_failed(e)
+                raise
             except Exception as e:  # noqa: BLE001 — logged, watermark held
                 logger.error(
                     f"Buyer selection failed, buyers watermark not moved: {e}",
@@ -566,14 +604,22 @@ class SyncService:
 
             if buyers:
                 # Mirrored to Postgres inside the store method, portion by
-                # portion — the one call site every buyer writer shares.
-                count = await self.store.upsert_buyers(buyers)
+                # portion — the one call site every buyer writer shares. Under
+                # chain 4 it writes Postgres alone, and a buyer Postgres would
+                # refuse is skipped by id rather than failing the batch.
+                skipped: list = []
+                count = await self.store.upsert_buyers(buyers, skipped_out=skipped)
+                if not count and skipped:
+                    raise BuyersRefused(
+                        f"all {len(skipped)} buyer(s) fetched were refused by "
+                        "Postgres; their ids are in the log above")
                 await self.store.set_last_sync_time("buyers")
                 logger.info(f"Synced {count} buyers from KeyCRM")
                 self._buyer_step_ok(
                     selected=len(missing_ids), written=count,
                     unreadable=sum(1 for b in buyers
-                                   if birthday_is_unreadable(b.birthday)))
+                                   if birthday_is_unreadable(b.birthday)),
+                    skipped_bad=len(skipped))
                 return count
 
             await self.store.set_last_sync_time("buyers")
@@ -583,6 +629,9 @@ class SyncService:
             logger.warning(f"Buyer sync connection error (will retry): {e}")
             self._buyer_step_failed(e)
             return 0
+        except read_fallback.ReadUnavailable:
+            # Already recorded where it was raised; the caller answers it.
+            raise
         except KeyCRMAPIError as e:
             logger.error(f"Buyer sync API error: {e}")
             self._buyer_step_failed(e)
@@ -1274,6 +1323,14 @@ class SyncService:
                         read.cancel()
                     if not last_buyers_sync or (datetime.now(DEFAULT_TZ) - last_buyers_sync).total_seconds() > 3600:
                         stats["buyers"] = await self.sync_missing_buyers()
+                except read_fallback.ReadUnavailable as e:
+                    # The step recorded it and holds its watermark; the tick
+                    # skips it and goes on (DN-20c). Not in `stats`, which is
+                    # summed — the refusal shows on /api/health as buyer_sync's
+                    # error class and in read_fallback_mode.refused.
+                    read_fallback.answered(
+                        "incremental_sync", e,
+                        "skipped the buyers step; its watermark is held")
                 except Exception as e:  # noqa: BLE001 — recorded and published
                     logger.error(
                         f"Buyer step failed before it started: {type(e).__name__}",

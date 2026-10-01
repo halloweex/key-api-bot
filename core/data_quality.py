@@ -1949,6 +1949,12 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Run a full sync — the only path KeyCRM serves expense types to; until then /expenses shows every cost as Other"),
     ("chain_name_unresolved",
      "Find the write that skipped core.landing_rows.expense_type_rows, then run a full sync to rewrite the names"),
+    # Chain 4's buyers. Nothing deletes a buyer and every writer writes the
+    # three tables together, so an orphan is a write that went round them.
+    ("chain_buyer_orphan_rows",
+     "Find the write that skipped core.pg_buyers_write; never delete a buyer's contacts to clear it"),
+    ("chain_buyer_contact_missing",
+     "POST /api/duckdb/sync-all-buyers rewrites every buyer and its contacts; find what deleted the list first"),
     ("chain_invariants_unwatched",
      "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),
@@ -1986,7 +1992,7 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "manager_comment in fingerprint? Copy it to DuckDB from bronze.orders. "
      "Else read meta.mirror_state for silver.order_utm. Then POST /api/traffic/refresh"),
     ("buyers_without_verdict",
-     "Grep web's log for 'gender derivation failed'; read meta.mirror_state for app.buyer_gender"),
+     "Grep web's log for 'gender derivation failed'; unless chain 4 writes the buyers, read meta.mirror_state for app.buyer_gender"),
     ("buyers_missing_for_orders", "Read buyer_sync in /api/health: the step's failures and retry window"),
     ("pg_silver_arc_unwatched", "The Postgres twins did not look: read the reason in the finding"),
     ("pg_attribution_coverage_unwatched", "The orders mirror is failing or silent: see mirror freshness in /api/health"),

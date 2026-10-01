@@ -3,7 +3,7 @@
 
     python scripts/backfill_gender.py --dry-run            # Postgres, read-only
     python scripts/backfill_gender.py --dry-run --duckdb   # the local DuckDB file
-    python scripts/backfill_gender.py [--all]              # write — web must be stopped
+    python scripts/backfill_gender.py [--all]              # write — see below
 
 A thin CLI over `core.gender_backfill`, which is also what the hourly scheduler
 tick calls, so running this by hand and waiting for the tick produce the same
@@ -39,6 +39,26 @@ transitions, and what the split would be afterwards. Counts only — nothing it
 prints names a customer. It uses `KS_PG_DSN`; in production that is the web
 container's writer DSN, which is exactly why the transaction is read-only.
 
+UNDER CHAIN 4 THE WRITE PATH IS POSTGRES, AND ONLY ONCE WEB HAS WRITTEN THERE
+
+With `KS_WRITE_BUYERS` moving the buyers (`core/pg_buyers_write.py`), the
+verdicts are written in Postgres and DuckDB's copy has stopped, so the write
+path goes to `derive_gender_pg` — beside a live web, since Postgres takes two
+writers and the derivation share-locks what it decides. It goes there only when
+the chain is already latched. The latch is a marker file read once per process
+and cached (`core/chain_latch.py`): a script that took the first write would
+latch a chain web still believes is on DuckDB, and web would go on writing
+DuckDB until it restarted. So a chain flagged and not yet latched is refused
+(exit 4): let web make the first write. The trigger above makes it only when
+a verdict is pending (its result's `gender.pending` above 0); with nothing
+pending, the first write is the buyers step's, on the next new buyer an order
+names — and until then this script would have nothing to write either.
+A `KS_WRITE_BUYERS` nobody can read is refused the same way, rather than
+guessing which store it meant.
+
+`--dry-run --duckdb` reads a DuckDB that has stopped receiving buyers once the
+chain has moved them; the Postgres preview is the one to read then.
+
 WHAT IT WILL NOT DO
 
 It never touches a row with `override_by_human = TRUE`, under any flag. That is
@@ -47,7 +67,9 @@ human's classification became impossible to keep, and eight managers sold ₴3.1
 into the wrong bucket before anyone noticed.
 
 Exit codes: 0 done, 1 the derivation failed, 2 the DuckDB file is held by
-another process and nothing was written, 3 no store to read from.
+another process and nothing was written, 3 no store to read from, 4 chain 4's
+state forbids this write (flagged and not latched, or a flag nobody can read)
+and nothing was written.
 """
 import argparse
 import asyncio
@@ -60,6 +82,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import duckdb  # noqa: E402
 
+from core import chain_latch, pg_buyers_write  # noqa: E402
 from core.gender_backfill import (  # noqa: E402
     derive_gender, read_stored_duckdb, read_stored_postgres, summarise,
 )
@@ -84,7 +107,20 @@ from an older RULES_VERSION.
   - to see what would change first: rerun with --dry-run (reads Postgres,
     read-only)."""
 
-EXIT_OK, EXIT_FAILED, EXIT_HELD, EXIT_NO_STORE = 0, 1, 2, 3
+EXIT_OK, EXIT_FAILED, EXIT_HELD, EXIT_NO_STORE, EXIT_CHAIN = 0, 1, 2, 3, 4
+
+NOT_LATCHED = """KS_WRITE_BUYERS says postgres, but chain 4 has not written Postgres yet.
+Nothing was written.
+
+Its first write latches the chain, and the latch is a marker web reads once
+and caches: taken here, it would move a chain web still believes is on DuckDB,
+and web would keep writing DuckDB until it restarted. Let web make the first
+write, then rerun:
+  - POST /api/jobs/replicate_operational/trigger as an admin writes it when a
+    verdict is pending — its result's gender.pending is above 0;
+  - with nothing pending, the buyers step writes it on the next new buyer an
+    order names, and until then there is nothing for this script to write
+    either. --dry-run shows what is pending."""
 
 
 def held_by_another_process(exc: BaseException) -> bool:
@@ -144,20 +180,37 @@ async def preview(use_duckdb: bool) -> int:
 
 
 async def run(rebuild_all: bool) -> int:
-    store = await open_store()
-    if store is None:
-        print(HELD_ELSEWHERE, file=sys.stderr)
-        return EXIT_HELD
+    from core.runtime_modes import configure_modes
 
-    result = await derive_gender(store, rebuild_all=rebuild_all)
+    # The latch markers are loaded here; without this the chain's answer below
+    # would be the flag's alone.
+    configure_modes()
+    mode = pg_buyers_write.mode()
+    if mode is None:
+        logger.error("KS_WRITE_BUYERS is not understood; nothing was written. "
+                     "Correct it, or remove it for DuckDB.")
+        return EXIT_CHAIN
+    if mode == "postgres":
+        if not chain_latch.latched(pg_buyers_write.CHAIN):
+            print(NOT_LATCHED, file=sys.stderr)
+            return EXIT_CHAIN
+        result = await pg_buyers_write.derive_gender_pg(rebuild_all=rebuild_all)
+        where = "Postgres, where chain 4 writes the verdicts"
+    else:
+        store = await open_store()
+        if store is None:
+            print(HELD_ELSEWHERE, file=sys.stderr)
+            return EXIT_HELD
+        result = await derive_gender(store, rebuild_all=rebuild_all)
+        where = "DuckDB only — Postgres receives it on the next hourly tick"
+
     if result["error"]:
         logger.error("failed: %s", result["error"])
         return EXIT_FAILED
     logger.info(
-        "done: %d of %d written in %d ms (female %d, male %d, NULL %d). "
-        "DuckDB only — Postgres receives it on the next hourly tick.",
+        "done: %d of %d written in %d ms (female %d, male %d, NULL %d). %s.",
         result["written"], result["pending"], result["ms"],
-        result["female"], result["male"], result["null"],
+        result["female"], result["male"], result["null"], where,
     )
     return EXIT_OK
 

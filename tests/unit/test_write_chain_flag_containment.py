@@ -194,3 +194,74 @@ class TestTheDailyComparisonFilesIt:
         assert len(built) == 2, "both chain-level findings must be built here"
         assert len(returns) >= 2, "the early return moved — this test no longer guards it"
         assert max(built) < min(returns), "a chain finding is built after a return"
+
+
+class TestChainFourTypo:
+    """`KS_WRITE_BUYERS` nobody can read stops chain 4 and nothing else: the
+    buyers have nowhere known to go, so they are not written anywhere — and
+    orders, offers, stocks, the stats page and the other riders go on."""
+
+    @pytest.fixture
+    def typo(self, flags):
+        flags.setenv("KS_WRITE_BUYERS", "postgre")
+        return flags
+
+    @pytest.mark.asyncio
+    async def test_orders_offers_and_stocks_keep_their_watermarks(self, typo, store):
+        stamp = datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
+        for entity in ("orders", "offers", "stocks"):
+            await store.set_last_sync_time(entity, stamp)
+            assert await store.get_last_sync_time(entity) == stamp
+        with pytest.raises(RuntimeError, match="KS_WRITE_BUYERS"):
+            await store.get_last_sync_time("buyers")
+
+    @pytest.mark.asyncio
+    async def test_the_real_stats_answer_without_the_buyers(self, typo, store):
+        stats = await store.get_stats()
+        assert "orders" in stats and "buyers" not in stats
+        assert "buyer_contacts" not in stats
+
+    @pytest.mark.parametrize("how", ["flagged", "latched"])
+    @pytest.mark.asyncio
+    async def test_with_the_chain_on_postgres_the_stats_leave_them_out(
+            self, flags, store, how):
+        """DuckDB's counts stop there, and a count that never moves reads as
+        a sync that stopped (review of PR-3)."""
+        from core import chain_latch, pg_buyers_write
+
+        if how == "flagged":
+            flags.setenv("KS_WRITE_BUYERS", "postgres")
+            for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
+                flags.setenv(reader, "postgres")
+        else:
+            chain_latch.latch(pg_buyers_write.CHAIN, pg_buyers_write.WRITE_ENV)
+        stats = await store.get_stats()
+        assert "orders" in stats
+        assert "buyers" not in stats and "buyer_contacts" not in stats
+
+    @pytest.mark.asyncio
+    async def test_with_the_chain_on_duckdb_the_stats_carry_them(self, flags, store):
+        """The control: nothing moved, nothing left out."""
+        stats = await store.get_stats()
+        assert stats["buyers"] == 0 and stats["buyer_contacts"] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_rider_says_the_gender_stood_down_and_the_rest_run(self, typo):
+        from unittest.mock import AsyncMock
+
+        from core.scheduler import BackgroundScheduler
+
+        derive = AsyncMock(side_effect=AssertionError("DuckDB derived"))
+        derive_pg = AsyncMock(side_effect=AssertionError("Postgres derived"))
+        with patch("core.duckdb_store.get_store", new=AsyncMock()), \
+             patch("core.gender_backfill.derive_gender", new=derive), \
+             patch("core.pg_buyers_write.derive_gender_pg", new=derive_pg), \
+             patch("core.pg_operational.replicate_operational",
+                   new=AsyncMock(return_value={"movements_appended": 3})), \
+             patch("core.pg_bot_state.replicate_bot_state",
+                   new=AsyncMock(return_value={"rows": {}})):
+            result = await BackgroundScheduler()._run_replicate_operational()
+        assert "KS_WRITE_BUYERS" in result["gender"]["stood_down"]
+        assert result["movements_appended"] == 3
+        assert "bot_state" in result and "buyers_backfill" in result
+        assert "orders_backfill" in result and "expenses_backfill" in result

@@ -3391,8 +3391,12 @@ def buyer_completeness_findings(
                 "job — it logs 'gender derivation failed' in web's log and "
                 "/api/jobs shows nothing — and a failed ship to Postgres is "
                 "stamped in meta.mirror_state for app.buyer_gender "
-                "(last_error, failures_since_ok). A RULES_VERSION bump deployed "
-                "shortly before this ran explains a large count by itself."
+                "(last_error, failures_since_ok). Under chain 4 "
+                "(KS_WRITE_BUYERS) the verdicts are written in Postgres "
+                "directly, nothing ships them, and nothing is stamped there: "
+                "its log line reads 'gender derivation failed (postgres)'. A "
+                "RULES_VERSION bump deployed shortly before this ran explains "
+                "a large count by itself."
             ),
         ))
 
@@ -3438,12 +3442,17 @@ async def reconcile_buyer_completeness(
     *, now: Optional[datetime] = None, max_samples: int = 10,
 ) -> List[IntegrityIssue]:
     """Does every landed buyer have a current verdict, and does every buyer an
-    order names exist? Postgres alone; reports only; no store."""
-    from core import pg_landing
+    order names exist? Postgres alone; reports only; no store.
+
+    Asked while the landing mirror is on, and also whenever chain 4 writes the
+    buyers in Postgres: then it is the one Postgres-side check that the chain's
+    writer is alive, and it must not switch off with a mirror flag the chain
+    does not consult (the plan critic's b2)."""
+    from core import pg_buyers_write, pg_landing
     from core.gender import RULES_VERSION
     from core.pg import get_pool, require_revision
 
-    if not pg_landing.enabled():
+    if not (pg_landing.enabled() or pg_buyers_write.mode() == "postgres"):
         return []
     now = now or datetime.now(timezone.utc)
     pool = await get_pool()

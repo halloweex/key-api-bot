@@ -1615,6 +1615,12 @@ async def release_chain(pool, chain: ModuleType) -> bool:
 # under `replaced` in its log line. Looked up, not an if/else: a third chain
 # used to fall into the inventory branch and be sent to read checks about
 # somebody else's six tables.
+#
+# Chain 4 has B1–B5 and is deliberately not listed. Its checks judge the chain
+# while it writes Postgres; after a release `buyers_on` is 0 and every one of
+# them reads "not applicable" — a PASS that proves nothing about the way back.
+# What does is its two shippers stamping again, and `_soak_without_a_check`
+# already names each table's own shipper.
 _SOAK_AFTER_RELEASE = {
     "KS_WRITE_EXPENSES": "run deploy/stage4_soak.sh and read E1 (expenses "
                          "copy stood down) and E2",
@@ -1643,7 +1649,7 @@ def _soak_without_a_check(chain: ModuleType) -> str:
         parts.append(
             f"read meta.mirror_state for this chain's tables "
             f"({', '.join(operational)}) — deploy/stage4_soak.sh has no "
-            "check of its own for it yet — and see failures_since_ok at 0 and "
+            "check that applies after a release — and see failures_since_ok at 0 and "
             "last_ok_at moved by the next replicate_operational (POST "
             "/api/jobs/replicate_operational/trigger runs it now; its web-log "
             "line must list them under `replaced` again, not `stood_down`)"

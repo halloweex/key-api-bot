@@ -178,8 +178,11 @@ async def _both(store, monkeypatch, name, kwargs):
     alone — and the gate was green.
     """
     monkeypatch.delenv("KS_READ_MARKETING", raising=False)
+    monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
     duck = await getattr(store, name)(*WINDOW, **kwargs)
     monkeypatch.setenv("KS_READ_MARKETING", "postgres")
+    # A category filter resolves its tree through the filter bar's flag.
+    monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
     def _no_duckdb(*_a, **_k):
         raise AssertionError(
             f"{name} fell back to DuckDB — Postgres did not answer, so the "
@@ -189,6 +192,7 @@ async def _both(store, monkeypatch, name, kwargs):
     with patch.object(type(store), "connection", _no_duckdb):
         postgres = await getattr(store, name)(*WINDOW, **kwargs)
     monkeypatch.delenv("KS_READ_MARKETING", raising=False)
+    monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
     return duck, postgres
 
 
@@ -208,6 +212,10 @@ CALLS = (
     ("get_marketing_report_by_dates", {}),
     ("get_marketing_report_by_dates", {"sales_type": "all"}),
     ("get_marketing_report_by_dates", {"sales_type": "b2b"}),
+    ("get_marketing_report_by_dates", {"brand": "BrandA"}),
+    ("get_marketing_report_by_dates", {"brand": "Unknown", "sales_type": "all"}),
+    ("get_marketing_report_by_dates", {"category_id": 1}),
+    ("get_marketing_report_by_dates", {"category_id": 3, "brand": "BrandB"}),
     ("get_promocode_analytics", {}),
     ("get_promocode_analytics", {"sales_type": "all"}),
 )
@@ -297,3 +305,52 @@ async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
     assert len(report["sources"]) == 3
     assert report["general_sales"]["previous"]["revenue"] == 0, (
         "the previous period must be empty here, or the window is wrong")
+
+
+@pytest.mark.asyncio
+async def test_a_brand_narrows_every_section_to_its_lines(both_engines, monkeypatch):
+    """BrandA is Serum: order 1 on Instagram (2×500 + 1×500 under a second
+    name-as-sold) and order 2 on Telegram (1×500), both buyer 7 on one day.
+    Revenue is the lines, never the baskets' ₴1 800 of grand totals."""
+    duck, postgres = await _both(
+        both_engines, monkeypatch, "get_marketing_report_by_dates",
+        {"brand": "BrandA"})
+    for report in (duck, postgres):
+        cur = report["general_sales"]["current"]
+        assert cur["revenue"] == 2000.0, cur
+        assert cur["orders"] == 2
+        # One buyer on one day: Gold's grain counts them once.
+        assert cur["customers"] == 1
+        assert [b["brand"] for b in report["brands"]] == ["BrandA"]
+        by_name = {s["source_name"]: s for s in report["sources"]}
+        assert by_name["Instagram"]["revenue"] == 1500.0
+        assert by_name["Telegram"]["revenue"] == 500.0
+        assert by_name["Сайт"]["revenue"] == 0
+        assert report["product_filter"] == {"category_id": None, "brand": "BrandA"}
+
+
+@pytest.mark.asyncio
+async def test_a_parent_category_takes_its_children(both_engines, monkeypatch):
+    """Serum hangs off Serums (2), a child of Care (1). Choosing Care and
+    getting nothing is the empty result nobody debugs."""
+    duck, postgres = await _both(
+        both_engines, monkeypatch, "get_marketing_report_by_dates",
+        {"category_id": 1})
+    for report in (duck, postgres):
+        assert report["general_sales"]["current"]["revenue"] == 2000.0
+        assert [b["brand"] for b in report["brands"]] == ["BrandA"]
+
+
+@pytest.mark.asyncio
+async def test_a_filtered_full_month_hides_the_shop_goal(both_engines, monkeypatch):
+    """The goal is the whole shop's; beside one brand it would read as that
+    brand's target."""
+    store = both_engines
+    first = TODAY.replace(day=1)
+    from calendar import monthrange
+    last = TODAY.replace(day=monthrange(TODAY.year, TODAY.month)[1])
+    monkeypatch.delenv("KS_READ_MARKETING", raising=False)
+    report = await store.get_marketing_report_by_dates(first, last, brand="BrandA")
+    assert report["general_sales"]["monthly_goal"] is None
+    unfiltered = await store.get_marketing_report_by_dates(first, last)
+    assert unfiltered["product_filter"] is None
