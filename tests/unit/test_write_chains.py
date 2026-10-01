@@ -110,6 +110,10 @@ _DESTINATION = {
         "the alert journal lives in Postgres alone; there is no copy", None),
     ("core/alert_archive.py", "_write_escalated"): (
         "the alert journal lives in Postgres alone; there is no copy", None),
+    # The canary's watch over read fallbacks (OD-07): its one row sits in the
+    # journal's own table and has no DuckDB copy either.
+    ("core/alert_archive.py", "_write_watch"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
     ("core/ch_history.py", "ship_history"): (
         "writes ClickHouse's history.*, not Postgres", None),
     ("core/pg_silver.py", "rebuild_silver"): (

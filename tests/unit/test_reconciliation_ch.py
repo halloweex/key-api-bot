@@ -99,6 +99,10 @@ class TestTheArmGates:
         assert issue.check_name == "ch_reconcile_pending"
         assert issue.severity.value == "WARN"
         assert result["discrepancies"] == []
+        # Not blamed, and not a verdict either: nothing was compared, so the
+        # run is written as one that did not run (OD-08 review) and cannot
+        # reset the layer's age.
+        assert result["error"].startswith("ch_reconcile_pending: ")
 
     @pytest.mark.asyncio
     async def test_a_fresh_copy_is_compared_with_the_watermark_set_excluded(

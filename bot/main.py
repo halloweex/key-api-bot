@@ -435,8 +435,23 @@ def main() -> None:
             logger.error("Canary job crashed: %s", exc, exc_info=True)
             return
 
-        from bot.canary import defer_flaky
+        from bot.canary import (
+            READ_FALLBACK_WATCH_GAP_S, READ_FALLBACK_WATCH_KEY, defer_flaky,
+        )
+        from core.alert_archive import record_watch
         from core.alerting import raise_alert, resolve_group
+
+        # The watch over reads answered from DuckDB (OD-07), on every probe that
+        # read the block, whatever else it found and whether or not it pages:
+        # the soak before KS_READ_FALLBACK=off tells a clean week from one
+        # nobody watched by this row. Web's uptime tells the process it read
+        # last time from a new one. Fire-and-forget, never raises.
+        if result.read_fallbacks_clean is not None:
+            record_watch(
+                READ_FALLBACK_WATCH_KEY, clean=result.read_fallbacks_clean,
+                gap_s=READ_FALLBACK_WATCH_GAP_S,
+                web_uptime_s=result.web_uptime_s,
+            )
 
         defer, canary_prev_failures = defer_flaky(
             list(result.failure_keys), canary_prev_failures,
@@ -465,9 +480,14 @@ def main() -> None:
 
         # Every tick, not only the clean ones: with still_firing excluded,
         # a problem that dropped out of the failing set announces its own
-        # recovery even while its siblings still burn.
+        # recovery even while its siblings still burn. What this probe could
+        # not judge — the OD-07 keys when web did not answer — is kept: a
+        # probe that read nothing cannot say they cleared.
         try:
-            await resolve_group("canary", still_firing=result.failure_keys)
+            await resolve_group(
+                "canary",
+                still_firing=[*result.failure_keys, *result.unjudged_keys],
+            )
         except Exception as exc:
             logger.warning("Canary resolve failed: %s", exc)
 

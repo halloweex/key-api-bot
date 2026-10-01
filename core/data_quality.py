@@ -2021,6 +2021,11 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("status_group_vs_return_list", "The source's status group wins over the legacy list"),
     ("inventory_snapshot_gaps", "A missed day is gone for good; check the snapshot job"),
     ("ch_reconcile_pending", "Wait for a fresh ch_sync — never reconcile a lagging copy"),
+    # OD-08 (a). The generic `gold_` line would send the reader to a rebuild,
+    # which re-aggregates nothing in a second engine.
+    ("gold_values_unwatched",
+     "Set KS_CH_URL, or clear the ch_* finding beside it; then "
+     "POST /api/jobs/dq_mirror_landing/trigger to re-check Gold"),
 )
 
 DEFAULT_REMEDIATION = (
@@ -2105,6 +2110,7 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "ch_engines_gold_mismatch": "two engines' Gold differ",
     "ch_silver_roundtrip": "ClickHouse copy differs",
     "ch_reconcile_pending": "ClickHouse copy lagging",
+    "gold_values_unwatched": "Gold not re-checked by a second engine",
     "freshness_orders": "orders not arriving",
 }
 

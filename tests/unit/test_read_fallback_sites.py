@@ -952,8 +952,12 @@ class TestThroughTheApp:
     def test_nothing_fell_back_is_an_empty_block(self, admin_client, fresh_read_fallback):
         health = admin_client.get("/api/health").json()
         assert health["read_fallbacks"] == {}
+        # `fresh_read_fallback` unsets every KS_READ_*, so the cohorts are on
+        # DuckDB here — the route `off` would refuse, published as such.
         assert health["read_fallback_mode"] == {
-            "mode": "duckdb", "error": None, "misconfigured": []}
+            "mode": "duckdb", "error": None, "misconfigured": [],
+            "no_engine": ["cohorts: KS_READ_COHORTS=duckdb, and only clickhouse "
+                          "may answer it under KS_READ_FALLBACK=off"]}
 
     def test_an_unknown_value_starts_web_and_is_published(
         self, admin_client, fresh_read_fallback, monkeypatch,
