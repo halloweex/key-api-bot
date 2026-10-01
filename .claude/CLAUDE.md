@@ -3319,7 +3319,13 @@ whenever `seasonal_indices` held fewer than twelve rows, for any viewer and
 with the viewer's `sales_type`; `GET /api/goals/forecast?recalculate=true`
 did it on request. Neither does now: the smart goal reads only, a short
 table falls back per month as it always did, and `recalculate=true` is a 400
-naming the POST, for an admin too. A sweep runs every GET under `/api` with
+naming the POST, for an admin too. **The trade, taken knowingly:**
+`weekly_patterns` has no automatic writer now — the Monday job stores the
+other two (OQ-2) and only the POST stores it — so on a host whose goal
+tables start empty, milestone weeks use the default weights (0.23 a week,
+0.08 for the fifth) until an admin POSTs, where the first page view used to
+fill them. Production holds all three (12/60/1 rows), and the Sunday
+compaction exports them: none is in its `DERIVED_TABLES`. A sweep runs every GET under `/api` with
 `seasonal_indices` emptied and every optional boolean switched on, and fails
 on any that changes a goal table. **The YoY crash it fixed** would have come on
 2026-11-02: from the first order dated 1 November the running year has eleven
@@ -3331,7 +3337,12 @@ read now never takes the current Kyiv year, and every term is a float.
 **7b-2 — `KS_GOALS_HISTORY` chooses which orders count**: `bridge` (default,
 today's) or `silver` — every history read over `{silver_orders}` through
 `_goals_run`, so the engine is `KS_READ_GOALS`', and DN-20's counting and
-refusal cover it. An unknown value raises at the read, never at import. Not
+refusal cover it. An unknown value raises at the read, never at import —
+counting another set of orders in silence would be the worse failure — and
+since every goal read then answers 500 and the Monday job fails, neither of
+which pages anybody, `/api/health` publishes `goals_history {mode, error}`
+and the canary pages `goals_history_mode_invalid`, CRITICAL like
+`write_chain_flag_invalid`, with the variable as its lever. Not
 `KS_READ_GOALS` reused: that is `postgres` in production already, so a reuse
 would have moved the reads at the deploy; it names an engine, this names a
 row set; and an engine switch put back must never change semantics. Not
@@ -3354,10 +3365,28 @@ DuckDB's orders, classification, Silver and Gold refused at the statement and
 with DuckDB's Silver emptied.
 
 **The flip**: `KS_GOALS_HISTORY=silver` with `KS_READ_GOALS=postgres`, after
-`scripts/goals_semantics_dryrun.py --backup <that day's backup>` exits 0 —
-it runs the real goal methods both ways over a read-only in-memory copy and
-files every difference under its cause; not before 04:00 on a Monday, so the
-first Monday job under `silver` is watched. Rollback is unsetting the
+`scripts/goals_semantics_dryrun.py --backup <that day's backup>` exits 0,
+run as the web service (`docker compose run --rm --no-deps -T web`) once
+that morning's 07:30 `mirror_landing` run has reached the journal copy
+(hourly); not before 04:00 on a Monday, so the first Monday job under
+`silver` is watched. **Exit 0 needs both halves.** The backup half runs the
+real goal methods both ways over a read-only in-memory copy and files every
+difference under its cause — but it reads DuckDB's Silver on both sides,
+and the flip reads Postgres', so a Postgres Silver missing or misclassifying
+orders would have read clean there (review of 7b-2). The Postgres half
+reads, as `ks_readonly` through `utm_reclassify_dryrun.py`'s door (never
+`KS_PG_DSN`), the verdict of the one comparison that sets the two Silvers
+against each other at one instant: the latest `mirror_landing` run's
+`reconcile_silver`, from Postgres' copy of the quality journal. Clean only
+when the copy is under 75 min old and not failing, the run under 30 h (chain
+1's preflight limits, read from it), the run did not fail in
+`reconcile_silver`, `setup` or unparseably, it filed nothing against
+`silver.orders`, and `KS_MIRROR_LANDING` is not off — `reconcile_silver`
+files nothing then. Exit 1 is a difference or Postgres Silver not proved,
+each named; 2 a refusal (no read-only login, one that can write, Postgres
+unreachable); `--backup-only` skips the Postgres half and exits 3 on a clean
+backup, never 0. What the verdict cannot see is a Postgres Silver that went
+wrong after that run, which is why it is the flip day's run. Rollback is unsetting the
 variable and `up -d web`, number-neutral by the same measurement, while the
 bridge exists. `goals_bridge` in step 13's readiness is **met only under
 `silver`** — DuckDB's orders freeze at the switch whoever owns them — and its
