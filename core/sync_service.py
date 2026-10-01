@@ -881,8 +881,8 @@ class SyncService:
             # over a write that failed on its own data.
             await _record_failure("bronze.products", f"{type(exc).__name__}: {exc}")
             return
-        # Stands itself down under the chain; kept so the two paths are one.
-        await mirror_products(products)
+        # No mirror call: this step runs only while the chain is off DuckDB,
+        # where `_mirror` stands down for the catalogue in any case.
         self.catalogue_step.succeeded()
         await events.emit(SyncEvent.PRODUCTS_SYNCED, {"count": stats["products"]})
 
