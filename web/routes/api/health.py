@@ -246,7 +246,27 @@ async def _write_chains_block() -> dict:
     if isinstance(entry, dict):
         entry["preflight"] = await _inventory_preflight()
         entry["sync_step"] = await _inventory_sync_step()
+    # Chain 6's hourly products step off DuckDB, in chain 1's shape: recorded
+    # instead of ending the tick. Not judged by the canary — the freshness
+    # check watches `last_sync_products` at 48 h.
+    from core import pg_catalogue_write
+
+    entry = block.get(pg_catalogue_write.CHAIN)
+    if isinstance(entry, dict):
+        entry["sync_step"] = await _catalogue_sync_step()
     return block
+
+
+async def _catalogue_sync_step() -> "dict | None":
+    """What chain 6's hourly products step last did off DuckDB. Local state,
+    no I/O; null when the sync service cannot be had."""
+    try:
+        from core.sync_service import get_sync_service
+
+        return (await get_sync_service()).catalogue_step_health()
+    except Exception as e:
+        logger.debug(f"Catalogue sync step unavailable: {e}")
+        return None
 
 
 def _warehouse_writer_mode() -> dict:
