@@ -3309,6 +3309,95 @@ one bound for both, retried with the revision, published by class — and only
 of a Postgres that said its revision, so a start that cannot reach Postgres
 still names `pg_revision` alone.
 
+### Stage 5's two clocks: the parallel period and the week of silence (OD-17 (a))
+
+Stage 5 — the end of DuckDB — waits for two things in a row (owner decision
+OD-17 (a)): a **30-day parallel period** counted from the last `KS_WRITE_*`
+flag, then a **7-day week of silence**. Four things breach either one and
+restart its count: web opens DuckDB, the file's hash changes, a rollback lever
+is used, a read is served from DuckDB. None of the tooling below drops,
+deletes or moves anything — OD-11 (a) forbids any DROP before the owner's week
+after full completion, and schema removal, a `DERIVED_TABLES` addition and
+deleting the file all count. Everything is off or read-only by default;
+production behaves as before.
+
+**Why two clocks, not one.** Until stage 5 decouples the code, web opens the
+file on every boot and writes it all day, so "web opens DuckDB" and "the hash
+changed" are true every minute under today's settings and measure nothing.
+The parallel period is therefore judged on the two breaches that *can* be
+measured beside a live DuckDB — levers and fallbacks — and the week of silence
+on all four, with web running `KS_DUCKDB=off`.
+
+**`KS_DUCKDB`** (`core/duckdb_switch.py`; `on` default, `off`). `open_file` is
+the only `duckdb.connect` in `core/`, `web/` and `bot/` — a test walks the
+three trees (every import spelling, `getattr` included) and the host tools in
+`scripts/`/`deploy/` are an exemption map the walk must equal. Under `off` an
+open is refused **before the driver runs**, so the file is not even created;
+counted **at the raise**, because dozens of callers wrap `get_store()` in
+`except Exception` and a swallowed refusal is exactly the open the week must
+not miss; logged CRITICAL; published as `duckdb_switch.opened_while_off`
+(`{site: {count, last_at}}`, a site being `module:function`, at most 20, never
+exception text); and paged **CRITICAL `duckdb_opened_while_off`**, whose lever
+goes first because under `off` the outage beside it is its symptom. A typo
+runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
+**`off` does not make web work** — order intake stops and the dashboard
+errors; startup contains the refusal only so `/api/health` answers and the
+page can be seen. It is not set anywhere until the decoupling ships.
+
+**The file's hash** — `deploy/duckdb_silence_check.sh`, a host tool, **not
+installed**: hourly from root's crontab at the start of the week (the line is
+in its header). sha256 of the file and its `.wal`, O_RDONLY and no lock, so it
+can never be the change it reports; record in `/root/duckdb-silence/state`
+(600, atomic, parsed and never sourced) and one history line per run, cut to
+500 by the run that grows it. `--peek` hashes and writes nothing; `--status`
+reads the record and hashes nothing — that is what the soak calls. A MISSING
+file keeps the recorded hash as the reference, and the soak fails on it under
+either mode: deleting the file is a DROP. It cannot see a change and its exact
+reversal inside one hour, nor a read-only open.
+
+**A copy-back now leaves a trace.** `scripts/chain_copy_back.py` is the only
+lever that gives a chain back to DuckDB, and it used to leave only an absence
+— owner rows deleted, a marker unlinked, its report gone with its `--rm`
+container. `release_chain` now writes one `app.alert_events` row
+(`condition_key = 'lever:chain_copy_back'`, `event_type = 'lever_used'`,
+`context` naming the chain and outcome) **inside the transaction that deletes
+the owner rows** (`core/lever_journal.py`): a release whose record fails does
+not commit. Exit 3 writes `committed_not_released` while the owner rows still
+stand. No revision — `event_type` has no CHECK, and every reader of the journal
+asks for `fired`/`escalated`/`resolved` by name. A copy-back container that
+inherits `KS_DUCKDB=off` is refused (exit 2); `-e KS_DUCKDB=on` is the
+decision to restart both clocks, said out loud.
+
+**The soak checks**, `deploy/stage4_soak/50`–`53`, read-only as `ks_readonly`:
+
+- **P1** the file record. FAIL on MISSING always; under `off`, FAIL on a change
+  at the last check or inside the day, UNKNOWN with no record, one over 3 h
+  old, or one younger than the day; under `on`, not applicable.
+- **P2** levers in the day: a `lever_used` row, a `write_chain_flag_mismatch`
+  or `warehouse_hold_stuck` page (fired, escalated, resolved or still
+  standing), step 13 given back (`warehouse_writer` = duckdb with `since` in
+  the day), and `warehouse_preconditions_unmet` — but only once a period is
+  declared or web runs `off`, because before the step-13 flip that page means
+  "held back", not "rolled back". Never UNKNOWN: the journal is Postgres's own.
+- **P3** the parallel period. Starts at the latest of `SOAK_PARALLEL_FROM`
+  (the operator declares the last flip — nothing in the database knows which
+  flip the stage needed), the newest `owner:` row, step 13's switch, every
+  breach (P2's and F1's pages), and the `watch:read_fallbacks` clean-since — an
+  unwatched stretch is not a clean one. Covered at **720 h**.
+- **P4** the week of silence, under `off` only. Starts at the latest of the
+  `watch:duckdb_switch` clean-since (the canary writes it only while web runs
+  `off`, on F1's 35-minute rule), the file's unchanged-since, every breach of
+  all four kinds, and F1's watch. Covered at **168 h** — a full week holds
+  Sunday 05:00 and Monday 09:30 by construction — **and** an
+  `app.weekly_report_sends.sent_at` after the start, because a week that never
+  delivered a report has not shown the Monday path works without DuckDB.
+  Today that ledger is written in DuckDB and copied, so under `off` it cannot
+  be covered: correctly, since the decoupling has not happened.
+
+These are the measurements, not the gate: every chain latched, source
+reconciliation clean, `KS_READ_FALLBACK=off`, the second Ark and the rest of
+the plan's stage-5 preconditions are their own checks.
+
 ### The order write path asks the registry too (DN-22a)
 
 Until DN-22a nothing that ships orders out of DuckDB asked who owns the order
