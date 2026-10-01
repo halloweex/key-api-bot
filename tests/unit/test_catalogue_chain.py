@@ -995,3 +995,70 @@ class TestTheHandoverOfTheCatalogue:
         k, r = self._p(1)
         assert _classify(spec, {k: r}, {k: r}, moved_on=False) == []
         assert _classify(spec, {k: r}, {k: r}, moved_on=True, rewritten=frozenset()) == []
+
+
+# ─── /api/health publishes the step (§3.11) ──────────────────────────────────
+
+@pytest.fixture
+def health(flags):
+    """The health module with chain 1's preflight answered locally, so the
+    block is the registry's state and the two steps' recorders alone."""
+    from core import pg_inventory_write
+    from web.routes.api import health as module
+
+    async def preflight(*a, **kw):
+        return {"ok": False, "reasons": ["not asked here"]}
+
+    module._preflight_cache.update(data=None, expires_at=0)
+    flags.setattr(pg_inventory_write, "preflight", preflight)
+    yield module
+    module._preflight_cache.update(data=None, expires_at=0)
+
+
+class TestHealthPublishesTheStep:
+    @pytest.mark.asyncio
+    async def test_it_sits_under_chain_6s_entry_with_the_class_never_the_text(
+            self, health, monkeypatch):
+        from types import SimpleNamespace
+
+        from core import sync_service as sync_mod
+
+        mine = sync_mod.InventoryStepState()
+        mine.failed("products", OSError("password authentication failed for user ks_app"))
+        theirs = sync_mod.InventoryStepState()
+        service = SimpleNamespace(catalogue_step_health=lambda: mine.published(599),
+                                  inventory_step_health=lambda: theirs.published(None))
+        monkeypatch.setattr(sync_mod, "get_sync_service", AsyncMock(return_value=service))
+
+        block = await health._write_chains_block()
+
+        step = block[chain.CHAIN]["sync_step"]
+        assert step["failures_since_ok"] == 1 and step["last_failed_step"] == "products"
+        assert step["last_error"] == "OSError" and step["retry_in_s"] == 599
+        assert "password" not in str(block)                 # the class, never the text
+        # Each chain reads its own recorder: chain 1's stays clean.
+        assert block["pg_inventory_write"]["sync_step"]["failures_since_ok"] == 0
+        # The registry's half is untouched: the canary reads `mode` and `error` there.
+        assert block[chain.CHAIN]["mode"] == "duckdb"
+        assert "preflight" not in block[chain.CHAIN]
+
+    @pytest.mark.asyncio
+    async def test_no_sync_service_is_null_not_empty(self, health, monkeypatch):
+        from core import sync_service as sync_mod
+
+        monkeypatch.setattr(sync_mod, "get_sync_service",
+                            AsyncMock(side_effect=RuntimeError("no store")))
+        assert (await health._write_chains_block())[chain.CHAIN]["sync_step"] is None
+
+    @pytest.mark.asyncio
+    async def test_the_service_records_what_the_step_publishes(self):
+        from core import sync_service as sync_mod
+
+        svc = sync_mod.SyncService.__new__(sync_mod.SyncService)
+        svc.catalogue_step = sync_mod.InventoryStepState()
+        svc._catalogue_retry_at = 0.0
+        assert svc.catalogue_step_health()["retry_in_s"] is None
+        svc._catalogue_step_failed(ConnectionRefusedError("refused"))
+        published = svc.catalogue_step_health()
+        assert published["last_error"] == "ConnectionRefusedError"
+        assert 0 < published["retry_in_s"] <= sync_mod.CATALOGUE_RETRY_AFTER_S + 1
