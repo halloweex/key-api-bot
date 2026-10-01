@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.263
+
+- Chain 4 PR-3: a blind probe does not resolve the buyers step's page
+- Chain 4 PR-3: one account of where a refused buyer read goes
+- Chain 4 PR-3 review: what an operator reads says what is true
+- Chain 4 PR-3 review: the buyer walk judges the branch, not the question
+- Chain 4 PR-3 review: the writer lands or says so, and what watches it survives a restart
+- Chain 4 PR-3: a refused read reaches whoever can answer it (DN-20c)
+- Chain 4 PR-3: a buyer reader that is gone holds the chain, and says which
+- Chain 4 PR-3: say in CLAUDE.md what the buyers chain does, and what holds it
+- Chain 4 PR-3: the restore drill checks the buyers too
+- Chain 4 PR-3: the soak reads the buyers chain, B1 to B5
+- Chain 4 PR-3: under the chain a stalled buyers step pages
+- Chain 4 PR-3: every buyer path follows the chain's one answer
+- Chain 4 PR-3: the buyers chain, registered, flag off
+
+
 ## 3.0.262
 
 - Chain 4 PR-2: CLAUDE.md says what the contacts bound is, and that the canary pages mirror_landing
