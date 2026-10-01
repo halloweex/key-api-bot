@@ -51,6 +51,9 @@ case "$1" in
                     */pg_inventory_write) [ -n "${FAKE_INVENTORY_LATCHED:-}" ] && exit 0 ;;
                     */pg_buyers_write) [ -n "${FAKE_BUYERS_LATCHED:-}" ] && exit 0 ;;
                     */pg_dq_journal_write) [ -n "${FAKE_DQ_JOURNAL_LATCHED:-}" ] && exit 0 ;;
+                    */pg_watchdog_write) [ -n "${FAKE_WATCHDOGS_LATCHED:-}" ] && exit 0 ;;
+                    */pg_weekly_ledger_write) [ -n "${FAKE_WEEKLY_LEDGER_LATCHED:-}" ] && exit 0 ;;
+                    */pg_traffic_ledger_write) [ -n "${FAKE_TRAFFIC_LEDGER_LATCHED:-}" ] && exit 0 ;;
                 esac
                 exit 1
             fi
@@ -62,6 +65,9 @@ case "$1" in
                 KS_READ_SEARCH_INDEX) v="${FAKE_KS_READ_SEARCH_INDEX-__unset__}" ;;
                 KS_READ_DASHBOARD) v="${FAKE_KS_READ_DASHBOARD-__unset__}" ;;
                 KS_WRITE_DQ_JOURNAL) v="${FAKE_KS_WRITE_DQ_JOURNAL-__unset__}" ;;
+                KS_WRITE_WATCHDOGS) v="${FAKE_KS_WRITE_WATCHDOGS-__unset__}" ;;
+                KS_WRITE_WEEKLY_LEDGER) v="${FAKE_KS_WRITE_WEEKLY_LEDGER-__unset__}" ;;
+                KS_WRITE_TRAFFIC_LEDGER) v="${FAKE_KS_WRITE_TRAFFIC_LEDGER-__unset__}" ;;
                 *) v="__unset__" ;;
             esac
             [ "$v" = "__unset__" ] && exit 1
@@ -352,3 +358,32 @@ class TestChain9:
         is what stands, and the checks keep gating on it."""
         run = _run(tmp_path, FAKE_KS_WRITE_DQ_JOURNAL="postgress")
         assert all("dq_journal_direct=invalid" in c for c in run.psql), run.psql
+
+
+class TestTheOtherShadowChains:
+    """Chains 10, 11a and 11b (OD-02 (c)) reach H1 and H2 the way chain 9
+    reaches D8: the flag, outranked by the latch. Mutation: stop passing one
+    of the three, or drop the latch from `shadow_state` — a latched chain with
+    its flag put back would read "not applicable" in the one state the stand-
+    down exists for."""
+
+    NAMES = (("watchdogs_on", "KS_WRITE_WATCHDOGS", "WATCHDOGS"),
+             ("weekly_ledger_on", "KS_WRITE_WEEKLY_LEDGER", "WEEKLY_LEDGER"),
+             ("traffic_ledger_on", "KS_WRITE_TRAFFIC_LEDGER", "TRAFFIC_LEDGER"))
+
+    def test_unset_is_zero(self, healthy):
+        for var, _, _ in self.NAMES:
+            assert all(f"{var}=0" in c for c in healthy.psql), (var, healthy.psql)
+
+    @pytest.mark.parametrize("var,env,latch", NAMES)
+    def test_the_flag_is_one_and_a_typo_invalid(self, tmp_path, var, env, latch):
+        run = _run(tmp_path / "on", **{f"FAKE_{env}": " Postgres "})
+        assert all(f"{var}=1" in c for c in run.psql), run.psql
+        run = _run(tmp_path / "typo", **{f"FAKE_{env}": "postgress"})
+        assert all(f"{var}=invalid" in c for c in run.psql), run.psql
+
+    @pytest.mark.parametrize("var,env,latch", NAMES)
+    def test_the_latch_outranks_the_flag(self, tmp_path, var, env, latch):
+        run = _run(tmp_path, **{f"FAKE_{env}": "duckdb", f"FAKE_{latch}_LATCHED": "1"})
+        assert all(f"{var}=1" in c for c in run.psql), run.psql
+        assert f"{var}=1 ({env})" in run.out

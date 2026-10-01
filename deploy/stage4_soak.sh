@@ -157,6 +157,23 @@ if [ "$(latch_state pg_dq_journal_write)" = "1" ]; then
     DQ_JOURNAL_DIRECT=1
 fi
 
+# The other three shadow chains (OD-02 (c)): chain 10's samples and the two
+# report ledgers, 11a and 11b. Read as chain 9 is — the flag, outranked by the
+# latch — and judged by H1 (the hourly copy stood down for their tables) and
+# H2 (the 07:30 comparison of the two copies found nothing), which take chain
+# 9's state from DQ_JOURNAL_DIRECT.
+shadow_state() {
+    local state
+    state="$(flag_state "$1" postgres duckdb)"
+    if [ "$(latch_state "$2")" = "1" ]; then
+        state=1
+    fi
+    echo "$state"
+}
+WATCHDOGS_ON="$(shadow_state KS_WRITE_WATCHDOGS pg_watchdog_write)"
+WEEKLY_LEDGER_ON="$(shadow_state KS_WRITE_WEEKLY_LEDGER pg_weekly_ledger_write)"
+TRAFFIC_LEDGER_ON="$(shadow_state KS_WRITE_TRAFFIC_LEDGER pg_traffic_ledger_write)"
+
 # The latch wins, exactly as `writes_postgres()` resolves it — including over
 # `invalid`, because a latched chain with a misspelt variable goes on writing
 # Postgres and its stand-down still has to hold. The typo does not disappear
@@ -214,6 +231,9 @@ run_check() {
             -v buyers_held_by="$BUYERS_HELD_BY" \
             -v buyers_override_floor="$BUYERS_OVERRIDE_FLOOR" \
             -v dq_journal_direct="$DQ_JOURNAL_DIRECT" \
+            -v watchdogs_on="$WATCHDOGS_ON" \
+            -v weekly_ledger_on="$WEEKLY_LEDGER_ON" \
+            -v traffic_ledger_on="$TRAFFIC_LEDGER_ON" \
             < "$file" 2>&1)"; then
         rc=0
     else
@@ -250,6 +270,7 @@ fi
 echo "Stage 4 soak report · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC')"
 echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}, dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
 echo "  dq_journal_direct=$DQ_JOURNAL_DIRECT (KS_WRITE_DQ_JOURNAL)"
+echo "  watchdogs_on=$WATCHDOGS_ON (KS_WRITE_WATCHDOGS), weekly_ledger_on=$WEEKLY_LEDGER_ON (KS_WRITE_WEEKLY_LEDGER), traffic_ledger_on=$TRAFFIC_LEDGER_ON (KS_WRITE_TRAFFIC_LEDGER)"
 echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
 echo
 printf '%s' "$ROWS" | awk '
