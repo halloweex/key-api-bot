@@ -2318,6 +2318,17 @@ class DuckDBStore(
         that never moves again runs every tick (revision 0032). A key absent
         from Postgres is None, which the sync reads as due: the first tick
         after a switch syncs, and its stamp is the first one there.
+
+        Unless its chain declares `CHAIN_WATERMARK_INHERITS_DUCKDB`: then an
+        absent key is DuckDB's own value, which stopped moving at the switch —
+        the same stand-in `_freshness_check` judges. Chain 3 needs it, because
+        `last_sync_orders` is where the order step's window STARTS (the
+        chain-3 review): read as None it became "an hour ago", the window
+        began 25 h back, and every order KeyCRM updated between DuckDB's last
+        stamp and then — a flip after a maintenance window, or after a day of
+        KeyCRM failing — was never fetched by the incremental sync at all.
+        Present, Postgres's value wins: the copy-back deletes it on release,
+        and a stale one left behind only widens the window.
         """
         full_key = f"last_sync_{key}"
         # Only the chain that owns this key is asked — never every chain, or a
@@ -2327,7 +2338,11 @@ class DuckDBStore(
         chain = chain_for_sync_key(full_key)
         if chain is not None and chain.writes_postgres():
             from core.pg_chain_watermarks import get_value
-            return await get_value(full_key)
+            value = await get_value(full_key)
+            if value is not None or not getattr(
+                    chain, "CHAIN_WATERMARK_INHERITS_DUCKDB", False):
+                return value
+            # Inherited: DuckDB's frozen stamp, read below.
         async with self.connection() as conn:
             result = conn.execute(
                 "SELECT value FROM sync_metadata WHERE key = ?",

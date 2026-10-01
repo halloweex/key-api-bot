@@ -51,7 +51,8 @@ async def read_values(keys: Iterable[str]) -> Dict[str, str]:
     input, in the shape `sync_metadata` rows have. Missing keys are absent, so
     "never synced since the switch" still reads as never synced — except for a
     chain declaring `CHAIN_WATERMARK_INHERITS_DUCKDB`, whose absent key the
-    check judges by DuckDB's frozen stamp instead (`_freshness_check`)."""
+    check judges by DuckDB's frozen stamp instead (`_freshness_check`), as
+    the store's getter answers it (`DuckDBStore.get_last_sync_time`)."""
     keys = list(keys)
     if not keys:
         return {}

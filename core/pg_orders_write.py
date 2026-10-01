@@ -159,9 +159,15 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_orders",)
 # `updated_at`, not a sync time, and stands still overnight by design.
 # Freshness stays with `freshness_orders` and the order step's own health.
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
-# Absent until the first tick after the flip writes it; an absent key reads as
-# due (`incremental_sync`'s default window), so there is nothing to inherit.
-CHAIN_WATERMARK_INHERITS_DUCKDB = False
+# Absent from Postgres until the first tick after the flip writes it, and the
+# key is where the order step's window STARTS. Read as absent it was "an hour
+# ago", so the first tick fetched from 25 h back and every order KeyCRM
+# updated between DuckDB's last stamp and then was never fetched by the
+# incremental sync (the chain-3 review: a three-day-old DuckDB stamp skipped
+# two days). Declared, the store's getter answers DuckDB's frozen stamp for
+# the absent key (`DuckDBStore.get_last_sync_time`), and `_freshness_check`
+# judges the same value — one stand-in for both.
+CHAIN_WATERMARK_INHERITS_DUCKDB = True
 
 # Per statement, inside every transaction here (DN-05a: the server is asked to
 # give up, the client never cancels a statement in flight).

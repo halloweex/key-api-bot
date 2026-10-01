@@ -496,7 +496,9 @@ def _freshness_check(
     check: chain 6a's dictionary moves on the Sunday full sync, so a mid-week
     flip would otherwise file "never synced" on every run for up to a week
     about a dictionary the hourly copy shipped until the flip — and DuckDB's
-    stamp is exactly the age of what Postgres then holds.
+    stamp is exactly the age of what Postgres then holds. Chain 3 declares it
+    for its sync window, and the store's getter answers the same stand-in
+    (`DuckDBStore.get_last_sync_time`), so this judges what the sync reads.
     """
     from core.write_chains import WRITE_CHAINS, chain_name, stood_down_sync_keys_checked
 

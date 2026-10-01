@@ -1577,7 +1577,12 @@ is not KeyCRM's is recorded (`write_chains.pg_orders_write.sync_step`, the
 error class only), `last_sync_orders` stays where it was, `meta.mirror_state`
 marks `bronze.orders` failing, and products, managers, buyers and inventory run.
 The watermark lives in `meta.chain_watermarks` and is read before the fetch, so
-a dead Postgres spends no KeyCRM call. The canary pages
+a dead Postgres spends no KeyCRM call. Until the first tick under the flag
+writes it there, DuckDB's frozen stamp stands in
+(`CHAIN_WATERMARK_INHERITS_DUCKDB`, read by the store's getter as well as the
+freshness check): it is where the window starts, and read as absent it was
+"an hour ago", so a flip after a day of KeyCRM failing skipped every order
+updated in that day (found in review). The canary pages
 **`orders_sync_failing`** (CRITICAL) on three failures in a row, no success for
 15 minutes, or the step not reached for 20.
 

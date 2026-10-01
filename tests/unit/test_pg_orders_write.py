@@ -174,7 +174,9 @@ class TestTheDeclaration:
                                      "bronze.expenses", "app.order_backfill_misses")
         assert pow_.CHAIN_SYNC_KEYS == ("last_sync_orders",)
         assert pow_.CHAIN_WATERMARK_MAX_AGE_MIN is None
-        assert pow_.CHAIN_WATERMARK_INHERITS_DUCKDB is False
+        # The order step's window starts at this key (the chain-3 review;
+        # `TestTheFirstTickAfterTheFlip`).
+        assert pow_.CHAIN_WATERMARK_INHERITS_DUCKDB is True
 
     def test_the_archive_is_not_a_chain_table(self):
         """`app.order_versions` has one writer in both modes and no DuckDB
@@ -622,6 +624,85 @@ class TestTheOrderStepIsContained:
         svc = _tick_service(monkeypatch, store)
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(svc._orders_step(MagicMock(), {}), 5)
+
+
+class TestTheFirstTickAfterTheFlip:
+    """The chain-3 review: `last_sync_orders` is where the order step's window
+    STARTS, and Postgres holds no such key until the first tick under the flag
+    writes one. Read as absent it became "an hour ago", so the first tick asked
+    KeyCRM from 25 h back — and with DuckDB's last stamp three days old (a
+    maintenance window, a day of KeyCRM failing before the flip) two days of
+    updated orders were never fetched by the incremental sync at all."""
+
+    @staticmethod
+    def _recording_fetch(monkeypatch):
+        from core.sync_service import SyncService
+
+        asked = []
+
+        async def fetch(self, client, start, end, *args, **kwargs):
+            asked.append(start)
+            return []
+
+        monkeypatch.setattr(SyncService, "_fetch_orders_with_date_filter", fetch)
+        return asked
+
+    @staticmethod
+    def _window_start(watermark):
+        from core.sync_service import DEFAULT_TZ
+
+        return ((watermark - timedelta(hours=24)).astimezone(DEFAULT_TZ)
+                .strftime("%Y-%m-%d %H:%M:%S"))
+
+    @pytest.mark.asyncio
+    async def test_the_window_starts_where_duckdb_stopped(self, met, duck, monkeypatch):
+        """Mutations: declare `CHAIN_WATERMARK_INHERITS_DUCKDB = False`; drop
+        the inheritance from `DuckDBStore.get_last_sync_time`."""
+        from core import pg_chain_watermarks
+        from core.sync_service import SyncService
+
+        frozen = datetime.now(UTC).replace(microsecond=0) - timedelta(days=3)
+        await duck.set_last_sync_time("orders", frozen)         # flag off: DuckDB's
+        met.setenv("KS_WRITE_ORDERS", "postgres")
+        monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
+        asked = self._recording_fetch(monkeypatch)
+
+        assert await duck.get_last_sync_time("orders") == frozen
+        await SyncService(duck)._orders_step(MagicMock(), {"orders": 0, "expenses": 0})
+        assert asked == [self._window_start(frozen)]
+
+    @pytest.mark.asyncio
+    async def test_once_postgres_holds_the_key_it_wins(self, met, duck, monkeypatch):
+        """DuckDB's stamp stands in for an ABSENT key only. Mutation: read
+        DuckDB's whatever Postgres holds — every tick under the chain would
+        start from the frozen stamp, a window growing by a day a day."""
+        from core import pg_chain_watermarks
+        from core.sync_service import SyncService
+
+        frozen = datetime.now(UTC).replace(microsecond=0) - timedelta(days=3)
+        live = frozen + timedelta(days=2, hours=23)
+        await duck.set_last_sync_time("orders", frozen)
+        met.setenv("KS_WRITE_ORDERS", "postgres")
+        monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=live))
+        asked = self._recording_fetch(monkeypatch)
+
+        await SyncService(duck)._orders_step(MagicMock(), {"orders": 0, "expenses": 0})
+        assert asked == [self._window_start(live)]
+
+    @pytest.mark.asyncio
+    async def test_a_chain_that_does_not_declare_it_still_reads_absent(self, flags, duck,
+                                                                      monkeypatch):
+        """Opt-in, per chain: chain 1's keys move every hour, and its absence
+        past one tick is the finding (`_freshness_check`). Mutation: inherit
+        for every chain."""
+        from core import pg_chain_watermarks, pg_inventory_write
+
+        assert not getattr(pg_inventory_write, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
+        await duck.set_last_sync_time("offers", datetime.now(UTC) - timedelta(minutes=5))
+        flags.setenv("KS_WRITE_INVENTORY", "postgres")
+        assert pg_inventory_write.writes_postgres()
+        monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
+        assert await duck.get_last_sync_time("offers") is None
 
 
 # ─── G13: the canary pages a step that stopped, under the chain only ─────────
