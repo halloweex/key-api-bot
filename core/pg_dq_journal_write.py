@@ -243,8 +243,11 @@ def _duckdb_zone():
 
         import duckdb
 
-        name = duckdb.connect(":memory:").execute(
-            "SELECT current_setting('TimeZone')").fetchone()[0]
+        probe = duckdb.connect(":memory:")
+        try:
+            name = probe.execute("SELECT current_setting('TimeZone')").fetchone()[0]
+        finally:
+            probe.close()
         _ZONE = ZoneInfo(name)
     return _ZONE
 
