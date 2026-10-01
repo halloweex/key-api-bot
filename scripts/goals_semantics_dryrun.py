@@ -199,18 +199,22 @@ async def answers(conn, today: date) -> Dict[str, Any]:
     return _settled(out)
 
 
-def _differences(bridge, silver, path="") -> List[Tuple[str, Any, Any]]:
-    if isinstance(bridge, dict) and isinstance(silver, dict):
-        found = []
-        for key in sorted(set(bridge) | set(silver)):
-            found += _differences(bridge.get(key), silver.get(key), f"{path}/{key}")
-        return found
-    if isinstance(bridge, list) and isinstance(silver, list) and len(bridge) == len(silver):
-        found = []
-        for i, (b, s) in enumerate(zip(bridge, silver)):
-            found += _differences(b, s, f"{path}[{i}]")
-        return found
-    return [] if bridge == silver else [(path.lstrip("/"), bridge, silver)]
+def _differences(bridge, silver) -> List[Tuple[str, Any, Any]]:
+    """Every leaf that differs, by its path. A loop over a stack rather than
+    a recursion that builds the path as it descends."""
+    found: List[Tuple[str, Any, Any]] = []
+    stack: List[Tuple[str, Any, Any]] = [("", bridge, silver)]
+    while stack:
+        path, b, s = stack.pop()
+        if isinstance(b, dict) and isinstance(s, dict):
+            for key in sorted(set(b) | set(s), reverse=True):
+                stack.append((path + "/" + str(key), b.get(key), s.get(key)))
+        elif isinstance(b, list) and isinstance(s, list) and len(b) == len(s):
+            for i in reversed(range(len(b))):
+                stack.append((path + "[" + str(i) + "]", b[i], s[i]))
+        elif b != s:
+            found.append((path.lstrip("/"), b, s))
+    return found
 
 
 # ─── the orders each side counts ─────────────────────────────────────────────
