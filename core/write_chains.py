@@ -27,7 +27,8 @@ from types import ModuleType
 from typing import Dict, FrozenSet, Iterable, Optional, Tuple
 
 from core import (
-    pg_expense_types_write, pg_expenses_write, pg_goals_write, pg_inventory_write,
+    pg_buyers_write, pg_expense_types_write, pg_expenses_write, pg_goals_write,
+    pg_inventory_write,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,8 +39,13 @@ logger = logging.getLogger(__name__)
 # costs by. Both flags are off by default, so until `KS_WRITE_GOALS` or
 # `KS_WRITE_EXPENSE_TYPES` says postgres each stands down nothing and only adds
 # a row to the `/api/health` block.
+#
+# Chain 4 (`pg_buyers_write`) is the fifth: `bronze.buyers`,
+# `bronze.buyer_contacts` and `app.buyer_gender`, off by default, and held on
+# DuckDB until every reader of the buyers reads Postgres
+# (`unmet_precondition`).
 WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
-                pg_expense_types_write)
+                pg_expense_types_write, pg_buyers_write)
 
 # A KS_WRITE_* value no chain understands must stop that chain and nothing
 # else. The registry used to evaluate every chain's flag for every question, so

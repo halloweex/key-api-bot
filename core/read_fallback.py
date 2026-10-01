@@ -53,9 +53,10 @@ search index and the buyers step skip their step for the tick with the
 watermark held, and the tick goes on; the boot contains each of those; and
 the assistant's tools return a named `data_unavailable` result. A job says
 so in its result through `answered`, below, so `/api/jobs` shows a refusal
-rather than a quiet run — all but the incremental sync, whose buyers step
-is still answered by `sync_missing_buyers`' broad handler and so shows its
-refusal only in the log and in `refusals()`. The consumers are derived, not remembered —
+rather than a quiet run — all but the incremental sync, whose stats are
+summed and carry no strings: its buyers step records the refusal and passes
+it on, the tick names it at the call with `answered` and skips the step, and
+it shows in the log, in `buyer_sync`'s error class and in `refusals()`. The consumers are derived, not remembered —
 `tests/unit/test_read_fallback_consumers.py` walks up from every refusal to
 the entry points nothing in the repository calls (`NON_HTTP_CONSUMERS`), then
 back down through the `try` each call sits in, and pins where every

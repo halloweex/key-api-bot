@@ -42,7 +42,9 @@ REPO = Path(__file__).resolve().parents[2]
 SQL_DIR = REPO / "deploy" / "stage4_soak"
 FILES = sorted(SQL_DIR.glob("*.sql"))
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
-VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on": "0"}
+VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on": "0",
+             "buyers_on": "0", "buyers_flip_at": "", "buyers_held_by": "",
+             "buyers_override_floor": ""}
 RUN_AS_OWNER = "-- soak:run-as ks_app"
 # The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
 HISTORY_CHECKS = (
@@ -320,12 +322,16 @@ async def dq_issue(conn, run_id, check_name, *, table="silver.orders", count=1):
 @needs_pg
 class TestEveryCheckRuns:
     VARIANTS = (
-        {"inventory_on": "0", "dq_pg_warehouse_on": "0"},
+        {"inventory_on": "0", "dq_pg_warehouse_on": "0", "buyers_on": "0"},
         {"inventory_on": "1", "dq_pg_warehouse_on": "1",
-         "inventory_flip_at": "2030-06-01 10:00+03"},
-        {"inventory_on": "1", "dq_pg_warehouse_on": "1"},
-        {"inventory_on": "invalid", "dq_pg_warehouse_on": "invalid"},
-        {"inventory_on": "unknown", "dq_pg_warehouse_on": "unknown"},
+         "inventory_flip_at": "2030-06-01 10:00+03",
+         "buyers_on": "1", "buyers_flip_at": "2030-06-01 10:30+03",
+         "buyers_override_floor": "0"},
+        {"inventory_on": "1", "dq_pg_warehouse_on": "1", "buyers_on": "1"},
+        {"inventory_on": "invalid", "dq_pg_warehouse_on": "invalid", "buyers_on": "invalid"},
+        {"inventory_on": "unknown", "dq_pg_warehouse_on": "unknown", "buyers_on": "unknown"},
+        {"inventory_on": "0", "dq_pg_warehouse_on": "0", "buyers_on": "held",
+         "buyers_held_by": "KS_SMS_STORE"},
     )
 
     @pytest.mark.asyncio
@@ -352,6 +358,29 @@ class TestEveryCheckRuns:
             async with scenario(pool) as conn:
                 names += [r["check"] for r in await check(conn, path.name)]
         assert len(names) == len(set(names)), names
+
+    @pytest.mark.asyncio
+    async def test_buyer_checks_are_not_applicable_while_the_chain_is_off(self, pool):
+        for path in FILES:
+            if not path.name[3:].startswith("b"):
+                continue
+            async with scenario(pool) as conn:
+                v, detail = await verdict(conn, path.name, buyers_on="0")
+            assert (v, detail.startswith("not applicable")) == ("PASS", True), (path.name, detail)
+
+    @pytest.mark.asyncio
+    async def test_a_held_chain_fails_b1_once_and_nothing_else(self, pool):
+        """The flip did not move the chain: B1 says so and names the reader;
+        B2–B5 have nothing moved to judge."""
+        verdicts = {}
+        for path in FILES:
+            if not path.name[3:].startswith("b"):
+                continue
+            async with scenario(pool) as conn:
+                verdicts[path.name[:2]] = await verdict(
+                    conn, path.name, buyers_on="held", buyers_held_by="KS_READ_DASHBOARD")
+        assert verdicts.pop("23")[0] == "FAIL"
+        assert all(v == "PASS" and "held on DuckDB" in d for v, d in verdicts.values()), verdicts
 
     @pytest.mark.asyncio
     async def test_inventory_checks_are_not_applicable_while_the_chain_is_off(self, pool):
@@ -1017,6 +1046,264 @@ class TestE1ExpensesStoodDown:
             await mirror_state(conn, "app.manual_expenses", ok_at=ago(days=3), rows=0)
             v, detail = await verdict(conn, self.FILE)
         assert v == "PASS", detail
+
+
+# ── chain 4 ───────────────────────────────────────────────────────────────────
+
+BUYER_IDS = [990_000_201, 990_000_202, 990_000_203]
+
+
+async def buyer(conn, bid, *, name="Олена", phone=None, mirrored_at=None, contact=True):
+    await conn.execute(
+        "INSERT INTO bronze.buyers (id, full_name, phone, mirrored_at) VALUES ($1, $2, $3, $4)",
+        bid, name, phone, mirrored_at or ago(hours=3))
+    if contact and phone:
+        await conn.execute(
+            "INSERT INTO bronze.buyer_contacts (buyer_id, contact_type, value, is_primary) "
+            "VALUES ($1, 'phone', $2, true)", bid, phone)
+
+
+async def verdict_row(conn, bid, *, override=False):
+    await conn.execute(
+        "INSERT INTO app.buyer_gender (buyer_id, gender, method, rules_version, "
+        "override_by_human) VALUES ($1, 'f', 'given', 1, $2)", bid, override)
+
+
+async def owners(conn, at):
+    for table in ("bronze.buyers", "bronze.buyer_contacts", "app.buyer_gender"):
+        await conn.execute(
+            "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, $3) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "
+            "updated_at = EXCLUDED.updated_at", f"owner:{table}", at.isoformat(), at)
+
+
+async def clean_buyers(conn):
+    """The checks read whole tables; a scenario starts from none of their rows."""
+    for table in ("bronze.buyer_contacts", "app.buyer_gender", "bronze.buyers",
+                  "silver.orders"):
+        await conn.execute(f"DELETE FROM {table}")
+    await conn.execute("DELETE FROM meta.chain_watermarks "
+                       "WHERE key LIKE 'owner:%' OR key = 'last_sync_buyers'")
+    await conn.execute("DELETE FROM meta.mirror_state WHERE table_name IN "
+                       "('bronze.buyers', 'bronze.buyer_contacts', 'app.buyer_gender')")
+
+
+async def silver_order(conn, oid, *, buyer_id, ordered_at):
+    await conn.execute(
+        """
+        INSERT INTO silver.orders (id, source_id, status_id, grand_total, ordered_at,
+               buyer_id, order_date, is_return, sales_type, is_active_source, source_name)
+        VALUES ($1, 1, 1, 100, $2, $3, $4, false, 'retail', true, 'Instagram')
+        """, oid, ordered_at, buyer_id, ordered_at.date())
+
+
+@needs_pg
+class TestB1BuyersCopiesStoodDown:
+    FILE = "23_b1_buyers_copies_stood_down.sql"
+
+    @pytest.mark.asyncio
+    async def test_a_copy_after_the_handover_fails(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await owners(conn, ago(days=2))
+            await mirror_state(conn, "app.buyer_gender", ok_at=ago(hours=5))
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "FAIL" and "app.buyer_gender written by a copy" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_copy_before_the_handover_passes(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await owners(conn, ago(days=2))
+            await mirror_state(conn, "bronze.buyers", ok_at=ago(days=3))
+            await mirror_state(conn, "app.buyer_gender", ok_at=ago(days=2, minutes=5))
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "PASS" and "since the handover" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_failure_before_the_handover_is_not_the_shippers_now(self, pool):
+        """A mirror that failed the day before the flip keeps its count for ever
+        — nothing ships again to clear it. Only a failure after is one."""
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await owners(conn, ago(days=2))
+            await mirror_state(conn, "bronze.buyers", ok_at=ago(days=4),
+                               attempted_at=ago(days=3), failures=2, error="boom")
+            v, _ = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "PASS"
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await owners(conn, ago(days=2))
+            await mirror_state(conn, "bronze.buyers", ok_at=ago(days=4),
+                               attempted_at=ago(hours=1), failures=3, error="boom")
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "FAIL" and "failing (3)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_without_owner_rows_the_flip_time_decides(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await mirror_state(conn, "bronze.buyers", ok_at=ago(hours=2))
+            v, _ = await verdict(conn, self.FILE, buyers_on="1",
+                                 buyers_flip_at=ago(hours=3).isoformat())
+            assert v == "FAIL"
+            v, detail = await verdict(conn, self.FILE, buyers_on="1",
+                                      buyers_flip_at=ago(hours=1).isoformat())
+        assert v == "PASS" and "since the flip" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_with_neither_owner_row_nor_flip_time_a_recent_stamp_is_unknown(self, pool):
+        """The hourly copy stamps app.buyer_gender every run until the flip,
+        so a healthy flip reads one inside the window until the first write."""
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await mirror_state(conn, "app.buyer_gender", ok_at=ago(minutes=30))
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "UNKNOWN" and "SOAK_BUYERS_FLIP_AT" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_held_and_invalid_fail_with_their_reason(self, pool):
+        async with scenario(pool) as conn:
+            v, detail = await verdict(conn, self.FILE, buyers_on="held",
+                                      buyers_held_by="KS_SMS_STORE")
+            assert v == "FAIL" and "KS_SMS_STORE is not postgres" in detail, detail
+            v, detail = await verdict(conn, self.FILE, buyers_on="invalid")
+        assert v == "FAIL" and "no chain understands" in detail, detail
+
+
+@needs_pg
+class TestB2BuyersWatermark:
+    FILE = "24_b2_buyers_watermark.sql"
+
+    async def mark(self, conn, value):
+        await conn.execute(
+            "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+            "VALUES ('last_sync_buyers', $1, $2)", value, NOW)
+
+    @pytest.mark.asyncio
+    async def test_the_stored_value_is_judged_not_the_rows_stamp(self, pool):
+        """`updated_at` is NOW; the value the step wrote is two hours old."""
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await self.mark(conn, ago(hours=2).isoformat())
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "FAIL" and "moved 120 min ago" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_value_passes(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await self.mark(conn, ago(minutes=40).isoformat())
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "PASS" and "moved 40 min ago" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_missing_fails_unless_just_flipped(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            v, _ = await verdict(conn, self.FILE, buyers_on="1")
+            assert v == "FAIL"
+            v, detail = await verdict(conn, self.FILE, buyers_on="1",
+                                      buyers_flip_at=ago(minutes=20).isoformat())
+        assert v == "PASS" and "not written yet" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_value_that_is_not_a_timestamp_fails_and_does_not_error(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await self.mark(conn, "not a time")
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "FAIL" and "not a timestamp" in detail, detail
+
+
+@needs_pg
+class TestB3BuyersVerdicts:
+    FILE = "25_b3_gender_coverage.sql"
+
+    @pytest.mark.asyncio
+    async def test_a_buyer_past_the_grace_with_no_verdict_fails(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await buyer(conn, BUYER_IDS[0], mirrored_at=ago(hours=2))
+            await buyer(conn, BUYER_IDS[1], mirrored_at=ago(minutes=30))
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "FAIL" and detail.startswith("1 buyer(s)"), detail
+
+    @pytest.mark.asyncio
+    async def test_fewer_overrides_than_on_flip_day_fails(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await buyer(conn, BUYER_IDS[0])
+            await verdict_row(conn, BUYER_IDS[0], override=True)
+            v, _ = await verdict(conn, self.FILE, buyers_on="1", buyers_override_floor="1")
+            assert v == "PASS"
+            v, detail = await verdict(conn, self.FILE, buyers_on="1",
+                                      buyers_override_floor="2")
+        assert v == "FAIL" and "against 2 on flip day" in detail, detail
+
+
+@needs_pg
+class TestB4SelectionBacklog:
+    FILE = "26_b4_selection_backlog.sql"
+
+    @pytest.mark.asyncio
+    async def test_a_buyer_owed_for_a_day_fails(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await silver_order(conn, ORDER_IDS[0], buyer_id=BUYER_IDS[0],
+                               ordered_at=ago(hours=30))
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "FAIL" and "1 of them for over a day" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_one_and_a_landed_one_pass(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await silver_order(conn, ORDER_IDS[0], buyer_id=BUYER_IDS[0],
+                               ordered_at=ago(hours=1))
+            await buyer(conn, BUYER_IDS[1])
+            await silver_order(conn, ORDER_IDS[1], buyer_id=BUYER_IDS[1],
+                               ordered_at=ago(days=3))
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "PASS" and detail.startswith("1 buyer(s) owed"), detail
+
+
+@needs_pg
+class TestB5BuyersIntegrity:
+    FILE = "27_b5_buyers_integrity.sql"
+
+    @pytest.mark.asyncio
+    async def test_a_clean_set_passes(self, pool):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await buyer(conn, BUYER_IDS[0], phone="+380500000001")
+            await verdict_row(conn, BUYER_IDS[0])
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "PASS", detail
+
+    @pytest.mark.asyncio
+    async def test_an_empty_phone_is_the_parse_not_a_lost_contact(self, pool):
+        """KeyCRM's list starting with '' is stored as '' and gets no contact
+        row: the shared parse, reproduced by every rewrite."""
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await buyer(conn, BUYER_IDS[0], phone="", contact=False)
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "PASS", detail
+
+    @pytest.mark.parametrize("defect", ["orphan_verdict", "null_name", "lost_contact"])
+    @pytest.mark.asyncio
+    async def test_each_defect_fails(self, pool, defect):
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            if defect == "orphan_verdict":
+                await verdict_row(conn, BUYER_IDS[2])
+            elif defect == "null_name":
+                await buyer(conn, BUYER_IDS[0], name=None)
+            else:
+                await buyer(conn, BUYER_IDS[0], phone="+380500000001", contact=False)
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == "FAIL", (defect, detail)
 
 
 @needs_pg
