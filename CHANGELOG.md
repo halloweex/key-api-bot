@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.264
+
+- Chain 4 PR-4 review: the pin a test held, and the rollback said whole
+- Chain 4 PR-4: revision 0034 locks images without the chain out
+
+
 ## 3.0.263
 
 - Chain 4 PR-3: a blind probe does not resolve the buyers step's page
