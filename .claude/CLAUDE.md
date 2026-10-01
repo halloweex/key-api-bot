@@ -3102,6 +3102,18 @@ own readiness — whether the copy's preconditions hold, the way back's full
 rebuild inside 1.5 GB, and the timings at 47 k orders — which is what the
 host run is for.
 
+**The first local run found two things outside the rehearsal.** With a
+Silver row deleted and a Gold row bumped in one window, ClickHouse's
+comparison raised instead of filing: `compare_gold_cells` sorts cell keys
+whose roll-up `source_id` is NULL beside per-source ints, so one day that
+differs in both grains is a `TypeError`, `gold_values_unwatched`, and never
+`ch_engines_gold_mismatch`. The mutations now run one per DQ run. And DuckDB
+1.5.5 answered `WHERE run_id = ?` on the copy's `data_quality_issues` with no
+rows for two runs a scan returned (one bitpacked `DELTA_FOR` segment; the
+optimizer off, `IN (…)` or a text comparison all found them; not reproduced
+on a fresh file). `fetch_run_issues` asks exactly that, so the rehearsal reads
+issues by the id's text.
+
 ### OD-10: the DuckDB-only doors, retired (2026-09-30)
 
 Step 13 waited on every door in `web/` that read DuckDB's Silver, Gold or UTM
