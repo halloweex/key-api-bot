@@ -228,17 +228,39 @@ async def reading() -> AsyncIterator[Any]:
         yield conn
 
 
-def _local(row) -> Optional[Tuple[Any, ...]]:
-    """A Postgres row with every timestamp in the process's zone.
+_ZONE: Optional[Any] = None
 
-    asyncpg hands back UTC; DuckDB hands back the session's zone, which is the
-    process's. The shapers render `isoformat()` and the digest prints the
-    first sixteen characters, so an unconverted Postgres branch would date
-    every run three hours early in Kyiv.
+
+def _duckdb_zone():
+    """The zone DuckDB renders a TIMESTAMPTZ in — its session `TimeZone`,
+    which it takes from the process's at start and never sets here. Read once
+    from an in-memory connection rather than assumed to be the libc zone:
+    the two part company in a process whose `TZ` changed after DuckDB loaded,
+    and the point of converting is to render exactly as DuckDB would."""
+    global _ZONE
+    if _ZONE is None:
+        from zoneinfo import ZoneInfo
+
+        import duckdb
+
+        name = duckdb.connect(":memory:").execute(
+            "SELECT current_setting('TimeZone')").fetchone()[0]
+        _ZONE = ZoneInfo(name)
+    return _ZONE
+
+
+def _local(row) -> Optional[Tuple[Any, ...]]:
+    """A Postgres row with every timestamp in DuckDB's rendering zone.
+
+    asyncpg hands back UTC; DuckDB hands back its session's zone. The shapers
+    render `isoformat()` and the digest prints the first sixteen characters,
+    so an unconverted Postgres branch would date every run three hours early
+    in Kyiv.
     """
     if row is None:
         return None
-    return tuple(v.astimezone() if isinstance(v, datetime) and v.tzinfo else v
+    zone = _duckdb_zone()
+    return tuple(v.astimezone(zone) if isinstance(v, datetime) and v.tzinfo else v
                  for v in row)
 
 
