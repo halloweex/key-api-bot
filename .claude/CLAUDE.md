@@ -3049,6 +3049,59 @@ checklist done, not a switch thrown. An exception reading any fact is
 published by its class alone and logged whole: a driver's text names the
 database user, host and port.
 
+### The step-13 rehearsal (`deploy/step13_rehearsal.sh`)
+
+The gate-stack rehearsal named above, as one command and one table. It
+exercises PR #268's eight points on **copies** of production, on the host,
+beside the live stack: P1 the flip with every precondition, P2 DuckDB frozen
+while Postgres derives, P3 web killed inside the Postgres derivation (Gold's
+`TRUNCATE` held by a lock, so the kill lands between Silver's commit and
+Gold's), P4 the three mutations (a deleted Silver row, a landed order, an
+unknown sales_type via a trigger on the copy), P5 both DQ jobs under the
+stand-down, P6 two restarts and one resolve, P7 one precondition broken and
+the canary paging, P8 the way back. Plus K0 (KeyCRM never called) and Z0
+(no other container on the host moved). Exit 0 all PASS, 1 any FAIL, 2
+UNKNOWN only, 3 not set up.
+
+**What keeps it off production**, each pinned by parsing the script
+(`tests/unit/test_step13_rehearsal_script.py`): every container and the
+network are `reh-*` and nothing else is ever addressed — no `docker compose`;
+the network is `--internal`, so there is no route to KeyCRM, Telegram or any
+live container; `--pull never` on every `docker run`, so the image the next
+`up -d` starts is not changed; hard memory caps (web 1.5 g with DuckDB at
+768 MB, Postgres 512 m, ClickHouse 1.5 g), a start guard on `MemAvailable`
+and a watchdog that tears the rehearsal down first; `/tmp/ks-gate.lock`
+taken with `flock -n` before anything starts; the tree mounted read-only and
+never written; cleanup on EXIT with `docker rm -f -v`. reh-web runs with
+`KS_ALERTS_DISABLED=1`, no `BOT_TOKEN`, and `KEYCRM_BASE_URL` pointing at a
+stub (`deploy/step13_rehearsal/keycrm_stub.py`) — nothing in the application
+switches the sync off, so the base URL and the network are what keep the
+quota untouched. The canary is `bot/canary.py` imported inside reh-web and
+judged against its own `/api/health`, never sent. Jobs are triggered through
+reh-web's own API with a session signed by a key minted for the run.
+
+**Production enters as copies only**: the newest nightly `pg_dump` (streamed
+into `reh-pg`, ownership kept, on roles initdb creates with per-run
+passwords) and the newest `data/backups/analytics-*.duckdb` — never the live
+file — copied into the rehearsal's own directory (mode 700), plus the
+`KS_WRITE_*` chain flags read from `.env` by exact name. The copies go at the
+end; only the table survives, in `step13-rehearsal-<stamp>.txt` beside that
+directory, ids, counts and keys only. `--keep` leaves the copies and says so
+in red; `--cleanup-only` removes what a killed run left. A window guard
+refuses to start within 100 minutes of any reh-web or host cron
+(`--any-hour` overrides): ~75 minutes on production's data.
+
+`--local` runs it on a laptop over synthetic data: `seed_synthetic.py`
+invents an account, the stub serves it, a reh-web over an empty directory
+syncs it the way production once synced the real one, and the rehearsal
+proper then restores that dump and that backup by the host's path. The
+floor (`KS_PG_SILVER_INTERVAL_S`) is 120 s on the host and 60 s locally
+instead of 600 s; every property is "within floor plus a tick", so its size
+changes nothing proved. What the local run cannot answer is production's
+own readiness — whether the copy's preconditions hold, the way back's full
+rebuild inside 1.5 GB, and the timings at 47 k orders — which is what the
+host run is for.
+
 ### OD-10: the DuckDB-only doors, retired (2026-09-30)
 
 Step 13 waited on every door in `web/` that read DuckDB's Silver, Gold or UTM
