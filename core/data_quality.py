@@ -1699,6 +1699,87 @@ def _status_from_severity(sev: Severity) -> str:
     return {"CRITICAL": "CRITICAL", "WARN": "WARN", "INFO": "PASS"}[sev.value]
 
 
+@dataclass(frozen=True)
+class RunValues:
+    """One run row's values, computed once and handed to every store.
+
+    Chain 9 (OD-02 (c)) writes the journal to Postgres first and then hands
+    DuckDB the same row, so the status, the counts and the duration must be
+    computed in one place rather than once per store — two computations of
+    `duration_ms` a millisecond apart would be a `shadow_row_values` every
+    morning. `persist_run` computes it here too, so DuckDB's own branch is the
+    same arithmetic it always was.
+    """
+    started_at: datetime
+    ended_at: datetime
+    as_of: datetime
+    window_start: date
+    window_end: date
+    layer: str
+    status: str
+    integrity_issues_count: int
+    discrepancies_count: int
+    critical_count: int
+    warn_count: int
+    api_calls_used: int
+    duration_ms: int
+    error_message: Optional[str]
+
+
+# The run row's columns in insert order — `RunValues`' fields, which is what
+# `journal_rows` writes and both stores read back.
+RUN_COLUMNS: Tuple[str, ...] = (
+    "started_at", "ended_at", "as_of", "window_start", "window_end",
+    "layer", "status",
+    "integrity_issues_count", "discrepancies_count",
+    "critical_count", "warn_count",
+    "api_calls_used", "duration_ms", "error_message",
+)
+
+
+def run_values(
+    *,
+    started_at: datetime,
+    ended_at: datetime,
+    as_of: datetime,
+    window_start: date,
+    window_end: date,
+    layer: str,
+    issues: List[IntegrityIssue],
+    discrepancies: List[Discrepancy],
+    api_calls_used: int = 0,
+    error_message: Optional[str] = None,
+) -> RunValues:
+    """The run row `persist_run` writes, as values. Pure."""
+    issue_sev = summarize_issues(issues)
+
+    critical_count = (
+        issue_sev.get("CRITICAL", 0)
+        + sum(1 for d in discrepancies if d.severity == Severity.CRITICAL)
+    )
+    warn_count = (
+        issue_sev.get("WARN", 0)
+        + sum(1 for d in discrepancies if d.severity == Severity.WARN)
+    )
+
+    if error_message is not None:
+        status = "FAILED"
+    else:
+        status = _status_from_severity(overall_severity(issues, discrepancies))
+
+    duration_ms = int((ended_at - started_at).total_seconds() * 1000)
+    return RunValues(
+        started_at=started_at, ended_at=ended_at, as_of=as_of,
+        window_start=window_start, window_end=window_end, layer=layer,
+        status=status,
+        integrity_issues_count=len(issues),
+        discrepancies_count=len(discrepancies),
+        critical_count=critical_count, warn_count=warn_count,
+        api_calls_used=api_calls_used, duration_ms=duration_ms,
+        error_message=error_message,
+    )
+
+
 def persist_run(
     conn,
     *,
@@ -1724,35 +1805,29 @@ def persist_run(
     read as "every standing finding is new". A failed statement inside an
     open DuckDB transaction poisons the shared connection, so the ROLLBACK is
     not optional.
+
+    DuckDB's writer of the journal while chain 9 is on DuckDB. Reached only
+    through `core.dq_journal.journal_run`, which decides the store
+    (`tests/unit/test_dq_journal.py` walks every caller).
     """
-    summary = summarize_discrepancies(discrepancies)
-    issue_sev = summarize_issues(issues)
-
-    critical_count = (
-        issue_sev.get("CRITICAL", 0)
-        + sum(1 for d in discrepancies if d.severity == Severity.CRITICAL)
+    values = run_values(
+        started_at=started_at, ended_at=ended_at, as_of=as_of,
+        window_start=window_start, window_end=window_end, layer=layer,
+        issues=issues, discrepancies=discrepancies,
+        api_calls_used=api_calls_used, error_message=error_message,
     )
-    warn_count = (
-        issue_sev.get("WARN", 0)
-        + sum(1 for d in discrepancies if d.severity == Severity.WARN)
-    )
-
-    if error_message is not None:
-        status = "FAILED"
-    else:
-        status = _status_from_severity(overall_severity(issues, discrepancies))
-
-    duration_ms = int((ended_at - started_at).total_seconds() * 1000)
 
     conn.execute("BEGIN TRANSACTION")
     try:
         run_id = _persist_run_rows(
-            conn, started_at=started_at, ended_at=ended_at, as_of=as_of,
-            window_start=window_start, window_end=window_end, layer=layer,
-            status=status, issues=issues, discrepancies=discrepancies,
-            critical_count=critical_count, warn_count=warn_count,
-            api_calls_used=api_calls_used, duration_ms=duration_ms,
-            error_message=error_message,
+            conn, started_at=values.started_at, ended_at=values.ended_at,
+            as_of=values.as_of, window_start=values.window_start,
+            window_end=values.window_end, layer=values.layer,
+            status=values.status, issues=issues, discrepancies=discrepancies,
+            critical_count=values.critical_count, warn_count=values.warn_count,
+            api_calls_used=values.api_calls_used,
+            duration_ms=values.duration_ms,
+            error_message=values.error_message,
         )
         conn.execute("COMMIT")
     except Exception:
@@ -1762,6 +1837,21 @@ def persist_run(
             pass
         raise
     return run_id
+
+
+# The two child INSERTs, one spelling each for every DuckDB writer of the
+# journal — today's statement and chain 9's shadow (`insert_journal_rows`).
+_ISSUES_INSERT = """
+            INSERT INTO data_quality_issues
+              (run_id, check_name, table_name, severity, count, sample_ids, description)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """
+_DIFFS_INSERT = """
+            INSERT INTO data_quality_diffs
+              (run_id, month, source_id, diff_class, field,
+               dk_value, kc_value, severity, order_ids)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
 
 
 def _persist_run_rows(
@@ -1789,23 +1879,14 @@ def _persist_run_rows(
     run_id = int(row[0])
 
     if issues:
-        conn.executemany("""
-            INSERT INTO data_quality_issues
-              (run_id, check_name, table_name, severity, count, sample_ids, description)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, [
+        conn.executemany(_ISSUES_INSERT, [
             (run_id, i.check_name, i.table_name, i.severity.value,
              i.count, json.dumps(list(i.sample_ids)), i.description)
             for i in issues
         ])
 
     if discrepancies:
-        conn.executemany("""
-            INSERT INTO data_quality_diffs
-              (run_id, month, source_id, diff_class, field,
-               dk_value, kc_value, severity, order_ids)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, [
+        conn.executemany(_DIFFS_INSERT, [
             (run_id, d.month, d.source_id, d.diff_class.value, d.field,
              d.dk_value, d.kc_value, d.severity.value,
              json.dumps(list(d.order_ids)) if d.order_ids else None)
@@ -1813,6 +1894,81 @@ def _persist_run_rows(
         ])
 
     return run_id
+
+
+@dataclass(frozen=True)
+class JournalRows:
+    """One run and its findings as the rows both stores are handed — chain 9's
+    unit of writing (OD-02 (c)): Postgres commits these, then DuckDB is given
+    the very same tuples (`insert_journal_rows`)."""
+    run: Tuple[Any, ...]                      # (run_id, *RUN_COLUMNS)
+    issues: Tuple[Tuple[Any, ...], ...]       # data_quality_issues' 7 columns
+    diffs: Tuple[Tuple[Any, ...], ...]        # data_quality_diffs' 9 columns
+
+    @property
+    def run_id(self) -> int:
+        return int(self.run[0])
+
+
+def _require_aware(name: str, value: Any) -> None:
+    """A naive timestamp reads as Kyiv local time in DuckDB and as UTC in
+    asyncpg, so one value handed to both would land three hours apart."""
+    if isinstance(value, datetime) and value.tzinfo is None:
+        raise ValueError(
+            f"{name}={value!r} is naive; the journal's two stores would read "
+            "it in two different zones")
+
+
+def journal_rows(
+    run_id: int,
+    values: RunValues,
+    issues: Sequence[IntegrityIssue],
+    discrepancies: Sequence[Discrepancy],
+) -> JournalRows:
+    """The rows of one run, for both stores. Pure.
+
+    The same expressions `_persist_run_rows` writes, with two normalisations
+    a second engine needs and DuckDB does not mind: `dk_value`/`kc_value` as
+    `float` (asyncpg's float8 refuses nothing a DOUBLE takes, but a `Decimal`
+    from a rollup would reach one store as a Decimal), and `count` as `int`.
+    Raises on a naive timestamp (`_require_aware`).
+    """
+    for column in ("started_at", "ended_at", "as_of"):
+        _require_aware(column, getattr(values, column))
+    run = (int(run_id),) + tuple(getattr(values, c) for c in RUN_COLUMNS)
+    issue_rows = tuple(
+        (int(run_id), i.check_name, i.table_name, i.severity.value,
+         int(i.count), json.dumps(list(i.sample_ids)), i.description)
+        for i in issues
+    )
+    diff_rows = tuple(
+        (int(run_id), d.month, int(d.source_id), d.diff_class.value, d.field,
+         float(d.dk_value), float(d.kc_value), d.severity.value,
+         json.dumps(list(d.order_ids)) if d.order_ids else None)
+        for d in discrepancies
+    )
+    return JournalRows(run=run, issues=issue_rows, diffs=diff_rows)
+
+
+def insert_journal_rows(conn, rows: JournalRows) -> None:
+    """DuckDB's half of a chain-9 write: the run with the id Postgres issued,
+    and its children through the same child statements as `persist_run`.
+
+    The caller owns the transaction (`core.shadow_writes.into_duckdb`). The
+    explicit `run_id` bypasses `data_quality_run_seq`, which then lags the
+    ids Postgres issued — harmless while Postgres allocates, and floored by
+    `_m0027` on every boot and by the copy-back on the way back.
+    """
+    cols = ", ".join(("run_id",) + RUN_COLUMNS)
+    marks = ", ".join("?" for _ in range(len(RUN_COLUMNS) + 1))
+    conn.execute(
+        f"INSERT INTO data_quality_runs ({cols}) VALUES ({marks})",
+        list(rows.run),
+    )
+    if rows.issues:
+        conn.executemany(_ISSUES_INSERT, [list(r) for r in rows.issues])
+    if rows.diffs:
+        conn.executemany(_DIFFS_INSERT, [list(r) for r in rows.diffs])
 
 
 # `severity` is text, so `ORDER BY severity DESC` ranked WARN, INFO, CRITICAL:
@@ -1824,16 +1980,49 @@ _WORST_FIRST = (
 )
 
 
-def fetch_run_diffs(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-    """Read all discrepancies for a run. For health/UI surface and digest."""
-    rows = conn.execute(f"""
+# The journal's three tables, as a hole each reader's text carries, so one
+# statement serves both stores: DuckDB's bare names, or Postgres's `app.*`
+# with `?` numbered (chain 9, OD-02 (c) — the readers follow the writer).
+JOURNAL_TABLES = {
+    "duckdb": {"runs": "data_quality_runs", "issues": "data_quality_issues",
+               "diffs": "data_quality_diffs"},
+    "postgres": {"runs": "app.data_quality_runs",
+                 "issues": "app.data_quality_issues",
+                 "diffs": "app.data_quality_diffs"},
+}
+
+
+def journal_sql(sql: str, engine: str = "duckdb") -> str:
+    """A reader's text for one engine: its table holes filled, and `?`
+    numbered for asyncpg when the engine is Postgres."""
+    rendered = sql.format(**JOURNAL_TABLES[engine])
+    if engine == "postgres":
+        from core.sql_dialect import numbered
+
+        return numbered(rendered)
+    return rendered
+
+
+RUN_DIFFS_SQL = f"""
         SELECT month, source_id, diff_class, field,
                dk_value, kc_value, severity, order_ids
-        FROM data_quality_diffs
+        FROM {{diffs}}
         WHERE run_id = ?
         ORDER BY {_WORST_FIRST}, month, source_id
         LIMIT ?
-    """, [run_id, limit]).fetchall()
+    """
+
+RUN_ISSUES_SQL = f"""
+        SELECT check_name, table_name, severity, count, sample_ids, description
+        FROM {{issues}}
+        WHERE run_id = ?
+        ORDER BY {_WORST_FIRST}, check_name
+        LIMIT ?
+    """
+
+
+def diff_dicts(rows) -> List[Dict[str, Any]]:
+    """`fetch_run_diffs`' shape, from either store's rows."""
     out: List[Dict[str, Any]] = []
     for r in rows:
         out.append({
@@ -1846,14 +2035,8 @@ def fetch_run_diffs(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]
     return out
 
 
-def fetch_run_issues(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]:
-    rows = conn.execute(f"""
-        SELECT check_name, table_name, severity, count, sample_ids, description
-        FROM data_quality_issues
-        WHERE run_id = ?
-        ORDER BY {_WORST_FIRST}, check_name
-        LIMIT ?
-    """, [run_id, limit]).fetchall()
+def issue_dicts(rows) -> List[Dict[str, Any]]:
+    """`fetch_run_issues`' shape, from either store's rows."""
     out: List[Dict[str, Any]] = []
     for r in rows:
         out.append({
@@ -1863,6 +2046,17 @@ def fetch_run_issues(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]
             "description": r[5],
         })
     return out
+
+
+def fetch_run_diffs(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+    """Read all discrepancies for a run. For health/UI surface and digest."""
+    rows = conn.execute(journal_sql(RUN_DIFFS_SQL), [run_id, limit]).fetchall()
+    return diff_dicts(rows)
+
+
+def fetch_run_issues(conn, run_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+    rows = conn.execute(journal_sql(RUN_ISSUES_SQL), [run_id, limit]).fetchall()
+    return issue_dicts(rows)
 
 
 # ─── What to do about it ─────────────────────────────────────────────────────
@@ -2281,26 +2475,30 @@ def format_alert_message(
     return "\n".join(lines)
 
 
-def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Read the most recent run row. Used by health endpoint."""
-    where = ""
-    params: List[Any] = []
-    if layer is not None:
-        where = "WHERE layer = ?"
-        params.append(layer)
-    row = conn.execute(f"""
+_RUN_SELECT = """
         SELECT run_id, started_at, ended_at, as_of, window_start, window_end,
                layer, status, integrity_issues_count, discrepancies_count,
                critical_count, warn_count, api_calls_used, duration_ms, error_message
-        FROM data_quality_runs
-        {where}
-        -- By id, not by `started_at`. `fetch_baseline_run` bounds on
-        -- `run_id`, and a reconstruction that ranks by one key while its
-        -- bound uses another is right only while the two never disagree.
-        -- Verified on all 350 production rows: identical ranking today.
+        FROM {runs}"""
+
+# By id, not by `started_at`. `fetch_baseline_run` bounds on `run_id`, and a
+# reconstruction that ranks by one key while its bound uses another is right
+# only while the two never disagree. Verified on all 350 production rows:
+# identical ranking today.
+LATEST_RUN_SQL = _RUN_SELECT + """
         ORDER BY run_id DESC
         LIMIT 1
-    """, params).fetchone()
+    """
+LATEST_RUN_OF_LAYER_SQL = _RUN_SELECT + """
+        WHERE layer = ?
+        ORDER BY run_id DESC
+        LIMIT 1
+    """
+RUN_BY_ID_SQL = _RUN_SELECT + " WHERE run_id = ?"
+
+
+def run_dict(row) -> Optional[Dict[str, Any]]:
+    """`fetch_latest_run`'s shape, from either store's row."""
     if not row:
         return None
     return {
@@ -2320,6 +2518,15 @@ def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, An
         "duration_ms": int(row[13] or 0),
         "error_message": row[14],
     }
+
+
+def fetch_latest_run(conn, layer: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Read the most recent run row. Used by health endpoint."""
+    if layer is None:
+        row = conn.execute(journal_sql(LATEST_RUN_SQL), []).fetchone()
+    else:
+        row = conn.execute(journal_sql(LATEST_RUN_OF_LAYER_SQL), [layer]).fetchone()
+    return run_dict(row)
 
 
 # Layers a run-age watchdog is expected to see. A layer that never appears
@@ -2457,6 +2664,24 @@ def alert_fingerprint(
     return f"dq:{layer}:{severity.value}:{body}"
 
 
+PREVIOUS_RUN_ID_SQL = """
+        SELECT run_id FROM {runs}
+        WHERE layer = ? AND run_id < ?
+          AND error_message IS NULL AND status <> 'FAILED'
+        ORDER BY run_id DESC
+        LIMIT 1
+    """
+
+BASELINE_RUN_ID_SQL = """
+            SELECT run_id FROM {runs}
+            WHERE layer = ? AND run_id < ?
+              AND error_message IS NULL AND status <> 'FAILED'
+              AND ended_at IS NOT NULL AND ended_at <= ?
+            ORDER BY run_id DESC
+            LIMIT 1
+        """
+
+
 def fetch_previous_run(conn, layer: str, before_run_id: int) -> Optional[Dict[str, Any]]:
     """The run of `layer` immediately preceding `before_run_id`, if any.
 
@@ -2464,13 +2689,8 @@ def fetch_previous_run(conn, layer: str, before_run_id: int) -> Optional[Dict[st
     runs are skipped: their zero counts would read as "fixed, then broke
     again" and turn every 429 into a fake recovery.
     """
-    row = conn.execute("""
-        SELECT run_id FROM data_quality_runs
-        WHERE layer = ? AND run_id < ?
-          AND error_message IS NULL AND status <> 'FAILED'
-        ORDER BY run_id DESC
-        LIMIT 1
-    """, [layer, before_run_id]).fetchone()
+    row = conn.execute(journal_sql(PREVIOUS_RUN_ID_SQL),
+                       [layer, before_run_id]).fetchone()
     if not row:
         return None
     return fetch_latest_run_by_id(conn, int(row[0]))
@@ -2503,14 +2723,8 @@ def fetch_baseline_run(conn, layer: str, *, sent_at, before_run_id: int):
     counts read as "fixed, then broke again".
     """
     if sent_at is not None:
-        row = conn.execute("""
-            SELECT run_id FROM data_quality_runs
-            WHERE layer = ? AND run_id < ?
-              AND error_message IS NULL AND status <> 'FAILED'
-              AND ended_at IS NOT NULL AND ended_at <= ?
-            ORDER BY run_id DESC
-            LIMIT 1
-        """, [layer, before_run_id, sent_at]).fetchone()
+        row = conn.execute(journal_sql(BASELINE_RUN_ID_SQL),
+                           [layer, before_run_id, sent_at]).fetchone()
         if row:
             return fetch_latest_run_by_id(conn, int(row[0]))
     return fetch_previous_run(conn, layer, before_run_id)
@@ -2518,31 +2732,8 @@ def fetch_baseline_run(conn, layer: str, *, sent_at, before_run_id: int):
 
 def fetch_latest_run_by_id(conn, run_id: int) -> Optional[Dict[str, Any]]:
     """Read one run row by id, in the same shape as `fetch_latest_run`."""
-    row = conn.execute("""
-        SELECT run_id, started_at, ended_at, as_of, window_start, window_end,
-               layer, status, integrity_issues_count, discrepancies_count,
-               critical_count, warn_count, api_calls_used, duration_ms, error_message
-        FROM data_quality_runs WHERE run_id = ?
-    """, [run_id]).fetchone()
-    if not row:
-        return None
-    return {
-        "run_id": int(row[0]),
-        "started_at": row[1].isoformat() if row[1] else None,
-        "ended_at": row[2].isoformat() if row[2] else None,
-        "as_of": row[3].isoformat() if row[3] else None,
-        "window_start": row[4].isoformat() if row[4] else None,
-        "window_end": row[5].isoformat() if row[5] else None,
-        "layer": row[6],
-        "status": row[7],
-        "integrity_issues_count": int(row[8] or 0),
-        "discrepancies_count": int(row[9] or 0),
-        "critical_count": int(row[10] or 0),
-        "warn_count": int(row[11] or 0),
-        "api_calls_used": int(row[12] or 0),
-        "duration_ms": int(row[13] or 0),
-        "error_message": row[14],
-    }
+    row = conn.execute(journal_sql(RUN_BY_ID_SQL), [run_id]).fetchone()
+    return run_dict(row)
 
 
 # ─── Daily digest ─────────────────────────────────────────────────────────────
@@ -2760,18 +2951,27 @@ def fetch_last_success_ages(
     reports `last_success_at=None, age_seconds=None`, so the consumer can
     tell "never ran" apart from "ran recently" instead of seeing a missing key.
     """
-    placeholders = ", ".join("?" for _ in layers)
-    rows = conn.execute(f"""
+    rows = conn.execute(last_success_sql(len(layers)), list(layers)).fetchall()
+    return success_ages(rows, layers)
+
+
+def last_success_sql(n_layers: int, engine: str = "duckdb") -> str:
+    """`fetch_last_success_ages`' statement for `n_layers` layers."""
+    placeholders = ", ".join("?" for _ in range(n_layers))
+    return journal_sql(f"""
         SELECT layer,
                MAX(started_at) AS last_success_at,
                EXTRACT(EPOCH FROM (now() - MAX(started_at))) AS age_seconds
-        FROM data_quality_runs
+        FROM {{runs}}
         WHERE layer IN ({placeholders})
           AND error_message IS NULL
           AND status <> 'FAILED'
         GROUP BY layer
-    """, list(layers)).fetchall()
+    """, engine)
 
+
+def success_ages(rows, layers: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    """`fetch_last_success_ages`' shape, from either store's rows."""
     found = {
         r[0]: {
             "last_success_at": r[1].isoformat() if r[1] else None,
