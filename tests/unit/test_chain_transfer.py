@@ -74,6 +74,12 @@ class TestTheClockIsDerived:
             "bronze.buyers": ("updated_at",),
             "bronze.buyer_contacts": (),
             "app.buyer_gender": ("decided_at",),
+            # Chain 6. KeyCRM serves no `updated_at` for a product or a
+            # category, and DuckDB's `synced_at` against Postgres's
+            # `mirrored_at` is each store's own bookkeeping: nothing orders
+            # two versions, and the rewrite clock dates the chain's writes.
+            "bronze.products": (),
+            "bronze.categories": (),
         }
 
 

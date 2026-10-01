@@ -355,7 +355,38 @@ class Buyers:
     contact_missing_sample: Tuple[int, ...] = ()
 
 
+@dataclass(frozen=True)
+class CatalogueTable:
+    """One catalogue table against the last full write's instant (OD-15 (a)).
+
+    `last_ok_at` is `meta.mirror_state.last_ok_at` — the instant the last full
+    write (the chain's, or the mirror's before it) stamped on every row it
+    carried — and `last_rows` how many distinct rows it carried. `current`,
+    `retired` and `around` split the table by `mirrored_at` against it: equal,
+    earlier (KeyCRM stopped serving the row) and later (written round the
+    chain). None for `last_ok_at` is a table no full write has ever stamped."""
+    table: str
+    rows: int = 0
+    last_ok_at: Optional[datetime] = None
+    last_rows: Optional[int] = None
+    current: int = 0
+    retired: int = 0
+    around: int = 0
+    retired_sample: Tuple[int, ...] = ()
+    around_sample: Tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class Catalogue:
+    """Chain 6's two tables. `latched_at` None is a chain flagged that has not
+    written here yet: "lost" is not judged then, because the last full write
+    was the mirror's, whose `last_rows` counts a repeated payload id twice."""
+    tables: Tuple[CatalogueTable, ...] = ()
+    latched_at: Optional[datetime] = None
+
+
 Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Unwatched, None]
+Group = Union[Group, Catalogue]
 
 
 @dataclass(frozen=True)
@@ -375,6 +406,7 @@ class Facts:
     goals: Group = None
     expense_types: Group = None
     buyers: Group = None
+    catalogue: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
@@ -399,6 +431,12 @@ DICTIONARY_EMPTY = "chain_dictionary_empty"
 NAME_UNRESOLVED = "chain_name_unresolved"
 BUYER_ORPHANS = "chain_buyer_orphan_rows"
 CONTACT_MISSING = "chain_buyer_contact_missing"
+# Chain 6, the catalogue (OD-15 (a)): `CatalogueTable`'s three counts judged.
+CATALOGUE_EMPTY = "chain_catalogue_empty"
+CATALOGUE_WRITTEN_AROUND = "chain_catalogue_written_around"
+CATALOGUE_ROWS_LOST = "chain_catalogue_rows_lost"
+CATALOGUE_RETIRED = "chain_catalogue_retired"
+CATALOGUE_SHORT_WRITE = "chain_catalogue_short_write"
 UNWATCHED = "chain_invariants_unwatched"
 
 # What a blind run holds rather than resolves — `data_quality`'s
@@ -408,6 +446,8 @@ CONDITIONS: Tuple[str, ...] = (
     ROLLUP_MISSING, SNAPSHOT_SHORT, WATERMARK_STALE,
     DICTIONARY_EMPTY, NAME_UNRESOLVED, BUYER_ORPHANS, CONTACT_MISSING,
 )
+CONDITIONS += (CATALOGUE_EMPTY, CATALOGUE_WRITTEN_AROUND, CATALOGUE_ROWS_LOST,
+               CATALOGUE_RETIRED, CATALOGUE_SHORT_WRITE)
 
 # The family name every condition above carries, and the key the integrity
 # job resolves them by when its DuckDB half failed (`resolve_group(...,
@@ -463,12 +503,14 @@ def _reader_groups() -> Dict[str, str]:
         pg_buyers_write, pg_expense_types_write, pg_expenses_write,
         pg_goals_write, pg_inventory_write,
     )
+    from core import pg_catalogue_write
 
     return {pg_expenses_write.CHAIN: "expenses",
             pg_inventory_write.CHAIN: "inventory",
             pg_goals_write.CHAIN: "goals",
             pg_expense_types_write.CHAIN: "expense_types",
-            pg_buyers_write.CHAIN: "buyers"}
+            pg_buyers_write.CHAIN: "buyers",
+            pg_catalogue_write.CHAIN: "catalogue"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -645,6 +687,22 @@ SELECT count(*) FILTER (WHERE kind = 'contact') AS contacts,
 FROM orphans
 """
 
+# One catalogue table split by `mirrored_at` against the last full write's
+# instant. The table name is the chain's own constant, never input.
+_CATALOGUE_STATE_SQL = (
+    "SELECT last_ok_at, last_rows FROM meta.mirror_state WHERE table_name = $1")
+_CATALOGUE_SPLIT_SQL = """
+SELECT count(*)                                         AS rows,
+       count(*) FILTER (WHERE mirrored_at = $1)         AS current,
+       count(*) FILTER (WHERE mirrored_at < $1)         AS retired,
+       count(*) FILTER (WHERE mirrored_at > $1)         AS around,
+       (array_agg(id ORDER BY id) FILTER (WHERE mirrored_at < $1))[1:10]
+                                                        AS retired_sample,
+       (array_agg(id ORDER BY id) FILTER (WHERE mirrored_at > $1))[1:10]
+                                                        AS around_sample
+FROM {table}
+"""
+
 _KYIV_DAY_SQL = "SELECT ($1::timestamptz AT TIME ZONE 'Europe/Kyiv')::date"
 
 _ROLLUP_SQL = """
@@ -725,6 +783,32 @@ async def _read_buyers(conn, latched_at: Optional[datetime] = None) -> Buyers:
                   orphan_contacts=int(orphans["contacts"]),
                   orphan_verdicts=int(orphans["verdicts"]),
                   orphan_sample=tuple(int(i) for i in orphans["sample"]))
+
+
+async def _read_catalogue(conn, latched_at: Optional[datetime] = None) -> Catalogue:
+    """Both catalogue tables against their last full write. A table with no
+    stamp is read for its size alone — the verdict says why it is unjudged."""
+    from core.pg_catalogue_write import CHAIN_TABLES
+
+    tables: List[CatalogueTable] = []
+    for table in CHAIN_TABLES:
+        state = await conn.fetchrow(_CATALOGUE_STATE_SQL, table)
+        last_ok_at = state["last_ok_at"] if state else None
+        last_rows = state["last_rows"] if state else None
+        if last_ok_at is None:
+            rows = await conn.fetchval(f"SELECT count(*) FROM {table}")
+            tables.append(CatalogueTable(table=table, rows=int(rows),
+                                         last_rows=last_rows))
+            continue
+        row = await conn.fetchrow(_CATALOGUE_SPLIT_SQL.format(table=table), last_ok_at)
+        tables.append(CatalogueTable(
+            table=table, rows=int(row["rows"]), last_ok_at=last_ok_at,
+            last_rows=None if last_rows is None else int(last_rows),
+            current=int(row["current"]), retired=int(row["retired"]),
+            around=int(row["around"]),
+            retired_sample=tuple(int(i) for i in (row["retired_sample"] or ())),
+            around_sample=tuple(int(i) for i in (row["around_sample"] or ()))))
+    return Catalogue(tables=tuple(tables), latched_at=latched_at)
 
 
 async def _read_inventory(conn, latched_at: Optional[datetime],
@@ -866,6 +950,7 @@ async def read_facts(*, pool=None) -> Facts:
     from core import (
         pg_buyers_write, pg_expenses_write, pg_goals_write, pg_inventory_write,
     )
+    from core import pg_catalogue_write
 
     groups: Dict[str, Group] = {}
     watermarks_unread: Optional[Unwatched] = None
@@ -887,6 +972,8 @@ async def read_facts(*, pool=None) -> Facts:
                     "expense_types": _read_expense_types,
                     "buyers": lambda c: _read_buyers(
                         c, _stamp(watched.get(pg_buyers_write.CHAIN))),
+                    "catalogue": lambda c: _read_catalogue(
+                        c, _stamp(watched.get(pg_catalogue_write.CHAIN))),
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -924,6 +1011,7 @@ async def read_facts(*, pool=None) -> Facts:
                  goals=groups.get("goals"),
                  expense_types=groups.get("expense_types"),
                  buyers=groups.get("buyers"),
+                 catalogue=groups.get("catalogue"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
                  unread=unread)
 
@@ -1210,6 +1298,91 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
     return issues
 
 
+def _catalogue_issues(cat: Catalogue, chain: str) -> List:
+    """OD-15 (a), judged on what Postgres holds. Pure.
+
+    Every rule but "lost" holds whoever made the last full write — the mirror
+    stamps `last_ok_at` in its rows' transaction exactly as the chain does —
+    so they are judged from the flag. "Lost" reads `last_rows`, which only the
+    chain's own write counts exactly, so it waits for that write."""
+    from core.data_quality import Severity
+    from core.pg_catalogue_write import RETIRED_WARN_MIN_ROWS, RETIRED_WARN_PCT
+
+    issues: List = []
+    for t in cat.tables:
+        if not t.rows:
+            issues.append(_issue(
+                check_name=CATALOGUE_EMPTY, table_name=t.table,
+                severity=Severity.CRITICAL, count=1,
+                description=(
+                    f"{t.table} holds no rows, and {chain} writes it: every "
+                    "order line Postgres serves joins it for a name, a brand "
+                    "and a category, so the dashboard's goods read Unknown. "
+                    "The writer upserts and never deletes, so something else "
+                    "emptied it — or the chain was flipped onto a Postgres the "
+                    "mirror never reached.")))
+            continue
+        if t.last_ok_at is None:
+            issues.append(unwatched_issue(
+                f"meta.mirror_state records no full write of {t.table}, so a "
+                "retired row cannot be told from a lost one", (chain,)))
+            continue
+        if t.around:
+            shown = ", ".join(str(i) for i in t.around_sample)
+            issues.append(_issue(
+                check_name=CATALOGUE_WRITTEN_AROUND, table_name=t.table,
+                severity=Severity.CRITICAL, count=t.around,
+                sample_ids=t.around_sample,
+                description=(
+                    f"{t.around} row(s) of {t.table} were written after the "
+                    f"last full write of the catalogue (e.g. id {shown}). "
+                    f"{chain} writes the whole catalogue and stamps "
+                    "meta.mirror_state in the same transaction, so every row it "
+                    "writes carries that instant exactly; a later one is a "
+                    "writer going round it, and nothing compares this table "
+                    "with DuckDB any more.")))
+        if (cat.latched_at is not None and t.last_rows is not None
+                and t.last_ok_at >= cat.latched_at):
+            lost = t.last_rows - t.current - t.around
+            if lost > 0:
+                issues.append(_issue(
+                    check_name=CATALOGUE_ROWS_LOST, table_name=t.table,
+                    severity=Severity.CRITICAL, count=lost,
+                    description=(
+                        f"The last full write of {t.table} carried "
+                        f"{t.last_rows} row(s) and {t.current + t.around} of "
+                        f"them are still there: at least {lost} were deleted "
+                        f"since. {chain} never deletes, so a statement that is "
+                        "not the chain's removed them. The next full write "
+                        "restores any KeyCRM still serves.")))
+        if t.retired:
+            shown = ", ".join(str(i) for i in t.retired_sample)
+            issues.append(_issue(
+                check_name=CATALOGUE_RETIRED, table_name=t.table,
+                severity=Severity.INFO, count=t.retired,
+                sample_ids=t.retired_sample,
+                description=(
+                    f"{t.retired} row(s) of {t.table} were not in the last "
+                    f"full write (e.g. id {shown}): KeyCRM no longer serves "
+                    "them. The writer never deletes, so old orders on them "
+                    "keep their names. Not a defect.")))
+            share = t.retired * 100.0 / t.rows
+            if share > RETIRED_WARN_PCT and t.retired >= RETIRED_WARN_MIN_ROWS:
+                issues.append(_issue(
+                    check_name=CATALOGUE_SHORT_WRITE, table_name=t.table,
+                    severity=Severity.WARN, count=t.retired,
+                    sample_ids=t.retired_sample,
+                    description=(
+                        f"{share:.1f}% of {t.table} was missing from the last "
+                        f"full write ({t.last_rows} row(s) written against "
+                        f"{t.rows} held), over the {RETIRED_WARN_PCT:g}% "
+                        "KeyCRM retires in the ordinary way. The sync's "
+                        "pagination stops on the first short page, so this is "
+                        "most likely a truncated catalogue; the next full "
+                        "write carries the rest.")))
+    return issues
+
+
 def _watermark_issues(marks: Tuple[WatermarkAge, ...]) -> List:
     from core.data_quality import Severity
 
@@ -1316,6 +1489,14 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
         issues += _null_issues(facts.buyers.nulls, pg_buyers_write.CHAIN,
                                facts.buyers.latched_at)
         issues += _buyer_issues(facts.buyers, pg_buyers_write.CHAIN)
+
+    from core import pg_catalogue_write
+
+    if isinstance(facts.catalogue, Unwatched):
+        issues.append(unwatched_issue(facts.catalogue.reason,
+                                      (pg_catalogue_write.CHAIN,)))
+    elif isinstance(facts.catalogue, Catalogue):
+        issues += _catalogue_issues(facts.catalogue, pg_catalogue_write.CHAIN)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(

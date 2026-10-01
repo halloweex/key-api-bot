@@ -313,6 +313,20 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "the orphaned rows are corrected or their buyers land — a human, not a job"),
     "chain_buyer_contact_missing": _c(
         "the next write of each buyer rewrites its contacts"),
+    # Chain 6's catalogue (OD-15 (a)). Retired is a fact about KeyCRM, not a
+    # defect; the rest are writes that went round the chain, or a short page.
+    "chain_catalogue_empty": _c(
+        "a products sync or a full sync lands the catalogue again"),
+    "chain_catalogue_written_around": _c(
+        "the next full write re-stamps the rows — once a human has found the "
+        "writer that went round the chain"),
+    "chain_catalogue_rows_lost": _c(
+        "the next full write restores what KeyCRM still serves; a human finds "
+        "the statement that deleted them"),
+    "chain_catalogue_retired": _c(
+        "KeyCRM serves the rows again — or never; it is not a defect"),
+    "chain_catalogue_short_write": _c(
+        "the next full write carries the whole catalogue"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 

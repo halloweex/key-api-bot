@@ -4531,6 +4531,9 @@ BUYER_CONTACTS_SPEC = MirroredTable(
 # DuckDB, never replaced out of it — for the copy-back's third source. Not
 # `MIRRORED_TABLES`, which is the catalogue `reconcile_mirror` compares.
 MIRRORED_LANDING_TABLES = (BUYERS_SPEC, BUYER_CONTACTS_SPEC)
+# Chain 6: the catalogue, which `MIRRORED_TABLES` compares daily and the
+# copy-back reads the other way — the same two specs, not a second description.
+MIRRORED_LANDING_TABLES += (PRODUCTS_SPEC, CATEGORIES_SPEC)
 
 # A contact is part of the landing only with its buyer. Neither store declares
 # a foreign key, and this check has always read DuckDB's contacts through a
