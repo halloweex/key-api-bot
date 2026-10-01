@@ -305,19 +305,28 @@ _COPIED_FROM_SQLITE = (
 )
 
 
+# The catalogue, as constants rather than inline, because three readers need
+# the one description: the daily comparison below, the carry of the rows it
+# calls retired (`core.pg_landing.carry_retired_catalogue`), and chain 6's
+# copy-back (`core.chain_transfer.chain_specs`), which reads these tables the
+# other way — the buyers' arrangement (`BUYERS_SPEC`).
+PRODUCTS_SPEC = MirroredTable(
+    pg_table="bronze.products",
+    dk_table="products",
+    columns=tuple(PRODUCT_COLUMNS),
+    numeric=("price",),
+)
+
+CATEGORIES_SPEC = MirroredTable(
+    pg_table="bronze.categories",
+    dk_table="categories",
+    columns=tuple(CATEGORY_COLUMNS),
+)
+
 # Order matters only for reporting. Products first: it is the table that moves.
 MIRRORED_TABLES: Tuple[MirroredTable, ...] = (
-    MirroredTable(
-        pg_table="bronze.products",
-        dk_table="products",
-        columns=tuple(PRODUCT_COLUMNS),
-        numeric=("price",),
-    ),
-    MirroredTable(
-        pg_table="bronze.categories",
-        dk_table="categories",
-        columns=tuple(CATEGORY_COLUMNS),
-    ),
+    PRODUCTS_SPEC,
+    CATEGORIES_SPEC,
     # Not a mirror — a replica. `is_retail` and the effective-dated intervals
     # are decisions KeyCRM cannot supply, so `core/pg_replication.py` copies
     # what DuckDB holds rather than re-deriving them. `full_replace` because
