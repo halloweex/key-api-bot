@@ -142,9 +142,10 @@ DQ_DIFFS_TABLE = "app.data_quality_diffs"
 OFFERS_TABLE = "bronze.offers"
 SYNC_METADATA_TABLE = "app.sync_metadata"
 # The forecast group (revision 0025). Four tables, 313 rows, and the reason
-# they come first out of the sixteen with no Postgres home: `get_predictions`
-# and `generate_smart_goals` are the last two dashboard reads still tied to
-# DuckDB, and they are tied to it only because these are not here.
+# they came first out of the sixteen with no Postgres home: `get_predictions`
+# and `generate_smart_goals` were the last two dashboard reads tied to DuckDB.
+# `get_predictions` moved with #183; the smart goal's reads of the other three
+# stay where they are written until their writer moves (chain 7b-3).
 PREDICTIONS_TABLE = "app.revenue_predictions"
 SEASONAL_TABLE = "app.seasonal_indices"
 WEEKLY_PATTERNS_TABLE = "app.weekly_patterns"
