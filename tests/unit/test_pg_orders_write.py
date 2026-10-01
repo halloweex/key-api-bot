@@ -6,7 +6,7 @@ every precondition holds (OD-13 (a)). Production has the flag off; what is
 pinned here is that off means today's behaviour, that on means Postgres and
 nothing else, and that the flag cannot move the writes before the goal
 bridge, step 13, chain 1 and the backups say it may. Against a real Postgres
-the writer is proved in `tests/integration/test_orders_writer.py`.
+the writer is proved in `tests/integration/test_orders_chain_writer.py`.
 
 Each test names the mutation it exists to fail on.
 """
