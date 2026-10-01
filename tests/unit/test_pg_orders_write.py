@@ -705,6 +705,57 @@ class TestTheFirstTickAfterTheFlip:
         assert await duck.get_last_sync_time("offers") is None
 
 
+class TestTheTickSaysWhenItWaitsForTheHeavyLock:
+    @pytest.mark.asyncio
+    async def test_the_wait_is_published_and_ends_when_the_tick_runs(self, flags, monkeypatch):
+        """What the canary's allowance reads. Mutations: drop `waiting()` —
+        the wait is never published and a heavy hold pages; drop the
+        `done_waiting()` taken with the lock — a tick stuck INSIDE the lock
+        reads as waiting, and is excused for 90 minutes instead of 20."""
+        from core import sync_service as sync_mod
+        from core.scheduler import BackgroundScheduler
+        from core.sync_service import SyncService
+
+        svc = SyncService(_quiet_store())
+        seen_inside = []
+
+        async def tick():
+            seen_inside.append(svc.orders_step_health()["lock_wait_s"])
+            return {"orders": 0}
+
+        svc.incremental_sync = tick
+        monkeypatch.setattr(sync_mod, "get_sync_service", AsyncMock(return_value=svc))
+        scheduler = BackgroundScheduler()
+        assert svc.orders_step_health()["lock_wait_s"] is None
+
+        await scheduler._heavy_job_lock.acquire()              # the 05:15 refresh
+        job = asyncio.ensure_future(scheduler._run_incremental_sync())
+        for _ in range(50):
+            if svc.orders_step.waiting_since is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert svc.orders_step_health()["lock_wait_s"] is not None
+        assert not job.done()
+        scheduler._heavy_job_lock.release()
+        assert await asyncio.wait_for(job, 5) == {"orders": 0}
+
+        assert seen_inside == [None]
+        assert svc.orders_step_health()["lock_wait_s"] is None
+
+    @pytest.mark.asyncio
+    async def test_a_tick_that_raises_stops_waiting(self, flags, monkeypatch):
+        from core import sync_service as sync_mod
+        from core.scheduler import BackgroundScheduler
+        from core.sync_service import SyncService
+
+        svc = SyncService(_quiet_store())
+        svc.incremental_sync = AsyncMock(side_effect=RuntimeError("tick"))
+        monkeypatch.setattr(sync_mod, "get_sync_service", AsyncMock(return_value=svc))
+        with pytest.raises(RuntimeError):
+            await BackgroundScheduler()._run_incremental_sync()
+        assert svc.orders_step.waiting_since is None
+
+
 # ─── G13: the canary pages a step that stopped, under the chain only ─────────
 
 
@@ -729,6 +780,7 @@ class TestTheCanary:
         ({"last_ok_age_s": 14 * 60}, False),
         ({"last_ok_age_s": 25 * 60, "last_attempt_age_s": 25 * 60}, True),
         ({"last_ok_age_s": 25 * 60, "last_attempt_age_s": None}, True),
+        ({"lock_wait_s": None}, False),
     ])
     def test_it_fires_on_a_streak_a_stale_success_or_a_step_not_reached(self, step, fires):
         from bot.canary import check_orders_sync_chain
@@ -738,6 +790,39 @@ class TestTheCanary:
         if fires:
             (key, message), = found
             assert key == "orders_sync_failing" and "chain 3" in message
+
+    @pytest.mark.parametrize("step,fires,says", [
+        # The review's shape: a 22-minute heavy hold right after a success —
+        # the tick queued behind the lock, nothing at fault. Mutation: ignore
+        # `lock_wait_s`.
+        ({"last_ok_age_s": 22 * 60, "last_attempt_age_s": 22 * 60,
+          "lock_wait_s": 21 * 60 + 30}, False, None),
+        ({"last_ok_age_s": 80 * 60, "last_attempt_age_s": 80 * 60,
+          "lock_wait_s": 79 * 60}, False, None),
+        # Stale BEFORE the wait began: the wait excuses its own length and
+        # nothing more. Mutation: answer "not stale" for any wait.
+        ({"last_ok_age_s": 40 * 60, "last_attempt_age_s": 40 * 60,
+          "lock_wait_s": 10 * 60}, True, "not reached"),
+        ({"last_ok_age_s": 30 * 60, "last_attempt_age_s": 12 * 60,
+          "lock_wait_s": 10 * 60}, True, "no success"),
+        # A wait past chain 4's bound: whatever holds the lock is stuck.
+        # Mutation: no bound on the wait.
+        ({"last_ok_age_s": 92 * 60, "last_attempt_age_s": 92 * 60,
+          "lock_wait_s": 91 * 60}, True, "heavy-job lock"),
+        # A streak pages whatever the tick is doing now.
+        ({"consecutive_failures": 3, "lock_wait_s": 60}, True, "failures in a row"),
+    ])
+    def test_a_tick_queued_behind_the_heavy_lock_is_not_a_stopped_one(self, step, fires, says):
+        """The chain-3 review: the full sync, training, the backup and the
+        05:15 refresh hold `_heavy_job_lock`, the tick waits behind them, and
+        a hold past 20 minutes paged CRITICAL with no fault behind it."""
+        from bot.canary import check_orders_sync_chain
+
+        found = check_orders_sync_chain(self._payload(**step))
+        assert bool(found) is fires, found
+        if fires:
+            (key, message), = found
+            assert key == "orders_sync_failing" and says in message
 
     @pytest.mark.parametrize("mode", ["duckdb", None])
     def test_not_under_duckdb(self, mode):

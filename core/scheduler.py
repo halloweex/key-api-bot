@@ -1048,20 +1048,32 @@ class BackgroundScheduler:
     # ═══════════════════════════════════════════════════════════════════════════
 
     async def _run_incremental_sync(self) -> Dict[str, Any]:
-        """Run incremental sync job."""
-        async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
-                logger.debug("Starting incremental sync job")
+        """Run incremental sync job.
 
-                from core.sync_service import get_sync_service
-                sync_service = await get_sync_service()
-                stats = await sync_service.incremental_sync()
+        The wait for `_heavy_job_lock` is recorded on the order step's state
+        (`OrdersStepState.waiting`): the Sunday full sync, training, the
+        backup and the 05:15 refresh hold the lock, and under chain 3 the
+        canary judges the order step by its ages — a tick queued behind them
+        is not a tick that stopped (the chain-3 review)."""
+        from core.sync_service import get_sync_service
 
-                logger.debug(
-                    "Incremental sync job complete",
-                    extra={"stats": stats}
-                )
-                return stats
+        sync_service = await get_sync_service()
+        sync_service.orders_step.waiting()
+        try:
+            async with self._heavy_job_lock:
+                sync_service.orders_step.done_waiting()
+                with correlation_context() as corr_id:
+                    logger.debug("Starting incremental sync job")
+
+                    stats = await sync_service.incremental_sync()
+
+                    logger.debug(
+                        "Incremental sync job complete",
+                        extra={"stats": stats}
+                    )
+                    return stats
+        finally:
+            sync_service.orders_step.done_waiting()
 
     async def _run_full_sync(self) -> Dict[str, Any]:
         """Run full sync job (90 days)."""

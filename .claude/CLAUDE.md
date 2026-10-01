@@ -1584,7 +1584,13 @@ freshness check): it is where the window starts, and read as absent it was
 "an hour ago", so a flip after a day of KeyCRM failing skipped every order
 updated in that day (found in review). The canary pages
 **`orders_sync_failing`** (CRITICAL) on three failures in a row, no success for
-15 minutes, or the step not reached for 20.
+15 minutes, or the step not reached for 20 — except while the tick waits
+for the heavy-job lock (`sync_step.lock_wait_s`, recorded by the scheduler's
+tick): the full sync, training, the backup and the 05:15 refresh hold it,
+and a hold past 20 minutes paged with nothing at fault (found in review).
+The wait excuses its own length, never what was stale before it, and pages
+on its own past 90 minutes, chain 4's bound. How long those jobs hold the
+lock has not been measured.
 
 **What stands down with it.** DuckDB's arm of `dq_reconciliation` (layer
 `reconciliation`): against a DuckDB that no longer receives orders it would

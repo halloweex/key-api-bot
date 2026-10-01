@@ -625,6 +625,15 @@ ORDERS_CHAIN = "pg_orders_write"
 ORDERS_SYNC_FAILURES = 3
 ORDERS_SYNC_STALE_S = 15 * 60
 ORDERS_SYNC_UNREACHED_S = 20 * 60
+# Except while the tick waits for the scheduler's heavy-job lock
+# (`lock_wait_s`): the Sunday full sync, training, the backup and the 05:15
+# refresh hold it, and the tick queues behind them before it can reach the
+# step. Nobody has measured how long they hold it, so the wait is not given a
+# number of its own to fit inside: the clocks are judged as they stood when the
+# wait began — a step already stale before it still pages — and the wait
+# itself pages past chain 4's bound for its own step, the point past which
+# whatever holds the lock is stuck (the chain-3 review).
+ORDERS_SYNC_LOCK_WAIT_MAX_S = 90 * 60
 
 
 def check_orders_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
@@ -647,6 +656,16 @@ def check_orders_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
         return [("orders_sync_failing",
                  f"order sync: {failures} failures in a row ({error}) — chain 3 "
                  "makes it the only writer of orders")]
+    wait = _number(step.get("lock_wait_s"))
+    if wait is not None:
+        if wait > ORDERS_SYNC_LOCK_WAIT_MAX_S:
+            return [("orders_sync_failing",
+                     f"order sync: waiting {wait // 60} min for the heavy-job "
+                     "lock — whatever holds it is stuck — and chain 3 makes it "
+                     "the only writer of orders")]
+        # The wait excuses its own length and nothing before it.
+        ok_age = None if ok_age is None else max(0, ok_age - wait)
+        attempt = None if attempt is None else max(0, attempt - wait)
     if attempt is None or attempt > ORDERS_SYNC_UNREACHED_S:
         if ok_age is not None and ok_age > ORDERS_SYNC_UNREACHED_S:
             return [("orders_sync_failing",
@@ -1337,7 +1356,7 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("derivation_marks_",
      "Read meta.derivation_signal's last_error in meta.mirror_state, then meta.derivation_runs"),
     ("orders_sync_failing",
-     "Chain 3: nothing else writes orders. write_chains.pg_orders_write.sync_step names the error class; Postgres back, the 24 h window refills"),
+     "Chain 3: nothing else writes orders. write_chains.pg_orders_write.sync_step names the error class (a long lock_wait_s: /api/jobs shows the heavy job); Postgres back, the 24 h window refills"),
     ("buyer_sync_stalled_chain",
      "Chain 4: nothing else writes buyers. 'step not reached' means the tick stops first: grep 'Incremental sync'; else buyer_sync names the error class, grep 'Buyer'"),
     ("buyer_sync_",

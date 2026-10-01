@@ -170,6 +170,18 @@ class OrdersStepState:
         self.last_attempt_at: Optional[datetime] = None
         self.last_error_class: Optional[str] = None
         self.last_refused = 0
+        # When the scheduler's tick began waiting for `_heavy_job_lock`, or
+        # None while it is not waiting. The full sync, training, the backup
+        # and the 05:15 refresh hold that lock, and the tick queues behind
+        # them before it can reach the step; the canary must tell that wait
+        # from a tick that stopped (`check_orders_sync_chain`).
+        self.waiting_since: Optional[datetime] = None
+
+    def waiting(self) -> None:
+        self.waiting_since = datetime.now(timezone.utc)
+
+    def done_waiting(self) -> None:
+        self.waiting_since = None
 
     def attempted(self) -> None:
         self.last_attempt_at = datetime.now(timezone.utc)
@@ -199,6 +211,8 @@ class OrdersStepState:
             "last_attempt_age_s": age(self.last_attempt_at),
             "last_error_class": self.last_error_class,
             "last_refused": self.last_refused,
+            # How long the tick has waited for the heavy-job lock, or None.
+            "lock_wait_s": age(self.waiting_since),
         }
 
 
