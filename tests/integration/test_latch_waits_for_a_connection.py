@@ -42,7 +42,7 @@ import pytest_asyncio
 
 from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-    pg_goals_write, pg_inventory_write, write_chains,
+    pg_goals_write, pg_inventory_write, pg_orders_write, write_chains,
 )
 
 DSN = os.getenv("KS_PG_DSN")
@@ -53,7 +53,13 @@ pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_P
 # next module as a chain owning a table with no local marker.
 _WRITTEN = ("bronze.offers", "app.manual_expenses", "app.revenue_goals",
             "bronze.expense_types", "bronze.buyer_contacts", "app.buyer_gender",
-            "bronze.buyers")
+            "bronze.buyers", "bronze.order_products", "bronze.expenses",
+            "bronze.orders", "app.order_backfill_misses")
+
+# Chain 3's order, and the archive rows its write captures: `app.order_versions`
+# is append-only for every writer in the repository, so only this order's are
+# removed, by a test, and never the table.
+ORDER_ID = 990_301
 
 STOCK = {"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
          "quantity": 40, "reserve": 0}
@@ -63,6 +69,7 @@ async def _clean(pool):
     async with pool.acquire() as conn:
         for table in _WRITTEN:
             await conn.execute(f"DELETE FROM {table}")
+        await conn.execute("DELETE FROM app.order_versions WHERE order_id = $1", ORDER_ID)
         await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
 
 
@@ -201,6 +208,28 @@ async def _derive(_store):
     return await pg_buyers_write.derive_gender_pg()
 
 
+def _order_payload(oid: int = ORDER_ID) -> dict:
+    when = "2026-09-20T12:00:00+00:00"
+    return {
+        "id": oid, "source_id": 1, "status_id": 12, "status_group_id": 4,
+        "grand_total": "100.00", "ordered_at": when, "created_at": when,
+        "updated_at": when, "buyer": {"id": 5301}, "manager": {"id": 4},
+        "manager_comment": None, "promocode": None,
+        "products": [{"name": "Товар", "quantity": 1, "price_sold": "100.00",
+                      "offer": {"product_id": 701}}],
+        "expenses": [{"id": 77_301, "expense_type_id": 1, "amount": 10.5,
+                      "status": "paid"}],
+    }
+
+
+def _sync_orders(store):
+    """Chain 3's order write, through the one call site every sync path
+    reaches (`SyncService._upsert_orders_with_expenses`)."""
+    from core.sync_service import SyncService
+
+    return SyncService(store)._upsert_orders_with_expenses([_order_payload()])
+
+
 # Writers that return their failure rather than raise it — chain 4's
 # derivation, `derive_gender`'s contract. A cancellation still goes through.
 NEVER_RAISES = {"derive_gender_pg"}
@@ -228,6 +257,13 @@ WRITERS = {
         [{"id": 1, "name": "Delivery"}])),
     "upsert_buyers": (pg_buyers_write, lambda s: s.upsert_buyers([_buyer()])),
     "derive_gender_pg": (pg_buyers_write, _derive),
+    "upsert_orders_with_expenses": (pg_orders_write, _sync_orders),
+    "record_backfill_misses": (pg_orders_write, lambda s: s.record_backfill_misses(
+        {ORDER_ID: "not_in_keycrm"})),
+    # Reached from the two comment backfills, which call it directly; with no
+    # NULL comment to fill it still opens its transaction and claims.
+    "restore_manager_comments": (pg_orders_write, lambda _s: (
+        pg_orders_write.restore_manager_comments({ORDER_ID: "utm_source=ig"}))),
 }
 
 
@@ -248,6 +284,10 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
         monkeypatch.setenv(reader, "postgres")
+    # Chain 3 moves nothing until chain 7b, step 13, chain 1 and the backup
+    # evidence hold (`pg_orders_write.unmet_precondition`); none of them is
+    # what this module is about, and every one is a local read.
+    monkeypatch.setattr(pg_orders_write, "unmet_precondition", lambda: None)
     store = DuckDBStore(db_path=tmp_path / "latch-acquire.duckdb")
     await store.connect()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
@@ -440,6 +480,7 @@ FIRST_WRITES = {
     "pg_goals_write": ("set_goal", "app.revenue_goals", "period_type", "daily"),
     "pg_expense_types_write": ("upsert_expense_types", "bronze.expense_types", "id", 1),
     "pg_buyers_write": ("upsert_buyers", "bronze.buyers", "id", 1),
+    "pg_orders_write": ("upsert_orders_with_expenses", "bronze.orders", "id", ORDER_ID),
 }
 
 
