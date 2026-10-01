@@ -7,7 +7,7 @@ chain 6 moves the catalogue's writes to Postgres, a human carries it with
 the selection rule, which is the daily comparison's own, and the route's and
 the function's refusals, on the recording pool `test_write_chains` built for
 every other backfill route. The rows themselves land in
-`tests/integration/test_catalogue_carry.py`.
+`tests/integration/test_catalogue_writer.py` (`TestTheWayThereAndBack`).
 """
 from __future__ import annotations
 
