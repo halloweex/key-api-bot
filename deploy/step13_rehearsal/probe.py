@@ -56,6 +56,13 @@ STOOD_DOWN = ("attribution_coverage", "goods_shipped_without_sale", "gold_cell_v
 # The twins' groups whose DuckDB guard stands down, so the twins file alone.
 STANDALONE_GROUPS = ("silver_arc", "attribution", "line_items")
 RETIRED_GOLD = ("gold_missing_cells", "gold_orphan_cells", "gold_cell_values")
+# The three comparisons the switch stands down in dq_mirror_landing, and the
+# one it asks in reconcile_gold's place (core.warehouse_cutover,
+# core.scheduler): what the job's `checks_run` must and must not name.
+RETIRED_COMPARISONS = ("reconcile_silver", "reconcile_order_utm", "reconcile_gold")
+INTERNAL_CHECK = "pg_gold_internal_check"
+# The job's completion line, which carries `checks_run` (core.scheduler).
+MIRROR_COMPLETE = "Mirror reconciliation complete"
 
 
 def _app_path() -> None:
@@ -191,8 +198,15 @@ def dq_last(layer: str) -> Optional[Dict[str, Any]]:
     run = (block or {}).get("last_run") if isinstance(block, Mapping) else None
     if not isinstance(run, Mapping):
         return None
-    return {k: run.get(k) for k in ("run_id", "started_at", "ended_at", "status",
-                                    "error_message", "critical_count", "warn_count")}
+    out = {k: run.get(k) for k in ("run_id", "started_at", "ended_at", "status",
+                                   "error_message", "critical_count", "warn_count")}
+    # What the live process's own reader showed of the run (its first 20),
+    # names only: context for a judge that later finds the copy's reader blind.
+    issues = block.get("issues") if isinstance(block, Mapping) else None
+    if isinstance(issues, list):
+        out["issue_names"] = sorted(str(i.get("check_name")) for i in issues
+                                    if isinstance(i, Mapping))
+    return out
 
 
 def _job(job_id: str) -> Optional[Dict[str, Any]]:
@@ -335,6 +349,11 @@ def duckdb_facts(db: str, gate: Optional[str], runs: Sequence[int]) -> Dict[str,
                 "FROM data_quality_issues WHERE CAST(run_id AS VARCHAR) = ? ORDER BY check_name",
                 [str(run_id)]).fetchall()
             out_runs[str(run_id)] = {
+                # And what the product's own reader sees of the same run —
+                # `/api/health/data-quality` and the digest ask exactly this.
+                # The judges compare the two and fail when they differ: a
+                # finding only a scan can find is one nobody is shown.
+                "reader": _product_reader(con, run_id),
                 "run_id": row[0], "layer": row[1], "status": row[2], "error_message": row[3],
                 "started_at": row[4], "ended_at": row[5],
                 "issues": [{
@@ -372,6 +391,21 @@ def duckdb_facts(db: str, gate: Optional[str], runs: Sequence[int]) -> Dict[str,
         "runs": out_runs,
         "gate_delivered": delivered,
     }
+
+
+def _product_reader(con: Any, run_id: int) -> Dict[str, Any]:
+    """`core.data_quality.fetch_run_issues` on the copy: the check names it
+    returns, or the class of what it raised. On the first local rehearsals it
+    returned nothing for runs a scan found — DuckDB 1.5.5 after the F6 kill,
+    see `judge_reader`."""
+    try:
+        _app_path()
+        from core.data_quality import fetch_run_issues
+
+        found = fetch_run_issues(con, int(run_id), limit=100000)
+        return {"names": sorted(str(i.get("check_name")) for i in found)}
+    except Exception as exc:  # noqa: BLE001 — reported, judged UNKNOWN
+        return {"error": type(exc).__name__}
 
 
 def seed_gate(gate: str, *, age_s: float = 3600.0) -> Dict[str, Any]:
@@ -436,6 +470,61 @@ def _cut(snap: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
 
 def flipped(snap: Optional[Mapping[str, Any]]) -> bool:
     return _block(snap).get("mode") == "postgres"
+
+
+def judge_reader(run: Optional[Mapping[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    """Whether the product's reader sees what the scan found in one DQ run.
+
+    `(fail, unknown)`, at most one set. The scan reads the issues by the id's
+    text; `fetch_run_issues` asks `WHERE run_id = ?`, the way the dashboard
+    and the digest do. On a DuckDB 1.5.5 file whose runs were written before
+    a SIGKILL — the rehearsal's own F6 — and that was checkpointed after the
+    restart without a new row in `data_quality_issues`, the second returns
+    nothing for those runs while the first returns every row (reproduced on
+    a fresh file with production's DDL, writer and reader; no index on
+    run_id, or no kill, and the two agree). A finding only the scan can see
+    is not one the product shows anybody, so a judge that read around it
+    would pass what nobody was told."""
+    if not run:
+        return None, None
+    rid = run.get("run_id")
+    reader = run.get("reader")
+    if not isinstance(reader, Mapping):
+        return None, f"the product's reader was not run on run #{rid}"
+    if reader.get("error"):
+        return None, f"the product's reader raised {reader.get('error')} on run #{rid}"
+    scan = sorted(str(i.get("check_name")) for i in run.get("issues") or [])
+    seen = sorted(str(n) for n in reader.get("names") or [])
+    if seen == scan:
+        return None, None
+    live = run.get("live_names")
+    when = (f"; the live process showed {len(live)} at F4, before the kill"
+            if isinstance(live, list) else "")
+    return (f"fetch_run_issues returns {len(seen)} of the {len(scan)} findings a scan "
+            f"finds in run #{rid} — the dashboard's and the digest's reader does not "
+            f"see them{when}"), None
+
+
+def mirror_checks(lines: Optional[Iterable[Any]], run_id: Any) -> Optional[List[str]]:
+    """The `checks_run` the job's completion line names for `run_id`, or None
+    when there is no such line, or it names none (an image older than the
+    field). Either rendering — the human one's dict repr, or JSON."""
+    import re
+
+    if run_id is None:
+        return None
+    for line in lines or []:
+        text = str(line)
+        if MIRROR_COMPLETE not in text:
+            continue
+        m = re.search(r"""['"]run_id['"]:\s*(\d+)""", text)
+        if not m or int(m.group(1)) != int(run_id):
+            continue
+        c = re.search(r"""['"]checks_run['"]:\s*\[([^\]]*)\]""", text)
+        if not c:
+            return None
+        return re.findall(r"""['"]([A-Za-z0-9_]+)['"]""", c.group(1))
+    return None
 
 
 def judge_p7(ev: Mapping[str, Any]) -> Verdict:
@@ -633,10 +722,15 @@ def judge_p4(ev: Mapping[str, Any], *, floor_s: int) -> Verdict:
         parts.append(("4a", UNKNOWN, "the integrity run was not read"))
     else:
         found = [i for i in (a["run"].get("issues") or []) if i.get("check_name") == "pg_silver_missing_rows"]
-        if found and a["deleted_id"] in (found[0].get("sample_ids") or []) and a.get("restored"):
-            parts.append(("4a", PASS, f"pg_silver_missing_rows names {a['deleted_id']}, restored by a refresh"))
-        else:
+        blind, unread = judge_reader(a["run"])
+        if not (found and a["deleted_id"] in (found[0].get("sample_ids") or []) and a.get("restored")):
             parts.append(("4a", FAIL, f"pg_silver_missing_rows={found[:1]} restored={a.get('restored')}"))
+        elif blind:
+            parts.append(("4a", FAIL, f"filed and restored, but {blind}"))
+        elif unread:
+            parts.append(("4a", UNKNOWN, f"filed and restored, but {unread}"))
+        else:
+            parts.append(("4a", PASS, f"pg_silver_missing_rows names {a['deleted_id']}, restored by a refresh"))
 
     b = ev.get("b") or []
     if len(b) < 3:
@@ -687,6 +781,28 @@ def judge_p5(ev: Mapping[str, Any], *, retired: Iterable[str], standalone_twins:
     if ev.get("derivations_after_bump") not in (0, None):
         return UNKNOWN, "a derivation rebuilt Gold between the bump and the mirror-landing run"
     bad: List[str] = []
+    unknown: List[str] = []
+    # What the job asked, read off its completion line. Absent findings
+    # cannot prove a comparison stood down: `compare_gold` excuses every cell
+    # whose orders synced inside its grace, and the fixture's landings put
+    # the cells the bump touches inside it.
+    asked = ev.get("checks_run")
+    if asked is None:
+        unknown.append(f"the job's completion line names no checks_run for run "
+                       f"#{mirror.get('run_id')}, so a stand-down cannot be told "
+                       f"from a comparison that found nothing")
+    else:
+        ran = sorted(set(asked) & set(RETIRED_COMPARISONS))
+        if ran:
+            bad.append(f"a retired comparison ran: {ran}")
+        if INTERNAL_CHECK not in asked:
+            bad.append(f"{INTERNAL_CHECK} was not asked")
+    for run in (mirror, integrity):
+        blind, unread = judge_reader(run)
+        if blind:
+            bad.append(blind)
+        if unread:
+            unknown.append(unread)
     m_issues = mirror.get("issues") or []
     if mirror.get("error_message") is not None:
         bad.append(f"mirror_landing error: {str(mirror.get('error_message'))[:200]}")
@@ -730,15 +846,18 @@ def judge_p5(ev: Mapping[str, Any], *, retired: Iterable[str], standalone_twins:
             bad.append("pg_silver_missing_rows not filed")
     if bad:
         return FAIL, "; ".join(bad)
+    if unknown:
+        return UNKNOWN, "; ".join(unknown)
     twins_filed = sorted(n for n in filed if n in twins)
     # Context, not criterion: ClickHouse's own derivation is the one
     # independent check of Gold left after the switch (OD-08 (a)).
     ch = ("ClickHouse did not compare" if "gold_values_unwatched" in names else
           "ClickHouse caught the bump too" if "ch_engines_gold_mismatch" in names else
           "ClickHouse compared, found nothing")
-    return PASS, (f"mirror_landing #{mirror.get('run_id')} without error, gold_rollup_mismatch filed, "
-                  f"no DuckDB comparison ({ch}); integrity #{integrity.get('run_id')} without error, "
-                  f"no stood-down check, twins alone: {_fmt(twins_filed)}")
+    return PASS, (f"mirror_landing #{mirror.get('run_id')} without error, asked {INTERNAL_CHECK} "
+                  f"and none of {_fmt(RETIRED_COMPARISONS)}, gold_rollup_mismatch filed ({ch}); "
+                  f"integrity #{integrity.get('run_id')} without error, no stood-down check, "
+                  f"twins alone: {_fmt(twins_filed)}; the product's reader sees both runs whole")
 
 
 def judge_p6(ev: Mapping[str, Any]) -> Verdict:
@@ -914,6 +1033,13 @@ LABELS = (
 )
 
 
+def _lines(ev_dir: Path, name: str) -> Optional[List[str]]:
+    try:
+        return (ev_dir / name).read_text().splitlines()
+    except FileNotFoundError:
+        return None
+
+
 def _load(ev_dir: Path, name: str) -> Any:
     path = ev_dir / name
     try:
@@ -949,6 +1075,14 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
     # P8's conditional branch: the reclassify door under postgres noted a
     # Postgres-only re-parse in the record, so the way back must empty DuckDB's
     # verdicts and say a reclassify is needed.
+    # What the live process's reader showed of each run right after it ran,
+    # before F6's kill: context for `judge_reader`.
+    for run_key, live_file in (("integrity", "f4_integrity_live.json"),
+                               ("mirror_landing", "f4_mirror_live.json")):
+        rid, live = ids.get(run_key), L(live_file)
+        if rid and isinstance(runs.get(str(rid)), Mapping) and isinstance(live, Mapping) \
+                and live.get("run_id") == rid and isinstance(live.get("issue_names"), list):
+            runs[str(rid)] = {**runs[str(rid)], "live_names": live["issue_names"]}
     record = (d1 or {}).get("writer") or {}
     p8 = L("p8.json") or {}
     if "expect_reclassify" not in p8:
@@ -973,6 +1107,8 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
                "mirror": runs.get(str(ids.get("mirror_landing"))) if ids.get("mirror_landing") else None,
                "integrity": runs.get(str(ids.get("integrity"))) if ids.get("integrity") else None,
                "stood_down": ((L("f4_snapshot.json") or {}).get("status") or {}).get("cutover", {}).get("stood_down_duckdb_checks"),
+               "checks_run": mirror_checks(_lines(ev_dir, "mirror_complete.log"),
+                                           ids.get("mirror_landing")),
                "derivations_after_bump": (L("p4a.json") or {}).get("derivations_after_bump")},
         "P6": {"flipped": is_flipped, "resolved_at": (_cut(f1).get("writer") or {}).get("resolved_at"),
                "restarts": restarts, "gate_delivered": (d1 or {}).get("gate_delivered")},

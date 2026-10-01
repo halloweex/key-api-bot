@@ -231,7 +231,13 @@ def test_p3_is_unknown_when_the_kill_did_not_land_inside_the_derivation():
 
 # ─── P4 ──────────────────────────────────────────────────────────────────────
 
-def integrity_run(*, missing_ids=(900123,), extra=()):
+def _read_whole(run):
+    """The run as the product's reader sees it when DuckDB answers honestly:
+    the same names the scan found."""
+    return {**run, "reader": {"names": sorted(i["check_name"] for i in run["issues"])}}
+
+
+def integrity_run(*, missing_ids=(900123,), extra=(), reader=None):
     issues = [{"check_name": "pg_silver_missing_rows", "count": len(missing_ids),
                "sample_ids": list(missing_ids), "severity": "WARN"},
               {"check_name": "pg_twin_pairing", "count": 1, "sample_ids": [],
@@ -240,7 +246,10 @@ def integrity_run(*, missing_ids=(900123,), extra=()):
                               "headline_vs_line_items": None,
                               "goods_shipped_without_sale": None},
                    "standalone": {"pg_silver_missing_rows": len(missing_ids)}})}]
-    return {"run_id": 31, "error_message": None, "issues": issues + list(extra)}
+    run = _read_whole({"run_id": 31, "error_message": None, "issues": issues + list(extra)})
+    if reader is not None:
+        run["reader"] = reader
+    return run
 
 
 def p4_ev(**over):
@@ -272,6 +281,26 @@ def test_p4a_fails_when_the_twin_does_not_name_the_row():
     ev = p4_ev()
     ev["a"] = {**ev["a"], "run": integrity_run(missing_ids=(5,))}
     assert probe.judge_p4(ev, floor_s=120)[0] == FAIL
+
+
+def test_p4a_fails_when_the_products_reader_does_not_see_the_finding():
+    ev = p4_ev()
+    ev["a"] = {**ev["a"], "run": integrity_run(reader={"names": []})}
+    verdict, detail = probe.judge_p4(ev, floor_s=120)
+    assert verdict == FAIL and "4a FAIL" in detail and "fetch_run_issues" in detail
+
+
+def test_p4a_is_unknown_when_the_products_reader_was_not_run():
+    ev = p4_ev()
+    ev["a"] = {**ev["a"], "run": integrity_run(reader={"error": "CatalogException"})}
+    assert probe.judge_p4(ev, floor_s=120)[0] == UNKNOWN
+
+
+def test_the_reader_judge_says_what_the_live_process_saw():
+    run = {**integrity_run(reader={"names": []}), "live_names": ["pg_silver_missing_rows",
+                                                                "pg_twin_pairing"]}
+    fail, unknown = probe.judge_reader(run)
+    assert unknown is None and "the live process showed 2 at F4" in fail
 
 
 def test_p4a_healed_before_the_check_looked_is_unknown():
@@ -313,13 +342,23 @@ RETIRED = ["silver_arc_mismatch", "gold_cell_values", "attribution_coverage_low"
 TWINS = ["pg_silver_missing_rows", "pg_silver_orphan_rows", "pg_headline_vs_line_items"]
 
 
+ASKED = ["reconcile_mirror", "reconcile_orders", "reconcile_order_utm_completeness",
+         "reconcile_expenses", "pg_gold_internal_check", "reconcile_operational",
+         "reconcile_clickhouse", "reconcile_ch_history"]
+
+
+def mirror_run(issues=None, **over):
+    issues = issues if issues is not None else [
+        {"check_name": "gold_rollup_mismatch", "table_name": "gold.daily_revenue"},
+        {"check_name": "mirror_row_values", "table_name": "bronze.orders"}]
+    run = _read_whole({"run_id": 32, "error_message": None, "issues": issues})
+    run.update(over)
+    return run
+
+
 def p5_ev(**over):
-    ev = {"flipped": True,
-          "mirror": {"run_id": 32, "error_message": None,
-                     "issues": [{"check_name": "gold_rollup_mismatch", "table_name": "gold.daily_revenue"},
-                                {"check_name": "mirror_row_values", "table_name": "bronze.orders"}]},
-          "integrity": integrity_run(),
-          "stood_down": STOOD}
+    ev = {"flipped": True, "mirror": mirror_run(), "integrity": integrity_run(),
+          "stood_down": STOOD, "checks_run": list(ASKED)}
     ev.update(over)
     return ev
 
@@ -336,9 +375,52 @@ def test_p5_passes_when_the_stand_down_holds_in_both_jobs():
     [],
 ])
 def test_p5_fails_when_a_retired_comparison_ran_or_the_internal_check_did_not(mirror_issues):
-    ev = p5_ev()
-    ev["mirror"] = {**ev["mirror"], "issues": mirror_issues}
+    ev = p5_ev(mirror=mirror_run(mirror_issues))
     assert probe.judge_p5(ev, retired=RETIRED, standalone_twins=TWINS)[0] == FAIL
+
+
+@pytest.mark.parametrize("retired", list(probe.RETIRED_COMPARISONS))
+def test_p5_fails_on_a_retired_comparison_that_ran_and_found_nothing(retired):
+    """The review's mutation: `reconcile_gold` run under the stand-down, with
+    every cell excused as in flight, files nothing — the run's findings are
+    exactly a clean stand-down's. Only the job's own list tells them apart."""
+    verdict, detail = probe.judge_p5(p5_ev(checks_run=ASKED + [retired]),
+                                     retired=RETIRED, standalone_twins=TWINS)
+    assert verdict == FAIL and retired in detail
+
+
+def test_p5_fails_when_the_internal_check_was_not_asked():
+    asked = [c for c in ASKED if c != probe.INTERNAL_CHECK]
+    assert probe.judge_p5(p5_ev(checks_run=asked), retired=RETIRED,
+                          standalone_twins=TWINS)[0] == FAIL
+
+
+def test_p5_without_the_jobs_list_is_unknown_never_pass():
+    """An image whose completion line carries no `checks_run`: absent
+    findings alone cannot have shown a comparison that ran."""
+    verdict, detail = probe.judge_p5(p5_ev(checks_run=None), retired=RETIRED,
+                                     standalone_twins=TWINS)
+    assert verdict == UNKNOWN and "checks_run" in detail
+
+
+@pytest.mark.parametrize("which", ["mirror", "integrity"])
+def test_p5_fails_when_the_products_reader_does_not_see_a_run(which):
+    """The rehearsal's F6 kill leaves DuckDB 1.5.5 answering `run_id = ?`
+    with nothing for the runs written before it; `fetch_run_issues` is that
+    query, so the dashboard and the digest show those runs as empty."""
+    run = (mirror_run if which == "mirror" else integrity_run)()
+    ev = p5_ev(**{which: {**run, "reader": {"names": []}}})
+    verdict, detail = probe.judge_p5(ev, retired=RETIRED, standalone_twins=TWINS)
+    assert verdict == FAIL and "fetch_run_issues returns 0 of the" in detail
+
+
+def test_p5_is_unknown_when_the_products_reader_was_not_run():
+    ev = p5_ev(mirror=mirror_run(reader={"error": "ImportError"}))
+    assert probe.judge_p5(ev, retired=RETIRED, standalone_twins=TWINS)[0] == UNKNOWN
+    bare = mirror_run()
+    del bare["reader"]
+    assert probe.judge_p5(p5_ev(mirror=bare), retired=RETIRED,
+                          standalone_twins=TWINS)[0] == UNKNOWN
 
 
 def test_p5_fails_on_an_error_or_a_stood_down_check_filing():
@@ -530,6 +612,66 @@ def test_assemble_derives_the_reclassify_branch_from_the_recorded_writer(tmp_pat
     assert probe.assemble(tmp_path)["P8"]["expect_reclassify"] is False
 
 
+def test_assemble_reads_the_jobs_list_for_the_mirror_run_and_the_live_view(tmp_path):
+    (tmp_path / "f4_runs.json").write_text(json.dumps({"integrity": 31, "mirror_landing": 32}))
+    (tmp_path / "d1.json").write_text(json.dumps({**DUCK1, "runs": {
+        "31": integrity_run(), "32": mirror_run()}}))
+    (tmp_path / "mirror_complete.log").write_text("\n".join([
+        "x - Mirror reconciliation complete | {'run_id': 9, 'checks_run': ['reconcile_gold']}",
+        "x - Mirror reconciliation complete | {'run_id': 32, 'error': None, "
+        "'findings': ['WARN:gold_rollup_mismatch:gold.daily_revenue:1'], "
+        "'checks_run': ['reconcile_mirror', 'pg_gold_internal_check']}",
+    ]))
+    (tmp_path / "f4_integrity_live.json").write_text(json.dumps(
+        {"run_id": 31, "issue_names": ["pg_silver_missing_rows", "pg_twin_pairing"]}))
+    ev = probe.assemble(tmp_path)["P5"]
+    assert ev["checks_run"] == ["reconcile_mirror", "pg_gold_internal_check"]
+    assert ev["integrity"]["live_names"] == ["pg_silver_missing_rows", "pg_twin_pairing"]
+    assert "live_names" not in ev["mirror"]
+
+
+def test_the_copys_runs_are_read_by_the_products_reader_too(tmp_path, monkeypatch):
+    """`duckdb_facts` runs `fetch_run_issues` beside the scan, on production's
+    own DDL and writer: where DuckDB answers both honestly they agree, and
+    where the reader comes back empty the judge fails."""
+    duckdb = pytest.importorskip("duckdb")
+    from datetime import date, datetime, timezone
+
+    from core import data_quality, migrations
+    from core.data_quality import IntegrityIssue, Severity, persist_run
+
+    monkeypatch.setattr(probe, "APP_DIR", str(REPO))
+    db = str(tmp_path / "copy.duckdb")
+    con = duckdb.connect(db)
+
+    class _Store:
+        _connection = con
+
+    migrations._m0023_data_quality_tables(_Store())
+    con.execute("CREATE TABLE sync_metadata (key VARCHAR, value VARCHAR, updated_at TIMESTAMP)")
+    con.execute("CREATE TABLE warehouse_refreshes (id INTEGER, trigger VARCHAR, "
+                "validation_passed BOOLEAN, refreshed_at TIMESTAMP)")
+    for name in ("orders", "silver_orders", "silver_order_utm"):
+        con.execute(f"CREATE TABLE {name} (id INTEGER)")
+    now = datetime.now(timezone.utc)
+    run_id = persist_run(
+        con, started_at=now, ended_at=now, as_of=now, window_start=date.today(),
+        window_end=date.today(), layer="integrity", discrepancies=[],
+        issues=[IntegrityIssue("pg_silver_missing_rows", "silver.orders", Severity.WARN, 1, (5,)),
+                IntegrityIssue("pg_twin_pairing", "silver.orders", Severity.INFO, 1, (), "{}")])
+    con.close()
+
+    facts = probe.duckdb_facts(db, None, [run_id])
+    run = facts["runs"][str(run_id)]
+    assert run["reader"] == {"names": ["pg_silver_missing_rows", "pg_twin_pairing"]}
+    assert probe.judge_reader(run) == (None, None)
+
+    monkeypatch.setattr(data_quality, "fetch_run_issues", lambda conn, rid, limit=100: [])
+    blind = probe.duckdb_facts(db, None, [run_id])["runs"][str(run_id)]
+    assert blind["reader"] == {"names": []}
+    assert probe.judge_reader(blind)[0].startswith("fetch_run_issues returns 0 of the 2")
+
+
 def test_a_judge_that_raises_is_unknown(tmp_path, monkeypatch):
     monkeypatch.setattr(probe, "judge_k0", lambda ev: 1 / 0)
     rows = dict((label, verdict) for label, verdict, _d in probe.judge_all(
@@ -549,6 +691,19 @@ def test_the_probe_constants_are_the_codes():
     assert wc.RESOLVE_NOTE.startswith(probe.RESOLVE_NOTE_HEAD)
     assert probe.SEEDED_KEY in REGISTRY and is_condition(probe.SEEDED_KEY)
     assert set(probe.STANDALONE_GROUPS) <= set(GUARD_CONDITIONS)
+    assert set(probe.RETIRED_COMPARISONS) == set(wc.RETIRED_COMPARISONS)
+
+
+def test_the_jobs_list_and_its_line_are_the_codes():
+    import inspect
+
+    from core.scheduler import BackgroundScheduler
+
+    source = inspect.getsource(BackgroundScheduler._run_dq_mirror_landing)
+    assert f'logger.info("{probe.MIRROR_COMPLETE}", extra=result)' in source
+    assert '"checks_run": list(checks_run)' in source
+    assert f'check("{probe.INTERNAL_CHECK}"' in source
+    assert "grep -F 'Mirror reconciliation complete'" in SCRIPT.read_text()
 
 
 def test_the_fixture_versions_are_known_statuses():
@@ -608,17 +763,16 @@ def test_p5_bump_healed_before_the_run_looked_is_unknown():
 
 
 def test_p5_says_whether_clickhouse_compared():
-    ev = p5_ev()
-    ev["mirror"] = {**ev["mirror"], "issues": ev["mirror"]["issues"] + [
-        {"check_name": "ch_engines_gold_mismatch", "table_name": "gold.daily_revenue"}]}
+    ev = p5_ev(mirror=mirror_run(mirror_run()["issues"] + [
+        {"check_name": "ch_engines_gold_mismatch", "table_name": "gold.daily_revenue"}]))
     verdict, detail = probe.judge_p5(ev, retired=RETIRED, standalone_twins=TWINS)
     assert verdict == PASS and "ClickHouse caught the bump too" in detail
 
 
 def test_issues_are_read_by_the_ids_text_not_a_pushed_down_equality():
-    """DuckDB 1.5.5 answered `run_id = ?` with no rows on the first local
-    rehearsal's copy while a scan returned them; the judges then read two DQ
-    runs as having filed nothing."""
+    """DuckDB 1.5.5 answers `run_id = ?` with no rows, after a SIGKILL, for
+    runs a scan returns. The scan is what the judges hold the product's
+    reader against (`judge_reader`), so it must not ask the same question."""
     source = PROBE_PATH.read_text()
     assert "FROM data_quality_issues WHERE CAST(run_id AS VARCHAR) = ?" in source
     assert "data_quality_issues WHERE run_id = ?" not in source
