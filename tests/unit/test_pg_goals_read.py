@@ -4,12 +4,13 @@
 rather than the routing, because not every one of its thirteen methods can
 move:
 
-  * `generate_smart_goals` recomputes `seasonal_indices`, `weekly_patterns`
-    and `growth_metrics` in DuckDB and then reads them back. Postgres has had
-    those three since revision 0025, but only as an hourly replica, so a
-    routed read would return them as they were before the recompute. Its ML
-    signal is the one path that is routed, and it reads only Gold and
-    `revenue_predictions` (which moved with `get_predictions`, #183).
+  * `generate_smart_goals` reads `seasonal_indices`, `weekly_patterns` and
+    `growth_metrics`, which DuckDB writes. Postgres has had those three since
+    revision 0025, but only as an hourly replica, so a routed read would
+    return them up to an hour behind `POST /goals/recalculate`. They are read
+    where they are written until their writer moves (chain 7b-3). Its ML
+    signal is routed, and reads only Gold and `revenue_predictions` (which
+    moved with `get_predictions`, #183).
   * seven **write**, and `app.revenue_goals` is an hourly read replica: a
     write sent to Postgres would land in a copy and be overwritten within the
     hour.
@@ -54,17 +55,17 @@ TIMEOUT_S = 20
 ROUTED = ("get_goals", "get_smart_goals", "get_historical_revenue",
           "get_daily_revenue_for_dates", "get_predictions")
 
-# `generate_smart_goals` is not a read, and finding that out is why it is
-# alone here now.
+# `generate_smart_goals` was not a read, and finding that out is why it is
+# alone here.
 #
 # The audit filed it beside `get_predictions` because it has no INSERT of its
-# own — too shallow a test. It counts `seasonal_indices`, and when the count
-# is short (or `recalculate=True`, which is an argument callers pass) it runs
-# the three calculators, which write those tables **in DuckDB**, and then
-# reads them back. Route the read and the recompute writes to one store while
-# the read comes from another, an hour behind.
-#
-# It belongs to the writes, with the calculators it drives.
+# own — too shallow a test. It counted `seasonal_indices`, and when the count
+# was short (or `recalculate=True`) it ran the three calculators, which wrote
+# those tables **in DuckDB**, and then read them back. Chain 7b-1 (OD-14 (i))
+# took the write branch out — it reads only now — but the three tables it
+# reads are still written in DuckDB, by `recalculate_goal_tables`, and
+# Postgres holds an hourly replica of them. So they are still read where they
+# are written.
 #
 # Since DN-12 it does reach the router along exactly one path: its ML signal,
 # `_get_ml_forecast_total`, which reads Gold and `revenue_predictions` — both
@@ -80,8 +81,10 @@ ABSENT_FROM_POSTGRES_READS = ("seasonal_indices", "weekly_patterns", "growth_met
 # from the revenue history before storing it, and reading that history from
 # Postgres is exactly what this change is for. What they must not do is send a
 # *write* through it, and must still open DuckDB for the write itself.
-WRITERS = ("set_goal", "calculate_seasonality_indices", "calculate_yoy_growth",
-           "calculate_weekly_patterns", "store_predictions")
+#
+# The three calculators are not writers since chain 7b-1: they compute, and
+# `_persist_goal_tables` stores what they computed, in one transaction.
+WRITERS = ("set_goal", "_persist_goal_tables", "store_predictions")
 
 BODIES = ("_GOALS_PERIOD_REVENUE_SQL", "_GOALS_WEEKLY_TREND_SQL",
           "_GOALS_DAILY_FOR_DATES_SQL", "_STORED_GOALS_SQL",

@@ -249,9 +249,10 @@ class TestTheSummaryFallbackReadsTheRowsOwnSalesType:
 # ─── Three years of history, for the calculators ───────────────────────────
 
 # Production's shape: the first order is 2023-12-02, so there are two full
-# years and one pair of them. (Three full years would reach a separate, older
-# defect — `yoy_rates` hold DuckDB DECIMALs and the recency weights are floats,
-# so a second pair raises TypeError. Not this change's to fix; reported.)
+# years and one pair of them. (Three full years reached a separate, older
+# defect — `yoy_rates` held DuckDB DECIMALs and the recency weights are floats,
+# so a second pair raised TypeError. Chain 7b-1 fixed it; the pinning is in
+# `tests/unit/test_goals_read_paths_do_not_write.py`.)
 HISTORY_START = date(2023, 12, 2)
 HISTORY_END = date(2025, 12, 31)
 
@@ -313,11 +314,10 @@ def _settled(value):
 
 
 async def _calculators(store, sales_type):
-    seasonality = await store.calculate_seasonality_indices(sales_type, persist=False)
-    yoy = await store.calculate_yoy_growth(sales_type, persist=False)
-    weekly = await store.calculate_weekly_patterns(sales_type, persist=False)
-    async with store.connection() as conn:
-        caps = [store._get_dynamic_growth_cap(conn, m, sales_type) for m in range(1, 13)]
+    seasonality = await store.calculate_seasonality_indices(sales_type)
+    yoy = await store.calculate_yoy_growth(sales_type)
+    weekly = await store.calculate_weekly_patterns(sales_type)
+    caps = [await store._dynamic_growth_cap(m, sales_type) for m in range(1, 13)]
     return _settled([seasonality, yoy, weekly, caps])
 
 
@@ -329,12 +329,14 @@ def _without_clock(smart):
 
 
 async def _smart(store, sales_type):
-    """Next month's smart goal, recomputing (and persisting) the three tables —
-    the Monday job's path. Bounded: if the forecast read were taken inside the
+    """Next month's smart goal, after storing the three tables the way
+    `POST /goals/recalculate` does — `generate_smart_goals` reads only since
+    chain 7b-1 (OD-14 (i)). Bounded: if a history read were taken inside the
     store lock again, this would hang rather than fail."""
+    await asyncio.wait_for(
+        store.recalculate_goal_tables(include_weekly=True), TIMEOUT_S)
     return _without_clock(await asyncio.wait_for(
-        store.generate_smart_goals(2026, 10, sales_type, recalculate=True),
-        TIMEOUT_S))
+        store.generate_smart_goals(2026, 10, sales_type), TIMEOUT_S))
 
 
 class TestTheCalculatorsAnswerWhatTheyAnsweredBefore:
@@ -400,6 +402,10 @@ class TestAnEmptyHistoryLeavesTheStoredRateAlone:
                 "WHERE metric_type = 'yoy_overall'").fetchone()
         return None if row is None else (float(row[0]), row[1])
 
+    # Through `recalculate_goal_tables`, the one writer since chain 7b-1: the
+    # calculator itself stores nothing any more, so asking it would pass the
+    # first of these by writing nothing at all.
+
     @pytest.mark.asyncio
     async def test_the_placeholder_does_not_overwrite_a_measured_rate(self, store):
         async with store.connection() as conn:
@@ -408,7 +414,8 @@ class TestAnEmptyHistoryLeavesTheStoredRateAlone:
                 "INSERT INTO growth_metrics (metric_type, value, sample_size) "
                 "VALUES ('yoy_overall', ?, 3)", [self.STORED])
 
-        result = await store.calculate_yoy_growth("retail")
+        tables = await store.recalculate_goal_tables(include_weekly=False)
+        result = tables["yoy"]
 
         assert result["sample_size"] == 0 and result["overall_yoy"] == 0.10, (
             "the returned value is unchanged — only what is persisted is")
@@ -419,7 +426,7 @@ class TestAnEmptyHistoryLeavesTheStoredRateAlone:
         """Nothing better to keep: behaviour before DN-12, unchanged."""
         async with store.connection() as conn:
             conn.execute("DELETE FROM growth_metrics")
-        await store.calculate_yoy_growth("retail")
+        await store.recalculate_goal_tables(include_weekly=False)
         assert await self._stored_yoy(store) == (0.10, 0)
 
     @pytest.mark.asyncio
@@ -429,7 +436,7 @@ class TestAnEmptyHistoryLeavesTheStoredRateAlone:
             conn.execute(
                 "INSERT INTO growth_metrics (metric_type, value, sample_size) "
                 "VALUES ('yoy_overall', ?, 3)", [self.STORED])
-        result = await store.calculate_yoy_growth("retail")
+        result = (await store.recalculate_goal_tables(include_weekly=False))["yoy"]
         stored = await self._stored_yoy(store)
         assert result["sample_size"] >= 1
         assert stored[0] == pytest.approx(float(result["overall_yoy"]), abs=1e-4)
@@ -652,9 +659,8 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
         """December has three years in the fixture and so two pairs — the one
         month where the standard deviation is not zero."""
         await _seed_history(store)
-        async with store.connection() as conn:
-            caps = [store._get_dynamic_growth_cap(conn, m, "retail")
-                    for m in range(1, 13)]
+        caps = [await store._dynamic_growth_cap(m, "retail")
+                for m in range(1, 13)]
         assert caps == pytest.approx(
             [_expected_cap("retail", m) for m in range(1, 13)], rel=1e-9)
 
