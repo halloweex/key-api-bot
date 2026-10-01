@@ -12,7 +12,10 @@ differs. Proved here on a backup written for the purpose:
   * no read leaves the copy, whatever `KS_READ_GOALS` says in the
     environment (mutation: drop the forced `duckdb`, and a read is routed —
     counted as a fallback here);
-  * a missing backup, or one without a goal table, is refused with 2.
+  * a missing backup, or one without a goal table, is refused with 2;
+  * each path to DIFFERENCES on its own: a growth cap — a list leaf — moving
+    alone, and an order counted by one side only while no number moves, on
+    either side (mutations MXp, MXq, MXq2).
 """
 from __future__ import annotations
 
@@ -122,3 +125,70 @@ class TestTheDryRun:
         conn.close()
         assert dryrun.main(["--backup", str(path)]) == 2
         assert "silver_orders" in capsys.readouterr().err
+
+
+class TestEveryVerdictPathCounts:
+    """The two ways the dry run reaches DIFFERENCES, each pinned on its own
+    (review of 7b-2: both mutations below passed the tests above, which only
+    ever produced a difference in a number *and* in the orders at once)."""
+
+    def test_a_list_leaf_is_compared(self):
+        """The twelve growth caps per sales type are a list. Mutation MXp:
+        skip lists in `_differences`, and a cap that moved reads clean."""
+        bridge = {"caps/retail": [0.25, 0.3, 0.35], "nested": [{"a": [1.0, 2.0]}]}
+        silver = {"caps/retail": [0.25, 0.31, 0.35], "nested": [{"a": [1.0, 2.5]}]}
+        assert dryrun._differences(bridge, silver) == [
+            ("caps/retail[1]", 0.3, 0.31),
+            ("nested[0]/a[1]", 2.0, 2.5),
+        ]
+        # A list that changed length is one difference, not a silent pass.
+        assert dryrun._differences({"x": [1.0]}, {"x": [1.0, 2.0]}) == [
+            ("x", [1.0], [1.0, 2.0])]
+
+    def test_a_cap_alone_moving_fails_the_run(self, tmp_path, monkeypatch, capsys):
+        """End to end: the silver side's answers differ in one cap and in
+        nothing else — exit 1, the cap named by its path."""
+        import json
+
+        from core import pg_goals_read
+
+        backup = _backup(tmp_path)
+        real = dryrun.answers
+
+        async def one_cap_moved(conn, today):
+            out = await real(conn, today)
+            if pg_goals_read.history_mode() == "silver":
+                out["caps/retail"][3] = round(out["caps/retail"][3] + 0.01, 6)
+            return out
+
+        monkeypatch.setattr(dryrun, "answers", one_cap_moved)
+        assert dryrun.main(["--backup", str(backup), "--today", TODAY, "--json"]) == 1
+        report = json.loads(capsys.readouterr().out)
+        assert [d["path"] for d in report["differences"]] == ["caps/retail[3]"]
+        assert all(not v["bridge_only"] and not v["silver_only"]
+                   for v in report["orders"].values())
+
+    @pytest.mark.parametrize("status,group,side", [
+        (1, 6, "bridge_only"),    # lost by KeyCRM's group, status not listed
+        (19, 4, "silver_only"),   # status listed, KeyCRM's group says not lost
+    ])
+    def test_orders_that_differ_fail_the_run_when_no_number_moves(
+        self, tmp_path, capsys, status, group, side,
+    ):
+        """An order counted by one side only, worth nothing: no number moves,
+        and the flip would still change which orders count. Mutation MXq:
+        `Report.clean` reads the numbers alone, and both exit 0; MXq2: it
+        reads `bridge_only` alone, and the second does."""
+        import json
+
+        backup = _backup(tmp_path, (
+            "INSERT INTO orders (id, source_id, status_id, status_group_id, "
+            "grand_total, ordered_at, buyer_id) VALUES (900001, 1, ?, ?, 0, ?, 1)",
+            [status, group, datetime(2025, 3, 10, 12, tzinfo=KYIV)]))
+        assert dryrun.main(["--backup", str(backup), "--today", TODAY, "--json"]) == 1
+        report = json.loads(capsys.readouterr().out)
+        assert report["differences"] == [] and report["clean"] is False
+        retail = report["orders"]["retail"]
+        assert list(retail[side]) == [f"return rule: status {status}, group {group}"]
+        other = "silver_only" if side == "bridge_only" else "bridge_only"
+        assert retail[other] == {}
