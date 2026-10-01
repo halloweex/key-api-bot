@@ -44,6 +44,7 @@ from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
     pg_goals_write, pg_inventory_write, write_chains,
 )
+from core import pg_dq_journal_write  # noqa: E402 — the shadow chains' block
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -53,7 +54,10 @@ pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_P
 # next module as a chain owning a table with no local marker.
 _WRITTEN = ("bronze.offers", "app.manual_expenses", "app.revenue_goals",
             "bronze.expense_types", "bronze.buyer_contacts", "app.buyer_gender",
-            "bronze.buyers")
+            "bronze.buyers",
+            # The shadow chains (OD-02 (c)).
+            "app.data_quality_issues", "app.data_quality_diffs",
+            "app.data_quality_runs")
 
 STOCK = {"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
          "quantity": 40, "reserve": 0}
@@ -63,7 +67,8 @@ async def _clean(pool):
     async with pool.acquire() as conn:
         for table in _WRITTEN:
             await conn.execute(f"DELETE FROM {table}")
-        await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
+        await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%' "
+                           "OR key = 'dq_digest_last_sent'")
 
 
 def _caller(depth: int = 2) -> str:
@@ -201,6 +206,19 @@ async def _derive(_store):
     return await pg_buyers_write.derive_gender_pg()
 
 
+def _journal_run(_store):
+    """Chain 9's writer, with the values the router would hand it."""
+    from datetime import datetime, timezone
+
+    from core.data_quality import run_values
+
+    now = datetime.now(timezone.utc)
+    values = run_values(started_at=now, ended_at=now, as_of=now,
+                        window_start=now.date(), window_end=now.date(),
+                        layer="integrity", issues=[], discrepancies=[])
+    return pg_dq_journal_write.persist_run(values, [], [])
+
+
 # Writers that return their failure rather than raise it — chain 4's
 # derivation, `derive_gender`'s contract. A cancellation still goes through.
 NEVER_RAISES = {"derive_gender_pg"}
@@ -228,6 +246,12 @@ WRITERS = {
         [{"id": 1, "name": "Delivery"}])),
     "upsert_buyers": (pg_buyers_write, lambda s: s.upsert_buyers([_buyer()])),
     "derive_gender_pg": (pg_buyers_write, _derive),
+    # Chain 9 (OD-02 (c)): driven at the chain module rather than through
+    # `dq_journal.journal_run`, which would also hand DuckDB the shadow — the
+    # latch is the writer's alone.
+    "persist_run": (pg_dq_journal_write, _journal_run),
+    "set_digest_marker": (pg_dq_journal_write, lambda s: pg_dq_journal_write
+                          .set_digest_marker("2026-10-01T06:00:00+00:00")),
 }
 
 
@@ -440,6 +464,7 @@ FIRST_WRITES = {
     "pg_goals_write": ("set_goal", "app.revenue_goals", "period_type", "daily"),
     "pg_expense_types_write": ("upsert_expense_types", "bronze.expense_types", "id", 1),
     "pg_buyers_write": ("upsert_buyers", "bronze.buyers", "id", 1),
+    "pg_dq_journal_write": ("persist_run", "app.data_quality_runs", "run_id", 1),
 }
 
 
