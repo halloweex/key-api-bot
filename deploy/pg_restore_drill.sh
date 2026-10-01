@@ -260,6 +260,15 @@ drill_from_remote() {
 
     echo
     echo "PASS — the copy off this machine restores, and its rows agree with live."
+
+    # The evidence chain 3's flip reads (`core/backup_evidence.py`): the copy
+    # that survives this host was restored, and when. Only after PASS, and
+    # through a rename; a failed drill leaves the previous marker to age.
+    local marker="${BACKUP_PG_REMOTE_DRILL_MARKER:-data/.pg_restore_drill_remote_last_ok}"
+    mkdir -p "$(dirname "$marker")"
+    printf '%s provider=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "${BACKUP_PG_PROVIDER:-unlabelled}" >"$marker.tmp"
+    mv -f "$marker.tmp" "$marker"
 }
 
 for arg in "$@"; do

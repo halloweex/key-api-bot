@@ -193,3 +193,12 @@ done
 
 echo "── done ─────────────────────────────────────────────────"
 echo "Base $STAMP restored and replayed from the archive. PITR is real."
+
+# The evidence chain 3's flip reads (`core/backup_evidence.py`): a PITR drill
+# that passed, and when. Written only here, after every check above, and
+# through a rename so a reader never sees half a line — a marker written
+# earlier would be the drill vouching for a recovery it had not finished.
+MARKER="${BACKUP_PITR_DRILL_MARKER:-data/.pg_pitr_drill_last_ok}"
+mkdir -p "$(dirname "$MARKER")"
+printf '%s base=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$STAMP" >"$MARKER.tmp"
+mv -f "$MARKER.tmp" "$MARKER"
