@@ -777,32 +777,44 @@ if [ "$FLIPPED" = 1 ]; then
     say "F3: reclassify in Postgres alone"
     wprobe api POST /api/traffic/reclassify > "$EV/f3_reclassify.json" 2>&1 || say "F3: reclassify answered non-2xx"
 
-    # ─── F4: a quiet window, two mutations, two DQ runs (P4a, P5) ─────────────
-    say "F4: a Silver row deleted and a Gold fine row bumped; integrity and mirror-landing triggered"
+    # ─── F4: two mutations, each alone before the run that must see it ──────
+    #
+    # One at a time, so each run sees exactly its own: a Silver row missing
+    # when the integrity twins look, and Postgres Gold one hryvnia off its own
+    # Silver when dq_mirror_landing looks. Both at once made ClickHouse's
+    # comparison find the deleted row's day in both of Gold's grains, and
+    # `compare_gold_cells` raised sorting a roll-up key (source_id NULL)
+    # beside a fine one — a latent defect, reported, not this rehearsal's.
+    say "F4: a Silver row deleted, integrity; then a Gold fine row bumped, mirror-landing"
     poll_pg "SELECT 1 FROM meta.derivation_signal WHERE layer = 'warehouse' AND requested <= built" \
         "$DERIVE_TIMEOUT" 3 >/dev/null || say "F4: a derivation is still owed"
     GRACE=$(( (FLOOR_S + 59) / 60 + 15 ))
     T_DELETE="$(pgq "SELECT now()")"
     DELETED="$(pgfile p4a_delete_silver_row.sql -v "grace=$GRACE" | head -n 1 || true)"
-    BUMPED="$(pgfile p5_bump_gold_fine_row.sql | head -n 1 || true)"
-    say "F4: deleted silver.orders ${DELETED:-nothing}, bumped gold ${BUMPED:-nothing}"
+    say "F4: deleted silver.orders ${DELETED:-nothing}"
     int_before="$(wprobe dq-last integrity 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
     wprobe trigger-wait dq_integrity_check --timeout "$STEP_TIMEOUT" > "$EV/f4_integrity_job.json" 2>&1 || true
     INT_RUN="$(wprobe wait-dq integrity --after "${int_before:-0}" --timeout 60 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
-    ml_before="$(wprobe dq-last mirror_landing 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
-    wprobe trigger-wait dq_mirror_landing --timeout "$STEP_TIMEOUT" > "$EV/f4_mirror_job.json" 2>&1 || true
-    ML_RUN="$(wprobe wait-dq mirror_landing --after "${ml_before:-0}" --timeout 60 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
     BETWEEN="$(pgq "SELECT count(*) FROM meta.derivation_runs WHERE started_at >= '$T_DELETE'::timestamptz")"
-    wprobe snapshot > "$EV/f4_snapshot.json" 2>/dev/null || true
-    cp "$EV/f4_snapshot.json" "$EV/flip_snap_f4.json" 2>/dev/null || true
-    printf '{"integrity": %s, "mirror_landing": %s}\n' "${INT_RUN:-null}" "${ML_RUN:-null}" > "$EV/f4_runs.json"
-    wprobe api POST /api/warehouse/refresh > "$EV/f4_repair.json" 2>&1 || say "F4: the repair refresh answered non-2xx"
+    wprobe api POST /api/warehouse/refresh > "$EV/f4_repair_silver.json" 2>&1 || say "F4: the repair refresh answered non-2xx"
     RESTORED=false
     if [ -n "$DELETED" ] && [ -n "$(pgq "SELECT 1 FROM silver.orders WHERE id = $DELETED")" ]; then
         RESTORED=true
     fi
-    printf '{"deleted_id": %s, "derivations_between": %s, "restored": %s, "bumped": "%s"}\n' \
-        "${DELETED:-null}" "${BETWEEN:-null}" "$RESTORED" "${BUMPED:-}" > "$EV/p4a.json"
+    T_BUMP="$(pgq "SELECT now()")"
+    BUMPED="$(pgfile p5_bump_gold_fine_row.sql | head -n 1 || true)"
+    say "F4: bumped gold ${BUMPED:-nothing}"
+    ml_before="$(wprobe dq-last mirror_landing 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
+    wprobe trigger-wait dq_mirror_landing --timeout "$STEP_TIMEOUT" > "$EV/f4_mirror_job.json" 2>&1 || true
+    ML_RUN="$(wprobe wait-dq mirror_landing --after "${ml_before:-0}" --timeout 60 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
+    AFTER_BUMP="$(pgq "SELECT count(*) FROM meta.derivation_runs WHERE started_at >= '$T_BUMP'::timestamptz")"
+    wprobe snapshot > "$EV/f4_snapshot.json" 2>/dev/null || true
+    cp "$EV/f4_snapshot.json" "$EV/flip_snap_f4.json" 2>/dev/null || true
+    printf '{"integrity": %s, "mirror_landing": %s}\n' "${INT_RUN:-null}" "${ML_RUN:-null}" > "$EV/f4_runs.json"
+    sleep 13   # the refresh endpoint's rate limit is 5 a minute
+    wprobe api POST /api/warehouse/refresh > "$EV/f4_repair_gold.json" 2>&1 || say "F4: the repair refresh answered non-2xx"
+    printf '{"deleted_id": %s, "derivations_between": %s, "restored": %s, "bumped": "%s", "derivations_after_bump": %s}\n' \
+        "${DELETED:-null}" "${BETWEEN:-null}" "$RESTORED" "${BUMPED:-}" "${AFTER_BUMP:-null}" > "$EV/p4a.json"
 
     # ─── F5: an unknown sales_type (P4c) ─────────────────────────────────────
     say "F5: one manager's orders given a sales_type no code knows"

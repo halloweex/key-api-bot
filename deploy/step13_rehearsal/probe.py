@@ -317,16 +317,23 @@ def duckdb_facts(db: str, gate: Optional[str], runs: Sequence[int]) -> Dict[str,
         counts = one("SELECT (SELECT count(*) FROM orders), (SELECT max(id) FROM orders), "
                      "(SELECT count(*) FROM silver_orders), (SELECT count(*) FROM silver_order_utm)")
         out_runs: Dict[str, Any] = {}
+        # By the id's text, never `run_id = ?`. On the first local rehearsal
+        # DuckDB 1.5.5 answered that pushed-down equality with no rows for
+        # runs 6 and 7 of a copy whose run_id column sat in one bitpacked
+        # DELTA_FOR segment, while a scan, `IN (6, 7)` and the optimizer off
+        # all returned them. Not reproduced on a fresh file; a comparison
+        # nothing can push into a segment cannot be fooled the same way.
         for run_id in runs:
             row = one("SELECT run_id, layer, status, error_message, CAST(started_at AS VARCHAR), "
-                      "CAST(ended_at AS VARCHAR) FROM data_quality_runs WHERE run_id = ?", [run_id])
+                      "CAST(ended_at AS VARCHAR) FROM data_quality_runs "
+                      "WHERE CAST(run_id AS VARCHAR) = ?", [str(run_id)])
             if row is None:
                 out_runs[str(run_id)] = None
                 continue
             issues = con.execute(
                 "SELECT check_name, table_name, severity, count, sample_ids, description "
-                "FROM data_quality_issues WHERE run_id = ? ORDER BY check_name",
-                [run_id]).fetchall()
+                "FROM data_quality_issues WHERE CAST(run_id AS VARCHAR) = ? ORDER BY check_name",
+                [str(run_id)]).fetchall()
             out_runs[str(run_id)] = {
                 "run_id": row[0], "layer": row[1], "status": row[2], "error_message": row[3],
                 "started_at": row[4], "ended_at": row[5],
@@ -677,6 +684,8 @@ def judge_p5(ev: Mapping[str, Any], *, retired: Iterable[str], standalone_twins:
     mirror, integrity = ev.get("mirror"), ev.get("integrity")
     if not mirror or not integrity:
         return UNKNOWN, f"runs not read (mirror={bool(mirror)}, integrity={bool(integrity)})"
+    if ev.get("derivations_after_bump") not in (0, None):
+        return UNKNOWN, "a derivation rebuilt Gold between the bump and the mirror-landing run"
     bad: List[str] = []
     m_issues = mirror.get("issues") or []
     if mirror.get("error_message") is not None:
@@ -722,9 +731,14 @@ def judge_p5(ev: Mapping[str, Any], *, retired: Iterable[str], standalone_twins:
     if bad:
         return FAIL, "; ".join(bad)
     twins_filed = sorted(n for n in filed if n in twins)
-    return PASS, (f"mirror_landing #{mirror.get('run_id')} clean, gold_rollup_mismatch filed, no DuckDB "
-                  f"comparison; integrity #{integrity.get('run_id')} clean, no stood-down check, "
-                  f"twins alone: {_fmt(twins_filed)}")
+    # Context, not criterion: ClickHouse's own derivation is the one
+    # independent check of Gold left after the switch (OD-08 (a)).
+    ch = ("ClickHouse did not compare" if "gold_values_unwatched" in names else
+          "ClickHouse caught the bump too" if "ch_engines_gold_mismatch" in names else
+          "ClickHouse compared, found nothing")
+    return PASS, (f"mirror_landing #{mirror.get('run_id')} without error, gold_rollup_mismatch filed, "
+                  f"no DuckDB comparison ({ch}); integrity #{integrity.get('run_id')} without error, "
+                  f"no stood-down check, twins alone: {_fmt(twins_filed)}")
 
 
 def judge_p6(ev: Mapping[str, Any]) -> Verdict:
@@ -921,7 +935,8 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
         "P5": {"flipped": is_flipped,
                "mirror": runs.get(str(ids.get("mirror_landing"))) if ids.get("mirror_landing") else None,
                "integrity": runs.get(str(ids.get("integrity"))) if ids.get("integrity") else None,
-               "stood_down": ((L("f4_snapshot.json") or {}).get("status") or {}).get("cutover", {}).get("stood_down_duckdb_checks")},
+               "stood_down": ((L("f4_snapshot.json") or {}).get("status") or {}).get("cutover", {}).get("stood_down_duckdb_checks"),
+               "derivations_after_bump": (L("p4a.json") or {}).get("derivations_after_bump")},
         "P6": {"flipped": is_flipped, "resolved_at": (_cut(f1).get("writer") or {}).get("resolved_at"),
                "restarts": restarts, "gate_delivered": (d1 or {}).get("gate_delivered")},
         "P8": {**p8, "flipped": is_flipped, "dk": dz,

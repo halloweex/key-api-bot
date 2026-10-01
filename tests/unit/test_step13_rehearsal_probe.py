@@ -573,3 +573,25 @@ def test_the_session_is_minted_for_a_hardcoded_admin(monkeypatch):
 
     monkeypatch.setattr(probe, "APP_DIR", str(REPO))
     assert probe._admin_id() in ADMIN_USER_IDS
+
+
+def test_p5_bump_healed_before_the_run_looked_is_unknown():
+    assert probe.judge_p5(p5_ev(derivations_after_bump=1), retired=RETIRED,
+                          standalone_twins=TWINS)[0] == UNKNOWN
+
+
+def test_p5_says_whether_clickhouse_compared():
+    ev = p5_ev()
+    ev["mirror"] = {**ev["mirror"], "issues": ev["mirror"]["issues"] + [
+        {"check_name": "ch_engines_gold_mismatch", "table_name": "gold.daily_revenue"}]}
+    verdict, detail = probe.judge_p5(ev, retired=RETIRED, standalone_twins=TWINS)
+    assert verdict == PASS and "ClickHouse caught the bump too" in detail
+
+
+def test_issues_are_read_by_the_ids_text_not_a_pushed_down_equality():
+    """DuckDB 1.5.5 answered `run_id = ?` with no rows on the first local
+    rehearsal's copy while a scan returned them; the judges then read two DQ
+    runs as having filed nothing."""
+    source = PROBE_PATH.read_text()
+    assert "FROM data_quality_issues WHERE CAST(run_id AS VARCHAR) = ?" in source
+    assert "data_quality_issues WHERE run_id = ?" not in source
