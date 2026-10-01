@@ -92,12 +92,27 @@ PINNED_NO_DDL = frozenset({
 
 # ─── the walks ───────────────────────────────────────────────────────────────
 
+_IDENT = r'(?:"[^"]+"|[A-Za-z_]\w*)'
+_NAME = rf"{_IDENT}(?:\s*\.\s*{_IDENT})*"
 _DDL = re.compile(
     r"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?P<temp>(?:TEMP|TEMPORARY)\s+)?"
-    r"(?P<kind>TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?P<name>[\"\w.{}]+)",
+    r"(?P<kind>TABLE|VIEW)\b(?:\s+IF\s+NOT\s+EXISTS\b)?",
     re.IGNORECASE,
 )
-_RENAME = re.compile(r"\bRENAME\s+TO\s+(?P<name>[\"\w.{}]+)", re.IGNORECASE)
+_RENAME = re.compile(r"\bRENAME\s+TO\b", re.IGNORECASE)
+# The name after a DDL keyword, when the walk can read it: an identifier,
+# qualified or not, ending where SQL ends one. Anything else — `%s`, a `{}`
+# hole, a string that stops there because a variable is added to it — is a
+# name known only at run time, and is recorded as `UNREAD`, never skipped.
+_READABLE = re.compile(rf"\s+(?P<name>{_NAME})(?=[\s(;,)]|$)")
+UNREAD = "{}"
+# What an operand the walk cannot read becomes in the text it joins.
+HOLE = "{}"
+# DuckDB's relational API persists what these name — checked on 1.5.5:
+# `create`/`to_table` make a table in the file, `create_view`/`to_view` a view.
+_RELATIONAL = {"create": "TABLE", "to_table": "TABLE",
+               "create_view": "VIEW", "to_view": "VIEW"}
+_RELATIONAL_NAME_KW = ("table_name", "view_name")
 
 
 def _py_files(trees=DUCKDB_TREES) -> Iterator[Path]:
@@ -143,22 +158,68 @@ def _scopes(tree: ast.AST) -> Dict[int, str]:
     return scope
 
 
+def _is_text(node: ast.AST) -> bool:
+    return (isinstance(node, ast.JoinedStr)
+            or (isinstance(node, ast.Constant) and isinstance(node.value, str)))
+
+
+def _add_chain(node: ast.AST, links: List[ast.AST]) -> List[ast.AST]:
+    """`a + b + c`, flattened — Python nests it as `(a + b) + c`. `links`
+    collects the `+` nodes themselves."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        links.append(node)
+        return _add_chain(node.left, links) + _add_chain(node.right, links)
+    return [node]
+
+
+def _joined(node: ast.AST) -> str:
+    """The text an f-string or a constant contributes, `HOLE` for the rest."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(p.value if isinstance(p, ast.Constant) else HOLE
+                       for p in node.values)
+    return HOLE
+
+
 def _strings(tree: ast.AST) -> Iterator[Tuple[ast.AST, str]]:
-    """Every string the module can execute: constants that are not docstrings
-    and not pieces of an f-string, and f-strings with `{}` for each hole."""
+    """Every string the module can execute: constants that are not docstrings,
+    f-strings with `HOLE` for each hole, and a concatenation with `+` as one
+    text — `"CREATE TABLE " + name` is a statement whose name is a hole, not a
+    statement with no name. A piece of either is never read on its own."""
     docs = _docstrings(tree)
-    inside = set()
+    inside: Set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.JoinedStr):
-            for part in node.values:
-                inside.add(id(part))
-            yield node, "".join(
-                p.value if isinstance(p, ast.Constant) else "{}"
-                for p in node.values)
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                and id(node) not in docs and id(node) not in inside):
+        if id(node) in inside:
+            continue
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            links: List[ast.AST] = []
+            operands = _add_chain(node, links)
+            if not any(_is_text(o) for o in operands):
+                continue
+            inside.update(id(n) for n in links)
+            for o in operands:
+                if _is_text(o):
+                    inside.add(id(o))
+                if isinstance(o, ast.JoinedStr):
+                    inside.update(id(p) for p in o.values)
+            yield node, "".join(_joined(o) for o in operands)
+        elif isinstance(node, ast.JoinedStr):
+            inside.update(id(part) for part in node.values)
+            yield node, _joined(node)
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and id(node) not in docs):
             yield node, node.value
+
+
+def _unquote(name: str) -> str:
+    return ".".join(p.strip().strip('"') for p in re.split(r"\s*\.\s*", name))
+
+
+def _named(text: str, at: int) -> str:
+    """The name that follows position `at`, or `UNREAD`."""
+    m = _READABLE.match(text, at)
+    return _unquote(m.group("name")) if m else UNREAD
 
 
 @dataclasses.dataclass(frozen=True)
@@ -166,38 +227,85 @@ class DdlSite:
     path: str
     scope: str
     kind: str          # TABLE | VIEW
-    name: str          # unquoted; `{` when rendered at run time
+    name: str          # unquoted, dotted parts joined; `UNREAD` at run time
     temp: bool
+
+
+def _catalog() -> str:
+    """The DuckDB file's own catalog name: the stem of the file web opens."""
+    from core.duckdb_constants import DB_PATH
+
+    return DB_PATH.stem
+
+
+def place(name: str) -> "str | None":
+    """The table in the DuckDB file a DDL name creates, or None when the walk
+    cannot place it there: `main.x`, `<catalog>.x` and `<catalog>.main.x` are
+    the file's own `x`; any other dotted name belongs to another catalog or
+    another engine, and is listed like a rendered one rather than dropped."""
+    if "{" in name:
+        return None
+    parts = name.split(".")
+    catalog = _catalog().lower()
+    lowered = [p.lower() for p in parts]
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2 and lowered[0] in ("main", catalog):
+        return parts[1]
+    if len(parts) == 3 and lowered[0] == catalog and lowered[1] == "main":
+        return parts[2]
+    return None
+
+
+def walk_source(rel: str, source: str) -> List[DdlSite]:
+    """Every DDL site in one module: SQL text, and DuckDB's relational API."""
+    tree = ast.parse(source)
+    scopes = _scopes(tree)
+    sites = []
+    for node, text in _strings(tree):
+        found = [(m.group("kind").upper(), _named(text, m.end()), bool(m.group("temp")))
+                 for m in _DDL.finditer(text)]
+        found += [("TABLE", _named(text, m.end()), False) for m in _RENAME.finditer(text)]
+        for kind, name, temp in found:
+            sites.append(DdlSite(rel, scopes.get(id(node), "<module>"), kind, name, temp))
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _RELATIONAL):
+            continue
+        arg = node.args[0] if node.args else next(
+            (k.value for k in node.keywords if k.arg in _RELATIONAL_NAME_KW), None)
+        if arg is None:
+            continue  # `client.messages.create(**kwargs)` names no table
+        name = (arg.value if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                else UNREAD)
+        sites.append(DdlSite(rel, scopes.get(id(node), "<module>"),
+                             _RELATIONAL[node.func.attr], name, False))
+    return sites
 
 
 def walk_ddl(trees=DUCKDB_TREES) -> List[DdlSite]:
     sites = []
     for path in _py_files(trees):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        scopes = _scopes(tree)
-        rel = path.relative_to(REPO).as_posix()
-        for node, text in _strings(tree):
-            found = [(m.group("kind").upper(), m.group("name"), bool(m.group("temp")))
-                     for m in _DDL.finditer(text)]
-            found += [("TABLE", m.group("name"), False) for m in _RENAME.finditer(text)]
-            for kind, name, temp in found:
-                sites.append(DdlSite(rel, scopes.get(id(node), "<module>"),
-                                     kind, name.strip('"'), temp))
+        sites += walk_source(path.relative_to(REPO).as_posix(),
+                             path.read_text(encoding="utf-8"))
     return sites
+
+
+def needs_listing(site: DdlSite) -> bool:
+    """A site whose table the walk cannot name in the file: rendered at run
+    time, or qualified with a catalog or schema that is not the file's."""
+    return not site.temp and place(site.name) is None
 
 
 def duckdb_names(sites: List[DdlSite]) -> Dict[str, str]:
     """`{name: TABLE|VIEW}` the walk resolves to the DuckDB file: not TEMP
-    (DuckDB keeps those in its temp catalogue, never the file), not rendered,
-    and either unqualified or in `main` — a dotted name is another engine's."""
+    (DuckDB keeps those in its temp catalogue, never the file), and placed —
+    every other site is in `RENDERED_DDL` or fails."""
     out = {}
     for s in sites:
-        if s.temp or "{" in s.name:
-            continue
-        name = s.name[5:] if s.name.lower().startswith("main.") else s.name
-        if "." in name:
-            continue
-        out[name] = TABLE if s.kind == "TABLE" else VIEW
+        name = None if s.temp else place(s.name)
+        if name is not None:
+            out[name] = TABLE if s.kind == "TABLE" else VIEW
     return out
 
 
@@ -306,13 +414,67 @@ class TestEveryNameHasAFate:
             assert fate.object == actual, f"{name}: declared {fate.object}, is {actual}"
 
     def test_every_rendered_ddl_site_is_accounted_for(self, sites):
-        rendered = {(s.path, s.scope) for s in sites if "{" in s.name and not s.temp}
+        rendered = {(s.path, s.scope) for s in sites if needs_listing(s)}
         unlisted = sorted(rendered - set(RENDERED_DDL))
         gone = sorted(set(RENDERED_DDL) - rendered)
         assert not unlisted, (
-            f"DDL naming its table at run time at {unlisted}: the walk cannot "
-            f"read the name, so say where it comes from in RENDERED_DDL")
+            f"DDL naming its table at run time, or in a catalog the walk cannot "
+            f"place, at {unlisted}: say where the name comes from in RENDERED_DDL")
         assert not gone, f"RENDERED_DDL lists sites that no longer exist: {gone}"
+
+    @pytest.mark.parametrize("source, expected", [
+        # The four shapes that passed the whole file green (review, finding 2).
+        ('def f(c, name): c.execute("CREATE TABLE " + name + " (id INTEGER)")',
+         ("f", "TABLE", UNREAD)),
+        ('def f(c, name): c.execute("CREATE TABLE %s (id INTEGER)" % name)',
+         ("f", "TABLE", UNREAD)),
+        ('def f(c): c.sql("SELECT 1 AS id").create("mystery_relational")',
+         ("f", "TABLE", "mystery_relational")),
+        ('def f(c): c.execute("CREATE TABLE IF NOT EXISTS '
+         'analytics.main.mystery_catalog (id INTEGER)")',
+         ("f", "TABLE", "analytics.main.mystery_catalog")),
+        # And their neighbours.
+        ('def f(c, n): c.sql("SELECT 1").to_table(n)', ("f", "TABLE", UNREAD)),
+        ('def f(c): c.sql("SELECT 1").create_view(view_name="mystery_v")',
+         ("f", "VIEW", "mystery_v")),
+        ('def f(c): c.sql("SELECT 1").to_view("mystery_v2", replace=True)',
+         ("f", "VIEW", "mystery_v2")),
+        ('def f(c, n): c.execute("CREATE TABLE stg_{} (id INTEGER)".format(n))',
+         ("f", "TABLE", UNREAD)),
+        ('def f(c, n): c.execute(f"CREATE TABLE stg_{n} (id INTEGER)")',
+         ("f", "TABLE", UNREAD)),
+        ('def f(c): c.execute("CREATE TABLE "\n "mystery_implicit (id INTEGER)")',
+         ("f", "TABLE", "mystery_implicit")),
+        ('def f(c): c.execute("CREATE VIEW " + "mystery_folded AS SELECT 1")',
+         ("f", "VIEW", "mystery_folded")),
+        ('def f(c): c.execute(\'CREATE TABLE "main"."mystery_quoted" (id INT)\')',
+         ("f", "TABLE", "main.mystery_quoted")),
+        ('def f(c, old): c.execute("ALTER TABLE " + old + " RENAME TO mystery_rn")',
+         ("f", "TABLE", "mystery_rn")),
+    ])
+    def test_the_walk_reads_every_shape_of_ddl(self, source, expected):
+        """Each shape yields one site, read or recorded as unread — never
+        nothing. Mutations: the `+` folding in `_strings`, the `_READABLE`
+        fallback to `UNREAD`, the relational walk in `walk_source`."""
+        sites = walk_source("core/_probe.py", source)
+        assert [(s.scope, s.kind, s.name) for s in sites if not s.temp] == [expected]
+
+    @pytest.mark.parametrize("name, placed", [
+        ("orders", "orders"), ("main.orders", "orders"),
+        ("analytics.orders", "orders"), ("analytics.main.orders", "orders"),
+        ("ANALYTICS.MAIN.orders", "orders"),
+        ("bronze.orders", None), ("memory.main.orders", None),
+        ("analytics.other.orders", None), ("temp.orders", None), (UNREAD, None),
+    ])
+    def test_a_qualified_name_is_placed_or_listed(self, name, placed):
+        """Mutation: `place` dropping every dotted name as another engine's,
+        which is what let `analytics.main.mystery_catalog` through."""
+        assert place(name) == placed
+
+    def test_the_catalog_is_the_files_stem(self):
+        from core.duckdb_constants import DB_PATH
+
+        assert _catalog() == "analytics" == DB_PATH.stem
 
     def test_the_bot_never_opens_duckdb(self):
         """What lets `bot/` stay out of the walk."""
