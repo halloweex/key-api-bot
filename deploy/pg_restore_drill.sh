@@ -266,8 +266,7 @@ drill_from_remote() {
     # through a rename; a failed drill leaves the previous marker to age.
     local marker="${BACKUP_PG_REMOTE_DRILL_MARKER:-data/.pg_restore_drill_remote_last_ok}"
     mkdir -p "$(dirname "$marker")"
-    printf '%s provider=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        "${BACKUP_PG_PROVIDER:-unlabelled}" >"$marker.tmp"
+    date -u +%Y-%m-%dT%H:%M:%SZ >"$marker.tmp"
     mv -f "$marker.tmp" "$marker"
 }
 

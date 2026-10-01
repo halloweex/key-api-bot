@@ -22,10 +22,8 @@ def _write(root, name, at, **labels):
 
 def _all_fresh(root):
     _write(root, ev.PITR_DRILL, NOW - timedelta(days=2), base="20260928T081000Z")
-    _write(root, ev.REMOTE_DRILL, NOW - timedelta(days=2), provider="hetzner")
-    _write(root, ev.OFFSITE_PREFIX, NOW - timedelta(hours=2), provider="hetzner")
-    _write(root, ev.OFFSITE_PREFIX + ".second", NOW - timedelta(hours=3),
-           provider="rsyncnet")
+    _write(root, ev.REMOTE_DRILL, NOW - timedelta(days=2))
+    _write(root, ev.OFFSITE, NOW - timedelta(hours=2))
 
 
 def _keys(unmet):
@@ -39,51 +37,47 @@ def test_everything_fresh_is_met(tmp_path):
 
 def test_nothing_on_disk_is_every_piece_missing(tmp_path):
     """Mutation: treat an absent marker as met."""
-    assert _keys(ev.unmet(NOW, tmp_path)) == [
-        "pg_offsite", "pitr_drill", "remote_restore", "second_provider"]
+    assert _keys(ev.unmet(NOW, tmp_path)) == ["pg_offsite", "pitr_drill", "remote_restore"]
 
 
-@pytest.mark.parametrize("name,days,key", [
-    (ev.PITR_DRILL, 9, "pitr_drill"),
-    (ev.REMOTE_DRILL, 9, "remote_restore"),
+def test_one_provider_is_enough(tmp_path):
+    """OD-01 (c) was cancelled by the owner on 2026-10-01: one Storage Box,
+    risk accepted in writing. Mutation: put the second-provider check back —
+    this host, with one fresh shipment, would read as unmet for ever."""
+    _all_fresh(tmp_path)
+    assert not [line for line in ev.unmet(NOW, tmp_path) if "provider" in line]
+
+
+@pytest.mark.parametrize("name,key", [
+    (ev.PITR_DRILL, "pitr_drill"),
+    (ev.REMOTE_DRILL, "remote_restore"),
 ])
-def test_a_drill_older_than_a_week_and_a_day_is_unmet(tmp_path, name, days, key):
+def test_a_drill_older_than_a_week_and_a_day_is_unmet(tmp_path, name, key):
     """Mutation: compare against hours where the limit is days, or drop the
     age check — a drill that passed once would vouch for ever."""
     _all_fresh(tmp_path)
-    _write(tmp_path, name, NOW - timedelta(days=days), provider="hetzner")
+    _write(tmp_path, name, NOW - timedelta(days=9))
     assert _keys(ev.unmet(NOW, tmp_path)) == [key]
-    _write(tmp_path, name, NOW - timedelta(days=7, hours=23), provider="hetzner")
+    _write(tmp_path, name, NOW - timedelta(days=7, hours=23))
     assert ev.unmet(NOW, tmp_path) == []
 
 
-def test_a_stale_primary_shipment_is_unmet_at_offsite_checks_limit(tmp_path):
+def test_a_stale_shipment_is_unmet_at_offsite_checks_limit(tmp_path):
+    """Mutation: a limit other than `deploy/offsite_check.sh`'s 36 hours."""
     _all_fresh(tmp_path)
-    _write(tmp_path, ev.OFFSITE_PREFIX, NOW - timedelta(hours=37), provider="hetzner")
-    # Stale primary: its own key, and it no longer counts as a provider either.
-    assert _keys(ev.unmet(NOW, tmp_path)) == ["pg_offsite", "second_provider"]
-
-
-def test_two_copies_at_one_provider_are_one_provider(tmp_path):
-    """OD-01 (c) is about suppliers, not files. Mutation: count markers."""
-    _all_fresh(tmp_path)
-    _write(tmp_path, ev.OFFSITE_PREFIX + ".second", NOW - timedelta(hours=3),
-           provider="hetzner")
-    assert _keys(ev.unmet(NOW, tmp_path)) == ["second_provider"]
-
-
-def test_an_unlabelled_copy_vouches_for_nobody_s_second(tmp_path):
-    """Mutation: let `unlabelled` count as a provider."""
-    _all_fresh(tmp_path)
-    _write(tmp_path, ev.OFFSITE_PREFIX + ".second", NOW - timedelta(hours=3))
-    assert _keys(ev.unmet(NOW, tmp_path)) == ["second_provider"]
+    _write(tmp_path, ev.OFFSITE, NOW - timedelta(hours=37))
+    assert _keys(ev.unmet(NOW, tmp_path)) == ["pg_offsite"]
+    _write(tmp_path, ev.OFFSITE, NOW - timedelta(hours=35))
+    assert ev.unmet(NOW, tmp_path) == []
 
 
 def test_a_half_written_temporary_file_is_not_a_shipment(tmp_path):
+    """The scripts write `<marker>.tmp` and rename it. Mutation: read the
+    marker by prefix."""
     _all_fresh(tmp_path)
-    (tmp_path / (ev.OFFSITE_PREFIX + ".second")).unlink()
-    _write(tmp_path, ev.OFFSITE_PREFIX + ".tmp", NOW, provider="rsyncnet")
-    assert _keys(ev.unmet(NOW, tmp_path)) == ["second_provider"]
+    (tmp_path / ev.OFFSITE).unlink()
+    _write(tmp_path, ev.OFFSITE + ".tmp", NOW)
+    assert _keys(ev.unmet(NOW, tmp_path)) == ["pg_offsite"]
 
 
 def test_an_unreadable_line_falls_back_to_the_file_s_own_time(tmp_path):
@@ -97,14 +91,16 @@ def test_an_unreadable_line_falls_back_to_the_file_s_own_time(tmp_path):
 
 
 def test_a_missing_directory_is_evidence_missing_not_a_raise(tmp_path):
-    assert len(ev.unmet(NOW, tmp_path / "nope")) == 4
+    assert len(ev.unmet(NOW, tmp_path / "nope")) == 3
 
 
-def test_the_published_block_carries_ages_and_counts_only(tmp_path):
+def test_the_published_block_carries_ages_only(tmp_path):
     """Public endpoint: no path, host or label leaves this module."""
     _all_fresh(tmp_path)
     out = ev.published(NOW, tmp_path)
     assert out == {"pitr_drill_age_h": 48.0, "remote_restore_age_h": 48.0,
-                   "pg_offsite_age_h": 2.0, "pg_offsite_copies": 2,
-                   "fresh_providers": 2}
+                   "pg_offsite_age_h": 2.0}
     assert not any(isinstance(v, str) for v in out.values())
+    assert ev.published(NOW, tmp_path / "nope") == {
+        "pitr_drill_age_h": None, "remote_restore_age_h": None,
+        "pg_offsite_age_h": None}

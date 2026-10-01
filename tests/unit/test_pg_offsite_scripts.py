@@ -814,45 +814,21 @@ def test_real_gpg_round_trips(tmp_path):
 # ── the evidence chain 3's flip reads (core/backup_evidence.py) ───────────────
 
 class TestTheEvidenceMarkers:
-    def test_the_marker_names_the_provider_the_configuration_names(self, world):
-        """OD-01 (c) counts providers, so the marker has to say whose copy it
-        vouches for. Mutation: write the time alone."""
+    def test_the_shipment_marker_is_a_time_written_through_a_rename(self, world):
+        """The web container reads this line (`core.backup_evidence`).
+        Mutation: write the marker in place — a reader could see half a line —
+        or write something that is not the time."""
         from core.backup_evidence import read_markers
 
-        with (world.root / "deploy" / "backup.env").open("a") as fh:
-            fh.write("BACKUP_PG_PROVIDER=hetzner-storagebox\n")
         world.dump()
         assert world.run().code == 0
         line = world.marker.read_text().strip()
-        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ provider=hetzner-storagebox", line)
-        (_, _, shipped), = [read_markers(world.marker.parent)]
-        assert [m.labels["provider"] for m in shipped] == ["hetzner-storagebox"]
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", line)
+        assert read_markers(world.marker.parent)[2] is not None
         assert not list(world.marker.parent.glob("*.tmp"))
-
-    def test_a_configuration_naming_none_says_so(self, world):
-        world.dump()
-        assert world.run().code == 0
-        assert world.marker.read_text().strip().endswith("provider=unlabelled")
-
-    def test_a_second_configuration_ships_to_its_own_marker(self, world, tmp_path):
-        """The second provider is the same script under BACKUP_CONFIG, with its
-        own remote and its own marker. Mutation: ignore BACKUP_CONFIG — the
-        second run would ship to the first remote and overwrite its marker."""
-        second = world.root / "deploy" / "backup-second.env"
-        second.write_text(
-            (world.root / "deploy" / "backup.env").read_text()
-            + "BACKUP_PG_REMOTE_DIR=second/postgres\n"
-            + "BACKUP_PG_MARKER=data/.pg_offsite_last_ok.second\n"
-            + "BACKUP_PG_LOCK=data/.pg_offsite_second.lock\n"
-            + "BACKUP_PG_PROVIDER=rsyncnet\n")
-        world.dump()
-        run = world.run(BACKUP_CONFIG="deploy/backup-second.env")
-        assert run.code == 0, run.out
-        assert (world.remote_root / "second" / "postgres").is_dir()
-        assert not world.remote.exists()
-        assert not world.marker.exists()
-        text = (world.root / "data" / ".pg_offsite_last_ok.second").read_text()
-        assert text.strip().endswith("provider=rsyncnet")
+        script = (REPO / "deploy" / "pg_offsite.sh").read_text()
+        assert 'mv -f "$MARKER.tmp" "$MARKER"' in script
+        assert '>"$MARKER"' not in script, "the marker is written in place"
 
     def test_the_remote_drill_leaves_a_marker_only_when_it_passes(self, world):
         """Mutation: write the marker before the row comparison — this test's
@@ -868,5 +844,6 @@ class TestTheEvidenceMarkers:
 
         run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **RESTORED)
         assert run.code == 0, run.out
-        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ provider=\S+",
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ",
                             marker.read_text().strip())
+        assert not list(marker.parent.glob("*.tmp"))

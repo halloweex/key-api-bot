@@ -53,13 +53,7 @@ set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
 
-# One shipment per configuration. The primary is deploy/backup.env; a second
-# provider (OD-01 (c)) is the same script run with BACKUP_CONFIG naming its
-# own file, which sets its own BACKUP_REMOTE, BACKUP_PG_MARKER
-# (data/.pg_offsite_last_ok.<name>), BACKUP_PG_LOCK, BACKUP_PG_OFFSITE_LOG and
-# BACKUP_PG_PROVIDER. Two files and not two arms of one run, so a provider that
-# fails cannot cost the other its night.
-CONFIG="${BACKUP_CONFIG:-deploy/backup.env}"
+CONFIG="deploy/backup.env"
 # shellcheck source=/dev/null
 [ -f "$CONFIG" ] && . "$CONFIG"
 
@@ -70,12 +64,6 @@ CONFIG="${BACKUP_CONFIG:-deploy/backup.env}"
 source deploy/pg_offsite_lib.sh
 
 MARKER="${BACKUP_PG_MARKER:-data/.pg_offsite_last_ok}"
-# Who holds the copy, as the operator names it in the configuration. Written
-# into the marker beside the time, because chain 3's flip waits for two
-# providers holding fresh copies (`core/backup_evidence.py`, OD-01 (c)) and a
-# marker cannot otherwise say whose copy it vouches for. Typed, not derived:
-# two Storage Box accounts are one provider, and only a person knows that.
-PROVIDER="${BACKUP_PG_PROVIDER:-}"
 # Fourteen off-site, the same count pg_backup.sh keeps locally. The two
 # numbers answer different questions — how far back a mistake can be undone,
 # and how much of that survives the machine — but nothing yet argues for them
@@ -314,10 +302,9 @@ run_push() {
     # nobody has read back.
     mkdir -p "$(dirname "$MARKER")"
     # Through a temporary file and a rename, so a reader never sees half a
-    # line. The time comes first and alone on the line's start: offsite_check
-    # reads the file's age, the web container reads this text.
-    printf '%s provider=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        "${PROVIDER:-unlabelled}" >"$MARKER.tmp"
+    # line: offsite_check reads the file's age, and since chain 3 the web
+    # container reads its text (`core/backup_evidence.py`).
+    date -u +%Y-%m-%dT%H:%M:%SZ >"$MARKER.tmp"
     mv -f "$MARKER.tmp" "$MARKER"
 
     step "prune off-site"

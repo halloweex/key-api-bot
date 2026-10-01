@@ -3,19 +3,23 @@
 Chain 3 moves the orders — the one table every page reads — to Postgres with
 no DuckDB copy behind them, and OD-13 (a) made its flip wait for evidence that
 Postgres can be got back: a PITR drill that passed, Postgres dumps fresh off
-this host, the off-site copy restored, and (OD-01 (c)) a second provider
-holding one. Until 2026-10-01 only the shipment left anything the application
-could read. The drills printed PASS to a log nobody reads.
+this host, and the off-site copy restored. Until 2026-10-01 only the shipment
+left anything the application could read. The drills printed PASS to a log
+nobody reads.
+
+One off-site provider, on purpose: the owner cancelled OD-01 (c), the second
+provider, on 2026-10-01 and accepted the risk in writing. Nothing here counts
+providers.
 
 Each script now writes one line on success, and only on success, through a
 temporary file and a rename (`deploy/`):
 
-    data/.pg_offsite_last_ok[.<name>]       pg_offsite.sh, after verification
-        2026-10-01T07:41:00Z provider=<label>
+    data/.pg_offsite_last_ok                pg_offsite.sh, after verification
+        2026-10-01T07:41:00Z
     data/.pg_pitr_drill_last_ok             pg_pitr_drill.sh, after the checks
         2026-09-28T08:44:12Z base=<stamp>
     data/.pg_restore_drill_remote_last_ok   pg_restore_drill.sh --from-remote
-        2026-09-28T08:21:05Z provider=<label>
+        2026-09-28T08:21:05Z
 
 Read from `./data`, which both containers mount, without opening a database:
 the flip's precondition (`core.pg_orders_write.unmet_precondition`) is asked
@@ -39,13 +43,9 @@ from core.duckdb_constants import DB_DIR
 
 logger = logging.getLogger(__name__)
 
-OFFSITE_PREFIX = ".pg_offsite_last_ok"
+OFFSITE = ".pg_offsite_last_ok"
 PITR_DRILL = ".pg_pitr_drill_last_ok"
 REMOTE_DRILL = ".pg_restore_drill_remote_last_ok"
-
-# The label a shipment carries when its configuration names no provider. It
-# vouches for a copy, and for nobody's second one.
-UNLABELLED = "unlabelled"
 
 # `deploy/offsite_check.sh` alarms on the Postgres marker past 36 hours: one
 # missed nightly run plus slack. The flip reads the same limit, so the two
@@ -94,25 +94,22 @@ def _directory(base: Optional[Path]) -> Path:
 
 
 def read_markers(base: Optional[Path] = None) -> Tuple[Optional[Marker], Optional[Marker],
-                                                      List[Marker]]:
-    """`(pitr drill, remote drill, [off-site shipments])`. Never raises; an
-    unreadable directory reads as no markers at all, which every caller takes
-    as evidence missing."""
+                                                      Optional[Marker]]:
+    """`(pitr drill, remote drill, off-site shipment)`. Never raises; a marker
+    that cannot be read is None, which every caller takes as evidence
+    missing."""
     root = _directory(base)
-    try:
-        shipments = [m for m in (_parse(p) for p in sorted(root.glob(OFFSITE_PREFIX + "*"))
-                                 if not p.name.endswith(".tmp")) if m]
-    except OSError as exc:
-        logger.warning("backup evidence: cannot list %s (%s)", root, exc)
-        shipments = []
-    return _parse(root / PITR_DRILL), _parse(root / REMOTE_DRILL), shipments
+    return _parse(root / PITR_DRILL), _parse(root / REMOTE_DRILL), _parse(root / OFFSITE)
 
 
 def unmet(now: Optional[datetime] = None, base: Optional[Path] = None) -> List[str]:
     """Each piece of chain 3's backup evidence that does not hold, as a key
-    and a sentence. Empty when all of it does. Never raises."""
+    and a sentence. Empty when all of it does. Never raises. No path beyond
+    the marker's own name and no host appears: these sentences reach
+    `/api/health` through the registry's `unmet_precondition`, and that
+    endpoint is public."""
     now = now or datetime.now(timezone.utc)
-    pitr, remote, shipments = read_markers(base)
+    pitr, remote, offsite = read_markers(base)
     out: List[str] = []
 
     if pitr is None:
@@ -123,13 +120,12 @@ def unmet(now: Optional[datetime] = None, base: Optional[Path] = None) -> List[s
                    f"{pitr.age_h(now) / 24:.1f} days old (limit "
                    f"{DRILL_MAX_AGE_H // 24})")
 
-    primary = next((m for m in shipments if m.name == OFFSITE_PREFIX), None)
-    if primary is None:
+    if offsite is None:
         out.append("pg_offsite: no Postgres dump has left this host "
                    "(deploy/pg_offsite.sh leaves data/.pg_offsite_last_ok)")
-    elif primary.age_h(now) > OFFSITE_MAX_AGE_H:
+    elif offsite.age_h(now) > OFFSITE_MAX_AGE_H:
         out.append(f"pg_offsite: the last Postgres dump shipped off this host "
-                   f"is {primary.age_h(now):.0f} h old (limit {OFFSITE_MAX_AGE_H})")
+                   f"is {offsite.age_h(now):.0f} h old (limit {OFFSITE_MAX_AGE_H})")
 
     if remote is None:
         out.append("remote_restore: the off-site copy has never been restored "
@@ -138,35 +134,20 @@ def unmet(now: Optional[datetime] = None, base: Optional[Path] = None) -> List[s
         out.append(f"remote_restore: the off-site copy was last restored "
                    f"{remote.age_h(now) / 24:.1f} days ago (limit "
                    f"{DRILL_MAX_AGE_H // 24})")
-
-    providers = sorted({m.labels.get("provider", UNLABELLED) for m in shipments
-                        if m.age_h(now) <= OFFSITE_MAX_AGE_H}
-                       - {UNLABELLED, ""})
-    if len(providers) < 2:
-        out.append(
-            "second_provider: OD-01 (c) wants fresh Postgres copies at two "
-            f"providers, and {len(providers)} labelled provider(s) hold one"
-            + (f" ({', '.join(providers)})" if providers else "")
-            + " (BACKUP_PG_PROVIDER in each pg_offsite.sh configuration)")
     return out
 
 
 def published(now: Optional[datetime] = None, base: Optional[Path] = None) -> Dict[str, object]:
-    """Ages in hours and provider counts, for `/api/health`. Never raises.
-    No path, host or provider label: the endpoint is public."""
+    """Ages in hours, for `/api/health`. Never raises. No path, host or
+    label: the endpoint is public."""
     now = now or datetime.now(timezone.utc)
-    pitr, remote, shipments = read_markers(base)
+    pitr, remote, offsite = read_markers(base)
 
     def age(marker: Optional[Marker]) -> Optional[float]:
         return round(marker.age_h(now), 1) if marker else None
 
-    primary = next((m for m in shipments if m.name == OFFSITE_PREFIX), None)
-    fresh = {m.labels.get("provider", UNLABELLED) for m in shipments
-             if m.age_h(now) <= OFFSITE_MAX_AGE_H} - {UNLABELLED, ""}
     return {
         "pitr_drill_age_h": age(pitr),
         "remote_restore_age_h": age(remote),
-        "pg_offsite_age_h": age(primary),
-        "pg_offsite_copies": len(shipments),
-        "fresh_providers": len(fresh),
+        "pg_offsite_age_h": age(offsite),
     }
