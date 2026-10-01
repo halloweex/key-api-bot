@@ -738,6 +738,17 @@ class TestTheHostCheck:
         assert _run(host, "--file", str(host / "analytics.duckdb")) == check.EXIT_REFUSED
         assert not opened
 
+    def test_any_file_named_like_the_live_one_is_refused(self, host, opened):
+        """Not the configured live path and not the same inode — a separate
+        file under `/app/data` mounted somewhere `--live` does not point at is
+        still somebody's live database, and the name is all that says so."""
+        elsewhere = host / "elsewhere"
+        elsewhere.mkdir()
+        shutil.copyfile(host / "analytics.duckdb", elsewhere / "analytics.duckdb")
+        assert _run(host, "--file", str(elsewhere / "analytics.duckdb")) \
+            == check.EXIT_REFUSED
+        assert not opened
+
     def test_the_live_file_is_refused_under_another_name(self, host, opened):
         link = host / "backups" / "copy.duckdb"
         os.link(host / "analytics.duckdb", link)
