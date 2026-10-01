@@ -56,6 +56,10 @@ copies of the latch.
        to the state before the run. For --handover: a CRITICAL.
     2  refused before anything was written: a precondition, the handover's
        CRITICALs, the DuckDB lock, or two flags that ask opposite things.
+       One refusal comes after a write to Postgres alone: a report ledger's
+       spool (chains 11a/11b) is landed there before the copy reads, and a
+       week still spooled afterwards refuses — the weeks that did land are
+       the delivery records the job's next tick would have written.
     3  COMMITTED, then the checkpoint or the release failed. DuckDB HAS the
        copy, so `up -d` does not return to the state before the run. The
        message names which copies of the latch survived and the next step for

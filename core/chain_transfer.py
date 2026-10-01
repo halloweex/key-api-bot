@@ -1142,6 +1142,11 @@ async def copy_back(
       sentence that clears it, and neither copy is refused into silence.
     - **Nothing the write would destroy.** `handover_check`'s CRITICALs,
       asked before anything is written — see the module docstring.
+    - **No delivered week left in a spool** (chains 11a/11b). After the
+      handover, and only under `--execute`, the chain's `land_pending` lands
+      it in Postgres; anything still spooled refuses the copy. That refusal
+      comes after the weeks that did land were written to Postgres — the
+      record of a delivery, the write the job's next tick would have made.
     - **`KS_WRITE_*` is not a precondition.** Under OD-19 (a) it does not route
       writes while the chain is latched, so requiring it to say anything in
       particular would only add a step that changes nothing. The runbook printed
