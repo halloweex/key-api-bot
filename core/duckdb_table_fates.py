@@ -219,17 +219,19 @@ FATES: Dict[str, TableFate] = {
         "API can never be asked for.",
         successors=("app.order_backfill_misses",), chain="3"),
 
-    # ── chain 4: buyers and gender (no switch on main yet) ──────────────────
+    # ── chain 4: buyers and gender (KS_WRITE_BUYERS, registered) ────────────
     "buyers": TableFate(
         MOVED, KEYCRM, "Buyers; one parse feeds both stores.",
-        successors=("bronze.buyers",), chain="4"),
+        successors=("bronze.buyers",), chain="4", switch="KS_WRITE_BUYERS"),
     "buyer_contacts": TableFate(
         MOVED, KEYCRM, "Moves with buyers: one writer, one transaction.",
-        successors=("bronze.buyer_contacts",), chain="4"),
+        successors=("bronze.buyer_contacts",), chain="4",
+        switch="KS_WRITE_BUYERS"),
     "buyer_gender": TableFate(
         MOVED, IRREPLACEABLE, "Inferred from names, but override_by_human "
         "rows are a person's decision and no backfill touches them.",
-        successors=("app.buyer_gender",), chain="4"),
+        successors=("app.buyer_gender",), chain="4",
+        switch="KS_WRITE_BUYERS"),
 
     # ── chain 5: manager classification (no switch yet) ─────────────────────
     "managers": TableFate(

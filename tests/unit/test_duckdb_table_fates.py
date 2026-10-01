@@ -239,6 +239,23 @@ def sites() -> List[DdlSite]:
     return walk_ddl()
 
 
+def _validator_tiers() -> Dict[str, Set[str]]:
+    """Every table tier `core.snapshot_validation` declares, read off the
+    module rather than named here: each upper-case module constant that is a
+    set of strings, or a mapping keyed by them (`BOUNDED_SHRINK` arrived as a
+    dict with chain 4, where a hand list of the frozensets would not look)."""
+    from core import snapshot_validation as sv
+
+    tiers = {}
+    for name, value in vars(sv).items():
+        if not name.isupper():
+            continue
+        if isinstance(value, (set, frozenset, dict)) and value and all(
+                isinstance(k, str) for k in value):
+            tiers[name] = set(value)
+    return tiers
+
+
 # ─── 1. the names ────────────────────────────────────────────────────────────
 
 class TestEveryNameHasAFate:
@@ -313,10 +330,13 @@ class TestEveryNameHasAFate:
         assert not offenders, f"bot/ opens DuckDB in {offenders}; walk it too"
 
     def test_every_table_a_validator_names_has_a_fate(self):
-        from core import snapshot_validation as sv
-
-        named = sv.MUST_BE_NONEMPTY | sv.MONOTONE | sv.MAY_BE_EMPTY | sv.DERIVED
-        assert not sorted(named - set(FATES))
+        tiers = _validator_tiers()
+        # The family: a walk that found none of them would pass everything.
+        assert {"MUST_BE_NONEMPTY", "MONOTONE", "MAY_BE_EMPTY",
+                "DERIVED"} <= set(tiers)
+        stray = sorted(f"{tier}: {name}" for tier, names in tiers.items()
+                       for name in names if name not in FATES)
+        assert not stray, stray
 
 
 # ─── 2. compaction and the off-site archive ─────────────────────────────────
@@ -369,14 +389,17 @@ class TestTheCompactionAgrees:
                     f"export behind it")
 
     def test_the_snapshot_validator_agrees(self):
-        from core import snapshot_validation as sv
-
+        """Every tier the nightly validator judges an export by — whatever it
+        is called and however many there are — expects its tables in the
+        export, except `DERIVED`, which names what the export leaves out."""
         offsite = {n for n, f in FATES.items() if f.offsite}
         skipped = {n for n, f in FATES.items() if f.compaction == SKIPPED}
-        for tier in ("MUST_BE_NONEMPTY", "MONOTONE", "MAY_BE_EMPTY"):
-            stray = sorted(getattr(sv, tier) - offsite)
+        for tier, names in _validator_tiers().items():
+            if tier == "DERIVED":
+                assert names <= skipped, sorted(names - skipped)
+                continue
+            stray = sorted(names - offsite)
             assert not stray, f"snapshot_validation.{tier} expects {stray} off-site"
-        assert sv.DERIVED <= skipped, sorted(sv.DERIVED - skipped)
 
     def test_the_real_export_ships_exactly_the_offsite_tables(
             self, fresh_file, tmp_path, monkeypatch):
