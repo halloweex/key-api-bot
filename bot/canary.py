@@ -847,14 +847,27 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     design, until web restarts, so a first-time blip the canary holds back
     (`defer_flaky` — the 05:15 freeze, an nginx reload, a 10 s timeout)
     would announce it resolved and the next probe page it again as a new
-    incident, agent and all. Only these keys: every other payload-derived
-    key keeps today's behaviour."""
+    incident, agent and all. Only these keys, and the buyers step's: every
+    other payload-derived key keeps today's behaviour.
+
+    The buyers step's two keys are held the same way: both when the probe read
+    no `buyer_sync` block, and chain 4's CRITICAL when it read no entry for the
+    chain either. Under chain 4 that step is the only writer of buyers, and a
+    stall outlives the 05:15 freeze and every deploy recreate. Read blind, the
+    page was announced resolved and paged again as a new incident each time —
+    through the WARN beside it as much as through the CRITICAL, since both
+    fire for one stall (review of chain 4's merge with OD-07)."""
     payload = payload or {}
     keys = []
     if not isinstance(payload.get("read_fallbacks"), dict):
         keys.append("read_fallback_used")
     if not isinstance(payload.get("read_fallback_mode"), dict):
         keys += ["read_routed_to_duckdb", "read_refused"]
+    chains = payload.get("write_chains")
+    if not isinstance(payload.get("buyer_sync"), dict):
+        keys += ["buyer_sync_stalled", "buyer_sync_stalled_chain"]
+    elif not (isinstance(chains, dict) and isinstance(chains.get(BUYER_CHAIN), dict)):
+        keys.append("buyer_sync_stalled_chain")
     return keys
 
 

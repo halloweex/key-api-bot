@@ -2595,8 +2595,12 @@ holds back, the 05:15 freeze, a 10 s timeout — used to announce a standing
 `read_fallback_used` resolved and page it again as a new incident on the next
 probe, agent and all. `CanaryResult.unjudged_keys` names the OD-07 keys a
 probe could not judge for want of their block, and `canary_job` keeps them in
-`still_firing`. Every other payload-derived key keeps today's behaviour,
-though they share the flaw.
+`still_firing` — and the buyers step's two keys, `buyer_sync_stalled` when the
+probe read no `buyer_sync` block and chain 4's CRITICAL also when it read no
+entry for the chain: under chain 4 a stall of the only writer of buyers
+outlives the freeze and every recreate, and both keys fire for it.
+Every other payload-derived key keeps today's behaviour, though they share the
+flaw.
 
 A page proves a fallback, but it cannot prove that a quiet week was looked at.
 So every probe that read the block also rewrites one row,

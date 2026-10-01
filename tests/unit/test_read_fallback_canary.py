@@ -563,22 +563,48 @@ class TestABlindProbeKeepsThePage:
         assert len(sent) == 1 and not any("Resolved" in s for s in sent), sent
         assert agent == ["canary:read_refused"], agent
 
+    @pytest.mark.asyncio
+    async def test_chain_4s_page_is_held_through_a_blind_probe(self):
+        """Under chain 4 the buyers step is the only writer of buyers; a stall
+        outlives the 05:15 freeze and every recreate, and read blind it was
+        announced resolved and paged again as a new incident (review of chain
+        4's merge with OD-07)."""
+        stalled = self._payload({})
+        stalled["buyer_sync"] = {"last_ok_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 600,
+                                 "watermark_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 600,
+                                 "last_attempt_age_s": 120, "consecutive_failures": 0}
+        stalled["write_chains"] = {canary.BUYER_CHAIN: {"mode": "postgres"}}
+        sent, agent, _ = await self._run([stalled, None, stalled])
+        assert len(sent) == 1 and not any("Resolved" in s for s in sent), sent
+
 
 class TestUnjudgedKeys:
-    def test_no_payload_judges_none_of_the_three(self):
-        assert canary.unjudged_keys(None) == [
-            "read_fallback_used", "read_routed_to_duckdb", "read_refused"]
+    _CHAIN4 = {"buyer_sync": {"last_ok_age_s": 60},
+               "write_chains": {canary.BUYER_CHAIN: {"mode": "duckdb"}}}
 
-    def test_a_payload_with_both_blocks_judges_all_three(self):
-        payload = {"read_fallbacks": {}, "read_fallback_mode": {"mode": "duckdb"}}
+    def test_no_payload_judges_none_of_them(self):
+        assert canary.unjudged_keys(None) == [
+            "read_fallback_used", "read_routed_to_duckdb", "read_refused",
+            "buyer_sync_stalled", "buyer_sync_stalled_chain"]
+
+    def test_a_payload_with_every_block_judges_all_of_them(self):
+        payload = {"read_fallbacks": {}, "read_fallback_mode": {"mode": "duckdb"},
+                   **self._CHAIN4}
         assert canary.unjudged_keys(payload) == []
 
     def test_each_block_answers_for_its_own_keys(self):
-        assert canary.unjudged_keys({"read_fallback_mode": {}}) == ["read_fallback_used"]
-        assert canary.unjudged_keys({"read_fallbacks": {}}) == [
+        assert canary.unjudged_keys({"read_fallback_mode": {}, **self._CHAIN4}) == [
+            "read_fallback_used"]
+        assert canary.unjudged_keys({"read_fallbacks": {}, **self._CHAIN4}) == [
             "read_routed_to_duckdb", "read_refused"]
+        both = {"read_fallbacks": {}, "read_fallback_mode": {}}
+        assert canary.unjudged_keys({**both, "buyer_sync": {"last_ok_age_s": 1}}) == [
+            "buyer_sync_stalled_chain"], "no chain entry"
+        assert canary.unjudged_keys({**both, "buyer_sync": None,
+                                     "write_chains": self._CHAIN4["write_chains"]}) == [
+            "buyer_sync_stalled", "buyer_sync_stalled_chain"], "no step block"
 
-    def test_only_the_od07_keys_are_ever_held(self):
+    def test_only_the_od07_keys_and_the_buyers_steps_are_ever_held(self):
         """Every other payload-derived key keeps today's behaviour; each held
         key is one a check emits."""
         emitted = {k for k, _ in canary.check_read_fallbacks(
@@ -587,6 +613,12 @@ class TestUnjudgedKeys:
             {"read_fallback_mode": {"mode": "duckdb", "misconfigured": ["x"]}})}
         emitted |= {k for k, _ in canary.check_read_refusals(
             {"read_fallback_mode": {"refused": {"a": {"last_at": "?"}}}})}
+        emitted |= {k for k, _ in canary.check_buyer_sync(
+            {"buyer_sync": {"consecutive_failures": 3}})}
+        emitted |= {k for k, _ in canary.check_buyer_sync_chain(
+            {"buyer_sync": {"last_ok_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 1,
+                            "last_attempt_age_s": 60},
+             "write_chains": {canary.BUYER_CHAIN: {"mode": "postgres"}}})}
         assert set(canary.unjudged_keys(None)) == emitted
 
     @pytest.mark.asyncio
