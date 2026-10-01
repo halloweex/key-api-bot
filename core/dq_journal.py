@@ -66,6 +66,55 @@ def reads_postgres() -> bool:
 # ─── Writing ──────────────────────────────────────────────────────────────────
 
 
+def one_finding_per_key(issues: List[Any]) -> List[Any]:
+    """The run's findings with at most one per `(check_name, table_name)`.
+
+    `app.data_quality_issues` is keyed on `(run_id, check_name, table_name)`
+    and DuckDB's table is not, so two findings under one name in one run
+    were refused by Postgres whole under `KS_WRITE_DQ_JOURNAL=postgres` — the
+    run landed in neither store — and under `duckdb` DuckDB took them and the
+    hourly copy of the journal, which is never pruned, failed every hour from
+    then on. A producer that files two is a defect of its own
+    (`core.pg_chain_invariants.unwatched_issue` was one); this is the door
+    making sure such a defect costs a merged row and an ERROR, not the
+    journal. Folded: the most severe severity, the counts summed, the sample
+    ids in order without repeats, the descriptions joined. A run with no
+    repeated key is returned as the very same list, so the default path
+    writes exactly what it wrote before.
+    """
+    from dataclasses import replace
+
+    at: Dict[Tuple[str, str], int] = {}
+    out: List[Any] = []
+    folded: List[Tuple[str, str]] = []
+    for issue in issues:
+        key = (issue.check_name, issue.table_name)
+        if key not in at:
+            at[key] = len(out)
+            out.append(issue)
+            continue
+        first = out[at[key]]
+        worse = (issue.severity if issue.severity.rank() > first.severity.rank()
+                 else first.severity)
+        text = first.description
+        if issue.description and issue.description != first.description:
+            text = f"{text}\n{issue.description}" if text else issue.description
+        out[at[key]] = replace(
+            first, severity=worse, count=first.count + issue.count,
+            sample_ids=tuple(dict.fromkeys(
+                tuple(first.sample_ids) + tuple(issue.sample_ids))),
+            description=text)
+        folded.append(key)
+    if not folded:
+        return issues
+    logger.error(
+        "data-quality journal: %d finding(s) repeated a (check_name, "
+        "table_name) already in the run and were folded into it: %s. The "
+        "producer must name them apart.", len(folded),
+        ", ".join(f"{c} on {t}" for c, t in dict.fromkeys(folded)))
+    return out
+
+
 async def journal_run(
     store,
     *,
@@ -83,6 +132,7 @@ async def journal_run(
     """Journal one run; returns its id. The five check jobs' only door."""
     from core.data_quality import insert_journal_rows, persist_run, run_values
 
+    issues = one_finding_per_key(issues)
     chain = _chain()
     if not chain.writes_postgres():
         # duckdb — the block each site held, moved here unchanged.

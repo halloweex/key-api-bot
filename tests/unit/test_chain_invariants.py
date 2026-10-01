@@ -639,7 +639,7 @@ class TestBlindnessIsReported:
         assert facts.watermarks_unread is None
         issues = inv.check_chain_invariants(facts)
         assert [(i.check_name, i.table_name) for i in issues] == [
-            (inv.UNWATCHED, "(write chains)"),
+            (inv.UNWATCHED, "(pg_expenses_write)"),
             (inv.SEQUENCE_BEHIND, "app.stock_movements")]
 
     def test_a_blind_run_holds_every_condition(self):

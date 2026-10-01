@@ -1086,11 +1086,33 @@ def _issue(**kw):
     return IntegrityIssue(**kw)
 
 
-def unwatched_issue(reason: str, watched: Tuple[str, ...]):
+# What a blindness of everything is filed under — the whole read, a verdict
+# that raised, a forgotten pre-read. Each of those is the run's only finding.
+WHOLE_PART = "(write chains)"
+# The watermarks' blindness, beside any group's in the same run.
+WATERMARKS_PART = "meta.chain_watermarks"
+
+
+def unwatched_issue(reason: str, watched: Tuple[str, ...],
+                    part: Optional[str] = None):
+    """`part` names what could not be read, and it is the finding's
+    `table_name`: one chain's group is `(<chain>)`, the watermarks are
+    `meta.chain_watermarks`, everything at once is `(write chains)`.
+
+    It has to differ per part. `app.data_quality_issues` is keyed on
+    `(run_id, check_name, table_name)`, and one constant here gave a run with
+    two blind groups two findings under one key: Postgres refused the whole
+    run under `KS_WRITE_DQ_JOURNAL=postgres`, and under `duckdb` DuckDB took it
+    and the hourly copy of the journal — never pruned — failed every hour from
+    then on. Left out, it is derived from `watched`, so a group that names its
+    one chain is distinct by construction (`tests/unit/test_chain_invariants_unwatched.py`).
+    """
     from core.data_quality import Severity
 
+    if part is None:
+        part = f"({watched[0]})" if len(watched) == 1 else WHOLE_PART
     return _issue(
-        check_name=UNWATCHED, table_name="(write chains)",
+        check_name=UNWATCHED, table_name=part,
         severity=Severity.WARN, count=len(watched) or 1,
         description=(
             f"The invariants of {', '.join(watched) or 'the write chains'} "
@@ -1467,9 +1489,9 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
             "the integrity job judged these invariants without a pre-read; it "
             "must hand this check what core.pg_chain_invariants.read_facts "
             "returned",
-            watched)]
+            watched, WHOLE_PART)]
     if facts.whole is not None:
-        return [unwatched_issue(facts.whole.reason, facts.watched)]
+        return [unwatched_issue(facts.whole.reason, facts.watched, WHOLE_PART)]
     if not facts.watched:
         return []
 
@@ -1546,7 +1568,7 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(
             f"meta.chain_watermarks unreadable: {facts.watermarks_unread.reason}",
-            facts.watched))
+            facts.watched, WATERMARKS_PART))
     issues += _watermark_issues(facts.watermarks)
 
     for chain in facts.unread:
@@ -1579,7 +1601,7 @@ def judge(facts: Optional[Facts]) -> List:
         # could raise the very thing the verdict just did.
         return [unwatched_issue(
             f"judging the facts raised {type(e).__name__}: {e}",
-            facts.watched if facts is not None else ())]
+            facts.watched if facts is not None else (), WHOLE_PART)]
 
 
 def unverified_conditions(issues) -> List[str]:

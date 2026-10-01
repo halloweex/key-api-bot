@@ -697,3 +697,77 @@ class TestOrphanChildren:
         (issue,) = inv.check_chain_invariants(facts)
         assert issue.check_name == inv.UNWATCHED
         assert inv.unverified_conditions([issue]) == sorted(inv.CONDITIONS)
+
+
+# ─── One finding per key, at the door ─────────────────────────────────────────
+
+
+def _twin(name="chain_invariants_unwatched", table="(write chains)",
+          severity=Severity.WARN, count=1, samples=(), text="a"):
+    return IntegrityIssue(check_name=name, table_name=table, severity=severity,
+                          count=count, sample_ids=samples, description=text)
+
+
+class TestOneFindingPerKey:
+    """`app.data_quality_issues` is keyed on `(run_id, check_name,
+    table_name)`; DuckDB's table is not. Two findings under one key in one run
+    were refused whole by Postgres, or taken by DuckDB and then refused by the
+    hourly copy every hour after. The door folds them."""
+
+    def test_a_run_without_a_repeat_is_the_same_list(self):
+        """The default path writes exactly what it wrote before. Mutation:
+        rebuild the list (or reorder it) when nothing repeats."""
+        issues = [_issue("a"), _issue("b"), _twin()]
+        assert dq_journal.one_finding_per_key(issues) is issues
+
+    def test_a_repeat_is_folded_into_the_first(self):
+        """Mutation: keep the first and drop the second — its severity, its
+        count and what it said would be lost from the journal."""
+        issues = [_twin(count=1, samples=(1, 2), text="journal blind"),
+                  _issue("other"),
+                  _twin(severity=Severity.CRITICAL, count=2, samples=(2, 3),
+                        text="watchdogs blind")]
+        (first, other) = dq_journal.one_finding_per_key(issues)
+        assert other.check_name == "other"
+        assert first.severity is Severity.CRITICAL and first.count == 3
+        assert first.sample_ids == (1, 2, 3)
+        assert first.description == "journal blind\nwatchdogs blind"
+
+    @pytest.mark.asyncio
+    async def test_duckdb_is_handed_one_row_per_key(self, flag, store, monkeypatch):
+        """Through the door under `duckdb`, the default. Mutation: drop the
+        fold from `journal_run` — DuckDB takes both rows, and the hourly full
+        replace of `app.data_quality_issues` fails on the primary key from then
+        on (`tests/integration/test_dq_journal_pg.py` runs that copy)."""
+        flag(None)
+        _no_postgres(monkeypatch)
+        run_id = await dq_journal.journal_run(
+            store, **_kwargs(issues=[_twin(text="x"), _twin(text="y")]))
+        async with store.connection() as conn:
+            rows = conn.execute(
+                "SELECT check_name, table_name, count, description FROM "
+                "data_quality_issues WHERE run_id = ?", [run_id]).fetchall()
+            run = conn.execute(
+                "SELECT integrity_issues_count FROM data_quality_runs "
+                "WHERE run_id = ?", [run_id]).fetchone()
+        assert rows == [("chain_invariants_unwatched", "(write chains)", 2, "x\ny")]
+        assert run == (1,)
+
+    @pytest.mark.asyncio
+    async def test_postgres_is_handed_one_row_per_key(self, flag, store, monkeypatch):
+        """Under `postgres` the chain's writer is handed the folded list, and
+        DuckDB the same rows. Mutation: fold only on the duckdb branch."""
+        flag("postgres")
+        rec = _Recorder()
+        seen = []
+
+        async def persist_run(values, issues, discrepancies):
+            seen.append([(i.check_name, i.table_name) for i in issues])
+            return journal_rows(7, values, issues, discrepancies)
+
+        monkeypatch.setattr(chain, "persist_run", persist_run)
+        _record_duckdb(store, rec)
+        await dq_journal.journal_run(
+            store, **_kwargs(issues=[_twin(), _issue(), _twin()]))
+        assert seen == [[("chain_invariants_unwatched", "(write chains)"),
+                         ("pk_uniqueness_orders", "orders")]]

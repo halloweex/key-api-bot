@@ -292,3 +292,46 @@ class TestTheWayBack:
             assert await conn.fetchval(
                 "SELECT value FROM meta.chain_watermarks WHERE key = $1",
                 chain.DIGEST_MARKER_KEY) is None
+
+
+def _blind_twice():
+    """Two blind parts of the standing watch in one integrity run — each
+    `unwatched_issue` names its own part now, so the repeat is spelled out to
+    prove the door holds against the next producer that files one."""
+    return [IntegrityIssue(check_name="chain_invariants_unwatched",
+                           table_name="(write chains)", severity=Severity.WARN,
+                           count=1, description=f"{part} could not be read")
+            for part in ("the journal", "the watchdogs")]
+
+
+class TestOneFindingPerKey:
+    """`app.data_quality_issues` is keyed on `(run_id, check_name,
+    table_name)`, DuckDB's table on nothing."""
+
+    @pytest.mark.asyncio
+    async def test_under_postgres_the_run_lands_in_both_stores(self, stores):
+        """The review's reproduction. Mutation: drop the fold from
+        `journal_run` — Postgres refuses the run on its primary key, it lands
+        in neither store, and the failed attempt has latched the chain."""
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        run_id = await dq_journal.journal_run(store, **_kwargs(issues=_blind_twice()))
+        pg, dk = await _both(store, pool, "app.data_quality_issues")
+        assert pg == dk
+        assert [(r[0], r[1], r[2], r[4]) for r in pg] == [
+            (run_id, "chain_invariants_unwatched", "(write chains)", 2)]
+
+    @pytest.mark.asyncio
+    async def test_under_duckdb_the_hourly_copy_still_ships(self, stores):
+        """Left on duckdb, the default. Mutation: drop the fold — DuckDB takes
+        both rows, and `replicate_operational`'s full replace of
+        `app.data_quality_issues` then fails on the primary key every hour,
+        for good, since the journal is never pruned."""
+        from core.pg_operational import replicate_operational
+
+        store, pool, _env = stores
+        await dq_journal.journal_run(store, **_kwargs(issues=_blind_twice()))
+        result = await replicate_operational(store)
+        assert "error" not in result, result
+        pg, dk = await _both(store, pool, "app.data_quality_issues")
+        assert pg == dk and len(pg) == 1
