@@ -759,7 +759,15 @@ def classify_handover(
 
     missing = sorted(dk_rows.keys() - pg_rows.keys(), key=_sortable)
     if missing and spec.is_mirrored and moved_on:
-        dropped = [k for k in missing if owned_by_rewritten(dk_rows[k])]
+        # Only a child row — a contact, a line item — can be one the chain's
+        # writer dropped: it rewrites them whole with their owner. An owning
+        # row (a buyer, an order, an expense) is never deleted by it, so one
+        # only DuckDB holds is stranded whatever the rewritten set says. In
+        # practice that set is read off Postgres's own rows and cannot name a
+        # key Postgres lacks; this says it rather than relying on that.
+        child = spec.pg_table != spec.rewrite_clock
+        dropped = [k for k in missing
+                   if child and owned_by_rewritten(dk_rows[k])]
         stranded = [k for k in missing if k not in set(dropped)]
         if dropped:
             info("handover_rows_missing", dropped,
