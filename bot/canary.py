@@ -514,10 +514,21 @@ def check_write_chain_precondition(payload: Optional[dict]) -> "list[tuple[str, 
 # failures that are neither KeyCRM nor data errors mean the retry is not going
 # to heal it. Warn in both cases: nothing is lost while buyers still land in
 # DuckDB and ship to Postgres behind them. Once chain 4 makes this step the
-# ONLY writer of buyers, a stall there is a CRITICAL of its own, added with
-# the chain — not here, where there is no chain to ask.
+# ONLY writer of buyers, a stall there is a CRITICAL of its own
+# (`check_buyer_sync_chain`).
 BUYER_SYNC_STALE_S = 90 * 60
 BUYER_SYNC_FAILURES = 3
+
+# Chain 4 writes the buyers in Postgres alone (`core/pg_buyers_write.py`), so a
+# buyers step that has not succeeded is new customers landing nowhere: no
+# mirror behind it, no second writer, and the SMS audience and the search
+# index read what it writes. Three hours is two missed hourly runs past the
+# WARN above — long enough that a KeyCRM hiccup has had its retries, short
+# enough that a day's ~19 new buyers are not a morning's surprise. Spelled
+# rather than imported: nothing under `bot/` may import `core.pg*`, and a test
+# pins the name to the chain's.
+BUYER_CHAIN = "pg_buyers_write"
+BUYER_SYNC_CHAIN_STALE_S = 3 * 60 * 60
 
 
 def check_buyer_sync(payload: Optional[dict]) -> "list[tuple[str, str]]":
@@ -553,6 +564,46 @@ def check_buyer_sync(payload: Optional[dict]) -> "list[tuple[str, str]]":
                  f"buyer sync: no success for {age // 60} min"
                  f" ({block.get('last_error_class') or 'no error recorded'})")]
     return []
+
+
+def check_buyer_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the buyers step as the ONLY writer of buyers: CRITICAL.
+
+    Only when the same payload says chain 4 writes Postgres — the registry's
+    `mode`, which a latch sets whatever the flag says — so a web still on
+    DuckDB, or one publishing no chain block, is judged by `check_buyer_sync`
+    alone.
+
+    The age is the OLDER of two clocks. `last_ok_age_s` is the process's own
+    and is floored at web's start, so on its own every recreate reset a stall
+    — a writer dead across deploys under three hours apart never paged, and
+    each recreate announced the page resolved. `watermark_age_s` is the stamp
+    the step writes to Postgres on every completion and survives the restart;
+    when it cannot be read the local clock is all there is (review of PR-3).
+    """
+    block = (payload or {}).get("buyer_sync")
+    chain = ((payload or {}).get("write_chains") or {}).get(BUYER_CHAIN)
+    if not isinstance(block, dict) or not isinstance(chain, dict):
+        return []
+    if chain.get("mode") != "postgres":
+        return []
+    ages = [a for a in (_number(block.get("watermark_age_s")),
+                        _number(block.get("last_ok_age_s"))) if a is not None]
+    if not ages or max(ages) <= BUYER_SYNC_CHAIN_STALE_S:
+        return []
+    age = max(ages)
+    # The WARN's distinction, kept: with no attempt as recent as the stale
+    # bound the tick never reached the step, and the error class would send
+    # the reader to a buyers log line that was never written.
+    attempt = _number(block.get("last_attempt_age_s"))
+    if attempt is None or attempt > BUYER_SYNC_STALE_S:
+        return [("buyer_sync_stalled_chain",
+                 f"buyer sync: step not reached for {age // 60} min — the "
+                 "incremental tick stops before it — and chain 4 makes it the "
+                 "only writer of buyers")]
+    return [("buyer_sync_stalled_chain",
+             f"buyer sync: no success for {age // 60} min, and chain 4 makes it "
+             f"the only writer of buyers ({block.get('last_error_class') or 'no error recorded'})")]
 
 
 # How long a dropped derivation mark may stand before it says the heal is not
@@ -796,14 +847,27 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     design, until web restarts, so a first-time blip the canary holds back
     (`defer_flaky` — the 05:15 freeze, an nginx reload, a 10 s timeout)
     would announce it resolved and the next probe page it again as a new
-    incident, agent and all. Only these keys: every other payload-derived
-    key keeps today's behaviour."""
+    incident, agent and all. Only these keys, and the buyers step's: every
+    other payload-derived key keeps today's behaviour.
+
+    The buyers step's two keys are held the same way: both when the probe read
+    no `buyer_sync` block, and chain 4's CRITICAL when it read no entry for the
+    chain either. Under chain 4 that step is the only writer of buyers, and a
+    stall outlives the 05:15 freeze and every deploy recreate. Read blind, the
+    page was announced resolved and paged again as a new incident each time —
+    through the WARN beside it as much as through the CRITICAL, since both
+    fire for one stall (review of chain 4's merge with OD-07)."""
     payload = payload or {}
     keys = []
     if not isinstance(payload.get("read_fallbacks"), dict):
         keys.append("read_fallback_used")
     if not isinstance(payload.get("read_fallback_mode"), dict):
         keys += ["read_routed_to_duckdb", "read_refused"]
+    chains = payload.get("write_chains")
+    if not isinstance(payload.get("buyer_sync"), dict):
+        keys += ["buyer_sync_stalled", "buyer_sync_stalled_chain"]
+    elif not (isinstance(chains, dict) and isinstance(chains.get(BUYER_CHAIN), dict)):
+        keys.append("buyer_sync_stalled_chain")
     return keys
 
 
@@ -1156,6 +1220,12 @@ async def run_canary(
             fail(key, message)
         if buyer_failures and severity == "ok":
             severity = "warn"
+        # And under chain 4, where it is the only writer of buyers: page.
+        chain_buyer_failures = check_buyer_sync_chain(payload)
+        for key, message in chain_buyer_failures:
+            fail(key, message)
+        if chain_buyer_failures:
+            severity = "critical"
 
     if cert_err:
         fail("cert_unreachable", f"cert check failed: {cert_err}")
@@ -1205,6 +1275,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),
     ("derivation_marks_",
      "Read meta.derivation_signal's last_error in meta.mirror_state, then meta.derivation_runs"),
+    ("buyer_sync_stalled_chain",
+     "Chain 4: nothing else writes buyers. 'step not reached' means the tick stops first: grep 'Incremental sync'; else buyer_sync names the error class, grep 'Buyer'"),
     ("buyer_sync_",
      "grep web's log for 'Buyer' and 'Incremental sync'; 'step not reached' means the whole tick stops"),
     ("write_chain_flag_mismatch",

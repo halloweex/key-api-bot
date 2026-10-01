@@ -462,3 +462,58 @@ class TestTheManualEndpoint:
 
         assert r.status_code == 200, r.text
         assert r.json()["buyers_synced"] == 3
+
+
+class TestARefusedReadIsAnsweredByTheCaller:
+    """DN-20c, finished by chain 4: under `KS_READ_FALLBACK=off` the selection
+    can refuse (`no_address` on `KS_READ_BUYER_SYNC`). The step records it like
+    any failure and passes it on; the tick names it and skips the step; the
+    manual route answers 503 naming the surface. The step's own `except
+    Exception` used to answer both — a quiet step to the tick, and a 500
+    "Buyer sync failed" to the route."""
+
+    @staticmethod
+    def _refusing(monkeypatch):
+        from core.read_fallback import ReadUnavailable
+
+        svc, store, client = _service(monkeypatch)
+        store.get_missing_buyer_ids = AsyncMock(side_effect=ReadUnavailable("buyer_sync"))
+        return svc, store, client
+
+    @pytest.mark.asyncio
+    async def test_the_step_records_it_and_passes_it_on(self, monkeypatch, no_mirror):
+        from core.read_fallback import ReadUnavailable
+
+        svc, store, client = self._refusing(monkeypatch)
+        with pytest.raises(ReadUnavailable):
+            await svc.sync_missing_buyers()
+        client.fetch_buyers_by_ids.assert_not_awaited()
+        assert not _buyers_stamped(store)
+        state = svc.buyer_sync_state
+        assert (state.consecutive_failures, state.last_error_class) == (1, "ReadUnavailable")
+        assert svc._buyers_retry_in() is not None, "the retry window did not open"
+
+    @pytest.mark.asyncio
+    async def test_the_tick_names_it_and_goes_on(self, monkeypatch, no_mirror, caplog):
+        import logging
+
+        svc, store, _ = self._refusing(monkeypatch)
+        with caplog.at_level(logging.WARNING):
+            stats = await svc.incremental_sync()      # does not raise
+        svc.sync_offers.assert_awaited_once()
+        svc.sync_stocks.assert_awaited_once()
+        assert all(isinstance(v, int) for v in stats.values()), stats
+        assert "refused read answered by incremental_sync (buyer_sync)" in caplog.text
+        # Recorded once, by the step — not a second time by the tick.
+        assert svc.buyer_sync_state.consecutive_failures == 1
+
+    def test_the_manual_route_answers_503_naming_the_surface(self, monkeypatch, no_mirror):
+        from core import sync_service as mod
+
+        svc, _, _ = self._refusing(monkeypatch)
+        monkeypatch.setattr(mod, "_sync_service", svc)
+
+        r = TestTheManualEndpoint()._client().post("/api/duckdb/sync-buyers")
+
+        assert r.status_code == 503, r.text
+        assert "buyer_sync" in r.text

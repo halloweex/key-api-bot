@@ -64,6 +64,16 @@ class TestTheClockIsDerived:
             # Chain 6a (DN-26). DuckDB's `synced_at` and Postgres's
             # `mirrored_at` are each store's own bookkeeping.
             "bronze.expense_types": (),
+            # Chain 4. The buyers are ordered by KeyCRM's own `updated_at`,
+            # which both stores hold as the value KeyCRM served
+            # (`chain_transfer._SOURCE_CLOCK`); the contacts carry no clock and
+            # follow their buyer. The verdict's `decided_at` is compared daily
+            # since PR-2, and both writers stamp it from the web process's
+            # clock — DuckDB's CURRENT_TIMESTAMP, Postgres's chain writer a
+            # UTC stamp it passes in — so it orders two versions of a verdict.
+            "bronze.buyers": ("updated_at",),
+            "bronze.buyer_contacts": (),
+            "app.buyer_gender": ("decided_at",),
         }
 
 
