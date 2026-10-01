@@ -572,6 +572,13 @@ class TestFullSyncContainsThisChainOnly:
             await _full_sync(store)
         assert store.stamped == ["categories", "expense_types"]
 
+    @pytest.mark.asyncio
+    async def test_with_the_flag_off_a_categories_failure_raises_too(self, flags):
+        store = _SyncStore(categories=RuntimeError("duckdb said no to categories"))
+        with pytest.raises(RuntimeError, match="categories"):
+            await _full_sync(store)
+        assert store.stamped == []
+
 
 # ─── the incremental tick survives the chain (T-9) ──────────────────────────
 
