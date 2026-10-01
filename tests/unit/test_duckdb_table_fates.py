@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterator, List, Set, Tuple
 
@@ -678,17 +679,22 @@ class TestDuckdbWritten:
 
 # ─── 6. the host check ───────────────────────────────────────────────────────
 
+def _backup_name(hours_ago: float) -> str:
+    """A name the backup job would have written `hours_ago` hours ago."""
+    stamp = datetime.now(check.STAMP_TZ) - timedelta(hours=hours_ago)
+    return f"analytics-{stamp:%Y%m%d-%H%M%S}.duckdb"
+
+
 @pytest.fixture
 def host(tmp_path, fresh_file):
-    """A data directory as the host has it: a live file and two backups."""
+    """A data directory as the host has it: a live file and two backups, the
+    newer one from last night."""
     data = tmp_path / "data"
     (data / "backups").mkdir(parents=True)
     live = data / "analytics.duckdb"
     shutil.copyfile(fresh_file, live)
-    older = data / "backups" / "analytics-20260929-013000.duckdb"
-    newer = data / "backups" / "analytics-20260930-013000.duckdb"
-    shutil.copyfile(fresh_file, older)
-    shutil.copyfile(fresh_file, newer)
+    shutil.copyfile(fresh_file, data / "backups" / _backup_name(25))
+    shutil.copyfile(fresh_file, data / "backups" / _backup_name(1))
     return data
 
 
@@ -713,10 +719,104 @@ def _run(data: Path, *extra: str) -> int:
 
 class TestTheHostCheck:
     def test_a_clean_copy_passes_read_only(self, host, opened, capsys):
+        newest = max(p.name for p in (host / "backups").iterdir())
         assert _run(host) == check.EXIT_CLEAN
         out = capsys.readouterr().out
-        assert "analytics-20260930-013000.duckdb" in out  # the newest
+        assert newest in out and "clean" in out
         assert opened and all(kw.get("read_only") is True for _, kw in opened)
+
+    # ── a file it can open is not yet a file it can judge ──
+
+    def _only(self, host, build) -> Path:
+        """Replace the newest backup with a file `build(conn)` makes."""
+        newest = check.newest_backup(host / "backups")
+        newest.unlink()
+        conn = duckdb.connect(str(newest))
+        try:
+            build(conn)
+        finally:
+            conn.close()
+        return newest
+
+    def test_an_empty_file_is_refused_not_clean(self, host, capsys):
+        """Zero unknown names in a file holding nothing read "clean", exit 0
+        (review M-F1). Mutation: drop the `unseen` call from `main`."""
+        self._only(host, lambda conn: None)
+        assert _run(host) == check.EXIT_REFUSED
+        captured = capsys.readouterr()
+        assert "clean" not in captured.out
+        assert "does not hold" in captured.err
+
+    def test_another_database_is_refused(self, host, capsys):
+        """A wrong `--file` — any database but the application's."""
+        def build(conn):
+            conn.execute("CREATE TABLE authorized_users (user_id BIGINT)")
+            conn.execute("CREATE TABLE cache (key VARCHAR)")
+        path = self._only(host, build)
+        assert _run(host, "--file", str(path)) == check.EXIT_REFUSED
+        assert "clean" not in capsys.readouterr().out
+
+    def test_a_file_missing_one_anchor_is_refused(self, host, capsys):
+        """Mutation: drop the anchor half of `unseen` — the rest of the schema
+        is there, so only the anchors can refuse it."""
+        newest = check.newest_backup(host / "backups")
+        conn = duckdb.connect(str(newest))
+        conn.execute("DROP TABLE schema_migrations")
+        conn.close()
+        assert _run(host) == check.EXIT_REFUSED
+        assert "schema_migrations" in capsys.readouterr().err
+
+    def test_a_file_holding_only_the_anchors_is_refused(self, host, capsys):
+        """Mutation: drop the share half of `unseen`."""
+        def build(conn):
+            for name in check.ANCHORS:
+                conn.execute(f'CREATE TABLE "{name}" (id INTEGER)')
+        self._only(host, build)
+        assert _run(host) == check.EXIT_REFUSED
+        assert "tables today's schema creates" in capsys.readouterr().err
+
+    def test_the_anchors_are_tables_every_file_holds(self, fresh):
+        for name in check.ANCHORS:
+            assert FATES[name].ddl == SCHEMA and FATES[name].object == TABLE, name
+            assert fresh.get(name) == TABLE, name
+
+    def test_a_stale_newest_backup_is_refused(self, host, fresh_file, opened, capsys):
+        """A backup job that stopped a month ago answers last month's question.
+        Mutation: drop the `too_old` call from `main`."""
+        for old in (host / "backups").iterdir():
+            old.unlink()
+        stale = host / "backups" / _backup_name(24 * 30)
+        shutil.copyfile(fresh_file, stale)
+        assert _run(host) == check.EXIT_REFUSED
+        assert "old" in capsys.readouterr().err
+        assert not opened
+        # Read on purpose, or with the bound moved, it is judged.
+        assert _run(host, "--file", str(stale)) == check.EXIT_CLEAN
+        assert _run(host, "--max-age-hours", str(24 * 31)) == check.EXIT_CLEAN
+
+    def test_a_name_the_backup_job_never_writes_is_not_the_newest(self, host, fresh_file):
+        newest = check.newest_backup(host / "backups")
+        shutil.copyfile(fresh_file, host / "backups" / "analytics-zzz.duckdb")
+        shutil.copyfile(fresh_file, host / "backups" / "analytics-99999999-999999.duckdb")
+        assert check.newest_backup(host / "backups") == newest
+
+    def test_the_stamp_is_read_in_the_application_timezone(self):
+        from core.duckdb_constants import DB_PATH, DEFAULT_TZ
+
+        assert check.STAMP_TZ.key == DEFAULT_TZ.key
+        assert check.LIVE_DB.name == DB_PATH.name
+
+    def test_a_mismatch_alone_asks_for_a_decision(self, host, capsys):
+        """The one mismatch test also planted scratch, which kept the exit at 1
+        on its own (review M7: `mismatch` dropped from the exit condition)."""
+        newest = check.newest_backup(host / "backups")
+        conn = duckdb.connect(str(newest))
+        conn.execute("CREATE VIEW orders_v2 AS SELECT 1 AS id")
+        conn.close()
+        assert _run(host) == check.EXIT_DECIDE
+        out = capsys.readouterr().out
+        assert "MISMATCH: orders_v2" in out
+        assert "SCRATCH" not in out and "UNKNOWN" not in out
 
     def test_an_unknown_table_is_reported(self, host, capsys):
         newest = check.newest_backup(host / "backups")
