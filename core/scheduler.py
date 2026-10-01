@@ -231,6 +231,7 @@ async def _inventory_snapshot_taken_today_pg():
         return ()
 
 
+
 class BackgroundScheduler:
     """
     Background job scheduler with monitoring.
@@ -441,18 +442,26 @@ class BackgroundScheduler:
                     )
                 except Exception as e:
                     logger.warning(f"Could not queue inventory catch-up: {e}")
+        from core.pg_orders_write import stood_down_layers
+
+        stood_down = stood_down_layers()
         for job_id, (layer, max_age_s, delay_s) in CATCHUP_CHECKS.items():
-            entry = ages.get(layer) or {}
-            age = entry.get("age_seconds")
-            # The oldest arm the job writes decides, when it is older than its
-            # own layer (`CATCHUP_SIBLING_LAYERS`). Null is overdue there too.
+            # The layers this process writes for the job, and their ages: its
+            # own — absent counts as never succeeded — unless chain 3 stood it
+            # down, and each sibling arm this process writes
+            # (`CATCHUP_SIBLING_LAYERS`), where absence is no evidence.
+            candidates = []
+            if layer not in stood_down:
+                candidates.append((layer, (ages.get(layer) or {}).get("age_seconds")))
             for sibling in CATCHUP_SIBLING_LAYERS.get(job_id, ()):
                 sibling_entry = ages.get(sibling)
                 if not isinstance(sibling_entry, dict) or not _writes_layer(sibling):
                     continue
-                sibling_age = sibling_entry.get("age_seconds")
-                if age is not None and (sibling_age is None or sibling_age > age):
-                    layer, age = sibling, sibling_age
+                candidates.append((sibling, sibling_entry.get("age_seconds")))
+            if not candidates:
+                continue
+            # The oldest decides; null — never succeeded — is the oldest of all.
+            layer, age = max(candidates, key=lambda c: float("inf") if c[1] is None else c[1])
             # A layer that has never succeeded is exactly the case worth
             # catching up, so a null age counts as overdue, not as unknown.
             if age is not None and age <= max_age_s:
@@ -3313,6 +3322,14 @@ class BackgroundScheduler:
             api_calls = 0
             pg_result = None
             ch_result = None
+            # Chain 3: once the orders are written to Postgres, DuckDB's arm
+            # compares a store that stopped receiving them — every new order
+            # MISSING, every status change STATUS_DRIFT. It stands down: not
+            # extracted, not persisted, not paged, not resolved; the Postgres
+            # arm is the comparison against the source, and drives the repair.
+            from core import pg_orders_write
+
+            duckdb_arm = "reconciliation" not in pg_orders_write.stood_down_layers()
 
             try:
                 # 1. KeyCRM orders (counts API calls). Runs first because it
@@ -3323,25 +3340,27 @@ class BackgroundScheduler:
                     window_start, window_end, watermark=as_of,
                 )
 
-                # 2. The same facts from the warehouse, minus the same orders
-                async with store.connection() as conn:
-                    dk_orders = duckdb_orders_in_window(
-                        conn, window_start, window_end, watermark=as_of,
-                        exclude_ids=inflight_ids,
-                    )
-
-                # 3. Classify (pure). Both rollups come from one function, so
-                #    the two sides cannot aggregate differently. The per-order
-                #    pass costs no extra API calls and catches what totals hide:
-                #    offsetting errors net to zero in a monthly sum.
-                dk_rollup = rollup_from_orders(dk_orders)
                 kc_rollup = rollup_from_orders(kc_orders)
-                discrepancies = classify_discrepancies(dk_rollup, kc_rollup)
-                discrepancies += classify_order_discrepancies(dk_orders, kc_orders)
-                logger.info(
-                    f"DQ reconciliation: dk_cells={len(dk_rollup)} "
-                    f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
-                )
+                if duckdb_arm:
+                    # 2. The same facts from the warehouse, minus the same orders
+                    async with store.connection() as conn:
+                        dk_orders = duckdb_orders_in_window(
+                            conn, window_start, window_end, watermark=as_of,
+                            exclude_ids=inflight_ids,
+                        )
+
+                    # 3. Classify (pure). Both rollups come from one function,
+                    #    so the two sides cannot aggregate differently. The
+                    #    per-order pass costs no extra API calls and catches
+                    #    what totals hide: offsetting errors net to zero in a
+                    #    monthly sum.
+                    dk_rollup = rollup_from_orders(dk_orders)
+                    discrepancies = classify_discrepancies(dk_rollup, kc_rollup)
+                    discrepancies += classify_order_discrepancies(dk_orders, kc_orders)
+                    logger.info(
+                        f"DQ reconciliation: dk_cells={len(dk_rollup)} "
+                        f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
+                    )
                 # The same KeyCRM snapshot, compared a second time — against
                 # Postgres. Free: the API calls are the expensive part and they
                 # have already been made, and comparing both stores to the
@@ -3365,20 +3384,21 @@ class BackgroundScheduler:
 
             ended_at = datetime.now(timezone.utc)
 
-            # 4. Persist
+            # 4. Persist — DuckDB's arm only while it compares (chain 3).
             run_id = None
             try:
-                async with store.connection() as conn:
-                    run_id = persist_run(
-                        conn,
-                        started_at=started_at, ended_at=ended_at,
-                        as_of=as_of,
-                        window_start=window_start, window_end=window_end,
-                        layer="reconciliation",
-                        issues=issues, discrepancies=discrepancies,
-                        api_calls_used=api_calls,
-                        error_message=error_message,
-                    )
+                if duckdb_arm:
+                    async with store.connection() as conn:
+                        run_id = persist_run(
+                            conn,
+                            started_at=started_at, ended_at=ended_at,
+                            as_of=as_of,
+                            window_start=window_start, window_end=window_end,
+                            layer="reconciliation",
+                            issues=issues, discrepancies=discrepancies,
+                            api_calls_used=api_calls,
+                            error_message=error_message,
+                        )
             except Exception as e:
                 logger.exception(f"DQ reconciliation persist failed: {e}")
 
@@ -3420,9 +3440,15 @@ class BackgroundScheduler:
             #    now: `halfwritten_repair`.
             repair = None
             if not error_message:
+                # Under chain 3 the orders we do not hold are the ones
+                # Postgres lacks: its arm classified the same snapshot with
+                # Postgres on the store's side, so MISSING_IN_DK there means
+                # missing from the store the chain writes.
+                source = (discrepancies if duckdb_arm else
+                          (pg_result or {}).get("discrepancies") or [])
                 repairable = sorted({
                     oid
-                    for d in discrepancies
+                    for d in source
                     if d.diff_class == DiscrepancyClass.MISSING_IN_DK
                     for oid in d.order_ids
                 })
@@ -3438,7 +3464,7 @@ class BackgroundScheduler:
 
             # 6. Alert on CRITICAL severity
             sev = overall_severity(issues, discrepancies)
-            if sev == Severity.CRITICAL and not error_message:
+            if sev == Severity.CRITICAL and not error_message and duckdb_arm:
                 msg = format_alert_message(
                     "reconciliation", sev, issues, discrepancies,
                     window=(window_start, window_end),
@@ -3459,9 +3485,13 @@ class BackgroundScheduler:
                     evidence=evidence_for_agent("reconciliation", issues,
                                                 discrepancies, run_id=run_id),
                 )
-            await self._resolve_dq_layer("reconciliation", issues, error_message)
+            # A stood-down arm resolves nothing: it looked at nothing, and the
+            # flip waited for its pages to clear (`landing_pages_clear`).
+            if duckdb_arm:
+                await self._resolve_dq_layer("reconciliation", issues, error_message)
 
             result = {
+                **({} if duckdb_arm else {"stood_down": ["reconciliation"]}),
                 "run_id": run_id,
                 "discrepancies_count": len(discrepancies),
                 "severity": sev.value,
@@ -3577,7 +3607,14 @@ class BackgroundScheduler:
                         # next send overwrites it with something parseable.
                         logger.warning("Unparseable DQ digest marker: %r", row[0])
 
+                from core.pg_orders_write import stood_down_layers
+
+                stood_down = stood_down_layers()
                 for layer in WATCHED_LAYERS:
+                    # A layer chain 3 stood down is written by nothing; its
+                    # last run would read stale here every morning.
+                    if layer in stood_down:
+                        continue
                     run = fetch_latest_run(conn, layer=layer)
                     if run is None:
                         sections.append(DigestSection(layer=layer, run=None))

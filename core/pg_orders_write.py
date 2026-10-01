@@ -261,8 +261,28 @@ def retired_conditions() -> frozenset:
 
 
 # The DuckDB arm of `dq_reconciliation` pages under this group, and stands
-# down under the chain (`core.reconciliation_io.duckdb_arm_stands_down`).
+# down under the chain (`stood_down_layers`).
 RECONCILIATION_GROUP = "dq:reconciliation"
+
+# The data-quality layers that stop being written once the chain has moved.
+# `reconciliation` is DuckDB's own arm of the 05:30 job: against a DuckDB that
+# no longer receives orders, every order created since the flip would read
+# MISSING and every status change STATUS_DRIFT — a CRITICAL page each morning,
+# and a repair that re-fetches them all from KeyCRM, 200 a day for ever. Its
+# Postgres arm, `reconciliation_pg`, is the comparison against the source that
+# stays, and the repair is driven from it.
+STOOD_DOWN_LAYERS = frozenset({"reconciliation"})
+
+
+def stood_down_layers() -> frozenset:
+    """The layers neither written, paged on, caught up nor digested while the
+    chain is off DuckDB. Empty while it writes DuckDB. Never raises — the
+    canary's block, the catch-up and the digest all ask."""
+    try:
+        return STOOD_DOWN_LAYERS if mode() != "duckdb" else frozenset()
+    except Exception:  # noqa: BLE001 — mode() promises not to; then: not stood down
+        logger.exception("pg_orders_write: the stood-down layers could not be read")
+        return frozenset()
 
 
 def _landing_pages_unmet() -> Optional[str]:
@@ -351,6 +371,52 @@ def _self():
     import sys
 
     return sys.modules[__name__]
+
+
+# The landing tables whose history must be in Postgres before the flip: the
+# chain writes deltas, so an order or an expense the backfill never carried
+# would be missing for good once DuckDB stops shipping.
+_BACKFILLED = ("bronze.orders", "bronze.order_products", "bronze.expenses")
+
+
+async def preflight() -> Dict[str, Any]:
+    """Chain 3's answer to "may `KS_WRITE_ORDERS` be switched on now?", for
+    `/api/health` (`write_chains.pg_orders_write.preflight`). Never raises;
+    bounded and cached by the route.
+
+    `ok` is null once the chain writes Postgres — the question is over. Before
+    that, `reasons` names every precondition that does not hold, asked here
+    whatever the flag says (the registry asks them only under the flag), and
+    what Postgres says of the landing the chain inherits: the history of each
+    of the three tables carried across (`backfilled_at`), and none of their
+    mirrors failing. The error's class only — the endpoint is public. Not a
+    substitute for `scripts/chain_copy_back.py orders --handover`, which is
+    the gate: read this first, then stop web and ask the handover."""
+    if mode() == "postgres":
+        return {"ok": None, "reasons": []}
+    reasons: List[str] = []
+    unmet = unmet_precondition()
+    if unmet:
+        reasons.extend(unmet.split("; "))
+    try:
+        pool = await _pool()
+        async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
+            rows = await conn.fetch(
+                "SELECT table_name, backfilled_at, failures_since_ok "
+                "FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                list(_BACKFILLED))
+        state = {r["table_name"]: r for r in rows}
+        for table in _BACKFILLED:
+            row = state.get(table)
+            if row is None or row["backfilled_at"] is None:
+                reasons.append(f"backfill: {table} has not carried its history "
+                               "across (POST /api/mirror/backfill/orders or /expenses)")
+            elif row["failures_since_ok"]:
+                reasons.append(f"mirror: {table} is failing "
+                               f"({row['failures_since_ok']} in a row)")
+    except Exception as exc:  # noqa: BLE001 — an answer of its own
+        reasons.append(f"postgres: {type(exc).__name__}")
+    return {"ok": not reasons, "reasons": reasons}
 
 
 def _latch() -> str:

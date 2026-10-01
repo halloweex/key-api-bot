@@ -146,6 +146,22 @@ def _write_chains() -> dict:
     return chain_modes()
 
 
+def _mark_stood_down(data_quality):
+    """The `data_quality` block with every layer chain 3 stood down marked
+    `stood_down: true` — written by nothing by design, so the canary does not
+    page its age (`pg_orders_write.stood_down_layers`). Applied per response,
+    not in the 60-second stats cache, because a first write can move the
+    chain between two reads. None stays None: its absence is meaningful."""
+    if not isinstance(data_quality, dict):
+        return data_quality
+    from core.pg_orders_write import stood_down_layers
+
+    stood = stood_down_layers()
+    return {layer: ({**entry, "stood_down": True}
+                    if layer in stood and isinstance(entry, dict) else entry)
+            for layer, entry in data_quality.items()}
+
+
 def _read_fallbacks() -> dict:
     """`{surface: {count, last_at}}` — every read this process answered from
     DuckDB because the engine it was sent to failed (DN-20a). Local state, no
@@ -230,6 +246,45 @@ async def _inventory_sync_step() -> "dict | None":
         return None
 
 
+async def _orders_sync_step() -> "dict | None":
+    """What chain 3's order step last did (`OrdersStepState`): failures in a
+    row, ages, the error's class and how many orders Postgres would refuse.
+    Local state, no I/O; null when the sync service cannot be had. The canary
+    judges it as `orders_sync_failing` once the chain writes Postgres."""
+    try:
+        from core.sync_service import get_sync_service
+
+        return (await get_sync_service()).orders_step_health()
+    except Exception as e:
+        logger.debug(f"Orders sync step unavailable: {e}")
+        return None
+
+
+# Chain 3's pre-flip answer, on the same cache shape as chain 1's.
+_orders_preflight_cache: dict = {"data": None, "expires_at": 0}
+_orders_preflight_cache_lock = asyncio.Lock()
+
+
+async def _orders_preflight() -> dict:
+    """`pg_orders_write.preflight()`, cached and bounded. Never raises."""
+    from core import pg_orders_write
+
+    now = time.time()
+    async with _orders_preflight_cache_lock:
+        if (_orders_preflight_cache["data"] is not None
+                and now < _orders_preflight_cache["expires_at"]):
+            return _orders_preflight_cache["data"]
+        try:
+            data = await asyncio.wait_for(pg_orders_write.preflight(),
+                                          _PREFLIGHT_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            data = {"ok": False, "reasons": [
+                f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
+        _orders_preflight_cache["data"] = data
+        _orders_preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
+        return data
+
+
 async def _write_chains_block() -> dict:
     """The `write_chains` block: every chain's local state, and under chain 1's
     entry its `preflight` — the three questions asked before
@@ -241,11 +296,19 @@ async def _write_chains_block() -> dict:
     which the integrity job's chain invariants already watch."""
     from core import pg_inventory_write
 
+    from core import pg_orders_write
+
     block = _write_chains()
     entry = block.get(pg_inventory_write.CHAIN)
     if isinstance(entry, dict):
         entry["preflight"] = await _inventory_preflight()
         entry["sync_step"] = await _inventory_sync_step()
+    # Chain 3: its preflight — every precondition by name while the flag is
+    # still off — and the order step the canary judges.
+    entry = block.get(pg_orders_write.CHAIN)
+    if isinstance(entry, dict):
+        entry["preflight"] = await _orders_preflight()
+        entry["sync_step"] = await _orders_sync_step()
     return block
 
 
@@ -439,7 +502,7 @@ async def health_check(request: Request):
     # Its absence is meaningful (bot/canary.py treats a missing block as a
     # failure), so never substitute an empty dict for "we could not tell".
     stats = dict(duckdb_stats or {})
-    data_quality = stats.pop("data_quality", None)
+    data_quality = _mark_stood_down(stats.pop("data_quality", None))
 
     # The schema ledger. A migration that fails is retried on the next boot and
     # never recorded as applied, so it cannot be skipped past — but somebody has

@@ -42,6 +42,11 @@ class DataQualityFreshness(BaseModel):
     """
     last_success_at: Optional[str] = Field(None, description="ISO timestamp of the last successful run")
     age_seconds: Optional[int] = Field(None, description="Seconds since that run; null means never succeeded")
+    stood_down: bool = Field(
+        False, description=(
+            "The layer is not written by design — `reconciliation`, DuckDB's arm "
+            "of the 05:30 job, once chain 3 writes the orders to Postgres — so "
+            "its age is not judged"))
 
 
 class MirrorFreshness(BaseModel):

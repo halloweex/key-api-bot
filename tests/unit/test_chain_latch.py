@@ -439,6 +439,7 @@ _CONNECTION = {"get_pool", "_pool", "acquire"}
 # nothing, so a write added to one fails there instead of hiding here.
 _READERS = {
     "pg_inventory_write": {"read_snapshot_calendar", "preflight"},
+    "pg_orders_write": {"preflight"},
 }
 
 # A statement that writes, by how it starts. Upper-cased first; `setval` is a

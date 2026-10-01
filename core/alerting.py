@@ -162,6 +162,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "buyer_sync_stalled": _c("a buyers step that completes"),
     # Chain 4: the same step as the only writer of buyers, paged.
     "buyer_sync_stalled_chain": _c("a buyers step that completes"),
+    # Chain 3: the order step under the chain, judged by the canary.
+    "orders_sync_failing": _c("an order step that completes"),
     "mirror_missing:bronze.orders": _c("the table reports freshness again"),
     "mirror_never:bronze.orders": _c("the table's first successful shipment"),
     "mirror_stale:bronze.orders": _c("a shipment inside the age limit"),

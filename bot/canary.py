@@ -322,6 +322,12 @@ def check_dq_freshness(
             continue
 
         age = entry.get("age_seconds")
+        if entry.get("stood_down") is True:
+            # Not written by design (chain 3 stands DuckDB's reconciliation
+            # arm down): its age grows by construction, and `reconciliation_pg`
+            # is the page that remains.
+            ages[layer] = age
+            continue
         ages[layer] = age
         if age is None:
             failures.append(
@@ -604,6 +610,55 @@ def check_buyer_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
     return [("buyer_sync_stalled_chain",
              f"buyer sync: no success for {age // 60} min, and chain 4 makes it "
              f"the only writer of buyers ({block.get('last_error_class') or 'no error recorded'})")]
+
+
+# Chain 3 writes the orders in Postgres alone (`core/pg_orders_write.py`,
+# OD-13 (a)): an order step that fails is orders landing nowhere, with no
+# DuckDB copy behind it. Web publishes the step's own state under the chain's
+# `write_chains` entry as `sync_step`; judged only when the same payload says
+# the chain writes Postgres. Three failures in a row, no success for 15
+# minutes, or no attempt for 20 (the tick never reached the step) page: the
+# incremental tick runs at most five minutes apart, so each bound is past
+# anything the adaptive backoff can produce. Spelled rather than imported —
+# nothing under `bot/` may import `core.pg*`, and a test pins the name.
+ORDERS_CHAIN = "pg_orders_write"
+ORDERS_SYNC_FAILURES = 3
+ORDERS_SYNC_STALE_S = 15 * 60
+ORDERS_SYNC_UNREACHED_S = 20 * 60
+
+
+def check_orders_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the order step as the only writer of orders: CRITICAL.
+
+    The class of the last error, never its text — the block is public. A web
+    still on DuckDB, or one publishing no step for the chain, is not judged:
+    its orders land in DuckDB and the mirror's own watch covers them."""
+    chain = ((payload or {}).get("write_chains") or {}).get(ORDERS_CHAIN)
+    if not isinstance(chain, dict) or chain.get("mode") != "postgres":
+        return []
+    step = chain.get("sync_step")
+    if not isinstance(step, dict):
+        return []
+    failures = _number(step.get("consecutive_failures")) or 0
+    ok_age = _number(step.get("last_ok_age_s"))
+    attempt = _number(step.get("last_attempt_age_s"))
+    error = step.get("last_error_class") or "no error recorded"
+    if failures >= ORDERS_SYNC_FAILURES:
+        return [("orders_sync_failing",
+                 f"order sync: {failures} failures in a row ({error}) — chain 3 "
+                 "makes it the only writer of orders")]
+    if attempt is None or attempt > ORDERS_SYNC_UNREACHED_S:
+        if ok_age is not None and ok_age > ORDERS_SYNC_UNREACHED_S:
+            return [("orders_sync_failing",
+                     f"order sync: step not reached for {ok_age // 60} min — the "
+                     "incremental tick is not running — and chain 3 makes it the "
+                     "only writer of orders")]
+        return []
+    if ok_age is not None and ok_age > ORDERS_SYNC_STALE_S:
+        return [("orders_sync_failing",
+                 f"order sync: no success for {ok_age // 60} min ({error}), and "
+                 "chain 3 makes it the only writer of orders")]
+    return []
 
 
 # How long a dropped derivation mark may stand before it says the heal is not
@@ -1226,6 +1281,12 @@ async def run_canary(
             fail(key, message)
         if chain_buyer_failures:
             severity = "critical"
+        # Chain 3's order step, the only writer of orders under it: page.
+        orders_failures = check_orders_sync_chain(payload)
+        for key, message in orders_failures:
+            fail(key, message)
+        if orders_failures:
+            severity = "critical"
 
     if cert_err:
         fail("cert_unreachable", f"cert check failed: {cert_err}")
@@ -1275,6 +1336,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),
     ("derivation_marks_",
      "Read meta.derivation_signal's last_error in meta.mirror_state, then meta.derivation_runs"),
+    ("orders_sync_failing",
+     "Chain 3: nothing else writes orders. write_chains.pg_orders_write.sync_step names the error class; Postgres back, the 24 h window refills"),
     ("buyer_sync_stalled_chain",
      "Chain 4: nothing else writes buyers. 'step not reached' means the tick stops first: grep 'Incremental sync'; else buyer_sync names the error class, grep 'Buyer'"),
     ("buyer_sync_",

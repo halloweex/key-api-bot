@@ -197,6 +197,13 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
             "Ids: %s", len(pg_failed_ids), pg_failed_ids,
         )
 
+    await _reparse(store, force_ship=force_ship)
+
+
+async def _reparse(store, *, force_ship: bool) -> None:
+    """The re-parse both paths end on, and the one place this script hands
+    `--force-ship` on (`tests/unit/test_order_utm_shipping.py` holds it to
+    exactly one)."""
     # Now refresh UTM layers — in DuckDB only while it derives. Under
     # KS_WRITE_WAREHOUSE=postgres (DN-29) the parse below is Postgres' alone,
     # and the recorded writer notes it, so the way back re-parses DuckDB's
@@ -271,7 +278,6 @@ async def _backfill_utm_postgres(days_back: int, *, force_ship: bool = False):
     from core import pg_orders_read, pg_orders_write
     from core.duckdb_store import get_store
     from core.keycrm import get_async_client
-    from core.pg_utm_parse import reparse_router
     from core.runtime_modes import configure_modes
 
     # Idempotent, and asked again here because this function is the one that
@@ -318,9 +324,7 @@ async def _backfill_utm_postgres(days_back: int, *, force_ship: bool = False):
     logger.info(f"Backfill complete: restored {restored_total} comment(s) in Postgres")
     if failed_chunks:
         logger.error("Chunks not written, offered again by a re-run: %s", failed_chunks)
-    store = await get_store()
-    logger.info("UTM to Postgres: %s",
-                await reparse_router(store, full=True, force=force_ship))
+    await _reparse(await get_store(), force_ship=force_ship)
 
 
 if __name__ == "__main__":

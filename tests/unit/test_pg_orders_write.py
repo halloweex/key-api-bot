@@ -569,3 +569,123 @@ class TestTheOrderStepIsContained:
         svc = _tick_service(monkeypatch, store)
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(svc._orders_step(MagicMock(), {}), 5)
+
+
+# ─── G13: the canary pages a step that stopped, under the chain only ─────────
+
+
+class TestTheCanary:
+    @staticmethod
+    def _payload(mode="postgres", **step):
+        base = {"consecutive_failures": 0, "last_ok_age_s": 60, "ever_ok": True,
+                "last_attempt_age_s": 60, "last_error_class": None, "last_refused": 0}
+        base.update(step)
+        return {"write_chains": {"pg_orders_write": {"mode": mode, "sync_step": base}}}
+
+    def test_the_name_is_the_chain_s(self):
+        from bot import canary
+
+        assert canary.ORDERS_CHAIN == pow_.CHAIN
+
+    @pytest.mark.parametrize("step,fires", [
+        ({}, False),
+        ({"consecutive_failures": 3, "last_error_class": "ConnectionRefusedError"}, True),
+        ({"consecutive_failures": 2}, False),
+        ({"last_ok_age_s": 16 * 60}, True),
+        ({"last_ok_age_s": 14 * 60}, False),
+        ({"last_ok_age_s": 25 * 60, "last_attempt_age_s": 25 * 60}, True),
+        ({"last_ok_age_s": 25 * 60, "last_attempt_age_s": None}, True),
+    ])
+    def test_it_fires_on_a_streak_a_stale_success_or_a_step_not_reached(self, step, fires):
+        from bot.canary import check_orders_sync_chain
+
+        found = check_orders_sync_chain(self._payload(**step))
+        assert bool(found) is fires
+        if fires:
+            (key, message), = found
+            assert key == "orders_sync_failing" and "chain 3" in message
+
+    @pytest.mark.parametrize("mode", ["duckdb", None])
+    def test_not_under_duckdb(self, mode):
+        """Mutation: ignore `mode` — a web on DuckDB, whose orders also ship
+        through the mirror, would page about a step that is not the only
+        writer of anything."""
+        from bot.canary import check_orders_sync_chain
+
+        assert check_orders_sync_chain(self._payload(mode, consecutive_failures=9)) == []
+        assert check_orders_sync_chain({}) == []
+
+    def test_the_text_never_reaches_the_page(self):
+        from bot.canary import check_orders_sync_chain
+
+        (_, message), = check_orders_sync_chain(self._payload(
+            consecutive_failures=3, last_error_class="InterfaceError"))
+        assert "InterfaceError" in message
+
+    def test_it_is_a_critical_with_a_lever(self):
+        from bot import canary
+        from core.alerting import REGISTRY
+
+        assert "orders_sync_failing" in REGISTRY
+        assert any(prefix == "orders_sync_failing" for prefix, _ in canary._ACTIONS)
+
+
+class TestThePreflight:
+    @pytest.mark.asyncio
+    async def test_before_the_flip_it_names_every_precondition(self, flags):
+        """The registry asks the preconditions only under the flag; an operator
+        about to flip needs them before. Mutation: return early on the flag."""
+        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("no pg"))):
+            out = await pow_.preflight()
+        assert out["ok"] is False
+        keys = {r.split(":", 1)[0] for r in out["reasons"]}
+        assert {"goals_bridge", "step13", "chain1", "postgres"} <= keys
+
+    @pytest.mark.asyncio
+    async def test_it_asks_postgres_for_the_landing_it_inherits(self, met):
+        class _Conn:
+            async def fetch(self, sql, tables):
+                assert "meta.mirror_state" in sql
+                return [{"table_name": "bronze.orders", "backfilled_at": T0,
+                         "failures_since_ok": 0},
+                        {"table_name": "bronze.expenses", "backfilled_at": T0,
+                         "failures_since_ok": 2}]
+
+        class _Acquire:
+            async def __aenter__(self):
+                return _Conn()
+
+            async def __aexit__(self, *a):
+                return False
+
+        class _Pool:
+            def acquire(self, timeout=None):
+                return _Acquire()
+
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=_Pool())), \
+                patch("core.pg.require_revision", new=AsyncMock()):
+            out = await pow_.preflight()
+        assert out["ok"] is False
+        assert any(r.startswith("backfill: bronze.order_products") for r in out["reasons"])
+        assert any(r.startswith("mirror: bronze.expenses") for r in out["reasons"])
+        assert not any("bronze.orders " in r for r in out["reasons"])
+
+    @pytest.mark.asyncio
+    async def test_once_the_chain_writes_postgres_the_question_is_over(self, flags):
+        chain_latch.latch(pow_.CHAIN)
+        assert await pow_.preflight() == {"ok": None, "reasons": []}
+
+    @pytest.mark.asyncio
+    async def test_health_publishes_it_and_the_step_under_the_chain_s_entry(self, flags):
+        from web.routes.api import health
+
+        with patch.object(health, "_orders_preflight",
+                          new=AsyncMock(return_value={"ok": False, "reasons": ["x"]})), \
+                patch.object(health, "_orders_sync_step",
+                             new=AsyncMock(return_value={"consecutive_failures": 0})), \
+                patch.object(health, "_inventory_preflight", new=AsyncMock(return_value={})), \
+                patch.object(health, "_inventory_sync_step", new=AsyncMock(return_value=None)):
+            block = await health._write_chains_block()
+        entry = block["pg_orders_write"]
+        assert entry["preflight"] == {"ok": False, "reasons": ["x"]}
+        assert entry["sync_step"] == {"consecutive_failures": 0}
