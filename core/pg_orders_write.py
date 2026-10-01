@@ -597,9 +597,17 @@ async def _already_in_state(conn, orders, expenses, *, force_update: bool,
     """Read before the latch, unlocked: `(skipped_ids, deferred)` when this
     batch would write nothing — no expense, and every order already in its
     state or deferred — else None. Whatever it says, a batch that does write
-    is decided again under the lock."""
-    if expenses or force_update:
-        return None if (orders or expenses) else ([], 0)
+    is decided again under the lock.
+
+    A forced batch is asked too: the 05:15 refresh forces a header-only
+    rewrite, and a header-only refresh never creates an order, so a forced
+    batch of orders Postgres does not hold writes nothing — and, as the first
+    write after a flip, used to take the latch and claim the owner rows
+    anyway."""
+    if expenses:
+        return None
+    if not orders:
+        return ([], 0)
     existing = await _stored_stamps(conn, [r.id for r in orders], lock=False)
     to_write, skipped, deferred = decide(
         orders, existing, force_update=force_update, skip_products=skip_products)

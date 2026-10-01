@@ -275,6 +275,19 @@ class TestAnIdleTickSpendsNoLatch:
         assert not chain_latch.marker_path(chain.CHAIN).exists()
         assert await chain_latch.read_owners(pool) == {}
 
+    @pytest.mark.asyncio
+    async def test_a_forced_refresh_of_orders_postgres_does_not_hold(self, stores):
+        """The 05:15 refresh forces a header-only rewrite, which never creates
+        an order. As the first write after a flip it wrote nothing and took
+        the latch and the owner rows all the same. Mutation: skip the pre-read
+        for a forced batch."""
+        _store, pool, _env = stores
+        result, _ = await chain.upsert_orders_with_expenses(
+            [_payload(BASE, expenses=False)], force_update=True, skip_products=True)
+        assert (result.changed_ids, result.deferred_to_full_sync) == ([], 1)
+        assert not chain_latch.marker_path(chain.CHAIN).exists()
+        assert await chain_latch.read_owners(pool) == {}
+
 
 class TestTheMissesLedger:
     @pytest.mark.asyncio
