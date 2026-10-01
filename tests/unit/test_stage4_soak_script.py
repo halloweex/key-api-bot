@@ -393,3 +393,30 @@ class TestStage5:
     def test_the_check_is_only_ever_asked_for_its_status(self):
         calls = re.findall(r'"\$SILENCE_CHECK"[^\n]*', SCRIPT.read_text())
         assert calls == ['"$SILENCE_CHECK" --status 2>&1 || true)"'], calls
+
+
+# A soak file is named in prose far from where it lives — a module docstring
+# telling the reader which check reads its rows, a canary comment naming the
+# check that judges its page — and a renumbering leaves those pointing at
+# nothing. Found once: three such names survived a renumbering in the change
+# that added P1–P4. Walked, not listed: every tree a reader would look in.
+_SOAK_NAME = re.compile(r"\b\d{2}_[a-z0-9]+_[a-z0-9_]+\.sql\b")
+_PROSE_TREES = ("core", "bot", "web", "scripts", "deploy", "tests")
+
+
+def test_every_soak_file_named_anywhere_exists():
+    """Mutation: put P4's old number back in the canary's comment (52 for 53,
+    `p3` for `p4`), a file that does not exist, and this fails naming the
+    file and the name."""
+    sources = [REPO / ".claude" / "CLAUDE.md"]
+    for tree in _PROSE_TREES:
+        sources += [p for p in (REPO / tree).rglob("*")
+                    if p.is_file() and p.suffix in {".py", ".sh", ".sql", ".md", ".yml"}
+                    and "__pycache__" not in p.parts]
+    existing = {p.name for p in FILES}
+    dangling = sorted(
+        f"{path.relative_to(REPO)}: {name}"
+        for path in sources if path.exists()
+        for name in set(_SOAK_NAME.findall(path.read_text(errors="replace")))
+        if name not in existing)
+    assert not dangling, dangling

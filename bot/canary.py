@@ -1038,7 +1038,7 @@ def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
 # `off`, so a web running `on`, today, writes no row at all.
 
 # The first words of the page's line: what a reader greps the journal by. The
-# week-of-silence soak check (deploy/stage4_soak/52_p3_week_of_silence.sql)
+# week-of-silence soak check (deploy/stage4_soak/53_p4_week_of_silence.sql)
 # judges the page by its key and the watch below, never by these words.
 DUCKDB_OPENED_LINE = "DuckDB opened while KS_DUCKDB=off: "
 
