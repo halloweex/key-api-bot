@@ -362,8 +362,18 @@ json_field() {
 }
 
 others() {
-    # Every container on the host that is not the rehearsal's: Z0's evidence.
-    docker ps -a --no-trunc --format '{{.ID}} {{.Names}}' | { grep -v ' reh-' || true; } | sort
+    # Every container on the host that is not the rehearsal's, with what a
+    # restart or an OOM kill changes: Z0's evidence. An id and a name alone
+    # would read a live web the kernel killed and Docker restarted as
+    # "unchanged" — same id, same name. Read-only: `docker inspect` of the
+    # ids `docker ps` listed; one removed between the two calls is skipped.
+    local ids
+    ids="$(docker ps -aq --no-trunc)"
+    [ -n "$ids" ] || return 0
+    # One word per id, on purpose.
+    # shellcheck disable=SC2086
+    { docker inspect -f '{{.Id}} {{.Name}} {{.State.StartedAt}} {{.RestartCount}} {{.State.OOMKilled}}' \
+        $ids 2>/dev/null || true; } | sed 's# /# #' | { grep -v ' reh-' || true; } | sort
 }
 
 as_json_list() {

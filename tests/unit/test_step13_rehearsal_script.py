@@ -172,11 +172,23 @@ def test_every_container_is_named_as_one_of_the_rehearsals():
         assert name in {f"${v}" for v in CONTAINER_VARS} | {"$name"}, f"line {n}: --name {name}"
 
 
+def _function_lines(name: str) -> range:
+    lines = TEXT.splitlines()
+    start = next(i for i, l in enumerate(lines, start=1) if l.startswith(f"{name}() {{"))
+    end = next(i for i, l in enumerate(lines, start=1) if i > start and l == "}")
+    return range(start, end + 1)
+
+
 def test_every_container_command_targets_a_rehearsal_container():
     allowed = {f"${v}" for v in CONTAINER_VARS} | {"$1", "$name"}
     takes_value = {"-f", "--format", "-e", "-t", "--since", "--until", "-u", "--time", "-s"}
+    # The one look at containers that are not the rehearsal's: Z0's
+    # `docker inspect` of what `docker ps` listed, inside others() alone.
+    others = _function_lines("others")
     checked = 0
     for n, sub, words in DOCKER:
+        if sub == "inspect" and n in others and "$ids" in words:
+            continue
         if sub not in {"exec", "kill", "stop", "start", "rm", "logs", "inspect", "wait",
                        "cp", "restart", "pause", "unpause"}:
             continue
@@ -200,6 +212,23 @@ def test_every_container_command_targets_a_rehearsal_container():
             assert target in allowed, f"line {n}: docker {sub} aims at {target!r}"
             checked += 1
     assert checked >= 20, f"the walk found only {checked} targeted docker commands"
+
+
+def test_the_look_at_other_containers_only_reads_and_sees_restarts():
+    """others() is the one function aimed at containers that are not the
+    rehearsal's — production's among them — so it may list and inspect,
+    nothing else. And it must record what a restart changes: an id and a
+    name stay the same across a restart policy's restart, so a live web the
+    kernel killed would otherwise read as 'unchanged'."""
+    lines = _function_lines("others")
+    subs = [(n, sub) for n, sub, _w in DOCKER if n in lines]
+    assert subs and {sub for _n, sub in subs} == {"ps", "inspect"}, subs
+    body = _function_body("others")
+    for field in ("{{.State.StartedAt}}", "{{.RestartCount}}", "{{.State.OOMKilled}}"):
+        assert field in body, f"others() does not record {field}"
+    calls = [n for n, stmt in STATEMENTS if re.search(r"(^|[\s;(|&!])others(\s|$)", stmt)
+             and not stmt.startswith("others()")]
+    assert len(calls) == 2, f"others() is called {len(calls)} times, not before and after"
 
 
 def test_helpers_that_take_a_container_are_handed_a_rehearsal_one():

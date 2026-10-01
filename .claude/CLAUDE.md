@@ -3060,12 +3060,19 @@ Gold's), P4 the three mutations (a deleted Silver row, a landed order, an
 unknown sales_type via a trigger on the copy), P5 both DQ jobs under the
 stand-down, P6 two restarts and one resolve, P7 one precondition broken and
 the canary paging, P8 the way back. Plus K0 (KeyCRM never called) and Z0
-(no other container on the host moved). Exit 0 all PASS, 1 any FAIL, 2
-UNKNOWN only, 3 not set up.
+(no other container on the host moved). Z0 records every other container's
+`StartedAt`, `RestartCount` and `OOMKilled`, not just its id: a restart
+policy brings an OOM-killed live web back under the same id and name, so
+only those say it happened, and one that did is a FAIL until somebody has
+read why. A container gone or new is UNKNOWN — a deploy or a cron one-off,
+or, on a laptop, other work. Exit 0 all PASS, 1 any FAIL, 2 UNKNOWN only,
+3 not set up.
 
 **What keeps it off production**, each pinned by parsing the script
-(`tests/unit/test_step13_rehearsal_script.py`): every container and the
-network are `reh-*` and nothing else is ever addressed — no `docker compose`;
+(`tests/unit/test_step13_rehearsal_script.py`): every container, one-offs
+included, and the network are named `reh-*`, and nothing else is ever acted
+on — the one look at the rest is Z0's `docker ps` and `docker inspect`, and
+no `docker compose`;
 the network is `--internal`, so there is no route to KeyCRM, Telegram or any
 live container; `--pull never` on every `docker run`, so the image the next
 `up -d` starts is not changed; hard memory caps (web 1.5 g with DuckDB at

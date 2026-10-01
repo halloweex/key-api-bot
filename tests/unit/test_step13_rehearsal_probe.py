@@ -471,11 +471,38 @@ def test_k0():
     assert probe.judge_k0({})[0] == UNKNOWN
 
 
-def test_z0():
-    assert probe.judge_z0({"before": ["a x"], "after": ["a x"],
+WEB_UP = "c1 keycrm-web 2026-10-01T09:00:00.1Z 0 false"
+PG_UP = "c2 ks-postgres 2026-09-30T02:00:00.5Z 0 false"
+
+
+def test_z0_unchanged_is_pass():
+    assert probe.judge_z0({"before": [WEB_UP, PG_UP], "after": [PG_UP, WEB_UP],
                            "min_mem_available_mib": 2100})[0] == PASS
+    # The id-and-name form an older run wrote still reads.
+    assert probe.judge_z0({"before": ["a x"], "after": ["a x"],
+                           "min_mem_available_mib": None})[0] == PASS
+
+
+def test_z0_a_live_container_restarted_in_place_is_fail():
+    """A restart policy restarts an OOM-killed web under the same id and name,
+    and resets OOMKilled on the way up: only StartedAt and RestartCount say
+    it happened."""
+    restarted = "c1 keycrm-web 2026-10-01T10:12:44.9Z 1 false"
+    verdict, detail = probe.judge_z0({"before": [WEB_UP, PG_UP], "after": [restarted, PG_UP],
+                                      "min_mem_available_mib": 900})
+    assert verdict == FAIL and "keycrm-web" in detail and "ks-postgres" not in detail
+    stopped_oom = "c1 keycrm-web 2026-10-01T09:00:00.1Z 0 true"
+    verdict, detail = probe.judge_z0({"before": [WEB_UP], "after": [stopped_oom],
+                                      "min_mem_available_mib": 900})
+    assert verdict == FAIL and "OOM-killed" in detail
+
+
+def test_z0_a_container_gone_or_new_is_unknown():
+    assert probe.judge_z0({"before": [WEB_UP, PG_UP], "after": [PG_UP],
+                           "min_mem_available_mib": None})[0] == UNKNOWN
     assert probe.judge_z0({"before": ["a x"], "after": ["b y"],
                            "min_mem_available_mib": None})[0] == UNKNOWN
+    assert probe.judge_z0({"before": None, "after": [WEB_UP]})[0] == UNKNOWN
 
 
 # ─── assemble ────────────────────────────────────────────────────────────────

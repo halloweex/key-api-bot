@@ -848,17 +848,54 @@ def judge_k0(ev: Mapping[str, Any]) -> Verdict:
     return PASS, f"internal net; base url {url}; stub requests {stub}; keycrm.app in web logs 0"
 
 
+def _containers(lines: Optional[Iterable[Any]]) -> Dict[str, Dict[str, Any]]:
+    """`others()`'s lines — id, name, StartedAt, RestartCount, OOMKilled —
+    by id. A line carrying an id and a name alone reads the rest as None."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for line in lines or []:
+        f = str(line).split()
+        if not f:
+            continue
+        out[f[0]] = {"name": f[1] if len(f) > 1 else "?",
+                     "started": f[2] if len(f) > 2 else None,
+                     "restarts": f[3] if len(f) > 3 else None,
+                     "oom": (f[4] == "true") if len(f) > 4 else None}
+    return out
+
+
 def judge_z0(ev: Mapping[str, Any]) -> Verdict:
-    """Nothing else on the host moved (context)."""
+    """Nothing else on the host moved.
+
+    A container that was there before and after but started again in
+    between — a restart policy after a crash or an OOM kill keeps its id and
+    its name — is FAIL: the one thing the caps and the watchdog exist to
+    prevent is the live stack starved, and until somebody has read why it
+    restarted, the rehearsal is the suspect. A container gone or new is
+    UNKNOWN: a deploy recreates, a cron one-off comes and goes, and on a
+    laptop other work does both."""
     before, after = ev.get("before"), ev.get("after")
     mem = ev.get("min_mem_available_mib")
     mem_note = "memory watch skipped (local)" if mem is None else f"min MemAvailable {mem} MiB"
     if before is None or after is None:
         return UNKNOWN, f"container lists not read; {mem_note}"
-    if sorted(before) != sorted(after):
-        gone, new = sorted(set(before) - set(after)), sorted(set(after) - set(before))
-        return UNKNOWN, f"other containers changed during the run (gone {len(gone)}, new {len(new)}); {mem_note}"
-    return PASS, f"{len(before)} other containers unchanged; {mem_note}"
+    b, a = _containers(before), _containers(after)
+    both = [i for i in b if i in a]
+    oom = sorted(a[i]["name"] for i in both if a[i]["oom"] is True and b[i]["oom"] is not True)
+    restarted = sorted(a[i]["name"] for i in both
+                       if (a[i]["started"], a[i]["restarts"]) != (b[i]["started"], b[i]["restarts"]))
+    if oom or restarted:
+        parts = []
+        if oom:
+            parts.append(f"OOM-killed during the run: {_fmt(oom)}")
+        if restarted:
+            parts.append(f"started again during the run: {_fmt(restarted)}")
+        return FAIL, "; ".join(parts) + f"; {mem_note}"
+    gone = sorted(b[i]["name"] for i in b if i not in a)
+    new = sorted(a[i]["name"] for i in a if i not in b)
+    if gone or new:
+        return UNKNOWN, (f"other containers changed during the run (gone {len(gone)}, new {len(new)}); "
+                         f"none of those there throughout restarted; {mem_note}")
+    return PASS, f"{len(b)} other containers unchanged, none restarted or OOM-killed; {mem_note}"
 
 
 # ─── The table ───────────────────────────────────────────────────────────────
