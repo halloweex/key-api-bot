@@ -418,8 +418,14 @@ def _store_switch_writes_duckdb(switch: str) -> Optional[bool]:
             from core.pg_dashboard_users import user_store_is_postgres
             return not user_store_is_postgres()
         if switch == WAREHOUSE:
-            from core.warehouse_cutover import duckdb_derives
-            return duckdb_derives()
+            from core import warehouse_cutover
+            if warehouse_cutover.value() is None:
+                # `configure_modes()` has not run in this process, and only
+                # web's does: a script, a test, or anything reading this from
+                # outside web would otherwise answer "duckdb" whatever the
+                # variable says. Not knowing is the answer here.
+                return None
+            return warehouse_cutover.duckdb_derives()
     except ValueError:
         return None
     raise KeyError(f"{switch} is not a switch this manifest knows how to read")
@@ -427,15 +433,21 @@ def _store_switch_writes_duckdb(switch: str) -> Optional[bool]:
 
 def duckdb_written() -> Dict[str, Optional[bool]]:
     """`{table: True | False | None}` — does DuckDB still write it, in this
-    process, now.
+    process, now. None is "cannot tell from here".
 
     A registered chain answers through `core.write_chains.chain_modes()`, so a
     latch counts exactly as it does for the writers (OD-19 (a)), and a flag
     nobody can read is None: its writers raise rather than pick a store. A
     store switch asks its own reader; `KS_WRITE_WAREHOUSE` is the mode this
-    process configured, `duckdb` until `configure_modes()` has run. With no
-    switch, DuckDB still writes whatever moves or is derived, and nothing
-    writes a view, a retired table or a frozen archive.
+    process configured, and None in a process where `configure_modes()` never
+    ran — every process but web's. With no switch, DuckDB writes every table
+    in its schema except a frozen archive; nothing writes a view, a table
+    with no DDL left, or a migration's scratch outside its own step.
+
+    `kind` is the fate at stage 5, not today's state: `schema_migrations` is
+    retired with the file, and DuckDB writes it on every connect that applies
+    a migration until then. The test holds this answer to the writers the
+    code has, not to `kind`.
     """
     from core import write_chains
 
@@ -447,7 +459,7 @@ def duckdb_written() -> Dict[str, Optional[bool]]:
 
     out: Dict[str, Optional[bool]] = {}
     for name, fate in FATES.items():
-        if fate.object == VIEW or fate.kind == RETIRED:
+        if fate.object == VIEW or fate.ddl != SCHEMA:
             out[name] = False
         elif fate.switch is None:
             out[name] = fate.kind != ARCHIVE_ONLY

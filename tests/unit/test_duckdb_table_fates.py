@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import dataclasses
+import importlib
+import inspect
 import os
 import re
 import shutil
@@ -27,7 +30,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterator, List, Set, Tuple
+from typing import Callable, Dict, Iterator, List, Set, Tuple
 
 import duckdb
 import pytest
@@ -396,6 +399,472 @@ def repo_python() -> List[Tuple[str, Path]]:
                   if not r.startswith("tests/") and (REPO / r).is_file())
 
 
+# ── who writes each table, and behind which switch ──
+#
+# A store switch moves the tables whose every DuckDB writer stops when it
+# flips. That is read off the code, never declared: the statements each
+# switch's routers run (rendered by the router itself, for DuckDB), every
+# literal DuckDB write, and for each writer whether it runs only on the branch
+# where the switch's reader says DuckDB — under `if duckdb_derives():`, after
+# `if not duckdb_derives(): return`, or reached only from such a branch. A
+# function that merely calls the reader somewhere is not guarded: `full_sync`
+# asks `duckdb_derives()` about the warehouse and writes `categories` whatever
+# it says, and reading "asks anywhere" claimed eight such tables.
+#
+# Limits, named: a write whose target is rendered at run time (`f"DELETE FROM
+# {table}"` — the Postgres and ClickHouse shippers, the compaction's import,
+# the copy-back) names no table and is not counted; a guard spelled other than
+# a call of the reader, `not` of one, `and`/`or` of those, or an early
+# `return`/`raise`/`continue` is not seen, which errs toward "unguarded".
+
+# The SQL keywords that write a table. Upper case only: the repository's SQL
+# is, and "update orders" in a log line is not a statement.
+_WRITE = re.compile(
+    r"\b(?P<kw>INSERT\s+(?:OR\s+(?:REPLACE|IGNORE)\s+)?INTO|UPDATE|DELETE\s+FROM"
+    r"|TRUNCATE(?:\s+TABLE)?|MERGE\s+INTO|COPY)(?=\s)")
+# Words that follow a write keyword without being its table:
+# `DO UPDATE SET`, `FOR UPDATE OF`, `... UPDATE RETURNING`.
+_NOT_A_TABLE = frozenset({"set", "of", "on", "returning", "where", "from",
+                          "select", "values", "default", "nowait", "skip"})
+
+# Each store switch: the reader that decides it, whether the reader's True
+# means DuckDB writes, and the routers — functions that pick the engine by the
+# reader and run a statement handed to them. Held to the code below.
+STORE_ROUTERS: Dict[str, Tuple[str, bool, Tuple[str, ...]]] = {
+    fates_mod.SMS_STORE: ("sms_store_is_postgres", False, ("_sms_run", "_sms_tx")),
+    fates_mod.USER_STORE: ("user_store_is_postgres", False, ("_users_run", "_perms_run")),
+    fates_mod.WAREHOUSE: ("duckdb_derives", True, ()),
+}
+# `_sms_tx` yields a transaction; these are the methods that run a statement.
+_TX_METHODS = ("all", "one", "none", "many")
+
+# DuckDB writes that never reach the analytics file. Each says why; a listed
+# site that no longer exists fails, as in RENDERED_DDL.
+NOT_THE_FILE = {
+    ("deploy/measure_dlr_throughput.py", "seed_duckdb"):
+        "a benchmark's own DuckDB, created in a temp directory",
+    ("deploy/measure_dlr_throughput.py", "main"):
+        "a benchmark's own DuckDB, created in a temp directory",
+}
+
+
+@dataclasses.dataclass(frozen=True)
+class WriteSite:
+    path: str
+    owner: str                 # the function's qualname
+    table: str
+    router: "str | None"       # the router the statement went through
+    node: ast.AST = dataclasses.field(compare=False, hash=False, repr=False)
+
+
+def _write_targets(text: str) -> List[str]:
+    """The DuckDB tables a SQL text writes. A target the walk cannot read, or
+    another engine's qualified name, is not one."""
+    out = []
+    for m in _WRITE.finditer(text):
+        name = _named(text, m.end())
+        if name == UNREAD or name.lower() in _NOT_A_TABLE:
+            continue
+        if m.group("kw") == "COPY" and not re.match(
+                rf"\s+{_NAME}\s+FROM\b", text[m.end():]):
+            continue  # `COPY t TO` exports; only `COPY t FROM` loads
+        placed = place(name)
+        if placed is not None:
+            out.append(placed)
+    return out
+
+
+def _owners(tree: ast.AST) -> Dict[int, Tuple[str, str]]:
+    """Each node's owner: `("fn", qualname)` inside a function, `("const",
+    name)` in a module- or class-level assignment, else `("module", "")`."""
+    out: Dict[int, Tuple[str, str]] = {}
+
+    def visit(node, path, in_fn, const):
+        for child in ast.iter_child_nodes(node):
+            c_path, c_in_fn, c_const = path, in_fn, const
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                c_path, c_in_fn, c_const = path + [child.name], True, None
+            elif isinstance(child, ast.ClassDef):
+                c_path = path + [child.name]
+            elif not in_fn and isinstance(child, (ast.Assign, ast.AnnAssign)):
+                targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+                c_const = next((t.id for t in targets if isinstance(t, ast.Name)), None)
+            out[id(child)] = (("fn", ".".join(c_path)) if c_in_fn
+                              else ("const", c_const) if c_const else ("module", ""))
+            visit(child, c_path, c_in_fn, c_const)
+
+    visit(tree, [], False, None)
+    return out
+
+
+def _own_nodes(fn: ast.AST) -> Iterator[ast.AST]:
+    """A function's body, without the bodies of functions defined in it."""
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            stack.extend(ast.iter_child_nodes(node))
+
+
+@dataclasses.dataclass
+class _Fn:
+    path: str
+    qualname: str
+    node: ast.AST
+    # Every name the function reads, bare or as an attribute, with the nodes
+    # that read it — a call, or a function handed on as a callback.
+    refs: Dict[str, List[ast.AST]]
+
+
+@dataclasses.dataclass
+class _Module:
+    rel: str
+    tree: ast.AST
+    owners: Dict[int, Tuple[str, str]]
+    parents: Dict[int, ast.AST]
+    functions: Dict[str, _Fn]
+
+
+def _module_name(rel: str) -> str:
+    return rel[:-3].replace("/", ".")
+
+
+def _sources(trees=DUCKDB_TREES) -> List[Tuple[str, str]]:
+    return [(p.relative_to(REPO).as_posix(), p.read_text(encoding="utf-8"))
+            for p in _py_files(trees)]
+
+
+def _modules(sources: List[Tuple[str, str]]) -> List[_Module]:
+    out = []
+    for rel, source in sources:
+        tree = ast.parse(source)
+        owners = _owners(tree)
+        parents = {id(c): p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+        functions = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                refs: Dict[str, List[ast.AST]] = {}
+                for sub in _own_nodes(node):
+                    name = (sub.id if isinstance(sub, ast.Name)
+                            else sub.attr if isinstance(sub, ast.Attribute) else None)
+                    if name:
+                        refs.setdefault(name, []).append(sub)
+                qual = owners[id(node)][1]
+                functions[qual] = _Fn(rel, qual, node, refs)
+        out.append(_Module(rel, tree, owners, parents, functions))
+    return out
+
+
+def _statement_text(arg: ast.AST, module: _Module, fn: "_Fn | None") -> "str | None":
+    """The text of a statement handed to a router, or None when the walk
+    cannot know it: a constant, an f-string (holes as `__HOLE__`), a `+`
+    chain, a local assigned one of those, or a name imported or defined at
+    module level, read off the module it comes from."""
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return arg.value
+    if isinstance(arg, ast.JoinedStr):
+        return "".join(p.value if isinstance(p, ast.Constant) else "__HOLE__"
+                       for p in arg.values)
+    if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Add):
+        left = _statement_text(arg.left, module, fn)
+        right = _statement_text(arg.right, module, fn)
+        return None if left is None or right is None else left + right
+    if not isinstance(arg, ast.Name):
+        return None
+    local = list(_own_nodes(fn.node)) if fn else []
+    for node in local:
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == arg.id for t in node.targets)):
+            return _statement_text(node.value, module, fn)
+    for node in local + list(module.tree.body):
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for a in node.names:
+                if (a.asname or a.name) == arg.id:
+                    value = getattr(importlib.import_module(node.module), a.name, None)
+                    return value if isinstance(value, str) else None
+    value = getattr(importlib.import_module(_module_name(module.rel)), arg.id, None)
+    return value if isinstance(value, str) else None
+
+
+class _Captured:
+    """A DuckDB connection that records what it is asked to run."""
+
+    def __init__(self):
+        self.sql: List[str] = []
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        return self
+
+    def executemany(self, sql, rows=None):
+        self.sql.append(sql)
+        return self
+
+    def fetchall(self):
+        return []
+
+    def fetchone(self):
+        return None
+
+
+class _CapturingStore:
+    def __init__(self):
+        self.conn = _Captured()
+
+    @contextlib.asynccontextmanager
+    async def connection(self):
+        yield self.conn
+
+
+def _render_for_duckdb(router: str, sql: str) -> List[str]:
+    """What `router` runs on DuckDB for `sql`, by running the router itself
+    against a connection that records — its own placeholders and its own
+    engine choice, nothing restated here."""
+    from core.duckdb_store import DuckDBStore
+
+    store = _CapturingStore()
+
+    async def run():
+        if router == "_sms_tx":
+            async with DuckDBStore._sms_tx(store) as tx:
+                await tx.none(sql)
+        else:
+            await getattr(DuckDBStore, router)(store, sql, [], mode="none")
+
+    saved = {k: os.environ.get(k) for k in (fates_mod.SMS_STORE, fates_mod.USER_STORE)}
+    os.environ.update({fates_mod.SMS_STORE: "duckdb", fates_mod.USER_STORE: "duckdb"})
+    try:
+        asyncio.run(run())
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    return [s for s in store.conn.sql
+            if s.strip().upper() not in ("BEGIN TRANSACTION", "COMMIT", "ROLLBACK")]
+
+
+@dataclasses.dataclass
+class WriteWalk:
+    sites: List[WriteSite]
+    modules: Dict[str, _Module]
+    unread_statements: List[str]   # routed statements the walk could not read
+
+    def function(self, path: str, qualname: str) -> "_Fn | None":
+        module = self.modules.get(path)
+        return module.functions.get(qualname) if module else None
+
+    def writers(self, table: str) -> List[WriteSite]:
+        return [s for s in self.sites if s.table == table]
+
+    def written(self, exempt=True) -> Set[str]:
+        return {s.table for s in self.sites
+                if not (exempt and (s.path, s.owner) in NOT_THE_FILE)}
+
+
+def _handed_statements(module: _Module, routers) -> Iterator[Tuple[str, ast.AST, ast.AST]]:
+    """`(router, statement, call)` for every statement handed to a router:
+    its first argument, or for `_sms_tx` the first argument of each
+    transaction method called on the name it binds."""
+    for node in ast.walk(module.tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in routers and node.args):
+            yield node.func.attr, node.args[0], node
+        if isinstance(node, ast.AsyncWith):
+            for item in node.items:
+                ctx = item.context_expr
+                if not (isinstance(ctx, ast.Call) and isinstance(ctx.func, ast.Attribute)
+                        and ctx.func.attr in routers
+                        and isinstance(item.optional_vars, ast.Name)):
+                    continue
+                var = item.optional_vars.id
+                for sub in ast.walk(node):
+                    if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)
+                            and isinstance(sub.func.value, ast.Name)
+                            and sub.func.value.id == var
+                            and sub.func.attr in _TX_METHODS and sub.args):
+                        yield ctx.func.attr, sub.args[0], sub
+
+
+def walk_writes(sources: "List[Tuple[str, str]] | None" = None) -> WriteWalk:
+    """Every DuckDB write in `DUCKDB_TREES`, or in the `(rel, source)`
+    modules given."""
+    routers = {r for _, _, rs in STORE_ROUTERS.values() for r in rs}
+    modules = {m.rel: m for m in _modules(_sources() if sources is None else sources)}
+    loaders: Dict[str, List[Tuple[_Fn, ast.AST]]] = {}
+    for module in modules.values():
+        for fn in module.functions.values():
+            for name, nodes in fn.refs.items():
+                loaders.setdefault(name, []).extend((fn, n) for n in nodes)
+    sites: List[WriteSite] = []
+    unread: List[str] = []
+
+    for module in modules.values():
+        handed = list(_handed_statements(module, routers))
+        handed_ids = {id(arg) for _, arg, _ in handed}
+
+        # Literal statements, attributed to the function they are in, or to
+        # every function that reads the constant they are assigned to.
+        for node, text in _strings(module.tree):
+            if id(node) in handed_ids:
+                continue
+            targets = _write_targets(text)
+            if not targets:
+                continue
+            kind, owner = module.owners.get(id(node), ("module", ""))
+            if kind == "fn":
+                at = [(module.rel, owner, node)]
+            else:
+                at = [(fn.path, fn.qualname, ref) for fn, ref in loaders.get(owner, [])]
+                at = at or [(module.rel, f"<{owner or 'module'}>", node)]
+            sites += [WriteSite(rel, qual, t, None, where)
+                      for rel, qual, where in at for t in targets]
+
+        # Routed statements, each rendered for DuckDB by its router.
+        for router, arg, call in handed:
+            kind, owner = module.owners.get(id(call), ("module", ""))
+            fn = module.functions.get(owner) if kind == "fn" else None
+            text = _statement_text(arg, module, fn)
+            if text is None:
+                unread.append(f"{module.rel}:{arg.lineno} ({router})")
+                continue
+            for rendered in _render_for_duckdb(router, text):
+                if re.search(r"\b(?:INTO|UPDATE|FROM|TABLE)\s+__HOLE__", rendered):
+                    unread.append(f"{module.rel}:{arg.lineno} ({router})")
+                sites += [WriteSite(module.rel, owner if kind == "fn" else f"<{owner}>",
+                                    t, router, call)
+                          for t in _write_targets(rendered)]
+    return WriteWalk(sites, modules, unread)
+
+
+def _reader_says(test: ast.AST, reader: str, true_means_duckdb: bool) -> "bool | None":
+    """True when `test` is equivalent to "DuckDB writes", False when it is
+    equivalent to "DuckDB does not", None when it is neither: a call of the
+    reader, or `not` of one."""
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _reader_says(test.operand, reader, true_means_duckdb)
+        return None if inner is None else not inner
+    if isinstance(test, ast.Await):
+        return _reader_says(test.value, reader, true_means_duckdb)
+    if isinstance(test, ast.Call) and not test.args:
+        f = test.func
+        if (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)) == reader:
+            return true_means_duckdb
+    return None
+
+
+def _implies_duckdb(test, reader, polarity) -> bool:
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        return any(_implies_duckdb(v, reader, polarity) for v in test.values)
+    return _reader_says(test, reader, polarity) is True
+
+
+def _implied_by_not_duckdb(test, reader, polarity) -> bool:
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+        return any(_implied_by_not_duckdb(v, reader, polarity) for v in test.values)
+    return _reader_says(test, reader, polarity) is False
+
+
+def _exits(body: List[ast.stmt]) -> bool:
+    return bool(body) and isinstance(body[-1], (ast.Return, ast.Raise, ast.Continue))
+
+
+def on_duckdb_branch(module: _Module, fn: ast.AST, node: ast.AST,
+                     reader: str, polarity: bool) -> bool:
+    """Whether `node`, inside `fn`, runs only where `reader` says DuckDB:
+    in the body of an `if` the reader makes true, the `else` of one it makes
+    false, or after `if <not DuckDB>: return` earlier in an enclosing block."""
+    child = node
+    while child is not fn:
+        parent = module.parents.get(id(child))
+        if parent is None:
+            return False
+        if isinstance(parent, ast.If):
+            if any(s is child for s in parent.body) and _implies_duckdb(
+                    parent.test, reader, polarity):
+                return True
+            if any(s is child for s in parent.orelse) and _implied_by_not_duckdb(
+                    parent.test, reader, polarity):
+                return True
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(parent, field, None)
+            if not isinstance(block, list):
+                continue
+            for i, stmt in enumerate(block):
+                if stmt is child:
+                    if any(isinstance(prev, ast.If) and not prev.orelse
+                           and _implied_by_not_duckdb(prev.test, reader, polarity)
+                           and _exits(prev.body) for prev in block[:i]):
+                        return True
+                    break
+        child = parent
+    return False
+
+
+def guarded_by(walk: WriteWalk, switch: str) -> "Callable[[WriteSite], bool]":
+    """Whether a write runs only where the switch says DuckDB: through one
+    of its routers, on the DuckDB branch of its reader in its own function, or
+    in a function every reference to which — a call, or a callback handed on
+    — is itself on that branch or in such a function. A function nothing
+    references (a route, a job, a script's main) must guard itself; a cycle
+    is not an answer."""
+    reader, polarity, routers = STORE_ROUTERS[switch]
+    refs: Dict[str, List[Tuple[_Fn, ast.AST]]] = {}
+    for module in walk.modules.values():
+        for fn in module.functions.values():
+            for name, nodes in fn.refs.items():
+                refs.setdefault(name, []).extend((fn, n) for n in nodes)
+    memo: Dict[Tuple[str, str], bool] = {}
+    busy: Set[Tuple[str, str]] = set()
+
+    def at(fn: _Fn, node: ast.AST) -> bool:
+        module = walk.modules[fn.path]
+        return (on_duckdb_branch(module, fn.node, node, reader, polarity)
+                or whole(fn))
+
+    def whole(fn: _Fn) -> bool:
+        key = (fn.path, fn.qualname)
+        if key in memo:
+            return memo[key]
+        if key in busy:
+            return False
+        busy.add(key)
+        reaching = [(g, n) for g, n in refs.get(fn.qualname.rsplit(".", 1)[-1], [])
+                    if g is not fn]
+        result = bool(reaching) and all(at(g, n) for g, n in reaching)
+        busy.discard(key)
+        memo[key] = result
+        return result
+
+    def site(s: WriteSite) -> bool:
+        if s.router is not None:
+            return s.router in routers
+        fn = walk.function(s.path, s.owner)
+        return fn is not None and at(fn, s.node)
+
+    return site
+
+
+def switch_tables(walk: WriteWalk, switch: str) -> Set[str]:
+    """The tables `switch` stops DuckDB writing: written somewhere, and by no
+    writer that runs whatever the switch says."""
+    check = guarded_by(walk, switch)
+    out = set()
+    for table in walk.written():
+        sites = [s for s in walk.writers(table)
+                 if (s.path, s.owner) not in NOT_THE_FILE]
+        if sites and all(check(s) for s in sites):
+            out.add(table)
+    return out
+
+
+@pytest.fixture(scope="module")
+def writes() -> WriteWalk:
+    return walk_writes()
+
+
 @pytest.fixture(scope="module")
 def fresh_file(tmp_path_factory) -> Path:
     """A database built by today's code, exactly as web builds one: the schema,
@@ -674,6 +1143,20 @@ class TestTheCompactionAgrees:
                     f"{name} has no source to be rebuilt from and is not in "
                     f"the off-site archive — chain 12's blast radius")
 
+    def test_an_append_only_replica_is_irreplaceable(self):
+        """A table Postgres receives above a watermark (`_APPEND_ABOVE`) is a
+        log of events DuckDB recorded as they happened, and no source re-issues
+        an event. Marking one KEYCRM or COMPUTED takes it out of the
+        must-travel-off-site rule above (review, mutation M14: stock_movements
+        IRREPLACEABLE → KEYCRM survived the whole file)."""
+        from core import pg_operational
+
+        appended = {a.dk_table for a in pg_operational._APPEND_ABOVE}
+        assert {"stock_movements", "inventory_sku_history"} <= appended
+        loose = sorted(f"{n}: {FATES[n].origin}" for n in appended
+                       if FATES[n].origin != IRREPLACEABLE)
+        assert not loose, loose
+
     def test_a_table_without_ddl_is_retired_and_skipped(self):
         for name, fate in FATES.items():
             if fate.ddl == NONE:
@@ -857,6 +1340,8 @@ def every_switch_at_its_default(monkeypatch):
     for env in [*_chain_switches(), *STORE_SWITCHES]:
         if env != fates_mod.WAREHOUSE:
             monkeypatch.setenv(env, "duckdb")
+    # As `configure_mode()` leaves it for an unset variable, in web.
+    monkeypatch.setattr(wc, "_value", wc.DUCKDB)
     monkeypatch.setattr(wc, "_mode", wc.DUCKDB)
 
 
@@ -913,6 +1398,117 @@ class TestTheChains:
             assert fates_mod._store_switch_writes_duckdb(switch) is True, switch
 
 
+# ─── 4b. the store switches, read off the code ───────────────────────────────
+
+def _guarded(sources: List[Tuple[str, str]], switch: str = fates_mod.WAREHOUSE,
+             table: str = "silver_orders") -> List[bool]:
+    walk = walk_writes(sources)
+    check = guarded_by(walk, switch)
+    return [check(s) for s in walk.writers(table)]
+
+
+class TestTheStoreSwitches:
+    """Which tables KS_SMS_STORE, KS_USER_STORE and KS_WRITE_WAREHOUSE move
+    was declared by hand and checked against nothing, so a table marked with
+    the wrong switch — the unsafe direction, `duckdb_written()` answering
+    False for a table DuckDB still writes — passed (review, finding 4:
+    M11, M12, M13, M18, M19)."""
+
+    @pytest.mark.parametrize("switch", STORE_SWITCHES)
+    def test_a_store_switch_moves_exactly_what_it_stops_duckdb_writing(
+            self, writes, switch):
+        derived = switch_tables(writes, switch)
+        declared = set(fates_mod.tables_by_switch(switch))
+        assert derived, f"the walk found nothing {switch} moves"
+        assert declared == derived, (
+            f"{switch}: declared and not stopped by it {sorted(declared - derived)} "
+            f"— DuckDB still writes these whatever {switch} says, so "
+            f"duckdb_written() would lie about them; stopped by it and not "
+            f"declared {sorted(derived - declared)}")
+
+    def test_the_walk_reads_every_routed_statement(self, writes):
+        assert not writes.unread_statements, writes.unread_statements
+        routed = {(s.table, s.router) for s in writes.sites if s.router}
+        # The family: each router, and the transaction.
+        assert {("users", "_users_run"), ("role_permissions", "_perms_run"),
+                ("sms_audience_presets", "_sms_run"),
+                ("sms_campaign_members", "_sms_tx")} <= routed
+
+    def test_the_routers_are_the_ones_that_route(self):
+        """Each router asks its switch's reader, and the manifest reads the
+        switch through the same reader."""
+        from core.duckdb_store import DuckDBStore
+
+        manifest = inspect.getsource(fates_mod._store_switch_writes_duckdb)
+        for switch, (reader, _, routers) in STORE_ROUTERS.items():
+            assert reader in manifest, (switch, reader)
+            for router in routers:
+                source = inspect.getsource(getattr(DuckDBStore, router))
+                assert re.search(rf"\b{reader}\(\)", source), (router, reader)
+
+    def test_every_router_in_the_code_is_listed(self):
+        """A function that asks a store reader and runs a `sql` it is handed
+        is a router; one not listed would route statements the walk never
+        renders."""
+        readers = {r for r, _, _ in STORE_ROUTERS.values()}
+        listed = {r for _, _, rs in STORE_ROUTERS.values() for r in rs}
+        found = set()
+        for module in _modules(_sources(("core",))):
+            for fn in module.functions.values():
+                args = {a.arg for a in fn.node.args.args + fn.node.args.kwonlyargs}
+                if "sql" in args and readers & set(fn.refs):
+                    found.add(fn.qualname.rsplit(".", 1)[-1])
+        assert found == listed - {"_sms_tx"}, found
+
+    def test_not_the_file_lists_only_sites_that_exist(self, writes):
+        present = {(s.path, s.owner) for s in writes.sites}
+        assert set(NOT_THE_FILE) <= present, set(NOT_THE_FILE) - present
+
+    # ── the guard, shape by shape ──
+
+    _W = 'c.execute("DELETE FROM silver_orders")'
+
+    @pytest.mark.parametrize("source", [
+        f"def f(c):\n    if duckdb_derives():\n        {_W}",
+        f"def f(c):\n    if not wc.duckdb_derives():\n        return\n    {_W}",
+        f"def f(c):\n    if not duckdb_derives():\n        x()\n    else:\n        {_W}",
+        f"def f(c, x):\n    if x and duckdb_derives():\n        {_W}",
+        f"def f(c, x):\n    if not duckdb_derives() or x:\n        raise E\n    {_W}",
+        f"def f(c):\n    for i in y:\n        if not duckdb_derives():\n"
+        f"            continue\n        {_W}",
+        f"def w(c):\n    {_W}\n\ndef route(c):\n    if duckdb_derives():\n        w(c)",
+        f"def w(c):\n    {_W}\n\ndef route(loop):\n    if not duckdb_derives():\n"
+        f"        return\n    loop.run(w)",
+    ])
+    def test_a_write_on_the_duckdb_branch_is_guarded(self, source):
+        assert _guarded([("core/_probe.py", source)]) == [True]
+
+    @pytest.mark.parametrize("source", [
+        # Asks, and writes whatever the answer: `full_sync`'s shape. Reading
+        # "asks anywhere" as guarded claimed eight tables for the warehouse.
+        f"def f(c):\n    derives = duckdb_derives()\n    {_W}",
+        f"def f(c):\n    if duckdb_derives():\n        pass\n    {_W}",
+        f"def f(c):\n    if not duckdb_derives():\n        log()\n    {_W}",
+        f"def f(c, x):\n    if x or duckdb_derives():\n        {_W}",
+        f"def f(c):\n    {_W}",
+        f"def w(c):\n    {_W}\n\ndef a(c):\n    if duckdb_derives():\n        w(c)\n\n"
+        f"def b(c):\n    w(c)",
+        f"def w(c):\n    {_W}\n\ndef route(c):\n    if writes_postgres():\n        w(c)",
+    ])
+    def test_a_write_off_the_duckdb_branch_is_not(self, source):
+        assert _guarded([("core/_probe.py", source)]) == [False]
+
+    def test_the_polarity_follows_the_reader(self):
+        """`sms_store_is_postgres()` true means Postgres writes."""
+        w = 'c.execute("DELETE FROM marketing_optouts")'
+        on = f"def f(c):\n    if not sms_store_is_postgres():\n        {w}"
+        off = f"def f(c):\n    if sms_store_is_postgres():\n        {w}"
+        after = f"def f(c):\n    if sms_store_is_postgres():\n        return\n    {w}"
+        for source, expected in ((on, True), (off, False), (after, True)):
+            assert _guarded([("core/_probe.py", source)], fates_mod.SMS_STORE,
+                            "marketing_optouts") == [expected], source
+
+
 # ─── 5. "which tables are still DuckDB-written today" ──────────────────────
 
 @pytest.mark.usefixtures("every_switch_at_its_default")
@@ -920,15 +1516,39 @@ class TestDuckdbWritten:
     def test_it_answers_for_every_entry(self):
         assert set(fates_mod.duckdb_written()) == set(FATES)
 
-    def test_with_every_switch_off(self):
+    def test_with_every_switch_off(self, writes):
+        """With every switch at duckdb, DuckDB writes exactly the schema
+        tables some DuckDB statement in the code writes — read off the code,
+        not off `kind`. The first form pinned `schema_migrations` as not
+        written because its fate is "retired", while `_record_migration`
+        writes it on every connect that applies a step (review, finding 6).
+        Mutation: `duckdb_written` answering False for RETIRED again."""
         written = fates_mod.duckdb_written()
+        by_code = writes.written()
+        assert "schema_migrations" in by_code  # the family
+        wrong = {}
         for name, fate in FATES.items():
-            if fate.object == VIEW or fate.kind == RETIRED:
-                assert written[name] is False, name
-            elif fate.kind == ARCHIVE_ONLY and fate.switch is None:
-                assert written[name] is False, name
-            else:
-                assert written[name] is True, name
+            expected = (fate.object == TABLE and fate.ddl == SCHEMA
+                        and name in by_code)
+            if written[name] is not expected:
+                wrong[name] = (written[name], expected)
+        assert not wrong, f"duckdb_written() against the code's writers: {wrong}"
+
+    def test_the_warehouse_is_unknown_where_its_mode_was_never_configured(
+            self, monkeypatch):
+        """Outside web, `configure_modes()` never ran, and the warehouse
+        tables read True whatever KS_WRITE_WAREHOUSE said (review, finding 5).
+        Mutation: drop the `value() is None` answer."""
+        from core import warehouse_cutover as wc
+
+        monkeypatch.setattr(wc, "_value", None)
+        monkeypatch.setattr(wc, "_mode", None)
+        monkeypatch.setenv(fates_mod.WAREHOUSE, "postgres")
+        written = fates_mod.duckdb_written()
+        moved = set(fates_mod.tables_by_switch(fates_mod.WAREHOUSE))
+        assert moved and {written[n] for n in moved} == {None}
+        assert all(written[n] is not None for n in FATES if n not in moved
+                   and FATES[n].switch not in _chain_switches())
 
     @pytest.mark.parametrize("switch", ["KS_SMS_STORE", "KS_USER_STORE"])
     def test_a_store_switch_moves_its_tables_and_no_others(self, switch, monkeypatch):
@@ -946,6 +1566,7 @@ class TestDuckdbWritten:
     def test_the_warehouse_switch(self, monkeypatch):
         from core import warehouse_cutover as wc
 
+        monkeypatch.setattr(wc, "_value", wc.POSTGRES)
         monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
         written = fates_mod.duckdb_written()
         moved = set(fates_mod.tables_by_switch(fates_mod.WAREHOUSE))
