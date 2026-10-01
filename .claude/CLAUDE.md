@@ -1377,8 +1377,11 @@ routed differently:
   the hourly derive restamps only the verdicts it writes and the copy ships
   the value as it stands. Per row now, so a re-derive is forgiven for the
   90-minute grace and no longer.
-- **`buyer_contacts` left `snapshot_validation.MONOTONE`**: its writers replace
-  a buyer's contacts whole, so a count that fell is not a loss.
+- **`buyer_contacts` left `snapshot_validation.MONOTONE`** for `MUST_BE_NONEMPTY`
+  and a `BOUNDED_SHRINK` tier at 1%: its writers replace a buyer's contacts
+  whole, so a small fall is a dropped number and not a loss — but an export
+  that falls by more than 1% (~330 rows at 32 700), or to zero, is rejected,
+  including after a copy-back that writes back noticeably fewer contacts.
 - **The copy-back knows mirrored tables** — see "A write flag is no longer a
   rollback" — and `POST /api/mirror/backfill/buyers` is the lever its
   pre-flip handover names.
@@ -1657,9 +1660,11 @@ of CRITICALs.
 `mirror_buckets_disagree` caps the drill-down: more than 20 disagreeing buckets
 is a whole-table problem, and reading them all would turn a daily check into a
 table scan of both stores. `mirror_landing` is in
-`WATCHED_LAYERS` (digest section, layer age, catch-up) but deliberately not yet
-in the canary's `DQ_MAX_AGE_S` — that dict pages, and the canary's first probe
-is 90 s after the bot starts, before the catch-up run can finish.
+`WATCHED_LAYERS` (digest section, layer age, catch-up), and since 2026-08-28 in
+the canary's `DQ_MAX_AGE_S` too, paged at 30 h: the worry that kept it out —
+the canary's first probe 90 s after the bot starts, before the catch-up can
+finish — only bites a layer already past 30 h, and the 26 h catch-up sits
+under that page (see "Scheduled checks").
 
 ### Gold in Postgres, and why it is not the same table
 
