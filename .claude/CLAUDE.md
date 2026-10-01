@@ -1516,6 +1516,104 @@ it does not do, both written down in the revision:
   DuckDB before the mirror refuses — and after the flip `--handover` then
   refuses on those ids. After the flip, no image rollback at all.
 
+### Chain 3: the orders, written where they are read (off)
+
+`core/pg_orders_write.py` is the sixth registered write chain:
+`bronze.orders`, `bronze.order_products`, `bronze.expenses` and
+`app.order_backfill_misses`, moved together by `KS_WRITE_ORDERS=postgres`.
+**Off in production, and held off by its own preconditions.** Owner decision
+OD-13 (a): a **raising** writer. Under the chain a Postgres write *is* the
+write; there is no DuckDB fallback when Postgres is down, and the way back is
+`scripts/chain_copy_back.py orders`.
+
+**What moves together, and why.** The two order tables are one unit (DN-22a).
+The expenses come in the same payload (`include=…,expenses`) at the same call
+site, so a page's orders and their costs commit in one Postgres transaction or
+neither does. The misses ledger moves because the repair *selections* move: the
+gap scan and the half-written scan stop re-asking KeyCRM for an id only through
+a 30-day `NOT EXISTS` over it, and a ledger read where nothing writes it stops
+nothing. `app.order_versions` is **not** a chain table: it has no DuckDB copy,
+and its one writer runs in both modes, so the archive goes on across a flip and
+across a way back with nothing to copy. `bronze.expense_types` is chain 6a's.
+
+**One writer of the order tables stays one writer.** `pg_landing.write_orders`
+became a thin acquire-and-transaction around `_write_order_rows`, which takes
+the caller's connection (and `_write` around `_write_rows` for expenses). The
+mirror runs the cores in their own transaction; the chain runs them in its own,
+after `chain_latch.claim`, so the owner rows share an `xmin` with the order.
+The version capture, both landing watermarks (the canary's `mirror_stale` and
+`order_versions_stalled` keep meaning what they say) and the derivation mark go
+with them unchanged.
+
+**The decider read is the write decision.** DuckDB decided insert, update,
+skip-as-unchanged and the header-only refresh's deferral from one read of
+`(id, updated_at)` under its store lock. The chain reads the same pair
+`FOR UPDATE`, in id order, inside the writing transaction, and decides with the
+same `core.upsert_decider.should_update_order` — on UTC instants, and never
+rewriting a stored order from a payload without `updated_at` (DuckDB reads
+that stamp as NaT; a grid against DuckDB's own `upsert_orders` found it). A
+batch that would write nothing is read before the latch and takes none. A
+value Postgres would refuse (NUL in text, a number over `NUMERIC(12,2)`, an id
+outside INTEGER, a NULL into NOT NULL) is refused before the latch, logged by
+id, counted in `failed`. A `DataError` nobody foresaw retries the batch order
+by order on the same connection, each with its own claim. Anything else raises.
+
+**Every path asks the chain's one answer.** `SyncService._upsert_orders_with_expenses`
+routes at its first statement; DuckDB's `upsert_orders` and
+`upsert_expenses_batch` raise `ChainOwnsOrders` while it writes Postgres
+(`upsert_expenses`, which had no caller, is deleted). `record_backfill_misses`
+routes, dated by the web clock rather than `now()` — the clock the copy-back
+orders the two stores by. The gap, backdated, half-written and checkpoint
+selections read Postgres (`core/pg_orders_read.py`, no `except`), and so does
+the boot's "do we hold any orders" gate — a latched host with an empty DuckDB
+would otherwise full-sync 730 days on every start. The two comment backfills
+write through `restore_manager_comments`: only NULL comments, headers only,
+`kind='backfill'`. `tests/unit/test_order_paths_consult_chain.py` walks
+`core/`, `web/` and `scripts/` for every DuckDB statement writing the four
+tables.
+
+**The order step cannot take the tick down.** Under the chain a failure that
+is not KeyCRM's is recorded (`write_chains.pg_orders_write.sync_step`, the
+error class only), `last_sync_orders` stays where it was, `meta.mirror_state`
+marks `bronze.orders` failing, and products, managers, buyers and inventory run.
+The watermark lives in `meta.chain_watermarks` and is read before the fetch, so
+a dead Postgres spends no KeyCRM call. The canary pages
+**`orders_sync_failing`** (CRITICAL) on three failures in a row, no success for
+15 minutes, or the step not reached for 20.
+
+**What stands down with it.** DuckDB's arm of `dq_reconciliation` (layer
+`reconciliation`): against a DuckDB that no longer receives orders it would
+page every morning and re-fetch every new order. The Postgres arm, from the
+same KeyCRM snapshot, drives the repair; `/api/health` marks the layer
+`stood_down`, and the canary, the catch-up and the digest skip it. The ten
+DuckDB integrity checks over the order tables (`ORDER_LANDING_CHECKS`) join
+`stood_down_duckdb_checks()`, so DN-23's Postgres twins stand in alone;
+`tests/unit/test_order_landing_stand_down.py` derives the list from the scan.
+The standing watch adds `chain_expense_orphans` (an expense with no order past
+a day) and a NULL `checked_at` in the misses.
+
+**Preconditions, every one read locally** (`unmet_precondition()`, published
+through the registry, `write_chain_precondition_unmet` on the canary):
+`goals_bridge` (the goal calculators still read DuckDB orders until chain 7b),
+`step13` (Postgres alone derives the warehouse), `chain1` (DuckDB's SKU rebuild
+reads DuckDB order lines), the backup evidence — `pitr_drill` and
+`remote_restore` under 8 days, `pg_offsite` under 36 h, from the markers the
+host scripts now write on success only (`core/backup_evidence.py`; one provider,
+OD-01 (c) cancelled 2026-10-01) — and `landing_pages_clear`: no delivered page
+under a condition the stand-down retires. While any is unmet an unlatched chain
+runs as duckdb whatever its flag says. `preflight` adds what Postgres says:
+the three bronze tables backfilled and their mirrors not failing.
+
+**The way back** is the copy-back generalised from chain 4's mirrored tables:
+the orders and expenses dated by their own `mirrored_at`, a line item by its
+order's (a line only DuckDB holds is a basket the chain shrank only if the
+chain rewrote its order), KeyCRM's `updated_at` refusing a later DuckDB
+version, and the misses replaced whole. No allocator to carry. Proved against
+a real Postgres in `tests/integration/test_chain_copy_back_orders.py`. **What
+is not built**: the soak checks, the restore drill counting the four tables,
+and a lock-out revision for images without the chain (chain 4's 0034 shape —
+an owner's question, not a missing table).
+
 ### The Postgres mirror of landing
 One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
 rows; DuckDB and Postgres each write the rows they are handed. Bookkeeping
@@ -2789,7 +2887,8 @@ variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVEN
 goal amounts typed on /goals, whose POST wrote DuckDB while the GET read an
 hourly copy in Postgres), `KS_WRITE_EXPENSE_TYPES` (chain 6a, off),
 `KS_WRITE_BUYERS` (chain 4, off — the buyers, their contacts and their gender;
-see "Chain 4: the buyers, written where they are read"). Putting one
+see "Chain 4: the buyers, written where they are read"), `KS_WRITE_ORDERS`
+(chain 3, off — see "Chain 3: the orders, written where they are read"). Putting one
 back to `duckdb` reads like an undo and is not one:
 once rows have landed in Postgres, it starts a **second writer beside the
 first** — a typed expense in the store the page does not read, DuckDB's
@@ -3519,9 +3618,10 @@ the row's own transaction, so both watches keep meaning what they say. The
 alternative would blind the one liveness check on the one table nothing can
 rebuild at the moment its writer changes hands. Pinned: the order tables and
 the archive each have exactly one writer, a chain module included, and the two
-watches do not ask the registry. The chain's writer also owes one thing
-`mirror_orders` does today — recording its failures with `_record_failure` —
-or `mirror_failing` loses its fast signal.
+watches do not ask the registry. Chain 3 runs `write_orders`' own core,
+`_write_order_rows`, on its transaction, and its order step records a failure
+with `_record_failure` as `mirror_orders` did, so `mirror_failing` keeps its
+fast signal.
 
 Production today stands nothing down: no chain declares any of these tables
 and no owner row names one, so the per-tick shippers read no variable and no
