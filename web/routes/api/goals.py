@@ -3,6 +3,7 @@ from fastapi import APIRouter, Query, Request, HTTPException, Depends
 from typing import Optional
 
 from web.routes.auth import require_admin, require_permission
+from core.repositories.goals import GOAL_TABLES_SALES_TYPE
 from ._deps import limiter, get_store, validate_sales_type, ValidationError
 
 router = APIRouter()
@@ -122,11 +123,12 @@ async def get_seasonality_data(
         raise HTTPException(status_code=400, detail=str(e))
 
     store = await get_store()
-    # Read path: computed for the caller, stored by nobody. The tables have no
-    # sales_type in their keys, so a GET that stored its result replaced what
-    # every user's retail goal is built from — for any viewer, with one query
-    # parameter. Writing is `POST /goals/recalculate` and the Monday job.
-    return await store.calculate_seasonality_indices(sales_type, persist=False)
+    # Read path: computed for the caller, stored by nobody — the calculators
+    # cannot store at all (OD-14 (i)). The tables have no sales_type in their
+    # keys, so a GET that stored its result replaced what every user's retail
+    # goal is built from, for any viewer, with one query parameter. Writing is
+    # `POST /goals/recalculate` and the Monday job.
+    return await store.calculate_seasonality_indices(sales_type)
 
 
 @router.get("/goals/growth")
@@ -143,11 +145,12 @@ async def get_growth_data(
         raise HTTPException(status_code=400, detail=str(e))
 
     store = await get_store()
-    # Read path: computed for the caller, stored by nobody. The tables have no
-    # sales_type in their keys, so a GET that stored its result replaced what
-    # every user's retail goal is built from — for any viewer, with one query
-    # parameter. Writing is `POST /goals/recalculate` and the Monday job.
-    return await store.calculate_yoy_growth(sales_type, persist=False)
+    # Read path: computed for the caller, stored by nobody — the calculators
+    # cannot store at all (OD-14 (i)). The tables have no sales_type in their
+    # keys, so a GET that stored its result replaced what every user's retail
+    # goal is built from, for any viewer, with one query parameter. Writing is
+    # `POST /goals/recalculate` and the Monday job.
+    return await store.calculate_yoy_growth(sales_type)
 
 
 @router.get("/goals/weekly-patterns")
@@ -164,11 +167,12 @@ async def get_weekly_patterns(
         raise HTTPException(status_code=400, detail=str(e))
 
     store = await get_store()
-    # Read path: computed for the caller, stored by nobody. The tables have no
-    # sales_type in their keys, so a GET that stored its result replaced what
-    # every user's retail goal is built from — for any viewer, with one query
-    # parameter. Writing is `POST /goals/recalculate` and the Monday job.
-    return await store.calculate_weekly_patterns(sales_type, persist=False)
+    # Read path: computed for the caller, stored by nobody — the calculators
+    # cannot store at all (OD-14 (i)). The tables have no sales_type in their
+    # keys, so a GET that stored its result replaced what every user's retail
+    # goal is built from, for any viewer, with one query parameter. Writing is
+    # `POST /goals/recalculate` and the Monday job.
+    return await store.calculate_weekly_patterns(sales_type)
 
 
 @router.post("/goals/recalculate")
@@ -178,22 +182,34 @@ async def recalculate_seasonality(
     sales_type: Optional[str] = Query("retail"),
     admin: dict = Depends(require_admin),
 ):
-    """Force recalculation of seasonality indices and growth metrics. Requires admin."""
+    """Recompute and store the seasonality indices, growth metrics and weekly
+    patterns. Requires admin.
+
+    Retail only. The three tables carry no sales_type in their keys, so the
+    rows mean retail — the Monday job's answer since it stopped writing a b2b
+    pass over them. This route used to store the caller's sales_type there,
+    and every user's retail goal was then built from it.
+    """
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if sales_type != GOAL_TABLES_SALES_TYPE:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"sales_type must be {GOAL_TABLES_SALES_TYPE!r}: the "
+                    "seasonality tables are shared by every sales type and "
+                    "hold retail's numbers"))
 
     store = await get_store()
-    seasonality = await store.calculate_seasonality_indices(sales_type)
-    growth = await store.calculate_yoy_growth(sales_type)
-    await store.calculate_weekly_patterns(sales_type)
+    tables = await store.recalculate_goal_tables(include_weekly=True)
+    growth = tables["yoy"]
 
     return {
         "status": "success",
         "message": "Seasonality indices and growth metrics recalculated",
         "summary": {
-            "monthsCalculated": len(seasonality),
+            "monthsCalculated": len(tables["seasonal"]),
             "overallYoY": growth.get("overall_yoy", 0),
             "yearsAnalyzed": len(growth.get("yearly_data", [])),
         },
@@ -210,17 +226,22 @@ async def get_goal_forecast(
     recalculate: bool = Query(False),
     _gate=Depends(require_permission("dashboard")),
 ):
-    """Generate smart goals for a specific future month.
+    """Generate smart goals for a specific future month. Reads only.
 
-    `recalculate=true` rewrites the shared seasonality tables the same way
-    `POST /goals/recalculate` does, so it is admin-only the same way.
+    `recalculate=true` used to rewrite the shared seasonality tables from a
+    GET (OD-14 (i): a GET never writes). It is refused, for an admin too, and
+    the answer names the route that does it.
     """
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if recalculate:
-        await require_admin(request)
+        raise HTTPException(
+            status_code=400,
+            detail=("recalculate is not accepted on a GET: POST "
+                    "/api/goals/recalculate recomputes and stores the "
+                    "seasonality tables (admin)"))
 
     store = await get_store()
-    return await store.generate_smart_goals(year, month, sales_type, recalculate)
+    return await store.generate_smart_goals(year, month, sales_type)

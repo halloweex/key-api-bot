@@ -185,6 +185,144 @@ def _orders_sales_type_predicate(sales_type: str) -> tuple[str, List[Any]]:
     return f"({silver_sales_type_case(DUCKDB)}) = ?", [sales_type]
 
 
+# ─── The three shared goal tables ───────────────────────────────────────────
+#
+# `seasonal_indices`, `growth_metrics` and `weekly_patterns` carry no
+# sales_type in their keys, so whatever is stored there is what every user's
+# goal is built from — `b2b` and `all` included. The Monday job stopped storing
+# a b2b pass over the retail rows (`core/scheduler.py`), and the POST is held
+# to the same answer: the rows mean retail. Making sales_type part of the keys
+# is a migration, and out of chain 7b's scope.
+GOAL_TABLES_SALES_TYPE = "retail"
+
+# The statements `_persist_goal_tables` runs, in its one transaction. The same
+# texts the calculators ran when they stored for themselves.
+_SEASONAL_UPSERT_SQL = """
+    INSERT INTO seasonal_indices
+    (month, seasonality_index, sample_size, avg_revenue, min_revenue, max_revenue, confidence, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (month) DO UPDATE SET
+        seasonality_index = excluded.seasonality_index,
+        sample_size = excluded.sample_size,
+        avg_revenue = excluded.avg_revenue,
+        min_revenue = excluded.min_revenue,
+        max_revenue = excluded.max_revenue,
+        confidence = excluded.confidence,
+        updated_at = excluded.updated_at
+"""
+
+_YOY_OVERALL_EXISTS_SQL = (
+    "SELECT 1 FROM growth_metrics WHERE metric_type = 'yoy_overall'")
+
+_YOY_OVERALL_UPSERT_SQL = """
+    INSERT INTO growth_metrics (metric_type, value, period_start, period_end, sample_size, updated_at)
+    VALUES ('yoy_overall', ?, ?, ?, ?, ?)
+    ON CONFLICT (metric_type) DO UPDATE SET
+        value = excluded.value,
+        period_start = excluded.period_start,
+        period_end = excluded.period_end,
+        sample_size = excluded.sample_size,
+        updated_at = excluded.updated_at
+"""
+
+_MONTHLY_YOY_UPDATE_SQL = """
+    UPDATE seasonal_indices
+    SET yoy_growth = ?, updated_at = ?
+    WHERE month = ?
+"""
+
+_WEEKLY_UPSERT_SQL = """
+    INSERT INTO weekly_patterns (month, week_of_month, weight, sample_size, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT (month, week_of_month) DO UPDATE SET
+        weight = excluded.weight,
+        sample_size = excluded.sample_size,
+        updated_at = excluded.updated_at
+"""
+
+# Default: slightly more revenue in weeks 1-4, less in week 5.
+_DEFAULT_WEEKLY_WEIGHTS = {1: 0.23, 2: 0.23, 3: 0.23, 4: 0.23, 5: 0.08}
+
+
+def _recency_weighted(rates: List[float]) -> float:
+    """Oldest pair weighs 1.0, newest 2.0, linear in between."""
+    n = len(rates)
+    if n == 1:
+        return rates[0]
+    weights = [1.0 + (i / (n - 1)) for i in range(n)]
+    return sum(r * w for r, w in zip(rates, weights)) / sum(weights)
+
+
+def _yoy_answer(yearly_results, monthly_yoy_results) -> Tuple[Dict[str, Any], float]:
+    """The YoY arithmetic over the two reads: `(answer, overall)`, the second
+    unrounded, as `growth_metrics.value` stores it.
+
+    Floats, every term. The revenue arrives as DuckDB DECIMALs (and as asyncpg
+    `Decimal`s on the Silver path) and the recency weights are floats, and
+    `Decimal * float` raises — which it did not only because one pair of
+    years had never needed a weight.
+    """
+    yoy_rates: List[float] = []
+    for i in range(1, len(yearly_results)):
+        prev_year = float(yearly_results[i - 1][1])
+        curr_year = float(yearly_results[i][1])
+        if prev_year > 0:
+            yoy_rates.append((curr_year - prev_year) / prev_year)
+    overall_yoy = _recency_weighted(yoy_rates) if yoy_rates else 0.10
+
+    # Group by month, apply recency-weighted average
+    month_pairs: Dict[int, List[float]] = defaultdict(list)
+    for row in monthly_yoy_results:
+        if row[2] is not None:
+            month_pairs[int(row[0])].append(float(row[2]))
+    monthly_yoy = {month: round(_recency_weighted(rates), 4)
+                   for month, rates in month_pairs.items()}
+
+    logger.info(f"Calculated YoY growth: {overall_yoy:.2%}")
+    return {
+        "overall_yoy": round(overall_yoy, 4),
+        "monthly_yoy": monthly_yoy,
+        "yearly_data": [
+            {"year": int(row[0]), "revenue": round(float(row[1]), 2)}
+            for row in yearly_results
+        ],
+        "sample_size": len(yoy_rates),
+    }, overall_yoy
+
+
+def _weekly_answer(results) -> Tuple[Dict[int, Dict[int, float]], List[List[Any]]]:
+    """`(patterns, rows)`: every month and week filled for the reader, and
+    only the measured ones, unrounded, for the table."""
+    patterns: Dict[int, Dict[int, float]] = {}
+    pattern_rows: List[List[Any]] = []
+    for row in results:
+        month = int(row[0])
+        week = int(row[1])
+        weight = float(row[2] or 0.25)  # Default to 25% if no data
+        patterns.setdefault(month, {})[week] = round(weight, 4)
+        pattern_rows.append([month, week, weight, int(row[3])])
+
+    # Ensure all months have all 5 weeks (fill missing with equal distribution)
+    for month in range(1, 13):
+        weeks = patterns.setdefault(month, {})
+        for week in range(1, 6):
+            weeks.setdefault(week, _DEFAULT_WEEKLY_WEIGHTS[week])
+
+    logger.info(f"Calculated weekly patterns for {len(patterns)} months")
+    return patterns, pattern_rows
+
+
+def _growth_cap(row) -> float:
+    """`max(0.10, min(0.50, avg + 1.5 * stddev))` over the target month's
+    consecutive-year YoY, from `(avg, stddev, count)`; 0.35 with no pair."""
+    if not row or not row[2] or row[2] < 1 or row[0] is None:
+        return 0.35  # fallback
+    avg_yoy = float(row[0])
+    std_yoy = float(row[1] or 0)
+    cap = avg_yoy + 1.5 * std_yoy
+    return max(0.10, min(0.50, cap))
+
+
 class GoalsMixin:
 
     async def _goals_run(self, sql: str, params=None):
@@ -476,374 +614,351 @@ class GoalsMixin:
         )
 
     # ─── Smart Seasonality Methods ─────────────────────────────────────────────
+    #
+    # Two halves, and only the second one writes (OD-14 (i)).
+    #
+    # The calculators compute and return. Nothing they do stores anything, so
+    # the GETs that call them — `/goals/seasonality`, `/growth`,
+    # `/weekly-patterns`, and `/goals/smart` and `/goals/forecast` through
+    # `generate_smart_goals` — cannot write: by construction now, rather than
+    # by a `persist=False` each caller had to remember to pass. Until chain 7b
+    # one of them did not have to: `generate_smart_goals` recomputed and
+    # stored all three tables whenever `seasonal_indices` held fewer than
+    # twelve rows, for any viewer and with whatever sales_type the viewer
+    # asked for.
+    #
+    # `recalculate_goal_tables` is the one writer, reached from the Monday job
+    # and from `POST /goals/recalculate`. It computes everything first and
+    # then persists it in ONE transaction. They were two writers in a fixed
+    # order, and the YoY half was twelve autocommitted UPDATEs after twelve
+    # autocommitted upserts, so a crash or a refused read between them left
+    # this week's indices beside last week's `yoy_growth` and `growth_metrics`.
+
+    async def _bridge_rows(self, sql: str, params=()) -> List[Tuple]:
+        """One read of the DN-12 bridge, on the store's own connection."""
+        async with self.connection() as conn:
+            return conn.execute(sql, list(params)).fetchall()
 
     async def calculate_seasonality_indices(
-        self, sales_type: str = "retail", *, persist: bool = True,
+        self, sales_type: str = "retail",
     ) -> Dict[int, Dict[str, Any]]:
-        """
-        Calculate monthly seasonality indices from historical data.
+        """Monthly seasonality indices from the whole history. Reads only.
 
         Analyzes all available historical data to determine how each month
-        performs relative to the annual average.
+        performs relative to the annual average. Stored only by
+        `recalculate_goal_tables`.
 
         Args:
-            sales_type: 'retail', 'b2b', or 'all'
+            sales_type: 'retail', 'b2b', 'internal', 'exhibition' or 'all'
 
         Returns:
             Dictionary mapping month (1-12) to seasonality data
         """
-        async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
+        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
-            # Get monthly revenue totals for all available history (only complete months with 25+ days)
-            sql = f"""
-                WITH monthly_data AS (
-                    SELECT
-                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                        EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                        SUM(o.grand_total) as revenue,
-                        COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
-                    FROM orders o
-                    WHERE o.status_id NOT IN {return_statuses}
-                        AND {sales_filter}
-                    GROUP BY
-                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
-                        EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
-                    HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 20
-                ),
-                monthly_stats AS (
-                    SELECT
-                        month,
-                        AVG(revenue) as avg_revenue,
-                        MIN(revenue) as min_revenue,
-                        MAX(revenue) as max_revenue,
-                        COUNT(*) as sample_size,
-                        STDDEV(revenue) as std_dev
-                    FROM monthly_data
-                    GROUP BY month
-                ),
-                overall_avg AS (
-                    SELECT AVG(avg_revenue) as grand_avg FROM monthly_stats
-                )
+        # Get monthly revenue totals for all available history (only complete months with 25+ days)
+        sql = f"""
+            WITH monthly_data AS (
                 SELECT
-                    ms.month,
-                    ms.avg_revenue,
-                    ms.min_revenue,
-                    ms.max_revenue,
-                    ms.sample_size,
-                    ms.std_dev,
-                    ms.avg_revenue / oa.grand_avg as seasonality_index
-                FROM monthly_stats ms, overall_avg oa
-                ORDER BY ms.month
-            """
-
-            results = conn.execute(sql, sales_params).fetchall()
-
-            indices = {}
-            for row in results:
-                month = int(row[0])
-                sample_size = row[4] or 0
-
-                # Determine confidence based on sample size
-                if sample_size >= 3:
-                    confidence = "high"
-                elif sample_size >= 2:
-                    confidence = "medium"
-                else:
-                    confidence = "low"
-
-                indices[month] = {
-                    "month": month,
-                    "avg_revenue": round(float(row[1] or 0), 2),
-                    "min_revenue": round(float(row[2] or 0), 2),
-                    "max_revenue": round(float(row[3] or 0), 2),
-                    "sample_size": sample_size,
-                    "std_dev": round(float(row[5] or 0), 2),
-                    "seasonality_index": round(float(row[6] or 1.0), 4),
-                    "confidence": confidence
-                }
-
-            # Store in database for caching — batch upsert to avoid row-by-row lock hold
-            now = datetime.now(DEFAULT_TZ)
-            rows_to_upsert = [
-                [month, data["seasonality_index"], data["sample_size"],
-                 data["avg_revenue"], data["min_revenue"], data["max_revenue"],
-                 data["confidence"], now]
-                for month, data in indices.items()
-            ]
-            # `persist=False` is the read path: the tables are keyed on month
-            # alone, with no sales_type, so a GET that stored what it computed
-            # for one sales_type replaced the rows every user's retail goal is
-            # built from — and any viewer could do it with a query parameter.
-            if rows_to_upsert and persist:
-                conn.executemany("""
-                    INSERT INTO seasonal_indices
-                    (month, seasonality_index, sample_size, avg_revenue, min_revenue, max_revenue, confidence, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (month) DO UPDATE SET
-                        seasonality_index = excluded.seasonality_index,
-                        sample_size = excluded.sample_size,
-                        avg_revenue = excluded.avg_revenue,
-                        min_revenue = excluded.min_revenue,
-                        max_revenue = excluded.max_revenue,
-                        confidence = excluded.confidence,
-                        updated_at = excluded.updated_at
-                """, rows_to_upsert)
-
-            logger.info(f"Calculated seasonality indices for {len(indices)} months")
-            return indices
-
-    async def calculate_yoy_growth(
-        self, sales_type: str = "retail", *, persist: bool = True,
-    ) -> Dict[str, Any]:
+                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
+                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
+                    SUM(o.grand_total) as revenue,
+                    COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
+                FROM orders o
+                WHERE o.status_id NOT IN {return_statuses}
+                    AND {sales_filter}
+                GROUP BY
+                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
+                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
+                HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 20
+            ),
+            monthly_stats AS (
+                SELECT
+                    month,
+                    AVG(revenue) as avg_revenue,
+                    MIN(revenue) as min_revenue,
+                    MAX(revenue) as max_revenue,
+                    COUNT(*) as sample_size,
+                    STDDEV(revenue) as std_dev
+                FROM monthly_data
+                GROUP BY month
+            ),
+            overall_avg AS (
+                SELECT AVG(avg_revenue) as grand_avg FROM monthly_stats
+            )
+            SELECT
+                ms.month,
+                ms.avg_revenue,
+                ms.min_revenue,
+                ms.max_revenue,
+                ms.sample_size,
+                ms.std_dev,
+                ms.avg_revenue / oa.grand_avg as seasonality_index
+            FROM monthly_stats ms, overall_avg oa
+            ORDER BY ms.month
         """
-        Calculate year-over-year growth rate.
+        results = await self._bridge_rows(sql, sales_params)
 
-        Compares revenue between consecutive years to determine growth trend.
+        indices = {}
+        for row in results:
+            month = int(row[0])
+            sample_size = row[4] or 0
+
+            # Determine confidence based on sample size
+            if sample_size >= 3:
+                confidence = "high"
+            elif sample_size >= 2:
+                confidence = "medium"
+            else:
+                confidence = "low"
+
+            indices[month] = {
+                "month": month,
+                "avg_revenue": round(float(row[1] or 0), 2),
+                "min_revenue": round(float(row[2] or 0), 2),
+                "max_revenue": round(float(row[3] or 0), 2),
+                "sample_size": sample_size,
+                "std_dev": round(float(row[5] or 0), 2),
+                "seasonality_index": round(float(row[6] or 1.0), 4),
+                "confidence": confidence
+            }
+
+        logger.info(f"Calculated seasonality indices for {len(indices)} months")
+        return indices
+
+    async def calculate_yoy_growth(self, sales_type: str = "retail") -> Dict[str, Any]:
+        """Year-over-year growth, overall and per month. Reads only.
+
+        Compares revenue between consecutive full years to determine the
+        growth trend. Stored only by `recalculate_goal_tables`.
 
         Args:
-            sales_type: 'retail', 'b2b', or 'all'
+            sales_type: 'retail', 'b2b', 'internal', 'exhibition' or 'all'
 
         Returns:
             Growth metrics including overall YoY, monthly YoY, and trend slope
         """
-        async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
+        answer, _overall = await self._yoy_growth(sales_type)
+        return answer
 
-            # Get yearly totals — only full years (12 months with orders)
-            # to avoid startup partial year and current incomplete year
-            yearly_sql = f"""
-                WITH yearly_data AS (
-                    SELECT
-                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                        SUM(o.grand_total) as revenue,
-                        COUNT(DISTINCT EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})) as months_active
-                    FROM orders o
-                    WHERE o.status_id NOT IN {return_statuses}
-                        AND {sales_filter}
-                    GROUP BY EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')})
-                )
-                SELECT year, revenue FROM yearly_data
-                WHERE months_active >= 11
-                ORDER BY year
-            """
-            yearly_results = conn.execute(yearly_sql, sales_params).fetchall()
+    async def _yoy_growth(self, sales_type: str) -> Tuple[Dict[str, Any], float]:
+        """`(answer, overall)` — `overall` unrounded, as it is stored."""
+        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
-            # Calculate YoY growth between consecutive years with recency weighting
-            # Oldest pair gets weight 1.0, newest gets 2.0 (linear interpolation)
-            yoy_rates = []
-            for i in range(1, len(yearly_results)):
-                prev_year = yearly_results[i-1][1]
-                curr_year = yearly_results[i][1]
-                if prev_year > 0:
-                    yoy_rate = (curr_year - prev_year) / prev_year
-                    yoy_rates.append(yoy_rate)
-
-            if yoy_rates:
-                n = len(yoy_rates)
-                if n == 1:
-                    overall_yoy = yoy_rates[0]
-                else:
-                    weights = [1.0 + (i / (n - 1)) for i in range(n)]
-                    overall_yoy = sum(r * w for r, w in zip(yoy_rates, weights)) / sum(weights)
-            else:
-                overall_yoy = 0.10
-
-            # Calculate monthly YoY for each month with recency weighting
-            # Return per-year-pair rows so we can apply recency weights in Python
-            monthly_yoy_sql = f"""
-                WITH monthly_by_year AS (
-                    SELECT
-                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                        EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                        SUM(o.grand_total) as revenue,
-                        COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
-                    FROM orders o
-                    WHERE o.status_id NOT IN {return_statuses}
-                        AND {sales_filter}
-                    GROUP BY
-                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
-                        EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
-                    HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
-                )
+        # Only full years (11 months with orders or more), and never the
+        # current Kyiv year. The second half is what the comment here always
+        # said and the query never did: from the first order dated 1 November
+        # the running year has eleven months and counted as "full", a second
+        # pair of years appeared, and the weighted average below — DuckDB
+        # DECIMALs times float weights — raised TypeError. The Monday job
+        # would have failed from 2026-11-02, and `GET /goals/growth` with it.
+        this_year = date(datetime.now(DEFAULT_TZ).year, 1, 1)
+        yearly_sql = f"""
+            WITH yearly_data AS (
                 SELECT
-                    curr.month,
-                    curr.year as curr_year,
-                    (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0) as yoy_growth
-                FROM monthly_by_year curr
-                JOIN monthly_by_year prev
-                    ON curr.month = prev.month
-                    AND curr.year = prev.year + 1
-                ORDER BY curr.month, curr.year
-            """
-            monthly_yoy_results = conn.execute(monthly_yoy_sql, sales_params).fetchall()
+                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
+                    SUM(o.grand_total) as revenue,
+                    COUNT(DISTINCT EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})) as months_active
+                FROM orders o
+                WHERE o.status_id NOT IN {return_statuses}
+                    AND {sales_filter}
+                    AND {_date_in_kyiv('o.ordered_at')} < ?
+                GROUP BY EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')})
+            )
+            SELECT year, revenue FROM yearly_data
+            WHERE months_active >= 11
+            ORDER BY year
+        """
+        yearly_results = await self._bridge_rows(yearly_sql, sales_params + [this_year])
 
-            # Group by month, apply recency-weighted average
-            month_pairs: dict[int, list[float]] = defaultdict(list)
-            for row in monthly_yoy_results:
-                month_num = int(row[0])
-                yoy_val = float(row[2]) if row[2] is not None else None
-                if yoy_val is not None:
-                    month_pairs[month_num].append(yoy_val)
+        # Return per-year-pair rows so we can apply recency weights in Python
+        monthly_yoy_sql = f"""
+            WITH monthly_by_year AS (
+                SELECT
+                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
+                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
+                    SUM(o.grand_total) as revenue,
+                    COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
+                FROM orders o
+                WHERE o.status_id NOT IN {return_statuses}
+                    AND {sales_filter}
+                GROUP BY
+                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
+                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
+                HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
+            )
+            SELECT
+                curr.month,
+                curr.year as curr_year,
+                (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0) as yoy_growth
+            FROM monthly_by_year curr
+            JOIN monthly_by_year prev
+                ON curr.month = prev.month
+                AND curr.year = prev.year + 1
+            ORDER BY curr.month, curr.year
+        """
+        monthly_yoy_results = await self._bridge_rows(monthly_yoy_sql, sales_params)
+        return _yoy_answer(yearly_results, monthly_yoy_results)
 
-            monthly_yoy: dict[int, float] = {}
-            for month_num, rates in month_pairs.items():
-                n = len(rates)
-                if n == 1:
-                    monthly_yoy[month_num] = round(rates[0], 4)
-                else:
-                    weights = [1.0 + (i / (n - 1)) for i in range(n)]
-                    weighted = sum(r * w for r, w in zip(rates, weights)) / sum(weights)
-                    monthly_yoy[month_num] = round(weighted, 4)
-
-            # Store metrics — see calculate_seasonality_indices for `persist`.
-            if persist:
-                min_date = conn.execute(f"SELECT MIN({_date_in_kyiv('ordered_at')}) FROM orders").fetchone()[0]
-                max_date = conn.execute(f"SELECT MAX({_date_in_kyiv('ordered_at')}) FROM orders").fetchone()[0]
-                now = datetime.now(DEFAULT_TZ)
-
-                # The 0.10 above is a placeholder for "no pair of full years
-                # to compare", not a measurement. Written over a stored value
-                # it replaced a measured rate with a guess, and the hourly full
-                # replace then carried the guess into Postgres — exactly what
-                # an emptied history (a compaction under a Silver filter, a
-                # frozen `orders`) produces. So it is written only where there
-                # is nothing better to keep: a first run, before any row.
-                has_row = conn.execute(
-                    "SELECT 1 FROM growth_metrics WHERE metric_type = 'yoy_overall'"
-                ).fetchone() is not None
-                if yoy_rates or not has_row:
-                    conn.execute("""
-                        INSERT INTO growth_metrics (metric_type, value, period_start, period_end, sample_size, updated_at)
-                        VALUES ('yoy_overall', ?, ?, ?, ?, ?)
-                        ON CONFLICT (metric_type) DO UPDATE SET
-                            value = excluded.value,
-                            period_start = excluded.period_start,
-                            period_end = excluded.period_end,
-                            sample_size = excluded.sample_size,
-                            updated_at = excluded.updated_at
-                    """, [overall_yoy, min_date, max_date, len(yoy_rates), now])
-                else:
-                    logger.warning(
-                        "YoY: no pair of full years in the %s history; keeping "
-                        "the stored yoy_overall rather than overwriting it with "
-                        "the %.2f fallback", sales_type, overall_yoy,
-                    )
-
-                # Update seasonal_indices with monthly YoY
-                for month, yoy in monthly_yoy.items():
-                    conn.execute("""
-                        UPDATE seasonal_indices
-                        SET yoy_growth = ?, updated_at = ?
-                        WHERE month = ?
-                    """, [yoy, now, month])
-
-            logger.info(f"Calculated YoY growth: {overall_yoy:.2%}")
-            return {
-                "overall_yoy": round(overall_yoy, 4),
-                "monthly_yoy": monthly_yoy,
-                "yearly_data": [
-                    {"year": int(row[0]), "revenue": round(float(row[1]), 2)}
-                    for row in yearly_results
-                ],
-                "sample_size": len(yoy_rates)
-            }
+    async def _history_bounds(self) -> Tuple[Optional[date], Optional[date]]:
+        """The first and last Kyiv order date anywhere in the history —
+        `growth_metrics.period_start`/`period_end`."""
+        rows = await self._bridge_rows(
+            f"SELECT MIN({_date_in_kyiv('ordered_at')}), "
+            f"MAX({_date_in_kyiv('ordered_at')}) FROM orders")
+        return (rows[0][0], rows[0][1]) if rows else (None, None)
 
     async def calculate_weekly_patterns(
-        self, sales_type: str = "retail", *, persist: bool = True,
+        self, sales_type: str = "retail",
     ) -> Dict[int, Dict[int, float]]:
-        """
-        Calculate how revenue distributes across weeks within each month.
+        """How revenue distributes across the weeks of each month. Reads only.
+
+        Stored only by `recalculate_goal_tables(include_weekly=True)` —
+        `POST /goals/recalculate`; the Monday job does not store them (OQ-2).
 
         Args:
-            sales_type: 'retail', 'b2b', or 'all'
+            sales_type: 'retail', 'b2b', 'internal', 'exhibition' or 'all'
 
         Returns:
             Dictionary mapping month -> week_of_month -> weight (percentage)
         """
+        patterns, _rows = await self._weekly_patterns(sales_type)
+        return patterns
+
+    async def _weekly_patterns(self, sales_type: str):
+        """`(patterns, rows)` — `rows` are `[month, week, weight, sample_size]`
+        as stored: the measured weeks only, the weight unrounded."""
+        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
+
+        # Calculate weekly revenue within each month instance
+        sql = f"""
+            WITH weekly_data AS (
+                SELECT
+                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
+                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
+                    -- Week of month: 1-5 based on day of month
+                    LEAST(5, CEIL(EXTRACT(DAY FROM {_date_in_kyiv('o.ordered_at')}) / 7.0)::int) as week_of_month,
+                    SUM(o.grand_total) as revenue
+                FROM orders o
+                WHERE o.status_id NOT IN {return_statuses}
+                    AND {sales_filter}
+                GROUP BY
+                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
+                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}),
+                    LEAST(5, CEIL(EXTRACT(DAY FROM {_date_in_kyiv('o.ordered_at')}) / 7.0)::int)
+            ),
+            monthly_totals AS (
+                SELECT year, month, SUM(revenue) as month_total
+                FROM weekly_data
+                GROUP BY year, month
+            ),
+            weekly_weights AS (
+                SELECT
+                    wd.month,
+                    wd.week_of_month,
+                    AVG(wd.revenue / NULLIF(mt.month_total, 0)) as avg_weight,
+                    COUNT(*) as sample_size
+                FROM weekly_data wd
+                JOIN monthly_totals mt ON wd.year = mt.year AND wd.month = mt.month
+                GROUP BY wd.month, wd.week_of_month
+            )
+            SELECT month, week_of_month, avg_weight, sample_size
+            FROM weekly_weights
+            ORDER BY month, week_of_month
+        """
+        results = await self._bridge_rows(sql, sales_params)
+        return _weekly_answer(results)
+
+    async def _compute_goal_tables(self, *, include_weekly: bool) -> Dict[str, Any]:
+        """Every number the shared tables will hold, read and computed, and
+        nothing written. Retail: the tables carry no sales_type, so the rows
+        mean retail (`GOAL_TABLES_SALES_TYPE`)."""
+        sales_type = GOAL_TABLES_SALES_TYPE
+        seasonal = await self.calculate_seasonality_indices(sales_type)
+        yoy, overall = await self._yoy_growth(sales_type)
+        bounds = await self._history_bounds()
+        weekly_rows = None
+        if include_weekly:
+            _patterns, weekly_rows = await self._weekly_patterns(sales_type)
+        return {"seasonal": seasonal, "yoy": yoy, "yoy_overall": overall,
+                "history_bounds": bounds, "weekly_rows": weekly_rows}
+
+    async def _persist_goal_tables(
+        self, tables: Dict[str, Any], now: Optional[datetime] = None,
+    ) -> None:
+        """Store what `_compute_goal_tables` computed, in one transaction.
+
+        The statements are the ones the calculators ran when they stored for
+        themselves, in the order the Monday job and the POST ran them — the
+        indices, then the YoY over them, then the weekly weights — so the rows
+        are what they were. What changed is that a reader sees the old set or
+        the new one: a failure anywhere rolls the whole set back.
+
+        Two rules carried over exactly. `yoy_growth` is set only for months
+        with a pair of years, so a month without one keeps the value it had
+        (the upsert of the indices never touches the column). And the 0.10
+        overall placeholder — "no pair of full years", not a measurement — is
+        written only where there is nothing better to keep: before DN-12 an
+        emptied history wrote it over the measured rate, and the hourly full
+        replace carried the guess into Postgres.
+        """
+        now = now or datetime.now(DEFAULT_TZ)
+        seasonal = tables["seasonal"]
+        yoy = tables["yoy"]
+        start, end = tables["history_bounds"]
+        seasonal_rows = [
+            [month, data["seasonality_index"], data["sample_size"],
+             data["avg_revenue"], data["min_revenue"], data["max_revenue"],
+             data["confidence"], now]
+            for month, data in seasonal.items()
+        ]
+        weekly_rows = [list(row) + [now] for row in (tables.get("weekly_rows") or [])]
+
         async with self.connection() as conn:
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                if seasonal_rows:
+                    conn.executemany(_SEASONAL_UPSERT_SQL, seasonal_rows)
 
-            # Calculate weekly revenue within each month instance
-            sql = f"""
-                WITH weekly_data AS (
-                    SELECT
-                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                        EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                        -- Week of month: 1-5 based on day of month
-                        LEAST(5, CEIL(EXTRACT(DAY FROM {_date_in_kyiv('o.ordered_at')}) / 7.0)::int) as week_of_month,
-                        SUM(o.grand_total) as revenue
-                    FROM orders o
-                    WHERE o.status_id NOT IN {return_statuses}
-                        AND {sales_filter}
-                    GROUP BY
-                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
-                        EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}),
-                        LEAST(5, CEIL(EXTRACT(DAY FROM {_date_in_kyiv('o.ordered_at')}) / 7.0)::int)
-                ),
-                monthly_totals AS (
-                    SELECT year, month, SUM(revenue) as month_total
-                    FROM weekly_data
-                    GROUP BY year, month
-                ),
-                weekly_weights AS (
-                    SELECT
-                        wd.month,
-                        wd.week_of_month,
-                        AVG(wd.revenue / NULLIF(mt.month_total, 0)) as avg_weight,
-                        COUNT(*) as sample_size
-                    FROM weekly_data wd
-                    JOIN monthly_totals mt ON wd.year = mt.year AND wd.month = mt.month
-                    GROUP BY wd.month, wd.week_of_month
-                )
-                SELECT month, week_of_month, avg_weight, sample_size
-                FROM weekly_weights
-                ORDER BY month, week_of_month
-            """
+                has_row = conn.execute(_YOY_OVERALL_EXISTS_SQL).fetchone() is not None
+                if yoy["sample_size"] or not has_row:
+                    conn.execute(_YOY_OVERALL_UPSERT_SQL, [
+                        tables["yoy_overall"], start, end, yoy["sample_size"], now])
+                else:
+                    logger.warning(
+                        "YoY: no pair of full years in the %s history; keeping "
+                        "the stored yoy_overall rather than overwriting it with "
+                        "the %.2f fallback", GOAL_TABLES_SALES_TYPE,
+                        tables["yoy_overall"],
+                    )
+                for month, value in yoy["monthly_yoy"].items():
+                    conn.execute(_MONTHLY_YOY_UPDATE_SQL, [value, now, month])
 
-            results = conn.execute(sql, sales_params).fetchall()
+                if weekly_rows:
+                    conn.executemany(_WEEKLY_UPSERT_SQL, weekly_rows)
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
 
-            patterns = {}
-            now = datetime.now(DEFAULT_TZ)
-            pattern_rows = []
-            for row in results:
-                month = int(row[0])
-                week = int(row[1])
-                weight = float(row[2] or 0.25)  # Default to 25% if no data
-                sample_size = int(row[3])
+    async def recalculate_goal_tables(self, *, include_weekly: bool) -> Dict[str, Any]:
+        """Recompute the shared goal tables and store them — the one writer.
 
-                if month not in patterns:
-                    patterns[month] = {}
-                patterns[month][week] = round(weight, 4)
-                pattern_rows.append([month, week, weight, sample_size, now])
-
-            # Batch upsert to avoid row-by-row lock hold — see
-            # calculate_seasonality_indices for `persist`.
-            if pattern_rows and persist:
-                conn.executemany("""
-                    INSERT INTO weekly_patterns (month, week_of_month, weight, sample_size, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT (month, week_of_month) DO UPDATE SET
-                        weight = excluded.weight,
-                        sample_size = excluded.sample_size,
-                        updated_at = excluded.updated_at
-                """, pattern_rows)
-
-            # Ensure all months have all 5 weeks (fill missing with equal distribution)
-            for month in range(1, 13):
-                if month not in patterns:
-                    patterns[month] = {}
-                for week in range(1, 6):
-                    if week not in patterns[month]:
-                        # Default: slightly more revenue in weeks 1-4, less in week 5
-                        default_weights = {1: 0.23, 2: 0.23, 3: 0.23, 4: 0.23, 5: 0.08}
-                        patterns[month][week] = default_weights[week]
-
-            logger.info(f"Calculated weekly patterns for {len(patterns)} months")
-            return patterns
+        `include_weekly=False` is the Monday job (seasonality and YoY, what it
+        has always stored); `True` is `POST /goals/recalculate`, which stores
+        the weekly weights too. Everything is read before anything is written,
+        so a read refused under `KS_READ_FALLBACK=off` — or any other failure
+        while computing — leaves every table as it was.
+        """
+        tables = await self._compute_goal_tables(include_weekly=include_weekly)
+        await self._persist_goal_tables(tables)
+        return tables
 
     async def _forecast_actual_revenue(
         self, start: date, end: date, sales_type: str = "retail"
@@ -934,14 +1049,20 @@ class GoalsMixin:
                 "the blend: %s", target_year, target_month, exc)
             return 0.0
 
-    def _get_dynamic_growth_cap(
-        self, conn, target_month: int, sales_type: str = "retail"
+    async def _dynamic_growth_cap(
+        self, target_month: int, sales_type: str = "retail"
     ) -> float:
         """Calculate per-month dynamic growth cap from historical YoY variance.
 
-        Uses an existing connection to avoid re-entrant lock deadlock.
         Returns max(0.10, min(0.50, avg_yoy + 1.5 * stddev_yoy)).
         Falls back to 0.35 if insufficient data.
+
+        **Called without the store lock**, like `_get_ml_forecast_total`: it
+        reads on a connection of its own (and, under chain 7b's Silver
+        history, through `_goals_run`, which takes the lock itself on the
+        DuckDB path), and that lock is not reentrant — so
+        `generate_smart_goals` asks for it before it opens its own. It used to
+        take that connection as an argument.
         """
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
         sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
@@ -968,25 +1089,84 @@ class GoalsMixin:
             SELECT AVG(yoy) as avg_yoy, STDDEV(yoy) as std_yoy, COUNT(*) as cnt
             FROM yoy_pairs
         """
-        row = conn.execute(sql, [target_month] + sales_params).fetchone()
+        rows = await self._bridge_rows(sql, [target_month] + sales_params)
+        return _growth_cap(rows[0] if rows else None)
 
-        if not row or not row[2] or row[2] < 1 or row[0] is None:
-            return 0.35  # fallback
+    async def _last_year_month_revenue(
+        self, target_year: int, target_month: int, sales_type: str,
+    ) -> float:
+        """The target month a year earlier — signal 1's baseline."""
+        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
+        last_year_sql = f"""
+            SELECT SUM(o.grand_total) as revenue
+            FROM orders o
+            WHERE EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) = ?
+                AND EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) = ?
+                AND o.status_id NOT IN {return_statuses}
+                AND {sales_filter}
+        """
+        rows = await self._bridge_rows(
+            last_year_sql, [target_year - 1, target_month] + sales_params)
+        value = rows[0][0] if rows else None
+        return float(value or 0) if value else 0
 
-        avg_yoy = float(row[0])
-        std_yoy = float(row[1] or 0)
-        cap = avg_yoy + 1.5 * std_yoy
-        return max(0.10, min(0.50, cap))
+    async def _recent_three_month_average(self, sales_type: str) -> float:
+        """The last three complete months with at least 25 days of orders —
+        signal 2's baseline.
+
+        "Complete" is bounded by the first of the current month **in Kyiv**,
+        computed here rather than as `DATE_TRUNC('month', CURRENT_DATE)`: the
+        engines disagree about what day `CURRENT_DATE` is for three hours out
+        of twenty-four (`core/pg_goals_read.py`), and so does a test runner in
+        UTC against the warehouse's Kyiv dates. The web container runs
+        `TZ=Europe/Kyiv`, where the two are the same day — nothing moves in
+        production.
+        """
+        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
+        month_start = datetime.now(DEFAULT_TZ).date().replace(day=1)
+        recent_avg_sql = f"""
+            WITH monthly_revenue AS (
+                SELECT
+                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
+                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
+                    SUM(o.grand_total) as revenue,
+                    COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
+                FROM orders o
+                WHERE o.status_id NOT IN {return_statuses}
+                    AND {sales_filter}
+                    AND {_date_in_kyiv('o.ordered_at')} < ?
+                GROUP BY
+                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
+                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
+                HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
+                ORDER BY year DESC, month DESC
+                LIMIT 3
+            )
+            SELECT AVG(revenue) as avg_revenue FROM monthly_revenue
+        """
+        rows = await self._bridge_rows(recent_avg_sql, sales_params + [month_start])
+        value = rows[0][0] if rows else None
+        return float(value or 0) if value else 0
 
     async def generate_smart_goals(
         self,
         target_year: int,
         target_month: int,
         sales_type: str = "retail",
-        recalculate: bool = False
     ) -> Dict[str, Any]:
         """
         Generate smart goals for a target month using seasonality and growth.
+
+        Reads only (OD-14 (i)). It used to recompute and store the three shared
+        tables first whenever `seasonal_indices` held fewer than twelve rows, or
+        when asked to with `recalculate=True` — for any viewer of
+        `/goals/smart`, with the viewer's own sales_type. Storing them is
+        `recalculate_goal_tables`' alone now; a table that is short is read as
+        it stands, and each month without a row falls back the way it always
+        did (index 1.0, YoY at the cap, confidence `low`, default weekly
+        weights).
 
         Algorithm:
         1. Get last year's same month revenue as baseline
@@ -997,156 +1177,34 @@ class GoalsMixin:
         Args:
             target_year: Year to generate goals for
             target_month: Month (1-12) to generate goals for
-            sales_type: 'retail', 'b2b', or 'all'
-            recalculate: Force recalculation of indices
+            sales_type: 'retail', 'b2b', 'internal', 'exhibition' or 'all'
 
         Returns:
             Smart goals with monthly total and weekly breakdown
         """
-        # Recalculate indices BEFORE acquiring the connection lock to avoid
-        # re-entrant deadlock (each of these methods opens its own connection)
-        async with self.connection() as conn:
-            indices_exist = conn.execute(
-                "SELECT COUNT(*) FROM seasonal_indices"
-            ).fetchone()[0]
-
-        if recalculate or indices_exist < 12:
-            await self.calculate_seasonality_indices(sales_type)
-            await self.calculate_yoy_growth(sales_type)
-            await self.calculate_weekly_patterns(sales_type)
-
-        # ── Signal 3 is read here, before the connection below: it goes through
-        # `_goals_run`, which takes the store lock itself on the DuckDB path.
+        # ── The revenue history, each read before the connection below: they
+        # take the store lock themselves (or go through `_goals_run`, which
+        # does on the DuckDB path), and it is not reentrant.
         ml_forecast_goal = await self._get_ml_forecast_total(
             target_year, target_month, sales_type)
+        dynamic_cap = await self._dynamic_growth_cap(target_month, sales_type)
+        last_year_revenue = await self._last_year_month_revenue(
+            target_year, target_month, sales_type)
+        recent_3_month_avg = await self._recent_three_month_average(sales_type)
 
+        # ── The three shared tables, in one hold of the lock: their writer
+        # stores them in one transaction, so this reads one set of them.
         async with self.connection() as conn:
-            # Dynamic growth cap per-month (replaces flat 0.35)
-            dynamic_cap = self._get_dynamic_growth_cap(conn, target_month, sales_type)
-
-            # Get seasonality index for target month
             seasonality_result = conn.execute("""
                 SELECT seasonality_index, avg_revenue, yoy_growth, confidence
                 FROM seasonal_indices
                 WHERE month = ?
             """, [target_month]).fetchone()
 
-            if seasonality_result:
-                seasonality_index = float(seasonality_result[0] or 1.0)
-                historical_avg = float(seasonality_result[1] or 0)
-                monthly_yoy = float(seasonality_result[2] or dynamic_cap)
-                confidence = seasonality_result[3] or "low"
-            else:
-                seasonality_index = 1.0
-                historical_avg = 0
-                monthly_yoy = dynamic_cap
-                confidence = "low"
-
-            # Get overall YoY growth
             yoy_result = conn.execute("""
                 SELECT value FROM growth_metrics WHERE metric_type = 'yoy_overall'
             """).fetchone()
-            overall_yoy = float(yoy_result[0] or dynamic_cap) if yoy_result else dynamic_cap
 
-            # Get last year's same month revenue
-            return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-            sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
-
-            last_year_sql = f"""
-                SELECT SUM(o.grand_total) as revenue
-                FROM orders o
-                WHERE EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) = ?
-                    AND EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) = ?
-                    AND o.status_id NOT IN {return_statuses}
-                    AND {sales_filter}
-            """
-            last_year_result = conn.execute(
-                last_year_sql, [target_year - 1, target_month] + sales_params).fetchone()
-            last_year_revenue = float(last_year_result[0] or 0) if last_year_result[0] else 0
-
-            # Get recent 3-month average (last 3 complete months with at least 25 days of data)
-            recent_avg_sql = f"""
-                WITH monthly_revenue AS (
-                    SELECT
-                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                        EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                        SUM(o.grand_total) as revenue,
-                        COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
-                    FROM orders o
-                    WHERE o.status_id NOT IN {return_statuses}
-                        AND {sales_filter}
-                        AND {_date_in_kyiv('o.ordered_at')} < DATE_TRUNC('month', CURRENT_DATE)
-                    GROUP BY
-                        EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
-                        EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
-                    HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
-                    ORDER BY year DESC, month DESC
-                    LIMIT 3
-                )
-                SELECT AVG(revenue) as avg_revenue FROM monthly_revenue
-            """
-            recent_avg_result = conn.execute(recent_avg_sql, sales_params).fetchone()
-            recent_3_month_avg = float(recent_avg_result[0] or 0) if recent_avg_result[0] else 0
-
-            # Apply growth rate with dynamic cap
-            raw_growth_rate = monthly_yoy if monthly_yoy > 0 else overall_yoy
-            growth_rate = min(raw_growth_rate, dynamic_cap)
-
-            # ── Signal 1: YoY growth (last year same month × growth)
-            yoy_goal = 0.0
-            if last_year_revenue > 0:
-                yoy_goal = last_year_revenue * (1 + growth_rate)
-
-            # ── Signal 2: Recent baseline adjusted for seasonality
-            recent_goal = 0.0
-            if recent_3_month_avg > 0 and seasonality_index > 0:
-                recent_goal = recent_3_month_avg * seasonality_index
-
-            # ── Signal 3: ML forecast — read before the connection was taken.
-
-            # ── Weighted blend (replaces MAX)
-            # Confidence-based weight tables
-            weight_tables = {
-                "high":   {"yoy": 0.40, "recent": 0.30, "ml": 0.30},
-                "medium": {"yoy": 0.30, "recent": 0.35, "ml": 0.35},
-                "low":    {"yoy": 0.20, "recent": 0.40, "ml": 0.40},
-            }
-            base_weights = weight_tables.get(confidence, weight_tables["low"])
-
-            # Build signal dict (only non-zero signals)
-            signals = {}
-            if yoy_goal > 0:
-                signals["yoy"] = yoy_goal
-            if recent_goal > 0:
-                signals["recent"] = recent_goal
-            if ml_forecast_goal > 0:
-                signals["ml"] = ml_forecast_goal
-
-            if signals:
-                # Redistribute unavailable signal weights proportionally
-                available_weight = sum(base_weights[k] for k in signals)
-                blend_weights = {k: base_weights[k] / available_weight for k in signals}
-
-                monthly_goal = sum(signals[k] * blend_weights[k] for k in signals)
-
-                # Determine primary method
-                dominant = max(blend_weights, key=lambda k: blend_weights[k] * signals[k])
-                method_map = {"yoy": "yoy_growth", "recent": "recent_trend", "ml": "ml_forecast"}
-                calculation_method = method_map[dominant]
-            elif historical_avg > 0:
-                monthly_goal = historical_avg * (1 + growth_rate)
-                calculation_method = "historical_avg"
-                blend_weights = {}
-            else:
-                monthly_goal = 3000000  # 3M UAH default
-                growth_rate = dynamic_cap
-                calculation_method = "fallback"
-                blend_weights = {}
-
-            # Round to nice number
-            monthly_goal = round(monthly_goal / 100000) * 100000
-
-            # Get weekly patterns for this month
             weekly_patterns = conn.execute("""
                 SELECT week_of_month, weight
                 FROM weekly_patterns
@@ -1154,70 +1212,141 @@ class GoalsMixin:
                 ORDER BY week_of_month
             """, [target_month]).fetchall()
 
-            if weekly_patterns:
-                weekly_weights = {int(row[0]): float(row[1]) for row in weekly_patterns}
-            else:
-                # Default distribution
-                weekly_weights = {1: 0.23, 2: 0.23, 3: 0.23, 4: 0.23, 5: 0.08}
+        if seasonality_result:
+            seasonality_index = float(seasonality_result[0] or 1.0)
+            historical_avg = float(seasonality_result[1] or 0)
+            monthly_yoy = float(seasonality_result[2] or dynamic_cap)
+            confidence = seasonality_result[3] or "low"
+        else:
+            seasonality_index = 1.0
+            historical_avg = 0
+            monthly_yoy = dynamic_cap
+            confidence = "low"
 
-            # Normalize weights to sum to 1
-            total_weight = sum(weekly_weights.values())
-            if total_weight > 0:
-                weekly_weights = {k: v / total_weight for k, v in weekly_weights.items()}
+        # Overall YoY growth
+        overall_yoy = float(yoy_result[0] or dynamic_cap) if yoy_result else dynamic_cap
 
-            # Calculate weekly goals with residual adjustment
-            weekly_goals = {
-                week: round(monthly_goal * weight / 10000) * 10000
-                for week, weight in weekly_weights.items()
+        # Apply growth rate with dynamic cap
+        raw_growth_rate = monthly_yoy if monthly_yoy > 0 else overall_yoy
+        growth_rate = min(raw_growth_rate, dynamic_cap)
+
+        # ── Signal 1: YoY growth (last year same month × growth)
+        yoy_goal = 0.0
+        if last_year_revenue > 0:
+            yoy_goal = last_year_revenue * (1 + growth_rate)
+
+        # ── Signal 2: Recent baseline adjusted for seasonality
+        recent_goal = 0.0
+        if recent_3_month_avg > 0 and seasonality_index > 0:
+            recent_goal = recent_3_month_avg * seasonality_index
+
+        # ── Signal 3: ML forecast — read before the connection was taken.
+
+        # ── Weighted blend (replaces MAX)
+        # Confidence-based weight tables
+        weight_tables = {
+            "high":   {"yoy": 0.40, "recent": 0.30, "ml": 0.30},
+            "medium": {"yoy": 0.30, "recent": 0.35, "ml": 0.35},
+            "low":    {"yoy": 0.20, "recent": 0.40, "ml": 0.40},
+        }
+        base_weights = weight_tables.get(confidence, weight_tables["low"])
+
+        # Build signal dict (only non-zero signals)
+        signals = {}
+        if yoy_goal > 0:
+            signals["yoy"] = yoy_goal
+        if recent_goal > 0:
+            signals["recent"] = recent_goal
+        if ml_forecast_goal > 0:
+            signals["ml"] = ml_forecast_goal
+
+        if signals:
+            # Redistribute unavailable signal weights proportionally
+            available_weight = sum(base_weights[k] for k in signals)
+            blend_weights = {k: base_weights[k] / available_weight for k in signals}
+
+            monthly_goal = sum(signals[k] * blend_weights[k] for k in signals)
+
+            # Determine primary method
+            dominant = max(blend_weights, key=lambda k: blend_weights[k] * signals[k])
+            method_map = {"yoy": "yoy_growth", "recent": "recent_trend", "ml": "ml_forecast"}
+            calculation_method = method_map[dominant]
+        elif historical_avg > 0:
+            monthly_goal = historical_avg * (1 + growth_rate)
+            calculation_method = "historical_avg"
+            blend_weights = {}
+        else:
+            monthly_goal = 3000000  # 3M UAH default
+            growth_rate = dynamic_cap
+            calculation_method = "fallback"
+            blend_weights = {}
+
+        # Round to nice number
+        monthly_goal = round(monthly_goal / 100000) * 100000
+
+        if weekly_patterns:
+            weekly_weights = {int(row[0]): float(row[1]) for row in weekly_patterns}
+        else:
+            weekly_weights = dict(_DEFAULT_WEEKLY_WEIGHTS)
+
+        # Normalize weights to sum to 1
+        total_weight = sum(weekly_weights.values())
+        if total_weight > 0:
+            weekly_weights = {k: v / total_weight for k, v in weekly_weights.items()}
+
+        # Calculate weekly goals with residual adjustment
+        weekly_goals = {
+            week: round(monthly_goal * weight / 10000) * 10000
+            for week, weight in weekly_weights.items()
+        }
+        # Distribute residual so weekly goals sum exactly to monthly
+        residual = monthly_goal - sum(weekly_goals.values())
+        if residual != 0 and weekly_goals:
+            # Add residual to the largest week
+            largest_week = max(weekly_goals, key=lambda k: weekly_goals[k])
+            weekly_goals[largest_week] += residual
+
+        # Fix: use calendar.monthrange for correct days (handles leap years)
+        days_in_month = calendar.monthrange(target_year, target_month)[1]
+        daily_goal = round(monthly_goal / days_in_month / 10000) * 10000
+
+        # Calculate weekly goal (monthly / actual weeks)
+        weeks_in_month = days_in_month / 7.0
+        weekly_goal = round(monthly_goal / weeks_in_month / 50000) * 50000
+
+        return {
+            "targetYear": target_year,
+            "targetMonth": target_month,
+            "monthly": {
+                "goal": monthly_goal,
+                "lastYearRevenue": round(last_year_revenue, 2),
+                "recent3MonthAvg": round(recent_3_month_avg, 2),
+                "historicalAvg": round(historical_avg, 2),
+                "yoyGoal": round(yoy_goal, 2),
+                "recentGoal": round(recent_goal, 2),
+                "mlForecastGoal": round(ml_forecast_goal, 2),
+                "growthRate": round(growth_rate, 4),
+                "growthCap": round(dynamic_cap, 4),
+                "seasonalityIndex": seasonality_index,
+                "confidence": confidence,
+                "calculationMethod": calculation_method,
+                "blendWeights": {k: round(v, 4) for k, v in blend_weights.items()} if blend_weights else None,
+            },
+            "weekly": {
+                "goal": weekly_goal,  # Average weekly goal
+                "breakdown": weekly_goals,
+                "weights": weekly_weights
+            },
+            "daily": {
+                "goal": daily_goal,
+                "daysInMonth": days_in_month
+            },
+            "metadata": {
+                "overallYoY": round(overall_yoy, 4),
+                "monthlyYoY": round(monthly_yoy, 4),
+                "calculatedAt": datetime.now(DEFAULT_TZ).isoformat()
             }
-            # Distribute residual so weekly goals sum exactly to monthly
-            residual = monthly_goal - sum(weekly_goals.values())
-            if residual != 0 and weekly_goals:
-                # Add residual to the largest week
-                largest_week = max(weekly_goals, key=lambda k: weekly_goals[k])
-                weekly_goals[largest_week] += residual
-
-            # Fix: use calendar.monthrange for correct days (handles leap years)
-            days_in_month = calendar.monthrange(target_year, target_month)[1]
-            daily_goal = round(monthly_goal / days_in_month / 10000) * 10000
-
-            # Calculate weekly goal (monthly / actual weeks)
-            weeks_in_month = days_in_month / 7.0
-            weekly_goal = round(monthly_goal / weeks_in_month / 50000) * 50000
-
-            return {
-                "targetYear": target_year,
-                "targetMonth": target_month,
-                "monthly": {
-                    "goal": monthly_goal,
-                    "lastYearRevenue": round(last_year_revenue, 2),
-                    "recent3MonthAvg": round(recent_3_month_avg, 2),
-                    "historicalAvg": round(historical_avg, 2),
-                    "yoyGoal": round(yoy_goal, 2),
-                    "recentGoal": round(recent_goal, 2),
-                    "mlForecastGoal": round(ml_forecast_goal, 2),
-                    "growthRate": round(growth_rate, 4),
-                    "growthCap": round(dynamic_cap, 4),
-                    "seasonalityIndex": seasonality_index,
-                    "confidence": confidence,
-                    "calculationMethod": calculation_method,
-                    "blendWeights": {k: round(v, 4) for k, v in blend_weights.items()} if blend_weights else None,
-                },
-                "weekly": {
-                    "goal": weekly_goal,  # Average weekly goal
-                    "breakdown": weekly_goals,
-                    "weights": weekly_weights
-                },
-                "daily": {
-                    "goal": daily_goal,
-                    "daysInMonth": days_in_month
-                },
-                "metadata": {
-                    "overallYoY": round(overall_yoy, 4),
-                    "monthlyYoY": round(monthly_yoy, 4),
-                    "calculatedAt": datetime.now(DEFAULT_TZ).isoformat()
-                }
-            }
+        }
 
     async def get_smart_goals(
         self,
