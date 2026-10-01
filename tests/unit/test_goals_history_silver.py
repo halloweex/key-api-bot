@@ -549,3 +549,96 @@ class TestATypoStopsEveryHistoryRead:
                     getattr(store, name)(*args, **kwargs), TIMEOUT_S)
         finally:
             await store.close()
+
+
+class TestATypoIsSeen:
+    """The raise is where it belongs — at the read — but on its own it reached
+    nobody: a 500 on the goal widget and on `/goals/*`, and a Monday job error
+    in a log (review of 7b). `/api/health` publishes it and the canary pages
+    it, the way `KS_READ_FALLBACK`, `KS_UTM_PARSE` and `KS_WRITE_WAREHOUSE`
+    are seen.
+
+    Mutations: drop `goals_history` from `HealthResponse` (the public
+    endpoint loses it); `check_goals_history_mode` returning [] (the canary
+    is quiet); the wiring left at `warn` (no page).
+    """
+
+    TYPO = {"mode": None,
+            "error": "KS_GOALS_HISTORY='silvr' — unknown history. Expected one "
+                     "of ('bridge', 'silver')"}
+
+    @pytest.mark.parametrize("raw,mode", [(None, "bridge"), ("silver", "silver")])
+    def test_health_publishes_the_mode(self, monkeypatch, raw, mode):
+        from web.routes.api.health import _goals_history
+
+        _history(monkeypatch, raw)
+        assert _goals_history() == {"mode": mode, "error": None}
+
+    def test_health_publishes_the_error_a_read_would_raise(self, monkeypatch):
+        from web.routes.api.health import _goals_history
+
+        _history(monkeypatch, "silvr")
+        block = _goals_history()
+        assert block["mode"] is None
+        with pytest.raises(ValueError) as raised:
+            pg_goals_read.history_mode()
+        assert block["error"] == str(raised.value)
+        assert "KS_GOALS_HISTORY='silvr'" in block["error"]
+
+    def test_the_public_endpoint_carries_it_through_its_response_model(
+        self, monkeypatch,
+    ):
+        """`/api/health` declares a response model, and a key the model does
+        not name is dropped on the way out without a word."""
+        from fastapi.testclient import TestClient
+
+        from web.main import app
+        from web.ratelimit import limiter
+
+        _history(monkeypatch, "silvr")
+        limiter.reset()
+        try:
+            body = TestClient(app).get("/api/health").json()
+        finally:
+            limiter.reset()
+        block = body["goals_history"]
+        assert block["mode"] is None
+        assert "KS_GOALS_HISTORY='silvr'" in block["error"]
+
+    def test_the_canary_pages_an_error_and_is_quiet_otherwise(self):
+        from bot.canary import check_goals_history_mode
+
+        assert [k for k, _ in check_goals_history_mode(
+            {"goals_history": self.TYPO})] == ["goals_history_mode_invalid"]
+        assert check_goals_history_mode({}) == []
+        assert check_goals_history_mode(
+            {"goals_history": {"mode": "silver", "error": None}}) == []
+
+    @pytest.mark.asyncio
+    async def test_the_wiring_pages_and_names_its_lever(self):
+        from datetime import datetime, timedelta, timezone
+
+        import httpx
+
+        from bot import canary
+        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
+
+        payload = _healthy_payload()
+        payload["goals_history"] = self.TYPO
+
+        def handler(request):
+            return httpx.Response(200, json=payload)
+
+        future = datetime.now(timezone.utc) + timedelta(days=60)
+        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+        async with _mock_transport(handler) as client:
+            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
+                result = await canary.run_canary(DASHBOARD, client=client)
+        assert result.severity == "critical"
+        assert result.failure_keys == ["goals_history_mode_invalid"]
+        assert "KS_GOALS_HISTORY" in canary._what_to_do(result)
+
+    def test_it_is_a_registered_condition(self):
+        from core.alerting import Kind, spec_for
+
+        assert spec_for("goals_history_mode_invalid").kind is Kind.CONDITION

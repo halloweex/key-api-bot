@@ -135,6 +135,22 @@ def history_from_silver() -> bool:
     return history_mode() == SILVER
 
 
+def history_state() -> dict:
+    """`KS_GOALS_HISTORY` as a history read would take it now: `mode`, or
+    None and the `error` that read would raise. Never raises.
+
+    The raise is at the read, so a typo stops every goal history read — the
+    dashboard's goal widget, `/goals/*`, the POST and the Monday job — and
+    none of those pages anybody: a 500 on a page and a job error in a log.
+    So `/api/health` publishes this, and the canary pages the error as
+    `goals_history_mode_invalid`. The value is the variable's own, which is
+    not a secret, as `read_fallback_mode` publishes its siblings'."""
+    try:
+        return {"mode": history_mode(), "error": None}
+    except ValueError as exc:
+        return {"mode": None, "error": str(exc)}
+
+
 def enabled() -> bool:
     """Whether the goal reads should ask Postgres.
 

@@ -953,6 +953,25 @@ def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
     return []
 
 
+def check_goals_history_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `goals_history` block: a KS_GOALS_HISTORY web does not
+    understand (chain 7b).
+
+    Critical, unlike the siblings above, and for `write_chain_flag_invalid`'s
+    reason: those run as duckdb and nothing fails, while this one raises at
+    every goal history read on purpose — counting a different set of orders
+    in silence is the worse failure — so the dashboard's goal widget and
+    every `/goals/*` page answer 500 and the Monday job fails, and none of
+    those pages anybody by itself. An absent block is not a failure; an older
+    web publishes none.
+    """
+    block = (payload or {}).get("goals_history")
+    if isinstance(block, dict) and block.get("error"):
+        return [("goals_history_mode_invalid",
+                 f"goal history: {block['error']}")]
+    return []
+
+
 # ─── Orchestration ──────────────────────────────────────────────────────────
 
 async def run_canary(
@@ -1118,6 +1137,14 @@ async def run_canary(
         if utm_mode_failures and severity == "ok":
             severity = "warn"
 
+        # A KS_GOALS_HISTORY web does not understand: every goal history read
+        # raises, so this pages rather than warns.
+        goals_history_failures = check_goals_history_mode(payload)
+        for key, message in goals_history_failures:
+            fail(key, message)
+        if goals_history_failures:
+            severity = "critical"
+
         # Derivation marks dropped and demonstrably not being healed. Warn:
         # every row landed, and what is owed is a rebuild.
         marks_failures = check_derivation_marks(payload)
@@ -1219,6 +1246,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "Set the read flag the message names to postgres, then docker compose up -d web"),
     ("utm_parse_mode_invalid",
      "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
+    ("goals_history_mode_invalid",
+     "Set KS_GOALS_HISTORY to bridge or silver (or remove it) in .env, then recreate web; every goal read fails until then"),
     # Last: when an engine is down its own key names the cause, and a fallback
     # or a refusal is what that cause cost the pages. A route is a cause of
     # its own, and its lever is `.env`, so it goes first of the three.
