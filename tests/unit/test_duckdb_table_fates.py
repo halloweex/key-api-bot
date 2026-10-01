@@ -368,6 +368,19 @@ def duckdb_openers(rel: str, source: str) -> List[str]:
     return found
 
 
+def openers_outside(files: List[Tuple[str, str]]) -> Dict[str, List[str]]:
+    """`{rel: openers}` for each `(rel, source)` outside `DUCKDB_TREES` that
+    reaches DuckDB."""
+    out = {}
+    for rel, source in files:
+        if rel.split("/")[0] in DUCKDB_TREES:
+            continue
+        found = duckdb_openers(rel, source)
+        if found:
+            out[rel] = found
+    return out
+
+
 def _gitignored_dirs() -> Set[str]:
     """Directory names `.gitignore` excludes outright (`data/`, `venv/`)."""
     names = {"__pycache__", "node_modules"}
@@ -1027,6 +1040,16 @@ class TestEveryNameHasAFate:
         which is what let `analytics.main.mystery_catalog` through."""
         assert place(name) == placed
 
+    @pytest.mark.parametrize("name, listed", [
+        ("orders", False), ("main.orders", False), ("analytics.main.orders", False),
+        ("bronze.orders", True), ("memory.main.orders", True), (UNREAD, True),
+    ])
+    def test_an_unplaced_name_must_be_listed(self, name, listed):
+        """Mutation: `needs_listing` reading only `{` holes, which let every
+        dotted name through unlisted."""
+        assert needs_listing(DdlSite("core/x.py", "f", "TABLE", name, False)) is listed
+        assert needs_listing(DdlSite("core/x.py", "f", "TABLE", name, True)) is False
+
     def test_the_catalog_is_the_files_stem(self):
         from core.duckdb_constants import DB_PATH
 
@@ -1043,17 +1066,22 @@ class TestEveryNameHasAFate:
         tops = {rel.split("/")[0] for rel, _ in files}
         # The family: a scan that listed nothing outside the trees passes.
         assert {"bot", "migrations"} <= tops and set(DUCKDB_TREES) <= tops
-        offenders = {}
-        for rel, path in files:
-            if rel.split("/")[0] in DUCKDB_TREES:
-                continue
-            found = duckdb_openers(rel, path.read_text(encoding="utf-8"))
-            if found:
-                offenders[rel] = found
+        offenders = openers_outside(
+            [(rel, path.read_text(encoding="utf-8")) for rel, path in files])
         assert not offenders, (
             f"DuckDB is reached from outside {DUCKDB_TREES}: {offenders}. Move "
             f"the code into one of them, or add its directory to DUCKDB_TREES "
             f"so the DDL walk reads it")
+
+    def test_only_the_walked_trees_may_open_duckdb(self):
+        """Any top-level directory but the four, `tools/` as much as `bot/`.
+        Mutation: narrow `openers_outside` to `bot/`, as the first test was."""
+        files = [("tools/ledger.py", "import duckdb"), ("bot/x.py", "import duckdb"),
+                 ("migrations/env.py", "from core import duckdb_store"),
+                 ("manage.py", "import duckdb"),
+                 *[(f"{tree}/x.py", "import duckdb") for tree in DUCKDB_TREES]]
+        assert set(openers_outside(files)) == {
+            "tools/ledger.py", "bot/x.py", "migrations/env.py", "manage.py"}
 
     def test_the_opener_walk_sees_every_tree_open_duckdb(self):
         """The scan above is only as good as `duckdb_openers`: each walked
