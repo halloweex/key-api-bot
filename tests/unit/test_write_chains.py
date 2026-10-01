@@ -114,6 +114,10 @@ _DESTINATION = {
     # journal's own table and has no DuckDB copy either.
     ("core/alert_archive.py", "_write_watch"): (
         "the alert journal lives in Postgres alone; there is no copy", None),
+    # A rollback lever's use (OD-17 (a)), in the same journal and written
+    # inside the release's own transaction.
+    ("core/lever_journal.py", "record"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
     ("core/ch_history.py", "ship_history"): (
         "writes ClickHouse's history.*, not Postgres", None),
     ("core/pg_silver.py", "rebuild_silver"): (
