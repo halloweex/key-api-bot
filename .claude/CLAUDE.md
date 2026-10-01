@@ -3068,7 +3068,9 @@ read why. A container gone or new is UNKNOWN — a deploy or a cron one-off,
 or, on a laptop, other work. Exit 0 all PASS, 1 any FAIL, 2 UNKNOWN only,
 3 not set up.
 
-**What keeps it off production**, each pinned by parsing the script
+**What keeps it off production**, each pinned by parsing the script —
+and the watchdog, the lock and the disk guard by running its own functions
+against stubbed `docker`, `df` and `du`
 (`tests/unit/test_step13_rehearsal_script.py`): every container, one-offs
 included, and the network are named `reh-*`, and nothing else is ever acted
 on — the one look at the rest is Z0's `docker ps` and `docker inspect`, and
@@ -3076,11 +3078,24 @@ no `docker compose`;
 the network is `--internal`, so there is no route to KeyCRM, Telegram or any
 live container; `--pull never` on every `docker run`, so the image the next
 `up -d` starts is not changed; hard memory caps (web 1.5 g with DuckDB at
-768 MB, Postgres 512 m, ClickHouse 1.5 g), a start guard on `MemAvailable`
-and a watchdog that tears the rehearsal down first; `/tmp/ks-gate.lock`
-taken with `flock -n` before anything starts; the tree mounted read-only and
-never written; cleanup on EXIT with `docker rm -f -v`. reh-web runs with
-`KS_ALERTS_DISABLED=1`, no `BOT_TOKEN`, and `KEYCRM_BASE_URL` pointing at a
+768 MB, Postgres 512 m, ClickHouse 1.5 g) and `--oom-score-adj 1000` on
+every container — the caps bound what the rehearsal takes, but if the host
+runs short anyway the kernel kills the largest RSS, the live web, unless the
+rehearsal's processes ask to go first (at 0 the live one went, reproduced);
+a start guard on `MemAvailable`, and one on the disk that projects every
+copy onto both filesystems it lands on against 74 %, a point under the live
+monitor's 75 % WARN, which would otherwise page production's admins about
+the rehearsal's own files; a watchdog on both that kills the `reh-*`
+containers itself and only then signals the shell, which runs its TERM trap
+once its foreground command returns — 25 minutes for a `docker exec`,
+unbounded for `pg_restore`; `/tmp/ks-gate.lock` taken with `flock -n` before
+anything starts, and the watchdog launched with fd 9 closed and alive only
+while the shell is — a SIGKILLed shell left it looping with the lock, every
+gate waiting in `flock 9` and `--cleanup-only` refusing, and now it removes
+what the shell started instead; the tree mounted read-only and never
+written; cleanup on EXIT with `docker rm -f -v`, deaf to a second signal.
+reh-web runs with `KS_ALERTS_DISABLED=1`, no `BOT_TOKEN`, and
+`KEYCRM_BASE_URL` pointing at a
 stub (`deploy/step13_rehearsal/keycrm_stub.py`) — nothing in the application
 switches the sync off, so the base URL and the network are what keep the
 quota untouched. The canary is `bot/canary.py` imported inside reh-web and
@@ -3093,35 +3108,65 @@ passwords) and the newest `data/backups/analytics-*.duckdb` — never the live
 file — copied into the rehearsal's own directory (mode 700), plus the
 `KS_WRITE_*` chain flags read from `.env` by exact name. The copies go at the
 end; only the table survives, in `step13-rehearsal-<stamp>.txt` beside that
-directory, ids, counts and keys only. `--keep` leaves the copies and says so
-in red; `--cleanup-only` removes what a killed run left. A window guard
+directory, ids, counts and keys only. `--keep` leaves the copies and names
+each in red: the directory, and the stopped `reh-pg` (a full restore of
+production's Postgres, buyers and phones) and `reh-ch` in their anonymous
+volumes; `--cleanup-only` removes what a killed run left. A window guard
 refuses to start within 100 minutes of any reh-web or host cron
 (`--any-hour` overrides): ~75 minutes on production's data.
 
-`--local` runs it on a laptop over synthetic data: `seed_synthetic.py`
+`--local` runs it on a laptop over synthetic data, and is refused on the
+host — root, or `/opt/key-api-bot` present — since it skips the window,
+the memory guard and the watchdog: `seed_synthetic.py`
 invents an account, the stub serves it, a reh-web over an empty directory
 syncs it the way production once synced the real one, and the rehearsal
 proper then restores that dump and that backup by the host's path. The
 floor (`KS_PG_SILVER_INTERVAL_S`) is 120 s on the host and 60 s locally
 instead of 600 s; every property is "within floor plus a tick", so its size
-changes nothing proved. On 2026-10-01 the local run passed all eight
-points, K0 and Z0 against an image of main at 3.0.264 (revision 0034), in
-about 20 minutes over 400 orders. What the local run cannot answer is
+changes nothing proved. On 2026-10-01 a local run over 400 orders, on an
+image built from this branch (3.0.261, revision 0033) with `--build`,
+passed P1–P3, P6–P8 and K0 and failed P4 and P5 on the DuckDB defect below
+and on nothing else: the live process showed both DQ runs' findings at F4,
+and after F6's kill `fetch_run_issues` returned none of them. Z0 was
+UNKNOWN for other sessions' containers. 36 minutes, at the sync's
+off-hours cadence of one tick in five minutes. An earlier note here said a
+run had passed everything on an image of main at 3.0.264, revision 0034;
+the image it ran was built at revision 0033, and its P4a and P5 had read
+around the defect. What the local run cannot answer is
 production's own readiness — whether the copy's preconditions hold, the way
 back's full rebuild inside 1.5 GB, and the timings at 47 k orders — which is
 what the host run is for.
 
-**The first local run found two things outside the rehearsal.** With a
+**P5 reads the stand-down off the job, not off its silence.**
+`dq_mirror_landing` names every check it asked, verdict or raise, as
+`checks_run` on its completion line, and P5 fails on a retired comparison
+there and is UNKNOWN without the list. Absent findings could not fail it:
+`compare_gold` excuses every cell whose orders synced inside its 20-minute
+grace — every cell of the local seed, and on the host the fixture's — so a
+review that ran `reconcile_gold` under the stand-down got a PASS.
+
+**The local runs found two things outside the rehearsal.** With a
 Silver row deleted and a Gold row bumped in one window, ClickHouse's
 comparison raised instead of filing: `compare_gold_cells` sorts cell keys
 whose roll-up `source_id` is NULL beside per-source ints, so one day that
 differs in both grains is a `TypeError`, `gold_values_unwatched`, and never
-`ch_engines_gold_mismatch`. The mutations now run one per DQ run. And DuckDB
-1.5.5 answered `WHERE run_id = ?` on the copy's `data_quality_issues` with no
-rows for two runs a scan returned (one bitpacked `DELTA_FOR` segment; the
-optimizer off, `IN (…)` or a text comparison all found them; not reproduced
-on a fresh file). `fetch_run_issues` asks exactly that, so the rehearsal reads
-issues by the id's text.
+`ch_engines_gold_mismatch`. The mutations now run one per DQ run.
+
+**And DuckDB 1.5.5 loses DQ findings after a SIGKILL, for good.** With the
+index on `data_quality_issues(run_id)`, a kill after `persist_run` commits,
+and a next session that checkpoints before it inserts another issue row,
+`WHERE run_id = ?` answers nothing for the runs the kill caught in the WAL
+while a scan returns every row, and a later write does not bring them
+back. Reproduced on a fresh file with production's DDL, writer and reader;
+without the index, or without the kill, the two agree, and a `CHECKPOINT`
+right after the write avoids it. That query is `fetch_run_issues`, which
+`/api/health/data-quality` and the digest read through, so an OOM kill of
+the live web can empty them, for good, of every finding written since the
+last checkpoint. The rehearsal's own F6 kill does it to the runs P4a and P5
+judge: the judges run `fetch_run_issues` beside the scan and FAIL when the
+two differ. An earlier note here called it one odd segment, not reproduced
+on a fresh file, and the judges read around it — which passed what the
+product could not show anyone.
 
 ### OD-10: the DuckDB-only doors, retired (2026-09-30)
 
