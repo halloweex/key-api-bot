@@ -120,8 +120,8 @@ NON_HTTP_CONSUMERS = {
     # The sync, every 2 minutes, and its search index.
     "core/scheduler.py:BackgroundScheduler._run_incremental_sync",
     "core/scheduler.py:BackgroundScheduler._run_meilisearch_sync",
-    # Training, and the Monday goals job that writes seasonal_indices before
-    # the read that refuses.
+    # Training, and the Monday goals job, which writes seasonal_indices once
+    # every read it makes has answered (chain 7b-1).
     "core/scheduler.py:BackgroundScheduler._run_revenue_prediction",
     "core/scheduler.py:BackgroundScheduler._run_seasonality_calc",
     # The two weekly messages.
@@ -148,6 +148,9 @@ UNSWEPT_ROUTES = {
     "DELETE /api/goals/{period_type}",
     "POST /api/duckdb/sync-buyers",
     "POST /api/goals",
+    # Reads the order history through the goals router once
+    # KS_GOALS_HISTORY=silver (chain 7b-2), before its one write.
+    "POST /api/goals/recalculate",
     "POST /api/revenue/forecast/train",
     "POST /api/revenue/forecast/tune",
 } | IN_BAND_ROUTES
@@ -198,6 +201,7 @@ UNSWEPT_STOPS = {
     "POST /api/chat": {_TOOLS},
     "POST /api/duckdb/sync-buyers": {_BUYERS},
     "POST /api/goals": set(),
+    "POST /api/goals/recalculate": set(),
     "POST /api/revenue/forecast/train": set(),
     "POST /api/revenue/forecast/tune": set(),
 }

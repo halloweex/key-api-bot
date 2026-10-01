@@ -115,6 +115,7 @@ def _met_env(monkeypatch):
         "KS_READ_COHORTS": "clickhouse",
         # Named and never reached: nothing here runs a ClickHouse job.
         "KS_CH_URL": "http://127.0.0.1:9",
+        "KS_GOALS_HISTORY": "silver",   # chain 7b: no goal read on the bridge
         "KS_PG_SILVER_INTERVAL_S": "0",
         wc.ENV: "postgres",
     }

@@ -136,15 +136,18 @@ _FORECAST_PREDICTED_SQL = """
 #
 # It reads DuckDB `manager_classifications` and `managers`, so it is right only
 # while DuckDB still holds the classification (chain 5) and the orders (chain
-# 3). The chain 7b port replaces it. Until then a tripwire in that same test
-# fails the moment `core/write_chains.WRITE_CHAINS` registers a chain owning
-# `bronze.orders`, `bronze.managers` or `app.manager_classifications` while this
-# file still renders the DuckDB case.
+# 3). The chain 7b port replaces it: `KS_GOALS_HISTORY=silver` reads the same
+# history from Silver (below), and the bridge is what `bridge` — the default,
+# today's numbers — still runs. Until the bridge is deleted (7b-4) a tripwire
+# in that same test fails the moment `core/write_chains.WRITE_CHAINS`
+# registers a chain owning `bronze.orders`, `bronze.managers` or
+# `app.manager_classifications` while this file still renders the DuckDB case.
 #
-# The same question is asked at run time by the step-13 readiness
-# (`core/warehouse_cutover.py`, DN-28), through `sales_type_bridge_owners` —
-# one answer the deployed build gives, beside the one CI gave. Delete both with
-# the bridge.
+# The step-13 readiness (`core/warehouse_cutover.py`, DN-28) asks the run-time
+# half: `goals_bridge` is met only once `KS_GOALS_HISTORY` names `silver`, and
+# its detail names any chain that already owns one of the three tables
+# (`sales_type_bridge_owners`) — retail goals diverging from that moment.
+# Delete both with the bridge.
 
 # The tables the bridge reads out of DuckDB, by the names the write chains
 # declare them under.
@@ -183,6 +186,215 @@ def _orders_sales_type_predicate(sales_type: str) -> tuple[str, List[Any]]:
             f"{', '.join(KNOWN_SALES_TYPES)} or 'all'"
         )
     return f"({silver_sales_type_case(DUCKDB)}) = ?", [sales_type]
+
+
+# ─── The same history, from Silver (chain 7b-2, `KS_GOALS_HISTORY=silver`) ──
+#
+# What replaces the bridge. Every calculator reads `{silver_orders}` through
+# `_goals_run`, so the engine is `KS_READ_GOALS`' — Postgres Silver keeps
+# deriving after step 13, from whichever store holds the classification — and
+# a read DuckDB answers is counted (DN-20a), or refused under
+# `KS_READ_FALLBACK=off` (DN-20b). Nothing below names DuckDB's `orders`,
+# `managers` or `manager_classifications`.
+#
+# Silver's columns select what the bridge selects: `is_return` (KeyCRM's status
+# group first, the status list for rows synced before it) for the status list,
+# `order_date` for the per-row Kyiv date, `sales_type` for the CASE rendered
+# over `orders`. Measured on the 2026-08-31 production copy: 0 differing orders
+# of 46 961, for every sales type, and every calculator output and every smart
+# goal identical, on DuckDB and on Postgres.
+#
+# **`is_active_source` is deliberately absent** (OQ-1, the owner's question).
+# Every dashboard read carries it; a growth baseline must not. Source 3 is the
+# company website on Opencart, which carried 2 055 retail orders, ₴5.0M, from
+# 2024-07-15 to 2024-12-07 — Shopify (4) took over from 2024-11-28, with no
+# order on both. Dropping them shrinks 2024: retail YoY moves from 0.50 to
+# 0.82, five monthly caps hit the 0.50 ceiling, and next month's retail goal
+# moves from ₴4.0M to ₴4.2M. The bridge never filtered on source, so leaving it
+# out is what keeps the numbers. A test pins a source-3 order as counted.
+#
+# `{where}` is `_silver_history_where`'s, and every date bound is a parameter
+# computed in Python from the Kyiv clock — never `CURRENT_DATE`, which the two
+# engines disagree about for three hours a day (`core/pg_goals_read.py`).
+
+_SILVER_SEASONALITY_SQL = """
+    WITH monthly_data AS (
+        SELECT EXTRACT(YEAR FROM s.order_date) AS year,
+               EXTRACT(MONTH FROM s.order_date) AS month,
+               SUM(s.grand_total) AS revenue,
+               COUNT(DISTINCT s.order_date) AS days_with_orders
+        FROM {silver_orders} s
+        WHERE {where}
+        GROUP BY EXTRACT(YEAR FROM s.order_date), EXTRACT(MONTH FROM s.order_date)
+        HAVING COUNT(DISTINCT s.order_date) >= 20
+    ),
+    monthly_stats AS (
+        SELECT month,
+               AVG(revenue) AS avg_revenue,
+               MIN(revenue) AS min_revenue,
+               MAX(revenue) AS max_revenue,
+               COUNT(*) AS sample_size,
+               STDDEV(revenue) AS std_dev
+        FROM monthly_data
+        GROUP BY month
+    ),
+    overall_avg AS (
+        SELECT AVG(avg_revenue) AS grand_avg FROM monthly_stats
+    )
+    SELECT ms.month, ms.avg_revenue, ms.min_revenue, ms.max_revenue,
+           ms.sample_size, ms.std_dev, ms.avg_revenue / oa.grand_avg
+    FROM monthly_stats ms, overall_avg oa
+    ORDER BY ms.month
+"""
+
+# Full years only — eleven months with orders or more — and never the running
+# Kyiv year, whose first day is the last parameter.
+_SILVER_YEARLY_SQL = """
+    WITH yearly_data AS (
+        SELECT EXTRACT(YEAR FROM s.order_date) AS year,
+               SUM(s.grand_total) AS revenue,
+               COUNT(DISTINCT EXTRACT(MONTH FROM s.order_date)) AS months_active
+        FROM {silver_orders} s
+        WHERE {where}
+          AND s.order_date < ?
+        GROUP BY EXTRACT(YEAR FROM s.order_date)
+    )
+    SELECT year, revenue FROM yearly_data
+    WHERE months_active >= 11
+    ORDER BY year
+"""
+
+_SILVER_MONTHLY_YOY_SQL = """
+    WITH monthly_by_year AS (
+        SELECT EXTRACT(YEAR FROM s.order_date) AS year,
+               EXTRACT(MONTH FROM s.order_date) AS month,
+               SUM(s.grand_total) AS revenue
+        FROM {silver_orders} s
+        WHERE {where}
+        GROUP BY EXTRACT(YEAR FROM s.order_date), EXTRACT(MONTH FROM s.order_date)
+        HAVING COUNT(DISTINCT s.order_date) >= 25
+    )
+    SELECT curr.month, curr.year,
+           (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0)
+    FROM monthly_by_year curr
+    JOIN monthly_by_year prev
+      ON curr.month = prev.month AND curr.year = prev.year + 1
+    ORDER BY curr.month, curr.year
+"""
+
+# `growth_metrics.period_start`/`period_end`: the first and last order date of
+# the whole history, every sales type and every status — the bridge's question.
+_SILVER_BOUNDS_SQL = """
+    SELECT MIN(s.order_date), MAX(s.order_date) FROM {silver_orders} s
+"""
+
+# Week of month 1-5 by day of month. `CAST(… AS INTEGER)` rather than `::int`
+# reads the same in both engines, and `CEIL` of a NUMERIC (Postgres) and of a
+# DOUBLE (DuckDB) agree on every day 1-31.
+_SILVER_WEEKLY_SQL = """
+    WITH weekly_data AS (
+        SELECT EXTRACT(YEAR FROM s.order_date) AS year,
+               EXTRACT(MONTH FROM s.order_date) AS month,
+               LEAST(5, CAST(CEIL(EXTRACT(DAY FROM s.order_date) / 7.0) AS INTEGER))
+                   AS week_of_month,
+               SUM(s.grand_total) AS revenue
+        FROM {silver_orders} s
+        WHERE {where}
+        GROUP BY EXTRACT(YEAR FROM s.order_date),
+                 EXTRACT(MONTH FROM s.order_date),
+                 LEAST(5, CAST(CEIL(EXTRACT(DAY FROM s.order_date) / 7.0) AS INTEGER))
+    ),
+    monthly_totals AS (
+        SELECT year, month, SUM(revenue) AS month_total
+        FROM weekly_data
+        GROUP BY year, month
+    ),
+    weekly_weights AS (
+        SELECT wd.month, wd.week_of_month,
+               AVG(wd.revenue / NULLIF(mt.month_total, 0)) AS avg_weight,
+               COUNT(*) AS sample_size
+        FROM weekly_data wd
+        JOIN monthly_totals mt ON wd.year = mt.year AND wd.month = mt.month
+        GROUP BY wd.month, wd.week_of_month
+    )
+    SELECT month, week_of_month, avg_weight, sample_size
+    FROM weekly_weights
+    ORDER BY month, week_of_month
+"""
+
+# The target month's consecutive-year YoY; the month is the first parameter.
+_SILVER_GROWTH_CAP_SQL = """
+    WITH monthly_by_year AS (
+        SELECT EXTRACT(YEAR FROM s.order_date) AS year,
+               SUM(s.grand_total) AS revenue
+        FROM {silver_orders} s
+        WHERE EXTRACT(MONTH FROM s.order_date) = ?
+          AND {where}
+        GROUP BY EXTRACT(YEAR FROM s.order_date)
+        HAVING COUNT(DISTINCT s.order_date) >= 25
+    ),
+    yoy_pairs AS (
+        SELECT (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0) AS yoy
+        FROM monthly_by_year curr
+        JOIN monthly_by_year prev ON curr.year = prev.year + 1
+    )
+    SELECT AVG(yoy), STDDEV(yoy), COUNT(*) FROM yoy_pairs
+"""
+
+# The target month a year earlier, as a half-open range of dates: the bound is
+# a plain comparison on the column, in both engines.
+_SILVER_LAST_YEAR_SQL = """
+    SELECT SUM(s.grand_total)
+    FROM {silver_orders} s
+    WHERE s.order_date >= ? AND s.order_date < ?
+      AND {where}
+"""
+
+# The last three complete months with 25 days of orders; the first of the
+# current Kyiv month is the last parameter.
+_SILVER_RECENT_MONTHS_SQL = """
+    WITH monthly_revenue AS (
+        SELECT EXTRACT(YEAR FROM s.order_date) AS year,
+               EXTRACT(MONTH FROM s.order_date) AS month,
+               SUM(s.grand_total) AS revenue
+        FROM {silver_orders} s
+        WHERE {where}
+          AND s.order_date < ?
+        GROUP BY EXTRACT(YEAR FROM s.order_date), EXTRACT(MONTH FROM s.order_date)
+        HAVING COUNT(DISTINCT s.order_date) >= 25
+        ORDER BY year DESC, month DESC
+        LIMIT 3
+    )
+    SELECT AVG(revenue) FROM monthly_revenue
+"""
+
+
+def _silver_history_where(sales_type: str) -> tuple[str, List[Any]]:
+    """`(clause, params)` over `{silver_orders} s`: not a return, and one
+    `sales_type` unless `'all'`. No `is_active_source` — see above. An unknown
+    sales_type raises, as the bridge's predicate does."""
+    from core.duckdb_constants import KNOWN_SALES_TYPES
+
+    if sales_type == "all":
+        return "NOT s.is_return", []
+    if sales_type not in KNOWN_SALES_TYPES:
+        raise ValueError(
+            f"unknown sales_type {sales_type!r}; expected one of "
+            f"{', '.join(KNOWN_SALES_TYPES)} or 'all'"
+        )
+    return "NOT s.is_return AND s.sales_type = ?", [sales_type]
+
+
+def _history_from_silver() -> bool:
+    """`KS_GOALS_HISTORY` — asked at every history read, and it raises on a
+    value it does not know (`core/pg_goals_read.py`)."""
+    from core import pg_goals_read
+
+    return pg_goals_read.history_from_silver()
+
+
+def _first_of_next_month(d: date) -> date:
+    return date(d.year + (d.month == 12), d.month % 12 + 1, 1)
 
 
 # ─── The three shared goal tables ───────────────────────────────────────────
@@ -251,6 +463,38 @@ def _recency_weighted(rates: List[float]) -> float:
         return rates[0]
     weights = [1.0 + (i / (n - 1)) for i in range(n)]
     return sum(r * w for r, w in zip(rates, weights)) / sum(weights)
+
+
+def _seasonality_answer(results) -> Dict[int, Dict[str, Any]]:
+    """`{month: index row}` from `(month, avg, min, max, sample_size, stddev,
+    index)` rows — the same arithmetic for both histories. `float()` and
+    `int()` on every term: DuckDB answers BIGINT and DOUBLE, Postgres NUMERIC."""
+    indices = {}
+    for row in results:
+        month = int(row[0])
+        sample_size = int(row[4] or 0)
+
+        # Determine confidence based on sample size
+        if sample_size >= 3:
+            confidence = "high"
+        elif sample_size >= 2:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        indices[month] = {
+            "month": month,
+            "avg_revenue": round(float(row[1] or 0), 2),
+            "min_revenue": round(float(row[2] or 0), 2),
+            "max_revenue": round(float(row[3] or 0), 2),
+            "sample_size": sample_size,
+            "std_dev": round(float(row[5] or 0), 2),
+            "seasonality_index": round(float(row[6] or 1.0), 4),
+            "confidence": confidence
+        }
+
+    logger.info(f"Calculated seasonality indices for {len(indices)} months")
+    return indices
 
 
 def _yoy_answer(yearly_results, monthly_yoy_results) -> Tuple[Dict[str, Any], float]:
@@ -633,6 +877,12 @@ class GoalsMixin:
     # order, and the YoY half was twelve autocommitted UPDATEs after twelve
     # autocommitted upserts, so a crash or a refused read between them left
     # this week's indices beside last week's `yoy_growth` and `growth_metrics`.
+    #
+    # Every history read below has two bodies, chosen at the read by
+    # `KS_GOALS_HISTORY` (chain 7b-2): the DN-12 bridge on the store's own
+    # connection (`bridge`, the default), or Silver through `_goals_run`
+    # (`silver`). The two branches sit side by side in each method so the
+    # body each one hands its reader is a module constant a walk can read.
 
     async def _bridge_rows(self, sql: str, params=()) -> List[Tuple]:
         """One read of the DN-12 bridge, on the store's own connection."""
@@ -654,6 +904,11 @@ class GoalsMixin:
         Returns:
             Dictionary mapping month (1-12) to seasonality data
         """
+        if _history_from_silver():
+            where, params = _silver_history_where(sales_type)
+            return _seasonality_answer(await self._goals_run(
+                _SILVER_SEASONALITY_SQL.replace("{where}", where), params))
+
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
         sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
@@ -698,34 +953,7 @@ class GoalsMixin:
             FROM monthly_stats ms, overall_avg oa
             ORDER BY ms.month
         """
-        results = await self._bridge_rows(sql, sales_params)
-
-        indices = {}
-        for row in results:
-            month = int(row[0])
-            sample_size = row[4] or 0
-
-            # Determine confidence based on sample size
-            if sample_size >= 3:
-                confidence = "high"
-            elif sample_size >= 2:
-                confidence = "medium"
-            else:
-                confidence = "low"
-
-            indices[month] = {
-                "month": month,
-                "avg_revenue": round(float(row[1] or 0), 2),
-                "min_revenue": round(float(row[2] or 0), 2),
-                "max_revenue": round(float(row[3] or 0), 2),
-                "sample_size": sample_size,
-                "std_dev": round(float(row[5] or 0), 2),
-                "seasonality_index": round(float(row[6] or 1.0), 4),
-                "confidence": confidence
-            }
-
-        logger.info(f"Calculated seasonality indices for {len(indices)} months")
-        return indices
+        return _seasonality_answer(await self._bridge_rows(sql, sales_params))
 
     async def calculate_yoy_growth(self, sales_type: str = "retail") -> Dict[str, Any]:
         """Year-over-year growth, overall and per month. Reads only.
@@ -744,9 +972,6 @@ class GoalsMixin:
 
     async def _yoy_growth(self, sales_type: str) -> Tuple[Dict[str, Any], float]:
         """`(answer, overall)` — `overall` unrounded, as it is stored."""
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
-
         # Only full years (11 months with orders or more), and never the
         # current Kyiv year. The second half is what the comment here always
         # said and the query never did: from the first order dated 1 November
@@ -755,6 +980,17 @@ class GoalsMixin:
         # DECIMALs times float weights — raised TypeError. The Monday job
         # would have failed from 2026-11-02, and `GET /goals/growth` with it.
         this_year = date(datetime.now(DEFAULT_TZ).year, 1, 1)
+
+        if _history_from_silver():
+            where, params = _silver_history_where(sales_type)
+            yearly = await self._goals_run(
+                _SILVER_YEARLY_SQL.replace("{where}", where), params + [this_year])
+            monthly = await self._goals_run(
+                _SILVER_MONTHLY_YOY_SQL.replace("{where}", where), params)
+            return _yoy_answer(yearly, monthly)
+
+        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
+        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
         yearly_sql = f"""
             WITH yearly_data AS (
                 SELECT
@@ -805,6 +1041,9 @@ class GoalsMixin:
     async def _history_bounds(self) -> Tuple[Optional[date], Optional[date]]:
         """The first and last Kyiv order date anywhere in the history —
         `growth_metrics.period_start`/`period_end`."""
+        if _history_from_silver():
+            rows = await self._goals_run(_SILVER_BOUNDS_SQL)
+            return (rows[0][0], rows[0][1]) if rows else (None, None)
         rows = await self._bridge_rows(
             f"SELECT MIN({_date_in_kyiv('ordered_at')}), "
             f"MAX({_date_in_kyiv('ordered_at')}) FROM orders")
@@ -830,6 +1069,11 @@ class GoalsMixin:
     async def _weekly_patterns(self, sales_type: str):
         """`(patterns, rows)` — `rows` are `[month, week, weight, sample_size]`
         as stored: the measured weeks only, the weight unrounded."""
+        if _history_from_silver():
+            where, params = _silver_history_where(sales_type)
+            return _weekly_answer(await self._goals_run(
+                _SILVER_WEEKLY_SQL.replace("{where}", where), params))
+
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
         sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
@@ -1064,6 +1308,13 @@ class GoalsMixin:
         `generate_smart_goals` asks for it before it opens its own. It used to
         take that connection as an argument.
         """
+        if _history_from_silver():
+            where, params = _silver_history_where(sales_type)
+            rows = await self._goals_run(
+                _SILVER_GROWTH_CAP_SQL.replace("{where}", where),
+                [target_month] + params)
+            return _growth_cap(rows[0] if rows else None)
+
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
         sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
 
@@ -1096,6 +1347,15 @@ class GoalsMixin:
         self, target_year: int, target_month: int, sales_type: str,
     ) -> float:
         """The target month a year earlier — signal 1's baseline."""
+        if _history_from_silver():
+            where, params = _silver_history_where(sales_type)
+            first = date(target_year - 1, target_month, 1)
+            rows = await self._goals_run(
+                _SILVER_LAST_YEAR_SQL.replace("{where}", where),
+                [first, _first_of_next_month(first)] + params)
+            value = rows[0][0] if rows else None
+            return float(value or 0) if value else 0
+
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
         sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
         last_year_sql = f"""
@@ -1123,9 +1383,17 @@ class GoalsMixin:
         `TZ=Europe/Kyiv`, where the two are the same day — nothing moves in
         production.
         """
+        month_start = datetime.now(DEFAULT_TZ).date().replace(day=1)
+        if _history_from_silver():
+            where, params = _silver_history_where(sales_type)
+            rows = await self._goals_run(
+                _SILVER_RECENT_MONTHS_SQL.replace("{where}", where),
+                params + [month_start])
+            value = rows[0][0] if rows else None
+            return float(value or 0) if value else 0
+
         return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
         sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
-        month_start = datetime.now(DEFAULT_TZ).date().replace(day=1)
         recent_avg_sql = f"""
             WITH monthly_revenue AS (
                 SELECT
@@ -1485,10 +1753,11 @@ class GoalsMixin:
         """Stored revenue predictions for a date range, from whichever engine.
 
         The last read of this tab to move, and it could not until revision 0025
-        gave `revenue_predictions` a Postgres home — `generate_smart_goals`,
-        which the audit filed beside it, turned out not to be a read at all:
-        it recomputes the three seasonality tables in DuckDB and then reads
-        them back, so its read cannot leave without its write.
+        gave `revenue_predictions` a Postgres home. `generate_smart_goals`,
+        which the audit filed beside it, was not a read at all until chain
+        7b-1: it recomputed the three seasonality tables in DuckDB and read
+        them back. It reads only now, and those three tables are still read
+        where they are written, in DuckDB, until their writer moves (7b-3).
         """
         rows = await self._goals_run(
             _PREDICTIONS_SQL, [sales_type, start_date, end_date])

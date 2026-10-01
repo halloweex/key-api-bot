@@ -67,14 +67,18 @@ ROUTED = ("get_goals", "get_smart_goals", "get_historical_revenue",
 # Postgres holds an hourly replica of them. So they are still read where they
 # are written.
 #
-# Since DN-12 it does reach the router along exactly one path: its ML signal,
-# `_get_ml_forecast_total`, which reads Gold and `revenue_predictions` — both
-# of which Postgres has — before the method takes its own connection. That
-# path is excluded from the walk below by name, and what it routes is checked
-# separately, so the compute-then-read loop over the three seasonality tables
-# stays whole on DuckDB.
+# It reaches the router along four paths, and each is excluded from the walk
+# below by name, with what it routes checked separately: its ML signal,
+# `_get_ml_forecast_total`, which reads Gold and `revenue_predictions` (since
+# DN-12); and, under `KS_GOALS_HISTORY=silver` (chain 7b-2), the three history
+# reads it asks before taking its own connection — the growth cap, last
+# year's month and the recent months — which read `{silver_orders}`. None of
+# the four names a table Postgres holds only as a replica, so the three
+# seasonality tables stay read where they are written.
 NOT_ROUTED = ("generate_smart_goals",)
-ROUTED_ONLY_VIA = {"generate_smart_goals": ("_get_ml_forecast_total",)}
+ROUTED_ONLY_VIA = {"generate_smart_goals": (
+    "_get_ml_forecast_total", "_dynamic_growth_cap", "_last_year_month_revenue",
+    "_recent_three_month_average")}
 ABSENT_FROM_POSTGRES_READS = ("seasonal_indices", "weekly_patterns", "growth_metrics")
 
 # The writes. These *may* reach the router — `set_goal` computes a suggestion
@@ -196,14 +200,14 @@ class TestTheBoundary:
         assert self._reaches_router(name), f"{name} never reaches _goals_run"
 
     @pytest.mark.parametrize("name", NOT_ROUTED)
-    def test_the_recompute_then_read_is_not_routed(self, name):
+    def test_the_seasonality_tables_are_not_routed(self, name):
         assert not self._reaches_router(
             name, excluding=ROUTED_ONLY_VIA.get(name, ())), (
-            f"{name} reaches the router outside its ML signal. It recomputes "
-            f"seasonal_indices / weekly_patterns / growth_metrics in DuckDB "
-            f"and then reads them back; Postgres holds only an hourly replica "
-            f"of those three, so a routed read would return the tables as "
-            f"they were before the recompute it just ran."
+            f"{name} reaches the router outside its ML signal and its history "
+            f"reads. It reads seasonal_indices / weekly_patterns / "
+            f"growth_metrics, which DuckDB writes; Postgres holds only an "
+            f"hourly replica of those three, so a routed read would answer up "
+            f"to an hour behind POST /goals/recalculate."
         )
 
     @pytest.mark.parametrize("name", sorted(
