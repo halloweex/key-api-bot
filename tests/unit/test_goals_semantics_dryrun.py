@@ -16,11 +16,17 @@ differs. Proved here on a backup written for the purpose:
   * each path to DIFFERENCES on its own: a growth cap — a list leaf — moving
     alone, and an order counted by one side only while no number moves, on
     either side (mutations MXp, MXq, MXq2).
+  * where `reconcile_silver` does not run, its silence is no verdict: a
+    backup recording Postgres as the warehouse writer is refused, and
+    `KS_WRITE_WAREHOUSE` other than duckdb — like `KS_MIRROR_LANDING` off —
+    is a reason, read by the real `postgres_half` from its environment
+    (mutations MW1–MW6).
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -423,3 +429,119 @@ class TestTheDoor:
                  if isinstance(n, ast.Constant) and isinstance(n.value, str)
                  and id(n) not in docstrings and "KS_PG_DSN" in n.value]
         assert named == []
+
+
+# ─── Where reconcile_silver does not run at all ─────────────────────────────
+
+def _record_writer(path: Path, value: str) -> None:
+    """Write the warehouse writer record into a built backup, the way
+    `core.warehouse_cutover._write_writer` does — after the build, so no
+    refresh of the build's own reads it and moves the module's state."""
+    import duckdb
+
+    from core.warehouse_cutover import WRITER_KEY
+
+    conn = duckdb.connect(str(path))
+    try:
+        conn.execute("INSERT OR REPLACE INTO sync_metadata (key, value) VALUES (?, ?)",
+                     [WRITER_KEY, value])
+    finally:
+        conn.close()
+
+
+class TestAfterTheWarehouseSwitch:
+    """`reconcile_silver` does not run while the warehouse checks stand down —
+    Postgres alone derives, or a way back is owed its first validated full
+    DuckDB tick — and then the journal's silence about `silver.orders` is not
+    a verdict, and DuckDB's `silver_orders` the backup half reads is frozen.
+    The backup's recorded writer says which, by `read_writer`'s rules.
+    Mutations: skip the check (MW4); refuse any record at all (MW5); copy no
+    record out of the backup (MW6)."""
+
+    @pytest.mark.parametrize("record", [
+        json.dumps({"writer": "postgres", "since": "2026-11-02T04:00:00+00:00",
+                    "resolved": True}),
+        "not the JSON this build writes",
+    ], ids=["switched", "unreadable"])
+    def test_a_backup_recording_postgres_is_refused(self, tmp_path, capsys, record):
+        backup = _backup(tmp_path)
+        _record_writer(backup, record)
+        before = _sha(backup)
+        assert dryrun.main(["--backup", str(backup), "--today", TODAY]) == 2
+        err = capsys.readouterr().err
+        assert "records postgres as the warehouse writer" in err, err
+        assert "reconcile_silver stands down" in err
+        assert _sha(backup) == before
+
+    def test_a_way_back_that_completed_is_answered(self, tmp_path, capsys):
+        backup = _backup(tmp_path)
+        _record_writer(backup, json.dumps(
+            {"writer": "duckdb", "since": "2026-11-09T04:00:00+00:00"}))
+        assert dryrun.main(["--backup", str(backup), "--today", TODAY]) == 0
+        assert "CLEAN —" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("value,stands_down", [
+        (None, False), ("", False), ("duckdb", False), (" DuckDB ", False),
+        ("postgres", True), ("Postgres ", True), ("postgress", True),
+    ])
+    def test_the_switch_in_this_environment(self, value, stands_down):
+        """`KS_WRITE_WAREHOUSE` read as web reads it. A value web does not
+        understand runs as duckdb — unless a switch came first, when it takes
+        the way back and holds the checks down — so it is not trusted.
+        Mutation MW1: ignore `warehouse_value`."""
+        verdict = dryrun.judge_postgres(_state(), landing_on=True,
+                                        warehouse_value=value)
+        if stands_down:
+            assert len(verdict.reasons) == 1, verdict.reasons
+            assert verdict.reasons[0].startswith(
+                f"KS_WRITE_WAREHOUSE={value!r} in this environment")
+        else:
+            assert verdict.clean, verdict.reasons
+
+
+class TestTheEnvironmentItRunsIn:
+    """The real `postgres_half` judges with the environment it runs in —
+    web's, run as the web service — and not with constants. A login that
+    connects, can write nothing, and reads a clean journal. Mutations:
+    `landing_on=True` (MW2), `warehouse_value` not passed (MW3)."""
+
+    REAL_POSTGRES_HALF = True
+
+    @pytest.fixture(autouse=True)
+    def _a_clean_read_only_journal(self, monkeypatch):
+        from scripts import utm_reclassify_dryrun as door
+
+        class _Conn:
+            async def close(self):
+                pass
+
+        async def connect(dsn=None):
+            return _Conn()
+
+        async def writes_nothing(conn, role=None):
+            return []
+
+        async def clean_state(conn):
+            return _state()
+
+        monkeypatch.setattr(dryrun, "connect_readonly", connect)
+        monkeypatch.setattr(door, "write_privileges", writes_nothing)
+        monkeypatch.setattr(dryrun, "read_postgres_state", clean_state)
+        monkeypatch.delenv("KS_MIRROR_LANDING", raising=False)
+        monkeypatch.delenv("KS_WRITE_WAREHOUSE", raising=False)
+
+    def test_as_production_runs_it_is_clean(self):
+        verdict = asyncio.run(dryrun.postgres_half())
+        assert verdict.clean, verdict.reasons
+
+    @pytest.mark.parametrize("env,value,head", [
+        ("KS_MIRROR_LANDING", "0", "KS_MIRROR_LANDING is off"),
+        ("KS_WRITE_WAREHOUSE", "postgres", "KS_WRITE_WAREHOUSE='postgres'"),
+    ])
+    def test_a_switch_that_stands_reconcile_silver_down(
+        self, monkeypatch, env, value, head,
+    ):
+        monkeypatch.setenv(env, value)
+        verdict = asyncio.run(dryrun.postgres_half())
+        assert len(verdict.reasons) == 1 and verdict.reasons[0].startswith(head), \
+            verdict.reasons

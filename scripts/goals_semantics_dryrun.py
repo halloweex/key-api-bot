@@ -54,14 +54,23 @@ as `ks_readonly`, and the run is clean only when:
 - `KS_MIRROR_LANDING` is not off here: with the landing mirror off,
   `reconcile_silver` compares nothing and files nothing, and its silence is
   not a verdict. Read from this process's environment, which is web's when it
-  runs as the web service.
+  runs as the web service;
+- `KS_WRITE_WAREHOUSE` is `duckdb` (or unset) here, for the same reason:
+  `reconcile_silver` stands down while Postgres alone derives, and after a
+  switch a value web does not understand takes the way back, which holds it
+  down too.
 
 Backup half clean and Postgres half clean together say: DuckDB's bridge and
 DuckDB's Silver count the same orders the same way, and Postgres' Silver
-holds what DuckDB's holds. `reconcile_silver` stands down only under
-`KS_WRITE_WAREHOUSE=postgres`, which cannot take effect before this flip —
-`goals_bridge` is one of its preconditions — so before the flip it runs on
-every `mirror_landing` run. That the same bodies answer the same way on
+holds what DuckDB's holds. `reconcile_silver` stands down while the
+warehouse checks do — `KS_WRITE_WAREHOUSE=postgres`, or the way back from it
+before its first validated full DuckDB tick. The switch cannot take effect
+before this flip (`goals_bridge` is one of its preconditions), but a later
+re-flip can follow one, so it is not assumed: a backup whose
+`sync_metadata.warehouse_writer` reads `postgres` — switched, or a way back
+still owed — is refused (exit 2) before anything is compared, since its
+DuckDB Silver is frozen as well, and the variable above is a reason on the
+Postgres half. That the same bodies answer the same way on
 Postgres is proved on every pull request by
 `tests/integration/test_goals_history_two_engines.py`, and after the flip by
 the soak (the smart goal before and after).
@@ -143,6 +152,13 @@ def copy_backup(backup: Path):
             raise Refused(f"{backup} has no {', '.join(missing)}")
         for table in TABLES:
             conn.execute(f"CREATE TABLE {table} AS SELECT * FROM backup.main.{table}")
+        # The warehouse writer the backup records, and nothing else of
+        # sync_metadata: `refuse_after_the_switch` reads it by web's rules.
+        conn.execute("CREATE TABLE sync_metadata (key VARCHAR, value VARCHAR)")
+        if "sync_metadata" in present:
+            conn.execute(
+                "INSERT INTO sync_metadata SELECT key, CAST(value AS VARCHAR) "
+                "FROM backup.main.sync_metadata WHERE key = ?", [_writer_key()])
         for table, columns in KEYS.items():
             conn.execute(f"CREATE UNIQUE INDEX {table}_key ON {table} ({', '.join(columns)})")
         conn.execute("DETACH backup")
@@ -153,6 +169,39 @@ def copy_backup(backup: Path):
         conn.close()
         raise Refused(f"{backup} could not be read: {type(exc).__name__}: {exc}")
     return conn
+
+
+def _writer_key() -> str:
+    from core.warehouse_cutover import WRITER_KEY
+
+    return WRITER_KEY
+
+
+async def refuse_after_the_switch(conn, backup: Path) -> None:
+    """Refuse a backup that records Postgres as the warehouse writer.
+
+    Under it Postgres alone derives Silver — or the way back from that is
+    still owed its first validated full DuckDB tick — and both halves go
+    blind at once: the backup's `silver_orders` is frozen, so the backup half
+    compares the bridge with a stale Silver, and `reconcile_silver` stands
+    down in the job, so the journal holds no verdict on `silver.orders` and
+    its silence would read clean. Read by `core.warehouse_cutover.read_writer`,
+    whose rules decide it for web: a value it did not write counts as
+    postgres. This is the gate before the warehouse switch, which needs this
+    flip (`goals_bridge`), not after it."""
+    from core import warehouse_cutover as cutover
+
+    record = await cutover.read_writer(_store_class()(conn))
+    if record is not None and record.get("writer") != cutover.DUCKDB:
+        how = (" (a value this build did not write, read as postgres)"
+               if record.get("unreadable") else
+               f" since {record.get('since')}")
+        raise Refused(
+            f"{backup} records {record.get('writer')} as the warehouse writer"
+            f"{how}: Postgres alone derives Silver, or a way back is still "
+            "owed its first validated full DuckDB tick, so its silver_orders "
+            "is frozen and reconcile_silver stands down — neither half can "
+            "answer")
 
 
 def _store_class():
@@ -398,9 +447,13 @@ async def read_postgres_state(conn) -> Dict[str, Any]:
     }
 
 
-def judge_postgres(state: Mapping[str, Any], *, landing_on: bool) -> PostgresVerdict:
+def judge_postgres(state: Mapping[str, Any], *, landing_on: bool,
+                   warehouse_value: Optional[str] = None) -> PostgresVerdict:
     """Whether the state read proves Postgres Silver holds what DuckDB's
-    holds. Pure: `now` is the server's own `taken_at`."""
+    holds. Pure: `now` is the server's own `taken_at`, and the two switches
+    that stand `reconcile_silver` down are handed in — `landing_on`, and
+    `warehouse_value`, `KS_WRITE_WAREHOUSE` as the environment holds it."""
+    from core import warehouse_cutover as cutover
     from core.pg_inventory_write import _raised_checks
 
     journal_copy, copy_within, verdict_within = _journal_limits()
@@ -413,6 +466,16 @@ def judge_postgres(state: Mapping[str, Any], *, landing_on: bool) -> PostgresVer
             "KS_MIRROR_LANDING is off in this environment: reconcile_silver "
             "compares nothing then and files nothing, so silence about "
             f"{SILVER_TABLE} is not a verdict")
+    # Read as `configure_mode` reads it. A value web does not understand runs
+    # as duckdb — unless a switch came first, when it is the way back and
+    # holds the comparison down — so only `duckdb` itself is trusted.
+    warehouse = (warehouse_value or cutover.DUCKDB).strip().lower() or cutover.DUCKDB
+    if warehouse != cutover.DUCKDB:
+        reasons.append(
+            f"{cutover.ENV}={warehouse_value!r} in this environment: "
+            "reconcile_silver stands down while Postgres alone derives, and "
+            "while a way back is owed its first validated full DuckDB tick, "
+            f"so silence about {SILVER_TABLE} is not a verdict")
 
     ok_at = state.get("journal_ok_at")
     if ok_at is not None:
@@ -531,7 +594,10 @@ async def postgres_half(dsn: Optional[str] = None) -> PostgresVerdict:
                           f"{type(exc).__name__}: {exc}")
     finally:
         await conn.close()
-    return judge_postgres(state, landing_on=pg_landing.enabled())
+    from core import warehouse_cutover as cutover
+
+    return judge_postgres(state, landing_on=pg_landing.enabled(),
+                          warehouse_value=os.environ.get(cutover.ENV))
 
 
 # ─── the report ──────────────────────────────────────────────────────────────
@@ -591,6 +657,7 @@ async def measure(backup: Path, today: date) -> Report:
             conn = copy_backup(backup)
             try:
                 if side == SIDES[0]:
+                    await refuse_after_the_switch(conn, backup)
                     for sales_type in (*KNOWN_SALES_TYPES, "all"):
                         bridge, silver = order_sets(conn, sales_type)
                         report.orders[sales_type] = {

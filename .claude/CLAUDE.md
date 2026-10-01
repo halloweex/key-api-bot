@@ -3381,10 +3381,16 @@ against each other at one instant: the latest `mirror_landing` run's
 when the copy is under 75 min old and not failing, the run under 30 h (chain
 1's preflight limits, read from it), the run did not fail in
 `reconcile_silver`, `setup` or unparseably, it filed nothing against
-`silver.orders`, and `KS_MIRROR_LANDING` is not off — `reconcile_silver`
-files nothing then. Exit 1 is a difference or Postgres Silver not proved,
+`silver.orders`, and neither switch that stands `reconcile_silver` down is
+set here — `KS_MIRROR_LANDING` off, or `KS_WRITE_WAREHOUSE` anything but
+`duckdb` — since it files nothing then. A backup whose
+`sync_metadata.warehouse_writer` reads `postgres` (switched, or a way back
+still owed its validated full tick) is refused: its Silver is frozen and the
+comparison stood down, so neither half could answer. Before the warehouse
+switch neither can hold, since `goals_bridge` is one of its preconditions;
+a re-flip after one is when they would. Exit 1 is a difference or Postgres Silver not proved,
 each named; 2 a refusal (no read-only login, one that can write, Postgres
-unreachable); `--backup-only` skips the Postgres half and exits 3 on a clean
+unreachable, a backup after the switch); `--backup-only` skips the Postgres half and exits 3 on a clean
 backup, never 0. What the verdict cannot see is a Postgres Silver that went
 wrong after that run, which is why it is the flip day's run. Rollback is unsetting the
 variable and `up -d web`, number-neutral by the same measurement, while the
