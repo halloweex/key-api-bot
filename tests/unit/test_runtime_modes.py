@@ -130,11 +130,16 @@ class TestTheSchedulerStillConfigures:
 WRITER_MODULES = frozenset({
     "core.sync_service", "core.pg_landing", "core.pg_backfill",
     "core.pg_buyers", "core.pg_replication", "core.pg_buyers_write",
+    # Chain 3: which store an order goes to is chosen from the latch marker
+    # too, so a script reaching its writers must have loaded it.
+    "core.pg_orders_write",
 })
 WRITER_CALLS = frozenset({
     "upsert_orders", "upsert_managers", "upsert_buyers", "write_orders",
     "mirror_orders", "mirror_buyers", "backfill_orders", "backfill_buyers",
     "replicate_managers", "ship_orders_by_id", "derive_gender", "derive_gender_pg",
+    "upsert_orders_with_expenses", "record_backfill_misses",
+    "restore_manager_comments",
 })
 
 

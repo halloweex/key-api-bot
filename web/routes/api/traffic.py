@@ -356,7 +356,14 @@ async def _run_backfill(days: int):
 
 
 async def _run_backfill_inner(days: int):
+    from core.duckdb_store import _orders_in_postgres
     from core.keycrm import get_async_client
+
+    # Under chain 3 the orders are written to Postgres alone, and a comment
+    # restored in DuckDB would be one nobody reads — while `ship_orders_by_id`
+    # stands down and carries nothing. The run goes to the chain instead.
+    if _orders_in_postgres():
+        return await _run_backfill_postgres(days)
 
     store = await get_store()
     client = await get_async_client()
@@ -576,6 +583,94 @@ async def _run_backfill_inner(days: int):
         })
     except Exception as e:
         logger.error(f"UTM backfill failed: {e}", exc_info=True)
+        _backfill_status.update(running=False, result={
+            "status": "error", "error": "UTM backfill failed — see server logs",
+        })
+
+
+async def _run_backfill_postgres(days: int):
+    """`_run_backfill_inner` under chain 3 (`core/pg_orders_write.py`).
+
+    The same walk over KeyCRM, and the same answer shape, with one store:
+    each chunk's comments go to `pg_orders_write.restore_manager_comments`,
+    which fills in only the orders whose comment Postgres holds as NULL and
+    archives each as `kind='backfill'` (OD-20 (b)) in the row's own
+    transaction. Nothing is written to DuckDB, whose orders the chain froze.
+    The write holds the scheduler's heavy-job lock, as the DuckDB path does;
+    the KeyCRM pagination stays outside it. Under the chain step 13 is in
+    force, so Postgres alone parses what landed (`reparse_router`).
+    """
+    from core import pg_orders_read, pg_orders_write
+    from core.keycrm import get_async_client
+    from core.scheduler import get_scheduler
+
+    store = await get_store()
+    client = await get_async_client()
+    tz = ZoneInfo("Europe/Kyiv")
+    try:
+        null_count = await pg_orders_read.null_comment_count()
+        if null_count == 0:
+            _backfill_status.update(running=False, result={
+                "status": "skip", "message": "All orders already have manager_comment",
+            })
+            return
+        final_end = _dt.now(tz) + timedelta(days=1)
+        current_start = _dt.now(tz) - timedelta(days=days)
+        api_fetched_total = restored_total = chunks_processed = 0
+        failed_chunks: list[str] = []
+        while current_start < final_end:
+            current_end = min(current_start + timedelta(days=30), final_end)
+            start_str, end_str = current_start.strftime('%Y-%m-%d'), current_end.strftime('%Y-%m-%d')
+            chunks_processed += 1
+            comments: dict = {}
+            try:
+                params = {"filter[created_between]": f"{start_str}, {end_str}", "limit": 50}
+                async for batch in client.paginate("order", params=params, page_size=50):
+                    for order in batch:
+                        if order.get("manager_comment"):
+                            comments[order["id"]] = order["manager_comment"]
+            except Exception as e:
+                logger.warning(f"UTM backfill chunk {start_str}-{end_str} failed: {e}")
+                current_start = current_end
+                continue
+            api_fetched_total += len(comments)
+            if comments:
+                try:
+                    async with get_scheduler()._heavy_job_lock:
+                        restored = await pg_orders_write.restore_manager_comments(comments)
+                    restored_total += len(restored)
+                except Exception as write_error:
+                    # The chain's writer raises (OD-13 (a)). One chunk's
+                    # failure is reported and the walk goes on: a re-run
+                    # offers the same comments again, since Postgres still
+                    # holds them as NULL.
+                    failed_chunks.append(f"{start_str}..{end_str}")
+                    logger.error("UTM backfill (chain 3): chunk %s..%s not "
+                                 "written: %s", start_str, end_str,
+                                 type(write_error).__name__, exc_info=True)
+            _backfill_status["result"] = {
+                "status": "in_progress", "chunks_processed": chunks_processed,
+                "api_fetched": api_fetched_total, "pg_restored": restored_total,
+            }
+            current_start = current_end
+            await asyncio.sleep(3)
+
+        remaining_null = await pg_orders_read.null_comment_count()
+        parsed = await reparse_router(store)
+        pg_parse_error = parsed.get("error") or parsed.get("skipped")
+        _backfill_status.update(running=False, result={
+            "status": "partial" if failed_chunks or pg_parse_error else "success",
+            **({"pg_parse_error": pg_parse_error} if pg_parse_error else {}),
+            "orders_missing_before": null_count,
+            "orders_remaining_null": remaining_null,
+            "api_fetched": api_fetched_total,
+            "pg_restored": restored_total,
+            "failed_chunks": failed_chunks,
+            "chunks_processed": chunks_processed,
+            "utm_records_parsed": int(parsed.get("parsed") or 0),
+        })
+    except Exception as e:
+        logger.error(f"UTM backfill (chain 3) failed: {e}", exc_info=True)
         _backfill_status.update(running=False, result={
             "status": "error", "error": "UTM backfill failed — see server logs",
         })

@@ -121,6 +121,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from core import chain_latch
@@ -415,9 +416,24 @@ def _int_refusal(column: str, value, bounds=_INT32) -> Optional[str]:
     return None
 
 
-def _row_refusal(row, ints, not_null, text, money, *, bounds=None) -> Optional[str]:
+def _money_refusal(column: str, value, *, nullable: bool) -> Optional[str]:
+    """`pg_numeric.refusal` for a money column, reading a numeric string as
+    the number it is: KeyCRM may serve an expense's `amount` as text, the
+    shared parse passes it through, and both DuckDB's DECIMAL and asyncpg's
+    NUMERIC take it (checked on asyncpg against PostgreSQL 17.2)."""
+    from decimal import InvalidOperation
+
     from core.pg_numeric import refusal
 
+    if isinstance(value, str):
+        try:
+            value = Decimal(value)
+        except InvalidOperation:
+            return f"{column} is text that is not a number"
+    return refusal(column, value, *_MONEY, nullable=nullable)
+
+
+def _row_refusal(row, ints, not_null, text, money, *, bounds=None) -> Optional[str]:
     bounds = bounds or {}
     for column in not_null:
         if getattr(row, column) is None:
@@ -431,8 +447,8 @@ def _row_refusal(row, ints, not_null, text, money, *, bounds=None) -> Optional[s
         if why:
             return why
     for column in money:
-        why = refusal(column, getattr(row, column), *_MONEY,
-                      nullable=column not in not_null)
+        why = _money_refusal(column, getattr(row, column),
+                             nullable=column not in not_null)
         if why:
             return why
     return None
@@ -482,10 +498,19 @@ def decide(orders: Sequence[Any], existing: Mapping[int, Any], *,
         if skip_products and oid not in existing:
             deferred += 1
             continue
-        if oid in existing and not should_update_order(
-                _as_utc(existing[oid]), _as_utc(row.updated_at), force=force_update):
-            skipped.append(oid)
-            continue
+        if oid in existing:
+            stored, incoming = _as_utc(existing[oid]), _as_utc(row.updated_at)
+            # DuckDB's path reads a payload's missing stamp through pandas as
+            # NaT, which no comparison passes, so a stored order is never
+            # rewritten by a payload without `updated_at` — whatever the
+            # decider's own None rule says. Production is that path; found by
+            # the grid in tests/unit/test_pg_orders_write.py.
+            if incoming is None and stored is not None:
+                skipped.append(oid)
+                continue
+            if not should_update_order(stored, incoming, force=force_update):
+                skipped.append(oid)
+                continue
         to_write.append(row)
     return to_write, skipped, deferred
 

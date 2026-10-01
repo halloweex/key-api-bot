@@ -126,3 +126,12 @@ async def halfwritten_among(ids: Iterable[int]) -> List[int]:
         rows = await conn.fetch(
             f"{_EMPTY_LINE_ITEMS} AND o.id = ANY($1::int[]) ORDER BY o.id", wanted)
     return [int(r["id"]) for r in rows]
+
+
+async def null_comment_count() -> int:
+    """How many orders Postgres holds with no `manager_comment` — the comment
+    backfills' "anything to do?" under chain 3."""
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval(
+            "SELECT count(*) FROM bronze.orders WHERE manager_comment IS NULL"))
