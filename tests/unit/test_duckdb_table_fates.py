@@ -552,6 +552,20 @@ def _chain_switches() -> Dict[str, object]:
     return {c.WRITE_ENV: c for c in WRITE_CHAINS}
 
 
+@pytest.fixture
+def every_switch_at_its_default(monkeypatch):
+    """Every switch as production reads it with no line in `.env` — whatever
+    this machine's `.env` says. `core.config` loads `.env` at import, and
+    production's sets `KS_USER_STORE` and `KS_WRITE_EXPENSES`: a laptop
+    holding a copy would otherwise read "every switch off" as a failure."""
+    from core import warehouse_cutover as wc
+
+    for env in [*_chain_switches(), *STORE_SWITCHES]:
+        if env != fates_mod.WAREHOUSE:
+            monkeypatch.setenv(env, "duckdb")
+    monkeypatch.setattr(wc, "_mode", wc.DUCKDB)
+
+
 class TestTheChains:
     def test_every_chain_table_carries_its_chains_switch(self):
         for env, chain in _chain_switches().items():
@@ -599,13 +613,15 @@ class TestTheChains:
         assert not unknown, unknown
         assert set(STORE_SWITCHES) <= set(seen), "a store switch nobody reads"
 
-    def test_every_store_switch_has_a_reader(self, monkeypatch):
+    @pytest.mark.usefixtures("every_switch_at_its_default")
+    def test_every_store_switch_has_a_reader(self):
         for switch in STORE_SWITCHES:
             assert fates_mod._store_switch_writes_duckdb(switch) is True, switch
 
 
 # ─── 5. "which tables are still DuckDB-written today" ──────────────────────
 
+@pytest.mark.usefixtures("every_switch_at_its_default")
 class TestDuckdbWritten:
     def test_it_answers_for_every_entry(self):
         assert set(fates_mod.duckdb_written()) == set(FATES)
@@ -657,7 +673,7 @@ class TestDuckdbWritten:
             monkeypatch.setenv(env, "postgress")
             written = fates_mod.duckdb_written()
             assert {written[n] for n in fates_mod.tables_by_switch(env)} == {None}, env
-            monkeypatch.delenv(env)
+            monkeypatch.setenv(env, "duckdb")
 
 
 # ─── 6. the host check ───────────────────────────────────────────────────────

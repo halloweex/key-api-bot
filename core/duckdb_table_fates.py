@@ -305,15 +305,16 @@ FATES: Dict[str, TableFate] = {
     # ── chain 10: watchdog samples (no switch yet) ──────────────────────────
     "disk_samples": TableFate(
         MOVED, IRREPLACEABLE, "Bounded samples the disk watchdog differences "
-        "against; OD-16 puts them in a file, and this copy then freezes.",
+        "against; chain 10 moves the writer (where to is OD-16's), and the "
+        "hourly copy in app holds the history.",
         successors=("app.disk_samples",), chain="10"),
     "data_dir_samples": TableFate(
         MOVED, IRREPLACEABLE, "Per-group samples behind the 168 h data-dir "
-        "baseline; OD-16.",
+        "baseline; chain 10, as disk_samples.",
         successors=("app.data_dir_samples",), chain="10"),
     "memory_samples": TableFate(
         MOVED, IRREPLACEABLE, "Memory samples; the only memory of an OOM kill "
-        "across a container recreate. OD-16.",
+        "across a container recreate. Chain 10, as disk_samples.",
         successors=("app.memory_samples",), chain="10"),
 
     # ── chain 11: the two send ledgers (no switch yet) ──────────────────────
