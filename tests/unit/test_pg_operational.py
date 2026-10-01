@@ -1071,13 +1071,13 @@ class TestBuyerGenderIsShippedAndCompared:
         # rewrites it whole.
         assert spec.full_replace
 
-    def test_the_stamp_is_shipped_and_never_compared(self):
-        """A full re-derivation stamps all 20 145 rows in one pass.
-
-        Comparing `decided_at` would ask the two copies to have been taken at
-        the same instant, which they never are — `sku_inventory_status.
-        updated_at` is the same situation and the same exclusion. The verdict
-        itself is compared, which is what the check is for.
+    def test_the_stamp_is_shipped_compared_and_the_grace_clock(self):
+        """Compared since chain 4 (decision 7). The hourly derive restamps
+        only the verdicts it writes and the copy ships the value as it stands,
+        so a `decided_at` that differs is the copy having drifted — and it is
+        the clock chain 4's copy-back hands over on. Still the grace clock, so
+        a verdict re-derived minutes before the check is forgiven until the
+        next hourly copy lands it.
         """
         from core.pg_operational import BUYER_GENDER_TABLE
 
@@ -1085,9 +1085,11 @@ class TestBuyerGenderIsShippedAndCompared:
             s for s in OPERATIONAL_TABLES if s.pg_table == BUYER_GENDER_TABLE
         )
         assert spec.synced_column == "decided_at"
-        assert "decided_at" in spec.ignore_columns
-        for column in ("gender", "method", "confidence", "override_by_human"):
-            assert column not in spec.ignore_columns, column
+        assert spec.ignore_columns == ()
+        assert spec.stamp_is_per_row
+        for column in ("decided_at", "gender", "method", "confidence",
+                       "override_by_human"):
+            assert column in spec.columns, column
 
     def test_the_schema_revision_carries_the_table(self):
         """migrate must be rebuilt alongside web, or every read raises."""

@@ -71,8 +71,8 @@ class TestEveryWriteChainIsRegistered:
 # `app.` table, or one whose target it cannot read (`INSERT INTO {table}`: a
 # guard that could not resolve a name must not read it as "not ours"). Each
 # must ask the registry itself, or be reached only from functions that do —
-# `write_orders`, `pg_buyers._write` and `write_managers` are such primitives,
-# and it is their callers that ask. What is exempt is the destination side,
+# `write_orders`, `pg_buyer_rows._write_buyer_rows` (through `pg_buyers._write`)
+# and `write_managers` are such primitives, and it is their callers that ask. What is exempt is the destination side,
 # each entry with its reason, and the list must be exactly what the walk finds.
 #
 # Two shapes the walk used to miss, found by the DN-22b review, are read now: a
@@ -608,9 +608,11 @@ class TestEveryPostgresWriterAsksTheRegistry:
             f"table, and not only from a function that asks: {uncovered}")
 
     def test_the_callers_of_the_named_primitives_ask(self, walk):
-        """The plan names `pg_buyers._write` and `write_managers`: every
-        function that calls either asks, directly or through its callers."""
+        """The plan names `pg_buyers._write` and `write_managers`, and chain 4
+        added the buyers' row writer both the mirror and the chain run: every
+        function that calls one asks, directly or through its callers."""
         for primitive in (("core/pg_buyers.py", "_write"),
+                          ("core/pg_buyer_rows.py", "_write_buyer_rows"),
                           ("core/pg_replication.py", "write_managers")):
             callers = walk.callers.get(primitive, set())
             assert callers, f"nothing calls {primitive} — the walk is not looking"
@@ -625,7 +627,7 @@ class TestEveryPostgresWriterAsksTheRegistry:
         assert {
             ("core/pg_landing.py", "_write"),
             ("core/pg_landing.py", "write_orders"),
-            ("core/pg_buyers.py", "_write"),
+            ("core/pg_buyer_rows.py", "_write_buyer_rows"),
             ("core/pg_replication.py", "write_managers"),
             ("core/pg_expense_backfill.py", "backfill_expenses"),
             ("core/pg_operational.py", "replicate_operational"),
@@ -637,6 +639,8 @@ class TestEveryPostgresWriterAsksTheRegistry:
             ("core/pg_buyers.py", "mirror_buyers"),
             ("core/pg_buyers.py", "backfill_buyers"),
             ("core/pg_buyers.py", "hourly_ids_diff"),
+            ("core/pg_buyers.py", "reship_buyers"),
+            ("web/routes/api/admin.py", "backfill_mirror_buyers"),
             ("core/pg_replication.py", "replicate_managers"),
             ("core/pg_expense_backfill.py", "backfill_expenses"),
             ("core/pg_expense_backfill.py", "hourly_expenses_ids_diff"),
@@ -2395,6 +2399,8 @@ class TestTheBuyersAndClassificationCopiesReadTheOwnerRows:
 _POOLED = {
     "backfill_buyers": BUYERS,
     "hourly_ids_diff": BUYERS,
+    # Chain 4's pre-flip lever: every buyer DuckDB holds, not only the missing.
+    "reship_buyers": BUYERS,
     "backfill_expenses": EXPENSES,
     "hourly_expenses_ids_diff": EXPENSES,
 }
@@ -2406,6 +2412,7 @@ async def _run_pooled(path, store):
     return await {
         "backfill_buyers": pg_buyers.backfill_buyers,
         "hourly_ids_diff": pg_buyers.hourly_ids_diff,
+        "reship_buyers": pg_buyers.reship_buyers,
         "backfill_expenses": pg_expense_backfill.backfill_expenses,
         "hourly_expenses_ids_diff": pg_expense_backfill.hourly_expenses_ids_diff,
     }[path](store)
@@ -2448,7 +2455,9 @@ class TestTheBackfillsAndTheHourlyDiffs:
     async def test_the_chain_stands_it_down_before_postgres(
             self, pool, landing_chain, tmp_path, path, caplog):
         landing_chain()
-        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        # `_NoStore`: a stood-down path never opens DuckDB either, which held
+        # only by the order of lines until chain 4's PR-2 made it a test.
+        await _expect_stood_down(path, _NoStore(), caplog)
         _never_reached_postgres(pool)
 
     @pytest.mark.asyncio
@@ -2459,7 +2468,7 @@ class TestTheBackfillsAndTheHourlyDiffs:
         table moved, and a path holding a pool reads it — DN-06's rule."""
         landing_chain(env=lambda: False)
         pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
-        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        await _expect_stood_down(path, _NoStore(), caplog)
         assert pool.only_asked_who_owns(), pool.sql
 
     @pytest.mark.asyncio
@@ -2469,7 +2478,7 @@ class TestTheBackfillsAndTheHourlyDiffs:
         """An image older than the chain: the owner row is read as itself."""
         _no_landing_chain(flags)
         pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
-        await _expect_stood_down(path, await _landing_store(tmp_path), caplog)
+        await _expect_stood_down(path, _NoStore(), caplog)
         assert pool.only_asked_who_owns(), pool.sql
 
     @pytest.mark.asyncio
@@ -2589,6 +2598,147 @@ class TestTheAdminExpenseBackfill:
         assert res.status_code == 200, res.json()
         backfill.assert_awaited_once()
         assert pool.only_asked_who_owns()
+
+
+class TestTheAdminBuyerReship:
+    """`POST /api/mirror/backfill/buyers` (chain 4, PR-2): the lever the
+    copy-back's handover names before the flip. Detached, like sync-all —
+    minutes of work would outlive the request budget — so every refusal has
+    to be answered here, before "started"."""
+
+    @pytest.fixture
+    def reship(self, flags):
+        from unittest.mock import AsyncMock
+
+        run = AsyncMock(return_value={"status": "done"})
+        flags.setattr("core.pg_buyers.reship_buyers", run)
+        flags.setattr("web.routes.api.admin.get_store", AsyncMock(return_value=object()))
+        return run
+
+    def _post(self, flags):
+        return _admin_client(flags).post("/api/mirror/backfill/buyers")
+
+    REFUSAL = "is written by a write chain, not shipped out of DuckDB"
+
+    def test_409_on_the_chain_and_postgres_is_not_asked(
+            self, flags, pool, landing_chain, reship):
+        landing_chain()
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert self.REFUSAL in res.json()["detail"]
+        assert BUYERS in res.json()["detail"]
+        reship.assert_not_called()
+        _never_reached_postgres(pool)
+
+    def test_409_on_the_owner_row_when_the_marker_is_lost(
+            self, flags, pool, landing_chain, reship):
+        landing_chain(env=lambda: False)
+        pool.owner_rows = {CONTACTS: "2026-09-20T08:00:00+00:00"}
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert self.REFUSAL in res.json()["detail"]
+        reship.assert_not_called()
+        assert pool.only_asked_who_owns()
+
+    def test_an_unreadable_owner_row_is_a_503(self, flags, pool, landing_chain, reship):
+        landing_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        res = self._post(flags)
+        assert res.status_code == 503, res.json()
+        assert "unreadable" in res.json()["detail"]
+        reship.assert_not_called()
+
+    def test_the_mirror_off_is_a_409_and_postgres_is_not_asked(self, flags, pool, reship):
+        flags.setenv("KS_MIRROR_LANDING", "0")
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert "KS_MIRROR_LANDING" in res.json()["detail"]
+        reship.assert_not_called()
+        _never_reached_postgres(pool)
+
+    def test_a_second_reship_while_one_runs_is_refused(self, flags, pool, reship):
+        from unittest.mock import MagicMock
+
+        from web.routes.api import admin
+
+        running = MagicMock()
+        running.get_name.return_value = "reship_buyers"
+        running.done.return_value = False
+        flags.setattr(admin, "_BACKGROUND_TASKS", {running})
+        res = self._post(flags)
+        assert res.status_code == 409, res.json()
+        assert "already running" in res.json()["detail"]
+        reship.assert_not_called()
+
+    def test_without_a_chain_it_answers_started(self, flags, pool, reship):
+        res = self._post(flags)
+        assert res.status_code == 200, res.json()
+        assert res.json()["status"] == "started"
+        assert pool.only_asked_who_owns()
+
+    @pytest.mark.asyncio
+    async def test_two_requests_at_once_start_one_reship(self, flags, pool, reship):
+        """The review's double click: both requests used to pass the "already
+        running" check while the first sat in the owner read, before any task
+        existed. Two requests in flight at once, the first held in that read;
+        exactly one may start."""
+        import asyncio
+        import time as _time
+
+        import httpx
+
+        from core.permissions import ADMIN_USER_IDS
+        from web.main import app
+        from web.routes.api import admin
+        from web.routes.api._deps import limiter
+        from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
+
+        limiter.reset()
+        flags.setattr(admin, "_RESHIP_SLOT", {"claimed": False})
+        admin_id = sorted(ADMIN_USER_IDS)[0]
+
+        async def _resolve(session):
+            return {"user_id": admin_id, "role": "admin"}
+
+        flags.setattr("web.routes.auth._resolve_session", _resolve)
+        release = asyncio.Event()
+        real = __import__("core.pg_landing", fromlist=["x"]).tables_stood_down_or_owned
+
+        async def held(pool_, unit):
+            await release.wait()
+            return await real(pool_, unit)
+
+        flags.setattr("core.pg_landing.tables_stood_down_or_owned", held)
+        cookie = session_serializer.dumps(create_session_data(
+            {"id": str(admin_id), "first_name": "T", "last_name": "U",
+             "username": "t", "auth_date": str(int(_time.time()))}, role="admin"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t",
+                                     cookies={SESSION_COOKIE: cookie}) as client:
+            first = asyncio.ensure_future(client.post("/api/mirror/backfill/buyers"))
+            await asyncio.sleep(0.05)                   # the first is in the owner read
+            try:
+                # Bounded: without the slot the second request also waits in
+                # the held read, and the test would hang rather than fail.
+                second = await asyncio.wait_for(
+                    client.post("/api/mirror/backfill/buyers"), 5)
+            finally:
+                release.set()
+            first = await asyncio.wait_for(first, 5)
+        assert second.status_code == 409, second.json()
+        assert "already running" in second.json()["detail"]
+        assert first.status_code == 200 and first.json()["status"] == "started"
+
+    def test_a_refused_request_gives_the_slot_back(self, flags, pool, landing_chain, reship):
+        """A 503 or a 409 from the owner read must not leave the slot claimed,
+        or every later reship would be refused as "already running"."""
+        from web.routes.api import admin
+
+        flags.setattr(admin, "_RESHIP_SLOT", {"claimed": False})
+        landing_chain(env=lambda: False)
+        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
+        assert self._post(flags).status_code == 503
+        assert admin._RESHIP_SLOT["claimed"] is False
 
 
 # ─── DN-22b: the daily comparisons stand down with their shippers ───────────

@@ -145,6 +145,42 @@ class TestEveryWriterOfASourceRaisesTheSignal:
         assert found, "the walk found no writer at all — it is not looking"
         assert found == set(pg_derivation.MARK_SITES), found
 
+    def test_every_caller_of_the_buyers_writer_owns_the_transaction(self):
+        """`pg_buyer_rows._write_buyer_rows` writes on its CALLER's transaction
+        and opens a savepoint around nothing but the mark, so the check below
+        passes on it whether or not the rows and the mark share a transaction.
+        Before chain 4's PR-2 the registered site was `pg_buyers._write`, whose
+        own transaction held rows, watermarks and mark, and removing it failed
+        that check; the review found the move had left nothing guarding it.
+        So every call of the core — the mirror's today, the chain's next — must
+        sit lexically inside an `async with <x>.transaction()` of the function
+        making it: walked over the tree, not named."""
+        calls = []
+        for root in ("core", "web", "bot", "scripts"):
+            for path in (REPO / root).rglob("*.py"):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for fn in ast.walk(tree):
+                    if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    inside = {
+                        id(n)
+                        for w in ast.walk(fn) if isinstance(w, ast.AsyncWith)
+                        and any(isinstance(i.context_expr, ast.Call)
+                                and isinstance(i.context_expr.func, ast.Attribute)
+                                and i.context_expr.func.attr == "transaction"
+                                for i in w.items)
+                        for n in ast.walk(w)
+                    }
+                    for n in ast.walk(fn):
+                        if (isinstance(n, ast.Call)
+                                and getattr(n.func, "id", getattr(n.func, "attr", ""))
+                                == "_write_buyer_rows"):
+                            calls.append((path.relative_to(REPO).as_posix(), fn.name,
+                                          id(n) in inside))
+        assert calls, "nothing calls the buyers writer — the walk is not looking"
+        outside = [(p, f) for p, f, ok in calls if not ok]
+        assert not outside, f"calls the buyers writer outside a transaction: {outside}"
+
     @pytest.mark.parametrize("module,function", sorted(pg_derivation.MARK_SITES.items()))
     def test_each_registered_writer_marks_inside_its_transaction(self, module, function):
         import importlib
