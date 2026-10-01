@@ -1599,7 +1599,8 @@ through the registry, `write_chain_precondition_unmet` on the canary):
 reads DuckDB order lines), the backup evidence — `pitr_drill` and
 `remote_restore` under 8 days, `pg_offsite` under 36 h, from the markers the
 host scripts now write on success only (`core/backup_evidence.py`; one provider,
-OD-01 (c) cancelled 2026-10-01) — and `landing_pages_clear`: no delivered page
+OD-01 (c) cancelled 2026-10-01; their ages, and only their ages, are
+`/api/health`'s `backups`) — and `landing_pages_clear`: no delivered page
 under a condition the stand-down retires. While any is unmet an unlatched chain
 runs as duckdb whatever its flag says. `preflight` adds what Postgres says:
 the three bronze tables backfilled and their mirrors not failing.
