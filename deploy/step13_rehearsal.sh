@@ -38,9 +38,12 @@
 #   - The canary is judged by importing bot/canary.py inside reh-web against
 #     its own /api/health. Nothing is sent.
 #   - Hard memory caps on every container (reh-web 1.5g with DuckDB at 768MB,
-#     reh-pg 512m, reh-ch 1.5g), a start guard on MemAvailable, and a watchdog
-#     that tears the rehearsal down before the live web could be the one
-#     starved. /tmp/ks-gate.lock is taken first, so no gate runs beside it.
+#     reh-pg 512m, reh-ch 1.5g), each one the kernel's first choice if the
+#     host runs short anyway (--oom-score-adj 1000), a start guard on
+#     MemAvailable and on the disk the copies will fill, and a watchdog that
+#     kills the rehearsal's containers itself before the live web could be
+#     the one starved. /tmp/ks-gate.lock is taken first, so no gate runs
+#     beside it, and nothing left running in the background keeps it.
 #   - The image production runs, never pulled (`--pull never` everywhere): a
 #     pull would change what the next `up -d` starts. `--build` builds
 #     reh-web:local from the tree instead.
@@ -52,7 +55,8 @@
 #   ... --cleanup-only   remove whatever a killed run left, and stop
 #   ... --any-hour       skip the window guard
 #   ... --build          rehearse the tree instead of the deployed image
-#   ... --local          on a laptop, over synthetic data (seed_synthetic.py)
+#   ... --local          on a laptop, over synthetic data (seed_synthetic.py);
+#                        refused on the host, whose guards it skips
 #
 # Exit: 0 every point PASS, 1 any FAIL, 2 nothing failed but something is
 # UNKNOWN, 3 the rehearsal could not be set up. The table, with ids, counts
@@ -93,6 +97,13 @@ STUB_MEM=64m
 CAPS_MIB=3648
 MEM_HEADROOM_MIB=1024
 MEM_FLOOR_MIB=768
+# The live web's disk watchdog warns at 75% (core/disk_monitor.py,
+# WARN_DISK_PCT). The rehearsal ends under it, a point below: projected at the
+# start, watched while it runs.
+DISK_CEIL_PCT=74
+WATCH_INTERVAL_S=10
+MEMINFO=/proc/meminfo
+DOCKER_ROOT=""
 
 LOCAL=0
 KEEP=0
@@ -159,6 +170,14 @@ safe_root() {
 }
 safe_root
 
+# --local skips every guard the host has — the window, MemAvailable, the
+# watchdog — and may build an image with nothing capping it. A laptop's mode:
+# on the host (root, or the deployed tree there) it is refused before the
+# lock, before any container, before anything at all.
+if [ "$LOCAL" = 1 ] && { [ "$(id -u)" = 0 ] || [ -e /opt/key-api-bot ]; }; then
+    die "--local is for a laptop, and this looks like the host (root, or /opt/key-api-bot exists): run without it"
+fi
+
 # ─── Cleanup ──────────────────────────────────────────────────────────────────
 #
 # `-v`, as every removal in this repository: both store images declare a
@@ -166,6 +185,12 @@ safe_root
 # like the gates, so a run that was SIGKILLed is cleared by the next.
 BUILT=0
 WATCHDOG_PID=""
+kill_all() {
+    # Every rehearsal container stopped at once, volumes kept: the
+    # watchdog's own first move.
+    docker kill "$REH_WEB" "$REH_SEED" "$REH_KEYCRM" "$REH_CH" "$REH_PG" "$REH_PROBE" "$REH_MIGRATE" >/dev/null 2>&1 || true
+}
+
 remove_all() {
     docker rm -f -v "$REH_WEB" "$REH_SEED" "$REH_KEYCRM" "$REH_CH" "$REH_PG" "$REH_PROBE" "$REH_MIGRATE" >/dev/null 2>&1 || true
     docker network rm "$REH_NET" >/dev/null 2>&1 || true
@@ -179,6 +204,9 @@ remove_all() {
 
 cleanup() {
     local rc=$?
+    # Once, and whole: a second signal — the watchdog's, a second Ctrl-C —
+    # must not cut the removal short and leave copies of production behind.
+    trap '' TERM INT HUP
     if [ -n "$WATCHDOG_PID" ]; then
         kill "$WATCHDOG_PID" >/dev/null 2>&1 || true
         WATCHDOG_PID=""
@@ -186,7 +214,7 @@ cleanup() {
     if [ "$KEEP" = 1 ]; then
         docker stop -t 30 "$REH_WEB" "$REH_SEED" "$REH_KEYCRM" "$REH_CH" "$REH_PG" >/dev/null 2>&1 || true
         printf '\033[31m%s\033[0m\n' \
-            "--keep: $REH_ROOT holds a copy of production, customer names and phone numbers among it. Remove it with: bash $0 --cleanup-only" >&2
+            "--keep: copies of production are left behind, customer names and phone numbers among them — $REH_ROOT (the DuckDB copy), and the stopped $REH_PG and $REH_CH with their anonymous volumes (Postgres restored whole from the dump; ClickHouse's Silver). Remove all three with: bash $0 --cleanup-only" >&2
         return "$rc"
     fi
     remove_all
@@ -264,30 +292,86 @@ memory_guard() {
     say "memory guard: ${avail} MiB available"
 }
 
+disk_used_pct() {
+    # df's Use% of the filesystem holding $1: used over used + available,
+    # which reads higher than a statvfs total (the root reserve) — the
+    # cautious one of the two.
+    df -Pk "$1" | awk 'NR==2 && $3 + $4 > 0 {print int(($3 * 100 + $3 + $4 - 1) / ($3 + $4))}'
+}
+
 disk_guard() {
-    local need_kb free_kb used_pct
-    need_kb=$(( $(du -k "$1" | awk '{print $1}') * 2 + 4 * 1024 * 1024 ))
-    free_kb="$(df -Pk /root | awk 'NR==2 {print $4}')"
-    used_pct="$(df -Pk /root | awk 'NR==2 {gsub("%",""); print $5}')"
-    [ "$free_kb" -ge "$need_kb" ] || die "not enough disk: ${free_kb} KB free, ${need_kb} KB needed"
-    [ "$used_pct" -lt 70 ] || die "disk ${used_pct}% used: the copies would push it past 70%"
+    # $1 the DuckDB backup, $2 the Postgres dump. What the run will write:
+    # the DuckDB copy and as much again for its growth and spill (P8's full
+    # rebuild under a 768 MB memory limit); the dump restored — a custom-format
+    # dump is compressed, so five times its size, and 1 GiB of WAL beside it;
+    # ClickHouse's Silver and the logs, 1.5 GiB. All of it projected onto
+    # each filesystem that will hold part of it — the copies' and Docker's —
+    # as if it all landed there, and held under DISK_CEIL_PCT: a run that
+    # would end over the live monitor's WARN pages production's admins about
+    # the rehearsal's own files.
+    local backup_kb dump_kb need_kb fs used avail pct
+    backup_kb="$(du -k "$1" | awk '{print $1}')"
+    dump_kb="$(du -k "$2" | awk '{print $1}')"
+    need_kb=$(( backup_kb * 2 + dump_kb * 5 + (1024 + 1536) * 1024 ))
+    for fs in "$REPORT_DIR" "$DOCKER_ROOT"; do
+        [ -n "$fs" ] || continue
+        read -r used avail < <(df -Pk "$fs" | awk 'NR==2 {print $3, $4}')
+        [ "$avail" -ge "$need_kb" ] || die "not enough disk on $fs: ${avail} KB free, ${need_kb} KB needed"
+        pct=$(( (used + need_kb) * 100 / (used + avail) ))
+        [ "$pct" -lt "$DISK_CEIL_PCT" ] \
+            || die "disk on $fs would end at ${pct}% used with the copies (${need_kb} KB): ${DISK_CEIL_PCT}% is the ceiling, the live monitor warns at 75%"
+        say "disk guard: $fs ends at ~${pct}% at most"
+    done
 }
 
 watch_memory() {
-    local min=999999 avail
-    while :; do
-        avail="$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo)"
-        if [ "$avail" -lt "$min" ]; then
-            min="$avail"
-            echo "$min" > "$REH_ROOT/mem.min"
+    # In the background for as long as the shell it guards is alive, and
+    # launched without fd 9 (see the launch). Memory and disk both: either
+    # one running out is the live stack's problem before it is ours.
+    local min=999999 avail fs pct why fired=0
+    while kill -0 "$MAIN_PID" 2>/dev/null; do
+        why=""
+        avail="$(awk '/^MemAvailable:/ {print int($2 / 1024)}' "$MEMINFO" 2>/dev/null || true)"
+        if [ -n "$avail" ]; then
+            if [ "$avail" -lt "$min" ]; then
+                min="$avail"
+                echo "$min" > "$REH_ROOT/mem.min" 2>/dev/null || true
+            fi
+            if [ "$avail" -lt "$MEM_FLOOR_MIB" ]; then
+                why="MemAvailable ${avail} MiB under ${MEM_FLOOR_MIB}"
+            fi
         fi
-        if [ "$avail" -lt "$MEM_FLOOR_MIB" ]; then
-            echo "[reh] MemAvailable ${avail} MiB under ${MEM_FLOOR_MIB}: tearing the rehearsal down" >&2
-            kill -TERM "$MAIN_PID" 2>/dev/null || true
-            exit 0
+        for fs in "$REPORT_DIR" "$DOCKER_ROOT"; do
+            [ -n "$fs" ] || continue
+            pct="$(disk_used_pct "$fs" 2>/dev/null || true)"
+            if [ -n "$pct" ] && [ "$pct" -ge "$DISK_CEIL_PCT" ]; then
+                why="${why:+$why; }disk on $fs at ${pct}%"
+            fi
+        done
+        if [ -n "$why" ]; then
+            echo "[reh] $why: killing the rehearsal's containers, then its shell" >&2
+            # Itself, and first. The shell runs its TERM trap only once its
+            # foreground command returns — a docker exec bounded at 25 min,
+            # pg_restore at nothing — and until then the containers keep
+            # every byte they hold. Killed, they free it now, and whatever
+            # the shell was waiting on returns with them.
+            kill_all
+            if [ "$fired" = 0 ]; then
+                kill -TERM "$MAIN_PID" 2>/dev/null || true
+                fired=1
+            fi
         fi
-        sleep 10
+        sleep "$WATCH_INTERVAL_S"
     done
+    # The shell is gone without its EXIT trap — SIGKILL, the kernel's OOM
+    # killer — so nothing else will remove the copies of production it
+    # started, or stop them holding 3.6 GB.
+    echo "[reh] the rehearsal's shell died without cleaning up: removing what it started" >&2
+    if [ "$KEEP" = 1 ]; then
+        kill_all
+    else
+        remove_all
+    fi
 }
 
 rand() { head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
@@ -423,7 +507,7 @@ start_web() {
     # $1 container name; the rest are extra -e flags for this phase.
     local name="$1"
     shift
-    docker run -d --name "$name" --network "$REH_NET" --pull never --restart no \
+    docker run -d --name "$name" --network "$REH_NET" --pull never --oom-score-adj 1000 --restart no \
         --memory "$WEB_MEM" --memory-swap "$WEB_MEM" --cpus 1.0 \
         --log-opt max-size=50m --log-opt max-file=2 \
         -v "$DATA_DIR:/app/data" \
@@ -434,7 +518,7 @@ start_web() {
 
 probe_offline() {
     # The DuckDB copy, read while no reh-web holds it: `--network none`.
-    docker run --rm --name "$REH_PROBE" --network none --pull never \
+    docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 \
         --memory 1g --memory-swap 1g --log-opt max-size=10m \
         -v "$DATA_DIR:/app/data" \
         -v "$HELPER_DIR:/reh:ro" \
@@ -443,7 +527,7 @@ probe_offline() {
 
 probe_keycrm_dir() {
     # Writes the stub's one order; touches nothing but the stub's directory.
-    docker run --rm --name "$REH_PROBE" --network none --pull never \
+    docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 \
         --memory 128m --memory-swap 128m --log-opt max-size=10m \
         -v "$KEYCRM_DIR:/keycrm" \
         -v "$HELPER_DIR:/reh:ro" \
@@ -463,6 +547,8 @@ if [ "$LOCAL" = 0 ]; then
     [ "$(id -u)" = 0 ] || die "run as root on the host"
     window_guard
     memory_guard
+    DOCKER_ROOT="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)"
+    [ -n "$DOCKER_ROOT" ] || die "docker info names no DockerRootDir"
 fi
 
 install -d -m 700 "$REH_ROOT"
@@ -482,19 +568,22 @@ docker image inspect "$REH_MIGRATE_IMAGE" >/dev/null 2>&1 || die "no image $REH_
 docker image inspect "$PG_IMAGE" >/dev/null 2>&1 || die "no image $PG_IMAGE on this host"
 docker image inspect "$CH_IMAGE" >/dev/null 2>&1 || die "no image $CH_IMAGE on this host"
 
-APP_UID="$(docker run --rm --name "$REH_PROBE" --network none --pull never --memory 64m --memory-swap 64m \
+APP_UID="$(docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 --memory 64m --memory-swap 64m \
     --log-opt max-size=10m --entrypoint id "$REH_IMAGE" -u)"
-APP_GID="$(docker run --rm --name "$REH_PROBE" --network none --pull never --memory 64m --memory-swap 64m \
+APP_GID="$(docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 --memory 64m --memory-swap 64m \
     --log-opt max-size=10m --entrypoint id "$REH_IMAGE" -g)"
 if [ "$LOCAL" = 0 ]; then
     chown "$APP_UID:$APP_GID" "$DATA_DIR" "$KEYCRM_DIR"
-    watch_memory &
+    # With fd 9 closed: a child that inherits the host lock holds it for as
+    # long as it lives, and it outlives a shell that was SIGKILLed — every
+    # gate would then wait in `flock 9` for good, and --cleanup-only refuse.
+    watch_memory 9>&- &
     WATCHDOG_PID=$!
 fi
 
 image_names() {
     # The reader switches or the chain flags, as the image under test declares them.
-    docker run --rm --name "$REH_PROBE" --network none --pull never --memory 256m --memory-swap 256m \
+    docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 --memory 256m --memory-swap 256m \
         --log-opt max-size=10m -v "$HELPER_DIR:/reh:ro" \
         --entrypoint python "$REH_IMAGE" /reh/probe.py readers --list "$1"
 }
@@ -525,7 +614,7 @@ done
 docker network create --internal "$REH_NET" >/dev/null
 
 start_pg() {
-    docker run -d --name "$REH_PG" --network "$REH_NET" --pull never --restart no \
+    docker run -d --name "$REH_PG" --network "$REH_NET" --pull never --oom-score-adj 1000 --restart no \
         --memory "$PG_MEM" --memory-swap "$PG_MEM" --cpus 0.5 --shm-size 128m \
         --log-opt max-size=20m --log-opt max-file=2 \
         -e POSTGRES_USER=postgres -e "POSTGRES_PASSWORD=$PG_PW" -e POSTGRES_DB=ks \
@@ -551,7 +640,7 @@ start_pg() {
 }
 
 migrate() {
-    docker run --rm --name "$REH_MIGRATE" --network "$REH_NET" --pull never \
+    docker run --rm --name "$REH_MIGRATE" --network "$REH_NET" --pull never --oom-score-adj 1000 \
         --memory 256m --memory-swap 256m --log-opt max-size=10m \
         -e "KS_PG_DSN=$APP_DSN" \
         "$REH_MIGRATE_IMAGE" alembic upgrade head > "$LOG_DIR/migrate.log" 2>&1 \
@@ -559,7 +648,7 @@ migrate() {
 }
 
 start_stub() {
-    docker run -d --name "$REH_KEYCRM" --network "$REH_NET" --pull never --restart no \
+    docker run -d --name "$REH_KEYCRM" --network "$REH_NET" --pull never --oom-score-adj 1000 --restart no \
         --memory "$STUB_MEM" --memory-swap "$STUB_MEM" --cpus 0.2 \
         --log-opt max-size=20m --log-opt max-file=2 \
         -v "$HELPER_DIR:/reh:ro" \
@@ -578,7 +667,7 @@ seed_local() {
     say "local: seeding a synthetic account"
     start_pg
     migrate
-    docker run --rm --name "$REH_PROBE" --network none --pull never \
+    docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 \
         --memory 256m --memory-swap 256m --log-opt max-size=10m \
         -v "$KEYCRM_DIR:/out" -v "$HELPER_DIR:/reh:ro" \
         --entrypoint python "$REH_IMAGE" /reh/seed_synthetic.py /out \
@@ -625,7 +714,7 @@ else
         age=$(( $(date +%s) - $(stat -c %Y "$f") ))
         [ "$age" -le 108000 ] || die "$(basename "$f") is $((age / 3600)) h old: over 30 h"
     done
-    disk_guard "$BACKUP"
+    disk_guard "$BACKUP" "$DUMP"
 fi
 
 say "S: restoring $(basename "$DUMP") into $REH_PG"
@@ -647,7 +736,7 @@ PG_ORDERS="$(pgq "SELECT count(*) FROM bronze.orders")"
 [ "${PG_ORDERS:-0}" -gt 0 ] || die "the restored copy holds no orders"
 
 say "S: ClickHouse, the DuckDB copy, the KeyCRM stub"
-docker run -d --name "$REH_CH" --network "$REH_NET" --pull never --restart no \
+docker run -d --name "$REH_CH" --network "$REH_NET" --pull never --oom-score-adj 1000 --restart no \
     --memory "$CH_MEM" --memory-swap "$CH_MEM" --cpus 0.5 \
     --log-opt max-size=20m --log-opt max-file=2 \
     -e "CLICKHOUSE_PASSWORD=$CH_PW" \
@@ -666,7 +755,7 @@ done
 
 # The copy's latch markers, from the copy's owner rows — so its two halves of
 # each latch agree, as they do on the host. Production's markers are not read.
-docker run --rm --name "$REH_PROBE" --network "$REH_NET" --pull never \
+docker run --rm --name "$REH_PROBE" --network "$REH_NET" --pull never --oom-score-adj 1000 \
     --memory 512m --memory-swap 512m --log-opt max-size=10m \
     -e "KS_PG_DSN=$APP_DSN" \
     -v "$DATA_DIR:/app/data" \
@@ -675,7 +764,7 @@ docker run --rm --name "$REH_PROBE" --network "$REH_NET" --pull never \
     || die "the latch markers could not be derived from the copy's owner rows"
 
 IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$REH_IMAGE" | cut -c8-19)"
-VERSION="$(docker run --rm --name "$REH_PROBE" --network none --pull never --memory 64m --memory-swap 64m \
+VERSION="$(docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 --memory 64m --memory-swap 64m \
     --log-opt max-size=10m --entrypoint cat "$REH_IMAGE" /app/VERSION 2>/dev/null || echo '?')"
 PG_MAX="$(pgq "SELECT max(id) || ' / ' || to_char(max(ordered_at) AT TIME ZONE 'Europe/Kyiv', 'YYYY-MM-DD HH24:MI') FROM bronze.orders")"
 HEADER1="Step 13 rehearsal · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC') · image $IMAGE_ID ($VERSION) · dump $(basename "$DUMP") · backup $(basename "$BACKUP")"
@@ -804,7 +893,8 @@ if [ "$FLIPPED" = 1 ]; then
     say "F4: deleted silver.orders ${DELETED:-nothing}"
     int_before="$(wprobe dq-last integrity 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
     wprobe trigger-wait dq_integrity_check --timeout "$STEP_TIMEOUT" > "$EV/f4_integrity_job.json" 2>&1 || true
-    INT_RUN="$(wprobe wait-dq integrity --after "${int_before:-0}" --timeout 60 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
+    INT_RUN="$(wprobe wait-dq integrity --after "${int_before:-0}" --timeout 60 2>/dev/null \
+        | tee "$EV/f4_integrity_live.json" | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
     BETWEEN="$(pgq "SELECT count(*) FROM meta.derivation_runs WHERE started_at >= '$T_DELETE'::timestamptz")"
     wprobe api POST /api/warehouse/refresh > "$EV/f4_repair_silver.json" 2>&1 || say "F4: the repair refresh answered non-2xx"
     RESTORED=false
@@ -816,7 +906,11 @@ if [ "$FLIPPED" = 1 ]; then
     say "F4: bumped gold ${BUMPED:-nothing}"
     ml_before="$(wprobe dq-last mirror_landing 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
     wprobe trigger-wait dq_mirror_landing --timeout "$STEP_TIMEOUT" > "$EV/f4_mirror_job.json" 2>&1 || true
-    ML_RUN="$(wprobe wait-dq mirror_landing --after "${ml_before:-0}" --timeout 60 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
+    ML_RUN="$(wprobe wait-dq mirror_landing --after "${ml_before:-0}" --timeout 60 2>/dev/null \
+        | tee "$EV/f4_mirror_live.json" | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
+    # The job's own word on which checks it asked (P5): absent findings
+    # cannot say a comparison stood down.
+    docker logs "$REH_WEB" 2>&1 | grep -F 'Mirror reconciliation complete' > "$EV/mirror_complete.log" || true
     AFTER_BUMP="$(pgq "SELECT count(*) FROM meta.derivation_runs WHERE started_at >= '$T_BUMP'::timestamptz")"
     wprobe snapshot > "$EV/f4_snapshot.json" 2>/dev/null || true
     cp "$EV/f4_snapshot.json" "$EV/flip_snap_f4.json" 2>/dev/null || true
@@ -1014,7 +1108,7 @@ printf '{"before": %s, "after": %s, "min_mem_available_mib": %s}\n' \
     "$(as_json_list < "$REH_ROOT/others.before")" "$(as_json_list < "$REH_ROOT/others.after")" \
     "$MEM_MIN" > "$EV/z0.json"
 
-ROWS="$(docker run --rm --name "$REH_PROBE" --network none --pull never \
+ROWS="$(docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 \
     --memory 256m --memory-swap 256m --log-opt max-size=10m \
     -v "$EV:/ev:ro" \
     -v "$HELPER_DIR:/reh:ro" \

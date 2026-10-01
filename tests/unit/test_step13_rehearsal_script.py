@@ -484,3 +484,352 @@ def test_a_long_running_container_never_restarts_on_its_own():
 def test_the_documented_flags_exist(flag):
     assert re.search(rf"^\s+{re.escape(flag)}\) ", TEXT, re.M)
     assert flag in TEXT.split("set -Eeuo pipefail")[0], f"{flag} is not documented in the header"
+
+
+# ─── 8. The kernel picks the rehearsal, not the live web ─────────────────────
+
+def test_every_container_is_first_in_line_for_the_oom_killer():
+    """The caps bound what the rehearsal may take; they do not make it the
+    victim when the host itself runs short. The kernel kills the largest
+    badness, about its RSS — the live web (DuckDB at 4 GB, a 7 g cap) and
+    never a 1.5 g rehearsal container, at the default adjustment of 0.
+    Reproduced in one 400 m container: a 'live' process at 220 MB beside a
+    'rehearsal' one growing to 250 MB — at 0 the live one was killed, at
+    1000 the rehearsal was."""
+    runs = _runs()
+    for n, words in runs:
+        assert _flag(words, "--oom-score-adj") == "1000", f"line {n}: not first in line"
+
+
+# ─── 9. The watchdog, the lock and the disk, by running them ────────────────
+#
+# Each of these runs the script's own functions — cut out of the script, never
+# copied — in a bash with `docker`, `df` and `du` stubbed, so that what is
+# asserted is what the shell does, not what the text says.
+
+def _function_text(name: str) -> str:
+    m = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", TEXT, re.S | re.M)
+    assert m, f"no function {name}"
+    return m.group(0)
+
+
+def _launch_line() -> str:
+    lines = [l.strip() for l in TEXT.splitlines()
+             if re.match(r"\s*watch_memory\b.*&$", l) and not l.lstrip().startswith("#")]
+    assert len(lines) == 1, lines
+    return lines[0]
+
+
+DOCKER_STUB = """#!/bin/bash
+# Records every call. `exec` stands in for a foreground command that ends when
+# its container goes: it waits for a `kill` or an `rm`, and gives up at 30 s.
+echo "$*" >> "$STUB_LOG"
+case "$1" in
+    kill) touch "$STUB_DIR/gone" ;;
+    rm) sleep "${STUB_RM_SLEEP:-0}"; touch "$STUB_DIR/gone" ;;
+    exec) for _ in $(seq 1 300); do [ -e "$STUB_DIR/gone" ] && exit 137; sleep 0.1; done ;;
+esac
+exit 0
+"""
+
+DF_STUB = """#!/bin/bash
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/stub $((DF_USED + DF_AVAIL)) $DF_USED $DF_AVAIL 0% /"
+"""
+
+DU_STUB = """#!/bin/bash
+case "$2" in
+    *analytics*) echo "$DU_BACKUP_KB	$2" ;;
+    *) echo "$DU_DUMP_KB	$2" ;;
+esac
+"""
+
+
+def _stubs(tmp_path: Path) -> Dict[str, str]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (("docker", DOCKER_STUB), ("df", DF_STUB), ("du", DU_STUB)):
+        path = bin_dir / name
+        path.write_text(body)
+        path.chmod(0o755)
+    (tmp_path / "meminfo").write_text("MemAvailable:   8000000 kB\n")
+    (tmp_path / "reh-step13").mkdir()
+    (tmp_path / "docker-root").mkdir()
+    import os
+
+    return {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "STUB_LOG": str(tmp_path / "docker.log"), "STUB_DIR": str(tmp_path),
+            "DF_USED": "1000000", "DF_AVAIL": "9000000"}
+
+
+def _harness(tmp_path: Path, body: str) -> Path:
+    names = "\n".join(f"{v}={ASSIGN[v]}" for v in NAME_VARS)
+    functions = "".join(_function_text(f) for f in (
+        "safe_root", "kill_all", "remove_all", "cleanup", "disk_used_pct",
+        "disk_guard", "watch_memory"))
+    script = tmp_path / "harness.sh"
+    script.write_text(f"""set -Eeuo pipefail
+{names}
+MEM_FLOOR_MIB={ASSIGN["MEM_FLOOR_MIB"]}
+DISK_CEIL_PCT={ASSIGN["DISK_CEIL_PCT"]}
+WATCH_INTERVAL_S=1
+MEMINFO={tmp_path}/meminfo
+REPORT_DIR={tmp_path}
+DOCKER_ROOT={tmp_path}/docker-root
+REH_ROOT={tmp_path}/reh-step13
+REPO=/nonexistent-repository
+KEEP=0
+BUILT=0
+WATCHDOG_PID=""
+MAIN_PID=$$
+say() {{ printf '[reh] %s\\n' "$*" >&2; }}
+die() {{ say "ABORT: $*"; exit 3; }}
+{functions}
+{body}
+""")
+    return script
+
+
+def _calls(tmp_path: Path) -> List[str]:
+    try:
+        return (tmp_path / "docker.log").read_text().splitlines()
+    except FileNotFoundError:
+        return []
+
+
+@pytest.mark.parametrize("pressure", ["memory", "disk"])
+def test_the_watchdog_frees_the_host_itself_without_waiting_for_the_shell(tmp_path, pressure):
+    """The shell runs a trapped TERM only when its foreground command returns —
+    a `docker exec` bounded at 25 min, `pg_restore` at nothing. A watchdog
+    that only signals the shell left the containers holding 3.6 GB all that
+    time: reproduced, the teardown ran when the foreground command did, at
+    +12 s of a 12 s stand-in. So it kills the containers first, and the
+    command waiting on them returns."""
+    import subprocess
+    import time
+
+    env = _stubs(tmp_path)
+    if pressure == "memory":
+        (tmp_path / "meminfo").write_text("MemAvailable:    512000 kB\n")
+    else:
+        env.update(DF_USED="7400000", DF_AVAIL="2600000")     # 74 %
+    script = _harness(tmp_path, f"""
+trap cleanup EXIT
+trap 'exit 143' TERM INT HUP
+{_launch_line()}
+WATCHDOG_PID=$!
+docker exec "$REH_WEB" python /reh/probe.py trigger-wait dq_mirror_landing --timeout 1500
+echo "the shell went on" >> "$STUB_LOG"
+""")
+    started = time.monotonic()
+    proc = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True,
+                          timeout=60)
+    elapsed = time.monotonic() - started
+    calls = _calls(tmp_path)
+    assert proc.returncode == 143, (proc.returncode, proc.stderr)
+    assert elapsed < 10, f"the teardown waited {elapsed:.1f} s for the foreground command"
+    kills = [c for c in calls if c.startswith("kill ")]
+    assert kills, calls
+    assert set(kills[0].split()[1:]) == {ASSIGN[v] for v in CONTAINER_VARS}
+    assert calls.index(kills[0]) < next(i for i, c in enumerate(calls) if c.startswith("rm -f -v"))
+    assert "the shell went on" not in calls
+
+
+def test_a_killed_shell_leaves_neither_the_lock_nor_its_containers(tmp_path):
+    """SIGKILL — `kill -9`, the kernel's OOM killer — runs no EXIT trap. The
+    watchdog was forked after the lock was taken and inherited fd 9, so it
+    held the host lock for as long as it looped, which was forever:
+    reproduced, the lock was still held after the shell was gone, every gate
+    then waits in `flock 9`, and `--cleanup-only` refuses. Launched without
+    fd 9, it notices the shell is gone and removes what the shell started."""
+    import fcntl
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    env = _stubs(tmp_path)
+    lock = tmp_path / "ks-gate.lock"
+    script = _harness(tmp_path, f"""
+exec 9>{lock}
+{sys.executable} -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'
+{_launch_line()}
+echo $! > {tmp_path}/watchdog.pid
+docker exec "$REH_PG" pg_restore -U postgres -d ks
+""")
+
+    def held() -> bool:
+        fd = os.open(lock, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return False
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
+
+    proc = subprocess.Popen(["bash", str(script)], env=env, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "watchdog.pid").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        watchdog = int((tmp_path / "watchdog.pid").read_text())
+        assert held(), "the harness never took the lock"
+        proc.send_signal(signal.SIGKILL)
+        proc.wait()
+        deadline = time.monotonic() + 10
+        while held() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not held(), "the lock outlived the shell"
+        while time.monotonic() < deadline:
+            try:
+                os.kill(watchdog, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("the watchdog outlived the shell")
+        removed = [c for c in _calls(tmp_path) if c.startswith("rm -f -v ")]
+        assert removed and set(removed[0].split()[3:]) == {ASSIGN[v] for v in CONTAINER_VARS}
+        assert not (tmp_path / "reh-step13").exists(), "the copies were left behind"
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_the_watchdog_never_holds_the_lock_itself(tmp_path):
+    """Exiting with the shell is not enough on its own: the watchdog's last
+    act is a `docker rm` that a busy daemon can hold for minutes, and a child
+    holding fd 9 all that time is a gate waiting all that time. Here the
+    `rm` hangs and the shell's own foreground command does not carry the
+    lock (the real one ends when its container is removed — the test above),
+    so the only process that could still hold it is the watchdog."""
+    import fcntl
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    env = {**_stubs(tmp_path), "STUB_RM_SLEEP": "20"}
+    lock = tmp_path / "ks-gate.lock"
+    script = _harness(tmp_path, f"""
+exec 9>{lock}
+{sys.executable} -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'
+{_launch_line()}
+echo $! > {tmp_path}/watchdog.pid
+sleep 60 9>&-
+""")
+    proc = subprocess.Popen(["bash", str(script)], env=env, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / "watchdog.pid").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        watchdog = int((tmp_path / "watchdog.pid").read_text())
+        proc.send_signal(signal.SIGKILL)
+        proc.wait()
+        deadline = time.monotonic() + 8
+        while not (tmp_path / "docker.log").exists() and time.monotonic() < deadline:
+            time.sleep(0.1)       # the watchdog is inside its hanging `docker rm`
+        os.kill(watchdog, 0)      # and alive
+        fd = os.open(lock, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            pytest.fail("the watchdog holds the host lock")
+        finally:
+            os.close(fd)
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_the_watchdog_is_launched_without_the_lock_and_lives_only_with_the_shell():
+    assert _launch_line() == "watch_memory 9>&- &"
+    body = _function_body("watch_memory")
+    assert 'while kill -0 "$MAIN_PID" 2>/dev/null; do' in body
+    assert body.index("kill_all") < body.index('kill -TERM "$MAIN_PID"')
+
+
+KB = 1024
+GB = 1024 * 1024
+
+
+@pytest.mark.parametrize("used_pct, expect", [(69, 3), (63, 3), (60, 0), (40, 0)])
+def test_the_disk_guard_counts_the_copies_it_is_about_to_make(tmp_path, used_pct, expect):
+    """It used to compare today's use against 70 % and add nothing: a host at
+    69 % passed, and a 2.6 GB backup, its growth in P8 and a restored dump
+    end the run past the live monitor's 75 % WARN — production's admins paged
+    about the rehearsal's own files. Reproduced with the reviewer's numbers:
+    80 GB at 69 % passed."""
+    import subprocess
+
+    env = _stubs(tmp_path)
+    total = 80 * GB
+    used = total * used_pct // 100
+    env.update(DF_USED=str(used), DF_AVAIL=str(total - used),
+               DU_BACKUP_KB=str(int(2.6 * GB)), DU_DUMP_KB=str(int(0.4 * GB)))
+    script = _harness(tmp_path, f'disk_guard {tmp_path}/analytics-x.duckdb {tmp_path}/ks-x.dump')
+    proc = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True,
+                          timeout=30)
+    assert proc.returncode == expect, proc.stderr
+    if expect:
+        assert "would end at" in proc.stderr
+
+
+def test_the_disk_ceiling_sits_under_the_live_monitors_warning():
+    m = re.search(r"^WARN_DISK_PCT = ([\d.]+)$",
+                  (REPO / "core" / "disk_monitor.py").read_text(), re.M)
+    assert m and int(ASSIGN["DISK_CEIL_PCT"]) < float(m.group(1))
+    assert 'disk_guard "$BACKUP" "$DUMP"' in TEXT
+
+
+# ─── 10. --local on the host, --keep, a second signal ────────────────────────
+
+def test_local_is_refused_on_the_host_before_anything_runs(tmp_path):
+    """--local skips the window, MemAvailable and the watchdog, and may build
+    an uncapped image: on the host that is 3.6 GB beside the live web with
+    nothing watching. Refused before the lock and before any docker call."""
+    import os
+    import subprocess
+
+    env = _stubs(tmp_path)
+    fake_id = tmp_path / "bin" / "id"
+    fake_id.write_text('#!/bin/bash\n[ "$1" = -u ] && echo 0 || /usr/bin/id "$@"\n')
+    fake_id.chmod(0o755)
+    env["TMPDIR"] = str(tmp_path)
+    proc = subprocess.run(["bash", str(SCRIPT), "--local"], env=env, capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 3, proc.stderr
+    assert "--local is for a laptop" in proc.stderr
+    assert _calls(tmp_path) == [], "a docker command ran first"
+    lines = TEXT.splitlines()
+    refusal = next(i for i, l in enumerate(lines) if "--local is for a laptop" in l)
+    lock = lines.index("exec 9>/tmp/ks-gate.lock")
+    assert refusal < lock
+    assert os.path.exists(str(SCRIPT))
+
+
+def test_keep_names_every_copy_it_leaves():
+    """The stopped reh-pg keeps its anonymous volume, a full restore of
+    production's Postgres — buyers and phone numbers — and reh-ch its Silver:
+    seen after a local --keep run. The warning named the directory alone."""
+    cleanup = _function_body("cleanup")
+    message = next(l for l in cleanup.splitlines() if "--keep:" in l)
+    for word in ("$REH_ROOT", "$REH_PG", "$REH_CH", "anonymous volumes",
+                 "customer names and phone numbers", "--cleanup-only"):
+        assert word in message, word
+
+
+def test_cleanup_is_not_cut_short_by_a_second_signal():
+    cleanup = [l.strip() for l in _function_body("cleanup").splitlines()
+               if l.strip() and not l.strip().startswith("#")]
+    assert cleanup[0] == "local rc=$?"
+    assert cleanup[1] == "trap '' TERM INT HUP"
