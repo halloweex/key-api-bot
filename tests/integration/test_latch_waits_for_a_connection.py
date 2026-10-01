@@ -44,6 +44,7 @@ from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
     pg_goals_write, pg_inventory_write, write_chains,
 )
+from core import pg_catalogue_write
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -54,6 +55,8 @@ pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_P
 _WRITTEN = ("bronze.offers", "app.manual_expenses", "app.revenue_goals",
             "bronze.expense_types", "bronze.buyer_contacts", "app.buyer_gender",
             "bronze.buyers")
+# Chain 6's two tables, and the watermark row each write stamps beside them.
+_WRITTEN += ("bronze.products", "bronze.categories")
 
 STOCK = {"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
          "quantity": 40, "reserve": 0}
@@ -64,6 +67,8 @@ async def _clean(pool):
         for table in _WRITTEN:
             await conn.execute(f"DELETE FROM {table}")
         await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
+        await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                           list(pg_catalogue_write.CHAIN_TABLES))
 
 
 def _caller(depth: int = 2) -> str:
@@ -228,6 +233,10 @@ WRITERS = {
         [{"id": 1, "name": "Delivery"}])),
     "upsert_buyers": (pg_buyers_write, lambda s: s.upsert_buyers([_buyer()])),
     "derive_gender_pg": (pg_buyers_write, _derive),
+    "upsert_products": (pg_catalogue_write, lambda s: s.upsert_products(
+        [{"id": 1, "name": "Toner", "category_id": 10, "sku": "T-1", "price": 250}])),
+    "upsert_categories": (pg_catalogue_write, lambda s: s.upsert_categories(
+        [{"id": 10, "name": "Care", "parent_id": None}])),
 }
 
 
@@ -248,6 +257,10 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
         monkeypatch.setenv(reader, "postgres")
+    # Chain 6's precondition taken as met: setting KS_WRITE_INVENTORY=postgres
+    # here would move chain 1's own calls; the precondition itself is proved
+    # in tests/unit/test_catalogue_chain.py.
+    monkeypatch.setattr(pg_catalogue_write, "unmet_precondition", lambda: None)
     store = DuckDBStore(db_path=tmp_path / "latch-acquire.duckdb")
     await store.connect()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
@@ -440,6 +453,7 @@ FIRST_WRITES = {
     "pg_goals_write": ("set_goal", "app.revenue_goals", "period_type", "daily"),
     "pg_expense_types_write": ("upsert_expense_types", "bronze.expense_types", "id", 1),
     "pg_buyers_write": ("upsert_buyers", "bronze.buyers", "id", 1),
+    "pg_catalogue_write": ("upsert_products", "bronze.products", "id", 1),
 }
 
 
