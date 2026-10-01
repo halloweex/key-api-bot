@@ -44,7 +44,11 @@ FILES = sorted(SQL_DIR.glob("*.sql"))
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
 VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on": "0",
              "buyers_on": "0", "buyers_flip_at": "", "buyers_held_by": "",
-             "buyers_override_floor": ""}
+             "buyers_override_floor": "",
+             # Stage 5's clocks (OD-17 (a)); tests/integration/test_stage5_soak_sql.py.
+             "duckdb_off": "0", "parallel_from": "", "duckdb_file_last": "none",
+             "duckdb_file_since": "", "duckdb_file_since_reason": "",
+             "duckdb_file_checked_at": ""}
 RUN_AS_OWNER = "-- soak:run-as ks_app"
 # The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
 HISTORY_CHECKS = (

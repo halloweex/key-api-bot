@@ -4,7 +4,9 @@
 # The soak checks are the only detectors for a lost derivation mark (D4, D5),
 # stale Silver rows (D7), the chain-8 stand-down (E1) and a halted order intake
 # (S0), and the only daily verdict on reads served from DuckDB, whose PASS
-# counts the week KS_READ_FALLBACK=off waits for (F1), and they have to run
+# counts the week KS_READ_FALLBACK=off waits for (F1), and the two clocks
+# stage 5 waits for — the 30-day parallel period and the week of silence —
+# with their breach detectors (P1–P4, OD-17 (a)), and they have to run
 # every day for weeks. Run by hand from a checklist
 # they drift: a query pasted from yesterday's terminal, a precondition skipped
 # on a busy morning. So each check is a file under deploy/stage4_soak/ that
@@ -31,9 +33,12 @@
 #   deploy/stage4_soak.sh
 #   SOAK_INVENTORY_FLIP_AT='2026-10-01 10:00+03' deploy/stage4_soak.sh
 #   SOAK_BUYERS_FLIP_AT='2026-10-01 10:30+03' SOAK_BUYERS_OVERRIDE_FLOOR=0 deploy/stage4_soak.sh
+#   SOAK_PARALLEL_FROM='2026-11-02 10:00+02' deploy/stage4_soak.sh
 # The second form is for chain 1's flip day; see 15_i1_inventory_copy_stood_down.sql.
 # The third is chain 4's: the flip time, and how many human overrides of a
 # gender verdict there were that day (25_b3_gender_coverage.sql).
+# The fourth declares the stage-5 parallel period: the moment the last
+# KS_WRITE_* flag flipped (52_p3_parallel_period.sql, OD-17 (a)).
 #
 # Exit: 0 when every check passes, 1 on any FAIL, 2 when nothing failed but at
 # least one check is UNKNOWN.
@@ -157,6 +162,39 @@ if [ "$INVENTORY_LATCHED" = "1" ] && [ "$INVENTORY_ON" != "1" ]; then
     INVENTORY_ON=1
 fi
 
+# ── stage 5: the parallel period and the week of silence (OD-17 (a)) ───────────
+# KS_DUCKDB=off is the week of silence: 1 when web runs off, 0 when on or
+# unset. Read by name, like every flag here.
+DUCKDB_OFF="$(flag_state KS_DUCKDB off on)"
+PARALLEL_FROM="${SOAK_PARALLEL_FROM:-}"
+
+# The file's hash, as the hourly host cron recorded it
+# (deploy/duckdb_silence_check.sh). `--status` reads the record and nothing
+# else: it hashes nothing — a multi-GB file is the cron's to hash, not this
+# report's — and writes nothing, which this report promises above. The record
+# reaches the SQL as variables so P1 and P4 judge it on the same clock as
+# everything else.
+SILENCE_CHECK="deploy/duckdb_silence_check.sh"
+FILE_LAST=error FILE_SINCE="" FILE_SINCE_REASON="" FILE_CHECKED_AT=""
+silence_record() {
+    local out kv
+    out="$("$SILENCE_CHECK" --status 2>&1 || true)"
+    case "$out" in
+        NORECORD*) FILE_LAST=none ;;
+        STATUS\ *)
+            for kv in $out; do
+                case "$kv" in
+                    last=*) FILE_LAST="${kv#last=}" ;;
+                    since=*) FILE_SINCE="${kv#since=}" ;;
+                    since_reason=*) FILE_SINCE_REASON="${kv#since_reason=}" ;;
+                    checked_at=*) FILE_CHECKED_AT="${kv#checked_at=}" ;;
+                esac
+            done ;;
+        *) FILE_LAST=error ;;
+    esac
+}
+silence_record
+
 # ── S0, the log half ──────────────────────────────────────────────────────────
 # A failing orders job writes a line minutes before any watermark ages past a
 # threshold, so this is the fastest signal that intake has stopped.
@@ -202,6 +240,12 @@ run_check() {
             -v buyers_flip_at="$BUYERS_FLIP_AT" \
             -v buyers_held_by="$BUYERS_HELD_BY" \
             -v buyers_override_floor="$BUYERS_OVERRIDE_FLOOR" \
+            -v duckdb_off="$DUCKDB_OFF" \
+            -v parallel_from="$PARALLEL_FROM" \
+            -v duckdb_file_last="$FILE_LAST" \
+            -v duckdb_file_since="$FILE_SINCE" \
+            -v duckdb_file_since_reason="$FILE_SINCE_REASON" \
+            -v duckdb_file_checked_at="$FILE_CHECKED_AT" \
             < "$file" 2>&1)"; then
         rc=0
     else
@@ -238,6 +282,7 @@ fi
 echo "Stage 4 soak report · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC')"
 echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}, dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
 echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
+echo "  duckdb_off=$DUCKDB_OFF (KS_DUCKDB), file record: $FILE_LAST${FILE_SINCE:+ since $FILE_SINCE}${FILE_CHECKED_AT:+, checked $FILE_CHECKED_AT}${PARALLEL_FROM:+, parallel period from $PARALLEL_FROM}"
 echo
 printf '%s' "$ROWS" | awk '
     { lines[NR] = $0; c = $0; sub(/\|.*/, "", c); if (length(c) > w) w = length(c) }

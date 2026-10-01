@@ -60,6 +60,7 @@ case "$1" in
                 KS_SMS_STORE) v="${FAKE_KS_SMS_STORE-__unset__}" ;;
                 KS_READ_SEARCH_INDEX) v="${FAKE_KS_READ_SEARCH_INDEX-__unset__}" ;;
                 KS_READ_DASHBOARD) v="${FAKE_KS_READ_DASHBOARD-__unset__}" ;;
+                KS_DUCKDB) v="${FAKE_KS_DUCKDB-__unset__}" ;;
                 *) v="__unset__" ;;
             esac
             [ "$v" = "__unset__" ] && exit 1
@@ -119,7 +120,10 @@ def _run(workdir: Path, **fake: str) -> Run:
     calls.write_text("")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("FAKE_", "SOAK_"))}
     env.update({"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-                "FAKE_DOCKER_CALLS": str(calls), **fake})
+                "FAKE_DOCKER_CALLS": str(calls),
+                # The file-hash record P1 and P4 read: none, unless a test
+                # makes one. Never the host's /root/duckdb-silence.
+                "DUCKDB_SILENCE_STATE_DIR": str(workdir / "silence"), **fake})
     done = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True,
                           text=True, timeout=120)
     return Run(done, calls.read_text().splitlines())
@@ -325,3 +329,67 @@ class TestChain4:
                    SOAK_BUYERS_OVERRIDE_FLOOR="3")
         assert all("buyers_flip_at=2026-10-01 10:30+03 " in c
                    and "buyers_override_floor=3" in c for c in run.psql), run.psql
+
+
+class TestStage5:
+    """The parallel period and the week of silence (OD-17 (a)): KS_DUCKDB read
+    by name, the declared start passed through, and the file's hash record
+    read with `--status` — which hashes nothing and writes nothing."""
+
+    def test_nothing_set_is_on_undeclared_and_no_record(self, healthy):
+        assert all("duckdb_off=0 " in c and "parallel_from= " in c
+                   and "duckdb_file_last=none " in c and "duckdb_file_since= " in c
+                   for c in healthy.psql), healthy.psql
+        assert "duckdb_off=0 (KS_DUCKDB), file record: none" in healthy.out
+
+    @pytest.mark.parametrize("value, expected", [
+        ("off", "1"), (" OFF ", "1"), ("on", "0"), ("", "0"), ("of", "invalid")])
+    def test_ks_duckdb_reads_the_way_web_reads_it(self, tmp_path, value, expected):
+        run = _run(tmp_path, FAKE_KS_DUCKDB=value)
+        assert all(f"duckdb_off={expected} " in c for c in run.psql), run.psql
+
+    def test_a_stopped_web_is_unknown(self, tmp_path):
+        run = _run(tmp_path, FAKE_WEB="exited")
+        assert all("duckdb_off=unknown " in c for c in run.psql)
+
+    def test_the_declared_start_is_passed(self, tmp_path):
+        run = _run(tmp_path, SOAK_PARALLEL_FROM="2026-11-02 10:00+02")
+        assert all("parallel_from=2026-11-02 10:00+02 " in c for c in run.psql)
+        assert "parallel period from 2026-11-02 10:00+02" in run.out
+
+    def test_the_record_is_read_and_left_as_it_was(self, tmp_path):
+        """The hourly cron's record, made by the real script, then read by the
+        report: every field passed through, and the record byte for byte as
+        it was. Mutation: call the check without `--status` in the report —
+        it would hash the file and write the record."""
+        db = tmp_path / "analytics.duckdb"
+        db.write_bytes(b"duck")
+        state = tmp_path / "silence"
+        base = {k: v for k, v in os.environ.items() if not k.startswith("DUCKDB_")}
+        made = subprocess.run(
+            ["bash", str(REPO / "deploy" / "duckdb_silence_check.sh")],
+            env={**base, "DUCKDB_FILE": str(db), "DUCKDB_SILENCE_STATE_DIR": str(state),
+                 "DUCKDB_SILENCE_NOW": "1900000000"},
+            capture_output=True, text=True, timeout=60)
+        assert made.returncode == 2, made.stdout + made.stderr
+        before = {p.name: p.read_bytes() for p in state.iterdir()}
+        db.write_bytes(b"changed")  # a record-mode run would now say CHANGED
+
+        run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state), DUCKDB_FILE=str(db))
+        assert all("duckdb_file_last=BASELINE " in c
+                   and "duckdb_file_since=2030-03-17T17:46:40Z " in c
+                   and "duckdb_file_since_reason=baseline " in c
+                   and "duckdb_file_checked_at=2030-03-17T17:46:40Z" in c
+                   for c in run.psql), run.psql
+        assert {p.name: p.read_bytes() for p in state.iterdir()} == before
+
+    def test_an_unreadable_record_is_an_error_not_a_pass(self, tmp_path):
+        state = tmp_path / "silence"
+        state.mkdir()
+        (state / "state").write_text("nonsense=1\n")
+        run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state))
+        assert all("duckdb_file_last=error " in c for c in run.psql)
+
+    def test_the_check_is_only_ever_asked_for_its_status(self):
+        calls = re.findall(r'"\$SILENCE_CHECK"[^\n]*', SCRIPT.read_text())
+        assert calls == ['"$SILENCE_CHECK" --status 2>&1 || true)"'], calls
