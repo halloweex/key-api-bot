@@ -12,9 +12,11 @@
 comes first in both. **Before flipping a chain** it is the gate: exit 0 says
 everything DuckDB holds has reached Postgres, and anything CRITICAL is a row the
 flip would strand, because the shipper stands down the moment the chain routes
-to Postgres and a replicated table has no backfill (a mirrored one — chain 4's
-buyers — has the reship, `POST /api/mirror/backfill/buyers`, which the finding
-names). **Before rolling one back** it is
+to Postgres and a replicated table has no backfill (a mirrored one has a lever
+the finding names: chain 4's buyers the reship, `POST /api/mirror/backfill/buyers`;
+chain 3's orders and expenses `POST /api/mirror/backfill/orders` and
+`/expenses`, or the resync for a row both hold differently). **Before rolling
+one back** it is
 the preview: its CRITICALs are exactly what `--execute` refuses on, and its INFO
 lines are the size of the copy. `--execute` asks the same question again itself
 and refuses before writing anything, so skipping step 1 cannot destroy a row —
