@@ -267,21 +267,31 @@ class TestItCannotLoseAVersionTheMirrorWouldHaveLost:
     row it describes."""
 
     def test_capture_is_called_inside_the_transaction_block(self):
+        """Since chain 3's PR-1 the statements live in `_write_order_rows`,
+        which runs on its caller's transaction: `write_orders` opens it, and
+        chain 3's writer opens its own (`tests/unit/test_pg_own_derivation.py`
+        walks every caller for one that does not). So: the capture is in the
+        core, beside the header upsert, and `write_orders` calls the core
+        inside its transaction block. Mutation: move the capture out to
+        `mirror_orders`, or call the core before the transaction opens."""
         from core import pg_landing
 
         tree = ast.parse(inspect.getsource(pg_landing))
-        fn = next(
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.AsyncFunctionDef) and n.name == "write_orders"
-        )
+
+        def fn(name):
+            return next(n for n in ast.walk(tree)
+                        if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+
+        assert _calls(fn("_write_order_rows"), "capture_versions"), (
+            "capture_versions is not in the statements that write the header")
         blocks = [
-            n for n in ast.walk(fn)
+            n for n in ast.walk(fn("write_orders"))
             if isinstance(n, ast.AsyncWith) and _mentions(n.items, "transaction")
         ]
         assert blocks, "write_orders no longer opens a transaction"
         assert any(
-            _calls(block, "capture_versions") for block in blocks
-        ), "capture_versions is not inside the transaction that writes the header"
+            _calls(block, "_write_order_rows") for block in blocks
+        ), "the header and its version are not written inside the transaction"
 
     def test_capture_is_not_called_from_the_swallowing_wrapper(self):
         """`mirror_orders` is the one that catches. A capture there would be a

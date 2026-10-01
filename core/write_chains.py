@@ -28,7 +28,7 @@ from typing import Dict, FrozenSet, Iterable, Optional, Tuple
 
 from core import (
     pg_buyers_write, pg_expense_types_write, pg_expenses_write, pg_goals_write,
-    pg_inventory_write,
+    pg_inventory_write, pg_orders_write,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,8 +44,15 @@ logger = logging.getLogger(__name__)
 # `bronze.buyer_contacts` and `app.buyer_gender`, off by default, and held on
 # DuckDB until every reader of the buyers reads Postgres
 # (`unmet_precondition`).
+#
+# Chain 3 (`pg_orders_write`) is the sixth: the orders, their line items, their
+# expenses and the backfill-miss ledger, off by default (`KS_WRITE_ORDERS`),
+# and held on DuckDB until the goal bridge is gone, step 13 and chain 1 are in
+# force and the backups have proved themselves (`unmet_precondition`,
+# OD-13 (a)). Registered with the flag off, it stands nothing down: the order
+# shippers ask `stood_down_among`, which evaluates it and finds duckdb.
 WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
-                pg_expense_types_write, pg_buyers_write)
+                pg_expense_types_write, pg_buyers_write, pg_orders_write)
 
 # A KS_WRITE_* value no chain understands must stop that chain and nothing
 # else. The registry used to evaluate every chain's flag for every question, so

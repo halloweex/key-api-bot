@@ -104,42 +104,6 @@ class ExpensesMixin:
                     pass
                 raise
 
-    async def upsert_expenses(self, order_id: int, expenses: List[Dict[str, Any]]) -> int:
-        """Insert or update expenses for an order."""
-        if not expenses:
-            return 0
-
-        async with self.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            try:
-                count = 0
-                for exp in expenses:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO expenses
-                        (id, order_id, expense_type_id, amount, description, status, payment_date, created_at, synced_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                    """, [
-                        exp.get("id"),
-                        order_id,
-                        exp.get("expense_type_id"),
-                        exp.get("amount", 0),
-                        exp.get("description"),
-                        exp.get("status"),
-                        exp.get("payment_date"),
-                        exp.get("created_at")
-                    ])
-                    count += 1
-
-                conn.execute("COMMIT")
-                return count
-
-            except Exception:
-                try:
-                    conn.execute("ROLLBACK")
-                except Exception:
-                    pass
-                raise
-
     async def upsert_expenses_batch(self, orders_with_expenses: List[Dict[str, Any]]) -> int:
         """
         Insert or update expenses for multiple orders in a single transaction.
@@ -150,6 +114,13 @@ class ExpensesMixin:
         Returns:
             Total number of expenses upserted
         """
+        # Chain 3 writes the order-level expenses with their orders, in one
+        # Postgres transaction (`core/pg_orders_write.py`); this DuckDB writer
+        # refuses while it does. `upsert_expenses`, the per-order writer beside
+        # this one, had no caller anywhere and was deleted with chain 3.
+        from core.duckdb_store import _refuse_if_orders_in_postgres
+
+        _refuse_if_orders_in_postgres("upsert_expenses_batch")
         # Flattened and parsed in one place, for `upsert_expense_types`' reason.
         from core.landing_rows import expense_rows
 

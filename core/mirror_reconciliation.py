@@ -4518,10 +4518,48 @@ BUYER_CONTACTS_SPEC = MirroredTable(
     full_replace=True,
 )
 
+# Chain 3's order landing, read whole by its copy-back. The daily check never
+# reads these two whole — 48 k orders and 150 k line items fold into
+# fingerprints there (`ORDER_TABLES`) — but the comparison that releases a
+# latch cannot afford the fingerprint's blind spot (a text rewritten to the
+# same length), so it reads them row by row. The columns and the money are the
+# daily spec's, never restated; the key is each table's own id.
+_ORDERS_ORIGIN = (
+    "Both sides are written from the same parsed order in the same call — "
+    "the sync's mirror, or chain 3's writer and its copy-back — so a "
+    "disagreement here is a defect in the write path, not drift."
+)
+
+ORDERS_SPEC = MirroredTable(
+    pg_table=ORDER_TABLES[0].pg_table,
+    dk_table=ORDER_TABLES[0].dk_table,
+    columns=ORDER_TABLES[0].columns,
+    numeric=ORDER_TABLES[0].numeric,
+    key_columns=("id",),
+    synced_column="synced_at",
+    origin_note=_ORDERS_ORIGIN,
+    full_replace=True,
+)
+
+ORDER_PRODUCTS_SPEC = MirroredTable(
+    pg_table=ORDER_TABLES[1].pg_table,
+    dk_table=ORDER_TABLES[1].dk_table,
+    columns=ORDER_TABLES[1].columns,
+    numeric=ORDER_TABLES[1].numeric,
+    key_columns=("id",),
+    # No stamp of its own: a line item is in flight exactly when its order is.
+    synced_column=None,
+    origin_note=_ORDERS_ORIGIN,
+    full_replace=True,
+)
+
 # Landing tables the MIRROR ships — written in Postgres from the same parse as
 # DuckDB, never replaced out of it — for the copy-back's third source. Not
 # `MIRRORED_TABLES`, which is the catalogue `reconcile_mirror` compares.
-MIRRORED_LANDING_TABLES = (BUYERS_SPEC, BUYER_CONTACTS_SPEC)
+# Chain 4's two, then chain 3's three: the orders, their line items and the
+# order-level expenses, which the sync's mirrors ship from the same payload.
+MIRRORED_LANDING_TABLES = (BUYERS_SPEC, BUYER_CONTACTS_SPEC,
+                           ORDERS_SPEC, ORDER_PRODUCTS_SPEC, EXPENSES_TABLE)
 
 # A contact is part of the landing only with its buyer. Neither store declares
 # a foreign key, and this check has always read DuckDB's contacts through a

@@ -51,6 +51,30 @@ from core.repositories import (
 logger = logging.getLogger(__name__)
 
 
+def _orders_in_postgres() -> bool:
+    """Whether chain 3 writes the orders to Postgres — the one answer every
+    order writer and selection routes on. Raises on a `KS_WRITE_ORDERS`
+    nobody can read while unlatched (`pg_orders_write.writes_postgres`): a
+    repair job then fails loudly rather than choosing a store."""
+    from core import pg_orders_write
+
+    return pg_orders_write.writes_postgres()
+
+
+def _refuse_if_orders_in_postgres(writer: str) -> None:
+    """Raise `ChainOwnsOrders` when a DuckDB writer of chain 3's tables is
+    reached while the chain does not write DuckDB — by its flag, its latch, or
+    a flag nobody can read (`mode()`, which never raises)."""
+    from core import pg_orders_write
+
+    mode = pg_orders_write.mode()
+    if mode != "duckdb":
+        raise pg_orders_write.ChainOwnsOrders(
+            f"DuckDBStore.{writer} was called while chain 3 writes the orders "
+            f"to {mode or 'nowhere (KS_WRITE_ORDERS is not understood)'}; "
+            "the orders go through SyncService._upsert_orders_with_expenses")
+
+
 @dataclass(frozen=True)
 class UpsertResult:
     """What an order upsert actually did.
@@ -2464,7 +2488,15 @@ class DuckDBStore(
 
         Ids already known to be absent upstream are skipped, so the list drains
         to empty instead of cycling forever.
+
+        Asked of Postgres once chain 3 writes the orders there — the ids it
+        repairs and the misses it records land there, and a scan of DuckDB
+        would never see either and re-fetch the same 200 ids every hour.
         """
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.order_id_gaps(limit)
         async with self.connection() as conn:
             rows = conn.execute("""
                 WITH bounds AS (SELECT MIN(id) lo, MAX(id) hi FROM orders)
@@ -2496,7 +2528,14 @@ class DuckDBStore(
         fetch already returned to cover an hour at the edge. Measured on the
         2026-08-31 copy with a 30-day window: 156 ids over 183 daily runs
         (0.85 a day, at most 5), each one API call.
+
+        Asked of Postgres once chain 3 writes the orders there, for
+        `find_order_id_gaps`' reason.
         """
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.backdated_order_ids(since, limit)
         date_ordered = _date_in_kyiv("ordered_at")
         date_created = _date_in_kyiv("created_at")
         async with self.connection() as conn:
@@ -2511,9 +2550,16 @@ class DuckDBStore(
         return [int(r[0]) for r in rows]
 
     async def record_backfill_misses(self, misses: "Dict[int, str]") -> int:
-        """Remember ids KeyCRM could not supply, so they are not retried."""
+        """Remember ids KeyCRM could not supply, so they are not retried.
+
+        Written by chain 3 once it writes the orders to Postgres: the ledger
+        moves with the scans that read it (`core.pg_orders_write`)."""
         if not misses:
             return 0
+        if _orders_in_postgres():
+            from core import pg_orders_write
+
+            return await pg_orders_write.record_backfill_misses(misses)
         async with self.connection() as conn:
             conn.executemany(
                 "INSERT OR REPLACE INTO order_backfill_misses "
@@ -2521,6 +2567,49 @@ class DuckDBStore(
                 [(int(oid), str(reason)[:200]) for oid, reason in misses.items()],
             )
         return len(misses)
+
+    # Orders with revenue and no line items — the half-written repair's
+    # selection, moved here from `scheduler._run_halfwritten_repair` so it can
+    # be asked of Postgres once chain 3 writes the orders there.
+    _EMPTY_LINE_ITEMS_SQL = """
+        SELECT o.id FROM orders o
+        LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
+               ON li.order_id = o.id
+        WHERE li.order_id IS NULL AND o.grand_total > 0
+    """
+
+    async def find_halfwritten_orders(self, limit: int) -> List[int]:
+        """Orders with revenue and no line items, not recorded as a miss in
+        the last 30 days, largest first."""
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.halfwritten_candidates(limit)
+        async with self.connection() as conn:
+            return [int(r[0]) for r in conn.execute(f"""
+                {self._EMPTY_LINE_ITEMS_SQL}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM order_backfill_misses m
+                      WHERE m.order_id = o.id
+                        AND m.checked_at > CURRENT_TIMESTAMP - INTERVAL '30 days'
+                  )
+                ORDER BY o.grand_total DESC
+                LIMIT ?
+            """, [int(limit)]).fetchall()]
+
+    async def halfwritten_among(self, ids: List[int]) -> List[int]:
+        """Which of `ids` still carry revenue and no line items."""
+        if not ids:
+            return []
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.halfwritten_among(ids)
+        ph = ",".join("?" * len(ids))
+        async with self.connection() as conn:
+            return [int(r[0]) for r in conn.execute(
+                f"{self._EMPTY_LINE_ITEMS_SQL} AND o.id IN ({ph})", list(ids),
+            ).fetchall()]
 
     def _claim_stuck_rebuild_slot(self) -> bool:
         """Take the one full-rebuild attempt allowed per cooldown, if it is free.
@@ -2734,6 +2823,12 @@ class DuckDBStore(
             moved; `.count` includes rows that were already correct, so
             driving a rebuild from it rebuilds the world every cycle.
         """
+        # Chain 3 (`core/pg_orders_write.py`): once the orders are written to
+        # Postgres this writer must not run — the sync routes round it in
+        # `SyncService._upsert_orders_with_expenses`, and anything that comes
+        # here directly would write the store nobody reads. First, before the
+        # empty-batch return, so the refusal does not depend on the payload.
+        _refuse_if_orders_in_postgres("upsert_orders")
         if not orders:
             return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0, failed=0)
 
@@ -3524,10 +3619,31 @@ class DuckDBStore(
             ]
 
     async def get_latest_order_time(self) -> Optional[datetime]:
-        """Get the latest order updated_at timestamp for sync checkpoint."""
+        """Get the latest order updated_at timestamp for sync checkpoint.
+
+        From Postgres once chain 3 writes the orders there: the full sync
+        stamps `last_sync_orders` from this, and DuckDB's MAX would be the
+        moment of the flip, for ever (`core/pg_orders_read.py`)."""
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.latest_order_time()
         async with self.connection() as conn:
             result = conn.execute("SELECT MAX(updated_at) FROM orders").fetchone()
             return result[0] if result and result[0] else None
+
+    async def orders_held(self) -> int:
+        """How many orders the store they are written to holds — the boot's
+        "is there any history at all?". DuckDB's count, until chain 3 writes
+        the orders to Postgres: from then DuckDB's never grows, and a fresh
+        DuckDB on a latched host would read as empty on every boot and pull
+        730 days from KeyCRM each time. Raises what the read raises."""
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.order_count()
+        async with self.connection() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0])
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get database statistics.

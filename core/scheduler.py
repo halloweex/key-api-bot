@@ -3490,27 +3490,15 @@ class BackgroundScheduler:
         from core.duckdb_store import get_store
         from core.sync_service import SyncService, get_sync_service
 
-        _EMPTY_LINE_ITEMS = """
-            SELECT o.id FROM orders o
-            LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
-                   ON li.order_id = o.id
-            WHERE li.order_id IS NULL AND o.grand_total > 0
-        """
-
         with correlation_context():
             store = await get_store()
 
-            async with store.connection() as conn:
-                candidates = [int(r[0]) for r in conn.execute(f"""
-                    {_EMPTY_LINE_ITEMS}
-                      AND NOT EXISTS (
-                          SELECT 1 FROM order_backfill_misses m
-                          WHERE m.order_id = o.id
-                            AND m.checked_at > CURRENT_TIMESTAMP - INTERVAL '30 days'
-                      )
-                    ORDER BY o.grand_total DESC
-                    LIMIT ?
-                """, [SyncService.REPAIR_BATCH_LIMIT]).fetchall()]
+            # The store's own selection, so that under chain 3 it is asked of
+            # Postgres, where the repair lands and the misses are recorded —
+            # a scan of a frozen DuckDB would re-fetch the same orders every
+            # two hours for ever.
+            candidates = await store.find_halfwritten_orders(
+                SyncService.REPAIR_BATCH_LIMIT)
 
             if not candidates:
                 logger.debug("Half-written repair: nothing to fetch")
@@ -3522,11 +3510,7 @@ class BackgroundScheduler:
             )
 
             # Which ones KeyCRM served without line items anyway.
-            ph = ",".join("?" * len(candidates))
-            async with store.connection() as conn:
-                still_empty = [int(r[0]) for r in conn.execute(
-                    f"{_EMPTY_LINE_ITEMS} AND o.id IN ({ph})", candidates,
-                ).fetchall()]
+            still_empty = await store.halfwritten_among(candidates)
             recorded = await store.record_backfill_misses({
                 oid: "re-fetched by id; KeyCRM served no line items"
                 for oid in still_empty

@@ -29,7 +29,7 @@ import pytest_asyncio
 from bot import canary as canary_module
 from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-    pg_goals_write, pg_inventory_write, write_chains,
+    pg_goals_write, pg_inventory_write, pg_orders_write, write_chains,
 )
 
 CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
@@ -651,6 +651,11 @@ class TestEveryWriterLatchesFirst:
         # Chain 4: the buyers' writer, and the derivation that reads what is
         # pending before it latches.
         assert set(_writers(pg_buyers_write)) == {"upsert_buyers", "derive_gender_pg"}
+        # Chain 3: the orders with their expenses, the backfill-miss ledger,
+        # and the comment restore. Each spells its claim in its own body.
+        assert set(_writers(pg_orders_write)) == {
+            "upsert_orders_with_expenses", "record_backfill_misses",
+            "restore_manager_comments"}
 
     def test_every_registered_chain_has_a_writer_the_walk_can_see(self):
         """The guards below are parametrised over `WRITE_CHAINS`; a chain whose

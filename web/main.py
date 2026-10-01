@@ -212,9 +212,19 @@ async def startup_event():
         # still ends the startup here is a file, a table or a ledger.
         store = await get_store()
         stats = await store.get_stats()
-        if stats.get("orders", 0) == 0:
+        # Under chain 3 the orders are written to Postgres, so DuckDB's count
+        # says nothing about whether there is history to serve: a Postgres
+        # that failed this boot's sync is retried by the scheduler, and web —
+        # the only syncer — must not crash-loop over it (`pg_orders_write`).
+        from core import pg_orders_write
+
+        if pg_orders_write.mode() != "duckdb":
+            logger.warning("Serving with the boot sync failed under chain 3 — "
+                           "the scheduler retries the order step")
+        elif stats.get("orders", 0) == 0:
             raise  # Fail fast only if DuckDB has no data at all
-        logger.warning(f"Serving stale data ({stats['orders']} orders) — sync will retry via scheduler")
+        else:
+            logger.warning(f"Serving stale data ({stats['orders']} orders) — sync will retry via scheduler")
 
     # Migrate users from SQLite to DuckDB (one-time, idempotent)
 

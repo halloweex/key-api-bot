@@ -221,8 +221,17 @@ STOOD_DOWN_WHEN_POSTGRES: FrozenSet[str] = frozenset({
 def stood_down_duckdb_checks() -> FrozenSet[str]:
     """The DuckDB integrity checks that do not run, and that the twins do not
     compare against, in this process. Empty unless Postgres alone derives, or
-    the way back has not yet validated a full DuckDB tick."""
-    return STOOD_DOWN_WHEN_POSTGRES if warehouse_checks_stand_down() else frozenset()
+    the way back has not yet validated a full DuckDB tick — and, since chain
+    3, the checks over the order tables once the orders are written to
+    Postgres (`pg_orders_write.landing_checks_stood_down`). One answer for
+    both, because the integrity job reads it once for the scan and for
+    `duckdb_looked`. Step 13's own `retired_conditions` stays its five: the
+    landing checks retire on chain 3's flip, which waits on its own
+    `landing_pages_clear`."""
+    from core import pg_orders_write
+
+    warehouse = STOOD_DOWN_WHEN_POSTGRES if warehouse_checks_stand_down() else frozenset()
+    return warehouse | pg_orders_write.landing_checks_stood_down()
 
 
 # ─── What the stood-down checks leave behind ─────────────────────────────────

@@ -313,6 +313,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "the orphaned rows are corrected or their buyers land — a human, not a job"),
     "chain_buyer_contact_missing": _c(
         "the next write of each buyer rewrites its contacts"),
+    # Chain 3's orders. An unjoined cost stays until its order lands or a
+    # human corrects the row.
+    "chain_expense_orphans": _c(
+        "the orders land, or a human corrects the rows — not a job"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 

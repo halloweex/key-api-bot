@@ -74,6 +74,16 @@ class TestTheClockIsDerived:
             "bronze.buyers": ("updated_at",),
             "bronze.buyer_contacts": (),
             "app.buyer_gender": ("decided_at",),
+            # Chain 3. An order by KeyCRM's own `updated_at`, as a buyer is
+            # (and an equal stamp, common because KeyCRM does not bump it on a
+            # status change, proves nothing); line items follow their order
+            # and an expense has no KeyCRM stamp. The misses' `checked_at` is
+            # the daily spec's clock and a compared value, stamped from the
+            # web process's clock by both writers (`pg_orders_write`).
+            "bronze.orders": ("updated_at",),
+            "bronze.order_products": (),
+            "bronze.expenses": (),
+            "app.order_backfill_misses": ("checked_at",),
         }
 
 

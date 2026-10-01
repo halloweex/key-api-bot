@@ -1547,32 +1547,45 @@ def check_internal_integrity(
                 raised_out.append(name)
             return []
 
+    def landing(name: str, run) -> List[IntegrityIssue]:
+        """A check over the order tables, by its finding's name. Not guarded —
+        a raise still fails the scan, as it always has — but skipped once
+        chain 3 writes the orders to Postgres (`ORDER_LANDING_CHECKS`): it
+        would compare a frozen DuckDB, and DN-23's twins stand in alone."""
+        return [] if name in stood_down else run()
+
     # PK uniqueness on critical tables.
-    issues += _pk_uniqueness_check(conn, "orders", "id")
-    issues += _pk_uniqueness_check(conn, "order_products", "id")
+    issues += landing("pk_uniqueness_orders",
+                      lambda: _pk_uniqueness_check(conn, "orders", "id"))
+    issues += landing("pk_uniqueness_order_products",
+                      lambda: _pk_uniqueness_check(conn, "order_products", "id"))
     issues += _pk_uniqueness_check(conn, "products", "id")
     issues += _pk_uniqueness_check(conn, "buyers", "id")
     issues += _pk_uniqueness_check(conn, "categories", "id")
 
     # FK orphans (DuckDB doesn't enforce FK; we validate manually).
-    issues += _fk_orphan_check(conn, "order_products", "order_id", "orders", "id")
+    issues += landing("fk_orphan_order_products_order_id", lambda: _fk_orphan_check(
+        conn, "order_products", "order_id", "orders", "id"))
 
     # NULL constraints — required for analytics queries to work.
-    issues += _null_constraint_check(conn, "orders", "ordered_at")
-    issues += _null_constraint_check(conn, "orders", "source_id")
-    issues += _null_constraint_check(conn, "orders", "status_id")
+    issues += landing("not_null_orders_ordered_at",
+                      lambda: _null_constraint_check(conn, "orders", "ordered_at"))
+    issues += landing("not_null_orders_source_id",
+                      lambda: _null_constraint_check(conn, "orders", "source_id"))
+    issues += landing("not_null_orders_status_id",
+                      lambda: _null_constraint_check(conn, "orders", "status_id"))
 
     # Value domains — surface upstream changes (new KeyCRM status/source IDs).
-    issues += _value_domain_check(
+    issues += landing("value_domain_orders_status_id", lambda: _value_domain_check(
         conn, "orders", "status_id", KNOWN_STATUS_IDS, Severity.WARN,
-    )
+    ))
 
     # Our copy of "what counts as revenue" against KeyCRM's own grouping.
     issues += guarded("status_group_agreement",
                       lambda: _status_group_agreement_check(conn))
-    issues += _value_domain_check(
+    issues += landing("value_domain_orders_source_id", lambda: _value_domain_check(
         conn, "orders", "source_id", KNOWN_SOURCE_IDS, Severity.WARN,
-    )
+    ))
 
     # Freshness — catch silent sync-pipeline stalls (e.g. categories 45d stale).
     issues += _freshness_check(conn, chain_watermarks=chain_watermarks)
@@ -1609,7 +1622,8 @@ def check_internal_integrity(
 
     # An order with revenue and no products is a half-written order. The header
     # makes it look complete, so nothing goes back for it on its own.
-    issues += _orders_without_line_items_check(conn)
+    issues += landing("orders_without_line_items",
+                      lambda: _orders_without_line_items_check(conn))
 
     # A missed inventory snapshot is the one loss here with no second chance:
     # the API serves current stock, so yesterday's is gone the moment yesterday
@@ -1660,6 +1674,28 @@ GUARDED_CHECK_CONDITIONS: Dict[str, Tuple[str, ...]] = {
     "goods_shipped_without_sale": ("goods_shipped_without_sale",),
     "inventory_snapshot_continuity": ("inventory_snapshot_gaps",),
 }
+
+
+# The checks over the order tables that stand down once chain 3 writes the
+# orders to Postgres (`core.pg_orders_write.landing_checks_stood_down`, folded
+# into `warehouse_cutover.stood_down_duckdb_checks()`): every one reads DuckDB's
+# `orders` or `order_products`, which the chain freezes. Each name is the one
+# `check_internal_integrity` skips it under — the finding's own name for the
+# checks that run bare, the guard's for `status_group_agreement` — so the
+# integrity job's `duckdb_looked` leaves them out and DN-23's Postgres twins
+# stand in rather than compare against a frozen copy.
+ORDER_LANDING_CHECKS: FrozenSet[str] = frozenset({
+    "pk_uniqueness_orders",
+    "pk_uniqueness_order_products",
+    "fk_orphan_order_products_order_id",
+    "not_null_orders_ordered_at",
+    "not_null_orders_source_id",
+    "not_null_orders_status_id",
+    "value_domain_orders_status_id",
+    "value_domain_orders_source_id",
+    "status_group_agreement",
+    "orders_without_line_items",
+})
 
 
 def unverified_conditions(raised: Sequence[str], issues: List[IntegrityIssue]) -> List[str]:
@@ -1955,6 +1991,10 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Find the write that skipped core.pg_buyers_write; never delete a buyer's contacts to clear it"),
     ("chain_buyer_contact_missing",
      "POST /api/duckdb/sync-all-buyers rewrites every buyer and its contacts; find what deleted the list first"),
+    # Chain 3's orders: an order and its costs are written together, so an
+    # orphaned cost is an order refused or a write that went round the chain.
+    ("chain_expense_orphans",
+     "Read the web log for the order ids the chain refused; a refused order is re-offered for 24 h, then re-fetch it by id"),
     ("chain_invariants_unwatched",
      "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),

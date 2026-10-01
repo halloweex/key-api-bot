@@ -125,6 +125,24 @@ The buyers (chain 4):
   90 minutes, and a second limit on the stamp the same step writes would say
   one stall twice (`pg_buyers_write.CHAIN_WATERMARK_MAX_AGE_MIN`).
 
+The orders (chain 3):
+
+* **No expense without its order, once the chain has written.** The order
+  and its costs land in one transaction from one payload, so an expense whose
+  `order_id` `bronze.orders` does not hold — older than a day, past anything
+  in flight — is a write that went round the chain, or an order dropped
+  for want of `ordered_at` while its costs were kept, as DuckDB always kept
+  them. WARN: the cost is real, it is only unjoined. No check in either
+  engine looked at expenses against orders before this one; the integrity
+  scan's foreign-key check and DN-23's twin are order lines only.
+* **`app.order_backfill_misses.checked_at`.** Postgres has no default there
+  (revision 0008), and a NULL is an id the half-written repair re-asks KeyCRM
+  about every run, because its 30-day `NOT EXISTS` cannot compare it.
+* **Not its watermark.** `last_sync_orders` holds KeyCRM's newest
+  `updated_at`, not a sync time, and stands still overnight by design
+  (`pg_orders_write.CHAIN_WATERMARK_MAX_AGE_MIN`); `freshness_orders` and the
+  order step's own health judge the sync.
+
 WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
 
 A chain is watched when `core.write_chains.chain_modes()` says its writes go to
@@ -355,7 +373,17 @@ class Buyers:
     contact_missing_sample: Tuple[int, ...] = ()
 
 
-Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Unwatched, None]
+@dataclass(frozen=True)
+class Orders:
+    """What is true of chain 3's tables on their own. The expense orphans are
+    read only once the chain has written here (`latched_at`)."""
+    nulls: Nulls
+    latched_at: Optional[datetime] = None
+    expense_orphans: int = 0
+    expense_orphan_sample: Tuple[int, ...] = ()
+
+
+Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Orders, Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -375,6 +403,7 @@ class Facts:
     goals: Group = None
     expense_types: Group = None
     buyers: Group = None
+    orders: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
@@ -399,6 +428,7 @@ DICTIONARY_EMPTY = "chain_dictionary_empty"
 NAME_UNRESOLVED = "chain_name_unresolved"
 BUYER_ORPHANS = "chain_buyer_orphan_rows"
 CONTACT_MISSING = "chain_buyer_contact_missing"
+EXPENSE_ORPHANS = "chain_expense_orphans"
 UNWATCHED = "chain_invariants_unwatched"
 
 # What a blind run holds rather than resolves — `data_quality`'s
@@ -407,6 +437,7 @@ CONDITIONS: Tuple[str, ...] = (
     SEQUENCE_BEHIND, COLUMN_NULL, INITIAL_BURST, FIRST_SEEN_RESET,
     ROLLUP_MISSING, SNAPSHOT_SHORT, WATERMARK_STALE,
     DICTIONARY_EMPTY, NAME_UNRESOLVED, BUYER_ORPHANS, CONTACT_MISSING,
+    EXPENSE_ORPHANS,
 )
 
 # The family name every condition above carries, and the key the integrity
@@ -461,14 +492,15 @@ def _reader_groups() -> Dict[str, str]:
     """
     from core import (
         pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-        pg_goals_write, pg_inventory_write,
+        pg_goals_write, pg_inventory_write, pg_orders_write,
     )
 
     return {pg_expenses_write.CHAIN: "expenses",
             pg_inventory_write.CHAIN: "inventory",
             pg_goals_write.CHAIN: "goals",
             pg_expense_types_write.CHAIN: "expense_types",
-            pg_buyers_write.CHAIN: "buyers"}
+            pg_buyers_write.CHAIN: "buyers",
+            pg_orders_write.CHAIN: "orders"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -645,6 +677,23 @@ SELECT count(*) FILTER (WHERE kind = 'contact') AS contacts,
 FROM orphans
 """
 
+# Chain 3. `checked_at` has no default in Postgres (revision 0008).
+_MISS_NULLS_SQL = """
+SELECT count(*) FILTER (WHERE checked_at IS NULL) AS checked_at
+FROM app.order_backfill_misses
+"""
+
+# An expense whose order `bronze.orders` does not hold, past a day — the order
+# and its costs are written in one transaction from one payload, so nothing
+# legitimate is in flight that long.
+_EXPENSE_ORPHANS_SQL = """
+SELECT count(*) AS orphans,
+       COALESCE((array_agg(e.id ORDER BY e.id))[1:10], '{}'::int[]) AS sample
+FROM bronze.expenses e
+WHERE e.mirrored_at < now() - interval '1 day'
+  AND NOT EXISTS (SELECT 1 FROM bronze.orders o WHERE o.id = e.order_id)
+"""
+
 _KYIV_DAY_SQL = "SELECT ($1::timestamptz AT TIME ZONE 'Europe/Kyiv')::date"
 
 _ROLLUP_SQL = """
@@ -725,6 +774,18 @@ async def _read_buyers(conn, latched_at: Optional[datetime] = None) -> Buyers:
                   orphan_contacts=int(orphans["contacts"]),
                   orphan_verdicts=int(orphans["verdicts"]),
                   orphan_sample=tuple(int(i) for i in orphans["sample"]))
+
+
+async def _read_orders(conn, latched_at: Optional[datetime] = None) -> Orders:
+    nulls_row = await conn.fetchrow(_MISS_NULLS_SQL)
+    nulls = Nulls(table="app.order_backfill_misses",
+                  counts={"checked_at": int(nulls_row["checked_at"])})
+    if latched_at is None:
+        return Orders(nulls=nulls)
+    orphans = await conn.fetchrow(_EXPENSE_ORPHANS_SQL)
+    return Orders(nulls=nulls, latched_at=latched_at,
+                  expense_orphans=int(orphans["orphans"]),
+                  expense_orphan_sample=tuple(int(i) for i in orphans["sample"]))
 
 
 async def _read_inventory(conn, latched_at: Optional[datetime],
@@ -865,6 +926,7 @@ async def read_facts(*, pool=None) -> Facts:
 
     from core import (
         pg_buyers_write, pg_expenses_write, pg_goals_write, pg_inventory_write,
+        pg_orders_write,
     )
 
     groups: Dict[str, Group] = {}
@@ -887,6 +949,8 @@ async def read_facts(*, pool=None) -> Facts:
                     "expense_types": _read_expense_types,
                     "buyers": lambda c: _read_buyers(
                         c, _stamp(watched.get(pg_buyers_write.CHAIN))),
+                    "orders": lambda c: _read_orders(
+                        c, _stamp(watched.get(pg_orders_write.CHAIN))),
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -924,6 +988,7 @@ async def read_facts(*, pool=None) -> Facts:
                  goals=groups.get("goals"),
                  expense_types=groups.get("expense_types"),
                  buyers=groups.get("buyers"),
+                 orders=groups.get("orders"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
                  unread=unread)
 
@@ -1210,6 +1275,27 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
     return issues
 
 
+def _order_issues(o: Orders, chain: str) -> List:
+    from core.data_quality import Severity
+
+    if o.latched_at is None or not o.expense_orphans:
+        return []
+    shown = ", ".join(str(i) for i in o.expense_orphan_sample)
+    return [_issue(
+        check_name=EXPENSE_ORPHANS, table_name="bronze.expenses",
+        severity=Severity.WARN, count=o.expense_orphans,
+        sample_ids=o.expense_orphan_sample,
+        description=(
+            f"{o.expense_orphans} expense(s) older than a day name an order "
+            f"bronze.orders does not hold (e.g. expense {shown}). {chain} "
+            "writes an order and its costs in one transaction from one "
+            "payload, so these were written round it, or their order was "
+            "refused (no ordered_at, or a value Postgres would not take) while "
+            "its costs were kept — the rule DuckDB always followed. The cost "
+            "is real and unjoined: /expenses' profit analysis cannot place it "
+            "on a day."))]
+
+
 def _watermark_issues(marks: Tuple[WatermarkAge, ...]) -> List:
     from core.data_quality import Severity
 
@@ -1256,7 +1342,7 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     """
     from core import (
         pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-        pg_goals_write, pg_inventory_write,
+        pg_goals_write, pg_inventory_write, pg_orders_write,
     )
 
     if facts is None:
@@ -1316,6 +1402,14 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
         issues += _null_issues(facts.buyers.nulls, pg_buyers_write.CHAIN,
                                facts.buyers.latched_at)
         issues += _buyer_issues(facts.buyers, pg_buyers_write.CHAIN)
+
+    if isinstance(facts.orders, Unwatched):
+        issues.append(unwatched_issue(facts.orders.reason,
+                                      (pg_orders_write.CHAIN,)))
+    elif isinstance(facts.orders, Orders):
+        issues += _null_issues(facts.orders.nulls, pg_orders_write.CHAIN,
+                               facts.orders.latched_at)
+        issues += _order_issues(facts.orders, pg_orders_write.CHAIN)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(
