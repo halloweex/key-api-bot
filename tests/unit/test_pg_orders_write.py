@@ -94,6 +94,59 @@ class TestTheFlag:
         assert pow_.unmet_precondition()            # still published
         assert write_chains.chain_modes()[pow_.CHAIN]["unmet_precondition"]
 
+    def test_a_precondition_that_comes_good_mid_process_does_not_flip(self, met):
+        """The chain-3 review: with the flag set while the PITR drill marker
+        was stale, the Monday drill's fresh marker flipped a RUNNING web on
+        its next write — no stopped window, no `--handover`. Held is held
+        until the process ends, in the writer and in the registry alike.
+        Mutation: answer the live preconditions alone (drop `_held`)."""
+        met.setenv("KS_WRITE_ORDERS", "postgres")
+        met.setattr(pow_, "_backup_unmet", lambda: ["pitr_drill: 9 days old"])
+        assert pow_.writes_postgres() is False
+        met.setattr(pow_, "_backup_unmet", lambda: [])         # 08:44, the drill passed
+        assert pow_.writes_postgres() is False
+        assert pow_.mode() == "duckdb"
+        why = pow_.unmet_precondition()
+        assert why.startswith(pow_.HELD_KEY) and "pitr_drill" in why
+        assert "--handover" in why
+        assert write_chains.chain_modes()[pow_.CHAIN]["unmet_precondition"] == why
+        met.setattr(pow_, "_held", None)                         # a restart
+        assert pow_.writes_postgres() is True
+
+    def test_the_start_takes_the_verdict_before_any_consumer_asks(self, met):
+        """A precondition unmet when the process starts holds it, even if it
+        comes good before the first write asks. Mutation: drop
+        `settle_hold()` from `configure_modes()`."""
+        from core.runtime_modes import configure_modes
+
+        met.setenv("KS_WRITE_ORDERS", "postgres")
+        met.setattr(pow_, "_backup_unmet", lambda: ["remote_restore: never"])
+        configure_modes()
+        met.setattr(pow_, "_backup_unmet", lambda: [])
+        assert pow_.writes_postgres() is False
+        assert pow_.unmet_precondition().startswith(pow_.HELD_KEY)
+
+    def test_with_the_flag_off_the_start_reads_nothing_and_holds_nothing(self, flags):
+        """Production today: the start verdict costs nothing and records
+        nothing, so a later process — the only place a flag can change —
+        decides for itself. Mutation: record the hold whatever the flag."""
+        def boom():
+            raise AssertionError("read with the flag off")
+
+        live = pow_._live_unmet
+        flags.setattr(pow_, "_live_unmet", boom)
+        assert pow_.settle_hold() is None and pow_._held is None
+        flags.setattr(pow_, "_live_unmet", live)
+        assert pow_.unmet_precondition()                # unmet today, flag off
+        assert pow_._held is None
+
+    def test_a_latched_chain_is_never_held(self, met):
+        """The latch outranks the hold as it outranks every precondition."""
+        met.setenv("KS_WRITE_ORDERS", "postgres")
+        met.setattr(pow_, "_held", ("2026-10-01T08:00:00+00:00", "pitr_drill: old"))
+        chain_latch.latch(pow_.CHAIN)
+        assert pow_.writes_postgres() is True and pow_.mode() == "postgres"
+
     @pytest.mark.parametrize("state", ["off", "flag", "latched", "typo", "held"])
     def test_mode_is_the_registry_s_answer_in_every_state(self, met, state):
         """`mode()` and `chain_modes()` are one answer. Mutation: compute

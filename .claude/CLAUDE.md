@@ -1602,8 +1602,15 @@ host scripts now write on success only (`core/backup_evidence.py`; one provider,
 OD-01 (c) cancelled 2026-10-01; their ages, and only their ages, are
 `/api/health`'s `backups`) — and `landing_pages_clear`: no delivered page
 under a condition the stand-down retires. While any is unmet an unlatched chain
-runs as duckdb whatever its flag says. `preflight` adds what Postgres says:
-the three bronze tables backfilled and their mirrors not failing.
+runs as duckdb whatever its flag says. **And held is held until the process
+ends** (`held_until_restart`): the markers age and are rewritten by the
+host's drills, and a page resolves, inside a running web, and with the flag
+set the Monday drill's fresh marker used to flip a running web on its next
+write — no stopped window, no `--handover` (found in review). The first unmet
+answer under the flag is remembered, from the start (`configure_modes()`)
+on, so the flip happens only at a start that found everything met.
+`preflight` adds what Postgres says: the three bronze tables backfilled and
+their mirrors not failing.
 
 **The way back** is the copy-back generalised from chain 4's mirrored tables:
 the orders, expenses and line items each dated by their own `mirrored_at`,

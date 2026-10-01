@@ -65,9 +65,18 @@ def configure_modes() -> Dict[str, str]:
     # Last, because the switch's preconditions name the modes above it. Never
     # raises, for `KS_READ_FALLBACK`'s reason — an unmet precondition runs as
     # `duckdb` and is published; see `core/warehouse_cutover.py`.
-    return {
+    modes = {
         pg_derivation.ENV: pg_derivation.configure_mode(),
         read_fallback.ENV: read_fallback.configure_mode(),
         pg_utm_parse.ENV: pg_utm_parse.configure_mode(),
         warehouse_cutover.ENV: warehouse_cutover.configure_mode(),
     }
+    # Chain 3's start verdict (the chain-3 review): a precondition unmet when
+    # the process starts holds `KS_WRITE_ORDERS=postgres` on DuckDB until it
+    # ends, so the flip happens at a start and never mid-day on its own. After
+    # the warehouse switch, whose cached verdict is one of its facts. Not in
+    # the mapping, for the latch's reason. Never raises.
+    from core import pg_orders_write
+
+    pg_orders_write.settle_hold()
+    return modes

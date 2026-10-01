@@ -114,6 +114,11 @@ whatever the flag says (DN-26's rule, generic in the registry since DN-27):
 Every one is read locally: `/api/health` asks this through the registry and
 must answer with Postgres down. The warning is rate-limited, chain 4's reason:
 the order step asks every minute.
+
+A process that once found one unmet under the flag stays held until it ends
+(`held_until_restart`): the facts above move inside a running web, and the
+flip must happen at a start, after `--handover`, never on its own in the
+middle of a day (`unmet_precondition`).
 """
 from __future__ import annotations
 
@@ -308,13 +313,87 @@ def _backup_unmet() -> List[str]:
     return backup_evidence.unmet()
 
 
+# What this process decided the first time it found a precondition unmet under
+# `KS_WRITE_ORDERS=postgres`: `(since, reason)`, or None while it never has.
+# Once set it holds the chain on DuckDB until the process ends, whatever the
+# facts do afterwards — see `unmet_precondition`. Reset per test by
+# `tests/conftest.py`.
+_held: Optional[Tuple[str, str]] = None
+
+HELD_KEY = "held_until_restart"
+
+
+def _flag_says_postgres() -> bool:
+    try:
+        return env_writes_postgres()
+    except Exception:  # noqa: BLE001 — a typo is published by the registry
+        return False
+
+
 def unmet_precondition() -> Optional[str]:
     """Why `KS_WRITE_ORDERS=postgres` must not move the writes yet, or None.
 
     Never raises and never asks Postgres (module docstring): every fact is a
     cached verdict, an environment variable, a marker file or this process's
     alert gate. A fact that cannot be read is unmet, because nobody can then
-    say it holds."""
+    say it holds.
+
+    **Held is held until the process ends** (the chain-3 review). Several
+    facts change with time inside a running web — the backup markers age and
+    are rewritten by the host's drills (the Monday PITR drill at 08:44), a
+    delivered page resolves — and every consumer asks this on every call. So
+    a web started with the flag set and one fact unmet used to flip on its
+    own the moment the fact came good: the next sync write latched the chain,
+    with no stopped window, no `chain_copy_back.py orders --handover` and
+    nobody watching, and whatever the mirrors had not shipped by then was
+    stranded in the store that had just become the source of truth. Now the
+    first unmet answer under the flag is remembered (`_held`), and from then
+    on this process answers unmet — the live reasons while any stands, and
+    `held_until_restart` once none does. The flip therefore happens only in a
+    process that found every precondition met from its start
+    (`settle_hold()`, called by `configure_modes()`) to its first write: the
+    restart the runbook puts after `--handover`. A latched chain is not held
+    — the latch outranks every precondition (OD-19 (a)); what is unmet is
+    published either way."""
+    global _held
+
+    live = _live_unmet()
+    if chain_latch.latched(CHAIN):
+        return live
+    if _held is None:
+        if live and _flag_says_postgres():
+            _held = (_now_utc().isoformat(timespec="seconds"), live)
+            logger.warning(
+                "%s=postgres, and the chain is held on DuckDB until this "
+                "process restarts: %s", WRITE_ENV, live)
+        return live
+    if live:
+        return live
+    since, reason = _held
+    return (f"{HELD_KEY}: this process held the chain on DuckDB at {since} "
+            f"({reason}), and every precondition has held since — the flip "
+            "happens only at a start: stop web, ask "
+            "scripts/chain_copy_back.py orders --handover, and start it again")
+
+
+def settle_hold() -> Optional[str]:
+    """The start's verdict, taken before anything can write: `unmet_precondition`
+    once, so a precondition unmet when the process started holds it from the
+    first question rather than from whichever consumer asks first. Called by
+    `core.runtime_modes.configure_modes()`; idempotent. Never raises, and
+    with the flag off — production today — reads nothing at all."""
+    if not _flag_says_postgres():
+        return None
+    try:
+        return unmet_precondition()
+    except Exception:  # noqa: BLE001 — it promises not to; then: the next ask
+        logger.exception("pg_orders_write: the start's verdict could not be read")
+        return None
+
+
+def _live_unmet() -> Optional[str]:
+    """The preconditions as they stand now — `unmet_precondition` without the
+    hold. Never raises."""
     reasons: List[str] = []
     for check in (_goals_bridge_unmet, _step13_unmet, _chain1_unmet,
                   _landing_pages_unmet):
