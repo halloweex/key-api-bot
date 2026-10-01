@@ -2163,6 +2163,10 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # in one transaction, so an orphan is a write that went round it.
     ("chain_orphan_children",
      "Find the write that skipped core.dq_journal; never delete the findings to clear it"),
+    ("chain_samples_stale",
+     "grep the web log for \"sample not persisted\"; the watchdog still judges capacity without history"),
+    ("chain_retention_unbounded",
+     "Check the watchdog tick reaches its prune (core/watchdog_samples.py); never delete samples by hand"),
     ("chain_invariants_unwatched",
      "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),

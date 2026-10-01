@@ -44,7 +44,7 @@ from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
     pg_goals_write, pg_inventory_write, write_chains,
 )
-from core import pg_dq_journal_write  # noqa: E402 — the shadow chains' block
+from core import pg_dq_journal_write, pg_watchdog_write  # noqa: E402 — the shadow chains' block
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -57,7 +57,8 @@ _WRITTEN = ("bronze.offers", "app.manual_expenses", "app.revenue_goals",
             "bronze.buyers",
             # The shadow chains (OD-02 (c)).
             "app.data_quality_issues", "app.data_quality_diffs",
-            "app.data_quality_runs")
+            "app.data_quality_runs",
+            "app.disk_samples", "app.data_dir_samples", "app.memory_samples")
 
 STOCK = {"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
          "quantity": 40, "reserve": 0}
@@ -219,6 +220,28 @@ def _journal_run(_store):
     return pg_dq_journal_write.persist_run(values, [], [])
 
 
+def _disk_tick(_store):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    sample = {"sampled_at": now, "db_size_mb": 10.0, "disk_pct_used": 40.0,
+              "disk_free_gb": 100.0}
+    return pg_watchdog_write.disk_tick(
+        sample, {"duckdb": 1024, "unattributed": 2048}, now=now,
+        dir_sampled_at=now, disk_cutoff=now - timedelta(days=14),
+        dir_cutoff=now - timedelta(days=21))
+
+
+def _memory_tick(_store):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    mem = {"working_set": 512 * 1024 * 1024, "page_cache": 0,
+           "limit": 1024 * 1024 * 1024, "oom_kills": 0}
+    return pg_watchdog_write.memory_tick(mem, now=now, sampled_at=now,
+                                         cutoff=now - timedelta(days=14))
+
+
 # Writers that return their failure rather than raise it — chain 4's
 # derivation, `derive_gender`'s contract. A cancellation still goes through.
 NEVER_RAISES = {"derive_gender_pg"}
@@ -252,6 +275,9 @@ WRITERS = {
     "persist_run": (pg_dq_journal_write, _journal_run),
     "set_digest_marker": (pg_dq_journal_write, lambda s: pg_dq_journal_write
                           .set_digest_marker("2026-10-01T06:00:00+00:00")),
+    # Chain 10, at the chain module for the same reason.
+    "disk_tick": (pg_watchdog_write, _disk_tick),
+    "memory_tick": (pg_watchdog_write, _memory_tick),
 }
 
 
@@ -465,6 +491,7 @@ FIRST_WRITES = {
     "pg_expense_types_write": ("upsert_expense_types", "bronze.expense_types", "id", 1),
     "pg_buyers_write": ("upsert_buyers", "bronze.buyers", "id", 1),
     "pg_dq_journal_write": ("persist_run", "app.data_quality_runs", "run_id", 1),
+    "pg_watchdog_write": ("memory_tick", "app.memory_samples", None, None),
 }
 
 

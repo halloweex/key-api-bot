@@ -367,8 +367,15 @@ class Journal:
     orphan_sample: Tuple[int, ...] = ()
 
 
+@dataclass(frozen=True)
+class Watchdogs:
+    """Chain 10 (OD-02 (c)): per sample table, its newest and oldest
+    `sampled_at` — `(table, newest, oldest)`, None for an empty table."""
+    spans: Tuple[Tuple[str, Optional[datetime], Optional[datetime]], ...] = ()
+
+
 Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Journal,
-              Unwatched, None]
+              Watchdogs, Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -390,6 +397,7 @@ class Facts:
     buyers: Group = None
     # The shadow chains (OD-02 (c)), appended last.
     journal: Group = None
+    watchdogs: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
@@ -415,6 +423,8 @@ NAME_UNRESOLVED = "chain_name_unresolved"
 BUYER_ORPHANS = "chain_buyer_orphan_rows"
 CONTACT_MISSING = "chain_buyer_contact_missing"
 JOURNAL_ORPHANS = "chain_orphan_children"
+SAMPLES_STALE = "chain_samples_stale"
+RETENTION_UNBOUNDED = "chain_retention_unbounded"
 UNWATCHED = "chain_invariants_unwatched"
 
 # What a blind run holds rather than resolves — `data_quality`'s
@@ -423,7 +433,7 @@ CONDITIONS: Tuple[str, ...] = (
     SEQUENCE_BEHIND, COLUMN_NULL, INITIAL_BURST, FIRST_SEEN_RESET,
     ROLLUP_MISSING, SNAPSHOT_SHORT, WATERMARK_STALE,
     DICTIONARY_EMPTY, NAME_UNRESOLVED, BUYER_ORPHANS, CONTACT_MISSING,
-    JOURNAL_ORPHANS,
+    JOURNAL_ORPHANS, SAMPLES_STALE, RETENTION_UNBOUNDED,
 )
 
 # The family name every condition above carries, and the key the integrity
@@ -480,7 +490,7 @@ def _reader_groups() -> Dict[str, str]:
         pg_buyers_write, pg_expense_types_write, pg_expenses_write,
         pg_goals_write, pg_inventory_write,
     )
-    from core import pg_dq_journal_write
+    from core import pg_dq_journal_write, pg_watchdog_write
 
     return {pg_expenses_write.CHAIN: "expenses",
             pg_inventory_write.CHAIN: "inventory",
@@ -488,7 +498,8 @@ def _reader_groups() -> Dict[str, str]:
             pg_expense_types_write.CHAIN: "expense_types",
             pg_buyers_write.CHAIN: "buyers",
             # The shadow chains (OD-02 (c)).
-            pg_dq_journal_write.CHAIN: "journal"}
+            pg_dq_journal_write.CHAIN: "journal",
+            pg_watchdog_write.CHAIN: "watchdogs"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -707,6 +718,17 @@ async def _read_journal(conn) -> Journal:
     return Journal(orphan_issues=int(row["issues"] or 0),
                    orphan_diffs=int(row["diffs"] or 0),
                    orphan_sample=tuple(int(x) for x in (row["sample"] or ())))
+
+
+async def _read_watchdogs(conn) -> Watchdogs:
+    from core.pg_watchdog_write import CHAIN_TABLES
+
+    spans = []
+    for table in CHAIN_TABLES:
+        row = await conn.fetchrow(
+            f"SELECT max(sampled_at) AS newest, min(sampled_at) AS oldest FROM {table}")
+        spans.append((table, row["newest"], row["oldest"]))
+    return Watchdogs(spans=tuple(spans))
 
 
 async def _read_allocator(conn, table: str, sequence: str) -> Allocator:
@@ -934,6 +956,7 @@ async def read_facts(*, pool=None) -> Facts:
                     "buyers": lambda c: _read_buyers(
                         c, _stamp(watched.get(pg_buyers_write.CHAIN))),
                     "journal": _read_journal,
+                    "watchdogs": _read_watchdogs,
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -972,6 +995,7 @@ async def read_facts(*, pool=None) -> Facts:
                  expense_types=groups.get("expense_types"),
                  buyers=groups.get("buyers"),
                  journal=groups.get("journal"),
+                 watchdogs=groups.get("watchdogs"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
                  unread=unread)
 
@@ -1278,6 +1302,43 @@ def _journal_issues(j: Journal, chain: str) -> List:
             "these are findings nobody is shown."))]
 
 
+def _watchdog_issues(w: Watchdogs, chain: str, now: Optional[datetime]) -> List:
+    from datetime import timedelta
+
+    from core.data_quality import Severity
+    from core.pg_watchdog_write import STALE_AFTER, retention_days
+
+    if now is None:
+        return []
+    issues: List = []
+    keep = retention_days()
+    for table, newest, oldest in w.spans:
+        limit = STALE_AFTER[table]
+        if newest is None or now - newest > limit:
+            age = ("holds no sample" if newest is None
+                   else f"took its last sample {(now - newest).total_seconds() / 3600:.1f} h ago")
+            issues.append(_issue(
+                check_name=SAMPLES_STALE, table_name=table, severity=Severity.WARN,
+                count=1, description=(
+                    f"{table} {age}, past its {limit.total_seconds() / 3600:g} h "
+                    f"limit. {chain} writes it in Postgres now, so the watchdog "
+                    "differences against nothing newer: a growth or an OOM kill "
+                    "behind this gap cannot be seen. The job logs \"sample not "
+                    "persisted\" for every tick it could not store.")))
+        bound = timedelta(days=keep[table] + 1)
+        if oldest is not None and now - oldest > bound:
+            issues.append(_issue(
+                check_name=RETENTION_UNBOUNDED, table_name=table,
+                severity=Severity.WARN, count=1, description=(
+                    f"{table}'s oldest sample is {(now - oldest).days} days old, "
+                    f"past its {keep[table]}-day retention and a day of slack. "
+                    f"The prune runs in the same transaction as {chain}'s "
+                    "insert, so it has stopped running or was handed the wrong "
+                    "cutoff — and a table that keeps everything is the next "
+                    "page about the disk.")))
+    return issues
+
+
 def _watermark_issues(marks: Tuple[WatermarkAge, ...]) -> List:
     from core.data_quality import Severity
 
@@ -1393,6 +1454,14 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
                                       (pg_dq_journal_write.CHAIN,)))
     elif isinstance(facts.journal, Journal):
         issues += _journal_issues(facts.journal, pg_dq_journal_write.CHAIN)
+
+    from core import pg_watchdog_write
+
+    if isinstance(facts.watchdogs, Unwatched):
+        issues.append(unwatched_issue(facts.watchdogs.reason,
+                                      (pg_watchdog_write.CHAIN,)))
+    elif isinstance(facts.watchdogs, Watchdogs):
+        issues += _watchdog_issues(facts.watchdogs, pg_watchdog_write.CHAIN, facts.now)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(

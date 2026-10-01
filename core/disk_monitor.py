@@ -146,14 +146,78 @@ def sample_disk_state(db_path: str, mount_path: str = "/") -> dict:
 # ─── Persistence (writes to / reads from disk_samples) ────────────────────────
 
 
+# The tables' names as holes, so each statement below is one text for both
+# stores: DuckDB's bare names by default, `app.*` with `?` numbered once chain
+# 10 (`core/pg_watchdog_write.py`, OD-02 (c)) writes the samples to Postgres.
+SAMPLE_TABLES = {
+    "duckdb": {"disk_samples": "disk_samples", "data_dir_samples": "data_dir_samples"},
+    "postgres": {"disk_samples": "app.disk_samples",
+                 "data_dir_samples": "app.data_dir_samples"},
+}
+
+
+def sample_sql(sql: str, engine: str = "duckdb") -> str:
+    rendered = sql.format(**SAMPLE_TABLES[engine])
+    if engine == "postgres":
+        from core.sql_dialect import numbered
+
+        return numbered(rendered)
+    return rendered
+
+
+DISK_INSERT_SQL = (
+    "INSERT INTO {disk_samples} (sampled_at, db_size_mb, disk_pct_used, disk_free_gb) "
+    "VALUES (?, ?, ?, ?)"
+)
+DISK_AT_AGE_SQL = """
+        SELECT sampled_at, db_size_mb, disk_pct_used, disk_free_gb
+        FROM {disk_samples}
+        WHERE sampled_at BETWEEN ? AND ?
+        ORDER BY ABS(EXTRACT(EPOCH FROM (sampled_at - ?)))
+        LIMIT 1
+    """
+DISK_PRUNE_SQL = "DELETE FROM {disk_samples} WHERE sampled_at < ? RETURNING sampled_at"
+
+# Retention, one number per table for every writer of it.
+DISK_RETENTION_DAYS = 14
+DIR_RETENTION_DAYS = 21
+
+
+def disk_row(sample: dict) -> list:
+    """The values one disk sample is stored as — the same list to both stores."""
+    return [sample["sampled_at"], sample["db_size_mb"],
+            sample["disk_pct_used"], sample["disk_free_gb"]]
+
+
+def at_age_window(now: datetime, hours: float, slack_hours: float):
+    """`(lo, hi, target)` for "the sample closest to `hours` ago"."""
+    from datetime import timedelta
+
+    target = now - timedelta(hours=hours)
+    return (target - timedelta(hours=slack_hours),
+            target + timedelta(hours=slack_hours), target)
+
+
+def disk_sample_dict(row) -> Optional[dict]:
+    if not row:
+        return None
+    return {
+        "sampled_at": row[0],
+        "db_size_mb": float(row[1]),
+        "disk_pct_used": float(row[2]),
+        "disk_free_gb": float(row[3]),
+    }
+
+
+def prune_cutoff(retention_days: int, now: Optional[datetime] = None) -> datetime:
+    from datetime import timedelta, timezone
+
+    return (now or datetime.now(timezone.utc)) - timedelta(days=retention_days)
+
+
 def insert_sample(conn, sample: dict) -> None:
     """Persist a sample to disk_samples. Single INSERT, cheap."""
-    conn.execute(
-        "INSERT INTO disk_samples (sampled_at, db_size_mb, disk_pct_used, disk_free_gb) "
-        "VALUES (?, ?, ?, ?)",
-        [sample["sampled_at"], sample["db_size_mb"],
-         sample["disk_pct_used"], sample["disk_free_gb"]],
-    )
+    conn.execute(sample_sql(DISK_INSERT_SQL), disk_row(sample))
 
 
 def fetch_sample_at_age(conn, hours: int = 24, slack_hours: int = 2) -> Optional[dict]:
@@ -166,36 +230,22 @@ def fetch_sample_at_age(conn, hours: int = 24, slack_hours: int = 2) -> Optional
     Returns None when no sample exists in window — caller should skip
     growth check (bootstrap behaviour).
     """
-    from datetime import timedelta, timezone
+    from datetime import timezone
     now = datetime.now(timezone.utc)
-    target = now - timedelta(hours=hours)
-    lo = target - timedelta(hours=slack_hours)
-    hi = target + timedelta(hours=slack_hours)
-    row = conn.execute("""
-        SELECT sampled_at, db_size_mb, disk_pct_used, disk_free_gb
-        FROM disk_samples
-        WHERE sampled_at BETWEEN ? AND ?
-        ORDER BY ABS(EXTRACT(EPOCH FROM (sampled_at - ?)))
-        LIMIT 1
-    """, [lo, hi, target]).fetchone()
-    if not row:
-        return None
-    return {
-        "sampled_at": row[0],
-        "db_size_mb": float(row[1]),
-        "disk_pct_used": float(row[2]),
-        "disk_free_gb": float(row[3]),
-    }
+    lo, hi, target = at_age_window(now, hours, slack_hours)
+    row = conn.execute(sample_sql(DISK_AT_AGE_SQL), [lo, hi, target]).fetchone()
+    return disk_sample_dict(row)
 
 
-def prune_old_samples(conn, retention_days: int = 14) -> int:
-    """Delete samples older than retention_days. Tiny table; cheap to clean."""
-    from datetime import timedelta, timezone
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    result = conn.execute(
-        "DELETE FROM disk_samples WHERE sampled_at < ? RETURNING sampled_at",
-        [cutoff],
-    ).fetchall()
+def prune_old_samples(conn, retention_days: int = DISK_RETENTION_DAYS,
+                      cutoff: Optional[datetime] = None) -> int:
+    """Delete samples older than retention_days. Tiny table; cheap to clean.
+
+    `cutoff`, when given, is the instant itself: chain 10 computes it once and
+    hands it to both stores, so the two prune at the same moment."""
+    if cutoff is None:
+        cutoff = prune_cutoff(retention_days)
+    result = conn.execute(sample_sql(DISK_PRUNE_SQL), [cutoff]).fetchall()
     return len(result)
 
 
@@ -697,16 +747,33 @@ def sample_data_dir(data_dir: str, disk_used_bytes: Optional[int] = None) -> dic
     return totals
 
 
+DIR_INSERT_SQL = (
+    "INSERT INTO {data_dir_samples} (sampled_at, path_group, bytes) VALUES (?, ?, ?)"
+)
+DIR_NEAREST_SQL = (
+    "SELECT sampled_at FROM {data_dir_samples} WHERE sampled_at BETWEEN ? AND ? "
+    "ORDER BY ABS(EXTRACT(EPOCH FROM (sampled_at - ?))) LIMIT 1"
+)
+DIR_SET_SQL = "SELECT path_group, bytes FROM {data_dir_samples} WHERE sampled_at = ?"
+REMAINDER_SQL = (
+    "SELECT sampled_at, bytes FROM {data_dir_samples} "
+    "WHERE path_group = ? AND sampled_at >= ? ORDER BY sampled_at"
+)
+DIR_PRUNE_SQL = "DELETE FROM {data_dir_samples} WHERE sampled_at < ? RETURNING sampled_at"
+
+
+def dir_rows(totals: dict, sampled_at) -> list:
+    """One row per path group, all under one `sampled_at` — for both stores."""
+    return [[sampled_at, group, int(size)] for group, size in totals.items()]
+
+
 def insert_dir_samples(conn, totals: dict, sampled_at=None) -> None:
     """Persist one row per path group."""
     from datetime import timezone
     if sampled_at is None:
         sampled_at = datetime.now(timezone.utc)
-    for group, size in totals.items():
-        conn.execute(
-            "INSERT INTO data_dir_samples (sampled_at, path_group, bytes) VALUES (?, ?, ?)",
-            [sampled_at, group, int(size)],
-        )
+    for row in dir_rows(totals, sampled_at):
+        conn.execute(sample_sql(DIR_INSERT_SQL), row)
 
 
 def fetch_dir_sample_at_age(conn, hours: int = 168, slack_hours: int = 12) -> Optional[dict]:
@@ -716,20 +783,13 @@ def fetch_dir_sample_at_age(conn, hours: int = 168, slack_hours: int = 12) -> Op
     window and returns that whole set — never a mix of two runs, which would
     difference groups against different moments and invent growth.
     """
-    from datetime import timedelta, timezone
+    from datetime import timezone
     now = datetime.now(timezone.utc)
-    target = now - timedelta(hours=hours)
-    lo, hi = target - timedelta(hours=slack_hours), target + timedelta(hours=slack_hours)
-    row = conn.execute(
-        "SELECT sampled_at FROM data_dir_samples WHERE sampled_at BETWEEN ? AND ? "
-        "ORDER BY ABS(EXTRACT(EPOCH FROM (sampled_at - ?))) LIMIT 1",
-        [lo, hi, target],
-    ).fetchone()
+    lo, hi, target = at_age_window(now, hours, slack_hours)
+    row = conn.execute(sample_sql(DIR_NEAREST_SQL), [lo, hi, target]).fetchone()
     if not row:
         return None
-    rows = conn.execute(
-        "SELECT path_group, bytes FROM data_dir_samples WHERE sampled_at = ?", [row[0]]
-    ).fetchall()
+    rows = conn.execute(sample_sql(DIR_SET_SQL), [row[0]]).fetchall()
     return {g: int(b) for g, b in rows}
 
 
@@ -746,22 +806,18 @@ def fetch_remainder_series(conn, hours: int = 180):
     """
     from datetime import timedelta, timezone
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    rows = conn.execute(
-        "SELECT sampled_at, bytes FROM data_dir_samples "
-        "WHERE path_group = ? AND sampled_at >= ? ORDER BY sampled_at",
-        [UNATTRIBUTED, cutoff],
-    ).fetchall()
+    rows = conn.execute(sample_sql(REMAINDER_SQL), [UNATTRIBUTED, cutoff]).fetchall()
     return [(ts, int(b)) for ts, b in rows]
 
 
-def prune_old_dir_samples(conn, retention_days: int = 21) -> int:
+def prune_old_dir_samples(conn, retention_days: int = DIR_RETENTION_DAYS,
+                          cutoff: Optional[datetime] = None) -> int:
     """Delete samples older than retention_days.
 
     Longer than disk_samples keeps: differencing at a 168h lag needs a week of
     history to still be there, plus slack for a scheduler that missed runs.
+    `cutoff`, when given, is the instant itself (chain 10's shadow).
     """
-    from datetime import timedelta, timezone
-    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-    return len(conn.execute(
-        "DELETE FROM data_dir_samples WHERE sampled_at < ? RETURNING sampled_at", [cutoff],
-    ).fetchall())
+    if cutoff is None:
+        cutoff = prune_cutoff(retention_days)
+    return len(conn.execute(sample_sql(DIR_PRUNE_SQL), [cutoff]).fetchall())

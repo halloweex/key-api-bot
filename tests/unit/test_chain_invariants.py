@@ -318,7 +318,7 @@ class TestAChainWithNoInvariants:
         assert set(readers.values()) <= {"expenses", "inventory", "goals",
                                          "expense_types", "buyers",
                                          # The shadow chains (OD-02 (c)).
-                                         "journal"}
+                                         "journal", "watchdogs"}
         # And each names a field `Facts` actually carries — a reader whose
         # group the verdict never looks at is read and then judged by nothing.
         import dataclasses

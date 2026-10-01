@@ -328,6 +328,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # run is gone stays until a human finds the writer and the rows.
     "chain_orphan_children": _c(
         "the orphaned findings are corrected or their run restored — a human, not a job"),
+    # Chain 10: the next stored sample clears the first; the next prune the
+    # second.
+    "chain_samples_stale": _c("the watchdog stores a sample again"),
+    "chain_retention_unbounded": _c("the prune in the watchdog's tick runs again"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 

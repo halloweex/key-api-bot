@@ -2684,16 +2684,10 @@ class BackgroundScheduler:
             evaluate_disk_capacity,
             evaluate_growth,
             evidence_for_growth,
-            fetch_dir_sample_at_age,
-            fetch_remainder_series,
-            fetch_sample_at_age,
-            insert_dir_samples,
-            insert_sample,
-            prune_old_dir_samples,
-            prune_old_samples,
             sample_data_dir,
             sample_disk_state,
         )
+        from core import watchdog_samples
         from core.duckdb_store import get_store
 
         with correlation_context() as corr_id:
@@ -2717,22 +2711,17 @@ class BackgroundScheduler:
                 disk_used_bytes=sample.get("disk_used_bytes"),
             )
 
-            async with store.connection() as conn:
-                history = fetch_sample_at_age(conn, hours=24, slack_hours=2)
-                insert_sample(conn, sample)
-                # Keep the table tiny: ~56 rows max (14 days x 4 samples/day).
-                deleted = prune_old_samples(conn, retention_days=14)
-
-                dir_week_ago = fetch_dir_sample_at_age(conn, hours=168, slack_hours=12)
-                dir_six_ago = fetch_dir_sample_at_age(conn, hours=6, slack_hours=2)
-                if dir_now:
-                    insert_dir_samples(conn, dir_now)
-                    prune_old_dir_samples(conn, retention_days=21)
-                # After the insert, deliberately: the recent window is
-                # supposed to contain this very sample. The two lookups above
-                # are read first for the opposite reason — a "168h ago" search
-                # must not be able to find today.
-                remainder = fetch_remainder_series(conn, hours=180)
+            # The insert, its prune and the differencing reads beside them,
+            # from whichever store writes the samples (chain 10, OD-02 (c)):
+            # DuckDB's one connection as it always was, or one Postgres
+            # transaction shadowed into DuckDB. Under Postgres a store that
+            # refuses hands back no history, and capacity is judged anyway.
+            reads = await watchdog_samples.disk_tick(store, sample, dir_now)
+            history = reads["history"]
+            deleted = reads["deleted"]
+            dir_week_ago = reads["dir_week_ago"]
+            dir_six_ago = reads["dir_six_ago"]
+            remainder = reads["remainder"]
 
             growth = evaluate_growth(
                 current=dir_now, baseline=dir_week_ago,
@@ -4029,12 +4018,9 @@ class BackgroundScheduler:
         """
         from core.memory_monitor import (
             evaluate_memory,
-            fetch_last_sample,
-            fetch_peak_working_set_mb,
-            insert_sample,
-            prune_old_samples,
             read_cgroup_memory,
         )
+        from core import watchdog_samples
 
         mem = read_cgroup_memory()
         if not mem:
@@ -4045,12 +4031,11 @@ class BackgroundScheduler:
         try:
             from core.duckdb_store import get_store
             store = await get_store()
-            async with store.connection() as conn:
-                last = fetch_last_sample(conn)
-                previous_oom = last["oom_kills"] if last else None
-                insert_sample(conn, mem)
-                peak_24h = fetch_peak_working_set_mb(conn, hours=24)
-                prune_old_samples(conn, retention_days=14)
+            # From whichever store writes the samples (chain 10, OD-02 (c)).
+            reads = await watchdog_samples.memory_tick(store, mem)
+            last = reads["last"]
+            previous_oom = last["oom_kills"] if last else None
+            peak_24h = reads["peak_24h"]
         except Exception as e:
             # A memory check that cannot reach the database must still report
             # memory. Losing the OOM-across-restart comparison is the only cost.

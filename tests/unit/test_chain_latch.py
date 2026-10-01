@@ -31,7 +31,7 @@ from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
     pg_goals_write, pg_inventory_write, write_chains,
 )
-from core import pg_dq_journal_write  # noqa: E402 — the shadow chains' block
+from core import pg_dq_journal_write, pg_watchdog_write  # noqa: E402 — the shadow chains' block
 
 CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
 
@@ -657,6 +657,8 @@ class TestEveryWriterLatchesFirst:
         assert set(_writers(pg_buyers_write)) == {"upsert_buyers", "derive_gender_pg"}
         # Chain 9: a run with its findings, and the digest's beat.
         assert set(_writers(pg_dq_journal_write)) == {"persist_run", "set_digest_marker"}
+        # Chain 10: each watchdog's whole tick — reads, insert, prune.
+        assert set(_writers(pg_watchdog_write)) == {"disk_tick", "memory_tick"}
 
     def test_every_registered_chain_has_a_writer_the_walk_can_see(self):
         """The guards below are parametrised over `WRITE_CHAINS`; a chain whose

@@ -81,6 +81,11 @@ class TestTheClockIsDerived:
             "app.data_quality_runs": ("started_at",),
             "app.data_quality_issues": (),
             "app.data_quality_diffs": (),
+            # Chain 10. A sample is dated by its own `sampled_at`, the one
+            # value the router hands both stores — it is also the key.
+            "app.disk_samples": ("sampled_at",),
+            "app.data_dir_samples": ("sampled_at",),
+            "app.memory_samples": ("sampled_at",),
         }
 
 
