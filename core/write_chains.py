@@ -109,6 +109,7 @@ def _chain_state(chain: ModuleType) -> Dict[str, Optional[object]]:
         "latched_at": since,
         "mismatch": since is not None and env_mode != "postgres",
         "unmet_precondition": unmet,
+        "shadow": is_shadow(chain),
     }
 
 
@@ -127,7 +128,11 @@ def _unmet_precondition(chain: ModuleType) -> Optional[str]:
 
 def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
     """`{chain: {"env", "mode", "error", "latched", "latched_at", "mismatch",
-    "unmet_precondition"}}`.
+    "unmet_precondition", "shadow"}}`.
+
+    `shadow` is the chain's shape, not its state: True for a chain that keeps
+    feeding DuckDB after it moves (OD-02 (c), `is_shadow`), whatever `mode`
+    says.
 
     `mode` is where the chain's writes actually go — "postgres", "duckdb", or
     None when the environment was not understood and no latch overrides it.
@@ -154,6 +159,65 @@ def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
     `mismatch: false` is what it looks like here in the meantime.
     """
     return {chain_name(chain): _chain_state(chain) for chain in WRITE_CHAINS}
+
+
+# ─── The third state: copy stops, comparison continues (OD-02 (c)) ──────────
+#
+# A chain moves its writes in one of two shapes. Chains 1, 6a, 7a and 8 FREEZE
+# DuckDB: once the chain writes Postgres, DuckDB stops receiving its rows, so
+# the hourly copy and the daily comparison stand down together — every answer
+# above reads one `mode`.
+#
+# Chains 9, 10 and 11 SHADOW it (owner decision OD-02 (c), 2026-10-01):
+# Postgres becomes the writer and DuckDB still receives each row, after the
+# Postgres commit, from the same values (`core/shadow_writes.py`). That splits
+# the one answer in two:
+#
+# - the hourly copy still stands down. It must: a full replace out of DuckDB
+#   would delete from Postgres every row whose shadow write failed — for a
+#   send ledger, a delivered week — once an hour, looking healthy. So a shadow
+#   chain's tables stay in `stood_down_tables()` exactly like a frozen chain's,
+#   and the shipper needs no change;
+# - the daily comparison keeps comparing, because DuckDB is still a copy — fed
+#   from the other side. `compared_in_shadow()` is that set, and
+#   `reconcile_operational` subtracts it from what it stands down and compares
+#   those tables facing Postgres→DuckDB (`compare_shadow`).
+#
+# A chain declares the shape with `CHAIN_SHADOW = True`. Everything else about
+# it — the latch, the owner rows, the copy-back, the flag's typo rule — is the
+# frozen chains' machinery unchanged: a shadow chain is latched by its first
+# Postgres write like any other, because a row whose shadow failed exists in
+# Postgres alone, and the flag is then no more a rollback than chain 8's.
+
+
+def is_shadow(chain: ModuleType) -> bool:
+    """Does this chain keep feeding DuckDB after it moves? Never raises."""
+    return bool(getattr(chain, "CHAIN_SHADOW", False))
+
+
+def shadow_chains() -> Tuple[ModuleType, ...]:
+    """The registered chains that shadow DuckDB, in registry order."""
+    return tuple(chain for chain in WRITE_CHAINS if is_shadow(chain))
+
+
+def compared_in_shadow() -> FrozenSet[str]:
+    """Tables of shadow chains whose writes go to Postgres. Never raises.
+
+    The hourly copy stands them down — they are in `stood_down_tables()` like
+    any moved chain's — and the daily comparison keeps them, facing
+    Postgres→DuckDB. Only `mode == "postgres"`: a chain whose flag nobody can
+    read and that is not latched writes nowhere (its writers raise), so there
+    is no shadow to compare and it stands down with `write_chain_flag_invalid`
+    paging, the frozen chains' answer. A chain held only by owner rows — its
+    marker lost — follows its flag again, is not here, and stays stood down
+    with `chain_latch_disagrees` paging.
+    """
+    return frozenset(
+        table
+        for chain in WRITE_CHAINS if is_shadow(chain)
+        and _chain_state(chain)["mode"] == "postgres"
+        for table in chain.CHAIN_TABLES
+    )
 
 
 def mismatched_chains() -> Dict[str, str]:
