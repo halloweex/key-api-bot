@@ -5,7 +5,8 @@ Three of the four are landing tables the sync's mirrors ship from the same
 parse as DuckDB — mirrored, chain 4's third source — and the misses ledger is
 replaced whole by `replicate_operational`. What is new is that a mirrored
 table's rewrite clock is no longer always `bronze.buyers`: an order dates its
-own rows and its line items (`bronze.orders.mirrored_at`), an expense its own,
+own rows (`bronze.orders.mirrored_at`), its line items their own
+(`bronze.order_products.mirrored_at`, grouped by order), an expense its own,
 and the handover's sentences name chain 3's levers. Against a real Postgres
 the whole tool is proved in `tests/integration/test_chain_copy_back_orders.py`.
 
@@ -61,13 +62,21 @@ class TestTheSpecs:
             "mirrored", "mirrored", "mirrored", "operational"]
 
     def test_each_row_is_dated_by_the_table_its_writer_rewrites(self, specs):
-        """Line items are deleted and re-inserted with their order, so what
-        says a line item is the chain's is its ORDER's `mirrored_at`.
-        Mutation: date line items by their own clock."""
+        """A line item belongs to its order's landing (its words, its
+        shipper), but what dates it is ITS OWN `mirrored_at`, grouped by its
+        order: the order's header stamp moves on header-only writes too — the
+        05:15 refresh and the comment restore — and dated by it a line only
+        DuckDB holds under any refreshed order read as a basket the chain
+        shrank (the chain-3 review). Mutation: date line items by their
+        order's header."""
         assert (specs[ORDERS].rewrite_clock, specs[ORDERS].rewritten_by) == (ORDERS, "id")
         assert (specs[LINES].rewrite_clock, specs[LINES].rewritten_by) == (ORDERS, "order_id")
         assert (specs[EXPENSES].rewrite_clock, specs[EXPENSES].rewritten_by) == (EXPENSES, "id")
         assert specs[MISSES].rewrite_clock is None
+        assert specs[ORDERS].rewrite_stamp == (ORDERS, "id")
+        assert specs[LINES].rewrite_stamp == (LINES, "order_id")
+        assert specs[EXPENSES].rewrite_stamp == (EXPENSES, "id")
+        assert specs[MISSES].rewrite_stamp is None
 
     def test_an_order_is_ordered_by_keycrm_s_own_stamp(self, specs):
         """Mutation: drop the source clock — a DuckDB write after the latch
@@ -94,6 +103,19 @@ class TestTheSpecs:
         clocks = dict(chain_transfer._REWRITE_CLOCK, **{LINES: "bronze.buyers"})
         monkeypatch.setattr(chain_transfer, "_REWRITE_CLOCK", clocks)
         with pytest.raises(LookupError, match="does not own"):
+            chain_specs(pg_orders_write)
+
+    def test_a_stamp_table_outside_the_chain_raises(self, monkeypatch):
+        """Its owner row is what the stamp is compared against."""
+        stamps = dict(chain_transfer._REWRITE_STAMP, **{LINES: ("bronze.buyers", "id")})
+        monkeypatch.setattr(chain_transfer, "_REWRITE_STAMP", stamps)
+        with pytest.raises(LookupError, match="does not own"):
+            chain_specs(pg_orders_write)
+
+    def test_a_mirrored_table_with_no_stamp_raises(self, monkeypatch):
+        stamps = {k: v for k, v in chain_transfer._REWRITE_STAMP.items() if k != LINES}
+        monkeypatch.setattr(chain_transfer, "_REWRITE_STAMP", stamps)
+        with pytest.raises(LookupError, match="_REWRITE_STAMP"):
             chain_specs(pg_orders_write)
 
     def test_every_clock_table_has_its_words(self):
@@ -126,10 +148,11 @@ class TestBeforeTheFlip:
 
 class TestAfterTheLatch:
     def test_a_shrunk_basket_is_the_chain_s_work(self, specs):
-        """Order 1 was rewritten since the latch with one line item fewer: the
-        one only DuckDB holds is a line it dropped. Mutation: judge line items
-        by their own clock — nothing dates them, and every shrunk basket would
-        refuse the copy-back."""
+        """Order 1's line items were replaced since the latch with one fewer:
+        the one only DuckDB holds is a line it dropped. `rewritten` is the set
+        of orders whose Postgres line items carry a stamp at or after the
+        latch. Mutation: treat a missing line item as stranded whatever its
+        order — every shrunk basket would refuse the copy-back."""
         s = specs[LINES]
         dk = {1001: _line(s, 1, 1), 1002: _line(s, 1, 2)}
         pg = {1001: _line(s, 1, 1)}
@@ -197,9 +220,11 @@ class TestTheHandoverReadsEachClockOnce:
         }
         asked, seen = [], {}
 
-        async def rewritten(_pool, table):
-            asked.append(table)
-            return frozenset({1, 2}) if table == ORDERS else frozenset()
+        async def rewritten(_pool, table, column):
+            asked.append((table, column))
+            return {(ORDERS, "id"): frozenset({1, 2}),
+                    (LINES, "order_id"): frozenset({1, 2})}.get((table, column),
+                                                             frozenset())
 
         def classify(spec, dk, pg, **kw):
             seen[spec.pg_table] = kw["rewritten"]
@@ -225,7 +250,7 @@ class TestTheHandoverReadsEachClockOnce:
 
         await chain_transfer._handover_issues(
             _Store(), object(), list(specs.values()), moved_on=True, max_samples=5)
-        assert sorted(asked) == [EXPENSES, ORDERS]
+        assert sorted(asked) == [(EXPENSES, "id"), (LINES, "order_id"), (ORDERS, "id")]
         assert list(seen)[:2] == [ORDERS, EXPENSES]          # owners first
         assert seen[ORDERS] == frozenset({1, 2})
         assert seen[LINES] == frozenset({2})                 # 1 is DuckDB's later version
@@ -233,9 +258,12 @@ class TestTheHandoverReadsEachClockOnce:
         assert seen[MISSES] is None                          # operational: no rewrite clock
 
     @pytest.mark.asyncio
-    async def test_only_a_rewrite_clock_is_ever_read(self):
-        with pytest.raises(ValueError):
-            await chain_transfer._rewritten_since_latch(object(), "bronze.order_products")
+    async def test_only_a_rewrite_stamp_is_ever_read(self):
+        for table, column in (("bronze.order_products", "id"),
+                              ("bronze.orders", "order_id"),
+                              ("bronze.order_products; DROP", "order_id")):
+            with pytest.raises(ValueError):
+                await chain_transfer._rewritten_since_latch(object(), table, column)
 
 
 @pytest_asyncio.fixture

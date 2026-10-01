@@ -284,3 +284,76 @@ class TestTheRefusals:
                 "price_sold) VALUES (?, ?, 799, 'Зайвий', 1, 1.00)",
                 [BASE * 1000 + 7, BASE])
         await self._refused(store, "handover_rows_missing", LINES)
+
+
+class TestALineItemIsDatedByItsOwnWrite:
+    """A line item is the chain's only when the chain replaced its order's
+    line items, never because its order's HEADER moved: the 05:15 refresh
+    (`force_update=True, skip_products=True`) and the comment restore write
+    headers alone, every day, and each moves `bronze.orders.mirrored_at`. Dated
+    by the header, a line only DuckDB holds under any order refreshed since
+    the latch read as a basket the chain shrank, and `--execute` deleted it
+    (the chain-3 review). Mutation: `_REWRITE_STAMP[LINES]` back to
+    `("bronze.orders", "id")`."""
+
+    async def _refused(self, store, check, table):
+        await TestTheRefusals._refused(self, store, check, table)
+
+    @pytest.mark.asyncio
+    async def test_a_rogue_line_under_a_header_only_refresh_is_refused(self, stores):
+        store, pool, env = stores
+        await _both(store, pool, [_payload(BASE, items=3), _payload(BASE + 1)])
+        await _flip(env)
+        # The chain shrinks BASE's basket, and refreshes BASE + 1's header only.
+        await _sync(store, [_payload(BASE, status=20, items=2,
+                                     updated=T0 + timedelta(hours=1))])
+        await _sync(store, [_payload(BASE + 1, status=19)],
+                    force_update=True, skip_products=True)
+        assert (await _pg(pool, "SELECT status_id FROM bronze.orders WHERE id = $1",
+                          BASE + 1))[0][0] == 19
+        async with store.connection() as conn:
+            conn.execute(
+                "INSERT INTO order_products (id, order_id, product_id, name, quantity, "
+                "price_sold) VALUES (?, ?, 799, 'Зайвий', 1, 1.00)",
+                [(BASE + 1) * 1000 + 7, BASE + 1])
+        from core.chain_transfer import handover_check
+
+        issues = await handover_check(store, chain)
+        on_lines = {(i.severity.value, tuple(i.sample_ids)) for i in issues
+                    if i.table_name == LINES and i.check_name == "handover_rows_missing"}
+        # The shrunk basket is still the chain's work; the rogue line is not.
+        assert ("INFO", (BASE * 1000 + 2,)) in on_lines, on_lines
+        assert ("CRITICAL", ((BASE + 1) * 1000 + 7,)) in on_lines, on_lines
+        await self._refused(store, "handover_rows_missing", LINES)
+        # Nothing was written: the line DuckDB holds is still there.
+        assert await _duck(store, "SELECT id FROM order_products WHERE id = ?",
+                           [(BASE + 1) * 1000 + 7])
+
+    @pytest.mark.asyncio
+    async def test_a_line_that_differs_under_a_comment_restore_is_refused(self, stores):
+        store, pool, env = stores
+        await _both(store, pool, [_payload(BASE, comment=None)])
+        await _flip(env)
+        assert await chain.restore_manager_comments({BASE: "utm_source=ig"}) == [BASE]
+        async with store.connection() as conn:
+            conn.execute("UPDATE order_products SET quantity = 9 WHERE id = ?",
+                         [BASE * 1000])
+        await self._refused(store, "handover_rows_differ", LINES)
+
+    @pytest.mark.asyncio
+    async def test_a_basket_the_chain_emptied_is_refused_and_says_so(self, stores):
+        """Knowingly too strict: an emptied basket leaves no Postgres line to
+        date, so its DuckDB lines cannot be told from stranded ones. The
+        refusal names the case and the per-id decision."""
+        from core.chain_transfer import handover_check
+
+        store, pool, env = stores
+        await _both(store, pool, [_payload(BASE)])
+        await _flip(env)
+        await _sync(store, [_payload(BASE, items=0, updated=T0 + timedelta(hours=1))])
+        assert await _pg(pool, "SELECT id FROM bronze.order_products "
+                               "WHERE order_id = $1", BASE) == []
+        await self._refused(store, "handover_rows_missing", LINES)
+        said = " ".join(i.description for i in await handover_check(store, chain)
+                        if i.table_name == LINES)
+        assert "EMPTIED" in said and "delete its line items from DuckDB" in said

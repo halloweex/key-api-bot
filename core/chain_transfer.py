@@ -186,6 +186,10 @@ class TableTransfer:
     # for a contact, the order for a line item, the row itself otherwise.
     rewritten_by: Optional[str] = None
     rewrite_clock: Optional[str] = None
+    # A mirrored table only: `(table, column)` — the Postgres rows whose
+    # `mirrored_at` dates this row's last write, and the column of those rows
+    # that `rewritten_by` is matched against (`_REWRITE_STAMP`).
+    rewrite_stamp: Optional[Tuple[str, str]] = None
     # The row set to read, where it is not the whole table: chain 4's contacts
     # are read through a join to their own buyers in each store, as the daily
     # check reads DuckDB's (`mirror_reconciliation.BUYER_CONTACTS_FROM`).
@@ -210,10 +214,27 @@ class TableTransfer:
 # `updated_at = now()` (`chain_latch.claim`): both are Postgres's own clock,
 # so no host's clock is compared with another's. A row written in the
 # latching transaction carries exactly the owner row's instant, which is why
-# the rule is `>=`. Contacts and line items have no clock of their own — the
-# writers delete and rewrite a buyer's contacts and an order's line items
-# whole — so each is dated by its buyer or its order (`_REWRITE_CLOCK`), and
-# compared against the owner row of that table.
+# the rule is `>=`. A contact has no clock of its own — the writer deletes
+# and rewrites a buyer's contacts whole, every time it writes the buyer — so
+# it is dated by its buyer. `_REWRITE_CLOCK` names the landing a table
+# belongs to (its owner, its sentences, its shipper); `_REWRITE_STAMP` names
+# the Postgres rows whose `mirrored_at` dates the write, and the column of
+# those rows naming the owner.
+#
+# A line item is dated by ITS OWN `bronze.order_products.mirrored_at`, never
+# by its order's. The order's moves on every header write, and two of the
+# chain's writes are headers only: the 05:15 forced refresh
+# (`skip_products=True`, every order created in the last 30 days, every day)
+# and `restore_manager_comments`. Dated by the header, a line item only
+# DuckDB holds under any order refreshed since the latch read as a basket the
+# chain shrank, and the copy-back deleted it — a guard that was off for every
+# recent order (the chain-3 review reproduced it). A basket replacement
+# deletes the order's line items and inserts what the payload carries, so a
+# line Postgres holds of a basket the chain replaced carries a stamp at or
+# after the latch. One case is knowingly too strict: a basket the chain
+# EMPTIED (KeyCRM served the order with no line items) leaves no line to
+# date, and its DuckDB lines read as stranded — `_ORDER_WORDS.stranded` says
+# so and names the per-id decision.
 #
 # Declared, because nothing else says it: `chain_specs` raises for a mirrored
 # table missing here rather than guessing, the rule the rest of this module
@@ -227,6 +248,11 @@ _REWRITE_CLOCK = {"bronze.buyers": "bronze.buyers",
                   "bronze.orders": "bronze.orders",
                   "bronze.order_products": "bronze.orders",
                   "bronze.expenses": "bronze.expenses"}
+_REWRITE_STAMP = {"bronze.buyers": ("bronze.buyers", "id"),
+                  "bronze.buyer_contacts": ("bronze.buyers", "id"),
+                  "bronze.orders": ("bronze.orders", "id"),
+                  "bronze.order_products": ("bronze.order_products", "order_id"),
+                  "bronze.expenses": ("bronze.expenses", "id")}
 
 # Which version of a buyer is later, when both stores hold one: KeyCRM's own
 # `updated_at`, carried by both stores as a value from the one parse. Declared
@@ -349,18 +375,25 @@ _RESYNC = ("POST /api/duckdb/resync?days=N rewrites every order created in "
 _ORDER_WORDS = _MirrorWords(
     dropped=(
         "{n} row(s) in DuckDB's {dk_table} are not in {table}, and the "
-        "chain's writer rewrote their order after the latch — it replaces an "
-        "order's line items whole, so these are ones it dropped, a basket "
-        "that shrank. The copy-back removes them from DuckDB."),
+        "chain's writer replaced their order's line items after the latch — "
+        "Postgres's line items of that order carry a later stamp — so these "
+        "are ones it dropped, a basket that shrank. The copy-back removes "
+        "them from DuckDB."),
     stranded=(
         "{n} row(s) in DuckDB's {dk_table} have no counterpart in {table}, "
         "and nothing the chain wrote since the latch explains them: its "
         "writer never deletes an order or an expense, and replaces an "
-        "order's line items only when it rewrites that order. So DuckDB "
-        "holds something Postgres never had — stranded at the flip, or "
-        "written to DuckDB since — and a copy-back would delete it. Bring "
-        "web back up and re-fetch those orders through the chain ("
-        + _RESYNC + "; an older id is a decision of its own). Then ask again."),
+        "order's line items only when it writes them — a header-only write "
+        "(the 05:15 refresh, a comment restore) leaves them alone, and a "
+        "line item is dated by its own stamp. So DuckDB holds something "
+        "Postgres never had — stranded at the flip, or written to DuckDB "
+        "since — and a copy-back would delete it. Bring web back up and "
+        "re-fetch those orders through the chain (" + _RESYNC + "; an older "
+        "id is a decision of its own). Then ask again. One case is knowingly "
+        "refused too: a line item of an order whose basket the chain "
+        "EMPTIED (KeyCRM served it with no line items) has no Postgres line "
+        "left to date it. If KeyCRM still serves that order with no line "
+        "items, delete its line items from DuckDB by id and ask again."),
     missing_before=(
         "The order and expense mirrors and their hourly ids-diffs all stand "
         "down the moment this chain routes to Postgres, so a flip now "
@@ -382,12 +415,13 @@ _ORDER_WORDS = _MirrorWords(
         "ask again."),
     carried=(
         "{n} row(s) differ between DuckDB's {dk_table} and {table}, and the "
-        "chain's writer rewrote them, or their order, after the latch — the "
-        "work a copy-back carries."),
+        "chain's writer rewrote them after the latch (a line item when it "
+        "replaced its order's line items) — the work a copy-back carries."),
     unexplained=(
         "{n} row(s) differ between DuckDB's {dk_table} and {table}, and the "
-        "chain's writer has not rewritten them, or their order, since the "
-        "latch: Postgres holds the mirror's last copy, and DuckDB something "
+        "chain's writer has not rewritten them since the latch (a line item: "
+        "its order's line items were not replaced, whatever its header "
+        "says): Postgres holds the mirror's last copy, and DuckDB something "
         "else. Neither store says which is right, and a copy-back would "
         "overwrite DuckDB's. KeyCRM decides: re-fetch those orders through "
         "the chain (" + _RESYNC + "), which rewrites them in Postgres after "
@@ -402,11 +436,11 @@ _ORDER_WORDS = _MirrorWords(
         "there."),
     ahead_written=(
         "{n} row(s) in {table} are not in DuckDB's {dk_table}, and the "
-        "chain's writer wrote them, or their order, since the latch — the "
-        "size of the copy-back."),
+        "chain's writer wrote them since the latch — the size of the "
+        "copy-back."),
     ahead_older=(
         "{n} row(s) in {table} are not in DuckDB's {dk_table}, and the "
-        "chain's writer has not written them, or their order, since the "
+        "chain's writer has not written them since the "
         "latch: Postgres held them before the flip and DuckDB did not, which "
         "a clean pre-flip handover would have refused. A copy-back would "
         "carry them into DuckDB as if they were the chain's. Decide per id — "
@@ -555,17 +589,21 @@ def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
             source = mirrored[table]
             owner = _REWRITTEN_BY.get(table)
             clock_table = _REWRITE_CLOCK.get(table)
-            if owner is None or clock_table is None:
+            stamp = _REWRITE_STAMP.get(table)
+            if owner is None or clock_table is None or stamp is None:
                 raise LookupError(
                     f"{table} is a mirrored landing table with no entry in "
-                    "_REWRITTEN_BY or _REWRITE_CLOCK; the copy-back cannot tell "
-                    "a row the chain rewrote from one it never touched"
+                    "_REWRITTEN_BY, _REWRITE_CLOCK or _REWRITE_STAMP; the "
+                    "copy-back cannot tell a row the chain rewrote from one it "
+                    "never touched"
                 )
-            if clock_table not in chain.CHAIN_TABLES:
-                raise LookupError(
-                    f"{table} is dated by {clock_table}, which {chain.CHAIN} "
-                    "does not own: its owner row cannot date the chain's writes"
-                )
+            for dating in (clock_table, stamp[0]):
+                if dating not in chain.CHAIN_TABLES:
+                    raise LookupError(
+                        f"{table} is dated by {dating}, which {chain.CHAIN} "
+                        "does not own: its owner row cannot date the chain's "
+                        "writes"
+                    )
             joined = table == BUYER_CONTACTS_SPEC_TABLE
             out.append(TableTransfer(
                 pg_table=table, dk_table=source.dk_table,
@@ -578,6 +616,7 @@ def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
                     _compare_spec(source, (), source.columns), full_replace=True),
                 clock=_SOURCE_CLOCK.get(table, ()),
                 kind="mirrored", rewritten_by=owner, rewrite_clock=clock_table,
+                rewrite_stamp=stamp,
                 dk_select=buyer_contacts_select("duckdb") if joined else None,
                 pg_select=buyer_contacts_select("postgres") if joined else None,
             ))
@@ -705,7 +744,10 @@ def classify_handover(
       for a buyer the chain's writer rewrote since the latch (`rewritten`), and
       CRITICAL otherwise: decision 6, proved by data rather than by trusting
       that `--handover` was clean. A buyer only DuckDB holds stays CRITICAL —
-      the chain's writer never deletes one.
+      the chain's writer never deletes one. Chain 3's orders and expenses are
+      judged the same way; a line item by whether its ORDER'S LINE ITEMS were
+      replaced since the latch (`_REWRITE_STAMP`), never by its header, which
+      header-only writes move too.
     - **A Postgres row the copy could not write** — NULL in a column DuckDB
       declares NOT NULL (`required`) — is CRITICAL in both states. Without
       this the copy-back found it only at its first INSERT, as a traceback
@@ -964,10 +1006,14 @@ async def _handover_issues(
     rows a side in production.
     """
     issues: List[IntegrityIssue] = []
-    clocks = sorted({s.rewrite_clock for s in specs
-                     if s.is_mirrored and s.rewrite_clock})
-    rewritten: Dict[str, FrozenSet[Any]] = (
-        {clock: await _rewritten_since_latch(pool, clock) for clock in clocks}
+    mirrored = [s for s in specs if s.is_mirrored and s.rewrite_stamp]
+    clocks = sorted({s.rewrite_clock for s in mirrored})
+    # Each stamp read once, and remembered with the owning table its ids name:
+    # an order's header and its line items are two stamps of one owner.
+    owner_of = {s.rewrite_stamp: s.rewrite_clock for s in mirrored}
+    rewritten: Dict[Tuple[str, str], FrozenSet[Any]] = (
+        {stamp: await _rewritten_since_latch(pool, *stamp)
+         for stamp in sorted(owner_of)}
         if moved_on else {})
     # The owning tables first, whatever the chain's order: a buyer or an order
     # DuckDB holds in a later version is not the chain's, and its contacts or
@@ -981,14 +1027,15 @@ async def _handover_issues(
         issues += classify_handover(
             spec, dk_rows, pg_rows, moved_on=moved_on, max_samples=max_samples,
             required=required,
-            rewritten=(rewritten.get(spec.rewrite_clock)
+            rewritten=(rewritten.get(spec.rewrite_stamp)
                        if moved_on and spec.is_mirrored else None),
         )
-        if rewritten.get(spec.pg_table):
-            rewritten[spec.pg_table] = rewritten[spec.pg_table] - {
-                key for key in dk_rows.keys() & pg_rows.keys()
-                if _later_in_duckdb(spec, dk_rows[key], pg_rows[key])
-            }
+        if spec.pg_table in clocks and moved_on:
+            later = {key for key in dk_rows.keys() & pg_rows.keys()
+                     if _later_in_duckdb(spec, dk_rows[key], pg_rows[key])}
+            for stamp, owner in owner_of.items():
+                if owner == spec.pg_table and later:
+                    rewritten[stamp] = rewritten[stamp] - later
     return issues
 
 
@@ -1036,16 +1083,19 @@ def _not_null_columns(conn, spec: TableTransfer) -> Tuple[str, ...]:
     return tuple(c for c in spec.columns if c in declared)
 
 
-async def _rewritten_since_latch(pool, table: str = "bronze.buyers") -> FrozenSet[Any]:
-    """The rows of `table` — a rewrite clock, `_REWRITE_CLOCK` — its chain's
-    writer has written since the latch; `_REWRITTEN_BY` says why this dates
-    them. Empty when the table has no owner row: then nothing can be shown to
-    be the chain's, and every difference in a table it dates stays CRITICAL.
-    The table name is one of `_REWRITE_CLOCK`'s values, never input."""
+async def _rewritten_since_latch(pool, table: str = "bronze.buyers",
+                                 column: str = "id") -> FrozenSet[Any]:
+    """The owners whose rows in `table` its chain's writer has written since
+    the latch: `column` of every row of `table` whose `mirrored_at` is at or
+    after `table`'s owner row — a buyer's or an order's own id, or the order
+    a line item belongs to (`_REWRITE_STAMP` says why each dates its rows).
+    Empty when the table has no owner row: then nothing can be shown to be
+    the chain's, and every difference in a table it dates stays CRITICAL.
+    `(table, column)` is one of `_REWRITE_STAMP`'s values, never input."""
     from core import chain_latch
 
-    if table not in set(_REWRITE_CLOCK.values()):
-        raise ValueError(f"{table!r} is not a rewrite clock")
+    if (table, column) not in set(_REWRITE_STAMP.values()):
+        raise ValueError(f"{(table, column)!r} is not a rewrite stamp")
     async with pool.acquire() as conn:
         latched = await conn.fetchval(
             "SELECT updated_at FROM meta.chain_watermarks WHERE key = $1",
@@ -1054,7 +1104,7 @@ async def _rewritten_since_latch(pool, table: str = "bronze.buyers") -> FrozenSe
         if latched is None:
             return frozenset()
         rows = await conn.fetch(
-            f"SELECT id FROM {table} WHERE mirrored_at >= $1",
+            f"SELECT DISTINCT {column} AS id FROM {table} WHERE mirrored_at >= $1",
             latched,
         )
     return frozenset(row["id"] for row in rows)

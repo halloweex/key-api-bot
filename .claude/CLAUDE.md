@@ -1606,10 +1606,15 @@ runs as duckdb whatever its flag says. `preflight` adds what Postgres says:
 the three bronze tables backfilled and their mirrors not failing.
 
 **The way back** is the copy-back generalised from chain 4's mirrored tables:
-the orders and expenses dated by their own `mirrored_at`, a line item by its
-order's (a line only DuckDB holds is a basket the chain shrank only if the
-chain rewrote its order), KeyCRM's `updated_at` refusing a later DuckDB
-version, and the misses replaced whole. No allocator to carry. Proved against
+the orders, expenses and line items each dated by their own `mirrored_at`,
+KeyCRM's `updated_at` refusing a later DuckDB version, and the misses
+replaced whole. **A line item is never dated by its order's header**: the
+05:15 refresh and the comment restore write headers alone, so a line only
+DuckDB holds under any refreshed order read as a basket the chain shrank and
+`--execute` deleted it (found in review). It is the chain's only when
+Postgres's line items of its order carry a stamp from after the latch. A
+basket the chain emptied leaves no line to date and is refused, knowingly too
+strict, with the per-id decision named. No allocator to carry. Proved against
 a real Postgres in `tests/integration/test_chain_copy_back_orders.py`. **What
 is not built**: the soak checks, the restore drill counting the four tables,
 and a lock-out revision for images without the chain (chain 4's 0034 shape —
