@@ -162,12 +162,13 @@ def test_compose_is_never_addressed():
         assert not re.search(r"docker[ -]compose", line), f"line {n} addresses a compose project"
 
 
-def test_every_named_container_is_one_of_the_rehearsals():
+def test_every_container_is_named_as_one_of_the_rehearsals():
+    """No container goes unnamed, not even a `--rm` one-off of a second:
+    Docker would name it something like `eager_bassi`, which is not reh-*,
+    and the host's `docker ps` is shared with production while it runs."""
     for n, words in _runs():
         name = _flag(words, "--name")
-        if name is None:
-            assert "--rm" in words, f"line {n}: an unnamed container must be a --rm one-off"
-            continue
+        assert name is not None, f"line {n}: a container without --name"
         assert name in {f"${v}" for v in CONTAINER_VARS} | {"$name"}, f"line {n}: --name {name}"
 
 

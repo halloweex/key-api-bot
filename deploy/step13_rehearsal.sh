@@ -472,9 +472,9 @@ docker image inspect "$REH_MIGRATE_IMAGE" >/dev/null 2>&1 || die "no image $REH_
 docker image inspect "$PG_IMAGE" >/dev/null 2>&1 || die "no image $PG_IMAGE on this host"
 docker image inspect "$CH_IMAGE" >/dev/null 2>&1 || die "no image $CH_IMAGE on this host"
 
-APP_UID="$(docker run --rm --network none --pull never --memory 64m --memory-swap 64m \
+APP_UID="$(docker run --rm --name "$REH_PROBE" --network none --pull never --memory 64m --memory-swap 64m \
     --log-opt max-size=10m --entrypoint id "$REH_IMAGE" -u)"
-APP_GID="$(docker run --rm --network none --pull never --memory 64m --memory-swap 64m \
+APP_GID="$(docker run --rm --name "$REH_PROBE" --network none --pull never --memory 64m --memory-swap 64m \
     --log-opt max-size=10m --entrypoint id "$REH_IMAGE" -g)"
 if [ "$LOCAL" = 0 ]; then
     chown "$APP_UID:$APP_GID" "$DATA_DIR" "$KEYCRM_DIR"
@@ -484,7 +484,7 @@ fi
 
 image_names() {
     # The reader switches or the chain flags, as the image under test declares them.
-    docker run --rm --network none --pull never --memory 256m --memory-swap 256m \
+    docker run --rm --name "$REH_PROBE" --network none --pull never --memory 256m --memory-swap 256m \
         --log-opt max-size=10m -v "$HELPER_DIR:/reh:ro" \
         --entrypoint python "$REH_IMAGE" /reh/probe.py readers --list "$1"
 }
@@ -665,7 +665,7 @@ docker run --rm --name "$REH_PROBE" --network "$REH_NET" --pull never \
     || die "the latch markers could not be derived from the copy's owner rows"
 
 IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$REH_IMAGE" | cut -c8-19)"
-VERSION="$(docker run --rm --network none --pull never --memory 64m --memory-swap 64m \
+VERSION="$(docker run --rm --name "$REH_PROBE" --network none --pull never --memory 64m --memory-swap 64m \
     --log-opt max-size=10m --entrypoint cat "$REH_IMAGE" /app/VERSION 2>/dev/null || echo '?')"
 PG_MAX="$(pgq "SELECT max(id) || ' / ' || to_char(max(ordered_at) AT TIME ZONE 'Europe/Kyiv', 'YYYY-MM-DD HH24:MI') FROM bronze.orders")"
 HEADER1="Step 13 rehearsal · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC') · image $IMAGE_ID ($VERSION) · dump $(basename "$DUMP") · backup $(basename "$BACKUP")"
