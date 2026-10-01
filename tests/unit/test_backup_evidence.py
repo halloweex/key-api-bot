@@ -104,3 +104,59 @@ def test_the_published_block_carries_ages_only(tmp_path):
     assert ev.published(NOW, tmp_path / "nope") == {
         "pitr_drill_age_h": None, "remote_restore_age_h": None,
         "pg_offsite_age_h": None}
+
+
+# ─── /api/health publishes it ─────────────────────────────────────────────────
+
+def test_the_health_block_reads_the_data_directory(tmp_path, monkeypatch):
+    """The route reads the same markers the precondition does, from `./data`.
+    Mutation: return a constant, or read another directory."""
+    from web.routes.api import health
+
+    _write(tmp_path, ev.OFFSITE, datetime.now(timezone.utc) - timedelta(hours=3))
+    monkeypatch.setattr(ev, "DB_DIR", tmp_path)
+    block = health._backups()
+    assert set(block) == {"pitr_drill_age_h", "remote_restore_age_h", "pg_offsite_age_h"}
+    assert block["pitr_drill_age_h"] is None and block["remote_restore_age_h"] is None
+    assert block["pg_offsite_age_h"] == pytest.approx(3, abs=0.2)
+
+
+def test_an_unreadable_block_is_null_not_a_raise(monkeypatch):
+    """`/api/health` must answer whatever the disk says. Mutation: drop the
+    guard — the whole health check would 500 over one block."""
+    from web.routes.api import health
+
+    def boom(*a, **k):
+        raise OSError("disk")
+
+    monkeypatch.setattr(ev, "published", boom)
+    assert health._backups() is None
+
+
+def test_the_response_model_keeps_it():
+    """`/api/health` has a response model, and a field it does not declare is
+    dropped on the way out. Mutation: drop the field from `HealthResponse`."""
+    from web.schemas import HealthResponse
+
+    assert "backups" in HealthResponse.model_fields
+
+
+def test_the_route_returns_it():
+    """Read off the route's own return statement, not its prose: the dict
+    `health_check` returns names `backups` and fills it from `_backups()`.
+    Mutation: drop the key from the returned dict."""
+    import ast
+    import inspect
+
+    from web.routes.api import health
+
+    tree = ast.parse(inspect.getsource(health))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "health_check")
+    returned = [n.value for n in ast.walk(fn)
+                if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)]
+    assert returned, "health_check returns no dict literal"
+    pairs = {k.value: v for d in returned for k, v in zip(d.keys, d.values)
+             if isinstance(k, ast.Constant)}
+    value = pairs.get("backups")
+    assert isinstance(value, ast.Call) and getattr(value.func, "id", None) == "_backups"

@@ -351,6 +351,21 @@ def _utm_parse_mode() -> dict:
     return {"mode": pg_utm_parse.mode(), "error": pg_utm_parse.mode_error()}
 
 
+def _backups() -> "dict | None":
+    """The ages of what the host's backup scripts last proved — chain 3's
+    flip evidence (`core.backup_evidence`): the PITR drill, the off-site
+    restore drill and the Postgres off-site shipment, in hours, null where no
+    marker exists. Ages only: the endpoint is public. Local files, no
+    database, so it answers with Postgres down; null if even that fails."""
+    try:
+        from core import backup_evidence
+
+        return backup_evidence.published()
+    except Exception as e:  # noqa: BLE001 — a block that cannot be read is null
+        logger.debug(f"Backup evidence unavailable: {e}")
+        return None
+
+
 # Marks dropped and not yet covered by a validated rebuild, on the same TTL as
 # the watermarks. Its own cache rather than a field of theirs: "nothing
 # dropped" is an answer here and must be cached, where the mirror block caches
@@ -569,6 +584,7 @@ async def health_check(request: Request):
         "warehouse_writer_mode": _warehouse_writer_mode(),
         "utm_parse": _utm_parse_mode(),
         "buyer_sync": await _buyer_sync_block(),
+        "backups": _backups(),
     }
 
 

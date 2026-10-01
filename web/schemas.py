@@ -147,7 +147,24 @@ class HealthResponse(BaseModel):
             "`notes` that do not block it; and "
             "`sync_step`: consecutive Postgres failures of its offers or "
             "stocks step, the last one's step and error class, and when the "
-            "next attempt is allowed."
+            "next attempt is allowed. Chain 3's entry (`pg_orders_write`) "
+            "carries the same two: `preflight` names every unmet "
+            "precondition while its flag is still off, and `sync_step` is "
+            "the order step — failures in a row, ages, the last error's "
+            "class and how many orders Postgres would refuse — judged by the "
+            "canary as `orders_sync_failing` once the chain writes Postgres."
+        ),
+    )
+    backups: Optional[Dict[str, Optional[float]]] = Field(
+        None,
+        description=(
+            "Hours since the host's backup scripts last proved themselves, "
+            "read from the markers they write on success only: "
+            "`pitr_drill_age_h` (the weekly PITR drill), "
+            "`remote_restore_age_h` (the off-site copy restored) and "
+            "`pg_offsite_age_h` (a Postgres dump shipped off the host). Null "
+            "where no marker exists. Chain 3's flip waits on all three "
+            "(`unmet_precondition`). Ages only — no path, host or account."
         ),
     )
     derivation: Optional[Dict[str, Any]] = Field(
