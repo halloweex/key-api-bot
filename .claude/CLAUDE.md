@@ -1493,6 +1493,30 @@ reads UNKNOWN rather than FAIL a stamp inside its 75-minute window. The restore
 drill counts all three tables, because once the chain writes them the nightly
 dump is their only backup.
 
+**Revision 0034 locks older images out** (PR-4, owner decision 16) and is
+deployed directly before the flip. It changes no schema — three table comments
+saying who writes each table — and moves `REQUIRED_REVISION` to
+`0034_buyer_chain`, so an image without chain 4 refuses the database: its
+replication would otherwise full-replace `app.buyer_gender` out of a DuckDB
+that stopped, and its mirror ship DuckDB's buyers over the chain's. Two things
+it does not do, both written down in the revision:
+
+- **It does not hold images below v3.0.249.** Their buyers mirror and
+  backfills never called `require_revision`. None of them is a rollback target
+  after this revision, whatever the database says.
+- **It is not "no writes" for an image that checks — it is an outage.** The
+  session read raises under `KS_USER_STORE=postgres` (401 for everybody) and
+  the bot refuses to start. An image-only rollback therefore needs `alembic
+  downgrade 0033_derivation_signal` first, run with the new migrate image, and
+  then all three images moved back — keycrm-migrate too, or `up -d` re-runs its
+  `alembic upgrade head` and puts 0034 back. Only before the flip: after chain
+  4 has written Postgres the way back is `scripts/chain_copy_back.py buyers`,
+  never a downgrade below 0034.
+- **A locked-out image still writes DuckDB.** From v3.0.249 on, a build without
+  chain 4 cannot reach the buyer tables but its sync still commits buyers to
+  DuckDB before the mirror refuses — and after the flip `--handover` then
+  refuses on those ids. After the flip, no image rollback at all.
+
 ### The Postgres mirror of landing
 One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
 rows; DuckDB and Postgres each write the rows they are handed. Bookkeeping
@@ -1949,7 +1973,7 @@ migration now stops both in one place instead.
 
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
 moved to `0010_order_versions` at the time and `require_revision` raises on any
-mismatch, ahead or behind. It is `0021_user_allowed_features` today, and every
+mismatch, ahead or behind. It is `0034_buyer_chain` today, and every
 revision since has inherited the same rule: rebuild and push `keycrm-migrate`
 alongside `keycrm-web`, and let `docker wait ks-migrate` finish first. The bot
 checks it too, but only in `initialise()`, so a running bot survives the
