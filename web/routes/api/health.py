@@ -299,17 +299,28 @@ async def _write_chains_block() -> dict:
     from core import pg_orders_write
 
     block = _write_chains()
-    entry = block.get(pg_inventory_write.CHAIN)
-    if isinstance(entry, dict):
-        entry["preflight"] = await _inventory_preflight()
-        entry["sync_step"] = await _inventory_sync_step()
+    inventory = block.get(pg_inventory_write.CHAIN)
     # Chain 3: its preflight — every precondition by name while the flag is
     # still off — and the order step the canary judges.
-    entry = block.get(pg_orders_write.CHAIN)
-    if isinstance(entry, dict):
-        entry["preflight"] = await _orders_preflight()
-        entry["sync_step"] = await _orders_sync_step()
+    orders = block.get(pg_orders_write.CHAIN)
+    # The two preflights at once, never one after the other: each is bounded
+    # at `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row cost
+    # twice that — 10 s, the canary's whole `HEALTH_TIMEOUT_S` (the chain-3
+    # review). Concurrently they cost one bound.
+    preflights = await asyncio.gather(
+        _inventory_preflight() if isinstance(inventory, dict) else _nothing(),
+        _orders_preflight() if isinstance(orders, dict) else _nothing())
+    if isinstance(inventory, dict):
+        inventory["preflight"] = preflights[0]
+        inventory["sync_step"] = await _inventory_sync_step()
+    if isinstance(orders, dict):
+        orders["preflight"] = preflights[1]
+        orders["sync_step"] = await _orders_sync_step()
     return block
+
+
+async def _nothing() -> None:
+    return None
 
 
 def _warehouse_writer_mode() -> dict:

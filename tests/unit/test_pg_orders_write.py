@@ -908,3 +908,88 @@ class TestThePreflight:
         entry = block["pg_orders_write"]
         assert entry["preflight"] == {"ok": False, "reasons": ["x"]}
         assert entry["sync_step"] == {"consecutive_failures": 0}
+
+    @pytest.mark.asyncio
+    async def test_with_postgres_hung_the_two_preflights_cost_one_bound(self, flags):
+        """Each preflight is bounded at `_PREFLIGHT_TIMEOUT_S` (5 s). Asked one
+        after the other, a hung Postgres cost 10 s — the canary's whole
+        `HEALTH_TIMEOUT_S` — before anything else `/api/health` builds (the
+        chain-3 review). Mutation: await the two in turn."""
+        import time
+
+        from core import pg_inventory_write
+        from web.routes.api import health
+
+        async def hang():
+            await asyncio.sleep(3600)
+
+        bound = 0.5
+        health._preflight_cache.update(data=None, expires_at=0)
+        health._orders_preflight_cache.update(data=None, expires_at=0)
+        try:
+            with patch.object(pg_inventory_write, "preflight", hang), \
+                    patch.object(pow_, "preflight", hang), \
+                    patch.object(health, "_PREFLIGHT_TIMEOUT_S", bound):
+                started = time.monotonic()
+                block = await health._write_chains_block()
+                took = time.monotonic() - started
+        finally:
+            health._preflight_cache.update(data=None, expires_at=0)
+            health._orders_preflight_cache.update(data=None, expires_at=0)
+        assert took < 1.7 * bound, f"{took:.2f} s for two preflights bounded at {bound} s"
+        for chain in (pg_inventory_write.CHAIN, pow_.CHAIN):
+            assert block[chain]["preflight"]["ok"] is False
+            assert "did not answer" in block[chain]["preflight"]["reasons"][0]
+
+
+class TestTheDefaultShipsWhatMainShipped:
+    """With the flag at its default every order shipment out of DuckDB runs
+    `pg_landing._write_order_rows`, which chain 3 split out of `write_orders`.
+    The data was identical, the statements were not: the savepoint around the
+    derivation mark was opened whether or not derivation is owned (the
+    chain-3 review)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("owned", [False, True])
+    async def test_the_mark_s_savepoint_only_where_there_is_a_mark(self, owned, monkeypatch):
+        """Mutation: open the savepoint whatever `owns()` says."""
+        from core import pg_derivation, pg_landing, pg_order_versions
+
+        marked = []
+
+        async def mark(conn, layer=pg_derivation.LAYER):
+            marked.append(layer)
+            return True
+
+        monkeypatch.setattr(pg_derivation, "owns", lambda: owned)
+        monkeypatch.setattr(pg_derivation, "mark", mark)
+        monkeypatch.setattr(pg_order_versions, "capture_versions", AsyncMock(return_value=0))
+
+        class Conn:
+            savepoints = 0
+
+            async def executemany(self, sql, rows):
+                pass
+
+            async def execute(self, sql, *args):
+                pass
+
+            def transaction(self):
+                conn = self
+
+                class Savepoint:
+                    async def __aenter__(self):
+                        conn.savepoints += 1
+
+                    async def __aexit__(self, *exc):
+                        return False
+
+                return Savepoint()
+
+        landed = landed_orders([_payload(1, products=2)], with_products=True)
+        conn = Conn()
+        await pg_landing._write_order_rows(
+            conn, [tuple(r) for r in landed.orders], [tuple(p) for p in landed.products],
+            replace_products=True, version_kind="change")
+        assert conn.savepoints == (1 if owned else 0)
+        assert marked == ([pg_derivation.LAYER] if owned else [])

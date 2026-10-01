@@ -717,12 +717,16 @@ async def _write_order_rows(
     # Last, and in a savepoint of its own — no mark without the rows, no rows
     # without the mark — and unable to cost the transaction anything, the
     # order versions above included: see `core/pg_derivation.py`. A no-op
-    # unless KS_PG_DERIVE=own.
+    # unless KS_PG_DERIVE=own, and without it no savepoint is opened either:
+    # the one around the mark exists only for the mark, and with derivation
+    # not owned every shipment out of DuckDB paid a SAVEPOINT and a RELEASE
+    # for nothing (the chain-3 review: the default sends what main sent).
     if orders:
-        from core.pg_derivation import mark_if_owned
+        from core.pg_derivation import mark_if_owned, owns
 
-        async with conn.transaction():
-            await mark_if_owned(conn)
+        if owns():
+            async with conn.transaction():
+                await mark_if_owned(conn)
 
 
 async def mirror_orders(

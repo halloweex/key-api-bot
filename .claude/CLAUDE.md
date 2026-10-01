@@ -1621,7 +1621,9 @@ write — no stopped window, no `--handover` (found in review). The first unmet
 answer under the flag is remembered, from the start (`configure_modes()`)
 on, so the flip happens only at a start that found everything met.
 `preflight` adds what Postgres says: the three bronze tables backfilled and
-their mirrors not failing.
+their mirrors not failing. It is asked beside chain 1's, never after it: each
+is bounded at 5 s, and two in a row with Postgres hung were the canary's whole
+10 s (found in review).
 
 **The way back** is the copy-back generalised from chain 4's mirrored tables:
 the orders, expenses and line items each dated by their own `mirrored_at`,
