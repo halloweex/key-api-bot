@@ -289,6 +289,97 @@ class TestAnIdleTickSpendsNoLatch:
         assert await chain_latch.read_owners(pool) == {}
 
 
+class TestAnExpenseIsNeverIdle:
+    @pytest.mark.asyncio
+    async def test_new_and_changed_expenses_under_orders_already_in_state(self, stores):
+        """The chain is the only writer of `bronze.expenses`, and an order's
+        costs move without its `updated_at`. A page whose orders are all in
+        their state still carries expenses — a new one, one whose amount
+        changed — and must write them. Mutation (the chain-3 review's): let
+        `_already_in_state` answer idle for a batch with expenses — it
+        survived all 909 chain-3 tests, and every such tick would have
+        returned with none of its expenses written."""
+        from core import landing_rows, pg_landing
+
+        store, pool, _env = stores
+        # Shipped by the mirror before the flip, as the order step finds it.
+        landed = landing_rows.landed_orders([_payload(BASE, expenses=False)],
+                                            with_products=True)
+        await pg_landing.write_orders(landed.orders, landed.products,
+                                      replace_products=True)
+        offered = _payload(BASE)                        # same updated_at: in state
+        offered["expenses"] = [
+            {"id": BASE * 10, "expense_type_id": 1, "amount": 20.0, "status": "paid"},
+            {"id": BASE * 10 + 1, "expense_type_id": 2, "amount": 3.5, "status": "paid"},
+        ]
+        result, expense_count = await chain.upsert_orders_with_expenses([offered])
+        assert (result.changed_ids, result.skipped_unchanged, expense_count) == ([], 1, 2)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, amount FROM bronze.expenses WHERE order_id = $1 ORDER BY id",
+                BASE)
+        assert [(r["id"], float(r["amount"])) for r in rows] == [
+            (BASE * 10, 20.0), (BASE * 10 + 1, 3.5)]
+        # A write, so the chain is now the writer.
+        assert chain_latch.marker_path(chain.CHAIN).exists()
+        assert set(await chain_latch.read_owners(pool)) == set(chain.CHAIN_TABLES)
+
+        # And a CHANGED amount alone, the order still in state, lands too.
+        offered["expenses"][0]["amount"] = 25.0
+        _result, expense_count = await chain.upsert_orders_with_expenses([offered])
+        assert expense_count == 2
+        async with pool.acquire() as conn:
+            assert float(await conn.fetchval(
+                "SELECT amount FROM bronze.expenses WHERE id = $1", BASE * 10)) == 25.0
+
+
+class TestTheDeciderReadIsTheWriteDecision:
+    @pytest.mark.asyncio
+    async def test_a_newer_version_committed_while_it_waited_is_not_overwritten(self, stores):
+        """The decider reads the stored `updated_at` `FOR UPDATE`, inside the
+        writing transaction: a writer that commits a newer version of the
+        order while this one waits is read AFTER it commits, and the older
+        payload is skipped. Read without the lock, the decision is taken on
+        the version before, and the upsert — which waits on the same row, then
+        writes over whatever is there — puts the older payload over the newer
+        one. Every caller holds the heavy-job lock today, so this is defence in
+        depth; it is pinned because the module calls the read the decision.
+        Mutation (the chain-3 review's M2): `lock=True` → `lock=False`."""
+        import asyncio
+
+        store, pool, _env = stores
+        await _sync(store, [_payload(BASE, updated=T0)])
+        newer = T0 + timedelta(hours=2)
+        other = await asyncpg.connect(DSN)
+        try:
+            tx = other.transaction()
+            await tx.start()
+            await other.execute(
+                "UPDATE bronze.orders SET status_id = 21, updated_at = $2 WHERE id = $1",
+                BASE, newer)
+            write = asyncio.ensure_future(_sync(
+                store, [_payload(BASE, status=19, updated=T0 + timedelta(hours=1))]))
+            # Commit only once the writer is waiting on that row, so the order
+            # of events is the one under test and not a race.
+            for _ in range(200):
+                async with pool.acquire() as conn:
+                    waiting = await conn.fetchval(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = current_database() AND wait_event_type = 'Lock'")
+                if waiting:
+                    break
+                await asyncio.sleep(0.025)
+            assert waiting, "the writer never waited on the row"
+            assert not write.done()
+            await tx.commit()
+            (_count, _expenses), changed = await asyncio.wait_for(write, 10)
+        finally:
+            await other.close()
+        header = await _header(pool, BASE)
+        assert (header["status_id"], header["updated_at"]) == (21, newer)
+        assert changed == []
+
+
 class TestTheMissesLedger:
     @pytest.mark.asyncio
     async def test_routed_and_dated_by_the_web_clock(self, stores):
