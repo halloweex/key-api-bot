@@ -143,7 +143,7 @@ def signal_unreadable_ticks() -> int:
 # writer is `core.pg_buyer_rows`, which the landing mirror and chain 4's writer
 # both run, so one mark covers both.
 MARK_SITES: Dict[str, str] = {
-    "core.pg_landing": "write_orders",
+    "core.pg_landing": "_write_order_rows",
     "core.pg_replication": "write_managers",
     "core.pg_buyer_rows": "_write_buyer_rows",
 }

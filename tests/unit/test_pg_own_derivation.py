@@ -145,7 +145,14 @@ class TestEveryWriterOfASourceRaisesTheSignal:
         assert found, "the walk found no writer at all — it is not looking"
         assert found == set(pg_derivation.MARK_SITES), found
 
-    def test_every_caller_of_the_buyers_writer_owns_the_transaction(self):
+    # The cores that write a source table on their CALLER's transaction. Chain
+    # 3's PR-1 moved the order statements into `_write_order_rows` (and the
+    # expenses' into `_write_rows`) for the same reason chain 4 moved the
+    # buyers': the chain's owner row must share an `xmin` with its row.
+    CALLER_TRANSACTION_CORES = ("_write_buyer_rows", "_write_order_rows", "_write_rows")
+
+    @pytest.mark.parametrize("core_name", CALLER_TRANSACTION_CORES)
+    def test_every_caller_of_the_buyers_writer_owns_the_transaction(self, core_name):
         """`pg_buyer_rows._write_buyer_rows` writes on its CALLER's transaction
         and opens a savepoint around nothing but the mark, so the check below
         passes on it whether or not the rows and the mark share a transaction.
@@ -174,12 +181,12 @@ class TestEveryWriterOfASourceRaisesTheSignal:
                     for n in ast.walk(fn):
                         if (isinstance(n, ast.Call)
                                 and getattr(n.func, "id", getattr(n.func, "attr", ""))
-                                == "_write_buyer_rows"):
+                                == core_name):
                             calls.append((path.relative_to(REPO).as_posix(), fn.name,
                                           id(n) in inside))
-        assert calls, "nothing calls the buyers writer — the walk is not looking"
+        assert calls, f"nothing calls {core_name} — the walk is not looking"
         outside = [(p, f) for p, f, ok in calls if not ok]
-        assert not outside, f"calls the buyers writer outside a transaction: {outside}"
+        assert not outside, f"calls {core_name} outside a transaction: {outside}"
 
     @pytest.mark.parametrize("module,function", sorted(pg_derivation.MARK_SITES.items()))
     def test_each_registered_writer_marks_inside_its_transaction(self, module, function):

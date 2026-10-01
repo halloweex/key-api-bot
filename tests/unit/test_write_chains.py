@@ -625,8 +625,8 @@ class TestEveryPostgresWriterAsksTheRegistry:
         was written."""
         writers = walk.writers()
         assert {
-            ("core/pg_landing.py", "_write"),
-            ("core/pg_landing.py", "write_orders"),
+            ("core/pg_landing.py", "_write_rows"),
+            ("core/pg_landing.py", "_write_order_rows"),
             ("core/pg_buyer_rows.py", "_write_buyer_rows"),
             ("core/pg_replication.py", "write_managers"),
             ("core/pg_expense_backfill.py", "backfill_expenses"),
@@ -2004,14 +2004,19 @@ class TestTheOrderWatchesOutliveTheStandDown:
         return {key for key, targets in walk.writers().items()
                 if targets & set(tables)}
 
+    # Since chain 3's PR-1 the statements live in `_write_order_rows`, on the
+    # caller's transaction: `write_orders` runs them for every path that
+    # ships DuckDB's orders, and chain 3's writer for its own. Still one
+    # writer — the chain module spells no statement against these tables.
+    CORE = ("core/pg_landing.py", "_write_order_rows")
+
     def test_the_order_tables_have_one_writer(self, walk):
-        assert self._writers_of(walk, self.ORDER_TABLES) == {
-            ("core/pg_landing.py", "write_orders")}
+        assert self._writers_of(walk, self.ORDER_TABLES) == {self.CORE}
 
     def test_the_archive_is_written_only_inside_it(self, walk):
         capture = ("core/pg_order_versions.py", "capture_versions")
         assert self._writers_of(walk, {self.ARCHIVE}) == {capture}
-        assert walk.callers.get(capture) == {("core/pg_landing.py", "write_orders")}
+        assert walk.callers.get(capture) == {self.CORE}
 
     @pytest.mark.asyncio
     async def test_it_moves_the_watched_watermark_and_writes_the_archive(self, pool):

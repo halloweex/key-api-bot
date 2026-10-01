@@ -159,9 +159,23 @@ async def _write(table: str, columns: Sequence[str], rows: Sequence[tuple]) -> N
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            if rows:
-                await conn.executemany(_statement(table, columns), rows)
-            await conn.execute(_WATERMARK_OK, table, len(rows))
+            await _write_rows(conn, table, columns, rows)
+
+
+async def _write_rows(conn, table: str, columns: Sequence[str],
+                      rows: Sequence[tuple]) -> None:
+    """`_write`'s statements on the caller's connection and transaction.
+
+    The mirror runs them in a transaction of its own; chain 3's writer runs
+    them for `bronze.expenses` in the transaction that writes the same tick's
+    orders, so an order's header and its costs land together or neither does
+    (`core/pg_orders_write.py`). One statement for both, so `mirrored_at` —
+    the copy-back's rewrite clock and the comparison's — means the same thing
+    whichever of them wrote the row.
+    """
+    if rows:
+        await conn.executemany(_statement(table, columns), rows)
+    await conn.execute(_WATERMARK_OK, table, len(rows))
 
 
 async def _record_failure(table: str, error: str) -> bool:
@@ -593,15 +607,9 @@ async def write_orders(
     OD-20 writes exactly what it wrote before; `core/pg_backfill.py` passes
     `'backfill'` for the two `manager_comment` repairs.
 
-    **The one writer of the order tables, a write chain's included** (DN-22b).
-    Chain 3's writer ships through here rather than beside it: this is where
-    the version is captured in the row's own transaction, and where the
-    `bronze.orders` watermark moves that the canary's `mirror_stale` and the
-    archive's `order_versions_stalled` read — both keep their meaning under the
-    chain only because it does. That writer should also record its failures
-    with `_record_failure`, as `mirror_orders` does, or `mirror_failing`
-    loses its fast signal. `tests/unit/test_write_chains.py` walks for a
-    second writer.
+    The statements themselves are `_write_order_rows`, which runs on the
+    caller's transaction; this is the acquire and the transaction around them
+    for every path that ships DuckDB's orders.
     """
     from core.pg import get_pool
 
@@ -610,71 +618,111 @@ async def write_orders(
     # transaction would roll back the header upsert as well — and on the sync
     # path `mirror_orders` would swallow it, so the order would be lost to
     # Postgres over a misspelt constant. Refusing early costs nothing.
+    check_version_kind(version_kind)
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await _write_order_rows(
+                conn, orders, products,
+                replace_products=replace_products, version_kind=version_kind)
+
+
+def check_version_kind(version_kind: str) -> None:
+    """Refuse a `version_kind` the archive does not know. Raises ValueError."""
     if version_kind not in order_versions.WRITER_KINDS:
         raise ValueError(
             f"version_kind={version_kind!r} is not one of "
             f"{order_versions.WRITER_KINDS}"
         )
 
+
+async def _write_order_rows(
+    conn,
+    orders: Sequence[Any],
+    products: Sequence[Any],
+    *,
+    replace_products: bool,
+    version_kind: str,
+) -> None:
+    """The order tables' statements, on the caller's transaction.
+
+    **The one writer of the order tables, a write chain's included** (DN-22b).
+    Two paths run it: `write_orders`, for everything that ships DuckDB's
+    orders, and chain 3's writer (`core/pg_orders_write.py`), which writes
+    Postgres directly once `KS_WRITE_ORDERS` moves the orders. Both are handed
+    the rows `core.landing_rows` parsed, and both run these statements, so
+    this is where the version is captured in the row's own transaction, and
+    where the `bronze.orders` watermark moves that the canary's `mirror_stale`
+    and the archive's `order_versions_stalled` read — both keep their meaning
+    under the chain only because it does. `tests/unit/test_write_chains.py`
+    walks for a second writer.
+
+    On the caller's transaction, never one of its own around the rows: chain
+    3 proves its first write by the owner row sharing an `xmin` with the row
+    it was taken for, and a savepoint would give the rows a subtransaction's
+    XID. Only the derivation mark sits in a savepoint of its own, which
+    `mark()` opens anyway and the derivation guard reads. Every caller holds
+    the transaction (`tests/unit/test_pg_own_derivation.py` walks for one
+    that does not). `version_kind` is the caller's to have checked.
+    """
     order_ids = [int(r[0]) for r in orders]
 
-    pool = await get_pool()
-    async with pool.acquire() as conn:
+    if orders:
+        await conn.executemany(
+            _ORDER_UPSERT, [_order_params(r) for r in orders],
+        )
+
+        # Step 0. Archive a version of every header that actually moved —
+        # here, and not in `mirror_orders`, because this is the transaction
+        # that wrote the row being described and because the value to archive
+        # is the one COALESCE settled on, not the one that arrived.
+        # `core/pg_order_versions.py` has the argument in full; the short
+        # version is that the mirror can afford to lose a write and the
+        # archive cannot.
+        from core.pg_order_versions import capture_versions
+
+        versions = await capture_versions(conn, order_ids, version_kind)
+        if versions:
+            logger.info(
+                f"order_versions: {versions} new {version_kind} "
+                f"version(s) from {len(order_ids)} written order(s)"
+            )
+
+    if replace_products and order_ids:
+        # Delete first, then insert: the ids are positional, so the only way
+        # to lose a dropped line item is to remove the whole order's set and
+        # lay down what the payload actually carries.
+        await conn.execute(
+            "DELETE FROM bronze.order_products WHERE order_id = ANY($1::int[])",
+            order_ids,
+        )
+        if products:
+            # Deduplicate by id, keeping the last — the API repeats an order
+            # across paginated pages and a repeat would otherwise collide with
+            # itself inside one statement.
+            deduped = {int(p[0]): p for p in products}
+            await conn.executemany(
+                _ORDER_PRODUCT_INSERT,
+                [_order_product_params(p) for p in deduped.values()],
+            )
+
+    await conn.execute(_WATERMARK_OK, ORDERS_TABLE, len(orders))
+    if replace_products:
+        await conn.execute(
+            _WATERMARK_OK, ORDER_PRODUCTS_TABLE, len(products),
+        )
+
+    # Chain 2: Postgres owes a rebuild of what it derives from these rows.
+    # Last, and in a savepoint of its own — no mark without the rows, no rows
+    # without the mark — and unable to cost the transaction anything, the
+    # order versions above included: see `core/pg_derivation.py`. A no-op
+    # unless KS_PG_DERIVE=own.
+    if orders:
+        from core.pg_derivation import mark_if_owned
+
         async with conn.transaction():
-            if orders:
-                await conn.executemany(
-                    _ORDER_UPSERT, [_order_params(r) for r in orders],
-                )
-
-                # Step 0. Archive a version of every header that actually
-                # moved — here, and not in `mirror_orders`, because this is
-                # the transaction that wrote the row being described and
-                # because the value to archive is the one COALESCE settled on,
-                # not the one that arrived. `core/pg_order_versions.py` has the
-                # argument in full; the short version is that the mirror can
-                # afford to lose a write and the archive cannot.
-                from core.pg_order_versions import capture_versions
-
-                versions = await capture_versions(conn, order_ids, version_kind)
-                if versions:
-                    logger.info(
-                        f"order_versions: {versions} new {version_kind} "
-                        f"version(s) from {len(order_ids)} written order(s)"
-                    )
-
-            if replace_products and order_ids:
-                # Delete first, then insert: the ids are positional, so the
-                # only way to lose a dropped line item is to remove the whole
-                # order's set and lay down what the payload actually carries.
-                await conn.execute(
-                    "DELETE FROM bronze.order_products WHERE order_id = ANY($1::int[])",
-                    order_ids,
-                )
-                if products:
-                    # Deduplicate by id, keeping the last — the API repeats an
-                    # order across paginated pages and a repeat would otherwise
-                    # collide with itself inside one statement.
-                    deduped = {int(p[0]): p for p in products}
-                    await conn.executemany(
-                        _ORDER_PRODUCT_INSERT,
-                        [_order_product_params(p) for p in deduped.values()],
-                    )
-
-            await conn.execute(_WATERMARK_OK, ORDERS_TABLE, len(orders))
-            if replace_products:
-                await conn.execute(
-                    _WATERMARK_OK, ORDER_PRODUCTS_TABLE, len(products),
-                )
-
-            # Chain 2: Postgres owes a rebuild of what it derives from these
-            # rows. Last, inside this transaction — no mark without the rows,
-            # no rows without the mark — and unable to cost this transaction
-            # anything, the order versions above included: see
-            # `core/pg_derivation.py`. A no-op unless KS_PG_DERIVE=own.
-            if orders:
-                from core.pg_derivation import mark_if_owned
-
-                await mark_if_owned(conn)
+            await mark_if_owned(conn)
 
 
 async def mirror_orders(
