@@ -2159,6 +2159,10 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Find the write that skipped core.pg_buyers_write; never delete a buyer's contacts to clear it"),
     ("chain_buyer_contact_missing",
      "POST /api/duckdb/sync-all-buyers rewrites every buyer and its contacts; find what deleted the list first"),
+    # The shadow chains (OD-02 (c)). Chain 9 writes a run and its findings
+    # in one transaction, so an orphan is a write that went round it.
+    ("chain_orphan_children",
+     "Find the write that skipped core.dq_journal; never delete the findings to clear it"),
     ("chain_invariants_unwatched",
      "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),

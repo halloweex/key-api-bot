@@ -702,11 +702,19 @@ async def preflight(
                 f"{table} was last copied {_minutes(age)} min ago (limit {limit})")
 
     # ── the journal copy the findings are read from ──
+    # Unless chain 9 writes the journal in Postgres (OD-02 (c)): the findings
+    # are then read from the writer itself, the hourly copy has stood down,
+    # and its frozen `last_ok_at` would refuse the flip for ever. The verdict's
+    # age and its findings below are still asked.
+    from core import pg_dq_journal_write
+
     journal = marks.get(JOURNAL_COPY)
     journal_ok_at = journal["last_ok_at"] if journal else None
     if journal_ok_at is not None:
         out["journal_copy_age_s"] = int((now - journal_ok_at).total_seconds())
-    if journal_ok_at is None:
+    if pg_dq_journal_write.reads_postgres():
+        out["journal_copy_age_s"] = None
+    elif journal_ok_at is None:
         reasons.append(
             "the quality journal has never been copied into Postgres, so open "
             "findings cannot be read")

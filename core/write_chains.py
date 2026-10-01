@@ -69,6 +69,16 @@ WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
 # so the writers, the sync keys, the shipper and the comparison move together.
 
 
+# Chains 9, 10, 11a and 11b — the shadow chains (owner decision OD-02 (c),
+# 2026-10-01): Postgres writes first and DuckDB is still handed every row, so
+# the hourly copy stands down for their tables while the daily comparison
+# keeps comparing them (`compared_in_shadow` below). Appended in a block of
+# their own rather than folded into the tuple above, so the lanes that add
+# chains there and this one do not edit the same lines.
+from core import pg_dq_journal_write  # noqa: E402 — appended, see above
+
+WRITE_CHAINS = WRITE_CHAINS + (pg_dq_journal_write,)
+
 def chain_name(chain: ModuleType) -> str:
     return chain.__name__.rsplit(".", 1)[-1]
 

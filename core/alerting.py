@@ -324,6 +324,10 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "the orphaned rows are corrected or their buyers land — a human, not a job"),
     "chain_buyer_contact_missing": _c(
         "the next write of each buyer rewrites its contacts"),
+    # The shadow chains' standing watch (OD-02 (c)). Chain 9: a finding whose
+    # run is gone stays until a human finds the writer and the rows.
+    "chain_orphan_children": _c(
+        "the orphaned findings are corrected or their run restored — a human, not a job"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 

@@ -39,6 +39,9 @@ from apscheduler.events import (
 )
 
 from core.observability import get_logger, correlation_context
+# The data-quality journal's one door (chain 9, OD-02 (c)): every check
+# job journals its run through it, and the digest reads through it.
+from core import dq_journal
 
 logger = get_logger(__name__)
 
@@ -129,7 +132,9 @@ def _writes_layer(layer: str) -> bool:
 # Where the digest remembers its last delivery. In `sync_metadata` and not on
 # the scheduler object, because the weekly restatement beat has to outlive a
 # deploy — otherwise every release re-announces the same standing WARN.
-DQ_DIGEST_LAST_SENT_KEY = "dq_digest_last_sent"
+# Chain 9 moves it to `meta.chain_watermarks` with the journal; the spelling
+# lives in `core.dq_journal`, beside both of its readers.
+DQ_DIGEST_LAST_SENT_KEY = dq_journal.DIGEST_MARKER_KEY
 
 # The inventory snapshot gets its own catch-up rather than a row above, because
 # its liveness signal is not a data_quality layer age — it is whether
@@ -402,6 +407,11 @@ class BackgroundScheduler:
             # table that is being written correctly somewhere else.
             if writes_postgres():
                 inventory_today = await _inventory_snapshot_taken_today_pg()
+            # The same rule for the quality journal (chain 9): the ages come
+            # from the store that writes it. DuckDB's, read above inside the
+            # connection the probe needed anyway, are replaced — never merged.
+            if dq_journal.reads_postgres():
+                ages = await dq_journal.last_success_ages_pg()
         except Exception as e:
             logger.warning(f"Catch-up check skipped: {e}")
             return
@@ -2010,7 +2020,6 @@ class BackgroundScheduler:
             format_alert_message,
             machine_attempts_note,
             overall_severity,
-            persist_run,
         )
         from core.duckdb_store import get_store
 
@@ -2156,16 +2165,15 @@ class BackgroundScheduler:
             # Persist in a separate transaction (uses store wrapper).
             run_id = None
             try:
-                async with store.connection() as conn:
-                    run_id = persist_run(
-                        conn,
-                        started_at=started_at, ended_at=ended_at,
-                        as_of=ended_at,
-                        window_start=window_day, window_end=window_day,
-                        layer="integrity",
-                        issues=issues, discrepancies=[],
-                        error_message=error_message,
-                    )
+                run_id = await dq_journal.journal_run(
+                    store,
+                    started_at=started_at, ended_at=ended_at,
+                    as_of=ended_at,
+                    window_start=window_day, window_end=window_day,
+                    layer="integrity",
+                    issues=issues, discrepancies=[],
+                    error_message=error_message,
+                )
             except Exception as e:
                 logger.exception(f"DQ integrity persist failed: {e}")
 
@@ -2265,7 +2273,6 @@ class BackgroundScheduler:
             format_alert_message,
             machine_attempts_note,
             overall_severity,
-            persist_run,
         )
         from core.duckdb_store import get_store
         from core.mirror_reconciliation import (
@@ -2501,16 +2508,15 @@ class BackgroundScheduler:
 
             run_id = None
             try:
-                async with store.connection() as conn:
-                    run_id = persist_run(
-                        conn,
-                        started_at=started_at, ended_at=ended_at,
-                        as_of=ended_at,
-                        window_start=window_day, window_end=window_day,
-                        layer=MIRROR_LAYER,
-                        issues=issues, discrepancies=[],
-                        error_message=error_message,
-                    )
+                run_id = await dq_journal.journal_run(
+                    store,
+                    started_at=started_at, ended_at=ended_at,
+                    as_of=ended_at,
+                    window_start=window_day, window_end=window_day,
+                    layer=MIRROR_LAYER,
+                    issues=issues, discrepancies=[],
+                    error_message=error_message,
+                )
             except Exception as e:
                 logger.exception(f"Mirror reconciliation persist failed: {e}")
 
@@ -3019,7 +3025,6 @@ class BackgroundScheduler:
             format_alert_message,
             machine_attempts_note,
             overall_severity,
-            persist_run,
         )
         from core.duckdb_store import get_store
 
@@ -3035,20 +3040,19 @@ class BackgroundScheduler:
         # out, and the rest of the reconciliation job with it.
         run_id = None
         try:
-            async with store.connection() as conn:
-                run_id = persist_run(
-                    conn,
-                    started_at=started_at,
-                    ended_at=datetime.now(timezone.utc),
-                    as_of=as_of,
-                    window_start=window_start, window_end=window_end,
-                    layer=layer,
-                    issues=issues, discrepancies=discrepancies,
-                    # Zero, and that is the point: this comparison rides on the
-                    # fetch the DuckDB one already paid for.
-                    api_calls_used=0,
-                    error_message=error_message,
-                )
+            run_id = await dq_journal.journal_run(
+                store,
+                started_at=started_at,
+                ended_at=datetime.now(timezone.utc),
+                as_of=as_of,
+                window_start=window_start, window_end=window_end,
+                layer=layer,
+                issues=issues, discrepancies=discrepancies,
+                # Zero, and that is the point: this comparison rides on the
+                # fetch the DuckDB one already paid for.
+                api_calls_used=0,
+                error_message=error_message,
+            )
         except Exception as e:
             logger.exception(f"DQ Postgres reconciliation persist failed: {e}")
 
@@ -3213,7 +3217,6 @@ class BackgroundScheduler:
             format_alert_message,
             machine_attempts_note,
             overall_severity,
-            persist_run,
         )
         from core.duckdb_store import get_store
 
@@ -3229,18 +3232,17 @@ class BackgroundScheduler:
         # out, and the rest of the reconciliation job with it.
         run_id = None
         try:
-            async with store.connection() as conn:
-                run_id = persist_run(
-                    conn,
-                    started_at=started_at,
-                    ended_at=datetime.now(timezone.utc),
-                    as_of=as_of,
-                    window_start=window_start, window_end=window_end,
-                    layer=layer,
-                    issues=issues, discrepancies=discrepancies,
-                    api_calls_used=0,
-                    error_message=error_message,
-                )
+            run_id = await dq_journal.journal_run(
+                store,
+                started_at=started_at,
+                ended_at=datetime.now(timezone.utc),
+                as_of=as_of,
+                window_start=window_start, window_end=window_end,
+                layer=layer,
+                issues=issues, discrepancies=discrepancies,
+                api_calls_used=0,
+                error_message=error_message,
+            )
         except Exception as e:
             logger.exception(f"DQ ClickHouse reconciliation persist failed: {e}")
 
@@ -3278,7 +3280,6 @@ class BackgroundScheduler:
             format_alert_message,
             machine_attempts_note,
             overall_severity,
-            persist_run,
         )
         from core.duckdb_store import get_store
         from core.reconciliation_io import (
@@ -3368,17 +3369,16 @@ class BackgroundScheduler:
             # 4. Persist
             run_id = None
             try:
-                async with store.connection() as conn:
-                    run_id = persist_run(
-                        conn,
-                        started_at=started_at, ended_at=ended_at,
-                        as_of=as_of,
-                        window_start=window_start, window_end=window_end,
-                        layer="reconciliation",
-                        issues=issues, discrepancies=discrepancies,
-                        api_calls_used=api_calls,
-                        error_message=error_message,
-                    )
+                run_id = await dq_journal.journal_run(
+                    store,
+                    started_at=started_at, ended_at=ended_at,
+                    as_of=as_of,
+                    window_start=window_start, window_end=window_end,
+                    layer="reconciliation",
+                    issues=issues, discrepancies=discrepancies,
+                    api_calls_used=api_calls,
+                    error_message=error_message,
+                )
             except Exception as e:
                 logger.exception(f"DQ reconciliation persist failed: {e}")
 
@@ -3563,13 +3563,7 @@ class BackgroundScheduler:
         """
         from datetime import datetime, timezone
         from core.data_quality import (
-            DigestSection,
             build_digest,
-            fetch_latest_run,
-            fetch_baseline_run,
-            fetch_previous_run,
-            fetch_run_diffs,
-            fetch_run_issues,
             WATCHED_LAYERS,
         )
         from core.duckdb_store import get_store
@@ -3577,54 +3571,11 @@ class BackgroundScheduler:
         with correlation_context():
             store = await get_store()
             now = datetime.now(timezone.utc)
-            sections: List[DigestSection] = []
-            last_sent_at: Optional[datetime] = None
-
-            async with store.connection() as conn:
-                row = conn.execute(
-                    "SELECT value FROM sync_metadata WHERE key = ?",
-                    [DQ_DIGEST_LAST_SENT_KEY],
-                ).fetchone()
-                if row and row[0]:
-                    try:
-                        last_sent_at = datetime.fromisoformat(row[0])
-                    except ValueError:
-                        # An unreadable marker must not mute the digest; the
-                        # next send overwrites it with something parseable.
-                        logger.warning("Unparseable DQ digest marker: %r", row[0])
-
-                for layer in WATCHED_LAYERS:
-                    run = fetch_latest_run(conn, layer=layer)
-                    if run is None:
-                        sections.append(DigestSection(layer=layer, run=None))
-                        continue
-
-                    age_hours = None
-                    if run.get("started_at"):
-                        started = datetime.fromisoformat(run["started_at"])
-                        age_hours = (now - started).total_seconds() / 3600
-
-                    # "=" must mean "since you last read this", not
-                    # "since a run six hours ago".
-                    previous = fetch_baseline_run(
-                        conn, layer,
-                        sent_at=last_sent_at, before_run_id=run["run_id"],
-                    )
-                    sections.append(DigestSection(
-                        layer=layer,
-                        run=run,
-                        issues=fetch_run_issues(conn, run["run_id"], limit=20),
-                        diffs=fetch_run_diffs(conn, run["run_id"], limit=20),
-                        previous_issues=(
-                            fetch_run_issues(conn, previous["run_id"], limit=20)
-                            if previous else []
-                        ),
-                        previous_diffs=(
-                            fetch_run_diffs(conn, previous["run_id"], limit=20)
-                            if previous else []
-                        ),
-                        age_hours=age_hours,
-                    ))
+            # The beat and every layer's runs, from whichever store writes the
+            # journal (chain 9): one DuckDB connection, as it always was, or
+            # Postgres with the beat inherited from DuckDB until it moves.
+            last_sent_at, sections = await dq_journal.digest_inputs(
+                store, WATCHED_LAYERS, now)
 
             message = build_digest(sections, last_sent_at=last_sent_at, now=now)
             if message:
@@ -3653,11 +3604,7 @@ class BackgroundScheduler:
                 # Only a delivered digest moves the beat. Marking a failed
                 # send as delivered would mute the next seven days on the
                 # strength of a message nobody received.
-                async with store.connection() as conn:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
-                        VALUES (?, ?, CURRENT_TIMESTAMP)
-                    """, [DQ_DIGEST_LAST_SENT_KEY, now.isoformat()])
+                await dq_journal.mark_digest_sent(store, now.isoformat())
 
             result = {
                 "layers": len(sections),

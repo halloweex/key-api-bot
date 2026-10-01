@@ -74,6 +74,13 @@ class TestTheClockIsDerived:
             "bronze.buyers": ("updated_at",),
             "bronze.buyer_contacts": (),
             "app.buyer_gender": ("decided_at",),
+            # Chain 9 (OD-02 (c)). A run is dated by its own `started_at`,
+            # which both stores are handed as one value; its findings carry no
+            # clock of their own (the daily comparison borrows the run's
+            # through a subquery, which the copy-back does not ship).
+            "app.data_quality_runs": ("started_at",),
+            "app.data_quality_issues": (),
+            "app.data_quality_diffs": (),
         }
 
 

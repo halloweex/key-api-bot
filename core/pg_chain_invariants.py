@@ -355,7 +355,20 @@ class Buyers:
     contact_missing_sample: Tuple[int, ...] = ()
 
 
-Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Unwatched, None]
+@dataclass(frozen=True)
+class Journal:
+    """Chain 9 (OD-02 (c)): findings whose run Postgres does not hold. The
+    daily comparison still compares the journal — DuckDB is its shadow — so
+    this is only what a comparison of two copies cannot see: the property a
+    run and its findings land in one transaction, checked where it now
+    lives."""
+    orphan_issues: int = 0
+    orphan_diffs: int = 0
+    orphan_sample: Tuple[int, ...] = ()
+
+
+Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Journal,
+              Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -375,6 +388,8 @@ class Facts:
     goals: Group = None
     expense_types: Group = None
     buyers: Group = None
+    # The shadow chains (OD-02 (c)), appended last.
+    journal: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
@@ -399,6 +414,7 @@ DICTIONARY_EMPTY = "chain_dictionary_empty"
 NAME_UNRESOLVED = "chain_name_unresolved"
 BUYER_ORPHANS = "chain_buyer_orphan_rows"
 CONTACT_MISSING = "chain_buyer_contact_missing"
+JOURNAL_ORPHANS = "chain_orphan_children"
 UNWATCHED = "chain_invariants_unwatched"
 
 # What a blind run holds rather than resolves — `data_quality`'s
@@ -407,6 +423,7 @@ CONDITIONS: Tuple[str, ...] = (
     SEQUENCE_BEHIND, COLUMN_NULL, INITIAL_BURST, FIRST_SEEN_RESET,
     ROLLUP_MISSING, SNAPSHOT_SHORT, WATERMARK_STALE,
     DICTIONARY_EMPTY, NAME_UNRESOLVED, BUYER_ORPHANS, CONTACT_MISSING,
+    JOURNAL_ORPHANS,
 )
 
 # The family name every condition above carries, and the key the integrity
@@ -463,12 +480,15 @@ def _reader_groups() -> Dict[str, str]:
         pg_buyers_write, pg_expense_types_write, pg_expenses_write,
         pg_goals_write, pg_inventory_write,
     )
+    from core import pg_dq_journal_write
 
     return {pg_expenses_write.CHAIN: "expenses",
             pg_inventory_write.CHAIN: "inventory",
             pg_goals_write.CHAIN: "goals",
             pg_expense_types_write.CHAIN: "expense_types",
-            pg_buyers_write.CHAIN: "buyers"}
+            pg_buyers_write.CHAIN: "buyers",
+            # The shadow chains (OD-02 (c)).
+            pg_dq_journal_write.CHAIN: "journal"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -661,6 +681,32 @@ FROM app.inventory_sku_history
 WHERE date BETWEEN $1 AND $2
 GROUP BY date ORDER BY date
 """
+
+
+_JOURNAL_ORPHANS_SQL = """
+    WITH orphans AS (
+        SELECT 'issues' AS child, i.run_id FROM app.data_quality_issues i
+        WHERE NOT EXISTS (SELECT 1 FROM app.data_quality_runs r
+                          WHERE r.run_id = i.run_id)
+        UNION ALL
+        SELECT 'diffs', d.run_id FROM app.data_quality_diffs d
+        WHERE NOT EXISTS (SELECT 1 FROM app.data_quality_runs r
+                          WHERE r.run_id = d.run_id)
+    )
+    SELECT count(*) FILTER (WHERE child = 'issues') AS issues,
+           count(*) FILTER (WHERE child = 'diffs') AS diffs,
+           (SELECT array_agg(run_id ORDER BY run_id)
+              FROM (SELECT DISTINCT run_id FROM orphans
+                    ORDER BY run_id LIMIT 10) s) AS sample
+    FROM orphans
+"""
+
+
+async def _read_journal(conn) -> Journal:
+    row = await conn.fetchrow(_JOURNAL_ORPHANS_SQL)
+    return Journal(orphan_issues=int(row["issues"] or 0),
+                   orphan_diffs=int(row["diffs"] or 0),
+                   orphan_sample=tuple(int(x) for x in (row["sample"] or ())))
 
 
 async def _read_allocator(conn, table: str, sequence: str) -> Allocator:
@@ -887,6 +933,7 @@ async def read_facts(*, pool=None) -> Facts:
                     "expense_types": _read_expense_types,
                     "buyers": lambda c: _read_buyers(
                         c, _stamp(watched.get(pg_buyers_write.CHAIN))),
+                    "journal": _read_journal,
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -924,6 +971,7 @@ async def read_facts(*, pool=None) -> Facts:
                  goals=groups.get("goals"),
                  expense_types=groups.get("expense_types"),
                  buyers=groups.get("buyers"),
+                 journal=groups.get("journal"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
                  unread=unread)
 
@@ -1210,6 +1258,26 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
     return issues
 
 
+def _journal_issues(j: Journal, chain: str) -> List:
+    from core.data_quality import Severity
+
+    orphans = j.orphan_issues + j.orphan_diffs
+    if not orphans:
+        return []
+    shown = ", ".join(str(i) for i in j.orphan_sample)
+    return [_issue(
+        check_name=JOURNAL_ORPHANS, table_name="app.data_quality_runs",
+        severity=Severity.CRITICAL, count=orphans, sample_ids=j.orphan_sample,
+        description=(
+            f"{j.orphan_issues} finding(s) and {j.orphan_diffs} discrepancy "
+            f"row(s) name a run app.data_quality_runs does not hold (run "
+            f"{shown}). {chain} writes a run and its findings in one "
+            "transaction and nothing deletes a run, so these were written "
+            "round it, or a run was deleted by hand. The digest and "
+            "/api/health/data-quality reach findings through their run, so "
+            "these are findings nobody is shown."))]
+
+
 def _watermark_issues(marks: Tuple[WatermarkAge, ...]) -> List:
     from core.data_quality import Severity
 
@@ -1316,6 +1384,15 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
         issues += _null_issues(facts.buyers.nulls, pg_buyers_write.CHAIN,
                                facts.buyers.latched_at)
         issues += _buyer_issues(facts.buyers, pg_buyers_write.CHAIN)
+
+    # The shadow chains (OD-02 (c)).
+    from core import pg_dq_journal_write
+
+    if isinstance(facts.journal, Unwatched):
+        issues.append(unwatched_issue(facts.journal.reason,
+                                      (pg_dq_journal_write.CHAIN,)))
+    elif isinstance(facts.journal, Journal):
+        issues += _journal_issues(facts.journal, pg_dq_journal_write.CHAIN)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(

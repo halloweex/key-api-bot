@@ -31,6 +31,7 @@ from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
     pg_goals_write, pg_inventory_write, write_chains,
 )
+from core import pg_dq_journal_write  # noqa: E402 — the shadow chains' block
 
 CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
 
@@ -439,6 +440,9 @@ _CONNECTION = {"get_pool", "_pool", "acquire"}
 # nothing, so a write added to one fails there instead of hiding here.
 _READERS = {
     "pg_inventory_write": {"read_snapshot_calendar", "preflight"},
+    # Chain 9 (OD-02 (c)): the connection the journal's readers are handed —
+    # the digest, the layer ages, the data-quality endpoint, the catch-up.
+    "pg_dq_journal_write": {"reading"},
 }
 
 # A statement that writes, by how it starts. Upper-cased first; `setval` is a
@@ -651,6 +655,8 @@ class TestEveryWriterLatchesFirst:
         # Chain 4: the buyers' writer, and the derivation that reads what is
         # pending before it latches.
         assert set(_writers(pg_buyers_write)) == {"upsert_buyers", "derive_gender_pg"}
+        # Chain 9: a run with its findings, and the digest's beat.
+        assert set(_writers(pg_dq_journal_write)) == {"persist_run", "set_digest_marker"}
 
     def test_every_registered_chain_has_a_writer_the_walk_can_see(self):
         """The guards below are parametrised over `WRITE_CHAINS`; a chain whose
