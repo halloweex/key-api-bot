@@ -242,6 +242,54 @@ class TestUnderPostgres:
         assert all(at >= cutoffs["disk_cutoff"] for at in remaining) and len(remaining) == 1
 
     @pytest.mark.asyncio
+    async def test_every_shadow_prune_uses_the_routers_instant(
+            self, flag, store, monkeypatch):
+        """The router's clock is put an hour behind the wall, and each table
+        is seeded with a row half an hour inside its retention as the router
+        sees it — half an hour outside it as the wall does. Mutation: let any
+        DuckDB prune compute its own cutoff (`retention_days=` for `cutoff=`)
+        — DuckDB would then drop a row Postgres kept, and the comparison would
+        read every edge sample as `shadow_pruned_rows`. The test above cannot
+        see it: the two instants it compares are microseconds apart."""
+        flag("postgres")
+
+        class _Behind(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz) - timedelta(hours=1)
+
+        monkeypatch.setattr(watchdog_samples, "datetime", _Behind)
+        seen = _Behind.now(timezone.utc)
+        inside = timedelta(minutes=30)
+        edge = {"disk_samples": seen - timedelta(days=14) + inside,
+                "data_dir_samples": seen - timedelta(days=21) + inside,
+                "memory_samples": seen - timedelta(days=14) + inside}
+        async with store.connection() as conn:
+            from core.disk_monitor import insert_dir_samples, insert_sample
+            from core.memory_monitor import insert_sample as insert_memory
+
+            insert_sample(conn, _sample(at=edge["disk_samples"]))
+            insert_dir_samples(conn, {"duckdb": 5}, sampled_at=edge["data_dir_samples"])
+            insert_memory(conn, MEM, sampled_at=edge["memory_samples"])
+
+        async def disk_tick(sample, dir_now, **kw):
+            return {"history": None, "dir_week_ago": None, "dir_six_ago": None,
+                    "remainder": [], "deleted": 0}
+
+        async def memory_tick(mem, **kw):
+            return {"last": None, "peak_24h": None}
+
+        monkeypatch.setattr(chain, "disk_tick", disk_tick)
+        monkeypatch.setattr(chain, "memory_tick", memory_tick)
+        await watchdog_samples.disk_tick(store, _sample(), {"duckdb": 6})
+        await watchdog_samples.memory_tick(store, MEM)
+        async with store.connection() as conn:
+            for table, at in edge.items():
+                kept = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE sampled_at = ?",
+                                    [at]).fetchone()[0]
+                assert kept >= 1, f"{table}: the shadow pruned a row Postgres was told to keep"
+
+    @pytest.mark.asyncio
     async def test_a_refusing_postgres_returns_no_history_and_writes_nothing(
             self, flag, store, monkeypatch):
         """Mutation: let the failure propagate under postgres — the disk job

@@ -204,6 +204,23 @@ class TestUnderPostgres:
         assert await _duck(store, "weekly_report_sends") == []
 
     @pytest.mark.asyncio
+    async def test_a_record_refused_twice_lands_on_the_third_attempt(self, flags, store):
+        """Mutation: stop retrying at the first refusal — a Postgres restart of
+        a few seconds after the delivery would spool every week it overlaps
+        and page `report_ledger_pending` for a blip the retry exists to
+        absorb. (The fixture zeroes the delays, so it is the attempts that
+        are counted, not the ~12 s.)"""
+        chain = pg_weekly_ledger_write
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        pg = FakePostgres(flags, chain)
+        pg.refuse = 2
+        out = await report_ledger.mark_sent(store, report_ledger.WEEKLY, WEEK, "retail", 10.0, 3)
+        assert out == "recorded" and pg.calls == ["mark_sent"] * 3
+        assert not report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
+        (dk,) = await _duck(store, "weekly_report_sends")
+        assert dk[4] == pg.rows[(WEEK, "retail")]["sent_at"]
+
+    @pytest.mark.asyncio
     async def test_a_spooled_week_is_sent_and_drains_with_its_original_sent_at(
             self, flags, store):
         """Mutation: a gate that ignores the spool (the week is sent twice),
@@ -298,6 +315,36 @@ class TestTheJobSendsOnce:
         finally:
             await store.close()
 
+    @pytest.mark.asyncio
+    async def test_the_traffic_floor_is_asked_before_the_ledger(
+            self, flags, tmp_path, monkeypatch):
+        """A week before `KS_TRAFFIC_REPORT_FIRST_WEEK` is skipped without
+        asking the ledger, so a Postgres that is down cannot turn "not this
+        week" into a failed job. Mutation: move the floor after the gate —
+        the job then raises on the refusal, every day, for a week that was
+        never going to be sent."""
+        from core.traffic_report import FIRST_WEEK_ENV
+        from tests.unit.test_traffic_report import (
+            TestTheScheduledJob, _duck_store, _seed_gold,
+        )
+
+        chain = pg_traffic_ledger_write
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        flags.setattr(chain, "find_sent", AsyncMock(side_effect=ConnectionRefusedError()))
+        store = await _duck_store(tmp_path)
+        try:
+            week_start = await _seed_gold(store)
+            monkeypatch.setenv(FIRST_WEEK_ENV, (week_start + timedelta(days=7)).isoformat())
+            job = TestTheScheduledJob()
+            scheduler = job._wire(monkeypatch, store, tmp_path)
+            sent = job._capture(monkeypatch)
+            result = await scheduler._run_traffic_report()
+            assert result["reason"] == "before_first_week", result
+            assert sent["rich"] == [] and sent["text"] == []
+            assert not chain.find_sent.await_count
+        finally:
+            await store.close()
+
 
 # ─── The watch and the canary ────────────────────────────────────────────────
 
@@ -366,3 +413,48 @@ class TestTheCanary:
         assert block["pg_weekly_ledger_write"]["pending"]["count"] == 0
         assert "pending" not in block["pg_dq_journal_write"]
         assert block["pg_dq_journal_write"]["shadow_failures"]["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_published_block_carries_it(self, flags, monkeypatch):
+        """Through `_write_chains_block`, what `/api/health` actually publishes.
+        Mutation: drop the `_shadow_entries(block)` call — the test above
+        would still pass, calling the helper itself, and the canary would
+        never see a spooled week."""
+        from web.routes.api import health
+
+        monkeypatch.setattr(health, "_inventory_preflight", AsyncMock(return_value=None))
+        monkeypatch.setattr(health, "_inventory_sync_step", AsyncMock(return_value=None))
+        report_ledger.spool(pg_weekly_ledger_write.CHAIN, WEEK, "retail",
+                            Decimal("1.00"), 1, datetime.now(timezone.utc))
+        block = await health._write_chains_block()
+        assert block["pg_weekly_ledger_write"]["pending"]["count"] == 1
+        assert block["pg_weekly_ledger_write"]["shadow"] is True
+        assert block["pg_dq_journal_write"]["shadow_failures"]["count"] == 0
+        assert "shadow_failures" not in block["pg_expenses_write"]
+
+    @pytest.mark.asyncio
+    async def test_the_probe_warns_on_it(self):
+        """Through `run_canary`, the probe the bot runs every 15 min, on an
+        otherwise healthy payload. Mutation: drop `check_report_ledger_pending`
+        from the probe — the function above would still answer, and nobody
+        would be told that a delivered week is recorded only on local disk."""
+        import httpx
+        from unittest.mock import patch
+
+        from bot import canary
+        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
+
+        payload = _healthy_payload()
+        payload.setdefault("write_chains", {})["pg_weekly_ledger_write"] = {
+            "env": "postgres", "mode": "postgres", "error": None, "latched": True,
+            "latched_at": "2026-09-28T06:30:00+00:00", "mismatch": False,
+            "unmet_precondition": None, "shadow": True,
+            "pending": {"count": 1, "weeks": ["2026-09-21__retail"]}}
+        future = datetime.now(timezone.utc) + timedelta(days=60)
+        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+        async with _mock_transport(lambda request: httpx.Response(200, json=payload)) as client:
+            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
+                result = await canary.run_canary(DASHBOARD, client=client)
+        assert "report_ledger_pending" in result.failure_keys
+        assert result.severity == "warn"
+        assert "2026-09-21__retail" in canary.format_alert(result, DASHBOARD)

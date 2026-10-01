@@ -521,6 +521,22 @@ class TestNoFallback:
             await dq_journal.health_runs(store)
 
     @pytest.mark.asyncio
+    async def test_a_journal_lost_after_the_beat_still_fails_the_digest(
+            self, flag, store, pg_journal, monkeypatch):
+        """The beat answered and the runs did not — a connection lost between
+        the two reads. Mutation: fall back to DuckDB for the sections alone —
+        the test above would still pass, since its first read already raises,
+        and the digest would print DuckDB's journal under Postgres's beat."""
+        flag("postgres")
+
+        async def lost(conn, layer=None):
+            raise ConnectionResetError("lost mid-digest")
+
+        monkeypatch.setattr(chain, "latest_run", lost)
+        with pytest.raises(ConnectionResetError):
+            await dq_journal.digest_inputs(store, ("integrity",), NOW)
+
+    @pytest.mark.asyncio
     async def test_the_canary_gets_no_block_rather_than_duckdbs(self, flag, pg_journal):
         from web.routes.api import health
 

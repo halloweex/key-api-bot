@@ -128,18 +128,38 @@ class TestOneTickTwoStores:
 
     @pytest.mark.asyncio
     async def test_both_stores_prune_at_one_instant(self, stores):
+        """Every table, both stores: a row past its retention is gone from
+        each and the two hold the same rows. Mutation: drop any one of the
+        three prunes from the Postgres tick — the memory prune's absence
+        survived every other test here, since nothing else seeds an old
+        memory sample in Postgres."""
         store, pool, env = stores
         env.setenv(chain.WRITE_ENV, "postgres")
         now = datetime.now(timezone.utc)
-        old = now - timedelta(days=15)
+        old = {"app.disk_samples": now - timedelta(days=15),
+               "app.data_dir_samples": now - timedelta(days=22),
+               "app.memory_samples": now - timedelta(days=15)}
         async with pool.acquire() as conn:
-            await conn.execute("INSERT INTO app.disk_samples VALUES ($1, 1, 1, 1)", old)
+            await conn.execute("INSERT INTO app.disk_samples VALUES ($1, 1, 1, 1)",
+                               old["app.disk_samples"])
+            await conn.execute("INSERT INTO app.data_dir_samples VALUES ($1, 'duckdb', 1)",
+                               old["app.data_dir_samples"])
+            await conn.execute("INSERT INTO app.memory_samples VALUES ($1, 1, 1, 1, 0)",
+                               old["app.memory_samples"])
         async with store.connection() as conn:
-            conn.execute("INSERT INTO disk_samples VALUES (?, 1, 1, 1)", [old])
-        reads = await watchdog_samples.disk_tick(store, _sample(now), {})
+            conn.execute("INSERT INTO disk_samples VALUES (?, 1, 1, 1)",
+                         [old["app.disk_samples"]])
+            conn.execute("INSERT INTO data_dir_samples VALUES (?, 'duckdb', 1)",
+                         [old["app.data_dir_samples"]])
+            conn.execute("INSERT INTO memory_samples VALUES (?, 1, 1, 1, 0)",
+                         [old["app.memory_samples"]])
+        reads = await watchdog_samples.disk_tick(store, _sample(now), {"duckdb": 3})
+        await watchdog_samples.memory_tick(store, MEM)
         assert reads["deleted"] == 1
-        pg, dk = await _rows(store, pool, "app.disk_samples", COLS["app.disk_samples"])
-        assert pg == dk and len(pg) == 1
+        for table, cols in COLS.items():
+            pg, dk = await _rows(store, pool, table, cols)
+            assert pg == dk, table
+            assert pg and all(r[0] > old[table] for r in pg), table
 
 
 class TestTheShadowIsCompared:
