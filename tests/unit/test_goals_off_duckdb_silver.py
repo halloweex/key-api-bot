@@ -249,9 +249,9 @@ class TestTheSummaryFallbackReadsTheRowsOwnSalesType:
 # ─── Three years of history, for the calculators ───────────────────────────
 
 # Production's shape: the first order is 2023-12-02, so there are two full
-# years and one pair of them. (Three full years would reach a separate, older
-# defect — `yoy_rates` hold DuckDB DECIMALs and the recency weights are floats,
-# so a second pair raises TypeError. Not this change's to fix; reported.)
+# years and one pair of them. A second pair, and with it the recency weighting
+# that used to raise TypeError on DECIMAL sums, is covered on its own in
+# `tests/unit/test_goals_yoy_growth.py`.
 HISTORY_START = date(2023, 12, 2)
 HISTORY_END = date(2025, 12, 31)
 
