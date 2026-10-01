@@ -2299,10 +2299,19 @@ class BackgroundScheduler:
 
             retired_reported: set = set()
             retired_verdicts: set = set()
+            # Every check this run asked, verdict or raise, in order — so that
+            # a stand-down can be read off the run itself. Absent findings
+            # cannot say it: `compare_gold` excuses a cell whose orders synced
+            # inside its grace, so a `reconcile_gold` that ran when it should
+            # not have files nothing on the morning after a busy sync, and
+            # reads exactly like one that stood down. The step-13 rehearsal
+            # judges P5 on this list.
+            checks_run: list = []
 
             async def check(name, run) -> bool:
                 """Run one check; True when it returned a verdict."""
                 nonlocal issues
+                checks_run.append(name)
                 try:
                     found = await run()
                 except Exception as exc:  # noqa: BLE001 — recorded and named
@@ -2557,6 +2566,9 @@ class BackgroundScheduler:
                     for i in issues
                     if i.severity is not Severity.INFO
                 ][:10],
+                # Names only, as above; on the completion line, which is the
+                # one record of this run a reader outside the process has.
+                "checks_run": list(checks_run),
             }
             logger.info("Mirror reconciliation complete", extra=result)
             return result
