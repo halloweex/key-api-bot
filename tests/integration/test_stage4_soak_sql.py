@@ -44,7 +44,7 @@ FILES = sorted(SQL_DIR.glob("*.sql"))
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
 VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on": "0",
              "buyers_on": "0", "buyers_flip_at": "", "buyers_held_by": "",
-             "buyers_override_floor": ""}
+             "buyers_override_floor": "", "dq_journal_direct": "0"}
 RUN_AS_OWNER = "-- soak:run-as ks_app"
 # The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
 HISTORY_CHECKS = (
@@ -656,6 +656,97 @@ class TestStaleEvidenceIsUnknown:
                                ok_at=datetime(2030, 6, 5, 7, 40, tzinfo=KYIV))
             v, detail = await verdict(conn, "09_d8_mirror_landing.sql", now=at_0800)
         assert v == "UNKNOWN", detail
+
+
+@needs_pg
+class TestADirectJournalIsNotGatedOnTheCopy:
+    """Chain 9 (OD-02 (c)): once the journal is written in Postgres, these
+    rows are the journal and not a copy of it. The copy stands down with the
+    chain, its `last_ok_at` freezes, and without this D8, 20, 21 and 22 read
+    UNKNOWN for as long as the chain is on. Direct is the script's flag or the
+    latch's owner row, which outranks it. Mutation: drop the `journal` CTE's
+    effect from one file — its case below stays UNKNOWN."""
+
+    TODAY_0730 = datetime(2030, 6, 5, 7, 30, tzinfo=KYIV)
+    FROZEN = dict(ok_at=datetime(2030, 6, 1, 3, 0, tzinfo=KYIV))
+
+    @staticmethod
+    async def owner_row(conn):
+        await conn.execute(
+            "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+            "VALUES ('owner:app.data_quality_runs', '2030-06-01T00:00:00+00:00', now()) "
+            "ON CONFLICT (key) DO NOTHING")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("how", ["flag", "owner_row"])
+    async def test_d8_judges_the_run(self, pool, how):
+        async with scenario(pool) as conn:
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
+                         started_at=self.TODAY_0730)
+            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
+            if how == "owner_row":
+                await self.owner_row(conn)
+            v, detail = await verdict(
+                conn, "09_d8_mirror_landing.sql",
+                dq_journal_direct="1" if how == "flag" else "0")
+        assert v == "PASS", detail
+
+    @pytest.mark.asyncio
+    async def test_d8_still_fails_a_finding(self, pool):
+        async with scenario(pool) as conn:
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
+                         started_at=self.TODAY_0730)
+            await dq_issue(conn, DQ_RUN_IDS[0], "gold_cell_values", table="gold.daily_revenue")
+            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql",
+                                      dq_journal_direct="1")
+        assert v == "FAIL" and "gold_cell_values" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_without_either_the_frozen_copy_is_still_unknown(self, pool):
+        async with scenario(pool) as conn:
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
+                         started_at=self.TODAY_0730)
+            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "UNKNOWN", detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
+    async def test_the_histories_judge_the_runs(self, pool, name, layer):
+        history = TestReconciliationPgHistory()
+        history.LAYER = layer
+        async with scenario(pool) as conn:
+            await history.seed(conn, history.every_morning(), copied=self.FROZEN["ok_at"])
+            stale_v, _ = await verdict(conn, name)
+            v, detail = await verdict(conn, name, dq_journal_direct="1")
+        assert stale_v == "UNKNOWN"
+        assert v == "PASS", detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
+    async def test_a_silence_now_is_a_fail_not_an_unknown(self, pool, name, layer):
+        """With the journal direct there is no copy to wait for: a silence past
+        the limit at the read is one that happened."""
+        history = TestReconciliationPgHistory()
+        history.LAYER = layer
+        async with scenario(pool) as conn:
+            await history.seed(conn, history.every_morning(last=2),
+                               copied=self.FROZEN["ok_at"])
+            v, detail = await verdict(conn, name, dq_journal_direct="1")
+        assert v == "FAIL", detail
+
+    @pytest.mark.asyncio
+    async def test_pairing_judges_the_run(self, pool):
+        async with scenario(pool) as conn:
+            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
+            await dq_run(conn, DQ_RUN_IDS[1], layer="integrity", started_at=ago(hours=5))
+            await dq_issue(conn, DQ_RUN_IDS[1], "pg_line_items_disagree")
+            stale_v, _ = await verdict(conn, "21_pairing.sql", dq_pg_warehouse_on="1")
+            v, detail = await verdict(conn, "21_pairing.sql", dq_pg_warehouse_on="1",
+                                      dq_journal_direct="1")
+        assert stale_v == "UNKNOWN"
+        assert v == "FAIL" and "pg_line_items_disagree" in detail, detail
 
 
 @needs_pg

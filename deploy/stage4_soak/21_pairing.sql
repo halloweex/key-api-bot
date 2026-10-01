@@ -38,8 +38,19 @@ WITH clock AS (
 flag AS (
     SELECT :'dq_pg_warehouse_on'::text AS state
 ),
+journal AS (
+    -- Chain 9 (OD-02 (c)): once KS_WRITE_DQ_JOURNAL moves the journal's writer
+    -- to Postgres, these rows are the journal itself, not an hourly copy. The
+    -- copy stands down with the chain, so its `last_ok_at` freezes and would
+    -- make this check UNKNOWN for ever. Direct is the flag the script read,
+    -- or the latch's owner row, which outranks the flag (OD-19 (a)).
+    SELECT (:'dq_journal_direct' = '1'
+            OR EXISTS (SELECT 1 FROM meta.chain_watermarks
+                       WHERE key = 'owner:app.data_quality_runs')) AS direct
+),
 dq_copy AS (
     SELECT CASE
+               WHEN journal.direct THEN NULL
                WHEN s.table_name IS NULL THEN
                    'app.data_quality_runs has never been copied into Postgres'
                WHEN s.failures_since_ok > 0 THEN
@@ -53,6 +64,7 @@ dq_copy AS (
                           floor(extract(epoch FROM clock.now - s.last_ok_at) / 60))
            END AS stale
     FROM clock
+    CROSS JOIN journal
     LEFT JOIN meta.mirror_state s ON s.table_name = 'app.data_quality_runs'
 ),
 runs AS (

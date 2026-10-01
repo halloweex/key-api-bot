@@ -50,6 +50,7 @@ case "$1" in
                 case "$5" in
                     */pg_inventory_write) [ -n "${FAKE_INVENTORY_LATCHED:-}" ] && exit 0 ;;
                     */pg_buyers_write) [ -n "${FAKE_BUYERS_LATCHED:-}" ] && exit 0 ;;
+                    */pg_dq_journal_write) [ -n "${FAKE_DQ_JOURNAL_LATCHED:-}" ] && exit 0 ;;
                 esac
                 exit 1
             fi
@@ -60,6 +61,7 @@ case "$1" in
                 KS_SMS_STORE) v="${FAKE_KS_SMS_STORE-__unset__}" ;;
                 KS_READ_SEARCH_INDEX) v="${FAKE_KS_READ_SEARCH_INDEX-__unset__}" ;;
                 KS_READ_DASHBOARD) v="${FAKE_KS_READ_DASHBOARD-__unset__}" ;;
+                KS_WRITE_DQ_JOURNAL) v="${FAKE_KS_WRITE_DQ_JOURNAL-__unset__}" ;;
                 *) v="__unset__" ;;
             esac
             [ "$v" = "__unset__" ] && exit 1
@@ -325,3 +327,28 @@ class TestChain4:
                    SOAK_BUYERS_OVERRIDE_FLOOR="3")
         assert all("buyers_flip_at=2026-10-01 10:30+03 " in c
                    and "buyers_override_floor=3" in c for c in run.psql), run.psql
+
+
+class TestChain9:
+    """Where the quality journal is written decides whether D8, 20, 21 and 22
+    gate on the hourly copy (OD-02 (c)). Mutation: drop the latch from
+    `DQ_JOURNAL_DIRECT`, or stop passing it — a latched chain with its flag
+    put back would then read UNKNOWN on a copy that stood down."""
+
+    def test_unset_is_zero(self, healthy):
+        assert all("dq_journal_direct=0" in c for c in healthy.psql), healthy.psql
+
+    def test_the_flag_is_one(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_DQ_JOURNAL=" Postgres ")
+        assert all("dq_journal_direct=1" in c for c in run.psql), run.psql
+
+    def test_the_latch_outranks_the_flag(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_DQ_JOURNAL="duckdb",
+                   FAKE_DQ_JOURNAL_LATCHED="1")
+        assert all("dq_journal_direct=1" in c for c in run.psql), run.psql
+
+    def test_a_value_nobody_understands_is_not_direct(self, tmp_path):
+        """Unlatched, a typo writes the journal nowhere (OD-18 (a)); the copy
+        is what stands, and the checks keep gating on it."""
+        run = _run(tmp_path, FAKE_KS_WRITE_DQ_JOURNAL="postgress")
+        assert all("dq_journal_direct=invalid" in c for c in run.psql), run.psql

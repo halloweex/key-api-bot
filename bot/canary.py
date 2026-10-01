@@ -83,7 +83,9 @@ DQ_MAX_AGE_S = {
     # DuckDB stops being fed. It is not independent of DuckDB yet: the job
     # runs it only after the DuckDB extraction succeeded, inside the same try,
     # and journals it in DuckDB's data_quality_runs, which is where the age
-    # /api/health publishes comes from. So a DuckDB failure silences it too,
+    # /api/health publishes comes from — until chain 9 (KS_WRITE_DQ_JOURNAL,
+    # OD-02 (c)) moves the journal to Postgres, when the age comes from there;
+    # the job's dependence on the DuckDB extraction stays. So a DuckDB failure silences it too,
     # and since DN-21 that pages under this key as well as `reconciliation`.
     # Decoupling it belongs with step 13.
     # DN-21's opt-in rested on what the stage-4 soak checked on 18.09: a

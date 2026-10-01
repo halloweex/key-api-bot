@@ -146,6 +146,17 @@ elif [ "$BUYERS_ON" = "1" ] && [ "$BUYERS_LATCHED" = "unknown" ]; then
     BUYERS_ON=unknown
 fi
 
+# Chain 9 (OD-02 (c)): where the quality journal is written. D8, 20, 21 and 22
+# read `app.data_quality_*` and gate on the hourly copy's freshness — until the
+# journal is written in Postgres directly, when the copy stands down and its
+# freshness says nothing. 1 when the flag says postgres or the chain is latched
+# (the latch outranks the flag); the SQL also reads the latch's owner row, so a
+# lost marker does not send the four checks back to a copy that stopped.
+DQ_JOURNAL_DIRECT="$(flag_state KS_WRITE_DQ_JOURNAL postgres duckdb)"
+if [ "$(latch_state pg_dq_journal_write)" = "1" ]; then
+    DQ_JOURNAL_DIRECT=1
+fi
+
 # The latch wins, exactly as `writes_postgres()` resolves it — including over
 # `invalid`, because a latched chain with a misspelt variable goes on writing
 # Postgres and its stand-down still has to hold. The typo does not disappear
@@ -202,6 +213,7 @@ run_check() {
             -v buyers_flip_at="$BUYERS_FLIP_AT" \
             -v buyers_held_by="$BUYERS_HELD_BY" \
             -v buyers_override_floor="$BUYERS_OVERRIDE_FLOOR" \
+            -v dq_journal_direct="$DQ_JOURNAL_DIRECT" \
             < "$file" 2>&1)"; then
         rc=0
     else
@@ -237,6 +249,7 @@ fi
 # ── the table ─────────────────────────────────────────────────────────────────
 echo "Stage 4 soak report · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC')"
 echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}, dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
+echo "  dq_journal_direct=$DQ_JOURNAL_DIRECT (KS_WRITE_DQ_JOURNAL)"
 echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
 echo
 printf '%s' "$ROWS" | awk '
