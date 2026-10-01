@@ -16,6 +16,18 @@ week again — today's exposure, named in the design and left as it is: closing
 it on this path would change the default's behaviour, which is the owner's
 call (the design's §10).
 
+**One addition, and it reads nothing when there is nothing to read: a spool
+left by `postgres` is honoured here too.** A spooled row is a delivery that
+happened, whatever the flag says now, and two ordinary ways back walk past it:
+a flag put back to `duckdb` after a record that never latched the chain (the
+pool refused before `_latch()`), and a copy-back. Without this the next tick
+read DuckDB alone, found nothing, and sent the week a second time while the
+canary warned `report_ledger_pending` for ever. So the gate lands every
+spooled row in DuckDB — the writer of record under `duckdb` — with its
+original `sent_at`, counts a week still spooled as sent, and only then asks
+the statement that always stood here. With no spool directory, which is every
+chain that never ran under `postgres`, that is one `is_dir()` and nothing else.
+
 UNDER `postgres`: AT LEAST ONCE, NEVER TWICE (OD-16 (a))
 
 - **The record after delivery is retried, then spooled.** `sent_at` is taken
@@ -172,11 +184,20 @@ def is_spooled(chain_name: str, week_start: date, sales_type: str) -> bool:
     return _spool_path(chain_name, week_start, sales_type).exists()
 
 
+def _any_spooled(chain_name: str) -> bool:
+    folder = _spool_dir(chain_name)
+    return folder.is_dir() and any(folder.glob("*.json"))
+
+
 def pending_of(chain_name: str) -> Dict[str, Any]:
-    """`{count, weeks}` of spooled entries — what `/api/health` publishes."""
+    """`{count, weeks, unreadable}` of spooled entries — what `/api/health`
+    publishes, and what the copy-back's handover reports. `unreadable` names
+    the files no drain will land: a delivered week whose row a human writes."""
     entries = _spooled(chain_name)
     return {"count": len(entries),
-            "weeks": sorted(e["path"].stem for e in entries)}
+            "weeks": sorted(e["path"].stem for e in entries),
+            "unreadable": sorted(e["path"].stem for e in entries
+                                 if e.get("unreadable"))}
 
 
 async def drain(store, ledger: Ledger) -> int:
@@ -207,6 +228,43 @@ async def drain(store, ledger: Ledger) -> int:
     return landed
 
 
+async def land_in_duckdb(store, ledger: Ledger) -> int:
+    """Land every spooled row in DuckDB, the writer of record under `duckdb`,
+    then delete the file. Never raises; returns how many landed.
+
+    The same values the spool holds — `sent_at` included, so the row says
+    when the message went out, not when the flag came back — through the
+    report's own statement. Not a shadow: under `duckdb` nothing else holds
+    the row, so a failure is not counted as a shadow's, it leaves the file for
+    the next tick, which counts the week as sent meanwhile.
+    """
+    report = ledger.report()
+    landed = 0
+    for entry in _spooled(ledger.chain().CHAIN):
+        if entry.get("unreadable"):
+            continue
+        try:
+            async with store.connection() as conn:
+                report.mark_sent(conn, entry["week_start"], entry["sales_type"],
+                                 entry["revenue"], entry["orders"],
+                                 sent_at=entry["sent_at"])
+        except Exception as exc:  # noqa: BLE001 — stays spooled for the next tick
+            logger.warning("report ledger: %s still pending (%s)",
+                           entry["path"].name, type(exc).__name__)
+            continue
+        try:
+            entry["path"].unlink()
+        except OSError as exc:
+            logger.error("report ledger: landed %s and could not remove it: %s",
+                         entry["path"], exc)
+            continue
+        landed += 1
+        logger.warning("report ledger: drained %s into DuckDB — spooled under "
+                       "postgres, landed after the chain went back to duckdb",
+                       entry["path"].name)
+    return landed
+
+
 async def _shadow(store, ledger: Ledger, week_start, sales_type, revenue,
                   orders, sent_at) -> bool:
     from core import shadow_writes
@@ -226,7 +284,15 @@ async def already_sent(store, ledger: Ledger, week_start: date, sales_type: str)
     chain = ledger.chain()
     report = ledger.report()
     if not chain.writes_postgres():
-        # duckdb — the job's block, moved unchanged.
+        # duckdb. A spool here was left by `postgres` (module docstring): land
+        # it in DuckDB and count what is still spooled as sent.
+        if _any_spooled(chain.CHAIN):
+            await land_in_duckdb(store, ledger)
+            if is_spooled(chain.CHAIN, week_start, sales_type):
+                logger.info("Report ledger: %s/%s delivered under postgres, its "
+                            "row still spooled", week_start, sales_type)
+                return True
+        # The job's block, moved unchanged.
         async with store.connection() as conn:
             return report.already_sent(conn, week_start, sales_type)
 

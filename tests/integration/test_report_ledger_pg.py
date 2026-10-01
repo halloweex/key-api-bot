@@ -175,3 +175,97 @@ class TestTheWayBack:
         pg, dk = await _both(store, pool, chain)
         assert pg == dk and len(dk) == 1
         assert not chain_latch.latched(chain.CHAIN)
+
+
+class TestTheWayBackLandsTheSpool:
+    """The review's first reproduction: a week delivered under a latched chain
+    and spooled, then a copy-back. The handover said "every row DuckDB holds
+    is in Postgres", the copy released, and the week was in neither store."""
+
+    async def _latched_with_a_spooled_week(self, store, env, chain, ledger):
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await report_ledger.mark_sent(store, ledger, WEEK - timedelta(days=7),
+                                      "retail", 10.0, 1)          # latches
+        real = chain.mark_sent
+        env.setattr(chain, "mark_sent", AsyncMock(side_effect=ConnectionError("pg down")))
+        assert await report_ledger.mark_sent(store, ledger, WEEK, "retail", 20.0, 2) == "pending"
+        env.setattr(chain, "mark_sent", real)
+        return report_ledger._spooled(chain.CHAIN)[0]["sent_at"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ledger,chain", CHAINS)
+    async def test_execute_lands_it_before_the_copy(self, stores, ledger, chain):
+        """Mutation: drop `_land_spool` from `copy_back` — the release still
+        comes, and the week is in neither store."""
+        from core.chain_transfer import copy_back
+
+        store, pool, env = stores
+        spooled_at = await self._latched_with_a_spooled_week(store, env, chain, ledger)
+        result = await copy_back(store, chain, dry_run=False)
+        assert result["findings"] == [] and result["released"] is True, result
+        assert result["landed_from_spool"] == 1
+        assert chain.pending()["count"] == 0
+        pg, dk = await _both(store, pool, chain)
+        assert pg == dk
+        assert (WEEK, "retail", Decimal("20.00"), 2, spooled_at) in dk
+        env.setenv(chain.WRITE_ENV, "duckdb")
+        assert await report_ledger.already_sent(store, ledger, WEEK, "retail")
+
+    @pytest.mark.asyncio
+    async def test_the_dry_run_and_the_handover_report_it_and_land_nothing(self, stores):
+        """Mutation: land in the dry run (it would write Postgres on the one
+        call that promises to read), or drop the spool from either report."""
+        from core.chain_transfer import copy_back, handover_check
+
+        store, pool, env = stores
+        chain, ledger = pg_weekly_ledger_write, report_ledger.WEEKLY
+        await self._latched_with_a_spooled_week(store, env, chain, ledger)
+        plan = await copy_back(store, chain, dry_run=True)
+        assert "handover_ledger_spooled" in {f["check"] for f in plan["handover"]}
+        assert "landed_from_spool" not in plan
+        assert {i.check_name for i in await handover_check(store, chain)} >= {
+            "handover_ledger_spooled"}
+        assert report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
+        async with pool.acquire() as conn:
+            assert await conn.fetchval(
+                f"SELECT count(*) FROM {chain.TABLE} WHERE week_start = $1", WEEK) == 0
+
+    @pytest.mark.asyncio
+    async def test_a_week_postgres_will_not_take_refuses_the_copy(self, stores):
+        """Mutation: ignore what is still spooled after the landing — the copy
+        releases the chain with the week in a file."""
+        from core.chain_transfer import CopyBackRefused, copy_back
+
+        store, pool, env = stores
+        chain, ledger = pg_traffic_ledger_write, report_ledger.TRAFFIC
+        await self._latched_with_a_spooled_week(store, env, chain, ledger)
+        env.setattr(chain, "mark_sent", AsyncMock(side_effect=ConnectionError("pg down")))
+        before = await _both(store, pool, chain)
+        with pytest.raises(CopyBackRefused):
+            await copy_back(store, chain, dry_run=False)
+        assert await _both(store, pool, chain) == before
+        assert chain_latch.latched(chain.CHAIN)
+        assert report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
+
+    @pytest.mark.asyncio
+    async def test_a_file_that_will_not_parse_refuses_before_anything_is_written(
+            self, stores):
+        """CRITICAL in the handover, so `--execute` refuses at exit 2 with
+        nothing landed. Mutation: leave the spool out of `copy_back`'s own
+        handover — it would land the readable weeks first and refuse after."""
+        from core.chain_transfer import CopyBackRefused, copy_back, handover_check
+
+        store, pool, env = stores
+        chain, ledger = pg_weekly_ledger_write, report_ledger.WEEKLY
+        await self._latched_with_a_spooled_week(store, env, chain, ledger)
+        bad = report_ledger._spool_path(chain.CHAIN, WEEK + timedelta(days=7), "retail")
+        bad.write_text("{", encoding="utf-8")
+        found = {i.check_name: i.severity.value for i in await handover_check(store, chain)}
+        assert found["handover_ledger_spool_unreadable"] == "CRITICAL"
+        with pytest.raises(CopyBackRefused) as refused:
+            await copy_back(store, chain, dry_run=False)
+        assert "handover_ledger_spool_unreadable" in {i.check_name for i in refused.value.issues}
+        assert report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")      # nothing landed
+        async with pool.acquire() as conn:
+            assert await conn.fetchval(
+                f"SELECT count(*) FROM {chain.TABLE} WHERE week_start = $1", WEEK) == 0

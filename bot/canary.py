@@ -1323,7 +1323,7 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("write_chain_precondition_unmet",
      "Set the read flag the message names to postgres, then docker compose up -d web"),
     ("report_ledger_pending",
-     "Nothing to resend: the next daily tick drains data/report-ledger-pending into Postgres; grep web's log for 'Report ledger'"),
+     "Nothing to resend: the next daily tick drains data/report-ledger-pending into the ledger, under either flag; grep -i 'report ledger' in web's log"),
     ("utm_parse_mode_invalid",
      "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
     # Last: when an engine is down its own key names the cause, and a fallback

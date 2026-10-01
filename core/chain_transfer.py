@@ -34,6 +34,21 @@ each row once, and a Postgres row below the append watermark the copy never
 reads. The dry run asks the same question, so it says what `--execute` will
 refuse.
 
+A ROW THAT IS IN NEITHER STORE: THE REPORT LEDGERS' SPOOL
+
+Chains 11a/11b record a delivery after it happened, and a record Postgres
+refused three times waits in a file (`core/report_ledger.py`). That week is in
+neither store, so a comparison of the two cannot see it, and the first draft
+of the ledgers' way back released the latch with it still in the file — after
+which the gate under `duckdb` read DuckDB alone and sent the week again. A
+chain module that keeps such a spool says so with two hooks, `pending()` and
+`land_pending(store)`. The handover reports what is spooled (INFO, and a file
+no drain can parse as CRITICAL — a human writes that row first); `--execute`
+lands the spool in Postgres, the writer while the chain is latched, before it
+reads a row, and refuses if anything is still spooled after that. Landing is a
+write to Postgres made before a refusal can come, and it is the one the job's
+next tick would have made: the record of a delivery that happened.
+
 THE WRITE AND ITS PROOF ARE ONE TRANSACTION
 
 Everything the copy writes — every table, the watermarks, the id allocator — and
@@ -948,6 +963,73 @@ async def _owned_since(pool, name: str) -> Optional[str]:
     return chain_latch.claimed_chains(await chain_latch.read_owners(pool)).get(name)
 
 
+def _spool_issues(chain: ModuleType) -> List[IntegrityIssue]:
+    """What the chain's spool holds, as the handover reports it — empty for a
+    chain that keeps none (no `pending()` hook).
+
+    A readable entry is INFO, in both directions: the gate counts it as sent
+    under either flag and lands it in the store it writes, and `--execute`
+    lands it in Postgres before it reads. A file that will not parse is
+    CRITICAL: no drain will ever land it, so a human writes that week's row
+    and deletes the file before anything here goes ahead.
+    """
+    pending = getattr(chain, "pending", None)
+    if not callable(pending):
+        return []
+    state = pending()
+    unreadable = list(state.get("unreadable") or ())
+    readable = [w for w in state.get("weeks") or () if w not in set(unreadable)]
+    table = chain.CHAIN_TABLES[0]
+    folder = f"data/report-ledger-pending/{chain.CHAIN}/"
+    issues: List[IntegrityIssue] = []
+    if readable:
+        issues.append(IntegrityIssue(
+            check_name="handover_ledger_spooled", table_name=table,
+            severity=Severity.INFO, count=len(readable), sample_ids=(),
+            description=(
+                f"{len(readable)} delivered week(s) of {table} are spooled in "
+                f"{folder} and held by neither store: {', '.join(readable)}. "
+                "The message went out and its record has not landed. The gate "
+                "counts them as sent under either flag and lands them in the "
+                "store it writes; --execute lands them in Postgres before it "
+                "reads, so the copy carries them back.")))
+    if unreadable:
+        issues.append(IntegrityIssue(
+            check_name="handover_ledger_spool_unreadable", table_name=table,
+            severity=Severity.CRITICAL, count=len(unreadable), sample_ids=(),
+            description=(
+                f"{len(unreadable)} file(s) in {folder} cannot be parsed: "
+                f"{', '.join(unreadable)}. Each is a delivered week no drain "
+                "will land — the gate counts it as sent by its name alone. "
+                f"Write its row into {table} by hand (week_start, sales_type, "
+                "revenue, orders, sent_at, from the report's message), delete "
+                "the file, and ask again.")))
+    return issues
+
+
+async def _land_spool(store, chain: ModuleType) -> int:
+    """Land the chain's spool in Postgres, the writer while it is latched;
+    refuse if anything is left. Returns how many landed."""
+    land = getattr(chain, "land_pending", None)
+    if not callable(land):
+        return 0
+    landed = await land(store)
+    left = chain.pending()
+    if left.get("count"):
+        raise CopyBackRefused(
+            f"{chain.CHAIN}: {left['count']} delivered week(s) are still "
+            f"spooled after landing the spool in Postgres "
+            f"({', '.join(left.get('weeks') or ())}); {landed} landed. A copy "
+            "now would release the chain with those weeks in neither store. "
+            "Nothing was copied into DuckDB and the latch is where it was; "
+            "the weeks that landed are in Postgres, where the job's next tick "
+            "would have put them. Look for 'report ledger:' in this output — "
+            "Postgres refused the record, or a file did not parse — and run "
+            "this again.",
+            _spool_issues(chain))
+    return landed
+
+
 async def handover_check(
     store,
     chain: ModuleType,
@@ -980,9 +1062,10 @@ async def handover_check(
     pool = await get_pool()
     await require_revision()
     moved_on = await _owned_since(pool, chain_name(chain)) is not None
-    return await _handover_issues(
+    issues = await _handover_issues(
         store, pool, chain_specs(chain), moved_on=moved_on, max_samples=max_samples,
     )
+    return issues + _spool_issues(chain)
 
 
 def _sortable(key: Any) -> Tuple[str, Any]:
@@ -1115,7 +1198,7 @@ async def copy_back(
 
     handover = await _handover_issues(
         store, pool, specs, moved_on=True, max_samples=max_samples,
-    )
+    ) + _spool_issues(chain)
     blocking = [i for i in handover if i.severity is Severity.CRITICAL]
     if blocking:
         raise CopyBackRefused(_refusal(name, blocking), blocking)
@@ -1128,6 +1211,11 @@ async def copy_back(
             ).fetchone()[0]
             for spec in specs if spec.is_append
         }
+
+    # Before the read, never after: a delivered week still in the spool is in
+    # neither store, and the copy would release the chain without it (the
+    # module docstring). The dry run only reports it — the INFO above.
+    landed = 0 if dry_run else await _land_spool(store, chain)
 
     rows = {spec.pg_table: await _read_pg(pool, spec, floors.get(spec.pg_table))
             for spec in specs}
@@ -1147,6 +1235,8 @@ async def copy_back(
         # What the copy will overwrite or carry, none of it blocking.
         "handover": [_render(i) for i in handover],
     }
+    if landed:
+        plan["landed_from_spool"] = landed
     if dry_run:
         plan["executed"] = False
         plan["runbook"] = _runbook(chain, executed=False)

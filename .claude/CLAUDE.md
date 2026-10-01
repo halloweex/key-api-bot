@@ -3484,7 +3484,14 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
   lives in `meta.chain_watermarks` (the hourly replace of `app.sync_metadata`
   would wipe it) and is inherited from DuckDB while absent there, or the first
   digest after a flip restates every standing finding. A Postgres row is
-  rendered in DuckDB's session zone, read from DuckDB itself.
+  rendered in DuckDB's session zone, read from DuckDB itself. **One finding
+  per `(check_name, table_name)` in a run**, which Postgres keys
+  `app.data_quality_issues` on and DuckDB does not: `chain_invariants_unwatched`
+  names the part it could not read — `(<chain>)`, `meta.chain_watermarks`,
+  `(write chains)` for everything — and the journal's door folds any repeat
+  that still arrives, with an ERROR. Two blind groups under one constant name
+  had Postgres refuse the whole run, or, under `duckdb`, broke the hourly
+  copy of the never-pruned journal for good.
 - **Chain 10** runs each job's whole persistence — the differencing reads, the
   insert, the prune — as one Postgres transaction, so a read can never be left
   on the store the insert moved away from; every instant both stores see is
@@ -3503,7 +3510,12 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
   residual: Postgres refusing three times **and** the spool unwritable raises,
   and the next tick sends again — today's exposure on the `duckdb` path, left
   as it is because closing it there changes the default. Flip and roll back
-  Wednesday to Sunday, and drain the spool before a copy-back.
+  Wednesday to Sunday. **A spool outlives the flag that wrote it**: the gate
+  under `duckdb` lands it in DuckDB and counts a still-spooled week as sent
+  (a flag put back after a record that never latched, or after a copy-back,
+  sent the week twice before the review); the handover reports the spool —
+  INFO, a file that will not parse CRITICAL — and `--execute` lands it in
+  Postgres before it reads, refusing if anything is left.
 
 **Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
 since its owner rows; H2 (`29_h2`) — the 07:30 run filed no `shadow_*` above

@@ -200,7 +200,8 @@ class TestUnderPostgres:
         out = await report_ledger.mark_sent(store, report_ledger.WEEKLY, WEEK, "retail", 10.0, 3)
         assert out == "pending" and pg.calls == ["mark_sent"] * 3
         assert report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
-        assert chain.pending() == {"count": 1, "weeks": ["2026-09-21__retail"]}
+        assert chain.pending() == {"count": 1, "weeks": ["2026-09-21__retail"],
+                                   "unreadable": []}
         assert await _duck(store, "weekly_report_sends") == []
 
     @pytest.mark.asyncio
@@ -244,7 +245,7 @@ class TestUnderPostgres:
         assert pg.rows[(WEEK, "retail")]["sent_at"] == spooled_at
         (dk,) = await _duck(store, "weekly_report_sends")
         assert dk[4] == spooled_at
-        assert chain.pending() == {"count": 0, "weeks": []}
+        assert chain.pending() == {"count": 0, "weeks": [], "unreadable": []}
 
     @pytest.mark.asyncio
     async def test_a_row_only_duckdb_holds_is_adopted_not_resent(self, flags, store):
@@ -458,3 +459,140 @@ class TestTheCanary:
         assert "report_ledger_pending" in result.failure_keys
         assert result.severity == "warn"
         assert "2026-09-21__retail" in canary.format_alert(result, DASHBOARD)
+
+
+# ─── A spool outlives the flag that wrote it ─────────────────────────────────
+
+
+class TestASpoolOutlivesItsFlag:
+    """A spooled row is a delivery that happened, whatever the flag says now.
+    The review reproduced two ordinary ways back walking past it: the flag put
+    back to `duckdb` after a record that never latched (the pool refused
+    before `_latch()`), and a copy-back. The gate under `duckdb` read DuckDB
+    alone and the week went out a second time."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("ledger,chain,table", LEDGERS)
+    async def test_the_flag_put_back_unlatched_still_counts_it(
+            self, flags, store, ledger, chain, table):
+        """The review's second reproduction, needing no Postgres. Mutation:
+        drop the spool branch from the `duckdb` gate — it answers False and
+        the job sends the week again."""
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
+        flags.setattr(chain, "_pool", AsyncMock(side_effect=ConnectionRefusedError()))
+        assert await report_ledger.already_sent(store, ledger, WEEK, "retail") is False
+        assert await report_ledger.mark_sent(store, ledger, WEEK, "retail", 20.0, 2) == "pending"
+        assert not chain.chain_latch.latched(chain.CHAIN)
+        spooled_at = report_ledger._spooled(chain.CHAIN)[0]["sent_at"]
+
+        flags.setenv(chain.WRITE_ENV, "duckdb")
+        pool = AsyncMock(side_effect=AssertionError("asked for a pool"))
+        flags.setattr("core.pg.get_pool", pool)
+        assert await report_ledger.already_sent(store, ledger, WEEK, "retail") is True
+        (row,) = await _duck(store, table)
+        assert row == (WEEK, "retail", Decimal("20.00"), 2, spooled_at)
+        assert not report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
+        assert chain.pending()["count"] == 0
+        assert not pool.await_count
+
+    @pytest.mark.asyncio
+    async def test_a_spool_duckdb_cannot_take_still_counts_as_sent(
+            self, flags, store, monkeypatch):
+        """Mutation: count the week only once it has landed — a DuckDB that
+        refused the write would turn a delivered week into a second send."""
+        chain = pg_weekly_ledger_write
+        report_ledger.spool(chain.CHAIN, WEEK, "retail", Decimal("5.00"), 1,
+                            datetime.now(timezone.utc))
+        monkeypatch.setattr("core.weekly_report.mark_sent",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("full disk")))
+        assert await report_ledger.already_sent(store, report_ledger.WEEKLY, WEEK, "retail")
+        assert report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_file_counts_by_its_name_and_stays(self, flags, store):
+        """No drain lands a file that will not parse, and none deletes it."""
+        chain = pg_traffic_ledger_write
+        path = report_ledger._spool_path(chain.CHAIN, WEEK, "retail")
+        path.parent.mkdir(parents=True)
+        path.write_text("{not json", encoding="utf-8")
+        assert await report_ledger.already_sent(store, report_ledger.TRAFFIC, WEEK, "retail")
+        assert path.exists() and await _duck(store, "traffic_report_sends") == []
+        assert chain.pending() == {"count": 1, "weeks": ["2026-09-21__retail"],
+                                   "unreadable": ["2026-09-21__retail"]}
+
+    @pytest.mark.asyncio
+    async def test_other_weeks_of_the_spool_land_too(self, flags, store):
+        """The gate for one week lands the whole spool, so a week nobody asks
+        about again still reaches the ledger and the canary's page clears."""
+        chain = pg_weekly_ledger_write
+        earlier = WEEK - timedelta(days=7)
+        report_ledger.spool(chain.CHAIN, earlier, "retail", Decimal("3.00"), 1,
+                            datetime.now(timezone.utc))
+        assert not await report_ledger.already_sent(store, report_ledger.WEEKLY, WEEK, "retail")
+        assert [r[0] for r in await _duck(store, "weekly_report_sends")] == [earlier]
+        assert chain.pending()["count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_through_the_job_the_week_goes_out_once(self, flags, tmp_path, monkeypatch):
+        """End to end with the sales report's own wiring: delivered under
+        `postgres`, record spooled, flag put back, the next tick. Mutation:
+        drop the spool branch from the `duckdb` gate — `sent` holds two."""
+        from tests.unit.test_weekly_report import TestSchedulerJob, _store
+
+        chain = pg_weekly_ledger_write
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        pg = FakePostgres(flags, chain)
+        pg.refuse = 3
+        store = await _store(tmp_path)
+        try:
+            job = TestSchedulerJob()
+            week_start = await job._seed(store, complete=True)
+            sent = []
+            scheduler = job._wire(monkeypatch, store, sent, tmp_path)
+            first = await scheduler._run_weekly_report()
+            assert first["sent"] is True and first["ledger"] == "pending"
+            flags.setenv(chain.WRITE_ENV, "duckdb")
+            second = await scheduler._run_weekly_report()
+            assert second == {"sent": False, "reason": "already_sent",
+                              "week": week_start.isoformat()}
+            assert len(sent) == 1
+        finally:
+            await store.close()
+
+
+class TestTheWayBackSeesTheSpool:
+    def test_every_chain_that_can_spool_declares_both_hooks(self):
+        """The chains whose records `report_ledger` spools are read off its own
+        `LEDGERS`, and each must carry `pending()` and `land_pending()` — the
+        two hooks the handover and the copy-back look for. Mutation: drop
+        `land_pending` from one chain — its copy-back would release the chain
+        with the delivered weeks still in the file."""
+        from core import write_chains
+
+        spoolers = {ledger.chain().CHAIN for ledger in report_ledger.LEDGERS}
+        hooked = {c.CHAIN for c in write_chains.WRITE_CHAINS
+                  if callable(getattr(c, "pending", None))
+                  and callable(getattr(c, "land_pending", None))}
+        assert spoolers == hooked
+
+    def test_the_handover_reports_the_spool(self, flags):
+        """Mutation: drop `_spool_issues` — `--handover` would print "every row
+        DuckDB holds is in Postgres" over a week neither store holds."""
+        from core.chain_transfer import _spool_issues
+        from core.data_quality import Severity
+
+        chain = pg_weekly_ledger_write
+        assert _spool_issues(chain) == []
+        report_ledger.spool(chain.CHAIN, WEEK, "retail", Decimal("5.00"), 1,
+                            datetime.now(timezone.utc))
+        bad = report_ledger._spool_path(chain.CHAIN, WEEK - timedelta(days=7), "retail")
+        bad.write_text("{", encoding="utf-8")
+        issues = {i.check_name: i for i in _spool_issues(chain)}
+        assert issues["handover_ledger_spooled"].severity is Severity.INFO
+        assert "2026-09-21__retail" in issues["handover_ledger_spooled"].description
+        assert issues["handover_ledger_spool_unreadable"].severity is Severity.CRITICAL
+        assert "2026-09-14__retail" in issues["handover_ledger_spool_unreadable"].description
+        from core import pg_expenses_write
+
+        assert _spool_issues(pg_expenses_write) == []

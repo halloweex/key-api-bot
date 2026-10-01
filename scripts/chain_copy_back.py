@@ -265,6 +265,11 @@ def _report(result: dict) -> None:
     print(f"\nchain: {result['chain']}   marker {result['latched_at']}"
           f"   owner rows {result.get('owned_since')}")
     print(f"executed: {result.get('executed')}")
+    if result.get("landed_from_spool"):
+        # Chains 11a/11b: delivered weeks whose record waited in the spool,
+        # written to Postgres before the read below so the copy carries them.
+        print(f"\nlanded from the spool into Postgres first: "
+              f"{result['landed_from_spool']} delivered week(s)")
     print("\nrows read from Postgres:")
     for table, count in sorted(result["rows"].items()):
         print(f"  {table:<32} {count:>9,}")

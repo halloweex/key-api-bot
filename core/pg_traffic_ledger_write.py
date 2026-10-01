@@ -78,6 +78,20 @@ def pending() -> Dict[str, Any]:
     return pending_of(CHAIN)
 
 
+async def land_pending(store) -> int:
+    """Land every spooled row in Postgres, then in DuckDB — what the gate does
+    under `postgres` — and return how many landed. Never raises.
+
+    The copy-back's first write (`core.chain_transfer.copy_back`): a spooled
+    week is a delivery neither store holds, and a copy that read Postgres
+    without it would release the chain with the week in a file nothing under
+    `duckdb` used to read. `pending()` afterwards says what did not land.
+    """
+    from core.report_ledger import TRAFFIC, drain
+
+    return await drain(store, TRAFFIC)
+
+
 def _latch() -> str:
     """Inside `pool.acquire()`, never before it (`pg_expenses_write._latch`)."""
     return chain_latch.latch(CHAIN, WRITE_ENV)
