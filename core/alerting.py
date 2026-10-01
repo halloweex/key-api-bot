@@ -141,6 +141,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # without KS_PG_DERIVE=own; ran as duckdb, the ship as before (DN-19).
     "utm_parse_mode_invalid": _c(
         "web restarts with a valid KS_UTM_PARSE, postgres only beside KS_PG_DERIVE=own"),
+    # A path in web opened, or tried to open, the DuckDB file under
+    # KS_DUCKDB=off — the week of silence's tripwire (OD-17 (a)). The counters
+    # are per process, so only a restart empties them.
+    "duckdb_opened_while_off": _c(
+        "web restarts and opens no DuckDB file under KS_DUCKDB=off, or runs on"),
+    # KS_DUCKDB set to a value web did not understand: ran as `on` (OD-09).
+    "duckdb_mode_invalid": _c("web restarts with a valid KS_DUCKDB"),
     # Derivation marks dropped and demonstrably not being healed: the latest
     # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
     "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),

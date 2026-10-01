@@ -34,6 +34,7 @@ if TYPE_CHECKING:  # pragma: no cover — the annotation's name, no import cost
 import duckdb
 import pandas as pd
 
+from core import duckdb_switch
 from core.models import LOST_STATUS_GROUP_ID, Order, OrderStatus
 from core.exceptions import QueryTimeoutError
 from core.duckdb_constants import (
@@ -536,7 +537,10 @@ class DuckDBStore(
 
         async with self._lock:
             if self._connection is None:
-                self._connection = duckdb.connect(str(self.db_path))
+                # Through the one opener, which refuses under KS_DUCKDB=off
+                # before the driver can open — or create — the file
+                # (core/duckdb_switch.py). Under `on`, `duckdb.connect` as ever.
+                self._connection = duckdb_switch.open_file(self.db_path)
                 try:
                     # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
                     # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
@@ -2657,7 +2661,7 @@ class DuckDBStore(
 
             # Validate the copy read-only (outside the lock).
             def _validate() -> int:
-                con = duckdb.connect(str(tmp_path), read_only=True)
+                con = duckdb_switch.open_file(tmp_path, read_only=True)
                 try:
                     return con.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
                 finally:
