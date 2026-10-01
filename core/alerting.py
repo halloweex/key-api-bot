@@ -157,6 +157,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_*, or latched while its readers read DuckDB (DN-26).
     "write_chain_precondition_unmet": _c(
         "the read flag the chain names is set to postgres and web restarts"),
+    # A report delivered and its ledger row still spooled (chains 11a/11b,
+    # OD-16 (a)): the next tick of that report drains it into Postgres.
+    "report_ledger_pending": _c("the report's next daily tick lands the spooled row"),
     # The buyers step stopped succeeding: no success for 90 min, or three
     # failures in a row that are neither KeyCRM nor data errors (chain 4 PR-1).
     "buyer_sync_stalled": _c("a buyers step that completes"),
@@ -332,6 +335,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # second.
     "chain_samples_stale": _c("the watchdog stores a sample again"),
     "chain_retention_unbounded": _c("the prune in the watchdog's tick runs again"),
+    # Chains 11a/11b: the week's row lands — a delivery, or a drained spool.
+    "chain_report_week_missing": _c("the week's row lands in the ledger"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 

@@ -75,9 +75,13 @@ WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
 # keeps comparing them (`compared_in_shadow` below). Appended in a block of
 # their own rather than folded into the tuple above, so the lanes that add
 # chains there and this one do not edit the same lines.
-from core import pg_dq_journal_write, pg_watchdog_write  # noqa: E402 — appended, see above
+from core import (  # noqa: E402 — appended, see above
+    pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
+    pg_weekly_ledger_write,
+)
 
-WRITE_CHAINS = WRITE_CHAINS + (pg_dq_journal_write, pg_watchdog_write)
+WRITE_CHAINS = WRITE_CHAINS + (pg_dq_journal_write, pg_watchdog_write,
+                               pg_weekly_ledger_write, pg_traffic_ledger_write)
 
 def chain_name(chain: ModuleType) -> str:
     return chain.__name__.rsplit(".", 1)[-1]

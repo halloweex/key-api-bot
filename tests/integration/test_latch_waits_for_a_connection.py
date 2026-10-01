@@ -44,7 +44,10 @@ from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
     pg_goals_write, pg_inventory_write, write_chains,
 )
-from core import pg_dq_journal_write, pg_watchdog_write  # noqa: E402 — the shadow chains' block
+from core import (  # noqa: E402 — the shadow chains' block
+    pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
+    pg_weekly_ledger_write,
+)
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -58,7 +61,8 @@ _WRITTEN = ("bronze.offers", "app.manual_expenses", "app.revenue_goals",
             # The shadow chains (OD-02 (c)).
             "app.data_quality_issues", "app.data_quality_diffs",
             "app.data_quality_runs",
-            "app.disk_samples", "app.data_dir_samples", "app.memory_samples")
+            "app.disk_samples", "app.data_dir_samples", "app.memory_samples",
+            "app.weekly_report_sends", "app.traffic_report_sends")
 
 STOCK = {"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
          "quantity": 40, "reserve": 0}
@@ -242,6 +246,16 @@ def _memory_tick(_store):
                                          cutoff=now - timedelta(days=14))
 
 
+def _ledger(chain):
+    def call(_store):
+        from datetime import date, datetime, timezone
+        from decimal import Decimal
+
+        return chain.mark_sent(date(2026, 9, 21), "retail", Decimal("10.00"), 3,
+                               datetime.now(timezone.utc))
+    return call
+
+
 # Writers that return their failure rather than raise it — chain 4's
 # derivation, `derive_gender`'s contract. A cancellation still goes through.
 NEVER_RAISES = {"derive_gender_pg"}
@@ -278,7 +292,15 @@ WRITERS = {
     # Chain 10, at the chain module for the same reason.
     "disk_tick": (pg_watchdog_write, _disk_tick),
     "memory_tick": (pg_watchdog_write, _memory_tick),
+    # Chains 11a/11b share one writer's name, so the key carries the chain
+    # after a colon; the coverage test below compares (chain, writer) pairs.
+    "mark_sent:weekly": (pg_weekly_ledger_write, _ledger(pg_weekly_ledger_write)),
+    "mark_sent:traffic": (pg_traffic_ledger_write, _ledger(pg_traffic_ledger_write)),
 }
+
+
+def _writer_name(key: str) -> str:
+    return key.split(":", 1)[0]
 
 
 @pytest_asyncio.fixture
@@ -394,10 +416,12 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
     through another module's function is past what the walk follows."""
     from tests.unit.test_chain_latch import _writers
 
-    found = {name for chain in write_chains.WRITE_CHAINS for name in _writers(chain)}
-    assert set(WRITERS) == found
-    for name, (chain, _call) in WRITERS.items():
-        assert name in _writers(chain), f"{name} is not {chain.__name__}'s writer"
+    found = {(chain.__name__, name) for chain in write_chains.WRITE_CHAINS
+             for name in _writers(chain)}
+    driven = {(chain.__name__, _writer_name(key)) for key, (chain, _call) in WRITERS.items()}
+    assert driven == found
+    for key, (chain, _call) in WRITERS.items():
+        assert _writer_name(key) in _writers(chain), f"{key} is not {chain.__name__}'s writer"
 
 
 class TestAnAcquireThatFailsLeavesTheChainUnlatched:
@@ -492,6 +516,8 @@ FIRST_WRITES = {
     "pg_buyers_write": ("upsert_buyers", "bronze.buyers", "id", 1),
     "pg_dq_journal_write": ("persist_run", "app.data_quality_runs", "run_id", 1),
     "pg_watchdog_write": ("memory_tick", "app.memory_samples", None, None),
+    "pg_weekly_ledger_write": ("mark_sent:weekly", "app.weekly_report_sends", None, None),
+    "pg_traffic_ledger_write": ("mark_sent:traffic", "app.traffic_report_sends", None, None),
 }
 
 

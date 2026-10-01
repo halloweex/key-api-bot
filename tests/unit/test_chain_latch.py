@@ -31,7 +31,10 @@ from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
     pg_goals_write, pg_inventory_write, write_chains,
 )
-from core import pg_dq_journal_write, pg_watchdog_write  # noqa: E402 — the shadow chains' block
+from core import (  # noqa: E402 — the shadow chains' block
+    pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
+    pg_weekly_ledger_write,
+)
 
 CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
 
@@ -443,6 +446,9 @@ _READERS = {
     # Chain 9 (OD-02 (c)): the connection the journal's readers are handed —
     # the digest, the layer ages, the data-quality endpoint, the catch-up.
     "pg_dq_journal_write": {"reading"},
+    # Chains 11a/11b: the gate's question, asked of the writer's store.
+    "pg_weekly_ledger_write": {"find_sent"},
+    "pg_traffic_ledger_write": {"find_sent"},
 }
 
 # A statement that writes, by how it starts. Upper-cased first; `setval` is a
@@ -659,6 +665,9 @@ class TestEveryWriterLatchesFirst:
         assert set(_writers(pg_dq_journal_write)) == {"persist_run", "set_digest_marker"}
         # Chain 10: each watchdog's whole tick — reads, insert, prune.
         assert set(_writers(pg_watchdog_write)) == {"disk_tick", "memory_tick"}
+        # Chains 11a/11b: one record of one delivery each.
+        assert set(_writers(pg_weekly_ledger_write)) == {"mark_sent"}
+        assert set(_writers(pg_traffic_ledger_write)) == {"mark_sent"}
 
     def test_every_registered_chain_has_a_writer_the_walk_can_see(self):
         """The guards below are parametrised over `WRITE_CHAINS`; a chain whose

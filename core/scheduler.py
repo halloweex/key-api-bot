@@ -3621,12 +3621,11 @@ class BackgroundScheduler:
         from core import read_fallback
         from core.config import ADMIN_USER_IDS, DASHBOARD_URL
         from core.duckdb_store import get_store
+        from core import report_ledger
         from core.weekly_report import (
-            already_sent,
             build_report,
             format_report,
             last_complete_week,
-            mark_sent,
             warehouse_max_date,
         )
 
@@ -3638,16 +3637,18 @@ class BackgroundScheduler:
             week_start, week_end = last_complete_week(today)
             week = week_start.isoformat()
 
-            # The ledger is still DuckDB's, so it keeps its connection block.
-            # `warehouse_max_date` and `build_report` must stay OUTSIDE it:
-            # both are routed by KS_READ_WEEKLY now, and the DuckDB side of
+            # The ledger, from whichever store writes it (chain 11a, OD-02
+            # (c)): DuckDB's one connection as always, or Postgres — counting
+            # a spooled week as sent and adopting a row only DuckDB holds.
+            # `warehouse_max_date` and `build_report` stay outside any store
+            # block: both are routed by KS_READ_WEEKLY, and the DuckDB side of
             # that router takes `store.connection()` itself. The store lock is
             # not reentrant — a nested acquisition hangs rather than raises,
             # which on a weekly job means a scheduler thread parked forever.
-            async with store.connection() as conn:
-                if already_sent(conn, week_start, sales_type):
-                    logger.debug("Weekly report for %s already sent", week)
-                    return {"sent": False, "week": week, "reason": "already_sent"}
+            if await report_ledger.already_sent(
+                    store, report_ledger.WEEKLY, week_start, sales_type):
+                logger.debug("Weekly report for %s already sent", week)
+                return {"sent": False, "week": week, "reason": "already_sent"}
 
             # Under KS_READ_FALLBACK=off a read DuckDB would have answered is
             # refused instead (DN-20c). Both reads come before the ledger
@@ -3780,15 +3781,18 @@ class BackgroundScheduler:
                 logger.warning("Weekly report for %s reached no admin", week)
                 return {"sent": False, "week": week, "reason": "not_delivered"}
 
-            async with store.connection() as conn:
-                mark_sent(
-                    conn, week_start, sales_type,
-                    report.current.revenue, report.current.orders,
-                )
+            # At least once, never twice (OD-16 (a)): under Postgres a record
+            # that fails is retried and then spooled, and the gate counts a
+            # spooled week as sent.
+            ledger = await report_ledger.mark_sent(
+                store, report_ledger.WEEKLY, week_start, sales_type,
+                report.current.revenue, report.current.orders,
+            )
 
             result = {
                 "sent": True,
                 "week": week,
+                "ledger": ledger,
                 "sales_type": sales_type,
                 "revenue": round(report.current.revenue, 2),
                 "orders": report.current.orders,
@@ -3820,14 +3824,13 @@ class BackgroundScheduler:
         from core import read_fallback
         from core.config import DASHBOARD_URL
         from core.duckdb_store import get_store
+        from core import report_ledger
         from core.traffic_report import (
             TRAFFIC_SALES_TYPE,
-            already_sent,
             build_report,
             first_week,
             format_report,
             format_report_rich,
-            mark_sent,
         )
         from core.weekly_report import last_complete_week, warehouse_max_date
 
@@ -3850,10 +3853,11 @@ class BackgroundScheduler:
                 )
                 return {"sent": False, "week": week, "reason": "before_first_week"}
 
-            async with store.connection() as conn:
-                if already_sent(conn, week_start, sales_type):
-                    logger.debug("Traffic report for %s already sent", week)
-                    return {"sent": False, "week": week, "reason": "already_sent"}
+            # The ledger, from whichever store writes it (chain 11b).
+            if await report_ledger.already_sent(
+                    store, report_ledger.TRAFFIC, week_start, sales_type):
+                logger.debug("Traffic report for %s already sent", week)
+                return {"sent": False, "week": week, "reason": "already_sent"}
 
             # Outside the block, for the weekly job's reason: the gate is
             # routed now and its DuckDB path takes the same non-reentrant lock.
@@ -3939,12 +3943,14 @@ class BackgroundScheduler:
                 logger.warning("Traffic report for %s reached no admin", week)
                 return {"sent": False, "week": week, "reason": "not_delivered"}
 
-            async with store.connection() as conn:
-                mark_sent(conn, week_start, sales_type, report.revenue, report.orders)
+            ledger = await report_ledger.mark_sent(
+                store, report_ledger.TRAFFIC, week_start, sales_type,
+                report.revenue, report.orders)
 
             result = {
                 "sent": True,
                 "week": week,
+                "ledger": ledger,
                 "sales_type": sales_type,
                 "revenue": round(report.revenue, 2),
                 "orders": report.orders,

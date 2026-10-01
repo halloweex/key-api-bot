@@ -174,6 +174,11 @@ def _never_the_real_chain_latch(monkeypatch, tmp_path):
 
     monkeypatch.setattr(chain_latch, "MARKER_DIR", tmp_path / "write-chain-owners")
     monkeypatch.setattr(chain_latch, "_latched", None, raising=False)
+    # The report ledgers' spool (chains 11a/11b) is a decision of the same
+    # kind — a spooled week reads as sent — so it is redirected the same way.
+    from core import report_ledger
+
+    monkeypatch.setattr(report_ledger, "SPOOL_DIR", tmp_path / "report-ledger-pending")
 
 
 @pytest.fixture(autouse=True)

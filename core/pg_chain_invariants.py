@@ -374,8 +374,20 @@ class Watchdogs:
     spans: Tuple[Tuple[str, Optional[datetime], Optional[datetime]], ...] = ()
 
 
+@dataclass(frozen=True)
+class Ledger:
+    """Chains 11a/11b (OD-02 (c)): one report's send ledger. `due` is whether
+    the last complete week should have gone out by now — after Wednesday
+    00:00 Kyiv, and not before the report's first week."""
+    nulls: Nulls
+    latched_at: Optional[datetime] = None
+    week_start: Optional[date] = None
+    due: bool = False
+    has_week: bool = True
+
+
 Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Journal,
-              Watchdogs, Unwatched, None]
+              Watchdogs, Ledger, Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -398,6 +410,8 @@ class Facts:
     # The shadow chains (OD-02 (c)), appended last.
     journal: Group = None
     watchdogs: Group = None
+    weekly_ledger: Group = None
+    traffic_ledger: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
@@ -425,6 +439,7 @@ CONTACT_MISSING = "chain_buyer_contact_missing"
 JOURNAL_ORPHANS = "chain_orphan_children"
 SAMPLES_STALE = "chain_samples_stale"
 RETENTION_UNBOUNDED = "chain_retention_unbounded"
+REPORT_WEEK_MISSING = "chain_report_week_missing"
 UNWATCHED = "chain_invariants_unwatched"
 
 # What a blind run holds rather than resolves — `data_quality`'s
@@ -433,7 +448,7 @@ CONDITIONS: Tuple[str, ...] = (
     SEQUENCE_BEHIND, COLUMN_NULL, INITIAL_BURST, FIRST_SEEN_RESET,
     ROLLUP_MISSING, SNAPSHOT_SHORT, WATERMARK_STALE,
     DICTIONARY_EMPTY, NAME_UNRESOLVED, BUYER_ORPHANS, CONTACT_MISSING,
-    JOURNAL_ORPHANS, SAMPLES_STALE, RETENTION_UNBOUNDED,
+    JOURNAL_ORPHANS, SAMPLES_STALE, RETENTION_UNBOUNDED, REPORT_WEEK_MISSING,
 )
 
 # The family name every condition above carries, and the key the integrity
@@ -490,7 +505,10 @@ def _reader_groups() -> Dict[str, str]:
         pg_buyers_write, pg_expense_types_write, pg_expenses_write,
         pg_goals_write, pg_inventory_write,
     )
-    from core import pg_dq_journal_write, pg_watchdog_write
+    from core import (
+        pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
+        pg_weekly_ledger_write,
+    )
 
     return {pg_expenses_write.CHAIN: "expenses",
             pg_inventory_write.CHAIN: "inventory",
@@ -499,7 +517,9 @@ def _reader_groups() -> Dict[str, str]:
             pg_buyers_write.CHAIN: "buyers",
             # The shadow chains (OD-02 (c)).
             pg_dq_journal_write.CHAIN: "journal",
-            pg_watchdog_write.CHAIN: "watchdogs"}
+            pg_watchdog_write.CHAIN: "watchdogs",
+            pg_weekly_ledger_write.CHAIN: "weekly_ledger",
+            pg_traffic_ledger_write.CHAIN: "traffic_ledger"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -720,6 +740,30 @@ async def _read_journal(conn) -> Journal:
                    orphan_sample=tuple(int(x) for x in (row["sample"] or ())))
 
 
+def ledger_week_due(today: date, floor: Optional[date]) -> Tuple[date, bool]:
+    """The last complete Monday–Sunday week as of `today` (Kyiv), and whether
+    its report should have gone out: from Wednesday on — Monday's tick and
+    Tuesday's retry have both had their turn — and not before `floor`."""
+    from datetime import timedelta
+
+    week_start = today - timedelta(days=today.weekday() + 7)
+    due = today.weekday() >= 2 and (floor is None or week_start >= floor)
+    return week_start, due
+
+
+async def _read_ledger(conn, chain, today: date,
+                       latched_at: Optional[datetime] = None) -> Ledger:
+    table = chain.TABLE
+    week_start, due = ledger_week_due(today, chain.first_week())
+    row = await conn.fetchrow(
+        f"SELECT count(*) FILTER (WHERE sent_at IS NULL) AS sent_at, "
+        f"bool_or(week_start = $1 AND sales_type = $2) AS has_week FROM {table}",
+        week_start, chain.report_sales_type())
+    return Ledger(nulls=Nulls(table=table, counts={"sent_at": int(row["sent_at"])}),
+                  latched_at=latched_at, week_start=week_start, due=due,
+                  has_week=bool(row["has_week"]))
+
+
 async def _read_watchdogs(conn) -> Watchdogs:
     from core.pg_watchdog_write import CHAIN_TABLES
 
@@ -934,6 +978,7 @@ async def read_facts(*, pool=None) -> Facts:
     from core import (
         pg_buyers_write, pg_expenses_write, pg_goals_write, pg_inventory_write,
     )
+    from core import pg_traffic_ledger_write, pg_weekly_ledger_write
 
     groups: Dict[str, Group] = {}
     watermarks_unread: Optional[Unwatched] = None
@@ -957,6 +1002,12 @@ async def read_facts(*, pool=None) -> Facts:
                         c, _stamp(watched.get(pg_buyers_write.CHAIN))),
                     "journal": _read_journal,
                     "watchdogs": _read_watchdogs,
+                    "weekly_ledger": lambda c: _read_ledger(
+                        c, pg_weekly_ledger_write, today,
+                        _stamp(watched.get(pg_weekly_ledger_write.CHAIN))),
+                    "traffic_ledger": lambda c: _read_ledger(
+                        c, pg_traffic_ledger_write, today,
+                        _stamp(watched.get(pg_traffic_ledger_write.CHAIN))),
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -996,6 +1047,8 @@ async def read_facts(*, pool=None) -> Facts:
                  buyers=groups.get("buyers"),
                  journal=groups.get("journal"),
                  watchdogs=groups.get("watchdogs"),
+                 weekly_ledger=groups.get("weekly_ledger"),
+                 traffic_ledger=groups.get("traffic_ledger"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
                  unread=unread)
 
@@ -1339,6 +1392,24 @@ def _watchdog_issues(w: Watchdogs, chain: str, now: Optional[datetime]) -> List:
     return issues
 
 
+def _ledger_issues(led: Ledger, chain: str) -> List:
+    from core.data_quality import Severity
+
+    issues = _null_issues(led.nulls, chain, led.latched_at)
+    if led.due and not led.has_week:
+        issues.append(_issue(
+            check_name=REPORT_WEEK_MISSING, table_name=led.nulls.table,
+            severity=Severity.WARN, count=1, description=(
+                f"The week starting {led.week_start} has no row in "
+                f"{led.nulls.table}, and it is Wednesday or later: either the "
+                "report never went out (the job's result in /api/jobs says "
+                "why — warehouse_behind, not_delivered, a refusal) or it went "
+                "out and the record did not land. A spooled record shows in "
+                f"/api/health under write_chains.{chain}.pending; the next "
+                "tick lands it.")))
+    return issues
+
+
 def _watermark_issues(marks: Tuple[WatermarkAge, ...]) -> List:
     from core.data_quality import Severity
 
@@ -1462,6 +1533,15 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
                                       (pg_watchdog_write.CHAIN,)))
     elif isinstance(facts.watchdogs, Watchdogs):
         issues += _watchdog_issues(facts.watchdogs, pg_watchdog_write.CHAIN, facts.now)
+
+    from core import pg_traffic_ledger_write, pg_weekly_ledger_write
+
+    for chain_mod, group in ((pg_weekly_ledger_write, facts.weekly_ledger),
+                             (pg_traffic_ledger_write, facts.traffic_ledger)):
+        if isinstance(group, Unwatched):
+            issues.append(unwatched_issue(group.reason, (chain_mod.CHAIN,)))
+        elif isinstance(group, Ledger):
+            issues += _ledger_issues(group, chain_mod.CHAIN)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(

@@ -511,6 +511,30 @@ def check_write_chain_precondition(payload: Optional[dict]) -> "list[tuple[str, 
     return [("write_chain_precondition_unmet", "write chains: " + "; ".join(parts))]
 
 
+def check_report_ledger_pending(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """A report that went out and whose ledger row is still spooled (chains
+    11a/11b, OD-16 (a)): `write_chains.<chain>.pending.count` above zero.
+
+    Warn: nothing is lost and nothing will be sent twice — the gate counts a
+    spooled week as sent, and the report's next daily tick drains the spool
+    into Postgres. What it says is that Postgres refused three times after a
+    delivery, and that the local disk is now the only record of the week until
+    the drain. Judged from the published block alone.
+    """
+    block = (payload or {}).get("write_chains")
+    if not isinstance(block, dict):
+        return []
+    parts = []
+    for name, state in sorted(block.items()):
+        pending = state.get("pending") if isinstance(state, dict) else None
+        if isinstance(pending, dict) and pending.get("count"):
+            weeks = ", ".join(pending.get("weeks") or ()) or f"{pending['count']} row(s)"
+            parts.append(f"{name}: {weeks}")
+    if not parts:
+        return []
+    return [("report_ledger_pending", "report ledgers spooled: " + "; ".join(parts))]
+
+
 # The buyers step, published by web as `buyer_sync` (chain 4, PR-1). The step
 # runs at most hourly by its watermark, so a success older than an hour and a
 # half means one hourly run has already been missed; three consecutive
@@ -1217,6 +1241,12 @@ async def run_canary(
             fail(key, message)
         if precondition_failures and severity == "ok":
             severity = "warn"
+        # A delivered report whose ledger row is spooled: warn.
+        ledger_failures = check_report_ledger_pending(payload)
+        for key, message in ledger_failures:
+            fail(key, message)
+        if ledger_failures and severity == "ok":
+            severity = "warn"
         # The buyers step: warn. Its own reasons are in check_buyer_sync.
         buyer_failures = check_buyer_sync(payload)
         for key, message in buyer_failures:
@@ -1292,6 +1322,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "grep web's log for 'UTM layer refresh failed'; then POST /api/warehouse/refresh — a full tick whose parse finishes ends it"),
     ("write_chain_precondition_unmet",
      "Set the read flag the message names to postgres, then docker compose up -d web"),
+    ("report_ledger_pending",
+     "Nothing to resend: the next daily tick drains data/report-ledger-pending into Postgres; grep web's log for 'Report ledger'"),
     ("utm_parse_mode_invalid",
      "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
     # Last: when an engine is down its own key names the cause, and a fallback

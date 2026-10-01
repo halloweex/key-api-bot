@@ -2167,6 +2167,8 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "grep the web log for \"sample not persisted\"; the watchdog still judges capacity without history"),
     ("chain_retention_unbounded",
      "Check the watchdog tick reaches its prune (core/watchdog_samples.py); never delete samples by hand"),
+    ("chain_report_week_missing",
+     "Read the report job's result in /api/jobs and write_chains.<chain>.pending in /api/health; never insert the row by hand unless the message went out"),
     ("chain_invariants_unwatched",
      "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),

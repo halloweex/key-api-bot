@@ -86,6 +86,10 @@ class TestTheClockIsDerived:
             "app.disk_samples": ("sampled_at",),
             "app.data_dir_samples": ("sampled_at",),
             "app.memory_samples": ("sampled_at",),
+            # Chains 11a/11b. A delivery is dated by `sent_at`, the moment
+            # the message went out, which the router hands both stores.
+            "app.weekly_report_sends": ("sent_at",),
+            "app.traffic_report_sends": ("sent_at",),
         }
 
 
