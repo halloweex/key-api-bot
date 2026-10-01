@@ -3543,7 +3543,9 @@ the Postgres or ClickHouse successor), **derived** (rebuilt from Postgres),
 what the weekly compaction does with it and whether it travels off-site.
 `duckdb_written()` answers "which tables does DuckDB still write today" through
 the readers the writers use — `chain_modes()` with its latch, the SMS and user
-store switches, `KS_WRITE_WAREHOUSE`. Nothing in production imports it.
+store switches, `KS_WRITE_WAREHOUSE` — and None where it cannot tell, which
+for the warehouse is any process whose `configure_modes()` never ran (every
+one but web's). Nothing in production imports it.
 
 `tests/unit/test_duckdb_table_fates.py` does not trust it: the names come from
 a fresh `DuckDBStore.connect()`, an AST walk of every `CREATE TABLE`/`VIEW`/
@@ -3556,10 +3558,27 @@ change** — chain 4 was the first the guard stopped. OD-11 is pinned there too:
 `DERIVED_TABLES` and the set with no DDL are literals, so a DROP says so in
 the diff.
 
+**The DDL walk reads every shape or lists it**: a name joined with `+`, a
+`%s` or a `{}` hole is a rendered site `RENDERED_DDL` must account for; the
+relational API (`.create`, `.to_table`, `.create_view`, `.to_view`) is DDL;
+a qualified name is the file's only as `main.x` or `analytics[.main].x`.
+**Nothing outside the four trees opens DuckDB**, checked over every Python
+file in the repository, import forms and `import_module` included. **Which
+tables a store switch moves is read off the writers**, not declared: the
+statements each router runs, rendered by the router itself, plus every
+literal DuckDB write, and a table belongs to `KS_SMS_STORE`, `KS_USER_STORE`
+or `KS_WRITE_WAREHOUSE` only if every writer runs on the branch where that
+reader says DuckDB. `duckdb_written()` is held to the same writers, not to
+`kind` — `schema_migrations` is retired at stage 5 and written until then.
+
 `deploy/duckdb_table_fates_check.py` asks the same of a file: the newest
 nightly backup, opened read-only, never the live database (refused by name, by
 inode, and with a `.wal` beside it). Exit 0 every name declared, 1 a name to
 decide, 2 refused. A copy of the 2026-08-31 production backup read 58 of 58.
+It refuses what it cannot see, too: a newest backup over 48 h old (`--file`
+reads an older one on purpose), and a file without `orders`, `sync_metadata`
+and `schema_migrations` or holding under half of today's schema — an empty
+file used to read "clean".
 
 ## TODO: Full DuckDB Resync Solution
 
