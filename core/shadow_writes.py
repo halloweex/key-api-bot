@@ -23,7 +23,7 @@ half, and it has exactly one rule set:
   optional, and a run's parent never lands without its children.
 - **Never while the caller holds `store.connection()`.** The store lock is not
   reentrant (`core/weekly_report.py` names the hang), so a caller holding it
-  would wait on itself. `tests/unit/test_shadow_writes.py` walks every caller.
+  would wait on itself. `tests/unit/test_shadow_state.py` walks every caller.
 
 It never uses the phrase `core/read_fallback.py` logs. A shadow is not a
 fallback — the soak greps for that phrase, and a log line here carrying it
