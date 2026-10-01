@@ -68,8 +68,9 @@ KYIV = ZoneInfo("Europe/Kyiv")
 GOAL_TABLES = ("seasonal_indices", "growth_metrics", "weekly_patterns",
                "revenue_predictions", "revenue_goals")
 
-# The history semantics the calculators run under. Chain 7b-2 adds `silver`.
-HISTORIES = ("bridge",)
+# The history semantics the calculators run under (`KS_GOALS_HISTORY`): the
+# DN-12 bridge, and Silver through the goal router (chain 7b-2).
+HISTORIES = ("bridge", "silver")
 
 
 def _history(monkeypatch, mode: str) -> None:

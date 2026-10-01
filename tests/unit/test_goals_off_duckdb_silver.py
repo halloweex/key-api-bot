@@ -642,8 +642,14 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
             "a clamped cap cannot show a filter being lost")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("history", ["bridge", "silver"])
     @pytest.mark.parametrize("sales_type", ["retail", "b2b"])
-    async def test_last_year_the_recent_months_and_the_cap(self, store, sales_type):
+    async def test_last_year_the_recent_months_and_the_cap(
+        self, store, monkeypatch, sales_type, history,
+    ):
+        """Under both histories (chain 7b-2): numbers written out here, so a
+        Silver body that lost its filter fails as a bridge one did."""
+        monkeypatch.setenv("KS_GOALS_HISTORY", history)
         await _seed_history(store)
         monthly = (await _smart(store, sales_type))["monthly"]
         year, month = self.TARGET
@@ -655,9 +661,11 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
             _expected_cap(sales_type, month), abs=1e-4)
 
     @pytest.mark.asyncio
-    async def test_the_cap_for_every_month(self, store):
+    @pytest.mark.parametrize("history", ["bridge", "silver"])
+    async def test_the_cap_for_every_month(self, store, monkeypatch, history):
         """December has three years in the fixture and so two pairs — the one
         month where the standard deviation is not zero."""
+        monkeypatch.setenv("KS_GOALS_HISTORY", history)
         await _seed_history(store)
         caps = [await store._dynamic_growth_cap(m, "retail")
                 for m in range(1, 13)]
