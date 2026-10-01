@@ -33,6 +33,7 @@ MUST_BE_NONEMPTY = frozenset({
     "order_products",
     "products",
     "buyers",
+    "buyer_contacts",
     "expense_types",
     "sync_metadata",
     "users",
@@ -43,19 +44,36 @@ MUST_BE_NONEMPTY = frozenset({
 # a count that fell between snapshots means loss — either upstream, or in the
 # export itself. Deliberately does not include tables that are rebuilt or
 # pruned by design (disk_samples, memory_samples, the derived layers).
+#
+# `buyer_contacts` was here and never belonged: both of its writers replace a
+# buyer's contacts wholesale (DELETE then INSERT per buyer — a phone list that
+# shrank must not keep the old number), so a count that fell by a few is a
+# buyer who dropped a number, not a lost row. Chain 4's copy-back makes that
+# certain rather than rare: it writes back whatever Postgres holds. It moved to
+# BOUNDED_SHRINK below and to MUST_BE_NONEMPTY above, not to no tier at all —
+# the review of that change found an export down to 0 contacts, or to 10,
+# would otherwise have shipped and become the next night's baseline.
 MONOTONE = frozenset({
     "orders",
     "order_products",
     "expenses",
     "stock_movements",
     "inventory_sku_history",
-    "buyer_contacts",
     "sms_campaign_members",
     "marketing_optouts",
     "reconciliation_log",
     "data_quality_runs",
     "warehouse_refreshes",
 })
+
+# Tables that legitimately shrink a little and never a lot: `{table: the
+# largest fall, as a fraction of the last accepted count}`. 1% is the same
+# bound `total_revenue` gets: about 330 contacts at 2026-09's 32 700, where a
+# night of buyers dropping numbers — or a copy-back of the weeks since chain
+# 4's flip — moves a handful, and a broken export moves thousands.
+BOUNDED_SHRINK = {
+    "buyer_contacts": 0.01,
+}
 
 # Legitimately empty, and the point is that this is written down. Each of these
 # is a live feature whose table is empty because nobody has used it yet — which
@@ -150,6 +168,20 @@ def validate_snapshot(
                 errors.append(
                     f"{table}: {before:,} → {now:,} rows. This table is only "
                     f"ever appended to, so a fall means rows were lost"
+                )
+
+    # Tier 2b — may shrink, but only by a little.
+    if previous_counts:
+        for table, bound in sorted(BOUNDED_SHRINK.items()):
+            now = counts.get(table)
+            before = previous_counts.get(table)
+            if now is None or before is None or before <= 0:
+                continue
+            if now < before * (1 - bound):
+                errors.append(
+                    f"{table}: {before:,} → {now:,} rows, a fall of more than "
+                    f"{bound:.0%}; its writers drop a buyer's number now and "
+                    f"then, not this many at once"
                 )
 
     # Tier 3 — empty is fine, silence is not.

@@ -156,6 +156,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/warehouse/status` | Last refresh, checksums, validation_passed; `cutover` — step 13's unmet preconditions (DN-28) |
 | `/api/warehouse/refresh` | Force a FULL rebuild of Silver + Gold (POST, admin) |
 | `/api/mirror/backfill/orders` | Ship the orders Postgres is missing; idempotent (POST, admin) |
+| `/api/mirror/backfill/buyers` | Re-ship every buyer DuckDB holds, with its contacts, detached; chain 4's pre-flip lever (POST, admin) |
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
@@ -1362,8 +1363,158 @@ changed nothing about which store is written, and four things about how:
   day old and never landed. Running with the flag off is the point: its false
   positives are measured before the flip. It read zero of each on 2026-09-24.
 
+PR-2 made the way back ready, still with no chain registered and nothing
+routed differently:
+
+- **One writer of buyer rows**, `core.pg_buyer_rows._write_buyer_rows` — the
+  mirror and, since PR-3, the chain both run it. The rows go on the caller's
+  transaction (the chain proves its first write by the owner row sharing an
+  `xmin` with the row) and it never touches `meta.mirror_state`, which stays
+  the mirror's. It lives outside the chain module on purpose: the registry
+  walk derives `BUYER_UNIT` from the function that writes it and skips chain
+  modules.
+- **`app.buyer_gender.decided_at` is compared** every morning (decision 7):
+  the hourly derive restamps only the verdicts it writes and the copy ships
+  the value as it stands. Per row now, so a re-derive is forgiven for the
+  90-minute grace and no longer.
+- **`buyer_contacts` left `snapshot_validation.MONOTONE`** for `MUST_BE_NONEMPTY`
+  and a `BOUNDED_SHRINK` tier at 1%: its writers replace a buyer's contacts
+  whole, so a small fall is a dropped number and not a loss — but an export
+  that falls by more than 1% (~330 rows at 32 700), or to zero, is rejected,
+  including after a copy-back that writes back noticeably fewer contacts.
+- **The copy-back knows mirrored tables** — see "A write flag is no longer a
+  rollback" — and `POST /api/mirror/backfill/buyers` is the lever its
+  pre-flip handover names.
+
 The chain itself, its rollback under the DN-06 latch and the owner's decisions
-are in `.planning/DUCKDB_EXIT_CHAIN4_PLAN.md`.
+are in `.planning/DUCKDB_EXIT_CHAIN4_PLAN.md`, revised against today's main in
+`.planning/DUCKDB_EXIT_CHAIN4_PLAN_REV2.md`.
+
+### Chain 4: the buyers, written where they are read
+
+`core/pg_buyers_write.py` is the fifth registered write chain (PR-3):
+`bronze.buyers`, `bronze.buyer_contacts` and `app.buyer_gender`, moved together
+by `KS_WRITE_BUYERS=postgres`. **Off in production.** The flip needs the
+owner's own yes, not before 2026-09-30, Tuesday to Thursday 10:30–12:30 Kyiv.
+
+**Held on DuckDB until its readers follow.** Three readers show buyers — the
+SMS audience (`KS_SMS_STORE`), the search index (`KS_READ_SEARCH_INDEX`) and
+the dashboard's buyer reads (`KS_READ_DASHBOARD`) — and each could still read
+DuckDB, whose buyers stop the moment the chain writes Postgres.
+`unmet_precondition()` names any of the three not on postgres (a typo in one is
+unmet), and until all are an unlatched chain runs as duckdb whatever its flag
+says: DN-26's hook, made generic in the registry for this chain. Production had
+all three on postgres on 2026-09-25, so the hook is met there and changes
+nothing. The warning is rate-limited to once an hour per reason — this chain's
+key is read every incremental tick — and `/api/health` publishes it on every
+read, where the canary warns `write_chain_precondition_unmet`.
+
+**Every buyer's verdict is written with its name.** `upsert_buyers` classifies
+the names it writes and writes the verdicts in the same transaction, in a
+savepoint caught on `asyncpg.PostgresError` only, so the buyers land whatever
+the gender does — and when that savepoint fails, the portion's verdicts are
+marked stale (`rules_version = 0`, never over a human's) so the hourly
+derivation re-decides them: a renamed buyer's old verdict at the current
+version is one nothing would select again. `derive_gender_pg` (the hourly rider, and
+`scripts/backfill_gender.py`) reads what is pending **before** it latches — an
+hour with nothing to decide takes nothing — then share-locks the portion's
+buyers and drops a verdict whose name moved. That closes a race the hourly
+derivation alone would leave open: a derivation that read an old name and
+wrote after a rename committed would store the old name's verdict at the
+current rules version, and nothing would ever select that buyer again. Proved
+by running it: without `FOR SHARE` the old verdict lands. A human override is
+never overwritten; an equal verdict is not rewritten, so `decided_at` is when
+the answer last changed — the web process's UTC clock, passed in, which is the
+clock DuckDB's `CURRENT_TIMESTAMP` is and the one the copy-back orders by.
+DuckDB never re-derives on a rename; this does, on purpose.
+
+**A buyer Postgres would refuse is skipped, not raised.** Refused before the
+latch where it can be seen (`_refusal`: an id missing or outside INTEGER, text
+that is not UTF-8 — a lone surrogate — a value of the wrong type, a loyalty
+figure over its `NUMERIC` via `core/pg_numeric.py`, shared with chain 7a), and
+retried buyer by buyer on a `DataError` it could not foresee. Either way the
+id is logged and counted in `buyer_sync.last_skipped_bad`. A batch `_refusal`
+rejects whole leaves no marker; one Postgres refuses buyer by buyer has
+already latched the chain, and the marker stands without an owner row until
+the next write lands — `chain_latch_disagrees` the next morning if none does,
+which is why `_refusal` asks everything the driver would refuse. A batch in
+which every fetched buyer was refused is **not a success**: the step raises
+`BuyersRefused`, a data error, so the watermark and the canary's clock stay
+where they were. A cancelled statement is not bad data and raises at once. A
+statement timeout and a two-minute deadline — counted from the latch, and
+never before the first portion — bound the write.
+
+**Every path asks the chain's one answer** (`pg_buyers_write.mode()`, never
+raising):
+
+- `DuckDBStore.upsert_buyers` hands the batch to the chain first, before the
+  portion loop — so DuckDB's copy stops and the mirror has nothing to ship.
+- `get_missing_buyer_ids` selects from Postgres whenever the chain is off
+  DuckDB, before and regardless of `KS_READ_BUYER_SYNC` — a selection from a
+  DuckDB that stopped would fetch the same buyers every hour. A latched chain
+  with its flag set back routes both the selection and the write to Postgres;
+  the copy-back's post-latch levers depend on exactly that, and one test pins
+  the two together.
+- A `KS_WRITE_BUYERS` nobody can read writes nowhere: the step refuses before
+  KeyCRM is asked, both manual doors answer 409 before starting, the gender
+  rider reports `stood_down`, and `get_stats` — `/health/detailed`,
+  `/api/duckdb/stats` and the DuckDB block of `/api/health` — leaves the buyer
+  counts out rather than show DuckDB's frozen ones; the live count is
+  `bronze.buyers` (`pg_buyer_sync_read.count_buyers`).
+- `scripts/backfill_gender.py` writes Postgres only for a chain web has
+  already latched (exit 4 otherwise): the latch is a marker web reads once and
+  caches, so a script taking the first write would leave web writing DuckDB
+  until it restarted.
+- `reconcile_buyer_completeness` also runs under the chain with the landing
+  mirror off — it is the one Postgres check that the writer is alive.
+
+`tests/unit/test_buyer_paths_consult_registry.py` walks the tree for every
+DuckDB statement that writes the three tables and requires each path into it
+to pass through a function that asks.
+
+**Watched from three sides.** The canary pages `buyer_sync_stalled_chain`
+(CRITICAL) when the step has not succeeded for three hours under the chain —
+the WARN at 90 minutes stays — judged by the older of the step's own clock and
+`buyer_sync.watermark_age_s`, the age of the stamp it writes to Postgres: the
+first is floored at web's start, so on its own every recreate reset a stall
+and announced it resolved. The standing watch (`core/pg_chain_invariants.py`)
+files `chain_buyer_orphan_rows` (CRITICAL, from the handover on),
+`chain_required_column_null` for a NULL `full_name` (DuckDB's is NOT NULL, so
+the copy-back could not carry it back) and `chain_buyer_contact_missing` (WARN):
+all three read zero on production on 2026-09-30. Its watermark is left to the
+canary, which pages on the step's own state. `deploy/stage4_soak.sh` reads
+B1–B5 — copies stood down, the watermark's stored value at 90 minutes,
+verdicts and the override floor, the selection's backlog, integrity — and
+knows a fifth state for this chain, `held`: flagged, unlatched and a reader
+not on postgres, reported by B1 as the flip that did not move. B1 dates the
+handover by the owner rows, then by `SOAK_BUYERS_FLIP_AT`, and with neither
+reads UNKNOWN rather than FAIL a stamp inside its 75-minute window. The restore
+drill counts all three tables, because once the chain writes them the nightly
+dump is their only backup.
+
+**Revision 0034 locks older images out** (PR-4, owner decision 16) and is
+deployed directly before the flip. It changes no schema — three table comments
+saying who writes each table — and moves `REQUIRED_REVISION` to
+`0034_buyer_chain`, so an image without chain 4 refuses the database: its
+replication would otherwise full-replace `app.buyer_gender` out of a DuckDB
+that stopped, and its mirror ship DuckDB's buyers over the chain's. Two things
+it does not do, both written down in the revision:
+
+- **It does not hold images below v3.0.249.** Their buyers mirror and
+  backfills never called `require_revision`. None of them is a rollback target
+  after this revision, whatever the database says.
+- **It is not "no writes" for an image that checks — it is an outage.** The
+  session read raises under `KS_USER_STORE=postgres` (401 for everybody) and
+  the bot refuses to start. An image-only rollback therefore needs `alembic
+  downgrade 0033_derivation_signal` first, run with the new migrate image, and
+  then all three images moved back — keycrm-migrate too, or `up -d` re-runs its
+  `alembic upgrade head` and puts 0034 back. Only before the flip: after chain
+  4 has written Postgres the way back is `scripts/chain_copy_back.py buyers`,
+  never a downgrade below 0034.
+- **A locked-out image still writes DuckDB.** From v3.0.249 on, a build without
+  chain 4 cannot reach the buyer tables but its sync still commits buyers to
+  DuckDB before the mirror refuses — and after the flip `--handover` then
+  refuses on those ids. After the flip, no image rollback at all.
 
 ### The Postgres mirror of landing
 One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
@@ -1533,9 +1684,11 @@ of CRITICALs.
 `mirror_buckets_disagree` caps the drill-down: more than 20 disagreeing buckets
 is a whole-table problem, and reading them all would turn a daily check into a
 table scan of both stores. `mirror_landing` is in
-`WATCHED_LAYERS` (digest section, layer age, catch-up) but deliberately not yet
-in the canary's `DQ_MAX_AGE_S` — that dict pages, and the canary's first probe
-is 90 s after the bot starts, before the catch-up run can finish.
+`WATCHED_LAYERS` (digest section, layer age, catch-up), and since 2026-08-28 in
+the canary's `DQ_MAX_AGE_S` too, paged at 30 h: the worry that kept it out —
+the canary's first probe 90 s after the bot starts, before the catch-up can
+finish — only bites a layer already past 30 h, and the 26 h catch-up sits
+under that page (see "Scheduled checks").
 
 ### Gold in Postgres, and why it is not the same table
 
@@ -1819,7 +1972,7 @@ migration now stops both in one place instead.
 
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
 moved to `0010_order_versions` at the time and `require_revision` raises on any
-mismatch, ahead or behind. It is `0021_user_allowed_features` today, and every
+mismatch, ahead or behind. It is `0034_buyer_chain` today, and every
 revision since has inherited the same rule: rebuild and push `keycrm-migrate`
 alongside `keycrm-web`, and let `docker wait ks-migrate` finish first. The bot
 checks it too, but only in `initialise()`, so a running bot survives the
@@ -2471,8 +2624,12 @@ holds back, the 05:15 freeze, a 10 s timeout — used to announce a standing
 `read_fallback_used` resolved and page it again as a new incident on the next
 probe, agent and all. `CanaryResult.unjudged_keys` names the OD-07 keys a
 probe could not judge for want of their block, and `canary_job` keeps them in
-`still_firing`. Every other payload-derived key keeps today's behaviour,
-though they share the flaw.
+`still_firing` — and the buyers step's two keys, `buyer_sync_stalled` when the
+probe read no `buyer_sync` block and chain 4's CRITICAL also when it read no
+entry for the chain: under chain 4 a stall of the only writer of buyers
+outlives the freeze and every recreate, and both keys fire for it.
+Every other payload-derived key keeps today's behaviour, though they share the
+flaw.
 
 A page proves a fallback, but it cannot prove that a quiet week was looked at.
 So every probe that read the block also rewrites one row,
@@ -2561,9 +2718,10 @@ assistant's tools return a named `data_unavailable` result, which is what
 the model reads instead of numbers. A job puts
 `{"reason": "read_unavailable", "surface"}` in its result
 (`read_fallback.answered`), so `/api/jobs` shows a refusal, not a quiet run —
-except the incremental sync, whose buyers step is still answered by
-`sync_missing_buyers`' own broad handler (chain 4's to change): its refusal
-shows only in the log and in `/api/health` `read_fallback_mode.refused`.
+except the incremental sync, whose `stats` are summed and carry no strings:
+the buyers step records the refusal and passes it on, and the tick names it
+at the call and skips the step, so it shows in the log, in `buyer_sync`'s
+error class and in `/api/health` `read_fallback_mode.refused`.
 Several of these never had a fallback — the weekly report, the training
 input, the buyers step and the index read Postgres or nothing — so for them
 a Postgres failure is still their own error, as before; `off` adds only the
@@ -2580,11 +2738,9 @@ passed by not seeing those routes — `service.chat(...)` names a method two
 classes define — so the walk types an object by the annotated factory that
 made it, and pins every call it still leaves unresolved under the name of a
 function that reaches a refusal (`UNRESOLVED_NAMESAKES`). A remembered list
-had missed the goals job. One writing route still
-does not reach the 503: `POST /api/duckdb/sync-buyers` shares the buyers
-step, whose `except Exception` answers "Synced 0 buyers" — pinned in
-`UNSWEPT_STOPS` and left to chain 4, which rebuilds that step and that
-route. An
+had missed the goals job. `POST /api/duckdb/sync-buyers` reaches the 503
+too: it shares the buyers step, which used to answer the refusal in its own
+`except Exception` and now passes it on (chain 4's PR-3). An
 unknown value **runs as `duckdb` and never raises** — web is the only syncer,
 so a crash loop over how a read degrades would stop order intake (OD-09); it
 publishes `read_fallback_mode.error` and the canary warns
@@ -2631,7 +2787,9 @@ Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
 variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVENTORY`
 (chain 1, off), `KS_WRITE_GOALS` (chain 7a, off — `app.revenue_goals`, the three
 goal amounts typed on /goals, whose POST wrote DuckDB while the GET read an
-hourly copy in Postgres), `KS_WRITE_EXPENSE_TYPES` (chain 6a, off). Putting one
+hourly copy in Postgres), `KS_WRITE_EXPENSE_TYPES` (chain 6a, off),
+`KS_WRITE_BUYERS` (chain 4, off — the buyers, their contacts and their gender;
+see "Chain 4: the buyers, written where they are read"). Putting one
 back to `duckdb` reads like an undo and is not one:
 once rows have landed in Postgres, it starts a **second writer beside the
 first** — a typed expense in the store the page does not read, DuckDB's
@@ -2653,8 +2811,10 @@ rather than writing DuckDB.
 
 The disagreement is never silent — `/api/health` publishes `latched`,
 `latched_at` and `mismatch` per chain, the canary pages `write_chain_flag_mismatch`
-(WARN) within one probe, the shipper stamps the chain's tables failing, and the
-daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
+(WARN) within one probe, the shipper stamps failing the chain's tables it ships
+itself (never a table another shipper carries — chain 4's bronze buyers are the
+buyers mirror's, and a stamp there only that mirror's next success could clear),
+and the daily comparison files `chain_latch_disagrees` and `chain_shipper_overwrote`
 (both CRITICAL) — and `chain_owner_unregistered` for an owner row no chain in
 the running build declares. Today nothing is latched: `app.manual_expenses` holds zero
 rows, so chain 8's flag can still be moved freely, and the first typed expense
@@ -2727,7 +2887,31 @@ the ids and the two levers.
 Its specs are derived rather than written out — `_FULL_REPLACE` and
 `_APPEND_ABOVE` intersected with the chain's `CHAIN_TABLES`, plus the daily
 comparison's own specs — and a chain table with no shipping shape or no
-comparison spec **raises** instead of being skipped. The two big tables are
+comparison spec **raises** instead of being skipped. Chain 4 added a third
+source, `MIRRORED_LANDING_TABLES`: `bronze.buyers` and `bronze.buyer_contacts`
+are shipped by the buyers mirror from the same parse as DuckDB and nothing
+replaces them whole. Their handover is stricter because it can be — Postgres
+dates every write of a buyer (`mirrored_at = now()`), and the owner row's
+`updated_at` is `now()` in the latching transaction, one clock. Before a flip
+any difference, either side, is CRITICAL. A buyer or contact DuckDB holds that
+Postgres lacks or holds differently, and a contact only Postgres holds of a
+buyer DuckDB holds, name `POST /api/mirror/backfill/buyers`, which re-ships
+every buyer DuckDB holds with its contacts (detached, heavy lock per portion;
+it moves every `mirrored_at`, so the search index re-indexes everything and
+`buyers_without_verdict` is blind for 90 minutes). A buyer only Postgres holds
+is a per-id decision — nothing deletes one. After the latch a difference, or
+a row on one side only, is INFO only for a buyer the chain rewrote since the
+latch and CRITICAL otherwise (decision 6); a buyer only DuckDB holds always
+refuses — the chain never deletes one — and so does a buyer DuckDB holds in a
+version KeyCRM's own `updated_at` dates later, with its contacts: a DuckDB
+write after the latch (the marker lost with the flag back at duckdb) that the
+rewrite clock alone would take for the chain's. Contacts are read in both
+stores through a join to their own buyers, as the daily check reads DuckDB's,
+so an orphan on either side is outside the landing rather than a refusal the
+reship could never clear. For every chain, a Postgres row with NULL where
+DuckDB declares NOT NULL (read from DuckDB's catalogue) is a handover CRITICAL
+whose lever is correcting it in Postgres, so `--handover` refuses what
+`--execute` would otherwise have died on at its first INSERT. The two big tables are
 compared row by row rather than by fingerprint, because the fingerprint's one
 blind spot — a text column rewritten to the same length — is affordable every
 morning and not affordable in the comparison that releases a latch.
@@ -2775,7 +2959,11 @@ docker compose run --rm --no-deps -T web \
 #   3. at +2 min: deploy/stage4_soak.sh — E1/E2 for chain 8, I1/I2/I3 for
 #      chain 1; chains 7a and 6a have no soak check yet, so meta.mirror_state
 #      for app.revenue_goals or bronze.expense_types. The hourly copy must be
-#      shipping the chain's tables again.
+#      shipping the chain's tables again. Chain 4's B1-B5 read "not
+#      applicable" once it is released, so read meta.mirror_state for its
+#      three tables: the buyers mirror stamps the bronze two on its next
+#      batch (POST /api/mirror/backfill/buyers now), replicate_operational
+#      stamps app.buyer_gender within the hour.
 ```
 
 **Run it as the web service, never as a bare `docker run --env-file .env`.**

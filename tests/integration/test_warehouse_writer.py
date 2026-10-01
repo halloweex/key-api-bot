@@ -425,6 +425,10 @@ class TestAMissingPrecondition:
         from core import warehouse_cutover as wc
         from web.routes.api.health import _warehouse_writer_mode
 
+        # The database is at whatever this build requires — the head CI
+        # migrated to — so the detail is checked against that, not a number
+        # that moves with every revision.
+        was = core.pg.REQUIRED_REVISION
         monkeypatch.setattr(core.pg, "REQUIRED_REVISION", "9999_not_this_one")
         await world.boot()
 
@@ -432,7 +436,7 @@ class TestAMissingPrecondition:
         block = _warehouse_writer_mode()
         assert block["preconditions_unmet"] == ["pg_revision"]
         (unmet,) = wc.preconditions_unmet()
-        assert "0033" in unmet.detail and "9999_not_this_one" in unmet.detail
+        assert repr(was) in unmet.detail and "9999_not_this_one" in unmet.detail
         assert [k for k, _ in check_warehouse_preconditions(
             {"warehouse_writer_mode": block})] == ["warehouse_preconditions_unmet"]
         # DuckDB derived its boot, as it always has, and nothing was recorded.

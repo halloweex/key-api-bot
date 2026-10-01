@@ -21,7 +21,9 @@ There is no fallback because a fallback's answer is exactly the frozen one this
 exists to escape. A failure is instead contained by the caller:
 `sync_missing_buyers` logs it and returns without moving the buyers watermark,
 so the hourly retry stands and `freshness_buyers` says so after 48 hours — and
-the offers and stocks syncs after it in the same tick still run.
+the offers and stocks syncs after it in the same tick still run. A read refused
+under `KS_READ_FALLBACK=off` is recorded the same way and then passed on: the
+tick names it and skips the step, and the manual route answers 503 (DN-20c).
 """
 from __future__ import annotations
 
@@ -61,3 +63,40 @@ async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(numbered(sql), *params)
     return [tuple(r) for r in rows]
+
+
+async def count_buyers() -> int:
+    """How many buyers Postgres holds — sync-all's before and after, once
+    chain 4 writes the buyers there and DuckDB's count has stopped moving.
+    Here rather than in the chain module, whose every public function reaching
+    a connection is held to the latch."""
+    from core.pg import get_pool, require_revision
+
+    pool = await get_pool()
+    await require_revision()
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval("SELECT count(*) FROM bronze.buyers"))
+
+
+async def watermark_age_s(now=None) -> "int | None":
+    """Seconds since the buyers step last completed, from the stamp it writes
+    to `meta.chain_watermarks` under chain 4 — a clock that survives a web
+    restart, where `buyer_sync.last_ok_age_s` is floored at the process start
+    and so reads young after every recreate. None when the key is not there
+    yet or holds no timestamp. Raises on a store that cannot be read; the
+    health block publishes None then."""
+    from datetime import datetime, timezone
+
+    from core.pg_chain_watermarks import read_values
+
+    raw = (await read_values(["last_sync_buyers"])).get("last_sync_buyers")
+    if not raw:
+        return None
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    return max(0, int((now - stamp).total_seconds()))

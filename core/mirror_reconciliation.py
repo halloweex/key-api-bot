@@ -117,7 +117,9 @@ from core.pg_operational import (
     WEEKLY_PATTERN_COLUMNS,
     WEEKLY_SEND_COLUMNS,
 )
-from core.landing_rows import EXPENSE_COLUMNS, EXPENSE_TYPE_COLUMNS
+from core.landing_rows import (  # noqa: E402
+    BUYER_COLUMNS, CONTACT_COLUMNS, EXPENSE_COLUMNS, EXPENSE_TYPE_COLUMNS,
+)
 from core.pg_order_utm import UTM_COLUMNS
 from core import pg_order_versions as _versions
 from core.pg_dashboard_users import USER_COLUMNS
@@ -2434,12 +2436,18 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         columns=BUYER_GENDER_COLUMNS,
         key_columns=("buyer_id",),
         synced_column="decided_at",
-        # Shipped and never compared, `sku_inventory_status.updated_at`'s
-        # situation exactly: a full re-derivation stamps all 20 145 rows in one
-        # pass, so comparing it would ask the two copies to have been taken at
-        # the same instant. What matters is the verdict, and the verdict IS
-        # compared.
-        ignore_columns=("decided_at",),
+        # Compared, and the grace clock too (chain 4, decision 7). It was
+        # ignored as `sku_inventory_status.updated_at`'s twin, and it is not
+        # one: the hourly derive restamps only the verdicts it writes — the
+        # buyers that had none — so the stamp dates its own row, and the full
+        # replace ships it as it stands, so the two copies agree to the
+        # microsecond (production, 23.09: 20 545 of 20 545). It is also the
+        # clock chain 4's copy-back hands over on, which only means something
+        # if a drifted value here is a finding. The rare whole-table re-derive
+        # (`backfill_gender.py --all`, a RULES_VERSION bump) restamps every row
+        # at once; the per-row grace forgives those for OPERATIONAL_GRACE_MINUTES,
+        # which the next hourly copy lands inside, and a copy that failed is
+        # already `mirror_failing` on the watermark in the meantime.
         full_replace=True,
         one_failure_warns=True,
     ),
@@ -2465,8 +2473,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # daily retrain, so every row carries one stamp from one run.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
-        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
-        # same case.
+        # identical. `app.sku_inventory_status` is the same
+        # case.
         ignore_columns=("created_at",),
         numeric=("predicted_revenue", "model_mae", "model_mape", "model_wape"),
         full_replace=True,
@@ -2484,8 +2492,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # statement, stamping every one of them with the same value.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
-        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
-        # same case.
+        # identical. `app.sku_inventory_status` is the same
+        # case.
         ignore_columns=("updated_at",),
         numeric=("seasonality_index", "avg_revenue", "min_revenue",
                  "max_revenue", "yoy_growth"),
@@ -2503,8 +2511,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # `calculate_weekly_patterns` writes all sixty month-weeks in one pass.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
-        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
-        # same case.
+        # identical. `app.sku_inventory_status` is the same
+        # case.
         ignore_columns=("updated_at",),
         numeric=("weight",),
         full_replace=True,
@@ -2521,8 +2529,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         # One row, rewritten whole by `calculate_yoy_growth`.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
-        # identical. `app.sku_inventory_status` and `app.buyer_gender` are the
-        # same case.
+        # identical. `app.sku_inventory_status` is the same
+        # case.
         ignore_columns=("updated_at",),
         numeric=("value",),
         full_replace=True,
@@ -3383,8 +3391,12 @@ def buyer_completeness_findings(
                 "job — it logs 'gender derivation failed' in web's log and "
                 "/api/jobs shows nothing — and a failed ship to Postgres is "
                 "stamped in meta.mirror_state for app.buyer_gender "
-                "(last_error, failures_since_ok). A RULES_VERSION bump deployed "
-                "shortly before this ran explains a large count by itself."
+                "(last_error, failures_since_ok). Under chain 4 "
+                "(KS_WRITE_BUYERS) the verdicts are written in Postgres "
+                "directly, nothing ships them, and nothing is stamped there: "
+                "its log line reads 'gender derivation failed (postgres)'. A "
+                "RULES_VERSION bump deployed shortly before this ran explains "
+                "a large count by itself."
             ),
         ))
 
@@ -3430,12 +3442,17 @@ async def reconcile_buyer_completeness(
     *, now: Optional[datetime] = None, max_samples: int = 10,
 ) -> List[IntegrityIssue]:
     """Does every landed buyer have a current verdict, and does every buyer an
-    order names exist? Postgres alone; reports only; no store."""
-    from core import pg_landing
+    order names exist? Postgres alone; reports only; no store.
+
+    Asked while the landing mirror is on, and also whenever chain 4 writes the
+    buyers in Postgres: then it is the one Postgres-side check that the chain's
+    writer is alive, and it must not switch off with a mirror flag the chain
+    does not consult (the plan critic's b2)."""
+    from core import pg_buyers_write, pg_landing
     from core.gender import RULES_VERSION
     from core.pg import get_pool, require_revision
 
-    if not pg_landing.enabled():
+    if not (pg_landing.enabled() or pg_buyers_write.mode() == "postgres"):
         return []
     now = now or datetime.now(timezone.utc)
     pool = await get_pool()
@@ -4472,36 +4489,56 @@ _BUYERS_ORIGIN = (
     "missing here was lost by the mirror, not retired by KeyCRM."
 )
 
-def _buyers_spec():
-    from core.landing_rows import BUYER_COLUMNS
+# The buyer landing, as constants rather than factories, because two readers
+# need the one description: the daily comparison below, and chain 4's
+# copy-back (`core.chain_transfer.chain_specs`), which reads these tables the
+# other way. A second description in the copy-back would be the fifth list
+# that module exists never to have.
+BUYERS_SPEC = MirroredTable(
+    pg_table="bronze.buyers",
+    dk_table="buyers",
+    columns=BUYER_COLUMNS,
+    numeric=("loyalty_discount", "loyalty_amount"),
+    key_columns=("id",),
+    synced_column="synced_at",
+    origin_note=_BUYERS_ORIGIN,
+    full_replace=True,
+)
 
-    return MirroredTable(
-        pg_table="bronze.buyers",
-        dk_table="buyers",
-        columns=BUYER_COLUMNS,
-        numeric=("loyalty_discount", "loyalty_amount"),
-        key_columns=("id",),
-        synced_column="synced_at",
-        origin_note=_BUYERS_ORIGIN,
-        full_replace=True,
-    )
+BUYER_CONTACTS_SPEC = MirroredTable(
+    pg_table="bronze.buyer_contacts",
+    dk_table="buyer_contacts",
+    columns=CONTACT_COLUMNS,
+    key_columns=("buyer_id", "contact_type", "value"),
+    # No timestamp of its own; the reader below joins the owning buyer's
+    # `synced_at`, because contacts ship in the same transaction as their
+    # buyer and are in flight exactly when the buyer is.
+    synced_column=None,
+    origin_note=_BUYERS_ORIGIN,
+    full_replace=True,
+)
+
+# Landing tables the MIRROR ships — written in Postgres from the same parse as
+# DuckDB, never replaced out of it — for the copy-back's third source. Not
+# `MIRRORED_TABLES`, which is the catalogue `reconcile_mirror` compares.
+MIRRORED_LANDING_TABLES = (BUYERS_SPEC, BUYER_CONTACTS_SPEC)
+
+# A contact is part of the landing only with its buyer. Neither store declares
+# a foreign key, and this check has always read DuckDB's contacts through a
+# join to `buyers`; the copy-back reads both stores the same way, so an orphan
+# contact is outside the landing on either side instead of a refusal whose
+# lever (the reship, which walks buyers) could never clear it — the chain 4
+# PR-2 review reproduced that. `{engine: FROM clause}`, aliased `c` and `b`.
+BUYER_CONTACTS_FROM = {
+    "duckdb": "buyer_contacts c JOIN buyers b ON b.id = c.buyer_id",
+    "postgres": "bronze.buyer_contacts c JOIN bronze.buyers b ON b.id = c.buyer_id",
+}
 
 
-def _contacts_spec():
-    from core.landing_rows import CONTACT_COLUMNS
-
-    return MirroredTable(
-        pg_table="bronze.buyer_contacts",
-        dk_table="buyer_contacts",
-        columns=CONTACT_COLUMNS,
-        key_columns=("buyer_id", "contact_type", "value"),
-        # No timestamp of its own; the reader below joins the owning buyer's
-        # `synced_at`, because contacts ship in the same transaction as their
-        # buyer and are in flight exactly when the buyer is.
-        synced_column=None,
-        origin_note=_BUYERS_ORIGIN,
-        full_replace=True,
-    )
+def buyer_contacts_select(engine: str) -> str:
+    """The contact columns, read through the join, for `engine`."""
+    return (f"SELECT {', '.join('c.' + col for col in CONTACT_COLUMNS)} "
+            f"FROM {BUYER_CONTACTS_FROM[engine]}")
 
 
 async def reconcile_buyers(
@@ -4541,8 +4578,8 @@ async def reconcile_buyers(
         return issues
     watermarks = await fetch_watermarks(pool)
 
-    buyers_spec = _buyers_spec()
-    contacts_spec = _contacts_spec()
+    buyers_spec = BUYERS_SPEC
+    contacts_spec = BUYER_CONTACTS_SPEC
 
     wm = watermarks.get(BUYERS_STATE)
     if wm and wm.get("last_ok_at") and not wm.get("backfilled_at"):
@@ -4563,11 +4600,8 @@ async def reconcile_buyers(
         dk_buyers, dk_buyers_synced = fetch_duckdb_rows(conn, buyers_spec)
         # Contacts, with the owning buyer's clock attached.
         contact_rows = conn.execute(
-            """
-            SELECT c.buyer_id, c.contact_type, c.value, c.is_primary, b.synced_at
-            FROM buyer_contacts c
-            JOIN buyers b ON b.id = c.buyer_id
-            """
+            buyer_contacts_select("duckdb").replace(
+                " FROM ", ", b.synced_at FROM ", 1)
         ).fetchall()
 
     dk_contacts: Dict[Any, Tuple[Any, ...]] = {}

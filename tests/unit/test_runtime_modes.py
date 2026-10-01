@@ -122,14 +122,19 @@ class TestTheSchedulerStillConfigures:
 # What reaches a writer that raises the derivation signal. The sync service is
 # how scripts reach `upsert_orders`; the rest are named so a script that goes
 # straight to a Postgres writer is caught too.
+#
+# Chain 4's derivations count too: which one runs is chosen from the latch
+# marker, which `configure_modes()` loads, so a script that derived without it
+# would route by its flag alone. `core.gender_backfill` is deliberately not a
+# writer module — its preview reads and writes nothing.
 WRITER_MODULES = frozenset({
     "core.sync_service", "core.pg_landing", "core.pg_backfill",
-    "core.pg_buyers", "core.pg_replication",
+    "core.pg_buyers", "core.pg_replication", "core.pg_buyers_write",
 })
 WRITER_CALLS = frozenset({
     "upsert_orders", "upsert_managers", "upsert_buyers", "write_orders",
     "mirror_orders", "mirror_buyers", "backfill_orders", "backfill_buyers",
-    "replicate_managers", "ship_orders_by_id",
+    "replicate_managers", "ship_orders_by_id", "derive_gender", "derive_gender_pg",
 })
 
 
@@ -183,6 +188,8 @@ class TestScriptsConfigureBeforeTheyWrite:
         found = self._scripts()
         assert "force_resync.py" in found, sorted(found)
         assert "backfill_utm.py" in found, sorted(found)
+        # Chain 4: the gender derivation's CLI routes by the chain's latch.
+        assert "backfill_gender.py" in found, sorted(found)
 
     def test_every_one_configures_the_modes_before_its_first_write(self):
         for name, (tree, writer_names) in self._scripts().items():

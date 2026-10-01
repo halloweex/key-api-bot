@@ -28,8 +28,8 @@ import pytest_asyncio
 
 from bot import canary as canary_module
 from core import (
-    chain_latch, pg_expense_types_write, pg_expenses_write, pg_goals_write,
-    pg_inventory_write, write_chains,
+    chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
+    pg_goals_write, pg_inventory_write, write_chains,
 )
 
 CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
@@ -312,9 +312,13 @@ class TestAWriteThatNeverReachesPostgres:
                            if failing == "get_pool" else
                            RuntimeError("schema revision 0032, expected 0033"))
 
-        with patch(f"core.pg.{failing}", new=broken):
+        # The revision case needs a pool to get past, or `get_pool` raises on
+        # the missing DSN first and the case proves nothing (review of PR-3).
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
+                patch(f"core.pg.{failing}", new=broken):
             with pytest.raises((OSError, RuntimeError)):
                 await store.add_expense(date(2026, 9, 17), "marketing", "Facebook Ads", 10)
+        broken.assert_awaited_once()
 
         assert not chain_latch.latched("pg_expenses_write"), (
             "a write that never reached Postgres latched the chain")
@@ -381,6 +385,45 @@ class TestAWriteThatNeverReachesPostgres:
         assert not chain_latch.latched("pg_inventory_write")
         flags.setenv("KS_WRITE_INVENTORY", "duckdb")
         assert pg_inventory_write.writes_postgres() is False
+
+    @pytest.mark.parametrize("failing", ["get_pool", "require_revision"])
+    @pytest.mark.asyncio
+    async def test_the_buyers_chain_through_the_buyers_step(self, flags, store, failing):
+        """Chain 4 writes on the incremental tick, ~19 buyers a day: a web that
+        came up ahead of `migrate` would otherwise make its first flip
+        irreversible on the first new buyer, with not one written."""
+        from core.models import Buyer
+
+        flags.setenv("KS_WRITE_BUYERS", "postgres")
+        for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
+            flags.setenv(reader, "postgres")           # its precondition
+        broken = AsyncMock(side_effect=OSError("connection refused")
+                           if failing == "get_pool" else
+                           RuntimeError("schema revision 0032, expected 0033"))
+        with patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
+                patch(f"core.pg.{failing}", new=broken):
+            with pytest.raises((OSError, RuntimeError)):
+                await store.upsert_buyers([Buyer.from_api({"id": 1, "full_name": "Олена"})])
+        broken.assert_awaited_once()
+
+        assert not chain_latch.latched("pg_buyers_write")
+        assert not chain_latch.marker_path("pg_buyers_write").exists()
+        flags.setenv("KS_WRITE_BUYERS", "duckdb")
+        assert pg_buyers_write.writes_postgres() is False
+        # And DuckDB was not written in its place: under the flag the batch
+        # belonged to Postgres.
+        async with store.connection() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_gender_derivation_returns_without_latching(self, flags):
+        """It never raises, so its failure is a result — and still no latch."""
+        flags.setenv("KS_WRITE_BUYERS", "postgres")
+        with patch("core.pg.get_pool",
+                   new=AsyncMock(side_effect=OSError("connection refused"))):
+            out = await pg_buyers_write.derive_gender_pg()
+        assert out["error_class"] == "OSError"
+        assert not chain_latch.marker_path("pg_buyers_write").exists()
 
 
 # ─── The guard: no writer may reach Postgres before taking the latch ─────────
@@ -605,6 +648,9 @@ class TestEveryWriterLatchesFirst:
         # have left the three guards below passing over an empty set.
         assert set(_writers(pg_goals_write)) == {"set_goal"}
         assert set(_writers(pg_expense_types_write)) == {"upsert_expense_types"}
+        # Chain 4: the buyers' writer, and the derivation that reads what is
+        # pending before it latches.
+        assert set(_writers(pg_buyers_write)) == {"upsert_buyers", "derive_gender_pg"}
 
     def test_every_registered_chain_has_a_writer_the_walk_can_see(self):
         """The guards below are parametrised over `WRITE_CHAINS`; a chain whose
