@@ -4,10 +4,13 @@
     docker compose run --rm --no-deps -T web \\
         python /app/scripts/goals_semantics_dryrun.py \\
             --backup /app/data/backups/analytics-<today>.duckdb
-    # exit 0 no difference · 1 differences, each with its cause · 2 refused
+    # exit 0 both halves clean · 1 differences or Postgres Silver not proved,
+    # each with its cause · 2 refused · 3 the backup alone, clean (--backup-only)
 
 Chain 7b-2's flip precondition (`.planning/DUCKDB_EXIT_STAGE4_CHAINS.md` §7):
-run on the flip day's backup, and flip only on exit 0.
+run on the flip day's backup, and flip only on exit 0. Run as the web service,
+so the one-off carries web's `.env` — `KS_READONLY_PASSWORD` is how it logs in
+to Postgres, and the compose network is how it reaches it.
 
 WHAT IT ANSWERS
 
@@ -27,22 +30,58 @@ each difference filed under its cause (not in Silver, the return rule, other);
 then every number the calculators answer, the two tables the Monday job stores
 and the smart goal for this month and the next three, for retail, b2b and all.
 
-WHAT IT DOES NOT ANSWER
+THE ENGINE THE FLIP SWITCHES TO: POSTGRES SILVER
 
-The engine. Both sides read DuckDB here — the backup's `silver_orders` stands
-in for Postgres' — because a backup and a live Postgres are hours apart, and
-that gap would read as a difference of semantics. That Postgres Silver answers
-the same bodies the same way is proved on every pull request by
+The production flip reads Postgres `silver.orders` (`KS_READ_GOALS=postgres`),
+and the comparison above reads the backup's DuckDB `silver_orders` on both
+sides: a backup and a live Postgres are hours apart, and that gap would read
+as a difference of semantics. So the Postgres half is asked as a verdict
+instead — the one comparison that sets the two Silvers against each other at
+one instant: `reconcile_silver`, inside the daily `mirror_landing` run,
+column by column over every column the history reads (`order_date`,
+`is_return`, `sales_type`, `grand_total`, `is_active_source`) with a
+tolerance of zero. It is read out of Postgres' copy of the quality journal,
+as `ks_readonly`, and the run is clean only when:
+
+- the journal copy is fresh — under 75 min old and not failing — or a copy
+  that stopped would keep showing an older clean run;
+- the latest `mirror_landing` run is under the canary's 30 h;
+- that run did not fail in `reconcile_silver`, between its checks (`setup`),
+  or with an error that does not say which check raised; a run that failed
+  elsewhere still compared Silver, and is a note;
+- it filed nothing against `silver.orders` — every finding there is WARN or
+  worse, so none is noise;
+- `KS_MIRROR_LANDING` is not off here: with the landing mirror off,
+  `reconcile_silver` compares nothing and files nothing, and its silence is
+  not a verdict. Read from this process's environment, which is web's when it
+  runs as the web service.
+
+Backup half clean and Postgres half clean together say: DuckDB's bridge and
+DuckDB's Silver count the same orders the same way, and Postgres' Silver
+holds what DuckDB's holds. `reconcile_silver` stands down only under
+`KS_WRITE_WAREHOUSE=postgres`, which cannot take effect before this flip —
+`goals_bridge` is one of its preconditions — so before the flip it runs on
+every `mirror_landing` run. That the same bodies answer the same way on
+Postgres is proved on every pull request by
 `tests/integration/test_goals_history_two_engines.py`, and after the flip by
 the soak (the smart goal before and after).
+
+`--backup-only` skips the Postgres half — the measurement on a laptop — and a
+clean result then exits 3, never 0: it is not the flip's gate.
 
 WHAT IT WRITES: NOTHING
 
 The backup is attached `READ_ONLY` and copied into an in-memory database; the
 Monday job's store goes there, once per side, and is dropped with the process.
-`KS_READ_GOALS` is forced to `duckdb` in this process alone, so no read is
-routed off the copy, and the Postgres reader is replaced by one that raises:
-the script opens no connection to any server. Nothing it computes reads
+`KS_READ_GOALS` is forced to `duckdb` in this process alone, so no goal read
+is routed off the copy, and the goal methods' Postgres reader is replaced by
+one that raises. The one connection the script opens is the Postgres half's,
+and it is `scripts/utm_reclassify_dryrun.py`'s door: `KS_PG_READONLY_DSN`
+(or `--dsn`), else `ks_readonly` with `KS_READONLY_PASSWORD` — never
+`KS_PG_DSN`, the application's read-write login — a login that could change
+anything is refused before a row is read, the session is read-only by
+default, the transaction is declared READ ONLY, and before it ends the server
+is asked whether it assigned a transaction id. Nothing it computes reads
 `revenue_goals`, the one table a write chain could route regardless of the
 flag. It needs the database file to itself only if it is the live one, which
 web holds; a backup is not.
@@ -56,9 +95,9 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[1]
@@ -283,6 +322,218 @@ def causes(conn, ids: set) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+# ─── Postgres Silver: the daily comparison's verdict ─────────────────────────
+
+# The comparison whose verdict counts, and what it is about.
+VERDICT_LAYER = "mirror_landing"
+SILVER_CHECK = "reconcile_silver"
+SILVER_TABLE = "silver.orders"
+APPLICATION_NAME = "goals_semantics_dryrun"
+
+
+def _journal_limits() -> Tuple[str, timedelta, timedelta]:
+    """The quality journal's Postgres copy, its freshness limit and the
+    verdict's age limit — chain 1's preflight asks the same journal the same
+    two questions (DN-03's 75 min, the canary's 30 h for `mirror_landing`),
+    and `tests/unit/test_inventory_preflip.py` pins the second to the canary.
+    One definition, so the two gates cannot drift apart."""
+    from core import pg_inventory_write as journal
+
+    return (journal.JOURNAL_COPY, journal.PREFLIGHT_JOURNAL_COPY_WITHIN,
+            journal.PREFLIGHT_VERDICT_WITHIN)
+
+
+@dataclass
+class PostgresVerdict:
+    """What the latest `mirror_landing` run says about `silver.orders`, read
+    as a read-only login. `reasons` empty is the clean answer; `notes` are
+    said and do not count."""
+    role: Optional[str] = None
+    taken_at: Optional[datetime] = None
+    journal_copy_age_s: Optional[int] = None
+    run_id: Optional[int] = None
+    run_started_at: Optional[datetime] = None
+    run_age_s: Optional[int] = None
+    findings: List[Tuple[str, str, int]] = field(default_factory=list)
+    reasons: List[str] = field(default_factory=list)
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def clean(self) -> bool:
+        return not self.reasons
+
+
+async def read_postgres_state(conn) -> Dict[str, Any]:
+    """The journal copy's mark, the latest `mirror_landing` run and its
+    findings against `silver.orders`, in one READ ONLY REPEATABLE READ
+    transaction — the run and its findings out of one snapshot — asking the
+    server before the end whether anything wrote."""
+    from scripts.utm_reclassify_dryrun import assert_wrote_nothing
+
+    journal_copy, _, _ = _journal_limits()
+    async with conn.transaction(isolation="repeatable_read", readonly=True):
+        taken_at = await conn.fetchval("SELECT statement_timestamp()")
+        role = await conn.fetchval("SELECT current_user")
+        mark = await conn.fetchrow(
+            "SELECT last_ok_at, failures_since_ok FROM meta.mirror_state "
+            "WHERE table_name = $1", journal_copy)
+        run = await conn.fetchrow(
+            "SELECT run_id, started_at, error_message "
+            "FROM app.data_quality_runs WHERE layer = $1 "
+            "ORDER BY run_id DESC LIMIT 1", VERDICT_LAYER)
+        findings = [] if run is None else await conn.fetch(
+            "SELECT check_name, severity, count FROM app.data_quality_issues "
+            "WHERE run_id = $1 AND table_name = $2 ORDER BY check_name",
+            run["run_id"], SILVER_TABLE)
+        await assert_wrote_nothing(conn)
+    return {
+        "taken_at": taken_at, "role": role,
+        "journal_ok_at": mark["last_ok_at"] if mark else None,
+        "journal_failures": int(mark["failures_since_ok"] or 0) if mark else 0,
+        "run": None if run is None else {
+            "run_id": int(run["run_id"]), "started_at": run["started_at"],
+            "error_message": run["error_message"]},
+        "findings": [(f["check_name"], f["severity"], int(f["count"]))
+                     for f in findings],
+    }
+
+
+def judge_postgres(state: Mapping[str, Any], *, landing_on: bool) -> PostgresVerdict:
+    """Whether the state read proves Postgres Silver holds what DuckDB's
+    holds. Pure: `now` is the server's own `taken_at`."""
+    from core.pg_inventory_write import _raised_checks
+
+    journal_copy, copy_within, verdict_within = _journal_limits()
+    now = state["taken_at"]
+    verdict = PostgresVerdict(role=state.get("role"), taken_at=now)
+    reasons, notes = verdict.reasons, verdict.notes
+
+    if not landing_on:
+        reasons.append(
+            "KS_MIRROR_LANDING is off in this environment: reconcile_silver "
+            "compares nothing then and files nothing, so silence about "
+            f"{SILVER_TABLE} is not a verdict")
+
+    ok_at = state.get("journal_ok_at")
+    if ok_at is not None:
+        verdict.journal_copy_age_s = int((now - ok_at).total_seconds())
+    if ok_at is None:
+        reasons.append(
+            f"the quality journal has never been copied into Postgres "
+            f"({journal_copy}), so no verdict can be read")
+    elif state.get("journal_failures"):
+        reasons.append(
+            f"the copy of the quality journal is failing "
+            f"({state['journal_failures']} in a row)")
+    elif now - ok_at >= copy_within:
+        reasons.append(
+            f"the copy of the quality journal is "
+            f"{int((now - ok_at).total_seconds() // 60)} min old (limit "
+            f"{int(copy_within.total_seconds() // 60)}), so a newer run may "
+            "not be in it")
+
+    run = state.get("run")
+    if run is None:
+        reasons.append(f"no {VERDICT_LAYER} run in the quality journal")
+        return verdict
+    verdict.run_id, verdict.run_started_at = run["run_id"], run["started_at"]
+    age = now - run["started_at"]
+    verdict.run_age_s = int(age.total_seconds())
+    named = f"the latest {VERDICT_LAYER} run ({run['run_id']})"
+    if age >= verdict_within:
+        reasons.append(
+            f"{named} is {int(age.total_seconds() // 3600)} h old (limit "
+            f"{int(verdict_within.total_seconds() // 3600)})")
+    if run["error_message"] is not None:
+        # Check names only: the text after them is a driver's message.
+        raised = _raised_checks(run["error_message"])
+        if raised is None:
+            reasons.append(
+                f"{named} failed, and its error does not say which check "
+                f"raised, so {SILVER_TABLE} may not have been compared")
+        elif SILVER_CHECK in raised:
+            reasons.append(
+                f"{named} failed in {SILVER_CHECK}, so {SILVER_TABLE} was not "
+                "compared")
+        elif "setup" in raised:
+            reasons.append(
+                f"{named} failed between its checks, so {SILVER_TABLE} may not "
+                "have been compared")
+        else:
+            notes.append(
+                f"{named} failed in {', '.join(raised)}; {SILVER_CHECK} "
+                "completed, so that does not count here")
+    verdict.findings = list(state.get("findings") or [])
+    if verdict.findings:
+        reasons.append(
+            f"{named} filed {len(verdict.findings)} finding(s) against "
+            f"{SILVER_TABLE}: " + ", ".join(
+                f"{name} ({severity}, {count})"
+                for name, severity, count in verdict.findings))
+    return verdict
+
+
+async def connect_readonly(dsn: Optional[str] = None):
+    """`scripts/utm_reclassify_dryrun.py`'s door: `--dsn`, else
+    `KS_PG_READONLY_DSN`, else `ks_readonly` at the compose alias with
+    `KS_READONLY_PASSWORD` — never `KS_PG_DSN`. The session is read-only by
+    default and in UTC."""
+    import asyncpg
+
+    from scripts import utm_reclassify_dryrun as door
+
+    options = {"server_settings": {**door.SESSION,
+                                   "application_name": APPLICATION_NAME},
+               "timeout": 15}
+    dsn = dsn or os.environ.get(door.DSN_ENV)
+    if dsn:
+        return await asyncpg.connect(dsn, **options)
+    password = os.environ.get(door.PASSWORD_ENV)
+    if password:
+        return await asyncpg.connect(
+            host=door.COMPOSE_HOST, port=5432, user=door.READONLY_ROLE,
+            database=door.DATABASE, password=password, **options)
+    raise Refused(
+        f"no read-only login for the Postgres half: pass --dsn, or set "
+        f"{door.DSN_ENV}, or {door.PASSWORD_ENV} for "
+        f"{door.READONLY_ROLE}@{door.COMPOSE_HOST} — or --backup-only, which "
+        "is not the flip's gate")
+
+
+async def postgres_half(dsn: Optional[str] = None) -> PostgresVerdict:
+    """Read the verdict as a login that can change nothing, and judge it.
+    Any failure to connect or read is a refusal: nothing was proved."""
+    from core import pg_landing
+    from scripts import utm_reclassify_dryrun as door
+
+    try:
+        conn = await connect_readonly(dsn)
+    except Refused:
+        raise
+    except Exception as exc:  # noqa: BLE001 — named, then refused
+        raise Refused(f"Postgres could not be reached as a read-only login: "
+                      f"{type(exc).__name__}: {exc}")
+    try:
+        refusals = await door.write_privileges(conn)
+        if refusals:
+            shown = "; ".join(refusals[:10])
+            if len(refusals) > 10:
+                shown += f"; and {len(refusals) - 10} more"
+            raise Refused(
+                "this login can write, and the Postgres half reads only as a "
+                f"role that cannot ({door.READONLY_ROLE}): " + shown)
+        try:
+            state = await read_postgres_state(conn)
+        except door.WroteSomething:
+            raise
+        except Exception as exc:  # noqa: BLE001 — named, then refused
+            raise Refused(f"the quality journal could not be read: "
+                          f"{type(exc).__name__}: {exc}")
+    finally:
+        await conn.close()
+    return judge_postgres(state, landing_on=pg_landing.enabled())
+
+
 # ─── the report ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -292,11 +543,27 @@ class Report:
     orders: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     differences: List[Tuple[str, Any, Any]] = field(default_factory=list)
     compared: int = 0
+    # None under --backup-only: the Postgres half was not asked.
+    postgres: Optional[PostgresVerdict] = None
+
+    @property
+    def backup_clean(self) -> bool:
+        return not self.differences and all(
+            not v["bridge_only"] and not v["silver_only"] for v in self.orders.values())
 
     @property
     def clean(self) -> bool:
-        return not self.differences and all(
-            not v["bridge_only"] and not v["silver_only"] for v in self.orders.values())
+        """The flip's gate: both halves, and the Postgres one asked."""
+        return (self.backup_clean and self.postgres is not None
+                and self.postgres.clean)
+
+    @property
+    def exit_code(self) -> int:
+        if self.clean:
+            return 0
+        if self.backup_clean and self.postgres is None:
+            return 3
+        return 1
 
 
 def _leaves(value) -> int:
@@ -360,44 +627,95 @@ def render(report: Report) -> str:
     if len(report.differences) > 200:
         out.append(f"  … and {len(report.differences) - 200} more")
     out.append("")
-    out.append("CLEAN — the flip moves no goal." if report.clean else
-               "DIFFERENCES — each needs a stated reason before the flip.")
+    out.append(f"Postgres silver.orders against DuckDB's — the latest "
+               f"{VERDICT_LAYER} run, read from Postgres")
+    pg = report.postgres
+    if pg is None:
+        out.append("  not asked (--backup-only)")
+    else:
+        out.append(f"  as {pg.role} at {pg.taken_at}: run {pg.run_id}, started "
+                   f"{pg.run_started_at}; journal copy "
+                   f"{'never' if pg.journal_copy_age_s is None else f'{pg.journal_copy_age_s // 60} min'} old")
+        if pg.clean:
+            out.append(f"  {SILVER_CHECK} filed nothing against {SILVER_TABLE}")
+        for reason in pg.reasons:
+            out.append(f"  NOT PROVED: {reason}")
+        for note in pg.notes:
+            out.append(f"  note: {note}")
+    out.append("")
+    if report.clean:
+        out.append("CLEAN — the flip moves no goal.")
+    elif report.exit_code == 3:
+        out.append("CLEAN ON THE BACKUP ALONE — Postgres Silver was not asked; "
+                   "this is not the flip's gate.")
+    else:
+        out.append("DIFFERENCES — each needs a stated reason before the flip.")
     return "\n".join(out)
 
 
 def render_json(report: Report) -> str:
+    pg = report.postgres
     return json.dumps({
         "backup": report.backup, "today": report.today, "clean": report.clean,
+        "backup_clean": report.backup_clean,
         "orders": report.orders, "compared": report.compared,
         "differences": [{"path": p, "bridge": b, "silver": s}
                         for p, b, s in report.differences],
+        "postgres": None if pg is None else {
+            "clean": pg.clean, "role": pg.role, "taken_at": pg.taken_at,
+            "run_id": pg.run_id, "run_started_at": pg.run_started_at,
+            "run_age_s": pg.run_age_s, "journal_copy_age_s": pg.journal_copy_age_s,
+            "findings": [{"check_name": n, "severity": sv, "count": c}
+                         for n, sv, c in pg.findings],
+            "reasons": pg.reasons, "notes": pg.notes,
+        },
     }, ensure_ascii=False, indent=2, default=str)
 
 
 def _parse(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Goal history, bridge against silver, on a DuckDB backup. "
-                    "Reads only; exit 0 clean, 1 differences, 2 refused.")
+        description="Goal history, bridge against silver, on a DuckDB backup, "
+                    "and Postgres Silver against DuckDB's by the latest "
+                    "mirror_landing run. Reads only; exit 0 both clean, 1 "
+                    "differences or Postgres Silver not proved, 2 refused, 3 "
+                    "the backup alone clean (--backup-only).")
     parser.add_argument("--backup", required=True, type=Path,
                         help="a DuckDB file — the flip day's backup")
     parser.add_argument("--today", type=date.fromisoformat, default=None,
                         help="the Kyiv date to compute as of (default: today in Kyiv)")
     parser.add_argument("--json", action="store_true", help="print JSON")
+    parser.add_argument(
+        "--dsn", help="a read-only login for the Postgres half; prefer "
+                      "KS_PG_READONLY_DSN, which keeps the password off the "
+                      "command line")
+    parser.add_argument(
+        "--backup-only", action="store_true",
+        help="skip the Postgres half; a clean run then exits 3, not 0")
     return parser.parse_args(argv)
+
+
+async def _run(args: argparse.Namespace, today: date) -> Report:
+    # The Postgres half first: it is a second's read, and a refusal there
+    # should not wait for the backup's minutes.
+    verdict = None if args.backup_only else await postgres_half(args.dsn)
+    report = await measure(args.backup, today)
+    report.postgres = verdict
+    return report
 
 
 def main(argv=None) -> int:
     args = _parse(argv)
     from core.duckdb_constants import DEFAULT_TZ
+    from scripts.utm_reclassify_dryrun import Refused as DoorRefused
 
     today = args.today or datetime.now(DEFAULT_TZ).date()
     try:
-        report = asyncio.run(measure(args.backup, today))
-    except Refused as exc:
+        report = asyncio.run(_run(args, today))
+    except (Refused, DoorRefused) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
     print(render_json(report) if args.json else render(report))
-    return 0 if report.clean else 1
+    return report.exit_code
 
 
 if __name__ == "__main__":
