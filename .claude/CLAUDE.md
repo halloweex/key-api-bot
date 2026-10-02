@@ -3544,7 +3544,12 @@ transaction, and still pages `owner_row_without_marker`.
 Proved on PostgreSQL 17.2 (`tests/integration/test_catalogue_writer.py`): the
 one-`xmin` write, retirement, a repeated id, two concurrent full writes with no
 deadlock, three planted defects reaching the watch by name, and the carry →
-handover → flip → copy-back round trip with 1055 landing in DuckDB.
+handover → flip → copy-back round trip with 1055 landing in DuckDB. Since the
+review: a write round the chain still CRITICAL after the next full write and
+refused by the copy-back, the record locked before any product, the short
+write judged per write (20 ordinary retirements quiet, a truncated write
+warned and cleared), the acquire and statement bounds, and the carry's
+`DO NOTHING` and `W − 1 µs` clamp.
 
 ### Every other shipper asks too, and a walk finds them (DN-22b)
 
