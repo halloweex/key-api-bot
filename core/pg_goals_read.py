@@ -8,11 +8,14 @@ WHAT IS HERE AND WHAT IS NOT
     `get_daily_revenue_for_dates`. They read `revenue_goals` and the revenue
     history, and Postgres has both: `app.revenue_goals` since revision 0017,
     Silver since 0005.
-  * **not here** — `get_predictions` reads `revenue_predictions`, and
-    `generate_smart_goals` reads `seasonal_indices`, `weekly_patterns` and
-    `growth_metrics`. **None of those four tables exists in Postgres at all.**
-    They are on the migration's own list of sixteen with no home, and moving
-    these two reads is a migration, not a flag.
+  * **since revision 0025** — `get_predictions`, over `revenue_predictions`,
+    which that revision gave a Postgres home (#183).
+  * **not here** — `generate_smart_goals`' reads of `seasonal_indices`,
+    `weekly_patterns` and `growth_metrics`. Revision 0025 created those three
+    in Postgres too, but only as an hourly replica of what DuckDB writes, so a
+    routed read would answer up to an hour behind `POST /goals/recalculate`.
+    They are read where they are written, until their writer moves (chain
+    7b-3).
   * **not here either** — the seven writes. This tab is the only one that
     writes from the interface, and `app.revenue_goals` is an hourly read
     replica: DuckDB is still the writer, so a write routed here would land in
@@ -63,17 +66,89 @@ answer to the same question but the goal as it stood before the flip. Those
 reads therefore go to Postgres while the chain does, whatever this flag says,
 and raise instead of falling back (`GoalsMixin._goals_run`,
 `core/pg_goals_write.py`).
+
+WHICH ORDERS THE CALCULATORS COUNT — A SECOND SWITCH (CHAIN 7b)
+
+The goal calculators — seasonality, YoY, weekly patterns, the growth cap, and
+the last-year and recent-months reads of a smart goal — read the whole order
+history. Since DN-12 they read it through a bridge: DuckDB `orders` narrowed by
+`silver_sales_type_case` rendered over DuckDB's `managers` and
+`manager_classifications`. That is right only while DuckDB holds those three,
+and step 13 freezes them.
+
+`KS_GOALS_HISTORY` chooses the row set: `bridge` (the default, today's
+numbers) or `silver` — `{silver_orders}` through `_goals_run`, so the engine
+is `KS_READ_GOALS`' as for every other goal read, and DN-20's counting and
+refusal cover it. Measured on the 2026-08-31 production copy before choosing:
+the two select the same orders for every sales type, and every calculator and
+every smart goal answered identically, on both engines.
+
+It is not `KS_READ_GOALS` reused, for three reasons: that variable is already
+`postgres` in production, so a reuse would move these reads at the deploy; it
+names an engine, and this names which orders count; and putting an engine
+switch back is every read port's rollback, which must never also change the
+semantics. Nor is it named `KS_READ_*`: the step-13 readiness reads every such
+name as an engine switch that must equal `postgres`.
+
+An unknown value raises at the read, this module's rule above — never at
+import or at startup, so web, the only syncer, cannot crash-loop on it.
 """
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any, List, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
 ENV = "KS_READ_GOALS"
 _VALID = ("duckdb", "postgres")
+
+HISTORY_ENV = "KS_GOALS_HISTORY"
+BRIDGE = "bridge"
+SILVER = "silver"
+_HISTORY_VALID = (BRIDGE, SILVER)
+
+
+def history_mode_of(raw: Optional[str]) -> str:
+    """`raw` — a `KS_GOALS_HISTORY` value, None for unset — as the mode it
+    names. Pure, so the step-13 readiness can ask it of an environment it was
+    handed. An unknown value raises."""
+    value = (raw or "").strip().lower() or BRIDGE
+    if value not in _HISTORY_VALID:
+        raise ValueError(
+            f"{HISTORY_ENV}={value!r} — unknown history. Expected one of "
+            f"{_HISTORY_VALID}; a typo here must stop the read, not quietly "
+            f"count a different set of orders."
+        )
+    return value
+
+
+def history_mode() -> str:
+    """Which orders the goal calculators count: `bridge` (DuckDB `orders`
+    through the DN-12 bridge) or `silver` (`{silver_orders}`, through the
+    goal router). Read at every history read; an unknown value raises."""
+    return history_mode_of(os.getenv(HISTORY_ENV))
+
+
+def history_from_silver() -> bool:
+    return history_mode() == SILVER
+
+
+def history_state() -> dict:
+    """`KS_GOALS_HISTORY` as a history read would take it now: `mode`, or
+    None and the `error` that read would raise. Never raises.
+
+    The raise is at the read, so a typo stops every goal history read — the
+    dashboard's goal widget, `/goals/*`, the POST and the Monday job — and
+    none of those pages anybody: a 500 on a page and a job error in a log.
+    So `/api/health` publishes this, and the canary pages the error as
+    `goals_history_mode_invalid`. The value is the variable's own, which is
+    not a secret, as `read_fallback_mode` publishes its siblings'."""
+    try:
+        return {"mode": history_mode(), "error": None}
+    except ValueError as exc:
+        return {"mode": None, "error": str(exc)}
 
 
 def enabled() -> bool:

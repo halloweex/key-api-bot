@@ -38,9 +38,10 @@ WRITERS = [
     ("DELETE", "/api/goals/daily"),
     ("POST", "/api/goals?period_type=daily&amount=1000"),
     ("POST", "/api/goals/recalculate"),
-    # A GET, but `recalculate=true` rewrites the shared seasonality tables the
-    # way the POST does, so it is gated the same way.
-    ("GET", "/api/goals/forecast?year=2026&month=9&recalculate=true"),
+    # `GET /api/goals/forecast?recalculate=true` stood here while it rewrote
+    # the shared seasonality tables the way the POST does. A GET never writes
+    # now (OD-14 (i)): it is refused for everybody, an admin included —
+    # `tests/unit/test_goals_read_paths_do_not_write.py`.
 ]
 
 
@@ -74,17 +75,9 @@ class _FakeStore:
         self.set_calls.append((period_type, amount, is_custom, growth_factor))
         return {"periodType": period_type, "amount": amount, "isCustom": is_custom}
 
-    async def calculate_seasonality_indices(self, sales_type="retail"):
-        self.recalculated.append(("seasonality", sales_type))
-        return {}
-
-    async def calculate_yoy_growth(self, sales_type="retail"):
-        self.recalculated.append(("growth", sales_type))
-        return {"overall_yoy": 0.0, "yearly_data": []}
-
-    async def calculate_weekly_patterns(self, sales_type="retail"):
-        self.recalculated.append(("weekly", sales_type))
-        return {}
+    async def recalculate_goal_tables(self, *, include_weekly):
+        self.recalculated.append(("goal_tables", include_weekly))
+        return {"seasonal": {}, "yoy": {"overall_yoy": 0.0, "yearly_data": []}}
 
 
 @pytest.fixture(autouse=True)
