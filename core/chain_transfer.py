@@ -239,15 +239,21 @@ _SOURCE_CLOCK = {"bronze.buyers": ("updated_at",)}
 # rows: the chain re-stamps every row KeyCRM serves with `mirrored_at = now()`
 # on every full write, hourly for the products and weekly for the categories,
 # and the owner row is `now()` in the latching transaction — one Postgres
-# clock, as for the buyers. So after the latch, "the chain wrote this row" is
-# `mirrored_at >= owner_row.updated_at` on the row itself, and a row it did not
-# write is one KeyCRM retired (OD-15 (a)). No source clock: KeyCRM serves no
-# `updated_at` for a product, so a version DuckDB holds can never be shown
-# later than Postgres's — which is safe here, because both stores were only
-# ever written from the same payload (`pg_catalogue_write`, module docstring).
+# clock, as for the buyers. But "at or after the latch" is not "the chain's":
+# a write round the chain after the latch is that too, and the copy-back
+# carried one into DuckDB and released (the chain-6 review). So for these two
+# tables "the chain wrote this row" is `mirrored_at` being one of the instants
+# the chain RECORDED writing at (`pg_catalogue_write.record_key`, in the
+# writing transaction) — `_recorded_since_latch`. A row it did not write is one
+# KeyCRM retired (OD-15 (a)) or one written round it, and either refuses if it
+# differs. No source clock: KeyCRM serves no `updated_at` for a product, so a
+# version DuckDB holds can never be shown later than Postgres's — which is safe
+# here, because both stores were only ever written from the same payload
+# (`pg_catalogue_write`, module docstring).
 _REWRITTEN_BY.update({"bronze.products": "id", "bronze.categories": "id"})
 _REWRITE_CLOCK_OF = {"bronze.products": "bronze.products",
                      "bronze.categories": "bronze.categories"}
+_RECORDED_CLOCKS = frozenset(_REWRITE_CLOCK_OF.values())
 
 
 @dataclass(frozen=True)
@@ -304,22 +310,26 @@ def _catalogue_texts(rows: str, sync: str) -> MirroredTexts:
             "and the chain's writer has written them since the latch — the "
             "work a copy-back carries."),
         differ_unexplained=(
-            "and the chain's writer has not written them since the latch: "
-            f"{rows} KeyCRM retired, which Postgres holds as the mirror or the "
-            "carry last wrote them, and DuckDB holds something else. Neither "
-            "store says which is right, and a copy-back would overwrite "
-            "DuckDB's. Decide per id — correct the Postgres row, or accept it "
-            "— and ask again."),
+            "and no write the chain recorded carries their mirrored_at: "
+            f"{rows} KeyCRM retired before the flip, which Postgres holds as "
+            "the mirror or the carry last wrote them, or rows written round "
+            "the chain since the latch (the standing watch names those "
+            "chain_catalogue_written_around). DuckDB holds something else, "
+            "neither store says which is right, and a copy-back would "
+            "overwrite DuckDB's. Decide per id — restore the Postgres row "
+            "from DuckDB, mirrored_at included, or, if KeyCRM still serves "
+            f"it, let {sync} rewrite it through the chain — and ask again."),
         ahead_written=(
             "and the chain's writer wrote them since the latch — the size of "
             "the copy-back."),
         ahead_older=(
-            "and the chain's writer has not written them since the latch: "
+            "and no write the chain recorded carries their mirrored_at: "
             "Postgres held them before the flip and DuckDB did not, which a "
-            "clean pre-flip handover would have refused. A copy-back would "
+            "clean pre-flip handover would have refused, or something "
+            "inserted them round the chain since the latch. A copy-back would "
             "carry them into DuckDB as if they were the chain's. Decide per "
-            "id — delete them from Postgres if they are stale — and ask "
-            "again."),
+            "id — delete them from Postgres if nothing should hold them — "
+            "and ask again."),
         resumes=(
             f"The mirror resumes with it: {sync} ships the catalogue again."),
         soak=(
@@ -1066,11 +1076,34 @@ async def _rewritten_since_latch(
         )
         if latched is None:
             return frozenset()
-        rows = await conn.fetch(
-            f"SELECT id FROM {clock_table} WHERE mirrored_at >= $1",
-            latched,
-        )
+        if clock_table in _RECORDED_CLOCKS:
+            rows = await _recorded_since_latch(conn, clock_table, latched)
+        else:
+            rows = await conn.fetch(
+                f"SELECT id FROM {clock_table} WHERE mirrored_at >= $1",
+                latched,
+            )
     return frozenset(row["id"] for row in rows)
+
+
+async def _recorded_since_latch(conn, clock_table: str, latched):
+    """Chain 6: the rows of `clock_table` whose `mirrored_at` is one of the
+    chain's recorded write instants at or after the latch. No record is an
+    empty one — nothing is then the chain's, and every difference after the
+    latch stays CRITICAL. One nobody can parse raises
+    (`WriteRecordUnreadable`): the copy-back stops before writing anything."""
+    from core import pg_catalogue_write as catalogue
+
+    value = await conn.fetchval(
+        "SELECT value FROM meta.chain_watermarks WHERE key = $1",
+        catalogue.record_key(clock_table),
+    )
+    stamps = [] if value is None else sorted(catalogue.parse_record(value).stamps)
+    return await conn.fetch(
+        f"SELECT id FROM {clock_table} WHERE mirrored_at >= $1 "
+        f"AND {catalogue.STAMP_SQL} = ANY($2::bigint[])",
+        latched, stamps,
+    )
 
 
 async def _owned_since(pool, name: str) -> Optional[str]:
@@ -1775,6 +1808,9 @@ async def release_chain(pool, chain: ModuleType) -> bool:
 
     keys = [chain_latch.owner_key(t) for t in chain.CHAIN_TABLES]
     keys += list(getattr(chain, "CHAIN_SYNC_KEYS", ()))
+    # And any bookkeeping the chain keeps beside them (chain 6's record of its
+    # own write instants): it describes writes DuckDB now owns again.
+    keys += list(getattr(chain, "CHAIN_RELEASED_KEYS", ()))
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(

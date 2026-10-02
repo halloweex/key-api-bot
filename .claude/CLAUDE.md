@@ -3460,6 +3460,24 @@ stamps the watermark, a writer handed part of the catalogue would make the
 rest read retired, so a walk holds the writer to the two repository methods
 and those to `full_sync` and the hourly products step.
 
+**"Later than `last_ok_at`" was evidence for one hour only.** The next full
+write moves the watermark past a row written round the chain, and a row KeyCRM
+does not serve — a stray insert, a retired product edited — is not in its
+payload: it read as retired, and the copy-back, whose rule was "`mirrored_at`
+at or after the latch", carried it into DuckDB and released (reproduced by the
+chain-6 review). So each write also keeps, in its own transaction, a record of
+the instants the chain has written at — `writes:<table>` in
+`meta.chain_watermarks`, microseconds since the epoch, pruned to the stamps
+some row still carries, so bounded by the table and not by the number of
+writes — locked before any product so two writes cannot lose each other's
+stamp. From the latch on, "the chain wrote this row" means its `mirrored_at`
+is a recorded stamp, for the watch and the copy-back alike; any other instant
+at or after the latch stays CRITICAL until KeyCRM serves the row again or a
+human deletes or restores it. What it cannot see, and says so: an edit that
+leaves `mirrored_at` alone, or copies a recorded instant — on a retired row
+only a trigger or a migration would date that. The copy-back releases the
+record with the latch.
+
 **The standing watch** reads both tables four times a day: empty and written
 round (CRITICAL), rows lost (`last_rows − current − around`, CRITICAL, judged
 only once the chain's own write stamped the watermark — the mirror's
@@ -3507,12 +3525,14 @@ whichever of chains 3 and 6 lands last, which is chain 3. A test keeps it off
 every chain that does not own an order table.
 
 **The way back** is `scripts/chain_copy_back.py catalogue`. Both tables are
-mirrored landing tables there, each its own rewrite clock (`mirrored_at >=` the
-owner row's `updated_at`), compared whole at zero. Before a flip a row on one
+mirrored landing tables there, each its own rewrite clock (`mirrored_at` one
+of the chain's recorded instants, at or after the owner row's `updated_at`),
+compared whole at zero. Before a flip a row on one
 side only, or differing, refuses and names the carry or the next products sync
 (categories: `POST /api/jobs/full_sync_weekly/trigger`); after the latch a row
 the chain re-stamped is the copy's work (INFO) and a retired row that differs,
-or one only DuckDB holds, refuses. The chain map's "run a full sync" rollback
+one written round the chain since the latch, or one only DuckDB holds,
+refuses. The chain map's "run a full sync" rollback
 is wrong under OD-19 (a): a full sync under a latched chain writes Postgres
 again. No lock-out migration: an image older than the chain writes DuckDB from
 the payload and mirrors the same payload, stamping the watermark in one

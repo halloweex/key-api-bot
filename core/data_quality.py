@@ -1960,7 +1960,7 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     ("chain_catalogue_empty",
      "POST /api/jobs/full_sync_weekly/trigger lands both tables; until then every Postgres order line reads Unknown"),
     ("chain_catalogue_written_around",
-     "Find the writer that is not core.pg_catalogue_write; never re-ship the catalogue from DuckDB"),
+     "Find the writer that is not pg_catalogue_write; delete a stray id or restore that one row from DuckDB, mirrored_at too; never re-ship the catalogue"),
     ("chain_catalogue_rows_lost",
      "Nothing deletes this table: find the statement; the next hourly products sync restores what KeyCRM serves"),
     ("chain_catalogue_retired",

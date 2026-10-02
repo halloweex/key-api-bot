@@ -34,6 +34,49 @@ write carried that is gone — from `last_rows`, which is why the rows are
 de-duplicated here before they are counted: the mirror's `last_rows` counts a
 payload's repeated id twice.
 
+THE CHAIN KEEPS A RECORD OF ITS OWN INSTANTS
+
+"Later than `last_ok_at`" is evidence only until the next full write: that
+write moves `last_ok_at` past a row written round the chain, and a row KeyCRM
+does not serve — a stray insert, a retired product edited — is not in its
+payload, so nothing re-stamps it. An hour later it read as RETIRED, "not a
+defect", and the copy-back took it for the chain's own work, because "the
+chain wrote it" was `mirrored_at >= ` the latch, which any write after the
+latch satisfies (the chain-6 review reproduced both, and the copy-back
+released the latch with the stray rows in DuckDB).
+
+So every write keeps, in the same transaction, a record of the instants the
+chain has written at: the row `writes:<table>` in `meta.chain_watermarks`
+(`record_key`), JSON `{"stamps": [...], "previous": ...}` in whole
+microseconds since the epoch (`STAMP_SQL` — an integer renders one way
+whatever the session's DateStyle). `stamps` is this write's `now()` plus every
+earlier stamp a row still carries; a stamp no row carries is dropped, so the
+record is bounded by the number of distinct `mirrored_at` values in the table,
+never by the number of writes. `previous` is `last_ok_at` as this write found
+it — the full write before it — which is what the short-write check measures
+against (`core.pg_chain_invariants`).
+
+From the latch on, "the chain wrote this row" is `mirrored_at` being one of the
+recorded stamps: the watch reads any other instant at or after the latch as
+written round the chain, CRITICAL for as long as the row keeps it, however many
+full writes pass; the copy-back counts only recorded rows as the chain's work
+(`chain_transfer._rewritten_since_latch`). It clears when KeyCRM serves the
+row again (the next full write re-stamps it) or when a human deletes it or
+restores it, `mirrored_at` included, from DuckDB's frozen copy.
+
+What it cannot see, named rather than claimed: a write that leaves
+`mirrored_at` alone, or copies an instant the chain did write. On a row KeyCRM
+serves the next full write overwrites it within the hour; on a retired one
+nothing in Postgres dates it — a trigger or a per-row history would, and both
+are a migration. The copy-back still refuses such an edit on a row retired
+before the flip, where DuckDB's frozen copy disagrees.
+
+The record row is locked FIRST, before any product: two full writes of one
+table queue on it and never interleave, so neither loses the other's stamp,
+and the rows are still locked in id order behind it. A record nobody can parse
+stops the write (`WriteRecordUnreadable`) rather than forget which instants
+were the chain's.
+
 THE FULL-CATALOGUE CONTRACT
 
 Because every write stamps `last_ok_at`, a write of PART of the catalogue
@@ -85,10 +128,12 @@ tick asks for the products watermark every minute.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from core import chain_latch
 from core.landing_rows import (
@@ -158,6 +203,42 @@ ACQUIRE_TIMEOUT_S = 10
 # Per statement, inside every writing transaction (chain 4's form, DN-05a).
 STATEMENT_TIMEOUT = "30s"
 
+# The record of the chain's own write instants (module docstring). The key
+# lives beside the owner rows in `meta.chain_watermarks`; nothing reads that
+# table except by an exact key or the `owner:` prefix, so a third family of
+# keys is seen by nobody but the two readers here.
+RECORD_PREFIX = "writes:"
+
+# A row's `mirrored_at` as the record keeps it: whole microseconds since the
+# epoch. `extract(epoch …)` is exact to the microsecond from PostgreSQL 14 on.
+STAMP_SQL = "(extract(epoch FROM mirrored_at) * 1000000)::bigint"
+
+# Released with the owner rows by `scripts/chain_copy_back.py catalogue`: the
+# record describes writes DuckDB owns again, and a later flip starts a new one.
+CHAIN_RELEASED_KEYS: Tuple[str, ...] = tuple(
+    f"{RECORD_PREFIX}{table}" for table in CHAIN_TABLES)
+
+_EMPTY_RECORD_TEXT = '{"stamps": [], "previous": null}'
+# Created empty if absent, then locked: the first statement of a write after
+# the owner rows (module docstring, last paragraph).
+_RECORD_CREATE_SQL = (
+    "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+    "VALUES ($1, $2, now()) ON CONFLICT (key) DO NOTHING")
+_RECORD_LOCK_SQL = (
+    "SELECT value FROM meta.chain_watermarks WHERE key = $1 FOR UPDATE")
+_PREVIOUS_OK_SQL = (
+    "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = $1")
+# This write's instant, every earlier stamp a row still carries, and the full
+# write before this one. `{table}` is the chain's own constant, never input.
+_RECORD_WRITE_SQL = (
+    "UPDATE meta.chain_watermarks SET updated_at = now(), value = "
+    "jsonb_build_object("
+    "'stamps', (SELECT COALESCE(jsonb_agg(s ORDER BY s), '[]'::jsonb) FROM ("
+    "SELECT DISTINCT " + STAMP_SQL + " AS s FROM {table} "
+    "WHERE mirrored_at = now() OR " + STAMP_SQL + " = ANY($2::bigint[])) kept), "
+    "'previous', (extract(epoch FROM $3::timestamptz) * 1000000)::bigint"
+    ")::text WHERE key = $1")
+
 # How often the unmet-precondition warning may repeat for one reason.
 UNMET_WARN_EVERY_S = 3600.0
 _unmet_warned: Dict[str, float] = {}
@@ -171,6 +252,47 @@ class CatalogueRefused(ValueError):
     """A catalogue Postgres would refuse, refused whole before the latch.
     Nothing was written in either store — DuckDB writes the catalogue in one
     transaction and would have refused it whole too."""
+
+
+class WriteRecordUnreadable(ValueError):
+    """`writes:<table>` holds something `parse_record` cannot read. The write
+    stops, the watch is blind and the copy-back refuses — none of them may
+    guess which instants were the chain's."""
+
+
+@dataclass(frozen=True)
+class WriteRecord:
+    """The record of one table's chain writes (module docstring).
+
+    `stamps` — the instants, in microseconds since the epoch, of every chain
+    write some row still carries; `previous` — `last_ok_at` as the last write
+    found it, None when no full write had stamped the table before it."""
+    stamps: FrozenSet[int] = frozenset()
+    previous: Optional[int] = None
+
+
+def record_key(table: str) -> str:
+    return f"{RECORD_PREFIX}{table}"
+
+
+def parse_record(value: str) -> WriteRecord:
+    """The record as stored. Raises `WriteRecordUnreadable` on anything but
+    `{"stamps": [int, ...], "previous": int | null}` — a bool is not an int."""
+    def whole(x) -> bool:
+        return isinstance(x, int) and not isinstance(x, bool)
+
+    try:
+        doc = json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise WriteRecordUnreadable(f"not JSON ({type(exc).__name__})") from None
+    if not isinstance(doc, dict):
+        raise WriteRecordUnreadable("not an object")
+    stamps, previous = doc.get("stamps"), doc.get("previous")
+    if not isinstance(stamps, list) or not all(whole(s) for s in stamps):
+        raise WriteRecordUnreadable("'stamps' is not a list of integers")
+    if previous is not None and not whole(previous):
+        raise WriteRecordUnreadable("'previous' is not an integer")
+    return WriteRecord(stamps=frozenset(stamps), previous=previous)
 
 
 def env_writes_postgres() -> bool:
@@ -345,6 +467,22 @@ def _dedupe(rows: Sequence[tuple]) -> List[tuple]:
     return [latest[k] for k in sorted(latest)]
 
 
+async def _land(conn, table: str, sql: str, rows: List[tuple]) -> None:
+    """One whole catalogue into `table`, on the writer's transaction: the
+    record locked first, the rows, the watermark, then the record of this
+    write's instant (module docstring)."""
+    from core.pg_landing import WATERMARK_OK_SQL
+
+    key = record_key(table)
+    await conn.execute(_RECORD_CREATE_SQL, key, _EMPTY_RECORD_TEXT)
+    record = parse_record(await conn.fetchval(_RECORD_LOCK_SQL, key))
+    previous_ok_at = await conn.fetchval(_PREVIOUS_OK_SQL, table)
+    await conn.executemany(sql, rows)
+    await conn.execute(WATERMARK_OK_SQL, table, len(rows))
+    await conn.execute(_RECORD_WRITE_SQL.format(table=table), key,
+                       sorted(record.stamps), previous_ok_at)
+
+
 async def upsert_products(rows: List[ProductRow]) -> int:
     """The whole product catalogue, from the rows `core.landing_rows` parsed.
     Raises. Returns how many distinct products were written.
@@ -372,8 +510,6 @@ async def upsert_products(rows: List[ProductRow]) -> int:
         + ", ".join(f"{c} = EXCLUDED.{c}" for c in columns if c != "id")
         + ", mirrored_at = EXCLUDED.mirrored_at"
     )
-    from core.pg_landing import WATERMARK_OK_SQL
-
     pool = await _pool()
     async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
         # Inside the acquire, not before it: an acquire that ends without a
@@ -382,8 +518,7 @@ async def upsert_products(rows: List[ProductRow]) -> int:
         async with conn.transaction():
             await conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
-            await conn.executemany(sql, rows)
-            await conn.execute(WATERMARK_OK_SQL, PRODUCTS, len(rows))
+            await _land(conn, PRODUCTS, sql, rows)
     return len(rows)
 
 
@@ -404,14 +539,11 @@ async def upsert_categories(rows: List[CategoryRow]) -> int:
         + ", ".join(f"{c} = EXCLUDED.{c}" for c in columns if c != "id")
         + ", mirrored_at = EXCLUDED.mirrored_at"
     )
-    from core.pg_landing import WATERMARK_OK_SQL
-
     pool = await _pool()
     async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
         stamp = _latch()
         async with conn.transaction():
             await conn.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
             await chain_latch.claim(conn, CHAIN_TABLES, stamp)
-            await conn.executemany(sql, rows)
-            await conn.execute(WATERMARK_OK_SQL, CATEGORIES, len(rows))
+            await _land(conn, CATEGORIES, sql, rows)
     return len(rows)

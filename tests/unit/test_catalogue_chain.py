@@ -411,6 +411,43 @@ class TestDeduplication:
                                        (3, "c2", None, None, None, None)]
 
 
+class TestTheRecordOfTheChainsWrites:
+    """What `writes:<table>` holds and who may read it. The statements that
+    write it are proved on a real Postgres (`test_catalogue_writer.py`)."""
+
+    def test_it_reads_what_the_writer_stores(self):
+        record = chain.parse_record('{"stamps": [3, 1, 2], "previous": 7}')
+        assert record == chain.WriteRecord(stamps=frozenset({1, 2, 3}), previous=7)
+        assert chain.parse_record('{"stamps": [], "previous": null}') == chain.WriteRecord()
+        # The empty record the writer creates is one it can read back.
+        assert chain.parse_record(chain._EMPTY_RECORD_TEXT) == chain.WriteRecord()
+
+    @pytest.mark.parametrize("value", [
+        "not json", "[]", "null", '{"previous": 1}', '{"stamps": "1,2"}',
+        '{"stamps": [1, "2"]}', '{"stamps": [true]}', '{"stamps": [1.5]}',
+        '{"stamps": [], "previous": "1"}', '{"stamps": [], "previous": false}',
+    ])
+    def test_anything_else_is_unreadable_never_a_guess(self, value):
+        with pytest.raises(chain.WriteRecordUnreadable):
+            chain.parse_record(value)
+
+    def test_one_key_per_table_beside_the_owner_rows(self):
+        keys = {chain.record_key(t) for t in chain.CHAIN_TABLES}
+        assert keys == {"writes:bronze.products", "writes:bronze.categories"}
+        assert not keys & {chain_latch.owner_key(t) for t in chain.CHAIN_TABLES}
+        assert not keys & set(chain.CHAIN_SYNC_KEYS)
+
+    def test_the_copy_back_releases_it_with_the_latch(self):
+        assert set(chain.CHAIN_RELEASED_KEYS) == {
+            chain.record_key(t) for t in chain.CHAIN_TABLES}
+
+    def test_the_copy_back_reads_it_for_both_tables_and_the_buyers_do_not(self):
+        from core import chain_transfer
+
+        assert chain_transfer._RECORDED_CLOCKS == frozenset(chain.CHAIN_TABLES)
+        assert chain_transfer._REWRITE_CLOCK_TABLE not in chain_transfer._RECORDED_CLOCKS
+
+
 # ─── only the two full-catalogue sync sites reach the writer (T-6) ──────────
 
 
@@ -791,6 +828,14 @@ class TestTheStandingWatch:
         assert (inv.CATALOGUE_WRITTEN_AROUND, "CRITICAL") in _names(issues)
         (around,) = [i for i in issues if i.check_name == inv.CATALOGUE_WRITTEN_AROUND]
         assert around.sample_ids == (7,)
+        assert "later than the last full write" in around.description
+
+    def test_once_the_chain_wrote_it_names_the_record_not_the_watermark(self):
+        (around,) = [i for i in inv.check_chain_invariants(_facts(
+            _table(current=1002, around=1, around_sample=(777,), recorded=True)))
+            if i.check_name == inv.CATALOGUE_WRITTEN_AROUND]
+        assert "none of the chain's recorded writes" in around.description
+        assert "stands until" in around.description
 
     def test_lost_counts_the_rows_written_round_it_as_still_there(self):
         """The stray-update probe: one served row re-stamped by somebody else

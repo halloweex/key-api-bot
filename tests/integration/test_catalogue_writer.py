@@ -17,7 +17,11 @@ What is proved, in the design's numbering:
 - I-8 planted defects reach the standing watch with their names;
 - I-4/I-5 the way there and back: the pre-flip handover refuses a retired
   product until it is carried, then the flip, then the copy-back releases with
-  the retired product in DuckDB.
+  the retired product in DuckDB;
+- the record of the chain's own write instants: what it keeps, that a write
+  round the chain outlives the next full write in the watch and refuses the
+  copy-back, that it is locked before any product, and that one nobody can
+  parse stops the write (the chain-6 review's first finding).
 
 The catalogue tables are emptied around each test, with the owner rows and the
 two watermark rows.
@@ -63,7 +67,8 @@ async def _clean(pool):
                            list(chain.CHAIN_TABLES))
         await conn.execute(
             "DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%' "
-            "OR key = ANY($1::text[])", list(chain.CHAIN_SYNC_KEYS))
+            "OR key LIKE $2 OR key = ANY($1::text[])", list(chain.CHAIN_SYNC_KEYS),
+            chain.RECORD_PREFIX + "%")
 
 
 @pytest_asyncio.fixture
@@ -292,6 +297,152 @@ class TestPlantedDefectsReachTheWatch:
         assert _names(issues) == {(inv.CATALOGUE_EMPTY, CATEGORIES, "CRITICAL")}
 
 
+async def _record(pool, table=PRODUCTS):
+    rows = await _pg(pool, "SELECT value FROM meta.chain_watermarks WHERE key = $1",
+                     chain.record_key(table))
+    return chain.parse_record(rows[0]["value"]) if rows else None
+
+
+async def _stamp(pool, ts):
+    (row,) = await _pg(pool, "SELECT (extract(epoch FROM $1::timestamptz) * 1000000)"
+                             "::bigint AS s", ts)
+    return row["s"]
+
+
+class TestTheRecordOfTheChainsWrites:
+    """The review's finding: "later than `last_ok_at`" lasted one full write.
+    The record of the chain's own instants is what outlives it."""
+
+    @pytest.mark.asyncio
+    async def test_it_keeps_exactly_the_instants_some_row_still_carries(self, stores):
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await store.upsert_products(PAYLOAD)
+        first = (await _state(pool))["last_ok_at"]
+        record = await _record(pool)
+        assert record.stamps == {await _stamp(pool, first)}
+        assert record.previous is None, "no full write had stamped the table before"
+
+        await store.upsert_products(PAYLOAD[:2])             # 3 retired at `first`
+        second = (await _state(pool))["last_ok_at"]
+        record = await _record(pool)
+        assert record.stamps == {await _stamp(pool, first), await _stamp(pool, second)}
+        assert record.previous == await _stamp(pool, first)
+
+        await store.upsert_products(PAYLOAD)                 # 3 served again
+        third = (await _state(pool))["last_ok_at"]
+        record = await _record(pool)
+        assert record.stamps == {await _stamp(pool, third)}, (
+            "a stamp no row carries was kept: the record would grow with every write")
+        assert record.previous == await _stamp(pool, second)
+        # Each table its own record, written by its own writes alone.
+        assert await _record(pool, CATEGORIES) is None
+
+    @pytest.mark.asyncio
+    async def test_a_write_round_the_chain_outlives_the_next_full_write(self, stores):
+        """The review's reproduction in the writer's terms: a stray insert of
+        an id KeyCRM never served and a retired product edited with its
+        `mirrored_at` moved. Both used to read as retired one write later."""
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await store.upsert_categories(CATS)
+        await store.upsert_products(PAYLOAD)
+        await store.upsert_products(PAYLOAD[:2])             # 3 retired by the chain
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO bronze.products (id, name, brand, sku, price) "
+                               "VALUES (777, 'stray insert', 'X', 'STRAY', 1.00)")
+            await conn.execute("UPDATE bronze.products SET name = 'tampered retired', "
+                               "price = 0.01, mirrored_at = now() WHERE id = 3")
+        before = inv.check_chain_invariants(await _facts(pool))
+        assert _names(before) == {(inv.CATALOGUE_WRITTEN_AROUND, PRODUCTS, "CRITICAL")}
+
+        await store.upsert_products(PAYLOAD[:2])             # the next hourly write
+
+        issues = inv.check_chain_invariants(await _facts(pool))
+        assert _names(issues) == {(inv.CATALOGUE_WRITTEN_AROUND, PRODUCTS, "CRITICAL")}, (
+            "the next full write turned a write round the chain into 'retired'")
+        (around,) = issues
+        assert around.sample_ids == (3, 777) and around.count == 2
+        assert "recorded" in around.description
+
+        # KeyCRM serving the row again is what clears it: the chain re-stamps it.
+        await store.upsert_products(PAYLOAD)
+        (around,) = inv.check_chain_invariants(await _facts(pool))
+        assert around.sample_ids == (777,)
+
+    @pytest.mark.asyncio
+    async def test_a_row_the_chain_retired_is_still_retired(self, stores):
+        """The other half: the record must not turn the chain's own old
+        instants into writes round it."""
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await store.upsert_categories(CATS)
+        await store.upsert_products(PAYLOAD)
+        await store.upsert_products(PAYLOAD[:2])
+        await store.upsert_products(PAYLOAD[:1])
+        issues = inv.check_chain_invariants(await _facts(pool))
+        assert _names(issues) == {(inv.CATALOGUE_RETIRED, PRODUCTS, "INFO")}
+        assert issues[0].sample_ids == (2, 3)
+
+    @pytest.mark.asyncio
+    async def test_the_record_is_locked_before_any_product(self, stores):
+        """Two writes of one table queue on the record, so neither loses the
+        other's stamp: shown without a race, the lock-order test's way. A
+        session holding the record stops a write before it has locked any
+        product."""
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await store.upsert_products(PAYLOAD)                 # the latch and the record
+        async with pool.acquire() as holder:
+            tx = holder.transaction()
+            await tx.start()
+            write = None
+            try:
+                await holder.execute("SELECT 1 FROM meta.chain_watermarks WHERE key = $1 "
+                                     "FOR UPDATE", chain.record_key(PRODUCTS))
+                write = asyncio.ensure_future(chain.upsert_products(product_rows(PAYLOAD)))
+                for _ in range(200):
+                    (waiting,) = await _pg(
+                        pool, "SELECT count(*) AS n FROM pg_stat_activity "
+                              "WHERE datname = current_database() "
+                              "AND wait_event_type = 'Lock'")
+                    if waiting["n"] or write.done():
+                        break
+                    await asyncio.sleep(0.05)
+                assert not write.done(), "the write did not wait for the record"
+                free = await holder.fetchval(
+                    "SELECT count(*) FROM (SELECT 1 FROM bronze.products "
+                    "FOR UPDATE SKIP LOCKED) s")
+                assert free == 3, "the write locked a product before the record"
+            finally:
+                await tx.rollback()
+                if write is not None:
+                    assert await asyncio.wait_for(write, timeout=30) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_record_nobody_can_parse_stops_the_write_and_blinds_the_watch(
+            self, stores):
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await store.upsert_categories(CATS)
+        await store.upsert_products(PAYLOAD)
+        before = await _pg(pool, "SELECT id, mirrored_at FROM bronze.products ORDER BY id")
+        state = await _state(pool)
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE meta.chain_watermarks SET value = 'not json' "
+                               "WHERE key = $1", chain.record_key(PRODUCTS))
+
+        with pytest.raises(chain.WriteRecordUnreadable):
+            await chain.upsert_products(product_rows(PAYLOAD[:2]))
+
+        assert await _pg(pool, "SELECT id, mirrored_at FROM bronze.products "
+                               "ORDER BY id") == before, "a write forgot the record"
+        assert (await _state(pool))["last_ok_at"] == state["last_ok_at"]
+        (issue,) = inv.check_chain_invariants(await _facts(pool))
+        assert issue.check_name == inv.UNWATCHED
+        assert "WriteRecordUnreadable" in issue.description
+
+
 class TestTheWayThereAndBack:
     async def _mirrored(self, store, pool):
         """Today's state: DuckDB written and the mirror shipping the same
@@ -367,6 +518,9 @@ class TestTheWayThereAndBack:
             ("2026-10-01T09:00:00+00:00",)]
         assert await chain_latch.read_owners(pool) == {}
         assert chain_latch.latched_at(chain.CHAIN) is None
+        # The record of the chain's writes goes with the latch.
+        assert await _pg(pool, "SELECT key FROM meta.chain_watermarks WHERE key LIKE $1",
+                         chain.RECORD_PREFIX + "%") == []
 
         # And the flag decides again: the next write is DuckDB's, mirrored.
         env.setenv(chain.WRITE_ENV, "duckdb")
@@ -391,6 +545,41 @@ class TestTheWayThereAndBack:
         with pytest.raises(CopyBackRefused):
             await copy_back(store, chain, dry_run=False)
         assert chain_latch.latched(chain.CHAIN)
+
+    @pytest.mark.asyncio
+    async def test_after_the_latch_a_row_written_round_the_chain_refuses(self, stores):
+        """The review's reproduction, end to end: after the flip a stray
+        product is inserted and the carried retired one is edited with its
+        `mirrored_at` moved, then the next hourly write runs. Both were taken
+        for the chain's work — at or after the latch — and the copy-back
+        released with them in DuckDB. Only a recorded instant is the chain's."""
+        from core.chain_transfer import copy_back, CopyBackRefused, handover_check
+        from core.pg_landing import carry_retired_catalogue
+
+        store, pool, env = stores
+        await self._mirrored(store, pool)
+        await carry_retired_catalogue(store, dry_run=False)
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await store.upsert_products(PAYLOAD)                 # the flip
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO bronze.products (id, name, brand, sku, price) "
+                               "VALUES (777, 'stray insert', 'X', 'STRAY', 1.00)")
+            await conn.execute("UPDATE bronze.products SET name = 'tampered retired', "
+                               "price = 0.01, mirrored_at = now() WHERE id = 1055")
+        await store.upsert_products(PAYLOAD[:2] + [_product(3, "Product 3 renamed")])
+
+        found = {(i.check_name, i.sample_ids, i.severity.value)
+                 for i in await handover_check(store, chain)}
+        assert ("handover_rows_differ", (1055,), "CRITICAL") in found
+        assert ("handover_rows_ahead", (777,), "CRITICAL") in found
+        # The chain's own rename is still the copy's work.
+        assert ("handover_rows_differ", (3,), "INFO") in found
+        with pytest.raises(CopyBackRefused):
+            await copy_back(store, chain, dry_run=False)
+        assert chain_latch.latched(chain.CHAIN)
+        assert await chain_latch.read_owners(pool) != {}
+        assert await _duck(store, "SELECT id, name FROM products WHERE id IN (777, 1055) "
+                                  "ORDER BY id") == [(1055, "Retired")]
 
     @pytest.mark.asyncio
     async def test_the_carry_refuses_once_the_chain_owns_the_catalogue(self, stores):

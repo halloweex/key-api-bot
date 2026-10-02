@@ -318,8 +318,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "chain_catalogue_empty": _c(
         "a products sync or a full sync lands the catalogue again"),
     "chain_catalogue_written_around": _c(
-        "the next full write re-stamps the rows — once a human has found the "
-        "writer that went round the chain"),
+        "the next full write re-stamps a row KeyCRM serves; one it does not "
+        "stays named until a human deletes or restores it — after finding "
+        "the writer that went round the chain"),
     "chain_catalogue_rows_lost": _c(
         "the next full write restores what KeyCRM still serves; a human finds "
         "the statement that deleted them"),

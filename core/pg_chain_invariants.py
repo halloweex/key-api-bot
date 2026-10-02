@@ -363,8 +363,12 @@ class CatalogueTable:
     write (the chain's, or the mirror's before it) stamped on every row it
     carried — and `last_rows` how many distinct rows it carried. `current`,
     `retired` and `around` split the table by `mirrored_at` against it: equal,
-    earlier (KeyCRM stopped serving the row) and later (written round the
-    chain). None for `last_ok_at` is a table no full write has ever stamped."""
+    earlier (KeyCRM stopped serving the row) and written round the chain —
+    later than it, or, once the chain has written (`recorded`), at or after
+    the latch at an instant that is none of the chain's recorded writes
+    (`pg_catalogue_write`, "THE CHAIN KEEPS A RECORD OF ITS OWN INSTANTS"). A
+    later full write never turns that second kind into retired. None for
+    `last_ok_at` is a table no full write has ever stamped."""
     table: str
     rows: int = 0
     last_ok_at: Optional[datetime] = None
@@ -374,6 +378,7 @@ class CatalogueTable:
     around: int = 0
     retired_sample: Tuple[int, ...] = ()
     around_sample: Tuple[int, ...] = ()
+    recorded: bool = False
 
 
 @dataclass(frozen=True)
@@ -688,19 +693,31 @@ FROM orphans
 """
 
 # One catalogue table split by `mirrored_at` against the last full write's
-# instant. The table name is the chain's own constant, never input.
+# instant ($1) and, once the chain has written, against its record: $2 the
+# latch (the owner row's `updated_at`, Postgres's clock), $3 the recorded
+# stamps. With $2 NULL the record is not consulted. The table name is the
+# chain's own constant, never input; `{stamp}` is `STAMP_SQL`.
 _CATALOGUE_STATE_SQL = (
     "SELECT last_ok_at, last_rows FROM meta.mirror_state WHERE table_name = $1")
+_CATALOGUE_RECORD_SQL = (
+    "SELECT (SELECT updated_at FROM meta.chain_watermarks WHERE key = $1) AS latched, "
+    "(SELECT value FROM meta.chain_watermarks WHERE key = $2) AS record")
 _CATALOGUE_SPLIT_SQL = """
-SELECT count(*)                                         AS rows,
-       count(*) FILTER (WHERE mirrored_at = $1)         AS current,
-       count(*) FILTER (WHERE mirrored_at < $1)         AS retired,
-       count(*) FILTER (WHERE mirrored_at > $1)         AS around,
-       (array_agg(id ORDER BY id) FILTER (WHERE mirrored_at < $1))[1:10]
-                                                        AS retired_sample,
-       (array_agg(id ORDER BY id) FILTER (WHERE mirrored_at > $1))[1:10]
-                                                        AS around_sample
-FROM {table}
+WITH r AS (
+    SELECT id, mirrored_at,
+           COALESCE(mirrored_at > $1
+                    OR ($2::timestamptz IS NOT NULL AND mirrored_at >= $2
+                        AND NOT {stamp} = ANY($3::bigint[])), false) AS around
+    FROM {table}
+)
+SELECT count(*)                                                    AS rows,
+       count(*) FILTER (WHERE mirrored_at = $1 AND NOT around)     AS current,
+       count(*) FILTER (WHERE mirrored_at < $1 AND NOT around)     AS retired,
+       count(*) FILTER (WHERE around)                              AS around,
+       (array_agg(id ORDER BY id) FILTER (WHERE mirrored_at < $1 AND NOT around))[1:10]
+                                                                   AS retired_sample,
+       (array_agg(id ORDER BY id) FILTER (WHERE around))[1:10]     AS around_sample
+FROM r
 """
 
 _KYIV_DAY_SQL = "SELECT ($1::timestamptz AT TIME ZONE 'Europe/Kyiv')::date"
@@ -787,8 +804,17 @@ async def _read_buyers(conn, latched_at: Optional[datetime] = None) -> Buyers:
 
 async def _read_catalogue(conn, latched_at: Optional[datetime] = None) -> Catalogue:
     """Both catalogue tables against their last full write. A table with no
-    stamp is read for its size alone — the verdict says why it is unjudged."""
-    from core.pg_catalogue_write import CHAIN_TABLES
+    stamp is read for its size alone — the verdict says why it is unjudged.
+
+    The chain's record of its own writes is consulted from the latch on — the
+    owner row of the table, whose `updated_at` is the latching transaction's
+    `now()`. No record yet (the chain has latched through the other table) is
+    an empty one: nothing at or after the latch is then the chain's. A record
+    nobody can parse raises, and the group reads as unwatched."""
+    from core import chain_latch
+    from core.pg_catalogue_write import (
+        CHAIN_TABLES, STAMP_SQL, WriteRecord, parse_record, record_key,
+    )
 
     tables: List[CatalogueTable] = []
     for table in CHAIN_TABLES:
@@ -800,14 +826,23 @@ async def _read_catalogue(conn, latched_at: Optional[datetime] = None) -> Catalo
             tables.append(CatalogueTable(table=table, rows=int(rows),
                                          last_rows=last_rows))
             continue
-        row = await conn.fetchrow(_CATALOGUE_SPLIT_SQL.format(table=table), last_ok_at)
+        mark = await conn.fetchrow(_CATALOGUE_RECORD_SQL,
+                                   chain_latch.owner_key(table), record_key(table))
+        latched = mark["latched"]
+        record = WriteRecord()
+        if latched is not None and mark["record"] is not None:
+            record = parse_record(mark["record"])
+        row = await conn.fetchrow(
+            _CATALOGUE_SPLIT_SQL.format(table=table, stamp=STAMP_SQL),
+            last_ok_at, latched, sorted(record.stamps))
         tables.append(CatalogueTable(
             table=table, rows=int(row["rows"]), last_ok_at=last_ok_at,
             last_rows=None if last_rows is None else int(last_rows),
             current=int(row["current"]), retired=int(row["retired"]),
             around=int(row["around"]),
             retired_sample=tuple(int(i) for i in (row["retired_sample"] or ())),
-            around_sample=tuple(int(i) for i in (row["around_sample"] or ()))))
+            around_sample=tuple(int(i) for i in (row["around_sample"] or ())),
+            recorded=latched is not None))
     return Catalogue(tables=tuple(tables), latched_at=latched_at)
 
 
@@ -1334,13 +1369,19 @@ def _catalogue_issues(cat: Catalogue, chain: str) -> List:
                 severity=Severity.CRITICAL, count=t.around,
                 sample_ids=t.around_sample,
                 description=(
-                    f"{t.around} row(s) of {t.table} were written after the "
-                    f"last full write of the catalogue (e.g. id {shown}). "
-                    f"{chain} writes the whole catalogue and stamps "
-                    "meta.mirror_state in the same transaction, so every row it "
-                    "writes carries that instant exactly; a later one is a "
-                    "writer going round it, and nothing compares this table "
-                    "with DuckDB any more.")))
+                    f"{t.around} row(s) of {t.table} carry a mirrored_at "
+                    + ("that is none of the chain's recorded writes "
+                       if t.recorded else
+                       "later than the last full write of the catalogue ")
+                    + f"(e.g. id {shown}). {chain} writes the whole catalogue "
+                    "and stamps meta.mirror_state in the same transaction, so "
+                    "every row it writes carries that instant exactly"
+                    + (", and it records every instant it writes at"
+                       if t.recorded else "")
+                    + "; any other is a writer going round it, and nothing "
+                    "compares this table with DuckDB any more. The finding "
+                    "stands until KeyCRM serves the row again or a human "
+                    "deletes or restores it.")))
         if (cat.latched_at is not None and t.last_rows is not None
                 and t.last_ok_at >= cat.latched_at):
             lost = t.last_rows - t.current - t.around
