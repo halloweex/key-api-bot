@@ -38,7 +38,14 @@
 # the hourly cadence below is what bounds that. A MISSING file never
 # overwrites the recorded hash, so a file that comes back is judged against
 # what it was; deleting it is a DROP (owner decision OD-11 (a)) and the soak
-# fails on it whatever KS_DUCKDB says.
+# fails on it whatever KS_DUCKDB says. And a MISSING is never forgotten when
+# the file comes back: `missing_at`, the last check that found it gone, is
+# carried by every later run and published by `--status`. A file moved away
+# and back byte for byte reads UNCHANGED, rightly — the bytes are what they
+# were — but for the hours it was gone nothing could vouch for it, so the soak
+# fails the day it was missing in and the week of silence starts again after
+# it. Without the key the episode lived only in `history`, which nothing
+# reads (review of 02.10).
 #
 # STATE, AND ITS BOUND
 # $STATE_DIR/state is key=value, written atomically (temp file and rename in
@@ -102,7 +109,7 @@ fi
 # ── the record ────────────────────────────────────────────────────────────────
 # Only these keys, and only values made of these characters: a state file that
 # was edited into something else is an ERROR, not an instruction.
-KEYS="version file hash wal size since_epoch since since_reason checked_epoch checked_at previous_checked_at last changes"
+KEYS="version file hash wal size since_epoch since since_reason checked_epoch checked_at previous_checked_at last changes missing_at"
 for k in $KEYS; do printf -v "r_$k" '%s' ""; done
 HAVE_RECORD=0
 if [ -f "$STATE" ]; then
@@ -130,7 +137,8 @@ if [ "$MODE" = status ]; then
     fi
     emit STATUS "last=${r_last:-UNKNOWN} since=$r_since since_reason=${r_since_reason:-baseline}" \
         "checked_at=$r_checked_at age_s=$((NOW - r_since_epoch))" \
-        "checked_age_s=$((NOW - ${r_checked_epoch:-$r_since_epoch})) changes=${r_changes:-0}"
+        "checked_age_s=$((NOW - ${r_checked_epoch:-$r_since_epoch})) changes=${r_changes:-0}" \
+        "missing_at=${r_missing_at:-none}"
     exit 0
 fi
 
@@ -155,6 +163,7 @@ record() {
         echo "previous_checked_at=$n_previous"
         echo "last=$1"
         echo "changes=$n_changes"
+        echo "missing_at=$n_missing_at"
     } > "$tmp"
     chmod 600 "$tmp"
     mv -f "$tmp" "$STATE"
@@ -168,6 +177,7 @@ record() {
 }
 
 n_previous="${r_checked_at:-}"
+n_missing_at="${r_missing_at:-}"
 if [ ! -e "$DUCKDB_FILE" ]; then
     if [ "$HAVE_RECORD" -eq 1 ]; then
         # The recorded content stays the reference: a file that comes back is
@@ -175,6 +185,7 @@ if [ ! -e "$DUCKDB_FILE" ]; then
         n_hash="$r_hash"; n_wal="$r_wal"; n_size="$r_size"
         n_since_epoch="$r_since_epoch"; n_since_reason="${r_since_reason:-baseline}"
         n_changes="${r_changes:-0}"
+        n_missing_at="$(iso "$NOW")"
         record MISSING
     fi
     emit MISSING "file=$DUCKDB_FILE last_hash=${r_hash:-none} last_checked_at=${r_checked_at:-never}"
@@ -199,7 +210,8 @@ if [ "$n_hash" = "$r_hash" ] && [ "$n_wal" = "$r_wal" ]; then
     n_changes="${r_changes:-0}"
     record UNCHANGED
     emit UNCHANGED "file=$DUCKDB_FILE since=$(iso "$n_since_epoch") since_reason=$n_since_reason" \
-        "age_s=$((NOW - n_since_epoch)) sha256=$n_hash wal=$n_wal changes=$n_changes"
+        "age_s=$((NOW - n_since_epoch)) sha256=$n_hash wal=$n_wal" \
+        "changes=$n_changes${n_missing_at:+ missing_at=$n_missing_at}"
     exit 0
 fi
 
@@ -207,5 +219,5 @@ n_since_epoch="$NOW"; n_since_reason=change; n_changes=$(( ${r_changes:-0} + 1 )
 record CHANGED
 emit CHANGED "file=$DUCKDB_FILE since=$(iso "$NOW") changed_after=${r_checked_at:-unknown}" \
     "sha256=$n_hash was=$r_hash wal=$n_wal was_wal=$r_wal size=$n_size was_size=${r_size:-?}" \
-    "changes=$n_changes"
+    "changes=$n_changes${n_missing_at:+ missing_at=$n_missing_at}"
 exit 1

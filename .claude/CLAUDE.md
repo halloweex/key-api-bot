@@ -3364,8 +3364,12 @@ can never be the change it reports; record in `/root/duckdb-silence/state`
 500 by the run that grows it. `--peek` hashes and writes nothing; `--status`
 reads the record and hashes nothing — that is what the soak calls. A MISSING
 file keeps the recorded hash as the reference, and the soak fails on it under
-either mode: deleting the file is a DROP. It cannot see a change and its exact
-reversal inside one hour, nor a read-only open.
+either mode: deleting the file is a DROP. The record also keeps `missing_at`,
+the last check that found the file gone, through every later run: a file
+moved away and back byte for byte reads UNCHANGED, and until the key existed
+only the history file — which nothing reads — remembered the episode, so the
+soak passed (review of 02.10). It cannot see a change and its exact reversal
+inside one hour, nor a read-only open.
 
 **A copy-back now leaves a trace.** `scripts/chain_copy_back.py` is the only
 lever that gives a chain back to DuckDB, and it used to leave only an absence
@@ -3382,7 +3386,8 @@ decision to restart both clocks, said out loud.
 
 **The soak checks**, `deploy/stage4_soak/50`–`53`, read-only as `ks_readonly`:
 
-- **P1** the file record. FAIL on MISSING always; under `off`, FAIL on a change
+- **P1** the file record. FAIL on MISSING, or a `missing_at` inside the day,
+  always; under `off`, FAIL on a change
   at the last check or inside the day, UNKNOWN with no record, one over 3 h
   old, or one younger than the day; under `on`, not applicable.
 - **P2** levers in the day: a `lever_used` row, a `write_chain_flag_mismatch`
@@ -3399,7 +3404,8 @@ decision to restart both clocks, said out loud.
 - **P4** the week of silence, under `off` only. Starts at the latest of the
   `watch:duckdb_switch` clean-since (the canary writes it only while web runs
   `off`, on F1's 35-minute rule), the file's unchanged-since, the last edit of
-  `.env`, every breach of all four kinds, and F1's watch. `.env` is asked
+  `.env`, every breach of all four kinds — the file's `missing_at` among them —
+  and F1's watch. `.env` is asked
   because the Sunday compaction and the nightly off-site start their sidecars
   from it, not from web's environment, and only the switch in the sidecar
   refuses their read-only open: web `off` with `.env` not saying `off` the way

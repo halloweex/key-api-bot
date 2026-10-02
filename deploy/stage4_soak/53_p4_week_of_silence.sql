@@ -14,7 +14,9 @@
 --   every probe that read the block under `off` — its first_fired_at is the
 --   moment since which every probe found nothing opened and no web process
 --   went unread for over 35 min (the read-fallback watch's rule);
--- - the file: P1's record of the hourly hash, as psql variables;
+-- - the file: P1's record of the hourly hash, as psql variables — a change,
+--   and the last check that found the file missing, which the record keeps
+--   after the file comes back;
 -- - the host-cron sidecars: the weekly compaction and the nightly off-site
 --   start theirs from `.env` (`docker run --env-file`), not from web's
 --   environment, and their phase 1 opens the live file read-only — no byte
@@ -44,7 +46,9 @@
 -- way the switch does not understand (the sidecars would run on); a breach
 -- inside the day; a tripwire, lever or
 -- fallback page still standing; the latest probe of either watch inside the
--- day found something; the file changed or is missing; step 13 on DuckDB.
+-- day found something; the file changed, is missing, or was found missing
+-- inside the day (it came back, but nothing vouched for it while it was
+-- gone); step 13 on DuckDB.
 -- UNKNOWN: web down; `.env` unreadable; either watch missing, not written for 35 min, or clean
 -- for less than the day; no file record, one over 3 h old, or one that began
 -- inside the day. PASS: otherwise, with how many of the 168 h are behind it.
@@ -78,6 +82,8 @@ rec AS (
                 THEN (:'duckdb_file_since')::text::timestamptz END AS file_since,
            CASE WHEN :'duckdb_file_checked_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
                 THEN (:'duckdb_file_checked_at')::text::timestamptz END AS file_checked_at,
+           CASE WHEN :'duckdb_file_missing_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
+                THEN (:'duckdb_file_missing_at')::text::timestamptz END AS file_missing_at,
            NULLIF(:'duckdb_off_env', '') AS duckdb_off_env,
            CASE WHEN :'duckdb_env_changed_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
                 THEN (:'duckdb_env_changed_at')::text::timestamptz END AS env_changed_at
@@ -120,6 +126,9 @@ breaches AS (
     UNION ALL
     SELECT r.file_since, 'the DuckDB file changed' FROM rec r
     WHERE r.file_since_reason = 'change' AND r.file_since IS NOT NULL
+    UNION ALL
+    SELECT r.file_missing_at, 'the DuckDB file was missing' FROM rec r
+    WHERE r.file_missing_at IS NOT NULL
 ),
 standing AS (
     SELECT string_agg(s.condition_key, ', ' ORDER BY s.condition_key) AS keys

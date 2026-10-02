@@ -204,7 +204,7 @@ fi
 # reaches the SQL as variables so P1 and P4 judge it on the same clock as
 # everything else.
 SILENCE_CHECK="deploy/duckdb_silence_check.sh"
-FILE_LAST=error FILE_SINCE="" FILE_SINCE_REASON="" FILE_CHECKED_AT=""
+FILE_LAST=error FILE_SINCE="" FILE_SINCE_REASON="" FILE_CHECKED_AT="" FILE_MISSING_AT=""
 silence_record() {
     local out kv
     out="$("$SILENCE_CHECK" --status 2>&1 || true)"
@@ -217,6 +217,8 @@ silence_record() {
                     since=*) FILE_SINCE="${kv#since=}" ;;
                     since_reason=*) FILE_SINCE_REASON="${kv#since_reason=}" ;;
                     checked_at=*) FILE_CHECKED_AT="${kv#checked_at=}" ;;
+                    missing_at=none) ;;
+                    missing_at=*) FILE_MISSING_AT="${kv#missing_at=}" ;;
                 esac
             done ;;
         *) FILE_LAST=error ;;
@@ -277,6 +279,7 @@ run_check() {
             -v duckdb_file_since="$FILE_SINCE" \
             -v duckdb_file_since_reason="$FILE_SINCE_REASON" \
             -v duckdb_file_checked_at="$FILE_CHECKED_AT" \
+            -v duckdb_file_missing_at="$FILE_MISSING_AT" \
             < "$file" 2>&1)"; then
         rc=0
     else
@@ -313,7 +316,7 @@ fi
 echo "Stage 4 soak report · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC')"
 echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}, dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
 echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
-echo "  duckdb_off=$DUCKDB_OFF (KS_DUCKDB), in .env: $DUCKDB_OFF_ENV${DUCKDB_ENV_CHANGED_AT:+ (edited $DUCKDB_ENV_CHANGED_AT)}, file record: $FILE_LAST${FILE_SINCE:+ since $FILE_SINCE}${FILE_CHECKED_AT:+, checked $FILE_CHECKED_AT}${PARALLEL_FROM:+, parallel period from $PARALLEL_FROM}"
+echo "  duckdb_off=$DUCKDB_OFF (KS_DUCKDB), in .env: $DUCKDB_OFF_ENV${DUCKDB_ENV_CHANGED_AT:+ (edited $DUCKDB_ENV_CHANGED_AT)}, file record: $FILE_LAST${FILE_SINCE:+ since $FILE_SINCE}${FILE_CHECKED_AT:+, checked $FILE_CHECKED_AT}${FILE_MISSING_AT:+, last missing $FILE_MISSING_AT}${PARALLEL_FROM:+, parallel period from $PARALLEL_FROM}"
 echo
 printf '%s' "$ROWS" | awk '
     { lines[NR] = $0; c = $0; sub(/\|.*/, "", c); if (length(c) > w) w = length(c) }

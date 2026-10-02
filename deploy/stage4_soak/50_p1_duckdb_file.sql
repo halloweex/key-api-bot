@@ -22,12 +22,16 @@
 --   duckdb_file_since          when the file's current content was first seen
 --   duckdb_file_since_reason   baseline (the first check ever) or change
 --   duckdb_file_checked_at     the last recording check
+--   duckdb_file_missing_at     the last check that found the file missing,
+--                              kept by every later run; empty if none ever did
 --
 -- WHAT EACH VERDICT MEANS
--- FAIL: the record says the file is MISSING — whatever KS_DUCKDB says,
--- because deleting the file is a DROP and none may happen before the owner's
--- week after full completion (OD-11 (a)) — or, under off, the content changed
--- at the last check or inside the day. UNKNOWN: under off, no record, a
+-- FAIL: the record says the file is MISSING, or a check inside the day found
+-- it missing and it has come back since — whatever KS_DUCKDB says, because
+-- deleting the file is a DROP and none may happen before the owner's week
+-- after full completion (OD-11 (a)), and for the hours it was gone nothing
+-- vouched for it, however unchanged its bytes came back — or, under off, the
+-- content changed at the last check or inside the day. UNKNOWN: under off, no record, a
 -- record not written for over 3 h (the cron runs hourly), or one that began
 -- inside the day. PASS: under on, not applicable — web writes the file all
 -- day; under off, the same bytes since a moment over a day ago.
@@ -51,19 +55,24 @@ rec AS (
            CASE WHEN :'duckdb_file_since' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
                 THEN (:'duckdb_file_since')::text::timestamptz END AS since,
            CASE WHEN :'duckdb_file_checked_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
-                THEN (:'duckdb_file_checked_at')::text::timestamptz END AS checked_at
+                THEN (:'duckdb_file_checked_at')::text::timestamptz END AS checked_at,
+           CASE WHEN :'duckdb_file_missing_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
+                THEN (:'duckdb_file_missing_at')::text::timestamptz END AS missing_at
 ),
 judged AS (
     SELECT c.now AS clock_now, l.span, l.record_max_age, r.*,
            r.last IN ('UNCHANGED', 'CHANGED', 'BASELINE')
                AND r.since IS NOT NULL AND r.checked_at IS NOT NULL AS readable,
            COALESCE(c.now - r.checked_at > l.record_max_age, false) AS stale,
-           COALESCE(r.since > c.now - l.span, false) AS since_in_day
+           COALESCE(r.since > c.now - l.span, false) AS since_in_day,
+           COALESCE(r.missing_at > c.now - l.span AND r.missing_at <= c.now, false)
+               AS missing_in_day
     FROM clock c CROSS JOIN limits l CROSS JOIN rec r
 ),
 verdicts AS (
     SELECT j.*,
            j.last = 'MISSING' AS fail_missing,
+           j.missing_in_day AND j.last IS DISTINCT FROM 'MISSING' AS fail_was_missing,
            j.readable AND NOT j.stale
                AND (j.last = 'CHANGED' OR (j.since_reason = 'change' AND j.since_in_day))
                AS fail_changed
@@ -71,7 +80,7 @@ verdicts AS (
 )
 SELECT 'P1 DuckDB file'::text AS "check",
        CASE
-           WHEN fail_missing THEN 'FAIL'
+           WHEN fail_missing OR fail_was_missing THEN 'FAIL'
            WHEN duckdb_off = 'unknown' THEN 'UNKNOWN'
            WHEN duckdb_off IS DISTINCT FROM '1' THEN 'PASS'
            WHEN NOT readable OR stale THEN 'UNKNOWN'
@@ -87,6 +96,13 @@ SELECT 'P1 DuckDB file'::text AS "check",
                                                          'DD.MM HH24:MI')) END
                || ': deleting it is a DROP, and none may happen before the owner''s week '
                || 'after full completion (OD-11 (a)); put it back from the Ark'
+           WHEN fail_was_missing THEN
+               format('the DuckDB file was missing at a check inside the day (last %s Kyiv) '
+                      || 'and has come back: for the hours it was gone nothing vouched for it, '
+                      || 'however unchanged its bytes; deleting or moving it is a DROP, and none '
+                      || 'may happen before the owner''s week after full completion (OD-11 (a)); '
+                      || 'find what moved it',
+                      to_char(missing_at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
            WHEN duckdb_off = 'unknown' THEN
                'web is not running, so whether KS_DUCKDB is off cannot be read'
            WHEN duckdb_off IS DISTINCT FROM '1' THEN

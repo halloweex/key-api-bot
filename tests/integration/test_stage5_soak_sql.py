@@ -43,12 +43,14 @@ def z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def record(*, last="UNCHANGED", since=None, reason="baseline", checked=None) -> dict:
+def record(*, last="UNCHANGED", since=None, reason="baseline", checked=None,
+           missing=None) -> dict:
     """psql variables as deploy/stage4_soak.sh hands over a file record."""
     return {"duckdb_file_last": last,
             "duckdb_file_since": z(since or ago(days=8)),
             "duckdb_file_since_reason": reason,
-            "duckdb_file_checked_at": z(checked or ago(minutes=20))}
+            "duckdb_file_checked_at": z(checked or ago(minutes=20)),
+            "duckdb_file_missing_at": z(missing) if missing else ""}
 
 
 async def clear(conn):
@@ -217,6 +219,27 @@ class TestP1DuckDBFile:
         async with scenario(pool) as conn:
             v, detail = await verdict(conn, P1, duckdb_off=off, **record(last="MISSING"))
         assert v == "FAIL" and "OD-11" in detail, detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("off", ["0", "1", "unknown"])
+    async def test_a_missing_episode_fails_the_day_it_ends_in(self, pool, off):
+        """The file moved away for two checks and back byte for byte: the
+        record reads UNCHANGED since its baseline, and only `missing_at` says
+        it was gone (review of 02.10). Mutation: drop `fail_was_missing`."""
+        async with scenario(pool) as conn:
+            v, detail = await verdict(conn, P1, duckdb_off=off,
+                                      **record(missing=ago(hours=3)))
+        assert v == "FAIL", detail
+        assert "was missing at a check inside the day (last 05.06 09:00 Kyiv)" in detail
+        assert "OD-11" in detail
+
+    @pytest.mark.asyncio
+    async def test_a_missing_episode_over_a_day_ago_is_p4s_to_count(self, pool):
+        """P1 is the day's question; the week restarting is P4's."""
+        async with scenario(pool) as conn:
+            v, detail = await verdict(conn, P1, duckdb_off="1",
+                                      **record(missing=ago(hours=25)))
+        assert v == "PASS" and "the same bytes since" in detail, detail
 
     @pytest.mark.asyncio
     async def test_the_same_bytes_for_over_a_day_pass(self, pool):
@@ -665,6 +688,24 @@ class TestP4WeekOfSilence:
                 v, detail = await verdict(conn, P4, duckdb_off="1", **record(**rec))
             assert v == "PASS", (what, detail)
             assert f"({what}): 48 h of the 168" in detail, (what, detail)
+
+    @pytest.mark.asyncio
+    async def test_a_missing_episode_breaks_it_and_restarts_it(self, pool):
+        """Mutation: drop the record's `missing_at` from `breaches`."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.silent(conn)
+            v, detail = await verdict(conn, P4, duckdb_off="1",
+                                      **record(missing=ago(hours=3)))
+        assert v == "FAIL" and "the DuckDB file was missing at 05.06 09:00" in detail, detail
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.silent(conn, days=9)
+            await report(conn, sent_at=ago(days=1))
+            v, detail = await verdict(conn, P4, duckdb_off="1",
+                                      **record(missing=ago(days=2)))
+        assert v == "PASS", detail
+        assert "(the DuckDB file was missing): 48 h of the 168" in detail, detail
 
     @pytest.mark.asyncio
     async def test_a_resolved_breach_inside_the_day_fails(self, pool):

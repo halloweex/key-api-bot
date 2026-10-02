@@ -129,6 +129,38 @@ class TestTheRecord:
         box.db.write_bytes(saved + b"x")
         assert box.run()[:2] == (1, "CHANGED")
 
+    def test_a_missing_episode_is_never_forgotten(self, box):
+        """The review of 02.10 moved the file away for two checks and back
+        byte for byte: the record read UNCHANGED since the baseline, with
+        nothing to say it had been gone, and the soak passed. `missing_at` is
+        the last check that found it missing, carried through every later run
+        and published by `--status`. Mutation: carry `missing_at` from the
+        record on MISSING instead of stamping the check, or drop it from an
+        UNCHANGED or CHANGED run."""
+        box.run()
+        away = box.root / "away"
+        box.tick(5)
+        box.db.rename(away)
+        assert box.run()[:2] == (3, "MISSING")
+        box.tick()
+        assert box.run()[:2] == (3, "MISSING")
+        assert box.record()["missing_at"] == "2030-03-17T23:46:40Z"
+
+        box.tick()
+        away.rename(box.db)
+        code, verdict, f, _ = box.run()
+        assert (code, verdict) == (0, "UNCHANGED")
+        assert f["since_reason"] == "baseline", "the bytes are what they were"
+        assert f["missing_at"] == "2030-03-17T23:46:40Z"
+        box.tick(30)
+        box.db.write_bytes(b"other")
+        assert box.run()[2]["missing_at"] == "2030-03-17T23:46:40Z"
+        box.tick()
+        assert box.run()[:2] == (0, "UNCHANGED")
+        code, verdict, f, _ = box.run("--status")
+        assert (code, verdict) == (0, "STATUS")
+        assert f["last"] == "UNCHANGED" and f["missing_at"] == "2030-03-17T23:46:40Z"
+
     def test_the_record_is_private(self, box):
         box.run()
         assert stat.S_IMODE((box.state / "state").stat().st_mode) == 0o600
@@ -204,7 +236,8 @@ class TestItWritesNothingItShouldNot:
         assert (code, verdict) == (0, "STATUS") and not mark.exists()
         assert f == {"last": "BASELINE", "since": "2030-03-17T17:46:40Z",
                      "since_reason": "baseline", "checked_at": "2030-03-17T17:46:40Z",
-                     "age_s": "7200", "checked_age_s": "7200", "changes": "0"}
+                     "age_s": "7200", "checked_age_s": "7200", "changes": "0",
+                     "missing_at": "none"}
         assert {p.name: p.read_bytes() for p in box.state.iterdir()} == before
 
     def test_status_without_a_record_says_so(self, box):

@@ -386,6 +386,31 @@ class TestStage5:
                    for c in run.psql), run.psql
         assert {p.name: p.read_bytes() for p in state.iterdir()} == before
 
+    def test_a_missing_episode_reaches_the_checks(self, tmp_path):
+        """The review of 02.10's sequence, by the real script: baseline, the
+        file moved away for a check, moved back. The record reads UNCHANGED
+        since the baseline; `missing_at` is what tells P1 and P4. Mutation:
+        drop the `missing_at=*` case from `silence_record`."""
+        db = tmp_path / "analytics.duckdb"
+        db.write_bytes(b"duck")
+        state = tmp_path / "silence"
+        base = {k: v for k, v in os.environ.items() if not k.startswith("DUCKDB_")}
+        env = {**base, "DUCKDB_FILE": str(db), "DUCKDB_SILENCE_STATE_DIR": str(state)}
+        check = ["bash", str(REPO / "deploy" / "duckdb_silence_check.sh")]
+        for now, move in ((1900000000, None), (1900003600, "away"), (1900007200, "back")):
+            if move == "away":
+                db.rename(tmp_path / "away")
+            elif move == "back":
+                (tmp_path / "away").rename(db)
+            subprocess.run(check, env={**env, "DUCKDB_SILENCE_NOW": str(now)},
+                           capture_output=True, text=True, timeout=60)
+        run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state), DUCKDB_FILE=str(db))
+        assert all("duckdb_file_last=UNCHANGED " in c
+                   and "duckdb_file_since_reason=baseline " in c
+                   and "duckdb_file_missing_at=2030-03-17T18:46:40Z" in c
+                   for c in run.psql), run.psql
+        assert "last missing 2030-03-17T18:46:40Z" in run.out
+
     def test_an_unreadable_record_is_an_error_not_a_pass(self, tmp_path):
         state = tmp_path / "silence"
         state.mkdir()
