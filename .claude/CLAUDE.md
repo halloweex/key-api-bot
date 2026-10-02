@@ -3609,7 +3609,9 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
   per `(check_name, table_name)` in a run**, which Postgres keys
   `app.data_quality_issues` on and DuckDB does not: `chain_invariants_unwatched`
   names the part it could not read — `(<chain>)`, `meta.chain_watermarks`,
-  `(write chains)` for everything — and the journal's door folds any repeat
+  `(write chains)` for everything, and the table itself for chain 6's
+  catalogue table with no full write recorded, which can be both tables in
+  one run — and the journal's door folds any repeat
   that still arrives, with an ERROR. Two blind groups under one constant name
   had Postgres refuse the whole run, or, under `duckdb`, broke the hourly
   copy of the never-pruned journal for good.
