@@ -3482,9 +3482,12 @@ record with the latch.
 round (CRITICAL), rows lost (`last_rows − current − around`, CRITICAL, judged
 only once the chain's own write stamped the watermark — the mirror's
 `last_rows` counts a repeated payload id twice), retired (INFO, with ids —
-product 1055 in production) and a short write (WARN above 5% and 10 rows: the
-sync's pagination stops on the first short page, so a truncated catalogue
-reads as mass retirement). Its watermarks are left to the freshness check (48
+product 1055 in production) and a short write (WARN when the last write left
+out over 5% and 10 rows of what the write before it carried — the record's
+`previous`: the sync's pagination stops on the first short page, so a
+truncated catalogue reads as mass retirement. Measured per write, not as
+retired against the table, which only rises because nothing deletes, and so
+warned after every complete write once ordinary retirements passed 5%). Its watermarks are left to the freshness check (48
 h, 192 h) and inherited from DuckDB until the first write under the flag.
 
 **Two hazards 6a's template did not cover, closed before the flag.** The

@@ -185,15 +185,18 @@ CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
 # until then. Chain 6a's arrangement.
 CHAIN_WATERMARK_INHERITS_DUCKDB = True
 
-# A retired share above this is not KeyCRM retiring goods: it is a catalogue
-# that arrived short — `paginate` stops on the first short page, so an API
-# hiccup hands the sync a silently truncated list (WARN
-# `chain_catalogue_short_write`). Reasoned, not measured: production carries
-# one retired product in ~1,004. The carry's dry run gives the real number.
+# A share of the previous full write's rows that the LAST write left out,
+# above which it is not KeyCRM retiring goods: it is a catalogue that arrived
+# short — `paginate` stops on the first short page, so an API hiccup hands the
+# sync a silently truncated list (WARN `chain_catalogue_short_write`). One
+# write against the one before, never everything ever retired against the
+# table: the writer never deletes, so that share only rises, and once past
+# this it warned after every complete write (the chain-6 review). Reasoned,
+# not measured: KeyCRM retires a product or two between two hourly writes.
 RETIRED_WARN_PCT = 5.0
 # And at least this many rows: the category tree is ~28 rows, where two
-# categories KeyCRM retired in the ordinary way are 7% and would warn for
-# ever. A truncated page of the products is 50.
+# categories KeyCRM retired in one week are 7% and ordinary. A truncated page
+# of the products is 50.
 RETIRED_WARN_MIN_ROWS = 10
 
 # How long an acquire may wait (chain 4's bound). The pool sets none, and the

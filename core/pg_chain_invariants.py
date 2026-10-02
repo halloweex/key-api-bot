@@ -379,6 +379,11 @@ class CatalogueTable:
     retired_sample: Tuple[int, ...] = ()
     around_sample: Tuple[int, ...] = ()
     recorded: bool = False
+    # Rows the full write before the last one carried and the last one did
+    # not: still at that write's instant (the record's `previous`). What a
+    # truncated catalogue leaves; 0 until the chain has written.
+    dropped: int = 0
+    dropped_sample: Tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -695,7 +700,8 @@ FROM orphans
 # One catalogue table split by `mirrored_at` against the last full write's
 # instant ($1) and, once the chain has written, against its record: $2 the
 # latch (the owner row's `updated_at`, Postgres's clock), $3 the recorded
-# stamps. With $2 NULL the record is not consulted. The table name is the
+# stamps, $4 the full write before the last one. With $2 NULL the record is
+# not consulted. The table name is the
 # chain's own constant, never input; `{stamp}` is `STAMP_SQL`.
 _CATALOGUE_STATE_SQL = (
     "SELECT last_ok_at, last_rows FROM meta.mirror_state WHERE table_name = $1")
@@ -704,7 +710,7 @@ _CATALOGUE_RECORD_SQL = (
     "(SELECT value FROM meta.chain_watermarks WHERE key = $2) AS record")
 _CATALOGUE_SPLIT_SQL = """
 WITH r AS (
-    SELECT id, mirrored_at,
+    SELECT id, mirrored_at, {stamp} AS stamp,
            COALESCE(mirrored_at > $1
                     OR ($2::timestamptz IS NOT NULL AND mirrored_at >= $2
                         AND NOT {stamp} = ANY($3::bigint[])), false) AS around
@@ -716,7 +722,10 @@ SELECT count(*)                                                    AS rows,
        count(*) FILTER (WHERE around)                              AS around,
        (array_agg(id ORDER BY id) FILTER (WHERE mirrored_at < $1 AND NOT around))[1:10]
                                                                    AS retired_sample,
-       (array_agg(id ORDER BY id) FILTER (WHERE around))[1:10]     AS around_sample
+       (array_agg(id ORDER BY id) FILTER (WHERE around))[1:10]     AS around_sample,
+       count(*) FILTER (WHERE stamp = $4 AND NOT around)           AS dropped,
+       (array_agg(id ORDER BY id) FILTER (WHERE stamp = $4 AND NOT around))[1:10]
+                                                                   AS dropped_sample
 FROM r
 """
 
@@ -834,7 +843,7 @@ async def _read_catalogue(conn, latched_at: Optional[datetime] = None) -> Catalo
             record = parse_record(mark["record"])
         row = await conn.fetchrow(
             _CATALOGUE_SPLIT_SQL.format(table=table, stamp=STAMP_SQL),
-            last_ok_at, latched, sorted(record.stamps))
+            last_ok_at, latched, sorted(record.stamps), record.previous)
         tables.append(CatalogueTable(
             table=table, rows=int(row["rows"]), last_ok_at=last_ok_at,
             last_rows=None if last_rows is None else int(last_rows),
@@ -842,7 +851,8 @@ async def _read_catalogue(conn, latched_at: Optional[datetime] = None) -> Catalo
             around=int(row["around"]),
             retired_sample=tuple(int(i) for i in (row["retired_sample"] or ())),
             around_sample=tuple(int(i) for i in (row["around_sample"] or ())),
-            recorded=latched is not None))
+            recorded=latched is not None, dropped=int(row["dropped"]),
+            dropped_sample=tuple(int(i) for i in (row["dropped_sample"] or ()))))
     return Catalogue(tables=tuple(tables), latched_at=latched_at)
 
 
@@ -1336,10 +1346,12 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
 def _catalogue_issues(cat: Catalogue, chain: str) -> List:
     """OD-15 (a), judged on what Postgres holds. Pure.
 
-    Every rule but "lost" holds whoever made the last full write — the mirror
-    stamps `last_ok_at` in its rows' transaction exactly as the chain does —
-    so they are judged from the flag. "Lost" reads `last_rows`, which only the
-    chain's own write counts exactly, so it waits for that write."""
+    Every rule but "lost" and the short write holds whoever made the last
+    full write — the mirror stamps `last_ok_at` in its rows' transaction
+    exactly as the chain does — so they are judged from the flag. "Lost" reads
+    `last_rows`, which only the chain's own write counts exactly, so it waits
+    for that write; the short write reads the record's `previous`, which only
+    the chain keeps."""
     from core.data_quality import Severity
     from core.pg_catalogue_write import RETIRED_WARN_MIN_ROWS, RETIRED_WARN_PCT
 
@@ -1407,20 +1419,26 @@ def _catalogue_issues(cat: Catalogue, chain: str) -> List:
                     f"full write (e.g. id {shown}): KeyCRM no longer serves "
                     "them. The writer never deletes, so old orders on them "
                     "keep their names. Not a defect.")))
-            share = t.retired * 100.0 / t.rows
-            if share > RETIRED_WARN_PCT and t.retired >= RETIRED_WARN_MIN_ROWS:
+        # What the LAST write left out of what the one before it carried — not
+        # `retired / rows`, which counts every product KeyCRM ever retired:
+        # the writer never deletes, so that share only ever rose and, past 5%,
+        # warned after every complete write (the chain-6 review's ratchet).
+        carried_before = (t.last_rows or 0) + t.dropped
+        if t.dropped and carried_before:
+            share = t.dropped * 100.0 / carried_before
+            if share > RETIRED_WARN_PCT and t.dropped >= RETIRED_WARN_MIN_ROWS:
                 issues.append(_issue(
                     check_name=CATALOGUE_SHORT_WRITE, table_name=t.table,
-                    severity=Severity.WARN, count=t.retired,
-                    sample_ids=t.retired_sample,
+                    severity=Severity.WARN, count=t.dropped,
+                    sample_ids=t.dropped_sample,
                     description=(
-                        f"{share:.1f}% of {t.table} was missing from the last "
-                        f"full write ({t.last_rows} row(s) written against "
-                        f"{t.rows} held), over the {RETIRED_WARN_PCT:g}% "
-                        "KeyCRM retires in the ordinary way. The sync's "
-                        "pagination stops on the first short page, so this is "
-                        "most likely a truncated catalogue; the next full "
-                        "write carries the rest.")))
+                        f"The last full write of {t.table} left out {t.dropped} "
+                        f"row(s) the write before it carried — {share:.1f}% of "
+                        f"{carried_before}, over the {RETIRED_WARN_PCT:g}% KeyCRM "
+                        "retires between two writes in the ordinary way. The "
+                        "sync's pagination stops on the first short page, so "
+                        "this is most likely a truncated catalogue; the next "
+                        "complete write carries the rest and clears this.")))
     return issues
 
 

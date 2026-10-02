@@ -868,17 +868,40 @@ class TestTheStandingWatch:
         assert inv.check_chain_invariants(_facts(_table(retired=0, retired_sample=()))) == []
 
     def test_a_short_write_is_a_warning(self):
+        """104 rows the write before carried, left out by the last one."""
         issues = inv.check_chain_invariants(_facts(
             _table(rows=1004, current=900, last_rows=900, retired=104,
-                   retired_sample=tuple(range(10)))))
+                   retired_sample=tuple(range(10)), recorded=True, dropped=104,
+                   dropped_sample=tuple(range(10)))))
         assert (inv.CATALOGUE_SHORT_WRITE, "WARN") in _names(issues)
+        (short,) = [i for i in issues if i.check_name == inv.CATALOGUE_SHORT_WRITE]
+        assert short.count == 104 and "10.4% of 1004" in short.description
+
+    def test_retirements_accumulated_over_many_writes_are_not_one(self):
+        """The review's ratchet: 104 of 1004 retired one at a time is every
+        product KeyCRM ever dropped, not what the last write left out. The old
+        share, `retired / rows`, warned after every complete write from here
+        on and no write could clear it."""
+        issues = inv.check_chain_invariants(_facts(
+            _table(rows=1004, current=900, last_rows=900, retired=104,
+                   retired_sample=tuple(range(10)), recorded=True, dropped=1,
+                   dropped_sample=(42,))))
+        assert _names(issues) == {(inv.CATALOGUE_RETIRED, "INFO")}
+
+    def test_not_judged_before_the_chain_keeps_a_record(self):
+        """Before the latch nothing says which rows the write before the last
+        carried, so the share is not guessed from the table."""
+        issues = inv.check_chain_invariants(_facts(
+            _table(rows=1004, current=900, last_rows=900, retired=104,
+                   retired_sample=tuple(range(10))), latched_at=None))
+        assert inv.CATALOGUE_SHORT_WRITE not in {i.check_name for i in issues}
 
     def test_a_few_retired_categories_are_not_a_short_write(self):
-        """Two of 28 is 7% and ordinary: the floor in rows keeps the small
-        table from warning for ever."""
+        """Two of 28 in one week is 7% and ordinary: the floor in rows keeps
+        the small table from warning on it."""
         issues = inv.check_chain_invariants(_facts(_table(
             "bronze.categories", rows=28, last_rows=26, current=26, retired=2,
-            retired_sample=(3, 4))))
+            retired_sample=(3, 4), recorded=True, dropped=2, dropped_sample=(3, 4))))
         assert _names(issues) == {(inv.CATALOGUE_RETIRED, "INFO")}
 
     def test_no_full_write_recorded_is_unwatched_not_clean(self):

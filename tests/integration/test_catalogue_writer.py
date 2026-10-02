@@ -385,6 +385,33 @@ class TestTheRecordOfTheChainsWrites:
         assert issues[0].sample_ids == (2, 3)
 
     @pytest.mark.asyncio
+    async def test_a_short_write_is_one_write_against_the_one_before(self, stores):
+        """The review's second finding on a real Postgres: 20 complete writes,
+        each one product smaller, retire 10% of the table and are not a short
+        write; one truncated write is, and the next complete one clears it."""
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await store.upsert_categories(CATS)
+        served = list(range(1, 201))
+        await store.upsert_products([_product(i) for i in served])
+        for retired in range(1, 21):
+            served.remove(retired)                           # KeyCRM retires one
+            await store.upsert_products([_product(i) for i in served])
+        issues = inv.check_chain_invariants(await _facts(pool))
+        assert _names(issues) == {(inv.CATALOGUE_RETIRED, PRODUCTS, "INFO")}
+        assert issues[0].count == 20
+
+        await store.upsert_products([_product(i) for i in served[:150]])   # truncated
+        issues = inv.check_chain_invariants(await _facts(pool))
+        (short,) = [i for i in issues if i.check_name == inv.CATALOGUE_SHORT_WRITE]
+        assert (short.severity.value, short.count) == ("WARN", 30)
+        assert short.sample_ids == tuple(served[150:160])
+
+        await store.upsert_products([_product(i) for i in served])        # complete
+        issues = inv.check_chain_invariants(await _facts(pool))
+        assert _names(issues) == {(inv.CATALOGUE_RETIRED, PRODUCTS, "INFO")}
+
+    @pytest.mark.asyncio
     async def test_the_record_is_locked_before_any_product(self, stores):
         """Two writes of one table queue on the record, so neither loses the
         other's stamp: shown without a race, the lock-order test's way. A
