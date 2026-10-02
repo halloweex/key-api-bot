@@ -524,13 +524,19 @@ class TestASpoolOutlivesItsFlag:
     @pytest.mark.asyncio
     async def test_other_weeks_of_the_spool_land_too(self, flags, store):
         """The gate for one week lands the whole spool, so a week nobody asks
-        about again still reaches the ledger and the canary's page clears."""
+        about again still reaches the ledger and the canary's page clears.
+        Two of them, so a drain that stops after its first landing is told
+        apart from one that lands everything. Mutation: land only one entry
+        per gate (`_spooled(...)[-1:]` in `land_in_duckdb`)."""
         chain = pg_weekly_ledger_write
         earlier = WEEK - timedelta(days=7)
-        report_ledger.spool(chain.CHAIN, earlier, "retail", Decimal("3.00"), 1,
-                            datetime.now(timezone.utc))
+        earliest = WEEK - timedelta(days=14)
+        for week in (earliest, earlier):
+            report_ledger.spool(chain.CHAIN, week, "retail", Decimal("3.00"), 1,
+                                datetime.now(timezone.utc))
         assert not await report_ledger.already_sent(store, report_ledger.WEEKLY, WEEK, "retail")
-        assert [r[0] for r in await _duck(store, "weekly_report_sends")] == [earlier]
+        assert sorted(r[0] for r in await _duck(store, "weekly_report_sends")) == [
+            earliest, earlier]
         assert chain.pending()["count"] == 0
 
     @pytest.mark.asyncio
