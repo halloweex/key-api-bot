@@ -13,7 +13,7 @@ Two halves:
   `duckdb-facts`, ...). Each prints JSON and never prints a credential: the
   admin session is minted from the rehearsal's own per-run
   `DASHBOARD_SECRET_KEY`, used for one request to `localhost`, and dropped.
-- **Judges** (`judge_p1` … `judge_p8`, `judge_k0`, `judge_z0`): pure functions
+- **Judges** (`judge_p1` … `judge_p8`, `judge_d1`, `judge_k0`, `judge_z0`): pure functions
   over that evidence, returning `(verdict, detail)` with verdict one of PASS,
   FAIL, UNKNOWN. `tests/unit/test_step13_rehearsal_probe.py` holds each to its
   three outcomes. A detail carries ids, counts, keys and times — never a name,
@@ -331,12 +331,10 @@ def duckdb_facts(db: str, gate: Optional[str], runs: Sequence[int]) -> Dict[str,
         counts = one("SELECT (SELECT count(*) FROM orders), (SELECT max(id) FROM orders), "
                      "(SELECT count(*) FROM silver_orders), (SELECT count(*) FROM silver_order_utm)")
         out_runs: Dict[str, Any] = {}
-        # By the id's text, never `run_id = ?`. On the first local rehearsal
-        # DuckDB 1.5.5 answered that pushed-down equality with no rows for
-        # runs 6 and 7 of a copy whose run_id column sat in one bitpacked
-        # DELTA_FOR segment, while a scan, `IN (6, 7)` and the optimizer off
-        # all returned them. Not reproduced on a fresh file; a comparison
-        # nothing can push into a segment cannot be fooled the same way.
+        # By the id's text, never `run_id = ?`: a comparison on the column
+        # takes the path through `idx_dqi_run`, and that index is what DuckDB
+        # 1.5.5 can lose rows from after a SIGKILL (`index_sweep`). The scan
+        # is the truth the product's reader is then held to.
         for run_id in runs:
             row = one("SELECT run_id, layer, status, error_message, CAST(started_at AS VARCHAR), "
                       "CAST(ended_at AS VARCHAR) FROM data_quality_runs "
@@ -364,6 +362,7 @@ def duckdb_facts(db: str, gate: Optional[str], runs: Sequence[int]) -> Dict[str,
                     "description": i[5] if i[0] == "pg_twin_pairing" else None,
                 } for i in issues],
             }
+        indexes = index_sweep(con)
     finally:
         con.close()
     writer_record = None
@@ -389,15 +388,95 @@ def duckdb_facts(db: str, gate: Optional[str], runs: Sequence[int]) -> Dict[str,
         "orders": counts[0], "max_order_id": counts[1],
         "silver_orders": counts[2], "silver_order_utm": counts[3],
         "runs": out_runs,
+        "indexes": indexes,
         "gate_delivered": delivered,
     }
 
 
+# Lifted for the sweep alone, on its own read-only connection: by default
+# DuckDB takes the index path only for a lookup of at most max(2048, 0.1 % of
+# the table) rows, and a sweep that wants every row through the index must
+# not fall back to the scan it is checked against.
+SWEEP_SETTINGS = ("SET index_scan_max_count = 4000000000",
+                  "SET index_scan_percentage = 1.0")
+
+
+def _index_columns(expressions: Any) -> List[str]:
+    """`duckdb_indexes().expressions` — `[k]`, `['"value"']`, `[a, b]` — as
+    column names. An entry that is not a bare name comes back as itself and
+    the caller skips it."""
+    text = str(expressions or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    cols = []
+    for part in text.split(","):
+        name = part.strip().strip("'").strip('"')
+        if name:
+            cols.append(name)
+    return cols
+
+
+def _ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def index_sweep(con: Any) -> Dict[str, Any]:
+    """Whether every index made by CREATE INDEX answers for every row it holds.
+
+    DuckDB 1.5.5 drops from such an index the rows a SIGKILL caught in the
+    WAL, when the first checkpoint after the restart is one DuckDB takes on
+    its own — at close, or past `wal_autocheckpoint` — and nothing filtered
+    or wrote the table in between: replay buffers those entries in the
+    still-unbound index, and that checkpoint writes the index without them.
+    PRIMARY KEY and UNIQUE constraints keep theirs. A single comparison on
+    the column (`run_id = ?`, `layer = ?`, `k >= v`, a `DELETE ... WHERE k IN
+    (v)`) then takes the index and misses those rows for good, while a scan
+    returns them (reproduced on a fresh file; see CLAUDE.md "The step-13
+    rehearsal").
+
+    Each single-column index is asked for every non-NULL row in two ranges —
+    `<=` the smallest value, `>=` the next — with the lookup limits lifted,
+    and held to `count_if` over the whole table, which no index can serve.
+    A composite index serves no read in this DuckDB (measured) and a column
+    with one value cannot be asked — the optimizer drops a filter its
+    statistics prove true — so both are listed, not asked."""
+    swept: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    try:
+        for stmt in SWEEP_SETTINGS:
+            con.execute(stmt)
+        indexes = con.execute(
+            "SELECT table_name, index_name, expressions FROM duckdb_indexes() "
+            "WHERE schema_name = 'main' ORDER BY table_name, index_name").fetchall()
+        for table, index, expressions in indexes:
+            name = f"{table}.{index}"
+            cols = _index_columns(expressions)
+            if len(cols) != 1:
+                skipped.append({"index": name, "why": "composite"})
+                continue
+            col, tbl = _ident(cols[0]), _ident(table)
+            values = [r[0] for r in con.execute(
+                f"SELECT DISTINCT {col} FROM {tbl} ORDER BY 1 NULLS LAST LIMIT 2").fetchall()
+                if r[0] is not None]
+            if len(values) < 2:
+                skipped.append({"index": name, "why": "empty" if not values else "one value"})
+                continue
+            rows = found = 0
+            for op, value in (("<=", values[0]), (">=", values[1])):
+                found += con.execute(f"SELECT count(*) FROM {tbl} WHERE {col} {op} ?",
+                                     [value]).fetchone()[0]
+                rows += con.execute(f"SELECT count_if({col} {op} ?) FROM {tbl}",
+                                    [value]).fetchone()[0]
+            swept.append({"index": name, "rows": rows, "missing": rows - found})
+    except Exception as exc:  # noqa: BLE001 — reported, judged UNKNOWN
+        return {"error": type(exc).__name__, "swept": swept, "skipped": skipped}
+    return {"swept": swept, "skipped": skipped}
+
+
 def _product_reader(con: Any, run_id: int) -> Dict[str, Any]:
     """`core.data_quality.fetch_run_issues` on the copy: the check names it
-    returns, or the class of what it raised. On the first local rehearsals it
-    returned nothing for runs a scan found — DuckDB 1.5.5 after the F6 kill,
-    see `judge_reader`."""
+    returns, or the class of what it raised. After a kill it can return
+    nothing for runs a scan finds — DuckDB 1.5.5, see `index_sweep`."""
     try:
         _app_path()
         from core.data_quality import fetch_run_issues
@@ -477,14 +556,12 @@ def judge_reader(run: Optional[Mapping[str, Any]]) -> Tuple[Optional[str], Optio
 
     `(fail, unknown)`, at most one set. The scan reads the issues by the id's
     text; `fetch_run_issues` asks `WHERE run_id = ?`, the way the dashboard
-    and the digest do. On a DuckDB 1.5.5 file whose runs were written before
-    a SIGKILL — the rehearsal's own F6 — and that was checkpointed after the
-    restart without a new row in `data_quality_issues`, the second returns
-    nothing for those runs while the first returns every row (reproduced on
-    a fresh file with production's DDL, writer and reader; no index on
-    run_id, or no kill, and the two agree). A finding only the scan can see
-    is not one the product shows anybody, so a judge that read around it
-    would pass what nobody was told."""
+    and the digest do, and that takes `idx_dqi_run` — the index DuckDB 1.5.5
+    loses rows from after a SIGKILL (`index_sweep`). P4a and P5 read their
+    runs at a graceful stop before the rehearsal's kill, where the two must
+    agree; D1 reads them again after it. A finding only the scan can see is
+    not one the product shows anybody, so a judge that read around it would
+    pass what nobody was told."""
     if not run:
         return None, None
     rid = run.get("run_id")
@@ -498,7 +575,7 @@ def judge_reader(run: Optional[Mapping[str, Any]]) -> Tuple[Optional[str], Optio
     if seen == scan:
         return None, None
     live = run.get("live_names")
-    when = (f"; the live process showed {len(live)} at F4, before the kill"
+    when = (f"; the live process showed {len(live)} at F4"
             if isinstance(live, list) else "")
     return (f"fetch_run_issues returns {len(seen)} of the {len(scan)} findings a scan "
             f"finds in run #{rid} — the dashboard's and the digest's reader does not "
@@ -615,10 +692,15 @@ def judge_p2(ev: Mapping[str, Any]) -> Verdict:
     if d0 is None or d1 is None:
         return UNKNOWN, "the DuckDB copy was not read at both stops"
     bad: List[str] = []
-    if d0.get("warehouse_dirty") != d1.get("warehouse_dirty"):
-        bad.append(f"warehouse_dirty moved {d0.get('warehouse_dirty')} -> {d1.get('warehouse_dirty')}")
-    if d0.get("refreshes") != d1.get("refreshes"):
-        bad.append(f"warehouse_refreshes moved {d0.get('refreshes')} -> {d1.get('refreshes')}")
+    # Every stop after the flip — the one before the kill too, when it was
+    # read — against the one before it.
+    later = [("before the kill", ev.get("d_pre"))] if ev.get("d_pre") else []
+    for when, dk in later + [("at F7", d1)]:
+        if d0.get("warehouse_dirty") != dk.get("warehouse_dirty"):
+            bad.append(f"warehouse_dirty moved {d0.get('warehouse_dirty')} -> "
+                       f"{dk.get('warehouse_dirty')} {when}")
+        if d0.get("refreshes") != dk.get("refreshes"):
+            bad.append(f"warehouse_refreshes moved {d0.get('refreshes')} -> {dk.get('refreshes')} {when}")
     r0 = (d0.get("refreshes") or {}).get("max_refreshed_at")
     frozen = [s for s in ev.get("frozen_samples") or []]
     if not frozen:
@@ -638,7 +720,8 @@ def judge_p2(ev: Mapping[str, Any]) -> Verdict:
     dirty = d0.get("warehouse_dirty")
     return PASS, (f"warehouse_dirty unchanged ({'absent' if dirty is None else 'set'}); "
                   f"warehouse_refreshes max {r0} count {(d0.get('refreshes') or {}).get('count')} "
-                  f"unchanged; derivation runs +{runs}; sync ticks {ticks}; 0 refreshing lines")
+                  f"unchanged at {len(later) + 1} stops; derivation runs +{runs}; sync ticks {ticks}; "
+                  f"0 refreshing lines")
 
 
 def _same_instant(a: Any, b: Any) -> Optional[bool]:
@@ -889,7 +972,8 @@ def judge_p6(ev: Mapping[str, Any]) -> Verdict:
         bad.append("the seeded page is still delivered in the gate file")
     if bad:
         return FAIL, "; ".join(bad)
-    return PASS, f"kill+start and stop+start: mode postgres, resolved_at {t1} unchanged, one resolve, gate clear"
+    return PASS, (f"{len(restarts)} restarts ({_fmt(r.get('kind') or '?' for r in restarts)}): "
+                  f"mode postgres, resolved_at {t1} unchanged, one resolve, gate clear")
 
 
 def judge_p8(ev: Mapping[str, Any]) -> Verdict:
@@ -944,6 +1028,72 @@ def judge_p8(ev: Mapping[str, Any]) -> Verdict:
     return PASS, (f"held with warehouse_dirty=full{' and reclassify_needed' if want_reclassify else ''}; "
                   f"one full tick (dirty_flag) validated and released; writer duckdb; "
                   f"silver_orders={dk.get('silver_orders')} == orders, utm rows {dk.get('silver_order_utm')}")
+
+
+def _sweep_losses(sweep: Any) -> Tuple[Optional[List[str]], Optional[str]]:
+    """`(losses, unread)` out of one `index_sweep`: each index short of its
+    rows, or why the sweep cannot be judged."""
+    if not isinstance(sweep, Mapping) or not isinstance(sweep.get("swept"), list):
+        return None, "not swept"
+    if sweep.get("error"):
+        return None, f"the sweep raised {sweep.get('error')}"
+    if not sweep["swept"]:
+        return None, "no index could be asked"
+    return [f"{s.get('index')} misses {s.get('missing')} of {s.get('rows')}"
+            for s in sweep["swept"] if s.get("missing")], None
+
+
+def judge_d1(ev: Mapping[str, Any]) -> Verdict:
+    """DuckDB answers through its indexes after the kill as it did before.
+
+    The rehearsal's F6 is the shape of an OOM kill of the live web, and
+    DuckDB 1.5.5 can lose index entries across one (`index_sweep`). P4a and
+    P5 read their runs at the graceful stop before it; this row is where
+    the kill's cost is reported instead of read around: every index swept
+    whole at both stops, and the same runs read whole by the product's
+    reader after the kill."""
+    if not ev.get("flipped"):
+        return UNKNOWN, "no flip"
+    if not ev.get("killed"):
+        return UNKNOWN, "no kill landed inside the derivation (see P3)"
+    pre, post = ev.get("pre"), ev.get("post")
+    if not pre or not post:
+        return UNKNOWN, (f"the DuckDB copy was not read at both stops around the kill "
+                         f"(before={bool(pre)}, after={bool(post)})")
+    bad: List[str] = []
+    unknown: List[str] = []
+    swept = 0
+    for when, facts in (("before the kill", pre), ("after the kill", post)):
+        losses, unread = _sweep_losses(facts.get("indexes"))
+        if unread:
+            unknown.append(f"indexes {when}: {unread}")
+            continue
+        swept = max(swept, len(facts["indexes"]["swept"]))
+        if losses:
+            bad.append(f"{when}, read through their indexes: {'; '.join(losses)}")
+    runs_pre = pre.get("runs") or {}
+    runs_post = post.get("runs") or {}
+    for rid in sorted(runs_pre, key=str):
+        if not runs_pre[rid]:
+            continue
+        after = runs_post.get(rid)
+        if not after:
+            unknown.append(f"run #{rid} not read after the kill")
+            continue
+        blind, unread = judge_reader(after)
+        if blind:
+            bad.append(f"after the kill: {blind}")
+        elif unread:
+            unknown.append(f"after the kill: {unread}")
+    if bad:
+        return FAIL, "; ".join(bad)
+    if unknown:
+        return UNKNOWN, "; ".join(unknown)
+    skipped = len((post.get("indexes") or {}).get("skipped") or [])
+    runs = _fmt(f"#{r}" for r in sorted(runs_pre, key=str) if runs_pre[r])
+    return PASS, (f"{swept} single-column indexes answer for every row at the stop before the "
+                  f"kill and the stop after it ({skipped} composite, empty or one-valued, not "
+                  f"asked); runs {runs} read whole by fetch_run_issues after the kill")
 
 
 def judge_k0(ev: Mapping[str, Any]) -> Verdict:
@@ -1028,6 +1178,7 @@ LABELS = (
     ("P6", "P6 two restarts, one resolve"),
     ("P7", "P7 unmet precondition pages"),
     ("P8", "P8 the way back"),
+    ("D1", "D1 DuckDB indexes survive the kill"),
     ("K0", "K0 KeyCRM never called"),
     ("Z0", "Z0 nothing else moved"),
 )
@@ -1061,9 +1212,12 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
     f1 = L("f1_snapshot.json")
     is_flipped = flipped(f1)
     d0, d1, dz = L("d0.json"), L("d1.json"), L("dz.json")
-    runs = (d1 or {}).get("runs") or {}
+    # The DQ runs P4a and P5 judge, read at the graceful stop before the kill
+    # (`d_pre.json`); `d1.json` is the stop after it, D1's.
+    d_pre = L("d_pre.json")
+    runs = dict((d_pre or {}).get("runs") or {})
     ids = L("f4_runs.json") or {}
-    restarts = [r for r in (L("p6_restart1.json"), L("p6_restart2.json")) if r]
+    restarts = [r for r in (L(p.name) for p in sorted(ev_dir.glob("p6_restart*.json"))) if r]
     p3 = L("p3.json") or {}
     # Every snapshot taken while the flipped process ran says what
     # `/api/warehouse/status` showed of DuckDB's last refresh: P2's samples.
@@ -1075,8 +1229,8 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
     # P8's conditional branch: the reclassify door under postgres noted a
     # Postgres-only re-parse in the record, so the way back must empty DuckDB's
     # verdicts and say a reclassify is needed.
-    # What the live process's reader showed of each run right after it ran,
-    # before F6's kill: context for `judge_reader`.
+    # What the live process's reader showed of each run right after it ran:
+    # context for `judge_reader`.
     for run_key, live_file in (("integrity", "f4_integrity_live.json"),
                                ("mirror_landing", "f4_mirror_live.json")):
         rid, live = ids.get(run_key), L(live_file)
@@ -1093,7 +1247,7 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
         "P1": {"snapshot": f1, "seeded": (L("seed_gate.json") or {}).get("seeded"),
                "log": L("f1_log.json"), "resolved_events": (L("f1_pg.json") or {}).get("resolved_events"),
                "d1": d1},
-        "P2": {"flipped": is_flipped, "d0": d0, "d1": d1,
+        "P2": {"flipped": is_flipped, "d0": d0, "d_pre": d_pre, "d1": d1,
                "frozen_samples": frozen,
                "runs_ok": (L("p2_pg.json") or {}).get("runs_ok"),
                "refreshing_lines": (L("p2_log.json") or {}).get("refreshing"),
@@ -1114,6 +1268,8 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
                "restarts": restarts, "gate_delivered": (d1 or {}).get("gate_delivered")},
         "P8": {**p8, "flipped": is_flipped, "dk": dz,
                "r0": ((d0 or {}).get("refreshes") or {}).get("max_refreshed_at")},
+        "D1": {"flipped": is_flipped, "killed": p3.get("seen_blocked") is True,
+               "pre": d_pre, "post": d1},
         "K0": L("k0.json") or {},
         "Z0": L("z0.json") or {},
     }
@@ -1126,7 +1282,8 @@ def judge_all(ev_dir: Path, *, floor_s: int, retired: Iterable[str],
         "P1": judge_p1, "P2": judge_p2, "P3": judge_p3,
         "P4": lambda e: judge_p4(e, floor_s=floor_s),
         "P5": lambda e: judge_p5(e, retired=retired, standalone_twins=standalone_twins),
-        "P6": judge_p6, "P7": judge_p7, "P8": judge_p8, "K0": judge_k0, "Z0": judge_z0,
+        "P6": judge_p6, "P7": judge_p7, "P8": judge_p8, "D1": judge_d1,
+        "K0": judge_k0, "Z0": judge_z0,
     }
     rows = []
     for key, label in LABELS:

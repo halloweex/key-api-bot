@@ -15,7 +15,10 @@
 #   P6  two restarts, one resolve
 #   P7  one precondition broken: runs as duckdb, the canary pages
 #   P8  the way back: a full DuckDB rebuild owed, held, released
-# plus K0 (KeyCRM never called) and Z0 (nothing else on the host moved).
+# plus D1 (DuckDB's indexes answer for every row after P3's kill, as they did
+# at the graceful stop before it — DuckDB 1.5.5 can lose index entries across
+# a SIGKILL, so P4 and P5 read their runs at that earlier stop), K0 (KeyCRM
+# never called) and Z0 (nothing else on the host moved).
 #
 # HOW IT STAYS AWAY FROM PRODUCTION
 #   - Its own containers only, every one named reh-*, on its own network
@@ -117,7 +120,7 @@ for arg in "$@"; do
         --cleanup-only) CLEANUP_ONLY=1 ;;
         --build) BUILD=1 ;;
         --any-hour) ANY_HOUR=1 ;;
-        -h|--help) sed -n '2,62p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,67p' "$0"; exit 0 ;;
         *) echo "unknown argument: $arg" >&2; exit 3 ;;
     esac
 done
@@ -438,6 +441,20 @@ poll_pg() {
         sleep "${3:-2}"
     done
     return 1
+}
+
+restart_record() {
+    # P6's record of one restart of the flipped reh-web: $1 the snapshot it
+    # answered with, $2 how the stop before it went (graceful | kill), $3 the
+    # file. The log lines are counted over every start of the container, so
+    # each record says how many there have been by then.
+    printf '{"kind": "%s", "snapshot": %s, "resolved_events": %s, "recorded_lines": %s, "resolved_lines": %s}\n' \
+        "$2" \
+        "$(cat "$1" 2>/dev/null || echo null)" \
+        "$(pgq "$RESOLVED_SQL")" \
+        "$(log_count "$LOG_DIR/flip.log" 'warehouse writer recorded as postgres')" \
+        "$(grep -F 'suppressed (KS_ALERTS_DISABLED)' "$LOG_DIR/flip.log" | grep -cF 'Resolved:' || true)" \
+        > "$3"
 }
 
 json_field() {
@@ -950,7 +967,35 @@ if [ "$FLIPPED" = 1 ]; then
     fi
     wprobe snapshot > "$EV/flip_snap_f5.json" 2>/dev/null || true
 
-    # ─── F6: kill inside the derivation, start again (P3, restart 1 of P6) ───
+    # ─── F5s: a graceful stop before any kill (P4a, P5, D1; restart 1 of P6) ──
+    #
+    # F4's two DQ runs are read here, before F6 kills anything. DuckDB 1.5.5
+    # drops from a CREATE INDEX the rows a SIGKILL caught in the WAL, when the
+    # first checkpoint after the restart is one it takes on its own (at close,
+    # or past wal_autocheckpoint) and nothing touched the table first — and
+    # `fetch_run_issues` reads through `idx_dqi_run`. Read after the kill,
+    # P4a and P5 would judge what that defect left of their runs; read here,
+    # at the checkpoint a deploy takes, they judge the runs as the product
+    # wrote them. F7 reads the same runs and sweeps every index again after
+    # the kill, and D1 reports any loss there — the defect is a finding of
+    # its own, never read around. The kill stays where P3 needs it, inside a
+    # live derivation, and F7's read stays after it for P2 and P6.
+    say "F5s: a graceful stop, F4's DQ runs and every index read, a start"
+    stop_web "$REH_WEB" flip
+    RUN_ARGS=()
+    [ -n "$INT_RUN" ] && RUN_ARGS+=(--run "$INT_RUN")
+    [ -n "$ML_RUN" ] && RUN_ARGS+=(--run "$ML_RUN")
+    probe_offline duckdb-facts --db /app/data/analytics.duckdb --gate /app/data/alert-gate-web.json \
+        ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} > "$EV/d_pre.json" 2>>"$LOG_DIR/probe.err" || true
+    docker start "$REH_WEB" >/dev/null
+    if wait_health "$REH_WEB" "$HEALTH_TIMEOUT"; then
+        sleep 5
+        wprobe snapshot > "$EV/flip_snap_r1.json" 2>/dev/null || true
+        save_log "$REH_WEB" flip
+        restart_record "$EV/flip_snap_r1.json" graceful "$EV/p6_restart1.json"
+    fi
+
+    # ─── F6: kill inside the derivation, start again (P3, restart 2 of P6) ───
     say "F6: holding Gold's TRUNCATE, then killing reh-web inside the derivation"
     poll_pg "SELECT 1 FROM meta.derivation_signal WHERE layer = 'warehouse' AND requested <= built" \
         "$DERIVE_TIMEOUT" 3 >/dev/null || true
@@ -992,7 +1037,7 @@ if [ "$FLIPPED" = 1 ]; then
     FIRST=""
     if wait_health "$REH_WEB" "$HEALTH_TIMEOUT"; then
         sleep 5
-        wprobe snapshot > "$EV/flip_snap_r1.json" 2>/dev/null || true
+        wprobe snapshot > "$EV/flip_snap_r2.json" 2>/dev/null || true
         if [ -n "$BLOCKED" ]; then
             FIRST="$(poll_pg "SELECT json_build_object('id', id, 'trigger', trigger,
                         'requested_seen', requested_seen, 'validation_passed', validation_passed,
@@ -1001,12 +1046,7 @@ if [ "$FLIPPED" = 1 ]; then
                     ORDER BY id LIMIT 1" $((FLOOR_S + 180)) 3 || true)"
         fi
         save_log "$REH_WEB" flip
-        printf '{"snapshot": %s, "resolved_events": %s, "recorded_lines": %s, "resolved_lines": %s}\n' \
-            "$(cat "$EV/flip_snap_r1.json" 2>/dev/null || echo null)" \
-            "$(pgq "$RESOLVED_SQL")" \
-            "$(log_count "$LOG_DIR/flip.log" 'warehouse writer recorded as postgres')" \
-            "$(grep -F 'suppressed (KS_ALERTS_DISABLED)' "$LOG_DIR/flip.log" | grep -cF 'Resolved:' || true)" \
-            > "$EV/p6_restart1.json"
+        restart_record "$EV/flip_snap_r2.json" kill "$EV/p6_restart2.json"
     fi
     if [ -n "$BLOCKED" ]; then
         BUILT_AFTER="$(pgq "SELECT built FROM meta.derivation_signal WHERE layer = 'warehouse'")"
@@ -1019,14 +1059,14 @@ if [ "$FLIPPED" = 1 ]; then
         echo '{"seen_blocked": false, "why": "no TRUNCATE gold.daily_revenue waited on the lock in time"}' > "$EV/p3.json"
     fi
 
-    # ─── F7: stop, read DuckDB, start again (P2, P5, restart 2 of P6) ────────
-    say "F7: a graceful stop, the DuckDB copy read, and a second start"
+    # ─── F7: stop, read DuckDB, start again (P2, D1, restart 3 of P6) ────────
+    #
+    # The read after the kill: P2's frozen state, P6's gate file, and D1's —
+    # the same runs F5s read, and every index swept again.
+    say "F7: a graceful stop, the DuckDB copy read after the kill, and a third start"
     F7_STOP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '{"runs_ok": %s}\n' "$(pgq "SELECT count(*) FROM meta.derivation_runs WHERE id > $N0 AND error IS NULL")" > "$EV/p2_pg.json"
     stop_web "$REH_WEB" flip
-    RUN_ARGS=()
-    [ -n "$INT_RUN" ] && RUN_ARGS+=(--run "$INT_RUN")
-    [ -n "$ML_RUN" ] && RUN_ARGS+=(--run "$ML_RUN")
     probe_offline duckdb-facts --db /app/data/analytics.duckdb --gate /app/data/alert-gate-web.json \
         ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} > "$EV/d1.json" 2>>"$LOG_DIR/probe.err" || true
     printf '{"refreshing": %s, "sync_ticks": %s}\n' \
@@ -1036,14 +1076,9 @@ if [ "$FLIPPED" = 1 ]; then
     docker start "$REH_WEB" >/dev/null
     if wait_health "$REH_WEB" "$HEALTH_TIMEOUT"; then
         sleep 30
-        wprobe snapshot > "$EV/flip_snap_r2.json" 2>/dev/null || true
+        wprobe snapshot > "$EV/flip_snap_r3.json" 2>/dev/null || true
         save_log "$REH_WEB" flip
-        printf '{"snapshot": %s, "resolved_events": %s, "recorded_lines": %s, "resolved_lines": %s}\n' \
-            "$(cat "$EV/flip_snap_r2.json" 2>/dev/null || echo null)" \
-            "$(pgq "$RESOLVED_SQL")" \
-            "$(log_count "$LOG_DIR/flip.log" 'warehouse writer recorded as postgres')" \
-            "$(grep -F 'suppressed (KS_ALERTS_DISABLED)' "$LOG_DIR/flip.log" | grep -cF 'Resolved:' || true)" \
-            > "$EV/p6_restart2.json"
+        restart_record "$EV/flip_snap_r3.json" graceful "$EV/p6_restart3.json"
     fi
     BASE_URL="$(wprobe keycrm-url 2>/dev/null || true)"
     stop_web "$REH_WEB" flip

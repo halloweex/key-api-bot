@@ -183,6 +183,13 @@ def test_p2_is_unknown_without_a_flip_or_both_reads():
     assert probe.judge_p2(p2_ev(d1=None))[0] == UNKNOWN
 
 
+def test_p2_holds_the_stop_before_the_kill_to_the_same_frozen_state():
+    assert probe.judge_p2(p2_ev(d_pre=DUCK1))[0] == PASS
+    moved = {**DUCK1, "refreshes": {"max_refreshed_at": "2026-10-01 10:00:00", "count": 813}}
+    verdict, detail = probe.judge_p2(p2_ev(d_pre=moved))
+    assert verdict == FAIL and "before the kill" in detail
+
+
 def test_a_timestamp_is_compared_as_an_instant_across_renderings():
     assert probe._same_instant("2026-10-01 10:00:00+03", "2026-10-01T07:00:00+00:00") is True
     assert probe._same_instant("2026-10-01 10:00:00", "2026-10-01T10:00:00") is True
@@ -405,9 +412,10 @@ def test_p5_without_the_jobs_list_is_unknown_never_pass():
 
 @pytest.mark.parametrize("which", ["mirror", "integrity"])
 def test_p5_fails_when_the_products_reader_does_not_see_a_run(which):
-    """The rehearsal's F6 kill leaves DuckDB 1.5.5 answering `run_id = ?`
-    with nothing for the runs written before it; `fetch_run_issues` is that
-    query, so the dashboard and the digest show those runs as empty."""
+    """A kill can leave DuckDB 1.5.5 answering `run_id = ?` with nothing for
+    runs a scan returns; `fetch_run_issues` is that query, so the dashboard
+    and the digest would show those runs as empty. P5 reads its runs before
+    the rehearsal's kill, and still fails if the reader there is blind."""
     run = (mirror_run if which == "mirror" else integrity_run)()
     ev = p5_ev(**{which: {**run, "reader": {"names": []}}})
     verdict, detail = probe.judge_p5(ev, retired=RETIRED, standalone_twins=TWINS)
@@ -485,6 +493,169 @@ def test_p6_fails_on_a_second_resolve_or_a_lost_flip(change):
 
 def test_p6_is_unknown_with_one_restart():
     assert probe.judge_p6(p6_ev(restarts=[restart()]))[0] == UNKNOWN
+
+
+def test_p6_names_each_restart_and_judges_all_three():
+    three = [restart(kind="graceful"), restart(kind="kill"), restart(kind="graceful")]
+    verdict, detail = probe.judge_p6(p6_ev(restarts=three))
+    assert verdict == PASS and "3 restarts (graceful,kill,graceful)" in detail
+    three[2] = restart(kind="graceful", resolved_events=2)
+    assert probe.judge_p6(p6_ev(restarts=three))[0] == FAIL
+
+
+# ─── D1 ──────────────────────────────────────────────────────────────────────
+
+SWEEP = {"swept": [{"index": "data_quality_issues.idx_dqi_run", "rows": 9, "missing": 0},
+                   {"index": "orders.idx_orders_status", "rows": 401, "missing": 0}],
+         "skipped": [{"index": "orders.idx_orders_buyer_date", "why": "composite"}]}
+
+
+def d1_ev(**over):
+    runs = {"31": integrity_run(), "32": mirror_run()}
+    ev = {"flipped": True, "killed": True,
+          "pre": {**DUCK1, "runs": runs, "indexes": SWEEP},
+          "post": {**DUCK1, "runs": runs, "indexes": SWEEP}}
+    ev.update(over)
+    return ev
+
+
+def test_d1_passes_when_every_index_and_both_runs_read_whole_after_the_kill():
+    verdict, detail = probe.judge_d1(d1_ev())
+    assert verdict == PASS, detail
+    assert "2 single-column indexes" in detail and "#31,#32" in detail
+
+
+def test_d1_fails_on_an_index_the_kill_left_short():
+    lost = {**SWEEP, "swept": [{**SWEEP["swept"][0], "missing": 7}, SWEEP["swept"][1]]}
+    ev = d1_ev()
+    ev["post"] = {**ev["post"], "indexes": lost}
+    verdict, detail = probe.judge_d1(ev)
+    assert verdict == FAIL
+    assert "after the kill" in detail and "idx_dqi_run misses 7 of 9" in detail
+
+
+def test_d1_fails_on_a_loss_already_there_before_the_kill():
+    ev = d1_ev()
+    ev["pre"] = {**ev["pre"], "indexes": {**SWEEP, "swept": [{**SWEEP["swept"][1], "missing": 1}]}}
+    verdict, detail = probe.judge_d1(ev)
+    assert verdict == FAIL and "before the kill" in detail
+
+
+def test_d1_fails_when_the_products_reader_is_blind_after_the_kill():
+    ev = d1_ev()
+    ev["post"] = {**ev["post"], "runs": {"31": integrity_run(reader={"names": []}),
+                                         "32": mirror_run()}}
+    verdict, detail = probe.judge_d1(ev)
+    assert verdict == FAIL and "fetch_run_issues returns 0 of the" in detail
+
+
+@pytest.mark.parametrize("change", [
+    {"flipped": False},
+    {"killed": False},
+    {"pre": None},
+    {"post": None},
+])
+def test_d1_without_a_kill_or_both_reads_is_unknown_never_pass(change):
+    assert probe.judge_d1(d1_ev(**change))[0] == UNKNOWN
+
+
+@pytest.mark.parametrize("sweep", [
+    None,
+    {"error": "IOException", "swept": [], "skipped": []},
+    {"swept": [], "skipped": [{"index": "t.i", "why": "empty"}]},
+])
+def test_d1_with_no_sweep_to_judge_is_unknown(sweep):
+    ev = d1_ev()
+    ev["post"] = {**ev["post"], "indexes": sweep}
+    assert probe.judge_d1(ev)[0] == UNKNOWN
+
+
+def test_d1_with_a_run_not_read_after_the_kill_is_unknown():
+    ev = d1_ev()
+    ev["post"] = {**ev["post"], "runs": {"31": integrity_run()}}
+    verdict, detail = probe.judge_d1(ev)
+    assert verdict == UNKNOWN and "#32" in detail
+
+
+_KILLED_WRITER = """
+import os, signal, sys
+import duckdb
+con = duckdb.connect(sys.argv[1])
+con.execute("INSERT INTO t SELECT 100000 + r, r % 3, 'late' || r, 1 FROM range(12) x(r)")
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+def _killed_copy(tmp_path, duckdb, *, kill):
+    """A file whose last twelve rows a SIGKILL caught in the WAL, then
+    replayed by a read-write session that touched nothing and closed — the
+    shape of an OOM-killed web restarted and then stopped for a deploy. With
+    `kill=False`, the same rows written by a clean session instead."""
+    import subprocess
+    import sys
+
+    db = str(tmp_path / f"{'killed' if kill else 'clean'}.duckdb")
+    con = duckdb.connect(db)
+    con.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, k BIGINT, s VARCHAR, one INTEGER)")
+    con.execute("CREATE INDEX i_k ON t(k)")
+    con.execute("CREATE INDEX i_s ON t(s)")
+    con.execute("CREATE INDEX i_one ON t(one)")
+    con.execute("CREATE INDEX i_ks ON t(k, s)")
+    con.execute("INSERT INTO t SELECT r, r % 5, 's' || (r % 7), 1 FROM range(1, 3001) x(r)")
+    con.close()
+    if kill:
+        proc = subprocess.run([sys.executable, "-c", _KILLED_WRITER, db])
+        assert proc.returncode == -9
+    else:
+        con = duckdb.connect(db)
+        con.execute("INSERT INTO t SELECT 100000 + r, r % 3, 'late' || r, 1 FROM range(12) x(r)")
+        con.close()
+    duckdb.connect(db).close()
+    return duckdb.connect(db, read_only=True)
+
+
+def test_the_sweep_reads_a_clean_file_whole(tmp_path):
+    duckdb = pytest.importorskip("duckdb")
+    con = _killed_copy(tmp_path, duckdb, kill=False)
+    try:
+        sweep = probe.index_sweep(con)
+    finally:
+        con.close()
+    assert sweep["swept"] == [{"index": "t.i_k", "rows": 3012, "missing": 0},
+                              {"index": "t.i_s", "rows": 3012, "missing": 0}]
+    assert sweep["skipped"] == [{"index": "t.i_ks", "why": "composite"},
+                                {"index": "t.i_one", "why": "one value"}]
+
+
+def test_the_sweep_finds_what_a_kill_costs_duckdb_1_5_5(tmp_path):
+    """The defect D1 exists to report, on DuckDB itself. If a DuckDB upgrade
+    makes `missing` zero here, the loss may be fixed: run the repro again
+    and correct CLAUDE.md "The step-13 rehearsal" before changing this."""
+    duckdb = pytest.importorskip("duckdb")
+    con = _killed_copy(tmp_path, duckdb, kill=True)
+    try:
+        sweep = probe.index_sweep(con)
+        # What a product's `WHERE col = ?` reads, against the scan.
+        assert con.execute("SELECT count(*) FROM t WHERE s = 'late3'").fetchone()[0] == 0
+        assert con.execute("SELECT count_if(s = 'late3') FROM t").fetchone()[0] == 1
+    finally:
+        con.close()
+    assert {s["index"]: s["missing"] for s in sweep["swept"]} == {"t.i_k": 12, "t.i_s": 12}
+
+
+def test_the_sweep_says_why_it_could_not_ask():
+    class _Broken:
+        def execute(self, *_a, **_k):
+            raise RuntimeError("closed")
+
+    assert probe.index_sweep(_Broken()) == {"error": "RuntimeError", "swept": [], "skipped": []}
+
+
+def test_index_expressions_are_read_as_column_names():
+    assert probe._index_columns("[run_id]") == ["run_id"]
+    assert probe._index_columns("['\"value\"']") == ["value"]
+    assert probe._index_columns("[buyer_id, ordered_at]") == ["buyer_id", "ordered_at"]
+    assert probe._index_columns(None) == []
 
 
 # ─── P8 ──────────────────────────────────────────────────────────────────────
@@ -614,7 +785,7 @@ def test_assemble_derives_the_reclassify_branch_from_the_recorded_writer(tmp_pat
 
 def test_assemble_reads_the_jobs_list_for_the_mirror_run_and_the_live_view(tmp_path):
     (tmp_path / "f4_runs.json").write_text(json.dumps({"integrity": 31, "mirror_landing": 32}))
-    (tmp_path / "d1.json").write_text(json.dumps({**DUCK1, "runs": {
+    (tmp_path / "d_pre.json").write_text(json.dumps({**DUCK1, "runs": {
         "31": integrity_run(), "32": mirror_run()}}))
     (tmp_path / "mirror_complete.log").write_text("\n".join([
         "x - Mirror reconciliation complete | {'run_id': 9, 'checks_run': ['reconcile_gold']}",
@@ -628,6 +799,26 @@ def test_assemble_reads_the_jobs_list_for_the_mirror_run_and_the_live_view(tmp_p
     assert ev["checks_run"] == ["reconcile_mirror", "pg_gold_internal_check"]
     assert ev["integrity"]["live_names"] == ["pg_silver_missing_rows", "pg_twin_pairing"]
     assert "live_names" not in ev["mirror"]
+
+
+def test_p4_and_p5_read_their_runs_before_the_kill_and_d1_after_it(tmp_path):
+    """The runs F4 wrote are judged as the stop before F6's kill read them;
+    what the kill left of them is D1's to report, never P4's or P5's to pass
+    or fail on — and a run read only after the kill is no run for them."""
+    (tmp_path / "f4_runs.json").write_text(json.dumps({"integrity": 31, "mirror_landing": 32}))
+    (tmp_path / "p3.json").write_text(json.dumps({"seen_blocked": True}))
+    blind = {"31": integrity_run(reader={"names": []}), "32": mirror_run(reader={"names": []})}
+    (tmp_path / "d1.json").write_text(json.dumps({**DUCK1, "runs": blind}))
+    ev = probe.assemble(tmp_path)
+    assert ev["P4"]["a"]["run"] is None
+    assert ev["P5"]["mirror"] is None and ev["P5"]["integrity"] is None
+    assert ev["D1"]["post"]["runs"] == blind and ev["D1"]["pre"] is None
+    whole = {"31": integrity_run(), "32": mirror_run()}
+    (tmp_path / "d_pre.json").write_text(json.dumps({**DUCK1, "runs": whole}))
+    ev = probe.assemble(tmp_path)
+    assert ev["P4"]["a"]["run"] == whole["31"]
+    assert ev["P5"]["integrity"] == whole["31"] and ev["P5"]["mirror"] == whole["32"]
+    assert ev["D1"]["pre"]["runs"] == whole and ev["D1"]["killed"] is True
 
 
 def test_the_copys_runs_are_read_by_the_products_reader_too(tmp_path, monkeypatch):
