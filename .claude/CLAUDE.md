@@ -3124,16 +3124,19 @@ syncs it the way production once synced the real one, and the rehearsal
 proper then restores that dump and that backup by the host's path. The
 floor (`KS_PG_SILVER_INTERVAL_S`) is 120 s on the host and 60 s locally
 instead of 600 s; every property is "within floor plus a tick", so its size
-changes nothing proved. On 2026-10-01 a local run over 400 orders, on an
+changes nothing proved. On 2026-10-02 a local run over 400 orders, on an
 image built from this branch (3.0.261, revision 0033) with `--build`,
-passed P1–P3, P6–P8 and K0 and failed P4 and P5 on the DuckDB defect below
-and on nothing else: the live process showed both DQ runs' findings at F4,
-and after F6's kill `fetch_run_issues` returned none of them. Z0 was
-UNKNOWN for other sessions' containers. 36 minutes, at the sync's
-off-hours cadence of one tick in five minutes. An earlier note here said a
-run had passed everything on an image of main at 3.0.264, revision 0034;
-the image it ran was built at revision 0033, and its P4a and P5 had read
-around the defect. What the local run cannot answer is
+passed P1–P8, D1 and K0 in 22 minutes, exit 2 for Z0 alone, UNKNOWN for
+other sessions' containers. P4a and P5 judged F4's runs as F5s read them,
+both whole through `fetch_run_issues`; D1 swept 23 indexes at both stops
+and found none short — that kill cost nothing, which D1 says rather than
+assumes. The run the day before, on the same image with P4a and P5 read
+after the kill, failed both on the DuckDB defect below and on nothing else:
+the live process showed both runs' findings at F4, and after F6's kill
+`fetch_run_issues` returned none of them. An earlier note here said a run
+had passed everything on an image of main at 3.0.264, revision 0034; the
+image it ran was built at revision 0033, and its P4a and P5 had read around
+the defect. What the local run cannot answer is
 production's own readiness — whether the copy's preconditions hold, the way
 back's full rebuild inside 1.5 GB, and the timings at 47 k orders — which is
 what the host run is for.
@@ -3168,7 +3171,8 @@ runs by `persist_run` in a process then SIGKILLed, the restart as
 `fetch_run_diffs` 0 of 3, and with rows in every indexed table each of the
 45 single-column indexes answered for 2 of 5; with the hourly
 `duckdb_checkpoint` job's explicit `CHECKPOINT` before the close, every one
-answered whole. Nothing the product runs at start binds them. A blind read
+answered whole. The same in web's image (Python 3.14, Linux) and on macOS.
+Nothing the product runs at start binds them. A blind read
 is the mildest of what follows:
 
 - **reads through the index miss the rows** — `fetch_run_issues` and
