@@ -401,6 +401,38 @@ class TestP3ParallelPeriod:
         assert v == "PASS" and "29 d 23 h of the 30 days" in detail, detail
 
     @pytest.mark.asyncio
+    async def test_every_start_is_a_start(self, pool):
+        """Each rule that can start the clock, alone the latest, is the start
+        and is named — a rule dropped from `starts` reads an older start, and
+        the period reads covered over days nobody watched (review of 02.10).
+        Mutation: replace any one `starts` branch's instant with NULL."""
+        cases = (
+            # The F1 watch's clean run began two days ago: before it, reads
+            # were not watched clean, so the 31 declared days are not 30.
+            ("reads watched clean since", "2 d 0 h of the 30 days",
+             lambda c: c.execute(
+                 "UPDATE app.alert_series SET first_fired_at = $1 "
+                 "WHERE condition_key = 'watch:read_fallbacks'", ago(days=2)),
+             "2030-05-05 12:00+03"),
+            ("step 13 switched to Postgres", "3 d 0 h of the 30 days",
+             lambda c: writer(c, json.dumps({"writer": "postgres",
+                                             "since": ago(days=3).isoformat()})),
+             DECLARED),
+            ("a chain latched", "4 d 0 h of the 30 days",
+             lambda c: owner(c, "app.stock_movements", at=ago(days=4)), DECLARED),
+            ("the declared last write flag", "10 d 0 h of the 30 days",
+             lambda c: owner(c, "app.stock_movements", at=ago(days=20)), DECLARED),
+        )
+        for what, how_far, seed, declared in cases:
+            async with scenario(pool) as conn:
+                await clear(conn)
+                await self.watched(conn)
+                await seed(conn)
+                v, detail = await verdict(conn, P3, parallel_from=declared)
+            assert v == "PASS", (what, detail)
+            assert f"({what}): {how_far}" in detail, (what, detail)
+
+    @pytest.mark.asyncio
     async def test_a_later_latch_moves_the_start(self, pool):
         async with scenario(pool) as conn:
             await clear(conn)
@@ -459,6 +491,32 @@ class TestP3ParallelPeriod:
                                            "since": ago(days=9).isoformat()}))
             v, detail = await verdict(conn, P3, parallel_from=DECLARED)
         assert v == "FAIL" and "step 13 is on DuckDB" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_way_back_in_the_day_is_named_with_its_time(self, pool):
+        """The way back is a breach, not only a state: the report says when.
+        Mutation: drop step 13's way back from `breaches`."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.watched(conn)
+            await writer(conn, json.dumps({"writer": "duckdb",
+                                           "since": ago(hours=2).isoformat()}))
+            v, detail = await verdict(conn, P3, parallel_from=DECLARED)
+        assert v == "FAIL", detail
+        assert "last step 13 given back to DuckDB at 05.06 10:00 Kyiv" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_breach_and_a_watch_restart_at_one_instant_name_the_breach(self, pool):
+        """Mutation: order `starts` by `rank DESC`."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.watched(conn, since=ago(days=5))
+            await series(conn, "read_fallback_used", state="resolved", first=ago(days=6),
+                         resolved=ago(days=5))
+            v, detail = await verdict(conn, P3, parallel_from=DECLARED)
+        assert v == "PASS", detail
+        assert ("(a read served from DuckDB (read_fallback_used, resolved)): 5 d 0 h"
+                in detail), detail
 
     @pytest.mark.asyncio
     async def test_an_unwatched_day_cannot_be_counted(self, pool):
@@ -570,6 +628,58 @@ class TestP4WeekOfSilence:
             assert v == "FAIL", (rec, detail)
 
     @pytest.mark.asyncio
+    async def test_every_start_is_a_start(self, pool):
+        """Each rule that can start the week, alone the latest, is the start
+        and is named. Two of them could be deleted with the suite green (review
+        of 02.10): the file's unchanged-since — a record two days old read as a
+        covered week — and a resolved breach page. Mutation: replace any one
+        `starts` branch's instant with NULL, or drop resolved pages from
+        `breaches`."""
+        cases = (
+            ("the file's bytes recorded unchanged since",
+             lambda c: c.execute("SELECT 1"), {"since": ago(days=2)}),
+            ("web watched under KS_DUCKDB=off, nothing opened, since",
+             lambda c: c.execute(
+                 "UPDATE app.alert_series SET first_fired_at = $1 "
+                 "WHERE condition_key = 'watch:duckdb_switch'", ago(days=2)), {}),
+            ("reads watched clean since",
+             lambda c: c.execute(
+                 "UPDATE app.alert_series SET first_fired_at = $1 "
+                 "WHERE condition_key = 'watch:read_fallbacks'", ago(days=2)), {}),
+            (f"web opened DuckDB ({TRIPWIRE}, resolved)",
+             lambda c: series(c, TRIPWIRE, state="resolved", first=ago(days=3),
+                              resolved=ago(days=2)), {}),
+            ("a lever page (write_chain_flag_mismatch, resolved)",
+             lambda c: series(c, "write_chain_flag_mismatch", state="resolved",
+                              first=ago(days=3), resolved=ago(days=2)), {}),
+            ("a read served from DuckDB (read_fallback_used, resolved)",
+             lambda c: series(c, "read_fallback_used", state="resolved",
+                              first=ago(days=3), resolved=ago(days=2)), {}),
+        )
+        for what, seed, rec in cases:
+            async with scenario(pool) as conn:
+                await clear(conn)
+                await self.silent(conn, days=9)
+                await report(conn, sent_at=ago(days=1))
+                await seed(conn)
+                v, detail = await verdict(conn, P4, duckdb_off="1", **record(**rec))
+            assert v == "PASS", (what, detail)
+            assert f"({what}): 48 h of the 168" in detail, (what, detail)
+
+    @pytest.mark.asyncio
+    async def test_a_resolved_breach_inside_the_day_fails(self, pool):
+        """A page that fired and resolved inside the day is a breach today,
+        whatever happened to its fired row. Mutation: drop resolved pages
+        from `breaches`."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.silent(conn)
+            await series(conn, TRIPWIRE, state="resolved", first=ago(days=3),
+                         resolved=ago(hours=2))
+            v, detail = await verdict(conn, P4, duckdb_off="1", **record())
+        assert v == "FAIL" and f"{TRIPWIRE}, resolved" in detail, detail
+
+    @pytest.mark.asyncio
     async def test_a_change_days_ago_is_the_start_and_named(self, pool):
         async with scenario(pool) as conn:
             await clear(conn)
@@ -617,6 +727,30 @@ class TestP4WeekOfSilence:
         assert v == "PASS", detail
         assert ("(.env, which the host-cron sidecars read, last edited): "
                 "48 h of the 168") in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_way_back_in_the_day_is_named_with_its_time(self, pool):
+        """Mutation: drop step 13's way back from `breaches`."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.silent(conn)
+            await writer(conn, json.dumps({"writer": "duckdb",
+                                           "since": ago(hours=2).isoformat()}))
+            v, detail = await verdict(conn, P4, duckdb_off="1", **record())
+        assert v == "FAIL", detail
+        assert "last step 13 given back to DuckDB at 05.06 10:00 Kyiv" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_dirty_probe_of_either_watch_fails(self, pool):
+        """The fallback watch's latest probe found a read served from DuckDB:
+        a breach now, not a watch too young to count. Mutation: drop the
+        `fw_clean = 0` half of `fail_probe`."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await watch(conn, "watch:duckdb_switch", since=ago(days=8))
+            await watch(conn, "watch:read_fallbacks", since=ago(minutes=10), probes=0)
+            v, detail = await verdict(conn, P4, duckdb_off="1", **record())
+        assert v == "FAIL" and "latest probe found an open" in detail, detail
 
     @pytest.mark.asyncio
     async def test_levers_and_fallbacks_break_it_too(self, pool):
