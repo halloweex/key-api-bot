@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.266
+
+- Chain 7b review: the gate does not read a stood-down comparison as clean
+- Chain 7b review: CLAUDE.md says what the gate asks of Postgres
+- Chain 7b review: the flip's gate asks about Postgres Silver too
+- Chain 7b review: the dry run's two verdict paths, pinned apart
+- Chain 7b review: a KS_GOALS_HISTORY typo is published and paged
+- Chain 7b review: the history bounds read every order, pinned
+- Chain 7b-2: the dry run's comparison is a loop, not a recursion
+- Chain 7b: say in CLAUDE.md what the goals read and what writes them
+- Chain 7b-2: scripts/goals_semantics_dryrun.py, the flip's precondition
+- Chain 7b-2: the Silver history on a real Postgres
+- Chain 7b-2: the sweeps and the job run under the Silver history too
+- Chain 7b-2: the Silver history proved equal, bridge-free and switch-safe
+- Chain 7b-2 (WIP): KS_GOALS_HISTORY=silver reads the goal history from Silver
+- Chain 7b-1 (WIP): tests follow the calculators that compute only
+- Chain 7b-1 (WIP): goal calculators compute only; one transactional writer; GET never writes
+
+
 ## 3.0.265
 
 - /marketing: the monthly report honours the brand and category filters
