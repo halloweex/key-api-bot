@@ -89,6 +89,27 @@ class TestEveryBlindPartIsItsOwnFinding:
             (inv.UNWATCHED, "(pg_dq_journal_write)"),
             (inv.UNWATCHED, "(pg_watchdog_write)")]
 
+    def test_a_blind_part_inside_a_read_group_is_its_own_finding(self):
+        """Chain 6 reads its group and then finds a table it cannot judge — no
+        full write recorded in `meta.mirror_state` — once per table. A fresh
+        Postgres has neither, and both used to be filed under
+        `(pg_catalogue_write)`, beside the watermarks' blindness in the same
+        run. Mutation: drop `part=t.table` in `_catalogue_issues` — two
+        findings under one key, the run Postgres refuses whole."""
+        from core import pg_catalogue_write
+
+        facts = inv.Facts(
+            watched=(pg_catalogue_write.CHAIN,), now=NOW,
+            watermarks_unread=inv.Unwatched("timeout"),
+            catalogue=inv.Catalogue(tables=tuple(
+                inv.CatalogueTable(table, rows=10)
+                for table in pg_catalogue_write.CHAIN_TABLES)))
+        keys = _keys(inv.check_chain_invariants(facts))
+        assert keys == [(inv.UNWATCHED, table)
+                        for table in pg_catalogue_write.CHAIN_TABLES] + [
+            (inv.UNWATCHED, inv.WATERMARKS_PART)]
+        assert len(set(keys)) == len(keys), keys
+
     def test_a_whole_blindness_keeps_its_name(self):
         """The one-finding cases keep `(write chains)` — the whole read, a
         forgotten pre-read, a verdict that raised — whatever `watched` holds."""

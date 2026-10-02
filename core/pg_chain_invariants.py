@@ -1517,9 +1517,14 @@ def _catalogue_issues(cat: Catalogue, chain: str) -> List:
                     "mirror never reached.")))
             continue
         if t.last_ok_at is None:
+            # Named by the table, not derived from `(chain,)`: both tables
+            # can lack a record in one run (a fresh Postgres), and two
+            # findings under `(pg_catalogue_write)` are one key in
+            # `app.data_quality_issues` — the run Postgres refuses whole.
             issues.append(unwatched_issue(
                 f"meta.mirror_state records no full write of {t.table}, so a "
-                "retired row cannot be told from a lost one", (chain,)))
+                "retired row cannot be told from a lost one", (chain,),
+                part=t.table))
             continue
         if t.around:
             shown = ", ".join(str(i) for i in t.around_sample)
