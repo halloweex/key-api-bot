@@ -420,6 +420,16 @@ services:
         condition: service_completed_successfully
     mem_limit: 7g
     cpus: 1.0
+    # How long a stop waits before SIGKILL; Docker's default is 10 s. web's
+    # shutdown waits on uvicorn draining requests (30 s timeout, and a handler
+    # runs on past its 504), then close_store() on whatever DuckDB work a
+    # cancelled job left in flight (a whole warehouse refresh, ~30 s on one
+    # CPU), then close()'s checkpoint (~7 s with a 900 MB WAL): ~67 s at
+    # worst. A web killed before its DuckDB closes leaves a WAL, and before
+    # open_read_write that cost index entries. Deploys (`up -d`) and
+    # `docker compose stop` both honour this; weekly_compact.sh passes its own
+    # --timeout. Inside the deploy step's 10-minute ssh timeout.
+    stop_grace_period: 120s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
       interval: 30s
