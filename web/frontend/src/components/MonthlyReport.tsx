@@ -234,6 +234,8 @@ export const MonthlyReport = memo(function MonthlyReport() {
   const period = useFilterStore((s) => s.period)
   const startDate = useFilterStore((s) => s.startDate)
   const endDate = useFilterStore((s) => s.endDate)
+  const categoryId = useFilterStore((s) => s.categoryId)
+  const brand = useFilterStore((s) => s.brand)
 
   const { data, isLoading, error, refetch } = useMarketingReport()
 
@@ -245,8 +247,10 @@ export const MonthlyReport = memo(function MonthlyReport() {
       params.set('start_date', startDate)
       params.set('end_date', endDate)
     }
+    if (categoryId) params.set('category_id', String(categoryId))
+    if (brand) params.set('brand', brand)
     window.open(`/api/reports/marketing-summary/export/csv?${params}`, '_blank')
-  }, [period, startDate, endDate, salesType])
+  }, [period, startDate, endDate, salesType, categoryId, brand])
 
   // Dynamic labels for comparison columns
   const { periodLabel, prevLabel, yoyLabel } = useMemo(() => {
@@ -276,6 +280,10 @@ export const MonthlyReport = memo(function MonthlyReport() {
           {t('reports.exportCsv')}
         </ExportCsvButton>
       </div>
+
+      {data?.product_filter && (
+        <p className="text-sm text-slate-500">{t('marketing.productFilterNote')}</p>
+      )}
 
       {isLoading && <SkeletonChart />}
       {error && <ApiErrorState error={error} onRetry={refetch} title="Failed to load report" />}

@@ -72,6 +72,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
+from core.pg_goals_read import HISTORY_ENV as GOALS_HISTORY, SILVER, history_mode_of
+
 logger = logging.getLogger(__name__)
 
 ENV = "KS_WRITE_WAREHOUSE"
@@ -409,8 +411,9 @@ PRECONDITIONS: Tuple[Tuple[str, str], ...] = (
     *((f"reader:{name}", f"{name}=postgres") for name in WAREHOUSE_READERS),
     ("cohorts_clickhouse", f"{COHORTS}=clickhouse"),
     ("ch_url", f"{CH_URL} set"),
-    ("goals_bridge", "no write chain owns a table the goal calculators' "
-                     "bridge reads from DuckDB (DN-12)"),
+    ("goals_bridge", f"{GOALS_HISTORY}={SILVER}: the goal calculators read "
+                     "Silver, not DuckDB's orders and classification through "
+                     "the DN-12 bridge (chain 7b)"),
     ("od10_doors", "every DuckDB-only door reading Silver ported or retired "
                    "(OD-10)"),
     ("retired_conditions_clear", "no delivered page open under a condition "
@@ -554,15 +557,36 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
          f"{CH_URL} is not set: ClickHouse is the only independent aggregation "
          "of Gold once DuckDB stops")
 
-    if facts.bridge_owners is None:
+    # Met by construction under `silver`: no goal calculator reads DuckDB
+    # `orders`, `managers` or `manager_classifications` then
+    # (`tests/unit/test_goals_history_silver.py` runs them with those three
+    # gone), and `reader:KS_READ_GOALS` above makes "Silver" Postgres Silver.
+    # Under `bridge` it is unmet whoever owns those tables — step 13 freezes
+    # them — and the owners, when there are any, are what makes it urgent.
+    try:
+        history = history_mode_of(env.get(GOALS_HISTORY))
+    except ValueError:
         need("goals_bridge", False,
-             f"the write-chain registry could not be read: {facts.bridge_error}")
+             f"{GOALS_HISTORY} is {_read(env, GOALS_HISTORY)!r}, which this "
+             "build does not understand (ValueError): every goal read refuses "
+             f"it. Set {SILVER!r}.")
     else:
-        owned = "; ".join(f"{chain}: {', '.join(tables)}"
-                          for chain, tables in sorted(facts.bridge_owners.items()))
-        need("goals_bridge", not facts.bridge_owners,
-             f"write chain(s) own tables the goal calculators still read from "
-             f"DuckDB — {owned}. Port chain 7b first.")
+        if facts.bridge_owners is None:
+            owners = (f" Whether a write chain already owns one of them is "
+                      f"unknown: the registry could not be read "
+                      f"({facts.bridge_error}).")
+        elif facts.bridge_owners:
+            owned = "; ".join(f"{chain}: {', '.join(tables)}"
+                              for chain, tables in sorted(facts.bridge_owners.items()))
+            owners = (f" And write chain(s) already own them — {owned}: retail "
+                      "goals are diverging from Postgres Silver now.")
+        else:
+            owners = ""
+        need("goals_bridge", history == SILVER,
+             f"{GOALS_HISTORY} is {history!r}: the goal calculators read DuckDB "
+             "orders, managers and manager_classifications (the DN-12 bridge), "
+             f"which this switch freezes. Set {GOALS_HISTORY}={SILVER} "
+             f"(chain 7b).{owners}")
 
     need("od10_doors", not facts.od10_doors,
          f"{len(facts.od10_doors)} door(s) still read DuckDB's Silver with no "
