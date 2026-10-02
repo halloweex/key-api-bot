@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.267
+
+- Soak D8: a UTM verdict inside its grace is not a disagreement
+
+
 ## 3.0.266
 
 - Chain 7b review: the gate does not read a stood-down comparison as clean
