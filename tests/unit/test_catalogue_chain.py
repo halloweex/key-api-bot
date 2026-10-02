@@ -787,6 +787,36 @@ class TestTheTickSurvivesTheChain:
         assert svc._catalogue_retry_in() is None
 
     @pytest.mark.asyncio
+    async def test_a_success_tells_the_dashboard_and_a_failure_does_not(
+            self, flagged_alone, monkeypatch, real_store):
+        """The websocket `products_synced` broadcast rides PRODUCTS_SYNCED; the
+        Postgres path must emit it as the DuckDB path does, and only for a
+        catalogue that landed (review mutation R-T9g)."""
+        from core import sync_service as mod
+        from core.events import SyncEvent
+
+        emitted = []
+
+        async def emit(event, data=None):
+            emitted.append((event, data))
+
+        monkeypatch.setattr(mod.events, "emit", emit)
+        svc, endpoints, writer = _tick(monkeypatch, real_store)
+        with patch("core.pg_chain_watermarks.get_value", new=AsyncMock(return_value=None)), \
+             patch("core.pg_chain_watermarks.set_value", new=AsyncMock()):
+            await svc.incremental_sync()
+        assert (SyncEvent.PRODUCTS_SYNCED, {"count": 2}) in emitted
+
+        emitted.clear()
+        svc, endpoints, writer = _tick(
+            monkeypatch, real_store,
+            upsert_products=AsyncMock(side_effect=ConnectionRefusedError("gone")))
+        with patch("core.pg_chain_watermarks.get_value", new=AsyncMock(return_value=None)), \
+             patch("core.pg_landing._record_failure", new=AsyncMock(return_value=True)):
+            await svc.incremental_sync()
+        assert SyncEvent.PRODUCTS_SYNCED not in [e for e, _ in emitted]
+
+    @pytest.mark.asyncio
     async def test_not_due_it_fetches_nothing(self, flagged_alone, monkeypatch, real_store):
         svc, endpoints, writer = _tick(monkeypatch, real_store)
         recent = datetime.now(UTC) - timedelta(minutes=5)

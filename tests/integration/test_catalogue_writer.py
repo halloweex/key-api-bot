@@ -625,6 +625,80 @@ class TestTheWayThereAndBack:
         assert chain.writes_postgres() is False
 
     @pytest.mark.asyncio
+    async def test_a_row_the_mirror_ships_while_the_carry_runs_keeps_the_mirrors_copy(
+            self, stores):
+        """T-12: the carry's `ON CONFLICT (id) DO NOTHING`. Between the carry
+        reading which ids Postgres holds and inserting, the mirror can ship one
+        of them — KeyCRM serving the product again. That row is served and
+        current; DuckDB's frozen copy must not overwrite it, and the race must
+        not fail the carry. Changed to DO UPDATE, or removed, it survived the
+        whole chain-6 set (review mutations R-T12e and M-m)."""
+        from core import pg_landing
+
+        store, pool, env = stores
+        await self._mirrored(store, pool)
+        async with pool.acquire() as conn:                   # the mirror, just now
+            await conn.execute(
+                "INSERT INTO bronze.products (id, name, category_id, brand, sku, price) "
+                "VALUES (1055, 'Served again', 10, 'B', 'NEW', 120.00)")
+        (served,) = await _pg(pool, "SELECT name, price, mirrored_at FROM bronze.products "
+                                    "WHERE id = 1055")
+        real = pg_landing.retired_rows
+
+        def read_before_the_mirror_shipped(rows, synced, held, last_ok_at):
+            return real(rows, synced, held - {1055}, last_ok_at)
+
+        env.setattr(pg_landing, "retired_rows", read_before_the_mirror_shipped)
+        done = await pg_landing.carry_retired_catalogue(store, dry_run=False)
+
+        assert done[PRODUCTS]["ids"] == [1055] and done[PRODUCTS]["carried"] == 0
+        (after,) = await _pg(pool, "SELECT name, price, mirrored_at FROM bronze.products "
+                                   "WHERE id = 1055")
+        assert tuple(after) == tuple(served), "the carry overwrote a row the mirror served"
+
+    @pytest.mark.asyncio
+    async def test_a_carried_row_stamped_at_the_watermark_still_reads_retired(self, stores):
+        """T-12: `mirrored_at = LEAST(synced, W − 1 µs)`. A row DuckDB stamped
+        at exactly W is retired by the comparison's `<=`; carried at W it
+        would read as one the last full write carried — current, and in the
+        lost count's `last_rows` it never was (review mutation R-T12d)."""
+        from core.pg_landing import carry_retired_catalogue
+
+        store, pool, env = stores
+        await self._mirrored(store, pool)
+        w = (await _state(pool))["last_ok_at"]
+        async with store.connection() as conn:
+            conn.execute("UPDATE products SET synced_at = ? WHERE id = 1055", [w])
+
+        done = await carry_retired_catalogue(store, dry_run=False)
+
+        assert done[PRODUCTS]["carried"] == 1
+        (carried,) = await _pg(pool, "SELECT mirrored_at FROM bronze.products WHERE id = 1055")
+        assert carried["mirrored_at"] == w - timedelta(microseconds=1)
+
+    @pytest.mark.asyncio
+    async def test_a_chain_write_after_a_failure_reads_healthy_again(self, stores):
+        """The chain stamps its watermark with the mirror's statement, which
+        resets the failure count — the copy-back's soak text tells an operator
+        to see `failures_since_ok` at 0 (review mutation M-y)."""
+        from core.pg_landing import _record_failure
+
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await store.upsert_products(PAYLOAD)
+        assert await _record_failure(PRODUCTS, "ConnectionRefusedError: gone")
+        assert await _record_failure(PRODUCTS, "ConnectionRefusedError: gone")
+        (failing,) = await _pg(pool, "SELECT failures_since_ok, last_error "
+                                     "FROM meta.mirror_state WHERE table_name = $1", PRODUCTS)
+        assert failing["failures_since_ok"] == 2 and failing["last_error"]
+
+        await store.upsert_products(PAYLOAD)
+
+        (healthy,) = await _pg(pool, "SELECT failures_since_ok, last_error "
+                                     "FROM meta.mirror_state WHERE table_name = $1", PRODUCTS)
+        assert (healthy["failures_since_ok"], healthy["last_error"]) == (0, None)
+
+    @pytest.mark.asyncio
     async def test_after_the_latch_a_retired_row_edited_in_duckdb_refuses(self, stores):
         from core.chain_transfer import copy_back, CopyBackRefused, handover_check
         from core.pg_landing import carry_retired_catalogue
