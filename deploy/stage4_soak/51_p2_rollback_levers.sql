@@ -27,12 +27,21 @@
 -- WHAT EACH VERDICT MEANS
 -- FAIL: a lever recorded in the day, a lever page fired, escalated or resolved
 -- in it, one still standing however old, or step 13's way back completed in
--- it. Never UNKNOWN: the journal is written to Postgres directly, not copied
--- out of DuckDB (D9's reason). PASS names the last lever ever recorded.
+-- it. UNKNOWN: nothing of that, but nothing durable says the pages could have
+-- been seen — the lever pages reach the journal only through the bot's alert
+-- archive, which is fire-and-forget: it writes nothing on a bot without
+-- KS_PG_DSN, stands down while Postgres is slow, and journals only delivered
+-- pages. Its proof of life is the row the same writer rewrites on every
+-- canary probe, `watch:read_fallbacks` (F1's, core.alert_archive): none, or
+-- none written for 35 min, and an empty journal says nothing. The copy-back
+-- record half is durable and FAILs without it (review of 02.10: P2 used to
+-- PASS on a journal nobody was writing). PASS names the last lever ever
+-- recorded.
 --
 -- WHAT IT CANNOT SEE
--- A way back that finished inside the hour before the hourly copy shipped the
--- record; a marker deleted by hand (the daily comparison's
+-- A page the journal missed between two live probes (a write that stood down
+-- for a second, a page the Gate did not deliver); a way back that finished
+-- inside the hour before the hourly copy shipped the record; a marker deleted by hand (the daily comparison's
 -- chain_latch_disagrees and the order owner-row checks see that, not this);
 -- and a KS_READ_* put back to duckdb outside step 13's list. One inside it —
 -- every Silver, Gold and UTM read switch — is a lost precondition, so the
@@ -43,11 +52,17 @@ WITH clock AS (
                     now()) AS now
 ),
 limits AS (
-    SELECT interval '24 hours' AS span
+    SELECT interval '24 hours' AS span,
+           interval '35 minutes' AS watch_gap
 ),
 win AS (
-    SELECT clock.now - limits.span AS starts, clock.now, limits.span
+    SELECT clock.now - limits.span AS starts, clock.now, limits.span, limits.watch_gap
     FROM clock CROSS JOIN limits
+),
+journal AS (
+    SELECT max(w.last_fired_at) AS last_probe
+    FROM app.alert_series w
+    WHERE w.condition_key = 'watch:read_fallbacks'
 ),
 running AS (
     SELECT NULLIF(:'parallel_from', '') IS NOT NULL OR :'duckdb_off' = '1' AS period
@@ -94,7 +109,8 @@ writer AS (
     WHERE m.key = 'warehouse_writer'
 ),
 judged AS (
-    SELECT win.starts, win.now AS clock_now, win.span,
+    SELECT win.starts, win.now AS clock_now, win.span, win.watch_gap,
+           journal.last_probe AS journal_probe,
            (SELECT count(*) FROM recorded r WHERE r.at > win.starts) AS n_recorded,
            (SELECT r.what FROM recorded r WHERE r.at > win.starts
              ORDER BY r.at DESC LIMIT 1) AS recorded_today,
@@ -109,6 +125,7 @@ judged AS (
            writer.writer, writer.since AS writer_since
     FROM win
     CROSS JOIN series
+    CROSS JOIN journal
     LEFT JOIN writer ON true
 ),
 verdicts AS (
@@ -118,13 +135,15 @@ verdicts AS (
            COALESCE(j.resolved_at > j.starts AND j.resolved_at <= j.clock_now, false)
                AS fail_resolved,
            COALESCE(j.writer = 'duckdb' AND j.writer_since > j.starts
-                    AND j.writer_since <= j.clock_now, false) AS fail_way_back
+                    AND j.writer_since <= j.clock_now, false) AS fail_way_back,
+           COALESCE(j.clock_now - j.journal_probe > j.watch_gap, true) AS journal_unseen
     FROM judged j
 )
 SELECT 'P2 rollback levers'::text AS "check",
        CASE
            WHEN fail_recorded OR fail_paged OR firing OR fail_resolved OR fail_way_back
                THEN 'FAIL'
+           WHEN journal_unseen THEN 'UNKNOWN'
            ELSE 'PASS'
        END AS verdict,
        CASE
@@ -150,6 +169,15 @@ SELECT 'P2 rollback levers'::text AS "check",
                               to_char(writer_since AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
                    END)
                || '; the parallel period and the week of silence start again (OD-17 (a))', 500)
+           WHEN journal_unseen THEN
+               format('no lever recorded in %s h, but nothing says a lever page could have been '
+                      || 'journaled: %s, and the bot''s alert archive writes both (a bot without '
+                      || 'KS_PG_DSN, one standing down, or no probe reaching web)',
+                      floor(extract(epoch FROM span) / 3600),
+                      CASE WHEN journal_probe IS NULL THEN 'no watch:read_fallbacks row'
+                           ELSE format('watch:read_fallbacks last written %s min ago (limit %s)',
+                                       floor(extract(epoch FROM clock_now - journal_probe) / 60),
+                                       floor(extract(epoch FROM watch_gap) / 60)) END)
            ELSE
                format('no rollback lever in %s h; last recorded: %s',
                       floor(extract(epoch FROM span) / 3600),

@@ -93,6 +93,12 @@ async def watch(conn, key, *, since, last=None, probes=100):
         key, since, last or ago(minutes=10), probes)
 
 
+async def journal(conn):
+    """The bot's alert archive is writing: the canary's read-fallback watch,
+    rewritten ten minutes ago (P2's proof that a lever page could land)."""
+    await watch(conn, "watch:read_fallbacks", since=ago(days=40))
+
+
 async def writer(conn, value: str):
     await conn.execute(
         "INSERT INTO app.sync_metadata (key, value, updated_at) VALUES "
@@ -161,6 +167,16 @@ class TestTheFilesReadWhatTheCodeWrites:
             gap = re.findall(r"interval\s+'(\d+)\s+minutes'\s+AS\s+watch_gap", code)
             assert [int(m) * 60 for m in gap] == [canary.READ_FALLBACK_WATCH_GAP_S], name
 
+    def test_p2_judges_the_journal_by_the_canarys_own_watch(self):
+        """The lever pages and the watch row are written by one writer, the
+        bot's alert archive; the row's key and gap are the canary's."""
+        from bot import canary
+
+        code = self.code(P2)
+        assert f"w.condition_key = '{canary.READ_FALLBACK_WATCH_KEY}'" in code
+        gap = re.findall(r"interval\s+'(\d+)\s+minutes'\s+AS\s+watch_gap", code)
+        assert [int(m) * 60 for m in gap] == [canary.READ_FALLBACK_WATCH_GAP_S]
+
     def test_the_tripwire_is_the_canarys(self):
         """Mutation: rename the page key or the watch key in bot/canary.py."""
         from bot import canary
@@ -174,7 +190,7 @@ class TestTheFilesReadWhatTheCodeWrites:
 
     @pytest.mark.parametrize("name, span, extra", [
         (P1, 24, {"record_max_age": "3 hours"}),
-        (P2, 24, {}),
+        (P2, 24, {"watch_gap": "35 minutes"}),
         (P3, 24, {"period": "720 hours"}),
         (P4, 24, {"week": "168 hours", "record_max_age": "3 hours"}),
     ])
@@ -290,10 +306,43 @@ class TestP1DuckDBFile:
 
 @needs_pg
 class TestP2RollbackLevers:
+    """Every scenario starts from a live journal — the canary's
+    `watch:read_fallbacks` row written ten minutes ago — unless it is about
+    the journal."""
+
+    @pytest.mark.asyncio
+    async def test_a_journal_nobody_writes_is_unknown(self, pool):
+        """An empty journal says nothing when nothing could have written it: a
+        bot without KS_PG_DSN, or standing down (review of 02.10: P2 passed
+        on a freshly migrated database). Mutation: drop `journal_unseen`."""
+        cases = (
+            (None, "UNKNOWN", "no watch:read_fallbacks row"),
+            (ago(minutes=36), "UNKNOWN", "last written 36 min ago (limit 35)"),
+            (ago(minutes=35), "PASS", "last recorded: none"),
+        )
+        for last, expected, words in cases:
+            async with scenario(pool) as conn:
+                await clear(conn)
+                if last is not None:
+                    await watch(conn, "watch:read_fallbacks", since=ago(days=40), last=last)
+                v, detail = await verdict(conn, P2)
+            assert (v, words in detail) == (expected, True), (last, detail)
+
+    @pytest.mark.asyncio
+    async def test_a_recorded_lever_fails_without_the_journal(self, pool):
+        """The copy-back's record is written by the copy-back, inside its own
+        transaction: it needs no bot to be seen."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await lever(conn, at=ago(hours=2))
+            v, detail = await verdict(conn, P2)
+        assert v == "FAIL" and "chain_copy_back" in detail, detail
+
     @pytest.mark.asyncio
     async def test_nothing_recorded_passes(self, pool):
         async with scenario(pool) as conn:
             await clear(conn)
+            await journal(conn)
             v, detail = await verdict(conn, P2)
         assert v == "PASS" and "last recorded: none" in detail, detail
 
@@ -301,6 +350,7 @@ class TestP2RollbackLevers:
     async def test_a_copy_back_in_the_day_fails_and_names_itself(self, pool):
         async with scenario(pool) as conn:
             await clear(conn)
+            await journal(conn)
             await lever(conn, at=ago(hours=2))
             v, detail = await verdict(conn, P2)
         assert v == "FAIL", detail
@@ -312,6 +362,7 @@ class TestP2RollbackLevers:
         """Mutation: drop `r.at > win.starts` from the count."""
         async with scenario(pool) as conn:
             await clear(conn)
+            await journal(conn)
             await lever(conn, at=ago(hours=25), outcome="committed_not_released")
             v, detail = await verdict(conn, P2)
         assert v == "PASS", detail
@@ -321,11 +372,13 @@ class TestP2RollbackLevers:
     async def test_a_flag_put_back_on_a_latched_chain_is_a_lever(self, pool):
         async with scenario(pool) as conn:
             await clear(conn)
+            await journal(conn)
             await page(conn, "write_chain_flag_mismatch", at=ago(hours=3))
             v, detail = await verdict(conn, P2)
         assert v == "FAIL" and "write_chain_flag_mismatch" in detail, detail
         async with scenario(pool) as conn:
             await clear(conn)
+            await journal(conn)
             await series(conn, "write_chain_flag_mismatch", state="firing", first=ago(days=3))
             v, detail = await verdict(conn, P2)
         assert v == "FAIL" and "still paging" in detail, detail
@@ -341,6 +394,7 @@ class TestP2RollbackLevers:
                 ({"duckdb_off": "1"}, "FAIL")):
             async with scenario(pool) as conn:
                 await clear(conn)
+                await journal(conn)
                 await page(conn, "warehouse_preconditions_unmet", at=ago(hours=3))
                 v, detail = await verdict(conn, P2, **variables)
             assert v == expected, (variables, detail)
@@ -349,12 +403,14 @@ class TestP2RollbackLevers:
     async def test_step_13_given_back(self, pool):
         async with scenario(pool) as conn:
             await clear(conn)
+            await journal(conn)
             await writer(conn, json.dumps({"writer": "duckdb",
                                            "since": ago(hours=3).isoformat()}))
             v, detail = await verdict(conn, P2)
         assert v == "FAIL" and "step 13 was given back to DuckDB at 05.06 09:00" in detail
         async with scenario(pool) as conn:
             await clear(conn)
+            await journal(conn)
             await writer(conn, json.dumps({"writer": "duckdb",
                                            "since": ago(days=3).isoformat()}))
             v, detail = await verdict(conn, P2)
@@ -364,6 +420,7 @@ class TestP2RollbackLevers:
     async def test_a_record_it_cannot_parse_is_not_an_error(self, pool):
         async with scenario(pool) as conn:
             await clear(conn)
+            await journal(conn)
             await writer(conn, '{"writer": "postgres", "since": "yesterday"}')
             v, _ = await verdict(conn, P2)
         assert v == "PASS"
@@ -375,6 +432,7 @@ class TestP2RollbackLevers:
 
         async with scenario(pool) as conn:
             await clear(conn)
+            await journal(conn)
             await lever_journal.record(conn, lever_journal.CHAIN_COPY_BACK,
                                        subject="pg_goals_write",
                                        outcome=lever_journal.RELEASED)

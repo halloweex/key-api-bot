@@ -3395,7 +3395,13 @@ decision to restart both clocks, said out loud.
   standing), step 13 given back (`warehouse_writer` = duckdb with `since` in
   the day), and `warehouse_preconditions_unmet` — but only once a period is
   declared or web runs `off`, because before the step-13 flip that page means
-  "held back", not "rolled back". Never UNKNOWN: the journal is Postgres's own.
+  "held back", not "rolled back". UNKNOWN when nothing says a page could
+  have been journaled: the pages reach `app.alert_events` only through the
+  bot's fire-and-forget alert archive (nothing without `KS_PG_DSN`, standing
+  down while Postgres is slow), whose proof of life is the
+  `watch:read_fallbacks` row the same writer rewrites every probe — none, or
+  none for 35 min, and an empty journal says nothing (review of 02.10: it used
+  to PASS on one nobody wrote). A recorded copy-back FAILs without it.
 - **P3** the parallel period. Starts at the latest of `SOAK_PARALLEL_FROM`
   (the operator declares the last flip — nothing in the database knows which
   flip the stage needed), the newest `owner:` row, step 13's switch, every
