@@ -41,9 +41,9 @@ write moves `last_ok_at` past a row written round the chain, and a row KeyCRM
 does not serve — a stray insert, a retired product edited — is not in its
 payload, so nothing re-stamps it. An hour later it read as RETIRED, "not a
 defect", and the copy-back took it for the chain's own work, because "the
-chain wrote it" was `mirrored_at >= ` the latch, which any write after the
-latch satisfies (the chain-6 review reproduced both, and the copy-back
-released the latch with the stray rows in DuckDB).
+chain wrote it" was `mirrored_at` at or after the latch, which any write
+after the latch satisfies (the chain-6 review reproduced both, and the
+copy-back released the latch with the stray rows in DuckDB).
 
 So every write keeps, in the same transaction, a record of the instants the
 chain has written at: the row `writes:<table>` in `meta.chain_watermarks`
