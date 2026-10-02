@@ -3343,8 +3343,8 @@ web that opens the live file, read-only, which no hash can see — and the
 nightly off-site's snapshot, which runs the same phase, open through the
 switch: their sidecars start from `.env`, so under `off` both are refused
 before the driver runs, each with one line saying its cron line is retired
-at the start of the week. Under `off` an
-open is refused **before the driver runs**, so the file is not even created;
+at the start of the week. Under `off` an open is refused **before the
+driver runs**, so the file is not even created;
 counted **at the raise**, because dozens of callers wrap `get_store()` in
 `except Exception` and a swallowed refusal is exactly the open the week must
 not miss; logged CRITICAL; published as `duckdb_switch.opened_while_off`
@@ -3387,9 +3387,9 @@ decision to restart both clocks, said out loud.
 **The soak checks**, `deploy/stage4_soak/50`–`53`, read-only as `ks_readonly`:
 
 - **P1** the file record. FAIL on MISSING, or a `missing_at` inside the day,
-  always; under `off`, FAIL on a change
-  at the last check or inside the day, UNKNOWN with no record, one over 3 h
-  old, or one younger than the day; under `on`, not applicable.
+  always; under `off`, FAIL on a change at the last check or inside the day,
+  UNKNOWN with no record, one over 3 h old, or one younger than the day;
+  under `on`, not applicable.
 - **P2** levers in the day: a `lever_used` row, a `write_chain_flag_mismatch`
   or `warehouse_hold_stuck` page (fired, escalated, resolved or still
   standing), step 13 given back (`warehouse_writer` = duckdb with `since` in
@@ -3411,10 +3411,9 @@ decision to restart both clocks, said out loud.
   `watch:duckdb_switch` clean-since (the canary writes it only while web runs
   `off`, on F1's 35-minute rule), the file's unchanged-since, the last edit of
   `.env`, every breach of all four kinds — the file's `missing_at` among them —
-  and F1's watch. `.env` is asked
-  because the Sunday compaction and the nightly off-site start their sidecars
-  from it, not from web's environment, and only the switch in the sidecar
-  refuses their read-only open: web `off` with `.env` not saying `off` the way
+  and F1's watch. `.env` is asked because the Sunday compaction and the
+  nightly off-site start their sidecars from it, not from web's environment,
+  and only the switch in the sidecar refuses their read-only open: web `off` with `.env` not saying `off` the way
   `docker run --env-file` reads it (last line, quotes kept) is a FAIL, and any
   edit of the file restarts the week. Covered at **168 h** — a full week holds
   Sunday 05:00 and Monday 09:30 by construction — **and** an
