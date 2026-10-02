@@ -3058,9 +3058,10 @@ while Postgres derives, P3 web killed inside the Postgres derivation (Gold's
 `TRUNCATE` held by a lock, so the kill lands between Silver's commit and
 Gold's), P4 the three mutations (a deleted Silver row, a landed order, an
 unknown sales_type via a trigger on the copy), P5 both DQ jobs under the
-stand-down, P6 two restarts and one resolve, P7 one precondition broken and
-the canary paging, P8 the way back. Plus K0 (KeyCRM never called) and Z0
-(no other container on the host moved). Z0 records every other container's
+stand-down, P6 restarts — graceful, after the kill, graceful — and one
+resolve, P7 one precondition broken and the canary paging, P8 the way back.
+Plus D1 (what P3's kill cost DuckDB's indexes, below), K0 (KeyCRM never
+called) and Z0 (no other container on the host moved). Z0 records every other container's
 `StartedAt`, `RestartCount` and `OOMKilled`, not just its id: a restart
 policy brings an OOM-killed live web back under the same id and name, so
 only those say it happened, and one that did is a FAIL until somebody has
@@ -3152,21 +3153,63 @@ whose roll-up `source_id` is NULL beside per-source ints, so one day that
 differs in both grains is a `TypeError`, `gold_values_unwatched`, and never
 `ch_engines_gold_mismatch`. The mutations now run one per DQ run.
 
-**And DuckDB 1.5.5 loses DQ findings after a SIGKILL, for good.** With the
-index on `data_quality_issues(run_id)`, a kill after `persist_run` commits,
-and a next session that checkpoints before it inserts another issue row,
-`WHERE run_id = ?` answers nothing for the runs the kill caught in the WAL
-while a scan returns every row, and a later write does not bring them
-back. Reproduced on a fresh file with production's DDL, writer and reader;
-without the index, or without the kill, the two agree, and a `CHECKPOINT`
-right after the write avoids it. That query is `fetch_run_issues`, which
-`/api/health/data-quality` and the digest read through, so an OOM kill of
-the live web can empty them, for good, of every finding written since the
-last checkpoint. The rehearsal's own F6 kill does it to the runs P4a and P5
-judge: the judges run `fetch_run_issues` beside the scan and FAIL when the
-two differ. An earlier note here called it one odd segment, not reproduced
-on a fresh file, and the judges read around it — which passed what the
+**And DuckDB 1.5.5 drops index entries across a SIGKILL — production's
+shape, not the rehearsal's.** Every index made by `CREATE INDEX` — all 57,
+on 26 tables; `PRIMARY KEY` and `UNIQUE` constraints keep theirs, and so
+does an index that was empty at the last checkpoint — loses the
+rows a kill caught in the WAL when the first checkpoint after the restart is
+one DuckDB takes on its own (at close, which is the next `docker stop`, or
+past `wal_autocheckpoint`) and nothing wrote that table, or filtered it on a
+value it holds, first. Replay buffers the entries in the still-unbound index;
+that checkpoint writes the index without them, and they stay out. Measured
+with production's own code on a fresh file: schema by `DuckDBStore.connect()`,
+runs by `persist_run` in a process then SIGKILLed, the restart as
+`connect()` then `close()` — `fetch_run_issues` answered 0 of 2 and 0 of 5,
+`fetch_run_diffs` 0 of 3, and with rows in every indexed table each of the
+45 single-column indexes answered for 2 of 5; with the hourly
+`duckdb_checkpoint` job's explicit `CHECKPOINT` before the close, every one
+answered whole. Nothing the product runs at start binds them. A blind read
+is the mildest of what follows:
+
+- **reads through the index miss the rows** — `fetch_run_issues` and
+  `fetch_run_diffs` (`run_id = ?`), so `/api/health/data-quality` and the
+  09:00 digest list no finding under a run whose counts (read by its
+  primary key, intact) say it has some;
+- **a `DELETE` through it leaves them** — the sync's
+  `DELETE FROM order_products WHERE order_id IN (?)` for a one-order batch
+  and `DELETE FROM buyer_contacts WHERE buyer_id = ?`: stale line items and
+  contacts;
+- **the next write that must take a lost row out of an index is a DuckDB
+  FATAL** ("Failed to delete all rows from index") — `UPDATE orders` on a
+  status change, `INSERT OR REPLACE` into `order_products` or `buyers`, the
+  samples' retention `DELETE`. A FATAL invalidates the instance: every later
+  statement on web's connection fails and nothing in the store reconnects.
+  A restart does not clear it — the index is still short, so the same write
+  fails the same way.
+
+The exposure is an OOM kill of web followed, within the hour before
+`duckdb_checkpoint` first runs in the new process, by a deploy or any other
+stop. The Sunday compaction rebuilds every index from its table (a row a
+`DELETE` missed survives it as a row), and so does `DROP INDEX` +
+`CREATE INDEX` with web stopped. A `CHECKPOINT` as the first statement after
+`duckdb.connect()` kept every entry in the same measurement; whether the
+store should take one is the owner's call, not this rehearsal's.
+
+**The rehearsal's F6 is that kill, so nothing P4 and P5 judge is read after
+it.** F5s stops reh-web gracefully after F5 — the checkpoint a deploy
+takes — and reads F4's two runs there, scan and `fetch_run_issues` side by
+side; P4a and P5 judge that read. The kill stays inside a live derivation
+for P3, and F7 still reads after it for P2's frozen state and P6's gate
+file. **D1** is that post-kill read's honesty: every single-column index
+swept whole at both stops (lookup limits lifted, held to `count_if` over the
+table — a composite one serves no read in 1.5.5, and a one-valued column
+cannot be asked) and F4's runs read again by the product's reader. A loss is
+a FAIL naming the index — the defect reported, never read around. Two
+earlier notes here called it one odd segment, then a DQ-journal matter, and
+the judges first read P4a and P5 after the kill, which passed what the
 product could not show anyone.
+`test_the_sweep_finds_what_a_kill_costs_duckdb_1_5_5` holds the loss on
+DuckDB itself: if an upgrade makes it zero, re-measure before changing it.
 
 ### OD-10: the DuckDB-only doors, retired (2026-09-30)
 
