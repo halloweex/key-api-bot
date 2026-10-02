@@ -3019,6 +3019,16 @@ class DuckDBStore(
 
         rows = product_rows(products)
 
+        # Chain 6: under KS_WRITE_CATALOGUE=postgres the parsed rows are the
+        # Postgres write and DuckDB's copy stops (`core/pg_catalogue_write.py`).
+        # After the parse, so both stores read a product the same way.
+        from core import pg_catalogue_write
+
+        if pg_catalogue_write.writes_postgres():
+            count = await pg_catalogue_write.upsert_products(rows)
+            logger.info(f"Upserted {count} products to Postgres (chain 6)")
+            return count
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
@@ -3058,6 +3068,13 @@ class DuckDBStore(
         from core.landing_rows import category_rows
 
         rows = category_rows(categories)
+
+        from core import pg_catalogue_write
+
+        if pg_catalogue_write.writes_postgres():
+            count = await pg_catalogue_write.upsert_categories(rows)
+            logger.info(f"Upserted {count} categories to Postgres (chain 6)")
+            return count
 
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")

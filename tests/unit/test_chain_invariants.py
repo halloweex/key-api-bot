@@ -316,7 +316,7 @@ class TestAChainWithNoInvariants:
                    if chain_name(c) not in readers]
         assert not missing, f"no chain invariants for {missing}"
         assert set(readers.values()) <= {"expenses", "inventory", "goals",
-                                         "expense_types", "buyers",
+                                         "expense_types", "buyers", "catalogue",
                                          # The shadow chains (OD-02 (c)).
                                          "journal", "watchdogs",
                                          "weekly_ledger", "traffic_ledger"}

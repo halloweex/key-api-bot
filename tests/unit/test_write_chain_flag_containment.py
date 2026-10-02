@@ -22,7 +22,8 @@ from core.duckdb_store import DuckDBStore
 
 @pytest.fixture
 def flags(monkeypatch):
-    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
+    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS",
+                "KS_WRITE_CATALOGUE"):
         monkeypatch.delenv(env, raising=False)
     return monkeypatch
 
@@ -72,7 +73,8 @@ class TestTheRegistryNeverRaises:
 
 class TestOrdersSurviveAnUnrelatedTypo:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("env", ["KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY"])
+    @pytest.mark.parametrize("env", ["KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY",
+                                     "KS_WRITE_CATALOGUE"])
     async def test_the_orders_watermark_still_reads_and_writes(self, flags, store, env):
         flags.setenv(env, "postgrse")
         stamp = datetime(2026, 9, 17, 10, 0, tzinfo=timezone.utc)

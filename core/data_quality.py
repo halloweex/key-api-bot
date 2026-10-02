@@ -2159,6 +2159,18 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Find the write that skipped core.pg_buyers_write; never delete a buyer's contacts to clear it"),
     ("chain_buyer_contact_missing",
      "POST /api/duckdb/sync-all-buyers rewrites every buyer and its contacts; find what deleted the list first"),
+    # Chain 6's catalogue (OD-15 (a)). Never re-ship it out of DuckDB: DuckDB's
+    # copy froze at the flip, and the chain's writer is the only one.
+    ("chain_catalogue_empty",
+     "POST /api/jobs/full_sync_weekly/trigger lands both tables; until then every Postgres order line reads Unknown"),
+    ("chain_catalogue_written_around",
+     "Find the writer that is not pg_catalogue_write; delete a stray id or restore that one row from DuckDB, mirrored_at too; never re-ship the catalogue"),
+    ("chain_catalogue_rows_lost",
+     "Nothing deletes this table: find the statement; the next hourly products sync restores what KeyCRM serves"),
+    ("chain_catalogue_retired",
+     "Not a defect: KeyCRM retired them, and the dashboard keeps their names"),
+    ("chain_catalogue_short_write",
+     "Read the last products sync in the web log (pages fetched vs the catalogue); the next hourly write heals it"),
     # The shadow chains (OD-02 (c)). Chain 9 writes a run and its findings
     # in one transaction, so an orphan is a write that went round it.
     ("chain_orphan_children",

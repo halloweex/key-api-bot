@@ -2167,8 +2167,13 @@ def landing_chain(flags):
         fake.WRITE_ENV = "KS_WRITE_LANDING"
         fake.CHAIN_TABLES = tuple(tables)
         fake.env_writes_postgres = env
-        flags.setattr(write_chains, "WRITE_CHAINS",
-                      write_chains.WRITE_CHAINS + (fake,))
+        # The fake is the only chain declaring its tables, as a table belongs
+        # to one chain in any build: a real chain declaring one of them too
+        # (chain 6, the catalogue) would widen an owner row of the fake's to
+        # that chain's other tables, which is not what these tests model.
+        flags.setattr(write_chains, "WRITE_CHAINS", tuple(
+            c for c in write_chains.WRITE_CHAINS
+            if not set(tables) & set(c.CHAIN_TABLES)) + (fake,))
         return fake
 
     return register

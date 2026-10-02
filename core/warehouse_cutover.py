@@ -480,6 +480,20 @@ def _read(env: Mapping[str, str], name: str, default: str = "") -> str:
     return (env.get(name) or default).strip().lower()
 
 
+def readers_not_on_postgres(env: Mapping[str, str]) -> Tuple[str, ...]:
+    """The `WAREHOUSE_READERS` switches `env` does not set to postgres, in
+    their order. Pure.
+
+    The one reading of that list, shared: `evaluate_preconditions` files one
+    `reader:<name>` per name here, and chain 6 holds its catalogue writes on
+    DuckDB while any is left (`core.pg_catalogue_write.unmet_precondition`) —
+    so the switch and the chain cannot come to disagree about which readers
+    still read DuckDB. Unset is duckdb; anything that is not exactly postgres,
+    a typo included, is not on postgres."""
+    return tuple(name for name in WAREHOUSE_READERS
+                 if (_read(env, name, "duckdb") or "duckdb") != "postgres")
+
+
 def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
     """Every precondition of the switch that `env` and `facts` leave unmet, in
     `PRECONDITIONS` order, each naming what it found. Empty is ready. Pure."""
@@ -536,7 +550,7 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
     need("mirror_landing", mirror_on(env.get(MIRROR_LANDING)),
          f"{MIRROR_LANDING} is {env.get(MIRROR_LANDING)!r}: the landing mirror "
          "is off, so Postgres would derive from a bronze nothing writes")
-    for name in WAREHOUSE_READERS:
+    for name in readers_not_on_postgres(env):
         equals(f"reader:{name}", name, "postgres", "duckdb")
     equals("cohorts_clickhouse", COHORTS, "clickhouse", "duckdb")
     need("ch_url", bool((env.get(CH_URL) or "").strip()),

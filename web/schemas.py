@@ -150,7 +150,8 @@ class HealthResponse(BaseModel):
             "`notes` that do not block it; and "
             "`sync_step`: consecutive Postgres failures of its offers or "
             "stocks step, the last one's step and error class, and when the "
-            "next attempt is allowed."
+            "next attempt is allowed. Chain 6's entry (the catalogue) carries "
+            "the same `sync_step` for its hourly products step."
         ),
     )
     derivation: Optional[Dict[str, Any]] = Field(

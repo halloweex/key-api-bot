@@ -666,6 +666,11 @@ class TestEveryWriterLatchesFirst:
         # Chain 4: the buyers' writer, and the derivation that reads what is
         # pending before it latches.
         assert set(_writers(pg_buyers_write)) == {"upsert_buyers", "derive_gender_pg"}
+        # Chain 6: the two full-catalogue writers, each spelling its own
+        # acquire, latch, transaction and claim.
+        from core import pg_catalogue_write
+
+        assert set(_writers(pg_catalogue_write)) == {"upsert_products", "upsert_categories"}
         # Chain 9: a run with its findings, and the digest's beat.
         assert set(_writers(pg_dq_journal_write)) == {"persist_run", "set_digest_marker"}
         # Chain 10: each watchdog's whole tick — reads, insert, prune.

@@ -319,19 +319,28 @@ _COPIED_FROM_SQLITE = (
 )
 
 
+# The catalogue, as constants rather than inline, because three readers need
+# the one description: the daily comparison below, the carry of the rows it
+# calls retired (`core.pg_landing.carry_retired_catalogue`), and chain 6's
+# copy-back (`core.chain_transfer.chain_specs`), which reads these tables the
+# other way — the buyers' arrangement (`BUYERS_SPEC`).
+PRODUCTS_SPEC = MirroredTable(
+    pg_table="bronze.products",
+    dk_table="products",
+    columns=tuple(PRODUCT_COLUMNS),
+    numeric=("price",),
+)
+
+CATEGORIES_SPEC = MirroredTable(
+    pg_table="bronze.categories",
+    dk_table="categories",
+    columns=tuple(CATEGORY_COLUMNS),
+)
+
 # Order matters only for reporting. Products first: it is the table that moves.
 MIRRORED_TABLES: Tuple[MirroredTable, ...] = (
-    MirroredTable(
-        pg_table="bronze.products",
-        dk_table="products",
-        columns=tuple(PRODUCT_COLUMNS),
-        numeric=("price",),
-    ),
-    MirroredTable(
-        pg_table="bronze.categories",
-        dk_table="categories",
-        columns=tuple(CATEGORY_COLUMNS),
-    ),
+    PRODUCTS_SPEC,
+    CATEGORIES_SPEC,
     # Not a mirror — a replica. `is_retail` and the effective-dated intervals
     # are decisions KeyCRM cannot supply, so `core/pg_replication.py` copies
     # what DuckDB holds rather than re-deriving them. `full_replace` because
@@ -4778,6 +4787,9 @@ BUYER_CONTACTS_SPEC = MirroredTable(
 # DuckDB, never replaced out of it — for the copy-back's third source. Not
 # `MIRRORED_TABLES`, which is the catalogue `reconcile_mirror` compares.
 MIRRORED_LANDING_TABLES = (BUYERS_SPEC, BUYER_CONTACTS_SPEC)
+# Chain 6: the catalogue, which `MIRRORED_TABLES` compares daily and the
+# copy-back reads the other way — the same two specs, not a second description.
+MIRRORED_LANDING_TABLES += (PRODUCTS_SPEC, CATEGORIES_SPEC)
 
 # A contact is part of the landing only with its buyer. Neither store declares
 # a foreign key, and this check has always read DuckDB's contacts through a

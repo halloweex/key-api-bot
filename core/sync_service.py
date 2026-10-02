@@ -164,6 +164,31 @@ def _expense_types_off_duckdb() -> bool:
     return chain_modes()[pg_expense_types_write.CHAIN]["mode"] != "duckdb"
 
 
+# ─── Chain 6's catalogue, contained ──────────────────────────────────────────
+#
+# The products watermark is read at the TOP of the incremental tick, before
+# orders, and the tick catches only KeyCRM errors. Under KS_WRITE_CATALOGUE
+# that getter reads Postgres, and raises on a flag nobody can read — so a typo
+# or a Postgres outage there would stop order intake once a minute (DN-01's
+# class, found designing chain 6). Off DuckDB the read moves into the hourly
+# products step itself, bounded like the buyers' (DN-05a), and a failure is
+# recorded and costs that step alone; the next attempt waits ten minutes,
+# during which neither KeyCRM nor Postgres is asked anything.
+CATALOGUE_RETRY_AFTER_S = 600
+CATALOGUE_STEP_EVERY_S = 3600
+CATALOGUE_WATERMARK_TIMEOUT_S = 10
+
+
+def _catalogue_off_duckdb() -> bool:
+    """Whether chain 6's writes do NOT go to DuckDB: to Postgres, or nowhere
+    anybody can name because `KS_WRITE_CATALOGUE` is not understood. The
+    registry's one answer (`pg_catalogue_write.mode`); never raises, so the
+    tick asks it before anything else and `full_sync` inside an `except`."""
+    from core import pg_catalogue_write
+
+    return pg_catalogue_write.mode() != "duckdb"
+
+
 # ─── The buyers step, contained ──────────────────────────────────────────────
 #
 # The buyers step runs inside the incremental tick, BEFORE offers and stocks,
@@ -310,6 +335,9 @@ class SyncService:
         # The buyers step, contained — see BuyerSyncState.
         self.buyer_sync_state = BuyerSyncState()
         self._buyers_retry_after: Optional[float] = None
+        # Chain 6's hourly products step off DuckDB — see CATALOGUE_RETRY_AFTER_S.
+        self.catalogue_step = InventoryStepState()
+        self._catalogue_retry_at = 0.0
 
     def _is_off_hours(self) -> bool:
         """Check if current time is during off-hours (low activity period)."""
@@ -797,6 +825,67 @@ class SyncService:
         if stocked:
             await events.emit(SyncEvent.INVENTORY_UPDATED, {"stocks_count": stats["stocks"]})
 
+    def _catalogue_retry_in(self) -> Optional[int]:
+        remaining = self._catalogue_retry_at - time.monotonic()
+        return int(remaining) + 1 if remaining > 0 else None
+
+    def catalogue_step_health(self) -> Dict[str, Any]:
+        """The `sync_step` entry of chain 6 on /api/health."""
+        return self.catalogue_step.published(self._catalogue_retry_in())
+
+    def _catalogue_step_failed(self, exc: BaseException) -> None:
+        self.catalogue_step.failed("products", exc)
+        self._catalogue_retry_at = time.monotonic() + CATALOGUE_RETRY_AFTER_S
+        logger.error(
+            "Catalogue products step failed off DuckDB; last_sync_products not "
+            "moved, next attempt in %ss: %s: %s", CATALOGUE_RETRY_AFTER_S,
+            type(exc).__name__, exc, exc_info=True)
+
+    async def _catalogue_step_postgres(self, client, stats: Dict[str, Any]) -> None:
+        """The hourly products step while chain 6 is off DuckDB. Never raises
+        a chain fault: a watermark it cannot read, a flag nobody can read, a
+        catalogue Postgres refuses or a Postgres that is down is recorded, and
+        the tick goes on to managers, buyers and inventory. A KeyCRM error
+        propagates exactly as it does on the DuckDB path.
+
+        Nothing is put in `stats` but a count: the tick sums it."""
+        from core.pg_landing import _record_failure
+
+        if self._catalogue_retry_in() is not None:
+            return
+        try:
+            # Shielded, the buyers step's form (DN-05a): a bare `wait_for`
+            # waits for a cancelled Postgres read to unwind.
+            read = asyncio.ensure_future(self.store.get_last_sync_time("products"))
+            try:
+                last = await asyncio.wait_for(
+                    asyncio.shield(read), CATALOGUE_WATERMARK_TIMEOUT_S)
+            finally:
+                read.cancel()
+        except Exception as exc:  # noqa: BLE001 — recorded, published, retried
+            self._catalogue_step_failed(exc)
+            return
+        if last and (datetime.now(DEFAULT_TZ) - last).total_seconds() <= CATALOGUE_STEP_EVERY_S:
+            return
+
+        logger.info("Syncing products (hourly, chain 6)...")
+        products = []
+        async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
+            products.extend(batch)
+        try:
+            stats["products"] = await self.store.upsert_products(products)
+            await self.store.set_last_sync_time("products")
+        except Exception as exc:  # noqa: BLE001 — recorded, published, retried
+            self._catalogue_step_failed(exc)
+            # Best effort, so meta.mirror_state does not keep reading healthy
+            # over a write that failed on its own data.
+            await _record_failure("bronze.products", f"{type(exc).__name__}: {exc}")
+            return
+        # No mirror call: this step runs only while the chain is off DuckDB,
+        # where `_mirror` stands down for the catalogue in any case.
+        self.catalogue_step.succeeded()
+        await events.emit(SyncEvent.PRODUCTS_SYNCED, {"count": stats["products"]})
+
     async def sync_to_meilisearch(self) -> Dict[str, int]:
         """
         Sync buyers, orders, and products to Meilisearch.
@@ -1005,6 +1094,20 @@ class SyncService:
                         WHERE p.synced_at > ?
                     """, [since]).fetchdf()
 
+    async def _catalogue_full_sync_failed(
+            self, stats: Dict[str, Any], entity: str, exc: BaseException) -> None:
+        """Record a chain 6 write `full_sync` contained: its watermark stays
+        where it was, so the freshness check sees a catalogue that did not
+        land, and meta.mirror_state says so too (best effort)."""
+        from core.pg_landing import _record_failure
+
+        stats[f"{entity}_error"] = f"{type(exc).__name__}: {exc}"
+        logger.error(
+            "Full sync: the %s were not stored (%s); their watermark stays where "
+            "it was and the sync carries on", entity, stats[f"{entity}_error"],
+            exc_info=True)
+        await _record_failure(f"bronze.{entity}", stats[f"{entity}_error"])
+
     async def full_sync(
         self, days_back: int = 730, force_update: bool = False,
     ) -> Dict[str, Any]:
@@ -1064,8 +1167,17 @@ class SyncService:
             )
 
             # Upsert to database (sequential due to DuckDB single-writer)
-            stats["categories"] = await self.store.upsert_categories(categories)
-            await self.store.set_last_sync_time("categories")
+            try:
+                stats["categories"] = await self.store.upsert_categories(categories)
+                await self.store.set_last_sync_time("categories")
+            except Exception as exc:
+                # Chain 6, chain 6a's containment: off DuckDB this is the
+                # Postgres write, and its fault stops the catalogue only — on a
+                # boot with an empty DuckDB, aborting here would cost the whole
+                # history. On DuckDB the raise goes out as it always has.
+                if not _catalogue_off_duckdb():
+                    raise
+                await self._catalogue_full_sync_failed(stats, "categories", exc)
             # Step 05. Same payloads, read through the same `landing_rows`;
             # never raises, so a Postgres fault cannot stop a sync.
             await mirror_categories(categories)
@@ -1102,8 +1214,13 @@ class SyncService:
             # Under chain 6a the write above IS the Postgres write, and the
             # hourly copy stands down for it (`core/pg_expense_types_write.py`).
 
-            stats["products"] = await self.store.upsert_products(products)
-            await self.store.set_last_sync_time("products")
+            try:
+                stats["products"] = await self.store.upsert_products(products)
+                await self.store.set_last_sync_time("products")
+            except Exception as exc:
+                if not _catalogue_off_duckdb():
+                    raise
+                await self._catalogue_full_sync_failed(stats, "products", exc)
             await mirror_products(products)
 
             # Sync orders with expenses - in chunks to avoid pagination limit (100 pages × 50 = 5000 orders max)
@@ -1213,7 +1330,12 @@ class SyncService:
 
             # Get last sync times
             last_orders_sync = await self.store.get_last_sync_time("orders")
-            last_products_sync = await self.store.get_last_sync_time("products")
+            # Off DuckDB the products watermark is read inside its own step,
+            # never here ahead of the orders (`_catalogue_step_postgres`).
+            catalogue_off_duckdb = _catalogue_off_duckdb()
+            last_products_sync = (
+                None if catalogue_off_duckdb
+                else await self.store.get_last_sync_time("products"))
 
             # Default to 1 hour ago if never synced
             if not last_orders_sync:
@@ -1279,7 +1401,10 @@ class SyncService:
                 logger.debug("No new orders in sync window, checkpoint unchanged")
 
             # Sync products less frequently (every hour)
-            if not last_products_sync or (datetime.now(DEFAULT_TZ) - last_products_sync).total_seconds() > 3600:
+            if catalogue_off_duckdb:
+                # Chain 6: recorded and retried, never the tick's end.
+                await self._catalogue_step_postgres(client, stats)
+            elif not last_products_sync or (datetime.now(DEFAULT_TZ) - last_products_sync).total_seconds() > 3600:
                 logger.info("Syncing products (hourly)...")
                 products = []
                 async for batch in client.paginate("products", params={"include": "custom_fields"}, page_size=50):
