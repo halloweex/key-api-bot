@@ -35,23 +35,23 @@
 -- `.env` restarts the week. 168 h is a full week, so it holds every weekly
 -- instant: Sunday 05:00 Kyiv, when the compaction would run — and is refused
 -- by the switch before it opens the file, because `.env` says off since
--- before the start — and Monday's reports. A week that holds them by the clock but in which no
--- weekly report was delivered has not shown the Monday path works without
--- DuckDB, so "covered" also needs a `app.weekly_report_sends.sent_at` after
--- the start.
+-- before the start — and Monday's reports. A week that holds them by the
+-- clock but in which no weekly report was delivered has not shown the Monday
+-- path works without DuckDB, so "covered" also needs a
+-- `app.weekly_report_sends.sent_at` after the start.
 --
 -- WHAT EACH VERDICT MEANS
 -- FAIL: KS_DUCKDB set to a value web does not understand (web runs `on`, the
--- week is not running); web off while `.env` does not say off, or says it in a
--- way the switch does not understand (the sidecars would run on); a breach
--- inside the day; a tripwire, lever or
--- fallback page still standing; the latest probe of either watch inside the
--- day found something; the file changed, is missing, or was found missing
--- inside the day (it came back, but nothing vouched for it while it was
--- gone); step 13 on DuckDB.
--- UNKNOWN: web down; `.env` unreadable; either watch missing, not written for 35 min, or clean
--- for less than the day; no file record, one over 3 h old, or one that began
--- inside the day. PASS: otherwise, with how many of the 168 h are behind it.
+-- week is not running); web off while `.env` does not say off, or says it in
+-- a way the switch does not understand (the sidecars would run on); a breach
+-- inside the day; a tripwire, lever or fallback page still standing; the
+-- latest probe of either watch inside the day found something; the file
+-- changed, is missing, or was found missing inside the day (it came back, but
+-- nothing vouched for it while it was gone); step 13 on DuckDB.
+-- UNKNOWN: web down; `.env` unreadable; either watch missing, not written for
+-- 35 min, or clean for less than the day; no file record, one over 3 h old, or
+-- one that began inside the day. PASS: otherwise, with how many of the 168 h
+-- are behind it.
 --
 -- WHAT IT CANNOT SEE
 -- An open in a web process after the canary's last probe of it and before it

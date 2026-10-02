@@ -31,10 +31,10 @@
 -- deleting the file is a DROP and none may happen before the owner's week
 -- after full completion (OD-11 (a)), and for the hours it was gone nothing
 -- vouched for it, however unchanged its bytes came back — or, under off, the
--- content changed at the last check or inside the day. UNKNOWN: under off, no record, a
--- record not written for over 3 h (the cron runs hourly), or one that began
--- inside the day. PASS: under on, not applicable — web writes the file all
--- day; under off, the same bytes since a moment over a day ago.
+-- content changed at the last check or inside the day. UNKNOWN: under off, no
+-- record, a record not written for over 3 h (the cron runs hourly), or one
+-- that began inside the day. PASS: under on, not applicable — web writes the
+-- file all day; under off, the same bytes since a moment over a day ago.
 --
 -- WHAT IT CANNOT SEE
 -- A change and its exact reversal between two hourly checks; and anything that
