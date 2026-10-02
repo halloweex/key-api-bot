@@ -3329,9 +3329,21 @@ measured beside a live DuckDB — levers and fallbacks — and the week of silen
 on all four, with web running `KS_DUCKDB=off`.
 
 **`KS_DUCKDB`** (`core/duckdb_switch.py`; `on` default, `off`). `open_file` is
-the only `duckdb.connect` in `core/`, `web/` and `bot/` — a test walks the
-three trees (every import spelling, `getattr` included) and the host tools in
-`scripts/`/`deploy/` are an exemption map the walk must equal. Under `off` an
+the only reach for the driver in `core/`, `web/` and `bot/` — `connect`, and
+every function on its default connection, which `ATTACH` points at any file.
+A test walks the three trees, and the host tools in `scripts/`/`deploy/` are
+an exemption map the walk must equal. It reads the driver however it is
+reached: imported, re-exported (`from core.duckdb_store import duckdb`, or
+`<module>.duckdb`), imported by its name (`import_module('duckdb')`,
+`sys.modules`), through `getattr`, or handed on as a value. It cannot read a
+module named by a variable, nor anything that is not Python; the first walk
+read `duckdb.connect` alone and let four such spellings past (review of
+02.10). The weekly compaction's phase 1 — the one scheduled process outside
+web that opens the live file, read-only, which no hash can see — and the
+nightly off-site's snapshot, which runs the same phase, open through the
+switch: their sidecars start from `.env`, so under `off` both are refused
+before the driver runs, each with one line saying its cron line is retired
+at the start of the week. Under `off` an
 open is refused **before the driver runs**, so the file is not even created;
 counted **at the raise**, because dozens of callers wrap `get_store()` in
 `except Exception` and a swallowed refusal is exactly the open the week must

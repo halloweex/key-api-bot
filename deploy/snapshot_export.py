@@ -41,7 +41,24 @@ def main() -> None:
     size_mb = compact.SOURCE_DB.stat().st_size / (1024 ** 2)
     compact.log(f"Source: {compact.SOURCE_DB} ({size_mb:,.0f} MB, read-only)")
 
-    manifest = compact.phase1_export()
+    # Phase 1 opens through the application's switch (core/duckdb_switch.py),
+    # and this sidecar is started with the whole `.env`: under KS_DUCKDB=off
+    # it is refused before the driver runs. The source is a backup, not the
+    # live file, but the week of silence retires this branch of the nightly
+    # off-site at its start (after the second Ark is off-site), and under
+    # `off` db_backup is refused in web anyway, so tonight's source would be
+    # stale. Said in a line a person can act on, not a traceback.
+    from core.duckdb_switch import DuckDBOpenedWhileOff
+
+    try:
+        manifest = compact.phase1_export()
+    except DuckDBOpenedWhileOff:
+        compact.log("KS_DUCKDB=off: the nightly DuckDB snapshot is refused before it "
+                    "opens the backup (the week of silence, OD-17 (a)). Nothing was "
+                    "exported or shipped. Remove daily_offsite.sh from root's crontab: "
+                    "it is retired at the start of the week of silence, once the "
+                    "second Ark is off-site", "ERROR")
+        sys.exit(1)
 
     previous = {}
     if PREVIOUS_PATH.exists():

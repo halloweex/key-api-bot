@@ -35,11 +35,16 @@ swallows is exactly the open the week of silence must not miss.
 
 ONE OPENER
 
-`open_file` is the only call of `duckdb.connect` in `core/`, `web/` and
-`bot/`; `tests/unit/test_duckdb_switch.py` walks those trees (and `scripts/`
-and `deploy/`, whose host-side tools are exempt by name and checked to still
+`open_file` is the only reach for a driver function in `core/`, `web/` and
+`bot/` — `duckdb.connect`, and every function that runs on the driver's
+default connection, which `ATTACH` points at any file — however the driver is
+spelled: imported, re-exported by another module, imported by name.
+`tests/unit/test_duckdb_switch.py` walks those trees (and `scripts/` and
+`deploy/`, whose host-side tools are exempt by name and checked to still
 exist) so a second opener fails the suite rather than slipping past the
-switch.
+switch. The weekly compaction's phase 1 — the one scheduled process outside
+web that opens the live file, read-only, which the file's hash cannot see —
+opens through it too.
 
 AN UNKNOWN VALUE DOES NOT STOP WEB
 

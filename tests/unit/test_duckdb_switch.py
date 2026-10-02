@@ -9,9 +9,12 @@ reading the code (core/duckdb_switch.py). What is held here:
 - the opener: under `off` it refuses before the driver runs — the file is not
   created — counts at the raise, names the site, bounds the sites, and
   publishes no exception text;
-- the walk: `open_file` is the only reference to `duckdb.connect` in `core/`,
-  `web/` and `bot/`, and the host-side tools that connect directly are exactly
-  the exemptions written down here;
+- the walk: `open_file` is the only reach for a driver function in `core/`,
+  `web/` and `bot/` — `connect`, and every function that runs on the default
+  connection — and the host-side tools that reach it directly are exactly the
+  exemptions written down here;
+- the weekly compaction, the one scheduled host process that opens the live
+  file, opens it through the switch;
 - web's startup survives the refusal, `/api/health` publishes it, and the
   canary pages it CRITICAL and keeps the watch only while web runs `off`.
 
@@ -35,6 +38,7 @@ from core import duckdb_switch
 from core.alerting import REGISTRY, Kind
 from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
 from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401  (fixture)
+from tests.unit.test_weekly_compact_wrapper import fake_bin  # noqa: F401  (fixture)
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -208,44 +212,166 @@ class TestTheOpener:
 
 # ─── The walk: one opener ────────────────────────────────────────────────────
 
-def connect_references(source: str) -> list:
-    """Every reference to `duckdb.connect` in a module, as the dotted name of
-    the function holding it (`<module>` at top level). References, not only
-    calls: `opener = duckdb.connect` hands the driver on just as well. Reads
-    `import duckdb [as x]`, `import a, duckdb`, `from duckdb import connect
-    [as c]` and `from duckdb import *`, wherever they sit in the module."""
+def _driver_functions() -> frozenset:
+    """Every function on the driver module, read off the driver itself.
+
+    `connect` opens a file; every other one — `execute`, `sql`, `query`,
+    `read_parquet`, `default_connection`... — runs on the module's default
+    connection, an in-memory database that `ATTACH '<file>'` turns into an
+    open of any file at all. So the walk forbids them all, not `connect`
+    alone. What the application may name is the driver's classes (its
+    exceptions, the connection type) and its plain values: neither opens
+    anything."""
+    import inspect
+
+    import duckdb
+
+    return frozenset(
+        name for name in dir(duckdb)
+        if not name.startswith("_") and callable(getattr(duckdb, name))
+        and not inspect.isclass(getattr(duckdb, name)))
+
+
+DRIVER_FUNCTIONS = _driver_functions()
+_IMPORTERS = frozenset({"import_module", "__import__"})
+
+
+def _is_driver_name(value) -> bool:
+    return isinstance(value, str) and (value == "duckdb" or value.startswith("duckdb."))
+
+
+def _called(node) -> str | None:
+    """The name a call is made by: `f(...)` and `x.f(...)` both give `f`."""
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    return func.attr if isinstance(func, ast.Attribute) else None
+
+
+def driver_references(source: str) -> list:
+    """Every reach for a driver function in a module, as the dotted name of
+    the function holding it (`<module>` at top level).
+
+    References, not only calls: `opener = duckdb.connect` hands the driver on
+    just as well. A function on the driver is reached as an attribute of the
+    driver, through `getattr` on it (a name the walk cannot read counts as
+    one), or bound by `from duckdb import <function> [as f]`; and
+    `from duckdb import *` counts where it stands.
+
+    The driver itself is any of:
+    - a name an import bound to it: `import duckdb [as x]`, `import a, duckdb`,
+      `import duckdb.sub`, and `from <anything> import duckdb [as d]` —
+      because every module that imports the driver re-exports it. A star
+      import from anywhere may bring it in the same way, so after one the bare
+      name `duckdb` is the driver;
+    - `<anything>.duckdb` where a driver function or `getattr` follows it
+      (`s.duckdb.connect`), and `<a module>.duckdb` anywhere — a module being
+      a name an import bound, or an attribute of one — so `args.duckdb`, a
+      command-line flag, is not;
+    - `importlib.import_module('duckdb')`, `__import__('duckdb')`,
+      `sys.modules['duckdb']`, `getattr(<a module>, 'duckdb')`.
+
+    Handed on as a value anywhere but the object of an attribute or of
+    `getattr` (`x = duckdb`, `f(duckdb)`), the driver counts too: no later
+    line can be traced through.
+
+    What it cannot read, and does not pretend to: a module named by a value
+    (`import_module(name)`), the driver reached through an object's
+    attribute set at run time, and anything that is not Python (`ATTACH` in a
+    SQL file, a `duckdb` CLI in a shell script)."""
     tree = ast.parse(source)
     parents = {child: node for node in ast.walk(tree)
                for child in ast.iter_child_nodes(node)}
-    modules, connects = set(), set()
+    imported, modules, functions = set(), set(), set()
+    starred = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            modules |= {a.asname or a.name for a in node.names if a.name == "duckdb"}
-        elif isinstance(node, ast.ImportFrom) and node.module == "duckdb":
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                imported.add(bound)
+                if alias.name == "duckdb" or (
+                        alias.name.startswith("duckdb.") and alias.asname is None):
+                    modules.add(bound)
+        elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name == "*":
-                    connects.add("connect")
-                elif alias.name == "connect":
-                    connects.add(alias.asname or "connect")
+                    modules.add("duckdb")
+                    if node.module == "duckdb":
+                        starred.append(node)
+                    continue
+                bound = alias.asname or alias.name
+                imported.add(bound)
+                if alias.name == "duckdb":
+                    modules.add(bound)
+                elif node.module == "duckdb" and alias.name in DRIVER_FUNCTIONS:
+                    functions.add(bound)
+
+    def sys_modules_key(expr):
+        if (isinstance(expr, ast.Subscript) and isinstance(expr.value, ast.Attribute)
+                and expr.value.attr == "modules" and isinstance(expr.slice, ast.Constant)):
+            return expr.slice.value
+        return None
+
+    def is_getattr(expr) -> bool:
+        return _called(expr) == "getattr" and len(expr.args) >= 2
+
+    def a_module(expr) -> bool:
+        if isinstance(expr, ast.Name):
+            return expr.id in imported or expr.id in modules
+        if isinstance(expr, ast.Attribute):
+            return a_module(expr.value)
+        return _called(expr) in _IMPORTERS or sys_modules_key(expr) is not None
+
+    def the_driver(expr, *, followed: bool) -> bool:
+        """`followed`: a driver function or `getattr` is applied to `expr`."""
+        if isinstance(expr, ast.Name):
+            return expr.id in modules
+        if isinstance(expr, ast.Attribute) and expr.attr == "duckdb":
+            return followed or a_module(expr.value)
+        if _called(expr) in _IMPORTERS:
+            return (bool(expr.args) and isinstance(expr.args[0], ast.Constant)
+                    and _is_driver_name(expr.args[0].value))
+        if is_getattr(expr):
+            looked_up = expr.args[1]
+            return (isinstance(looked_up, ast.Constant) and looked_up.value == "duckdb"
+                    and a_module(expr.args[0]))
+        return _is_driver_name(sys_modules_key(expr))
+
+    def reaches(node) -> bool:
+        if (isinstance(node, ast.Attribute) and node.attr in DRIVER_FUNCTIONS
+                and the_driver(node.value, followed=True)):
+            return True
+        if is_getattr(node) and the_driver(node.args[0], followed=True):
+            looked_up = node.args[1]
+            return not (isinstance(looked_up, ast.Constant)
+                        and looked_up.value not in DRIVER_FUNCTIONS)
+        if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+                and node.id in functions):
+            return True
+        ctx = getattr(node, "ctx", None)
+        if ctx is not None and not isinstance(ctx, ast.Load):
+            return False
+        if the_driver(node, followed=False):
+            # The driver as a value: fine as the object of an attribute or of
+            # getattr, judged above; anywhere else it is handed on.
+            parent = parents.get(node)
+            if isinstance(parent, ast.Attribute) and parent.value is node:
+                return False
+            if is_getattr(parent) and parent.args[0] is node:
+                return False
+            return True
+        return False
+
     found = []
-    for node in ast.walk(tree):
-        attribute = (isinstance(node, ast.Attribute) and node.attr == "connect"
-                     and isinstance(node.value, ast.Name) and node.value.id in modules)
-        by_getattr = (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                      and node.func.id == "getattr" and len(node.args) >= 2
-                      and isinstance(node.args[0], ast.Name)
-                      and node.args[0].id in modules
-                      and isinstance(node.args[1], ast.Constant)
-                      and node.args[1].value == "connect")
-        bare = (isinstance(node, ast.Name) and node.id in connects
-                and isinstance(node.ctx, ast.Load))
-        if attribute or by_getattr or bare:
-            scope, names = node, []
-            while scope in parents:
-                scope = parents[scope]
-                if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                    names.append(scope.name)
-            found.append(".".join(reversed(names)) or "<module>")
+    for node in [*starred, *(n for n in ast.walk(tree) if reaches(n))]:
+        scope, names = node, []
+        while scope in parents:
+            scope = parents[scope]
+            if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.append(scope.name)
+        found.append(".".join(reversed(names)) or "<module>")
     return found
 
 
@@ -254,7 +380,7 @@ def _walk(*trees: str) -> dict:
     for top in trees:
         for path in sorted((REPO / top).rglob("*.py")):
             rel = path.relative_to(REPO).as_posix()
-            for scope in connect_references(path.read_text(encoding="utf-8")):
+            for scope in driver_references(path.read_text(encoding="utf-8")):
                 out.setdefault((rel, scope), 0)
                 out[(rel, scope)] += 1
     return out
@@ -263,19 +389,18 @@ def _walk(*trees: str) -> dict:
 # The one opener in the application.
 OPENER = ("core/duckdb_switch.py", "open_file")
 
-# Host-side tools that connect directly. They do not run in web, so the switch
-# — which is about what web opens — does not cover them; what covers them is
-# the hourly sha256 of the file (deploy/duckdb_silence_check.sh), which sees
-# any of them that writes. Each key must still be found by the walk, and the
-# walk must find nothing else.
+# Host-side tools that reach the driver directly, past the switch. What covers
+# them is the hourly sha256 of the file (deploy/duckdb_silence_check.sh) — and
+# that sees only a WRITE to the live file: a read-only open changes no byte,
+# and nothing sees it. So an entry here must be a tool a person runs by hand,
+# or one that never opens the live file. The one scheduled tool that does, the
+# weekly compaction, opens it through the switch (TestTheCompaction), and is
+# not here. Each key must still be found by the walk, and the walk must find
+# nothing else.
 HOST_TOOLS = {
-    ("scripts/compact_duckdb.py", "phase1_export"):
-        "the weekly compaction reads the file read-only to export it; its phase 2 "
-        "opens through the store and is refused under off, so it never reaches "
-        "phase 3. Retired at the start of the week of silence",
     ("scripts/compact_duckdb.py", "phase3_validate"):
         "validates the NEW file the compaction built, never the live one; "
-        "unreachable under off (phase 2 is refused first)",
+        "unreachable under off (phase 1 is refused first)",
     ("scripts/weekly_report_preview.py", "live_report"):
         "an operator's preview on a laptop copy, read-only",
     ("deploy/ark_freeze.py", "freeze"):
@@ -311,21 +436,229 @@ class TestOneOpener:
         ("from duckdb import connect\nconnect('x')", ["<module>"]),
         ("from duckdb import connect as c\nclass A:\n    def m(self):\n        c('x')",
          ["A.m"]),
-        ("from duckdb import *\ndef f():\n    return connect", ["f"]),
+        ("from duckdb import *\ndef f():\n    return connect", ["<module>"]),
         ("import duckdb\nopener = duckdb.connect", ["<module>"]),
         ("import duckdb\nopener = getattr(duckdb, 'connect')", ["<module>"]),
+        ("import duckdb\ndef f(n):\n    return getattr(duckdb, n)", ["f"]),
         ("def f():\n    import duckdb\n    return duckdb.connect(':memory:')", ["f"]),
+        # The four spellings the first walk let past (review of 02.10): the
+        # driver re-exported by the store, reached through the store's
+        # module, imported by its name, and the default connection, which
+        # `ATTACH` points at any file.
+        ("from core.duckdb_store import duckdb as d\ndef f(p):\n    return d.connect(p)",
+         ["f"]),
+        ("import core.duckdb_store as s\ndef f(p):\n    return s.duckdb.connect(p)", ["f"]),
+        ("import importlib\ndef f(p):\n    return importlib.import_module('duckdb').connect(p)",
+         ["f"]),
+        ("import duckdb\ndef f():\n    duckdb.execute(\"ATTACH 'x.duckdb' AS live\")", ["f"]),
+        ("import duckdb\nduckdb.sql('SELECT 1')", ["<module>"]),
+        ("import sys\ndef g():\n    return sys.modules['duckdb'].sql('x')", ["g"]),
+        ("d = __import__('duckdb')", ["<module>"]),
+        ("import duckdb\nhanded_on = duckdb", ["<module>"]),
+        ("from core import duckdb_store\nx = duckdb_store.duckdb", ["<module>"]),
+        ("import core.duckdb_store\ndef f(p):\n    return core.duckdb_store.duckdb.sql(p)",
+         ["f"]),
+        ("import core.duckdb_store as s\ndef f(p):\n    return getattr(s, 'duckdb').connect(p)",
+         ["f"]),
+        ("def f(m, p):\n    return m.duckdb.connect(p)", ["f"]),
+        ("from core.duckdb_store import *\ndef f(p):\n    return duckdb.connect(p)", ["f"]),
+        # What may be named: the driver's classes and plain values.
+        ("import duckdb\ntry:\n    pass\nexcept duckdb.IOException:\n    pass", []),
+        ("import duckdb\ndef f(c: duckdb.DuckDBPyConnection):\n    return duckdb.__version__",
+         []),
         ("import sqlite3\nsqlite3.connect('x')", []),
-        ("import duckdb\nduckdb.sql('SELECT 1')", []),
+        ("class A:\n    def m(self):\n        self.duckdb = 1", []),
+        ("import os\nmode = os.getenv('KS_READ_X', 'duckdb')", []),
+        # A command-line flag named like the driver is not the driver
+        # (scripts/backfill_gender.py's `--duckdb`): only a module's
+        # attribute is, unless a driver function follows it.
+        ("import argparse\nargs = argparse.ArgumentParser().parse_args()\n"
+         "if args.duckdb:\n    use = args.duckdb", []),
+        ("from core.duckdb_store import duckdb\ntry:\n    pass\n"
+         "except duckdb.IOException:\n    pass", []),
     ])
     def test_the_walk_reads_every_spelling(self, source, expected):
-        assert connect_references(source) == expected
+        """Mutation: drop any one rule from `driver_references` — the module
+        re-exported, reached as an attribute, imported by name, or a function
+        other than `connect` — and its row fails."""
+        assert driver_references(source) == expected
+
+    def test_the_four_bypasses_of_the_review_are_each_found(self):
+        """The review of 02.10 put these four functions in `core/` and the
+        walk passed them, while each opened a file under `off` with nothing
+        counted. Each must now be one finding, in its own function."""
+        source = (
+            "import importlib\n\n\n"
+            "def via_reexport(p):\n"
+            "    from core.duckdb_store import duckdb as d\n"
+            "    return d.connect(p)\n\n\n"
+            "def via_module_attr(p):\n"
+            "    import core.duckdb_store as s\n"
+            "    return s.duckdb.connect(p)\n\n\n"
+            "def via_import_module(p):\n"
+            "    return importlib.import_module('duckdb').connect(p)\n\n\n"
+            "def via_default_connection(p):\n"
+            "    import duckdb\n"
+            "    duckdb.execute(f\"ATTACH '{p}' AS live\")\n"
+            "    return duckdb.sql('SELECT count(*) FROM live.t').fetchone()[0]\n")
+        assert sorted(driver_references(source)) == sorted([
+            "via_reexport", "via_module_attr", "via_import_module",
+            "via_default_connection", "via_default_connection"])
+
+    def test_every_function_on_the_driver_counts_not_connect_alone(self):
+        """Read off the driver: `execute` and `sql` run on the default
+        connection, which `ATTACH` points at any file. Classes are not
+        functions — the application names `duckdb.IOException`."""
+        assert {"connect", "execute", "sql", "default_connection",
+                "read_parquet"} <= DRIVER_FUNCTIONS
+        assert not {"IOException", "DuckDBPyConnection", "ConstraintException"} & DRIVER_FUNCTIONS
 
     def test_the_backup_validation_goes_through_the_opener(self):
         """The one read-only open in the store, of a copy: still DuckDB, still
         refused under off."""
         source = (REPO / "core" / "duckdb_store.py").read_text(encoding="utf-8")
         assert source.count("duckdb_switch.open_file(") == 2
+
+
+# ─── The weekly compaction: scheduled, so through the switch ─────────────────
+
+class TestTheCompaction:
+    """Every Sunday the host cron runs the compaction in a sidecar started with
+    the whole `.env`, and its phase 1 opens the LIVE file read-only — a read
+    changes no byte, so the hourly hash cannot see it, and the switch is the
+    only detector there is. It opens through `open_file`, so under `off` the
+    sidecar is refused before the driver runs, and the cron's abort quotes
+    why (review of 02.10: phase 1 used to connect directly, and a week of
+    silence could pass a Sunday in which the file was opened)."""
+
+    @pytest.fixture
+    def live(self, tmp_path, monkeypatch):
+        import duckdb
+
+        from scripts import compact_duckdb as compact
+
+        data = tmp_path / "data"
+        data.mkdir()
+        for name, value in (("DATA_DIR", data), ("SOURCE_DB", data / "analytics.duckdb"),
+                            ("NEW_DB", data / "analytics_clean.duckdb"),
+                            ("EXPORT_DIR", data / "export_parquet"),
+                            ("MANIFEST_PATH", data / "export_parquet" / "_manifest.json")):
+            monkeypatch.setattr(compact, name, value)
+        con = duckdb.connect(str(compact.SOURCE_DB))
+        # Phase 1 checksums `orders`, so the smallest file it can export has one.
+        con.execute("CREATE TABLE orders (id INTEGER, ordered_at TIMESTAMP, "
+                    "grand_total DECIMAL(12, 2), status_id INTEGER, source_id INTEGER)")
+        con.execute("INSERT INTO orders VALUES (1, TIMESTAMP '2026-09-01 10:00', 100, 1, 1)")
+        con.close()
+        return compact
+
+    @staticmethod
+    def _bytes(path: Path) -> tuple:
+        return path.read_bytes(), path.stat().st_mtime_ns
+
+    def test_under_off_phase_one_is_refused_before_the_driver(self, live, monkeypatch):
+        """Mutation: open with `duckdb.connect(str(SOURCE_DB), read_only=True)`
+        in `phase1_export` again — the driver is reached and nothing is
+        counted (and the walk above finds a host tool it was not told of)."""
+        import duckdb
+
+        before = self._bytes(live.SOURCE_DB)
+        reached = []
+        real = duckdb.connect
+        monkeypatch.setattr(duckdb, "connect",
+                            lambda *a, **k: reached.append(a) or real(*a, **k))
+        _off(monkeypatch)
+        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+            live.phase1_export()
+        assert reached == []
+        assert list(duckdb_switch.opened()) == ["scripts.compact_duckdb:phase1_export"]
+        assert self._bytes(live.SOURCE_DB) == before
+        assert not live.EXPORT_DIR.exists()
+
+    def test_under_on_phase_one_reads_as_ever(self, live):
+        manifest = live.phase1_export()
+        assert manifest["tables"] == ["orders"] and duckdb_switch.opened() == {}
+
+    def test_the_cron_says_why_and_that_its_line_is_left_over(
+        self, live, monkeypatch, capsys, tmp_path, fake_bin,
+    ):
+        """The whole sidecar under `off`: exit 1, and the line the wrapper
+        quotes in "Compact aborted" names the switch and the cron line to
+        remove. Mutation: drop the `except DuckDBOpenedWhileOff` in `main` —
+        a traceback, whose last quotable line says neither."""
+        from tests.unit.test_weekly_compact_wrapper import _run as wrapper_run
+
+        monkeypatch.setenv("FORCE_COMPACT", "1")  # a laptop's free disk is no question here
+        _off(monkeypatch)
+        with pytest.raises(SystemExit) as exit_:
+            live.main()
+        assert exit_.value.code == 1
+        printed = capsys.readouterr().out
+        assert "PHASE 2" not in printed
+
+        run = wrapper_run(tmp_path / "wrapper", fake_bin, printed, 1, "")
+        first = run.notify.splitlines()[0]
+        assert first.startswith(
+            "🚨 Compact aborted: compact failed (exit 1): KS_DUCKDB=off: the weekly "
+            "compaction is refused before it opens the DuckDB file"), first
+        assert "Remove weekly_compact.sh from root's crontab" in first, first
+
+
+class TestTheNightlySnapshot:
+    """`deploy/snapshot_export.py` — the nightly off-site's sidecar, also
+    started with the whole `.env` — runs the compaction's phase 1 against a
+    hard link to the newest backup. Routing phase 1 through the switch refuses
+    it too under `off`; it must say so in a line, not die in a traceback, and
+    leave nothing behind for daily_offsite.sh to ship."""
+
+    @pytest.fixture
+    def snapshot(self, tmp_path, monkeypatch):
+        import importlib.util
+
+        import duckdb
+
+        monkeypatch.syspath_prepend(str(REPO / "scripts"))
+        import compact_duckdb as compact
+
+        data = tmp_path / "data"
+        data.mkdir()
+        for name, value in (("DATA_DIR", data), ("SOURCE_DB", data / "analytics.duckdb"),
+                            ("EXPORT_DIR", data / "export_parquet"),
+                            ("MANIFEST_PATH", data / "export_parquet" / "_manifest.json")):
+            monkeypatch.setattr(compact, name, value)
+        con = duckdb.connect(str(compact.SOURCE_DB))
+        con.execute("CREATE TABLE orders (id INTEGER)")
+        con.close()
+        spec = importlib.util.spec_from_file_location(
+            "snapshot_export_under_test", REPO / "deploy" / "snapshot_export.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        monkeypatch.setattr(module, "PREVIOUS_PATH", data / ".last_snapshot.json")
+        return module, compact
+
+    def test_under_off_it_is_refused_in_a_line_and_ships_nothing(
+        self, snapshot, monkeypatch, capsys,
+    ):
+        """Mutation: drop the `except DuckDBOpenedWhileOff` in its `main` — the
+        refusal leaves as a traceback, not exit 1 with the line."""
+        import duckdb
+
+        module, compact = snapshot
+        reached = []
+        real = duckdb.connect
+        monkeypatch.setattr(duckdb, "connect",
+                            lambda *a, **k: reached.append(a) or real(*a, **k))
+        _off(monkeypatch)
+        with pytest.raises(SystemExit) as exit_:
+            module.main()
+        assert exit_.value.code == 1
+        printed = capsys.readouterr().out
+        assert ("KS_DUCKDB=off: the nightly DuckDB snapshot is refused before it opens "
+                "the backup") in printed, printed
+        assert "Remove daily_offsite.sh from root's crontab" in printed
+        assert reached == []
+        assert list(duckdb_switch.opened()) == ["compact_duckdb:phase1_export"]
+        assert not compact.EXPORT_DIR.exists() and not module.PREVIOUS_PATH.exists()
 
 
 # ─── Web: it starts, and it says so ──────────────────────────────────────────
