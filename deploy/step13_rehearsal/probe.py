@@ -944,13 +944,20 @@ def judge_p5(ev: Mapping[str, Any], *, retired: Iterable[str], standalone_twins:
 
 
 def judge_p6(ev: Mapping[str, Any]) -> Verdict:
-    """Two restarts, one resolve."""
+    """Two restarts, one resolve — at least one of them after the kill.
+
+    F5s added a graceful restart before F6, so two graceful ones alone could
+    reach the count with the restart P6 exists for — the one after a kill —
+    missing. A record without a kind predates F5s and is taken as it was."""
     if not ev.get("flipped"):
         return UNKNOWN, "no flip"
     t1 = ev.get("resolved_at")
     restarts = ev.get("restarts") or []
     if len(restarts) < 2:
         return UNKNOWN, f"{len(restarts)} of 2 restarts observed"
+    kinds = [r.get("kind") for r in restarts]
+    if all(kinds) and "kill" not in kinds:
+        return UNKNOWN, f"no restart after the kill observed ({_fmt(kinds)})"
     bad: List[str] = []
     for n, r in enumerate(restarts, start=1):
         if not r.get("snapshot") or r["snapshot"].get("health_code") != 200:

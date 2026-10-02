@@ -503,6 +503,14 @@ def test_p6_names_each_restart_and_judges_all_three():
     assert probe.judge_p6(p6_ev(restarts=three))[0] == FAIL
 
 
+def test_p6_without_the_restart_after_the_kill_is_unknown_never_pass():
+    """F5s's graceful restart and F7's make two; without the one after F6's
+    kill they are not the two P6 is about."""
+    two = [restart(kind="graceful"), restart(kind="graceful")]
+    verdict, detail = probe.judge_p6(p6_ev(restarts=two))
+    assert verdict == UNKNOWN and "no restart after the kill" in detail
+
+
 # ─── D1 ──────────────────────────────────────────────────────────────────────
 
 SWEEP = {"swept": [{"index": "data_quality_issues.idx_dqi_run", "rows": 9, "missing": 0},
