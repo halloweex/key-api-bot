@@ -123,7 +123,10 @@ def _run(workdir: Path, **fake: str) -> Run:
                 "FAKE_DOCKER_CALLS": str(calls),
                 # The file-hash record P1 and P4 read: none, unless a test
                 # makes one. Never the host's /root/duckdb-silence.
-                "DUCKDB_SILENCE_STATE_DIR": str(workdir / "silence"), **fake})
+                "DUCKDB_SILENCE_STATE_DIR": str(workdir / "silence"),
+                # The `.env` the host-cron sidecars read (P4): none, unless a
+                # test writes one. Never the checkout's.
+                "SOAK_ENV_FILE": str(workdir / "dot-env"), **fake})
     done = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True,
                           text=True, timeout=120)
     return Run(done, calls.read_text().splitlines())
@@ -340,7 +343,7 @@ class TestStage5:
         assert all("duckdb_off=0 " in c and "parallel_from= " in c
                    and "duckdb_file_last=none " in c and "duckdb_file_since= " in c
                    for c in healthy.psql), healthy.psql
-        assert "duckdb_off=0 (KS_DUCKDB), file record: none" in healthy.out
+        assert "duckdb_off=0 (KS_DUCKDB), in .env: unknown, file record: none" in healthy.out
 
     @pytest.mark.parametrize("value, expected", [
         ("off", "1"), (" OFF ", "1"), ("on", "0"), ("", "0"), ("of", "invalid")])
@@ -390,9 +393,57 @@ class TestStage5:
         run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state))
         assert all("duckdb_file_last=error " in c for c in run.psql)
 
+    @pytest.mark.parametrize("lines, expected", [
+        ("KS_DUCKDB=off\n", "1"),
+        ("KS_DUCKDB= OFF \r\n", "1"),
+        ("KS_DUCKDB=on\nKS_DUCKDB=off\n", "1"),
+        ("KS_DUCKDB=off\nKS_DUCKDB=on\n", "0"),
+        ("KS_DUCKDB=on\n", "0"),
+        ("BOT_TOKEN=x\n", "0"),
+        ("# KS_DUCKDB=off\n", "0"),
+        ('KS_DUCKDB="off"\n', "invalid"),
+        ("KS_DUCKDB=of\n", "invalid"),
+    ])
+    def test_env_is_read_the_way_the_sidecars_read_it(self, tmp_path, lines, expected):
+        """The weekly compaction and the nightly off-site start their sidecars
+        with `docker run --env-file .env`, so what refuses them is `.env`, not
+        web's environment: the last line naming the key, quotes kept.
+        Mutation: strip the quotes, or take the first line."""
+        env_file = tmp_path / "dot-env"
+        env_file.write_text(lines)
+        os.utime(env_file, (1900000000, 1900000000))
+        run = _run(tmp_path, SOAK_ENV_FILE=str(env_file))
+        assert all(f"duckdb_off_env={expected} " in c
+                   and "duckdb_env_changed_at=2030-03-17T17:46:40Z" in c
+                   for c in run.psql), run.psql
+
+    def test_no_env_is_unknown_and_nothing_else_is_read_from_it(self, tmp_path):
+        run = _run(tmp_path)
+        assert all("duckdb_off_env=unknown " in c and "duckdb_env_changed_at= " in c
+                   for c in run.psql), run.psql
+        env_file = tmp_path / "dot-env"
+        env_file.write_text("BOT_TOKEN=123456:never-printed\nKS_DUCKDB=off\n")
+        run = _run(tmp_path, SOAK_ENV_FILE=str(env_file))
+        assert "never-printed" not in run.out and not any("never-printed" in c
+                                                           for c in run.calls)
+        assert "in .env: 1 (edited 20" in run.out, run.out
+
     def test_the_check_is_only_ever_asked_for_its_status(self):
         calls = re.findall(r'"\$SILENCE_CHECK"[^\n]*', SCRIPT.read_text())
         assert calls == ['"$SILENCE_CHECK" --status 2>&1 || true)"'], calls
+
+
+def test_every_variable_a_check_reads_is_passed():
+    """Walked over the checks, not listed: a `:'name'` a file reads that the
+    script does not pass reaches the server as psql's literal text, and the
+    check judges that. Mutation: drop `-v duckdb_off_env=...` from the
+    script."""
+    passed = set(re.findall(r"-v (\w+)=", SCRIPT.read_text())) - {"ON_ERROR_STOP"}
+    read = set()
+    for path in FILES:
+        read |= set(re.findall(r":'(\w+)'",
+                               re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8"))))
+    assert read <= passed, sorted(read - passed)
 
 
 # A soak file is named in prose far from where it lives — a module docstring

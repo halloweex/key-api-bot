@@ -579,6 +579,46 @@ class TestP4WeekOfSilence:
         assert v == "PASS" and "(the DuckDB file changed): 48 h of the 168" in detail, detail
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("env, expected, words", [
+        ("0", "FAIL", ".env does not set KS_DUCKDB=off"),
+        ("invalid", "FAIL", "an env file passed to docker keeps its quotes"),
+        ("unknown", "UNKNOWN", ".env could not be read"),
+        ("", "UNKNOWN", ".env could not be read"),
+    ])
+    async def test_the_sidecars_env_must_say_off_too(self, pool, env, expected, words):
+        """The Sunday compaction and the nightly off-site start their sidecars
+        from `.env`, and their phase 1 opens the live file read-only — no hash
+        sees that, only the switch inside the sidecar refuses it (review of
+        02.10). Mutation: drop `fail_sidecars` from the verdict."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.silent(conn)
+            await report(conn, sent_at=ago(days=2))
+            v, detail = await verdict(conn, P4, duckdb_off="1", duckdb_off_env=env, **record())
+        assert (v, words in detail) == (expected, True), detail
+
+    @pytest.mark.asyncio
+    async def test_under_on_env_is_not_asked(self, pool):
+        async with scenario(pool) as conn:
+            await clear(conn)
+            v, detail = await verdict(conn, P4, duckdb_off="0", duckdb_off_env="0")
+        assert v == "PASS" and "not applicable" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_an_edit_of_env_restarts_the_week(self, pool):
+        """Nothing says the sidecars read `off` before the file's last edit.
+        Mutation: drop `.env`'s mtime from `starts`."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.silent(conn)
+            await report(conn, sent_at=ago(days=1))
+            v, detail = await verdict(conn, P4, duckdb_off="1", **record(),
+                                      duckdb_env_changed_at=z(ago(days=2)))
+        assert v == "PASS", detail
+        assert ("(.env, which the host-cron sidecars read, last edited): "
+                "48 h of the 168") in detail, detail
+
+    @pytest.mark.asyncio
     async def test_levers_and_fallbacks_break_it_too(self, pool):
         for seed in (lambda c: lever(c, at=ago(hours=1)),
                      lambda c: page(c, "warehouse_preconditions_unmet", at=ago(hours=1)),

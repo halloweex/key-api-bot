@@ -168,6 +168,35 @@ fi
 DUCKDB_OFF="$(flag_state KS_DUCKDB off on)"
 PARALLEL_FROM="${SOAK_PARALLEL_FROM:-}"
 
+# What refuses the host-cron sidecars is not web's environment but `.env`:
+# the weekly compaction and the nightly off-site start theirs with
+# `docker run --env-file .env`, and their phase 1 opens the live file
+# read-only — no byte changes, so only the switch in the sidecar can stop it.
+# So P4 asks the file too, by exact name and as `docker run --env-file` reads
+# it: the last line naming the key, everything after the first `=`, quotes
+# kept (docker does not strip them, and the switch reads `"off"` as a value
+# it does not understand, and runs on). And since when: the file's mtime,
+# because nothing says the sidecars read `off` before the last edit of it.
+ENV_FOR_SIDECARS="${SOAK_ENV_FILE:-.env}"
+DUCKDB_OFF_ENV=unknown
+DUCKDB_ENV_CHANGED_AT=""
+if [ -f "$ENV_FOR_SIDECARS" ] && [ -r "$ENV_FOR_SIDECARS" ]; then
+    duckdb_env_value="$(grep -E '^KS_DUCKDB=' "$ENV_FOR_SIDECARS" 2>/dev/null | tail -n 1 || true)"
+    duckdb_env_value="$(printf '%s' "${duckdb_env_value#KS_DUCKDB=}" | tr -d '\r' \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
+    case "$duckdb_env_value" in
+        off) DUCKDB_OFF_ENV=1 ;;
+        ""|on) DUCKDB_OFF_ENV=0 ;;
+        *) DUCKDB_OFF_ENV=invalid ;;
+    esac
+    env_mtime="$(stat -c %Y "$ENV_FOR_SIDECARS" 2>/dev/null || stat -f %m "$ENV_FOR_SIDECARS" 2>/dev/null || true)"
+    case "$env_mtime" in
+        ''|*[!0-9]*) ;;
+        *) DUCKDB_ENV_CHANGED_AT="$(date -u -d "@$env_mtime" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+               || date -u -r "$env_mtime" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" ;;
+    esac
+fi
+
 # The file's hash, as the hourly host cron recorded it
 # (deploy/duckdb_silence_check.sh). `--status` reads the record and nothing
 # else: it hashes nothing — a multi-GB file is the cron's to hash, not this
@@ -241,6 +270,8 @@ run_check() {
             -v buyers_held_by="$BUYERS_HELD_BY" \
             -v buyers_override_floor="$BUYERS_OVERRIDE_FLOOR" \
             -v duckdb_off="$DUCKDB_OFF" \
+            -v duckdb_off_env="$DUCKDB_OFF_ENV" \
+            -v duckdb_env_changed_at="$DUCKDB_ENV_CHANGED_AT" \
             -v parallel_from="$PARALLEL_FROM" \
             -v duckdb_file_last="$FILE_LAST" \
             -v duckdb_file_since="$FILE_SINCE" \
@@ -282,7 +313,7 @@ fi
 echo "Stage 4 soak report · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC')"
 echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}, dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
 echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
-echo "  duckdb_off=$DUCKDB_OFF (KS_DUCKDB), file record: $FILE_LAST${FILE_SINCE:+ since $FILE_SINCE}${FILE_CHECKED_AT:+, checked $FILE_CHECKED_AT}${PARALLEL_FROM:+, parallel period from $PARALLEL_FROM}"
+echo "  duckdb_off=$DUCKDB_OFF (KS_DUCKDB), in .env: $DUCKDB_OFF_ENV${DUCKDB_ENV_CHANGED_AT:+ (edited $DUCKDB_ENV_CHANGED_AT)}, file record: $FILE_LAST${FILE_SINCE:+ since $FILE_SINCE}${FILE_CHECKED_AT:+, checked $FILE_CHECKED_AT}${PARALLEL_FROM:+, parallel period from $PARALLEL_FROM}"
 echo
 printf '%s' "$ROWS" | awk '
     { lines[NR] = $0; c = $0; sub(/\|.*/, "", c); if (length(c) > w) w = length(c) }

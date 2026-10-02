@@ -48,7 +48,10 @@ VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on":
              # Stage 5's clocks (OD-17 (a)); tests/integration/test_stage5_soak_sql.py.
              "duckdb_off": "0", "parallel_from": "", "duckdb_file_last": "none",
              "duckdb_file_since": "", "duckdb_file_since_reason": "",
-             "duckdb_file_checked_at": ""}
+             "duckdb_file_checked_at": "",
+             # What `.env` tells the host-cron sidecars (P4): off, so a test
+             # that turns web off is not also testing `.env`.
+             "duckdb_off_env": "1", "duckdb_env_changed_at": ""}
 RUN_AS_OWNER = "-- soak:run-as ks_app"
 # The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
 HISTORY_CHECKS = (

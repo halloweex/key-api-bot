@@ -15,25 +15,37 @@
 --   moment since which every probe found nothing opened and no web process
 --   went unread for over 35 min (the read-fallback watch's rule);
 -- - the file: P1's record of the hourly hash, as psql variables;
+-- - the host-cron sidecars: the weekly compaction and the nightly off-site
+--   start theirs from `.env` (`docker run --env-file`), not from web's
+--   environment, and their phase 1 opens the live file read-only — no byte
+--   changes, so the hash cannot see it, and only the switch inside the
+--   sidecar refuses it. So `.env` must say KS_DUCKDB=off too, read as docker
+--   reads it (`duckdb_off_env`), and since when: its mtime
+--   (`duckdb_env_changed_at`), because nothing says the sidecars read `off`
+--   before the file's last edit;
 -- - the levers: P2's journal rows and pages, every one of them, since off;
 -- - the fallbacks: F1's pages and watch.
 --
 -- WHERE THE CLOCK STARTS
 -- The latest of the tripwire watch's clean-since (which is no earlier than
--- the first probe under `off`), the file's unchanged-since, every breach above
--- and the F1 watch's clean-since. 168 h is a full week, so it holds every
--- weekly instant: Sunday 05:00 Kyiv, when the compaction would run, and
--- Monday's reports. A week that holds them by the clock but in which no
+-- the first probe under `off`), the file's unchanged-since, the last edit of
+-- `.env`, every breach above and the F1 watch's clean-since — so any edit of
+-- `.env` restarts the week. 168 h is a full week, so it holds every weekly
+-- instant: Sunday 05:00 Kyiv, when the compaction would run — and is refused
+-- by the switch before it opens the file, because `.env` says off since
+-- before the start — and Monday's reports. A week that holds them by the clock but in which no
 -- weekly report was delivered has not shown the Monday path works without
 -- DuckDB, so "covered" also needs a `app.weekly_report_sends.sent_at` after
 -- the start.
 --
 -- WHAT EACH VERDICT MEANS
 -- FAIL: KS_DUCKDB set to a value web does not understand (web runs `on`, the
--- week is not running); a breach inside the day; a tripwire, lever or
+-- week is not running); web off while `.env` does not say off, or says it in a
+-- way the switch does not understand (the sidecars would run on); a breach
+-- inside the day; a tripwire, lever or
 -- fallback page still standing; the latest probe of either watch inside the
 -- day found something; the file changed or is missing; step 13 on DuckDB.
--- UNKNOWN: web down; either watch missing, not written for 35 min, or clean
+-- UNKNOWN: web down; `.env` unreadable; either watch missing, not written for 35 min, or clean
 -- for less than the day; no file record, one over 3 h old, or one that began
 -- inside the day. PASS: otherwise, with how many of the 168 h are behind it.
 --
@@ -65,7 +77,10 @@ rec AS (
            CASE WHEN :'duckdb_file_since' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
                 THEN (:'duckdb_file_since')::text::timestamptz END AS file_since,
            CASE WHEN :'duckdb_file_checked_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
-                THEN (:'duckdb_file_checked_at')::text::timestamptz END AS file_checked_at
+                THEN (:'duckdb_file_checked_at')::text::timestamptz END AS file_checked_at,
+           NULLIF(:'duckdb_off_env', '') AS duckdb_off_env,
+           CASE WHEN :'duckdb_env_changed_at' ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'
+                THEN (:'duckdb_env_changed_at')::text::timestamptz END AS env_changed_at
 ),
 breach_keys AS (
     SELECT v.condition_key, v.kind
@@ -134,6 +149,9 @@ starts AS (
     FROM watches w
     UNION ALL
     SELECT r.file_since, 'the file''s bytes recorded unchanged since', 1 FROM rec r
+    UNION ALL
+    SELECT r.env_changed_at, '.env, which the host-cron sidecars read, last edited', 1
+    FROM rec r
 ),
 judged AS (
     SELECT win.starts, win.now AS clock_now, win.span, win.week, win.watch_gap,
@@ -169,6 +187,9 @@ verdicts AS (
            COALESCE(j.sw_clean = 0 AND j.sw_probe > j.starts, false)
                OR COALESCE(j.fw_clean = 0 AND j.fw_probe > j.starts, false) AS fail_probe,
            COALESCE(j.file_last IN ('CHANGED', 'MISSING'), false) AS fail_file,
+           COALESCE(j.duckdb_off_env IN ('0', 'invalid'), false) AS fail_sidecars,
+           j.duckdb_off_env IS NULL OR j.duckdb_off_env NOT IN ('0', '1', 'invalid')
+               AS sidecars_unseen,
            j.sw_probe IS NULL OR j.fw_probe IS NULL AS unwatched,
            COALESCE(j.clock_now - j.sw_probe > j.watch_gap
                     OR j.clock_now - j.fw_probe > j.watch_gap, false) AS watch_stale,
@@ -186,8 +207,10 @@ SELECT 'P4 week of silence'::text AS "check",
            WHEN duckdb_off = 'invalid' THEN 'FAIL'
            WHEN duckdb_off IS DISTINCT FROM '1' AND duckdb_off IS DISTINCT FROM '0' THEN 'UNKNOWN'
            WHEN NOT applies THEN 'PASS'
-           WHEN fail_breach OR fail_standing OR fail_writer OR fail_probe OR fail_file THEN 'FAIL'
-           WHEN unwatched OR watch_stale OR watch_short OR file_unseen THEN 'UNKNOWN'
+           WHEN fail_breach OR fail_standing OR fail_writer OR fail_probe OR fail_file
+                OR fail_sidecars THEN 'FAIL'
+           WHEN sidecars_unseen OR unwatched OR watch_stale OR watch_short OR file_unseen
+               THEN 'UNKNOWN'
            ELSE 'PASS'
        END AS verdict,
        CASE
@@ -198,7 +221,8 @@ SELECT 'P4 week of silence'::text AS "check",
                'web is not running, so whether KS_DUCKDB is off cannot be read'
            WHEN NOT applies THEN
                'not applicable: KS_DUCKDB is on; the week starts when web runs off'
-           WHEN fail_breach OR fail_standing OR fail_writer OR fail_probe OR fail_file THEN left(
+           WHEN fail_breach OR fail_standing OR fail_writer OR fail_probe OR fail_file
+                OR fail_sidecars THEN left(
                concat_ws('; ',
                    CASE WHEN fail_breach THEN
                        format('%s breach(es) in %s h, last %s at %s Kyiv', n_breaches,
@@ -212,8 +236,20 @@ SELECT 'P4 week of silence'::text AS "check",
                    END,
                    CASE WHEN fail_file THEN
                        format('the file''s record says %s', file_last)
+                   END,
+                   CASE WHEN fail_sidecars THEN
+                       CASE duckdb_off_env WHEN 'invalid'
+                            THEN '.env sets KS_DUCKDB to a value the switch does not understand '
+                                 || '(an env file passed to docker keeps its quotes)'
+                            ELSE '.env does not set KS_DUCKDB=off' END
+                       || ': the weekly compaction and the nightly off-site start their '
+                       || 'sidecars from it and would open the file read-only, which neither '
+                       || 'the switch nor the hash sees; put KS_DUCKDB=off in .env'
                    END)
                || '; the week starts again (OD-17 (a))', 500)
+           WHEN sidecars_unseen THEN
+               '.env could not be read: whether the host-cron sidecars (the compaction, the '
+               || 'nightly off-site) are refused under off cannot be said'
            WHEN unwatched THEN
                'no ' || concat_ws(' or ',
                    CASE WHEN sw_probe IS NULL THEN 'watch:duckdb_switch' END,
