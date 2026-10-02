@@ -262,6 +262,77 @@ class TestTheWriter:
         assert state["last_rows"] == 2
 
 
+def _writer_and_rows(which):
+    from core.landing_rows import category_rows
+
+    if which == PRODUCTS:
+        return chain.upsert_products, product_rows(PAYLOAD)
+    return chain.upsert_categories, category_rows(CATS)
+
+
+async def _done_within(task, seconds):
+    """`task`'s result if it finishes inside `seconds`; else it is cancelled
+    and the test fails — a bound that is missing shows up as a wait, never as
+    a hang of the suite."""
+    done, _ = await asyncio.wait({task}, timeout=seconds)
+    if not done:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        pytest.fail(f"still waiting after {seconds}s: the bound is gone")
+    return task
+
+
+class TestTheWriterIsBounded:
+    """DN-05a's bounds, the fix for hazard F1: the hourly products step runs
+    inside the incremental tick under the heavy-job lock, so a writer that
+    waits without a bound stops order intake. Each removed survived the whole
+    chain-6 set until these (review mutations M-nn and M-oo)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("table", [PRODUCTS, CATEGORIES])
+    async def test_a_pool_with_no_connection_to_give_is_a_timeout(
+            self, stores, table):
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        env.setattr(chain, "ACQUIRE_TIMEOUT_S", 0.3)
+        write, rows = _writer_and_rows(table)
+        small = await asyncpg.create_pool(DSN, min_size=1, max_size=1)
+        try:
+            async with small.acquire():                      # the only one there is
+                with patch("core.pg.get_pool", new=AsyncMock(return_value=small)):
+                    task = await _done_within(asyncio.ensure_future(write(rows)), 10)
+                with pytest.raises(asyncio.TimeoutError):
+                    task.result()
+        finally:
+            await small.close()
+        assert not chain_latch.latched(chain.CHAIN), (
+            "a write that never got a connection latched the chain")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("table", [PRODUCTS, CATEGORIES])
+    async def test_a_table_another_session_holds_is_a_statement_timeout(
+            self, stores, table):
+        store, pool, env = stores
+        env.setenv(chain.WRITE_ENV, "postgres")
+        env.setattr(chain, "STATEMENT_TIMEOUT", "300ms")
+        write, rows = _writer_and_rows(table)
+        async with pool.acquire() as holder:
+            tx = holder.transaction()
+            await tx.start()
+            task = None
+            try:
+                await holder.execute(f"LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE")
+                task = await _done_within(asyncio.ensure_future(write(rows)), 10)
+                with pytest.raises(asyncpg.exceptions.QueryCanceledError):
+                    task.result()
+            finally:
+                await tx.rollback()
+        # Cancelled inside the transaction: nothing of the write landed.
+        assert await _pg(pool, f"SELECT id FROM {table}") == []
+        assert await _state(pool, table) is None
+        assert await chain_latch.read_owners(pool) == {}
+
+
 class TestPlantedDefectsReachTheWatch:
     @pytest_asyncio.fixture
     async def written(self, stores):

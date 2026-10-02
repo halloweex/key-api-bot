@@ -699,6 +699,43 @@ class TestTheTickSurvivesTheChain:
         assert svc.catalogue_step.last_error == "OSError"
 
     @pytest.mark.asyncio
+    async def test_a_watermark_read_that_never_answers_is_bounded_and_cancelled(
+            self, flagged_alone, monkeypatch, real_store):
+        """A paused Postgres answers nothing at all, which is not an error:
+        unbounded, the read would hold the tick — and the heavy-job lock, and
+        the orders behind it — for ever (hazard F1; review mutation M-u)."""
+        import asyncio
+
+        from core import sync_service as mod
+
+        monkeypatch.setattr(mod, "CATALOGUE_WATERMARK_TIMEOUT_S", 0.05)
+        svc, endpoints, writer = _tick(monkeypatch, real_store)
+        cancelled = asyncio.Event()
+
+        async def never_answers(key):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        with patch("core.pg_chain_watermarks.get_value", new=never_answers):
+            tick = asyncio.ensure_future(svc.incremental_sync())
+            done, _ = await asyncio.wait({tick}, timeout=5)
+            if not done:
+                tick.cancel()
+                await asyncio.gather(tick, return_exceptions=True)
+                pytest.fail("the tick waited on the products watermark without a bound")
+            tick.result()
+
+        _rest_of_the_tick_ran(svc)
+        assert "products" not in endpoints
+        writer.assert_not_called()
+        assert svc.catalogue_step.last_error == "TimeoutError"
+        assert svc._catalogue_retry_in() is not None
+        await asyncio.wait_for(cancelled.wait(), 1)          # not left running
+
+    @pytest.mark.asyncio
     async def test_a_failed_write_holds_the_watermark_and_stamps_the_mirror_state(
             self, flagged_alone, monkeypatch, real_store):
         svc, endpoints, writer = _tick(
