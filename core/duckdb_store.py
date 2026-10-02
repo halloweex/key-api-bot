@@ -118,6 +118,63 @@ def _memory_limit() -> str:
     return DEFAULT_DUCKDB_MEMORY_LIMIT
 
 
+def open_read_write(path) -> "duckdb.DuckDBPyConnection":
+    """The one read-write `duckdb.connect` of an analytics file, and it
+    checkpoints before anything else runs.
+
+    DuckDB 1.5.5 loses index entries across a kill. Rows a killed writer left
+    in the WAL are replayed into every `CREATE INDEX` index (not the PK/UNIQUE
+    ones) as entries that index has not bound yet, and DuckDB's *own*
+    checkpoint — the one `close()` runs, or `wal_autocheckpoint` — writes those
+    indexes without them unless something bound the index first. From then on
+    `WHERE col = ?` misses the rows a scan still sees, and a write that must
+    take such a row out of the index is a FatalException ("Failed to delete
+    all rows from index"). An explicit CHECKPOINT here, on the freshly replayed
+    instance, keeps every entry: measured through `DuckDBStore.connect()`, all
+    57 indexes whole instead of 45 of 45 single-column ones short.
+
+    **First, not after the SETs**: a SET that fails leaves the instance valid,
+    and closing a valid instance is the lossy checkpoint. With nothing before
+    it, the only failure left is the CHECKPOINT's own, which 1.5.5 makes a
+    FatalException: the instance writes nothing on close, the WAL stays, and
+    the next open replays it again. The PRAGMA below covers a failure that
+    would not invalidate, so that no exit from here closes through the lossy
+    path.
+
+    Free on a clean start — a graceful close leaves no WAL. Behind a kill it
+    is the checkpoint the restart would have taken at close, moved to the
+    open: 1.5 s / 3.6 s / 8.9 s for 30 / 300 / 900 MB of WAL on one CPU, peak
+    memory set by the replay, not by this. A read-only open replays into
+    memory and answers correctly; it can neither lose entries nor take this.
+    `tests/unit/test_duckdb_open_guard.py` holds every opener in the
+    repository to it.
+    """
+    wal = Path(f"{path}.wal")
+    try:
+        replayed = wal.stat().st_size
+    except OSError:
+        replayed = 0
+    con = duckdb.connect(str(path))
+    started = time.monotonic()
+    try:
+        con.execute("CHECKPOINT")
+    except BaseException:
+        with contextlib.suppress(Exception):
+            con.execute("PRAGMA disable_checkpoint_on_shutdown")
+        with contextlib.suppress(Exception):
+            con.close()
+        raise
+    if replayed:
+        # A clean close leaves no WAL, so one here means the last read-write
+        # process did not close: an OOM kill, or a stop that ran out of grace.
+        logger.warning(
+            "DuckDB replayed %.1f MB of WAL that a writer left without closing "
+            "(killed?) and checkpointed it in %.1f s before anything else ran: %s",
+            replayed / 1e6, time.monotonic() - started, path,
+        )
+    return con
+
+
 # The one definition of what a Gold revenue cell contains. Both the rebuild and
 # the per-cell audit in core/data_quality.py read it from here: an audit with
 # its own copy of the projection checks that two hand-written queries agree,
@@ -536,7 +593,9 @@ class DuckDBStore(
 
         async with self._lock:
             if self._connection is None:
-                self._connection = duckdb.connect(str(self.db_path))
+                # CHECKPOINTs whatever WAL a killed writer left, before the
+                # SETs below — see `open_read_write`.
+                self._connection = open_read_write(self.db_path)
                 try:
                     # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
                     # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
