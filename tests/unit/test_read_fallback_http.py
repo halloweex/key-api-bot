@@ -500,6 +500,13 @@ def _every_switch_on(monkeypatch) -> None:
         module = importlib.import_module(f"core.{name}")
         monkeypatch.setenv(module.ENV,
                            "clickhouse" if name.startswith("ch_") else "postgres")
+    # Not an engine switch, so the walk does not find it: which orders the
+    # goal calculators count (chain 7b-2). Under `silver` their history reads
+    # go through the goal router, and so can be refused; under the default
+    # bridge they read DuckDB `orders` and are never asked.
+    from core import pg_goals_read
+
+    monkeypatch.setenv(pg_goals_read.HISTORY_ENV, pg_goals_read.SILVER)
 
 
 class TestEveryRoute:
@@ -557,6 +564,17 @@ class TestEveryRoute:
         # ninety-eight GET routes refused when it was written.
         assert len(routes) >= 90, len(routes)
         assert len(refused_routes) >= 55, refused_routes
+        # Every goal route refuses, the three calculator GETs included: their
+        # history goes through the router under KS_GOALS_HISTORY=silver.
+        # Read off the app by prefix, never listed. Mutation M18: drop the
+        # setenv in `_every_switch_on`, and /goals/seasonality, /growth and
+        # /weekly-patterns answer from DuckDB `orders` — named here.
+        goal_routes = {e.path for e in routes if e.path.startswith("/api/goals")}
+        assert {"/api/goals/seasonality", "/api/goals/growth",
+                "/api/goals/weekly-patterns", "/api/goals/smart",
+                "/api/goals/forecast"} <= goal_routes, goal_routes
+        assert goal_routes <= set(refused_routes), (
+            f"goal routes not refused: {sorted(goal_routes - set(refused_routes))}")
 
     def test_the_sweep_is_read_off_the_app(self):
         """Every GET route but the named network ones — and a route added

@@ -337,6 +337,81 @@ class TestSeasonalityJob:
             await store.close()
 
 
+class TestSeasonalityJobRefusedAtEveryRead:
+    """Chain 7b: under KS_GOALS_HISTORY=silver every history read the job
+    makes goes through the goal router, so a refusal can come at any of them
+    — the suggestions, the indices, either YoY read, the bounds. Wherever it
+    comes, the job defers whole and every table keeps last week's rows: the
+    writer reads everything first (7b-1). Injected at each routed read in
+    turn, counted from a clean run rather than listed. Mutation M9: persist
+    the indices before computing the YoY, and a refusal at the YoY read
+    leaves this week's indices beside last week's growth — named here."""
+
+    @staticmethod
+    async def _tables(store):
+        async with store.connection() as conn:
+            return {t: sorted(repr(r) for r in conn.execute(
+                f"SELECT * FROM {t}").fetchall())
+                for t in ("seasonal_indices", "growth_metrics", "weekly_patterns")}
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_at_any_read_writes_nothing(
+        self, stores, monkeypatch, tmp_path,
+    ):
+        from core.repositories.goals import GoalsMixin
+        from core.scheduler import BackgroundScheduler
+        from tests.unit.test_goals_off_duckdb_silver import _seed_history
+
+        store = await _duck(tmp_path, "goals-every-read.duckdb")
+        try:
+            _serve(monkeypatch, store)
+            monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
+            monkeypatch.delenv("KS_READ_GOALS", raising=False)
+            _mode(monkeypatch, "off")
+            await _seed_history(store)
+            first = await BackgroundScheduler()._run_seasonality_calc()
+            assert first["retail_months"] == 12
+            # A week later every number would move.
+            async with store.connection() as conn:
+                conn.execute("UPDATE silver_orders SET grand_total = grand_total * 1.5 "
+                             "WHERE order_date >= '2025-06-01'")
+            before = await self._tables(store)
+
+            real = GoalsMixin._goals_run
+            calls = {"n": 0, "fail_at": None}
+
+            async def counted(self, sql, params=None):
+                calls["n"] += 1
+                if calls["n"] == calls["fail_at"]:
+                    read_fallback.fall_back("goals", OSError("postgres is gone"))
+                return await real(self, sql, params)
+
+            monkeypatch.setattr(GoalsMixin, "_goals_run", counted)
+            await BackgroundScheduler()._run_seasonality_calc()
+            total = calls["n"]
+            assert await self._tables(store) != before, "a clean run moved nothing"
+            assert total >= 6, f"only {total} routed reads — the history is not routed"
+            # Back to last week's, then refuse at each read in turn.
+            async with store.connection() as conn:
+                conn.execute("UPDATE silver_orders SET grand_total = grand_total / 1.5 "
+                             "WHERE order_date >= '2025-06-01'")
+            await BackgroundScheduler()._run_seasonality_calc()
+            async with store.connection() as conn:
+                conn.execute("UPDATE silver_orders SET grand_total = grand_total * 1.5 "
+                             "WHERE order_date >= '2025-06-01'")
+            before = await self._tables(store)
+
+            for fail_at in range(1, total + 1):
+                calls.update(n=0, fail_at=fail_at)
+                result = await BackgroundScheduler()._run_seasonality_calc()
+                assert result == {"skipped": True, **_refused("goals")}, fail_at
+                assert await self._tables(store) == before, (
+                    f"refused at routed read {fail_at} of {total}, and a goal "
+                    f"table was written — half an update")
+        finally:
+            await store.close()
+
+
 # ─── Training ─────────────────────────────────────────────────────────────
 
 @pytest.fixture

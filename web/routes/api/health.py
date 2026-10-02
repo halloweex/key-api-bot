@@ -353,6 +353,16 @@ def _derivation_mode() -> dict:
     return {"mode": pg_derivation.mode(), "error": pg_derivation.mode_error()}
 
 
+def _goals_history() -> dict:
+    """KS_GOALS_HISTORY as a goal history read takes it (chain 7b): `mode`
+    (`bridge` or `silver`), or null and the `error` every such read raises —
+    the variable is read at each read, not at start, so this is asked on each
+    request, with no I/O. Judged by the canary."""
+    from core import pg_goals_read
+
+    return pg_goals_read.history_state()
+
+
 def _utm_parse_mode() -> dict:
     """KS_UTM_PARSE as this process understood it at start, and the error when
     it ran as `duckdb` instead of what was set — an unknown value, or
@@ -594,6 +604,7 @@ async def health_check(request: Request):
         "read_fallback_mode": _read_fallback_mode(),
         "warehouse_writer_mode": _warehouse_writer_mode(),
         "utm_parse": _utm_parse_mode(),
+        "goals_history": _goals_history(),
         "buyer_sync": await _buyer_sync_block(),
         "backups": _backups(),
     }

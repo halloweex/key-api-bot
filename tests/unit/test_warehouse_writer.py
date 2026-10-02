@@ -45,6 +45,7 @@ MET_ENV = {
     **{name: "postgres" for name in wc.WAREHOUSE_READERS},
     "KS_READ_COHORTS": "clickhouse",
     "KS_CH_URL": "http://ch:8123",
+    "KS_GOALS_HISTORY": "silver",   # chain 7b: no goal read on the DN-12 bridge
 }
 
 

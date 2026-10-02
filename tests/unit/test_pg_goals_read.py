@@ -4,12 +4,13 @@
 rather than the routing, because not every one of its thirteen methods can
 move:
 
-  * `generate_smart_goals` recomputes `seasonal_indices`, `weekly_patterns`
-    and `growth_metrics` in DuckDB and then reads them back. Postgres has had
-    those three since revision 0025, but only as an hourly replica, so a
-    routed read would return them as they were before the recompute. Its ML
-    signal is the one path that is routed, and it reads only Gold and
-    `revenue_predictions` (which moved with `get_predictions`, #183).
+  * `generate_smart_goals` reads `seasonal_indices`, `weekly_patterns` and
+    `growth_metrics`, which DuckDB writes. Postgres has had those three since
+    revision 0025, but only as an hourly replica, so a routed read would
+    return them up to an hour behind `POST /goals/recalculate`. They are read
+    where they are written until their writer moves (chain 7b-3). Its ML
+    signal is routed, and reads only Gold and `revenue_predictions` (which
+    moved with `get_predictions`, #183).
   * seven **write**, and `app.revenue_goals` is an hourly read replica: a
     write sent to Postgres would land in a copy and be overwritten within the
     hour.
@@ -54,34 +55,40 @@ TIMEOUT_S = 20
 ROUTED = ("get_goals", "get_smart_goals", "get_historical_revenue",
           "get_daily_revenue_for_dates", "get_predictions")
 
-# `generate_smart_goals` is not a read, and finding that out is why it is
-# alone here now.
+# `generate_smart_goals` was not a read, and finding that out is why it is
+# alone here.
 #
 # The audit filed it beside `get_predictions` because it has no INSERT of its
-# own — too shallow a test. It counts `seasonal_indices`, and when the count
-# is short (or `recalculate=True`, which is an argument callers pass) it runs
-# the three calculators, which write those tables **in DuckDB**, and then
-# reads them back. Route the read and the recompute writes to one store while
-# the read comes from another, an hour behind.
+# own — too shallow a test. It counted `seasonal_indices`, and when the count
+# was short (or `recalculate=True`) it ran the three calculators, which wrote
+# those tables **in DuckDB**, and then read them back. Chain 7b-1 (OD-14 (i))
+# took the write branch out — it reads only now — but the three tables it
+# reads are still written in DuckDB, by `recalculate_goal_tables`, and
+# Postgres holds an hourly replica of them. So they are still read where they
+# are written.
 #
-# It belongs to the writes, with the calculators it drives.
-#
-# Since DN-12 it does reach the router along exactly one path: its ML signal,
-# `_get_ml_forecast_total`, which reads Gold and `revenue_predictions` — both
-# of which Postgres has — before the method takes its own connection. That
-# path is excluded from the walk below by name, and what it routes is checked
-# separately, so the compute-then-read loop over the three seasonality tables
-# stays whole on DuckDB.
+# It reaches the router along four paths, and each is excluded from the walk
+# below by name, with what it routes checked separately: its ML signal,
+# `_get_ml_forecast_total`, which reads Gold and `revenue_predictions` (since
+# DN-12); and, under `KS_GOALS_HISTORY=silver` (chain 7b-2), the three history
+# reads it asks before taking its own connection — the growth cap, last
+# year's month and the recent months — which read `{silver_orders}`. None of
+# the four names a table Postgres holds only as a replica, so the three
+# seasonality tables stay read where they are written.
 NOT_ROUTED = ("generate_smart_goals",)
-ROUTED_ONLY_VIA = {"generate_smart_goals": ("_get_ml_forecast_total",)}
+ROUTED_ONLY_VIA = {"generate_smart_goals": (
+    "_get_ml_forecast_total", "_dynamic_growth_cap", "_last_year_month_revenue",
+    "_recent_three_month_average")}
 ABSENT_FROM_POSTGRES_READS = ("seasonal_indices", "weekly_patterns", "growth_metrics")
 
 # The writes. These *may* reach the router — `set_goal` computes a suggestion
 # from the revenue history before storing it, and reading that history from
 # Postgres is exactly what this change is for. What they must not do is send a
 # *write* through it, and must still open DuckDB for the write itself.
-WRITERS = ("set_goal", "calculate_seasonality_indices", "calculate_yoy_growth",
-           "calculate_weekly_patterns", "store_predictions")
+#
+# The three calculators are not writers since chain 7b-1: they compute, and
+# `_persist_goal_tables` stores what they computed, in one transaction.
+WRITERS = ("set_goal", "_persist_goal_tables", "store_predictions")
 
 BODIES = ("_GOALS_PERIOD_REVENUE_SQL", "_GOALS_WEEKLY_TREND_SQL",
           "_GOALS_DAILY_FOR_DATES_SQL", "_STORED_GOALS_SQL",
@@ -193,14 +200,14 @@ class TestTheBoundary:
         assert self._reaches_router(name), f"{name} never reaches _goals_run"
 
     @pytest.mark.parametrize("name", NOT_ROUTED)
-    def test_the_recompute_then_read_is_not_routed(self, name):
+    def test_the_seasonality_tables_are_not_routed(self, name):
         assert not self._reaches_router(
             name, excluding=ROUTED_ONLY_VIA.get(name, ())), (
-            f"{name} reaches the router outside its ML signal. It recomputes "
-            f"seasonal_indices / weekly_patterns / growth_metrics in DuckDB "
-            f"and then reads them back; Postgres holds only an hourly replica "
-            f"of those three, so a routed read would return the tables as "
-            f"they were before the recompute it just ran."
+            f"{name} reaches the router outside its ML signal and its history "
+            f"reads. It reads seasonal_indices / weekly_patterns / "
+            f"growth_metrics, which DuckDB writes; Postgres holds only an "
+            f"hourly replica of those three, so a routed read would answer up "
+            f"to an hour behind POST /goals/recalculate."
         )
 
     @pytest.mark.parametrize("name", sorted(
