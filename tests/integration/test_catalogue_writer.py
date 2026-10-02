@@ -754,6 +754,36 @@ class TestTheWayThereAndBack:
                                   "ORDER BY id") == [(1055, "Retired")]
 
     @pytest.mark.asyncio
+    async def test_a_recorded_instant_before_the_latch_is_not_the_chains(self, stores):
+        """The latch is a floor under the record. A record that outlived its
+        era — a release that did not know to delete it, a restore — can name
+        an instant a row from before the flip still carries; an edit to that
+        row in Postgres, `mirrored_at` left alone, is not the chain's work and
+        must refuse rather than be copied into DuckDB."""
+        from core.chain_transfer import copy_back, CopyBackRefused, handover_check
+        from core.pg_landing import carry_retired_catalogue
+
+        store, pool, env = stores
+        await self._mirrored(store, pool)
+        await carry_retired_catalogue(store, dry_run=False)
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await store.upsert_products(PAYLOAD)                 # the flip
+        (old,) = await _pg(pool, "SELECT mirrored_at FROM bronze.products WHERE id = 1055")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE meta.chain_watermarks SET value = jsonb_set(value::jsonb, "
+                "'{stamps}', (value::jsonb -> 'stamps') || to_jsonb($2::bigint))::text "
+                "WHERE key = $1", chain.record_key(PRODUCTS), await _stamp(pool, old["mirrored_at"]))
+            await conn.execute("UPDATE bronze.products SET name = 'edited, stamp kept' "
+                               "WHERE id = 1055")
+
+        found = {(i.check_name, i.sample_ids, i.severity.value)
+                 for i in await handover_check(store, chain)}
+        assert ("handover_rows_differ", (1055,), "CRITICAL") in found
+        with pytest.raises(CopyBackRefused):
+            await copy_back(store, chain, dry_run=False)
+
+    @pytest.mark.asyncio
     async def test_the_carry_refuses_once_the_chain_owns_the_catalogue(self, stores):
         from core.pg_landing import CatalogueCarryRefused, carry_retired_catalogue
 
