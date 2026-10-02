@@ -141,6 +141,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # without KS_PG_DERIVE=own; ran as duckdb, the ship as before (DN-19).
     "utm_parse_mode_invalid": _c(
         "web restarts with a valid KS_UTM_PARSE, postgres only beside KS_PG_DERIVE=own"),
+    # KS_GOALS_HISTORY set to a value web does not understand: every goal
+    # history read raises — the goal widget, /goals/*, the Monday job (7b).
+    "goals_history_mode_invalid": _c("web runs with a valid KS_GOALS_HISTORY"),
     # Derivation marks dropped and demonstrably not being healed: the latest
     # older than a heartbeat's rebuild, or ten failing in a row (DN-05b).
     "derivation_marks_failing": _c("a validated derivation covers the dropped marks"),

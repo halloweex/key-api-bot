@@ -2709,8 +2709,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         key_columns=("month",),
         synced_column="updated_at",
         # Shipped and never compared — a whole-table stamp.
-        # `calculate_seasonality_indices` upserts all twelve months in one
-        # statement, stamping every one of them with the same value.
+        # `recalculate_goal_tables` upserts all twelve months in one
+        # transaction (chain 7b-1), stamping every one with the same value.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
         # identical. `app.sku_inventory_status` is the same
@@ -2729,7 +2729,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         key_columns=("month", "week_of_month"),
         synced_column="updated_at",
         # Shipped and never compared — a whole-table stamp.
-        # `calculate_weekly_patterns` writes all sixty month-weeks in one pass.
+        # `recalculate_goal_tables` writes all sixty month-weeks in one pass.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
         # identical. `app.sku_inventory_status` is the same
@@ -2747,7 +2747,7 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         key_columns=("metric_type",),
         synced_column="updated_at",
         # Shipped and never compared — a whole-table stamp.
-        # One row, rewritten whole by `calculate_yoy_growth`.
+        # One row, rewritten whole by `recalculate_goal_tables`.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
         # identical. `app.sku_inventory_status` is the same

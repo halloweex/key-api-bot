@@ -178,6 +178,32 @@ class TestTheFiles:
         block = re.search(r"blind_checks AS \((.*?)\n\),", sql, flags=re.S).group(1)
         assert set(re.findall(r"'(\w+)'", block)) == warns | {ch_silver.GOLD_UNWATCHED}
 
+    def test_d8s_grace_checks_are_the_info_the_utm_completeness_files(self):
+        """D8 forgives a UTM verdict still inside its grace (the 07:30 run
+        files one nearly every morning since KS_UTM_PARSE=postgres). Derived,
+        not remembered: exactly the INFO checks `order_utm_completeness_findings`
+        files, so its CRITICALs past the grace can never join the list."""
+        import ast
+        import inspect
+
+        from core import mirror_reconciliation
+
+        tree = ast.parse(inspect.getsource(
+            mirror_reconciliation.order_utm_completeness_findings))
+        by_severity = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                kws = {k.arg: k.value for k in node.keywords}
+                name, sev = kws.get("check_name"), kws.get("severity")
+                if isinstance(name, ast.Constant) and isinstance(sev, ast.Attribute):
+                    by_severity.setdefault(sev.attr, set()).add(name.value)
+        assert by_severity.get("CRITICAL"), "the walk found no CRITICAL: it reads nothing"
+        sql = _uncommented((SQL_DIR / "09_d8_mirror_landing.sql").read_text(encoding="utf-8"))
+        block = re.search(r"grace_checks AS \((.*?)\n\),", sql, flags=re.S).group(1)
+        assert set(re.findall(r"'(\w+)'", block)) == by_severity["INFO"]
+        filed_above_info = set().union(*(v for k, v in by_severity.items() if k != "INFO"))
+        assert not by_severity["INFO"] & filed_above_info
+
     def test_the_read_fallback_check_reads_what_the_canary_writes(self):
         """F1 judges two things the canary makes, so every name and number it
         shares with the canary is the canary's: the watch row's key and gap,
@@ -312,12 +338,13 @@ async def dq_run(conn, run_id, *, layer, started_at, error=None):
         "FAILED" if error else "OK", error)
 
 
-async def dq_issue(conn, run_id, check_name, *, table="silver.orders", count=1):
+async def dq_issue(conn, run_id, check_name, *, table="silver.orders", count=1,
+                   severity="WARN"):
     await conn.execute(
         """
         INSERT INTO app.data_quality_issues (run_id, check_name, table_name, severity, count)
-        VALUES ($1, $2, $3, 'WARN', $4)
-        """, run_id, check_name, table, count)
+        VALUES ($1, $2, $3, $5, $4)
+        """, run_id, check_name, table, count, severity)
 
 
 @needs_pg
@@ -651,6 +678,43 @@ class TestStaleEvidenceIsUnknown:
             await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
             v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
         assert v == "FAIL" and "gold_cell_values" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_utm_verdict_in_flight_passes_d8_and_is_counted(self, pool):
+        """The 07:30 run of 2026-10-01 and 10-02: one order without its verdict
+        inside the 20-minute grace, INFO, "Not a defect yet"."""
+        async with scenario(pool) as conn:
+            await self._clean_mirror_landing_run(conn)
+            await dq_issue(conn, DQ_RUN_IDS[0], "pg_order_utm_in_flight",
+                           table="silver.order_utm", severity="INFO")
+            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "PASS" and "1 UTM verdict(s) in flight" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_verdict_in_flight_beside_a_real_finding_still_fails(self, pool):
+        async with scenario(pool) as conn:
+            await self._clean_mirror_landing_run(conn)
+            await dq_issue(conn, DQ_RUN_IDS[0], "pg_order_utm_in_flight",
+                           table="silver.order_utm", severity="INFO")
+            await dq_issue(conn, DQ_RUN_IDS[0], "pg_order_utm_missing",
+                           table="silver.order_utm", severity="CRITICAL")
+            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "FAIL" and "pg_order_utm_missing" in detail, detail
+        assert "pg_order_utm_in_flight" not in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_the_grace_check_filed_above_info_is_not_forgiven(self, pool):
+        """Forgiven at INFO only: the same name at another severity is a
+        finding, so a future change to its severity cannot pass silently."""
+        async with scenario(pool) as conn:
+            await self._clean_mirror_landing_run(conn)
+            await dq_issue(conn, DQ_RUN_IDS[0], "pg_order_utm_in_flight",
+                           table="silver.order_utm", severity="WARN")
+            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(minutes=10))
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "FAIL" and "pg_order_utm_in_flight" in detail, detail
 
     @pytest.mark.asyncio
     async def test_a_fresh_copy_taken_before_the_run_is_unknown(self, pool):

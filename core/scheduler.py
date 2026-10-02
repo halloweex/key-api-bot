@@ -1291,28 +1291,28 @@ class BackgroundScheduler:
             # b2b: a b2b caller got the same shared rows. Until sales_type is
             # part of the keys, the shared rows mean retail.
             #
-            # The suggestions come FIRST, and that order is the whole of
-            # DN-20c here. They are the only read in this job that goes
-            # through a router (`/goals`' own), so under KS_READ_FALLBACK=off
-            # they are the only one that can be refused — and they write
-            # nothing and read neither table the other two write. Asked
-            # after `calculate_seasonality_indices`, a refusal left the new
-            # `seasonal_indices` beside last week's `growth_metrics`; asked
-            # first, it defers the whole job with nothing written.
+            # Nothing is written until everything has been read (DN-20c, and
+            # chain 7b's one-transaction persist). Under KS_READ_FALLBACK=off
+            # a read here can be refused — the suggestions go through
+            # `/goals`' router — and a refusal must leave last week's
+            # `seasonal_indices` and `growth_metrics` whole, never this week's
+            # indices beside last week's growth. `recalculate_goal_tables`
+            # computes both before its single transaction, so a refusal
+            # anywhere defers the whole job with nothing written. The weekly
+            # patterns are not stored here: the job never did (OQ-2).
             from core import read_fallback
             try:
                 retail_goals = await store.calculate_suggested_goals(
                     sales_type="retail", growth_factor=1.10)
+                tables = await store.recalculate_goal_tables(include_weekly=False)
             except read_fallback.ReadUnavailable as exc:
                 return {"skipped": True, **read_fallback.answered(
                     "seasonality_calc", exc,
                     "nothing written; seasonal_indices and growth_metrics "
                     "keep their previous values")}
-            retail_indices = await store.calculate_seasonality_indices("retail")
-            await store.calculate_yoy_growth("retail")
 
             result = {
-                "retail_months": len(retail_indices),
+                "retail_months": len(tables["seasonal"]),
                 "retail_goals": retail_goals,
             }
             logger.info(
