@@ -78,7 +78,6 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
-from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Optional, Tuple
 
 from core import chain_latch
@@ -188,32 +187,16 @@ def _fits(column: str, value: Optional[float], *, nullable: bool) -> None:
     route bounds `amount` only from below, so ₴10 000 000 000 is one typing
     slip away.
 
-    Postgres' own rule, written out: the value rounded half away from zero to
-    `scale` places must be under `10^(precision - scale)`, and an infinity
-    never fits. NaN does fit a `NUMERIC(12,2)` and is refused anyway: DuckDB's
-    `DECIMAL` refuses it, and a goal of NaN is not a number anybody typed.
-    `Decimal(str(value))` is what asyncpg sends for a float, so the boundary
-    lands where the server's does — `tests/integration/test_goals_writer.py`
-    writes both sides of it.
+    Postgres' own rule lives in `core.pg_numeric.refusal`, which chain 4 asks
+    of a buyer's loyalty figures too — one home, so the two chains cannot come
+    to disagree about where a boundary lies.
     """
-    if value is None:
-        if nullable:
-            return
-        raise ValueError(f"{column} must not be NULL")
-    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
-        raise ValueError(f"{column}={value!r} is not a number")
+    from core.pg_numeric import refusal
+
     precision, scale = NUMERIC_COLUMNS[column]
-    exact = Decimal(str(value))
-    if not exact.is_finite():                  # inf and NaN, float or Decimal
-        raise ValueError(f"{column}={value!r} is not a finite number")
-    digits = precision - scale
-    # The magnitude first: `quantize` itself raises `InvalidOperation`, not
-    # `ValueError`, on a number too long for the decimal context (1e30).
-    if exact.adjusted() >= digits or abs(exact.quantize(
-            Decimal(1).scaleb(-scale), rounding=ROUND_HALF_UP)) >= 10 ** digits:
-        raise ValueError(
-            f"{column}={value!r} does not fit NUMERIC({precision},{scale}): "
-            f"it must round to under 10^{digits}")
+    why = refusal(column, value, precision, scale, nullable=nullable)
+    if why:
+        raise ValueError(why)
 
 
 def _latch() -> str:

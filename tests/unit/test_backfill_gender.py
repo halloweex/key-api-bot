@@ -119,6 +119,21 @@ class TestOneBodyTwoEngines:
                     .replace(POSTGRES.buyers, DUCKDB.buyers))
         assert undone == duck
 
+    @pytest.mark.parametrize("rebuild_all", [False, True])
+    def test_the_pending_question_too(self, rebuild_all):
+        """Chain 4's derivation asks it of Postgres (`pg_buyers_write._pending`)
+        — one body, so the two engines cannot come to select different
+        buyers."""
+        duck, duck_params = gender_backfill.pending_sql(
+            DUCKDB.buyers, DUCKDB.buyer_gender, rebuild_all=rebuild_all)
+        pg, pg_params = gender_backfill.pending_sql(
+            POSTGRES.buyers, POSTGRES.buyer_gender, rebuild_all=rebuild_all)
+        assert duck_params == pg_params == ([] if rebuild_all else [RULES_VERSION])
+        undone = (pg.replace(POSTGRES.buyer_gender, DUCKDB.buyer_gender)
+                    .replace(POSTGRES.buyers, DUCKDB.buyers))
+        assert duck != pg and undone == duck
+        assert "override_by_human = FALSE" in duck
+
     @pytest.mark.asyncio
     async def test_the_duckdb_rendering_runs(self):
         conn = duckdb.connect(":memory:")
@@ -201,6 +216,78 @@ class TestTheWritePathWhenTheFileIsHeld:
     async def test_a_preview_without_a_dsn_says_so(self, monkeypatch):
         monkeypatch.delenv("KS_PG_DSN", raising=False)
         assert await script.main(rebuild_all=False, dry_run=True, use_duckdb=False) == 3
+
+
+class TestTheWritePathUnderChain4:
+    """With `KS_WRITE_BUYERS` moving the buyers, the verdicts are Postgres's
+    and DuckDB's copy has stopped — but a script may take the chain's first
+    write only if web already has: the latch is a marker web reads once and
+    caches, so a script that latched first would leave web writing DuckDB
+    until it restarted."""
+
+    READERS = ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD")
+
+    @pytest.fixture
+    def chain4(self, monkeypatch):
+        from core import duckdb_store, pg_buyers_write
+
+        monkeypatch.setenv(pg_buyers_write.WRITE_ENV, "postgres")
+        for reader in self.READERS:
+            monkeypatch.setenv(reader, "postgres")
+        monkeypatch.setattr(duckdb_store, "get_store", AsyncMock(
+            side_effect=AssertionError("DuckDB opened under chain 4")))
+        derive = AsyncMock(side_effect=AssertionError("DuckDB derived under chain 4"))
+        monkeypatch.setattr(script, "derive_gender", derive)
+        pg = AsyncMock(return_value={
+            "pending": 3, "written": 3, "female": 2, "male": 1, "null": 0,
+            "rules_version": RULES_VERSION, "error": None, "ms": 5})
+        monkeypatch.setattr(pg_buyers_write, "derive_gender_pg", pg)
+        return monkeypatch, pg
+
+    @pytest.mark.asyncio
+    async def test_latched_it_derives_in_postgres_and_never_opens_duckdb(self, chain4):
+        from core import chain_latch, pg_buyers_write
+
+        _env, pg = chain4
+        chain_latch.latch(pg_buyers_write.CHAIN, pg_buyers_write.WRITE_ENV)
+        assert await script.main(rebuild_all=True, dry_run=False, use_duckdb=False) == 0
+        pg.assert_awaited_once_with(rebuild_all=True)
+
+    @pytest.mark.asyncio
+    async def test_flagged_and_not_latched_it_writes_nothing(self, chain4, capsys):
+        from core import chain_latch, pg_buyers_write
+
+        _env, pg = chain4
+        assert await script.main(rebuild_all=False, dry_run=False, use_duckdb=False) == 4
+        pg.assert_not_awaited()
+        assert not chain_latch.latched(pg_buyers_write.CHAIN)
+        err = capsys.readouterr().err
+        assert "Nothing was written" in err and "replicate_operational/trigger" in err
+
+    @pytest.mark.asyncio
+    async def test_a_flag_nobody_can_read_writes_nothing(self, chain4):
+        from core import pg_buyers_write
+
+        env, pg = chain4
+        env.setenv(pg_buyers_write.WRITE_ENV, "postgre")
+        assert await script.main(rebuild_all=False, dry_run=False, use_duckdb=False) == 4
+        pg.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_it_reads_the_latch_from_disk_first(self, chain4):
+        """A marker web wrote is on disk, not in this process's cache: without
+        `configure_modes()` the script would see the flag alone."""
+        import json
+
+        from core import chain_latch, pg_buyers_write
+
+        _env, pg = chain4
+        chain_latch.MARKER_DIR.mkdir(parents=True, exist_ok=True)
+        (chain_latch.MARKER_DIR / pg_buyers_write.CHAIN).write_text(json.dumps(
+            {"chain": pg_buyers_write.CHAIN, "latched_at": "2026-09-30T10:00:00+00:00"}))
+        chain_latch._latched = {}                 # a cache that has not seen it
+        assert await script.main(rebuild_all=False, dry_run=False, use_duckdb=False) == 0
+        pg.assert_awaited_once()
 
 
 @needs_pg

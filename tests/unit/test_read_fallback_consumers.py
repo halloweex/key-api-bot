@@ -120,8 +120,8 @@ NON_HTTP_CONSUMERS = {
     # The sync, every 2 minutes, and its search index.
     "core/scheduler.py:BackgroundScheduler._run_incremental_sync",
     "core/scheduler.py:BackgroundScheduler._run_meilisearch_sync",
-    # Training, and the Monday goals job that writes seasonal_indices before
-    # the read that refuses.
+    # Training, and the Monday goals job, which writes seasonal_indices once
+    # every read it makes has answered (chain 7b-1).
     "core/scheduler.py:BackgroundScheduler._run_revenue_prediction",
     "core/scheduler.py:BackgroundScheduler._run_seasonality_calc",
     # The two weekly messages.
@@ -148,6 +148,9 @@ UNSWEPT_ROUTES = {
     "DELETE /api/goals/{period_type}",
     "POST /api/duckdb/sync-buyers",
     "POST /api/goals",
+    # Reads the order history through the goals router once
+    # KS_GOALS_HISTORY=silver (chain 7b-2), before its one write.
+    "POST /api/goals/recalculate",
     "POST /api/revenue/forecast/train",
     "POST /api/revenue/forecast/tune",
 } | IN_BAND_ROUTES
@@ -156,12 +159,19 @@ UNSWEPT_ROUTES = {
 # `named` is a handler naming `ReadUnavailable` that answers it — the job's
 # result says `read_unavailable` and the surface. `broad` is an `except
 # Exception` that was there already and contains every failure of a step
-# the same way, a refusal included: the buyers step holds its watermark and
-# the tick goes on (the plan's "record the failure and skip that step"), and
-# the boot keeps serving. Derived and compared, like the lists above: a
-# handler added on a consumer's path — or one taken away, which would let a
-# refusal out as an exception — fails here until somebody writes it down.
-_BUYERS = "core/sync_service.py:SyncService.sync_missing_buyers:broad"
+# the same way, a refusal included, and the boot keeps serving. Derived and
+# compared, like the lists above: a handler added on a consumer's path — or
+# one taken away, which would let a refusal out as an exception — fails here
+# until somebody writes it down.
+#
+# The buyers step records a refusal and passes it on since chain 4's PR-3:
+# the tick names it at the call (the plan's "record the failure and skip that
+# step") and the manual route below reaches the 503. It used to stop in the
+# step's own `except Exception`, which answered both. The tick's stats are
+# summed and carry no strings, so `/api/jobs` still shows a step with no
+# buyers; the refusal is in the log, in `buyer_sync`'s error class and in
+# `refusals()`.
+_BUYERS = "core/sync_service.py:SyncService.incremental_sync:named"
 _TOOLS = "core/chat_tools.py:execute_tool:named"
 ANSWERS = {
     "core/scheduler.py:BackgroundScheduler._run_incremental_sync": {_BUYERS},
@@ -187,17 +197,17 @@ ANSWERS = {
 
 # The routes the sweep does not run, and where a refusal stops on each before
 # the 503 handler — empty means it reaches the handler. The assistant's stop
-# at its tools, by design (`IN_BAND_ROUTES`). One writing route does too, and
-# not by design: the buyers step is shared with the scheduler's tick, and its
-# `except Exception` answers the route — "Synced 0 buyers" under `off`. It is
-# written down rather than changed here, because chain 4 (PR #249) rebuilds
-# that step and that route; see DN-20c's deviations.
+# at its tools, by design (`IN_BAND_ROUTES`). `POST /duckdb/sync-buyers`
+# reaches the handler: the buyers step passes a refusal on and the route lets
+# it through (chain 4's PR-3). Until then the step's `except Exception`
+# answered it, and the route said "Buyer sync failed" with a 500.
 UNSWEPT_STOPS = {
     "DELETE /api/goals/{period_type}": set(),
     "GET /api/chat/stream": {_TOOLS},
     "POST /api/chat": {_TOOLS},
-    "POST /api/duckdb/sync-buyers": {_BUYERS},
+    "POST /api/duckdb/sync-buyers": set(),
     "POST /api/goals": set(),
+    "POST /api/goals/recalculate": set(),
     "POST /api/revenue/forecast/train": set(),
     "POST /api/revenue/forecast/tune": set(),
 }

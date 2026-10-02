@@ -454,6 +454,7 @@
   "marketing.orders": "Кол-во заказов",
   "marketing.ordersPct": "% заказов",
   "marketing.previousMonth": "Предыдущий месяц",
+  "marketing.productFilterNote": "Только выбранный бренд или категория: выручка — сумма их позиций, заказы и клиенты — те, в чьих корзинах они были. Цель месяца скрыта.",
   "marketing.returnRate": "% возврата",
   "marketing.returningCustomers": "Вернувшиеся клиенты",
   "marketing.revenue": "Выручка (грн)",

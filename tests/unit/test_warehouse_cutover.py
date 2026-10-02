@@ -236,6 +236,7 @@ MET_ENV = {
     **{name: "postgres" for name in wc.WAREHOUSE_READERS},
     "KS_READ_COHORTS": "clickhouse",
     "KS_CH_URL": "http://ch:8123",
+    "KS_GOALS_HISTORY": "silver",
 }
 MET_FACTS = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
                      bridge_owners={}, expenses_backfilled=True)
@@ -259,6 +260,7 @@ def _breaking(key: str):
         "mirror_landing": ("KS_MIRROR_LANDING", "0"),
         "cohorts_clickhouse": ("KS_READ_COHORTS", "duckdb"),
         "ch_url": ("KS_CH_URL", " "),
+        "goals_bridge": ("KS_GOALS_HISTORY", "bridge"),
     }
     if key in simple:
         name, value = simple[key]
@@ -272,9 +274,6 @@ def _breaking(key: str):
         facts = dataclasses.replace(MET_FACTS, revision="0032_manual_goal_ids")
     elif key == "expenses_backfilled":
         facts = dataclasses.replace(MET_FACTS, expenses_backfilled=False)
-    elif key == "goals_bridge":
-        facts = dataclasses.replace(
-            MET_FACTS, bridge_owners={"pg_managers_write": ("bronze.managers",)})
     elif key == "retired_conditions_clear":
         facts = dataclasses.replace(
             MET_FACTS, open_retired={"silver_missing_rows": "dq:integrity"})
@@ -337,7 +336,7 @@ class TestTheEvaluator:
             revision_error="not asked: KS_PG_DSN is not set", bridge_owners={}))
         assert [u.key for u in unmet] == [
             k for k in KEYS
-            if k not in ("value_understood", "mirror_landing", "goals_bridge",
+            if k not in ("value_understood", "mirror_landing",
                          "retired_conditions_clear", "od10_doors",
                          # not asked: no DSN, so `pg_revision` names it
                          "expenses_backfilled")]
@@ -354,11 +353,45 @@ class TestTheEvaluator:
         (u,) = wc.evaluate_preconditions(MET_ENV, facts)
         assert u.key == "pg_revision" and "SchemaVersionError" in u.detail
 
-    def test_an_unreadable_registry_is_unmet_not_green(self):
+    def test_an_unreadable_registry_is_said_under_the_bridge(self):
+        env = {**MET_ENV, "KS_GOALS_HISTORY": "bridge"}
         facts = dataclasses.replace(MET_FACTS, bridge_owners=None,
                                     bridge_error="ImportError: gone")
-        (u,) = wc.evaluate_preconditions(MET_ENV, facts)
+        (u,) = wc.evaluate_preconditions(env, facts)
         assert u.key == "goals_bridge" and "ImportError" in u.detail
+
+    def test_under_silver_the_registry_does_not_matter(self):
+        """Met by construction: no calculator reads the three tables then
+        (`tests/unit/test_goals_history_silver.py`), so who owns them, or a
+        registry that cannot say, changes nothing. Mutation M19: judge the
+        owners alone again, and the owned case here is unmet."""
+        for facts in (
+            dataclasses.replace(MET_FACTS, bridge_owners=None, bridge_error="x"),
+            dataclasses.replace(MET_FACTS, bridge_owners={
+                "pg_orders_write": ("bronze.orders",)}),
+        ):
+            assert wc.evaluate_preconditions(MET_ENV, facts) == []
+
+    @pytest.mark.parametrize("value", [None, "", "bridge", " Bridge "])
+    def test_the_bridge_is_unmet_with_nobody_owning_anything(self, value):
+        """Step 13 freezes DuckDB's orders and classification whether or not
+        a chain owns them, so the bridge alone holds the switch. Mutation
+        M19's other half: evaluate owners only, and this is met."""
+        env = dict(MET_ENV)
+        if value is None:
+            env.pop("KS_GOALS_HISTORY")
+        else:
+            env["KS_GOALS_HISTORY"] = value
+        (u,) = wc.evaluate_preconditions(env, MET_FACTS)
+        assert u.key == "goals_bridge"
+        assert "KS_GOALS_HISTORY is 'bridge'" in u.detail
+        assert "diverging" not in u.detail
+
+    def test_a_value_it_does_not_understand_is_unmet_by_its_class(self):
+        env = {**MET_ENV, "KS_GOALS_HISTORY": "silvr"}
+        (u,) = wc.evaluate_preconditions(env, MET_FACTS)
+        assert u.key == "goals_bridge"
+        assert "'silvr'" in u.detail and "ValueError" in u.detail
 
     def test_the_mirror_is_read_as_the_mirror_reads_it(self, monkeypatch):
         """One rule for `KS_MIRROR_LANDING`, the mirror's own."""
@@ -645,9 +678,14 @@ class TestTheBridgeTripwire:
         assert sales_type_bridge_owners() == {"pg_chain_x_write": (table,)}
 
         facts = asyncio.run(wc.gather_facts({}))
-        (u,) = [u for u in wc.evaluate_preconditions(MET_ENV, facts)
+        env = {**MET_ENV, "KS_GOALS_HISTORY": "bridge"}
+        (u,) = [u for u in wc.evaluate_preconditions(env, facts)
                 if u.key == "goals_bridge"]
         assert "pg_chain_x_write" in u.detail and table in u.detail
+        assert "diverging" in u.detail
+        # Ported, the chain owning it changes nothing.
+        assert [u for u in wc.evaluate_preconditions(MET_ENV, facts)
+                if u.key == "goals_bridge"] == []
 
 
 # ─── Gathering and publishing ────────────────────────────────────────────────

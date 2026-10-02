@@ -248,6 +248,61 @@ class TestTheFullSyncRun:
         assert (result["buyers_fetched"], result["buyers_written"]) == (10, 0)
 
 
+class TestUnderChain4:
+    """The buyers land in Postgres alone, so sync-all counts them there, and a
+    flag nobody can read is refused at both doors before anything starts."""
+
+    READERS = ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD")
+
+    @pytest.mark.asyncio
+    async def test_sync_all_counts_the_buyers_where_they_are_written(self, monkeypatch):
+        from core import pg_buyer_sync_read
+        from web.routes.api import admin
+
+        monkeypatch.setenv("KS_WRITE_BUYERS", "postgres")
+        for reader in self.READERS:
+            monkeypatch.setenv(reader, "postgres")
+        counts = iter([100, 103])
+        monkeypatch.setattr(pg_buyer_sync_read, "count_buyers",
+                            AsyncMock(side_effect=lambda: next(counts)))
+        _keycrm(monkeypatch, AsyncMock(return_value=_buyers(3)))
+        store = _store_for_sync_all(AsyncMock(return_value=3))
+        store.connection.side_effect = AssertionError("DuckDB counted under chain 4")
+
+        result = await admin._sync_all_buyers(store)
+
+        assert (result["before_count"], result["after_count"],
+                result["new_buyers"]) == (100, 103, 3)
+
+    def test_sync_all_refuses_a_flag_nobody_can_read_before_it_starts(
+            self, monkeypatch, fresh_limits):
+        from web.routes.api import admin
+
+        monkeypatch.setenv("KS_WRITE_BUYERS", "postgre")
+        body = AsyncMock(side_effect=AssertionError("started"))
+        monkeypatch.setattr(admin, "_sync_all_buyers", body)
+        monkeypatch.setattr(admin, "get_store", AsyncMock(return_value=MagicMock()))
+
+        r = _client().post("/api/duckdb/sync-all-buyers")
+
+        assert r.status_code == 409, r.text
+        assert "KS_WRITE_BUYERS" in r.json()["detail"]
+        body.assert_not_called()
+
+    def test_the_manual_sync_refuses_it_too(self, monkeypatch, fresh_limits):
+        from core import sync_service
+        from web.routes.api import admin
+
+        monkeypatch.setenv("KS_WRITE_BUYERS", "postgre")
+        monkeypatch.setattr(sync_service, "get_sync_service",
+                            AsyncMock(side_effect=AssertionError("step ran")))
+
+        r = _client().post("/api/duckdb/sync-buyers")
+
+        assert r.status_code == 409, r.text
+        assert "KS_WRITE_BUYERS" in r.json()["detail"]
+
+
 class TestTheRoutes:
     def test_sync_all_answers_at_once_and_runs_detached(self, monkeypatch, fresh_limits):
         from web.routes.api import admin

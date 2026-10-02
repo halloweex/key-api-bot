@@ -111,9 +111,14 @@ class HealthResponse(BaseModel):
             "the process start when it has not succeeded yet, with `ever_ok` "
             "saying which), consecutive failures that are neither KeyCRM nor "
             "data errors, the CLASS of the last error — never its text, which "
-            "can carry a buyer's data — and the seconds left before a failed "
-            "step retries. Null when this process has not started syncing. "
-            "Judged by the canary as `buyer_sync_stalled`."
+            "can carry a buyer's data — the seconds left before a failed "
+            "step retries, and how many buyers of the last batch Postgres "
+            "would refuse and chain 4 skipped by id (`last_skipped_bad`). "
+            "Under chain 4 also `watermark_age_s`, the age of the stamp the "
+            "step writes to Postgres, which survives a restart. Null "
+            "when this process has not started syncing. Judged by the canary "
+            "as `buyer_sync_stalled` (WARN), and under chain 4 — this step the "
+            "only writer of buyers — as `buyer_sync_stalled_chain` (CRITICAL)."
         ),
     )
     write_chains: Optional[Dict[str, Any]] = Field(
@@ -209,6 +214,15 @@ class HealthResponse(BaseModel):
             "`error` names a value that ran as duckdb instead: one not "
             "understood, or postgres without KS_PG_DERIVE=own. Judged by the "
             "canary (DN-19)."
+        ),
+    )
+    goals_history: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Which orders the goal calculators count (chain 7b): `mode` is "
+            "KS_GOALS_HISTORY as a goal history read takes it — bridge or "
+            "silver — or null with `error` when the value is not understood, "
+            "and then every goal history read raises. Judged by the canary."
         ),
     )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(

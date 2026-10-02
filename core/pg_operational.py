@@ -142,9 +142,10 @@ DQ_DIFFS_TABLE = "app.data_quality_diffs"
 OFFERS_TABLE = "bronze.offers"
 SYNC_METADATA_TABLE = "app.sync_metadata"
 # The forecast group (revision 0025). Four tables, 313 rows, and the reason
-# they come first out of the sixteen with no Postgres home: `get_predictions`
-# and `generate_smart_goals` are the last two dashboard reads still tied to
-# DuckDB, and they are tied to it only because these are not here.
+# they came first out of the sixteen with no Postgres home: `get_predictions`
+# and `generate_smart_goals` were the last two dashboard reads tied to DuckDB.
+# `get_predictions` moved with #183; the smart goal's reads of the other three
+# stay where they are written until their writer moves (chain 7b-3).
 PREDICTIONS_TABLE = "app.revenue_predictions"
 SEASONAL_TABLE = "app.seasonal_indices"
 WEEKLY_PATTERNS_TABLE = "app.weekly_patterns"
@@ -894,10 +895,22 @@ async def replicate_operational(
             if stamps:
                 from core.pg_landing import _record_failure
 
+                # Only on tables this job ships itself. A chain may also own
+                # tables another shipper carries — chain 4's bronze buyers are
+                # the buyers mirror's — and a failure stamped on one of those
+                # is a count this job never clears: only that shipper's next
+                # non-empty success resets `failures_since_ok`, so after a
+                # rollback the daily comparison would page `mirror_failing` on
+                # two stores that agree. Those tables carry the disagreement
+                # through `chain_latch_disagrees`, `write_chain_flag_mismatch`
+                # and `write_chain_flag_invalid` instead. Every table of chains
+                # 1, 8, 7a and 6a is shipped here, so for them nothing moves.
+                ships = set(_tables_to_ship(frozenset()))
                 for name, note in stamps:
                     chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
                     for table in chain.CHAIN_TABLES:
-                        await _record_failure(table, note)
+                        if table in ships:
+                            await _record_failure(table, note)
             logger.info("Operational history replicated: %s", result)
             return result
         except Exception as e:

@@ -2,6 +2,76 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.267
+
+- Soak D8: a UTM verdict inside its grace is not a disagreement
+
+
+## 3.0.266
+
+- Chain 7b review: the gate does not read a stood-down comparison as clean
+- Chain 7b review: CLAUDE.md says what the gate asks of Postgres
+- Chain 7b review: the flip's gate asks about Postgres Silver too
+- Chain 7b review: the dry run's two verdict paths, pinned apart
+- Chain 7b review: a KS_GOALS_HISTORY typo is published and paged
+- Chain 7b review: the history bounds read every order, pinned
+- Chain 7b-2: the dry run's comparison is a loop, not a recursion
+- Chain 7b: say in CLAUDE.md what the goals read and what writes them
+- Chain 7b-2: scripts/goals_semantics_dryrun.py, the flip's precondition
+- Chain 7b-2: the Silver history on a real Postgres
+- Chain 7b-2: the sweeps and the job run under the Silver history too
+- Chain 7b-2: the Silver history proved equal, bridge-free and switch-safe
+- Chain 7b-2 (WIP): KS_GOALS_HISTORY=silver reads the goal history from Silver
+- Chain 7b-1 (WIP): tests follow the calculators that compute only
+- Chain 7b-1 (WIP): goal calculators compute only; one transactional writer; GET never writes
+
+
+## 3.0.265
+
+- /marketing: the monthly report honours the brand and category filters
+
+
+## 3.0.264
+
+- Chain 4 PR-4 review: the pin a test held, and the rollback said whole
+- Chain 4 PR-4: revision 0034 locks images without the chain out
+
+
+## 3.0.263
+
+- Chain 4 PR-3: a blind probe does not resolve the buyers step's page
+- Chain 4 PR-3: one account of where a refused buyer read goes
+- Chain 4 PR-3 review: what an operator reads says what is true
+- Chain 4 PR-3 review: the buyer walk judges the branch, not the question
+- Chain 4 PR-3 review: the writer lands or says so, and what watches it survives a restart
+- Chain 4 PR-3: a refused read reaches whoever can answer it (DN-20c)
+- Chain 4 PR-3: a buyer reader that is gone holds the chain, and says which
+- Chain 4 PR-3: say in CLAUDE.md what the buyers chain does, and what holds it
+- Chain 4 PR-3: the restore drill checks the buyers too
+- Chain 4 PR-3: the soak reads the buyers chain, B1 to B5
+- Chain 4 PR-3: under the chain a stalled buyers step pages
+- Chain 4 PR-3: every buyer path follows the chain's one answer
+- Chain 4 PR-3: the buyers chain, registered, flag off
+
+
+## 3.0.262
+
+- Chain 4 PR-2: CLAUDE.md says what the contacts bound is, and that the canary pages mirror_landing
+- Chain 4 PR-2 review: one reship at a time, and the docs promise what the levers do
+- Chain 4 PR-2 review: the copy-back reads contacts as the daily check does, and trusts KeyCRM's clock
+- Chain 4 PR-2 review: the transaction owner is guarded, and contacts keep a floor
+- Chain 4 PR-2: say in CLAUDE.md what the way back now knows, and the reship's costs
+- Chain 4 PR-2: the buyers' way back, end to end on a real Postgres and DuckDB
+- Chain 4 PR-2: the copy-back's runbook tells each table's shipper apart
+- Chain 4 PR-2: POST /api/mirror/backfill/buyers re-ships every buyer DuckDB holds
+- Chain 4 PR-2: the copy-back learns the tables the mirror ships
+- Chain 4 PR-2: a stood-down backfill or hourly diff never opens DuckDB
+- Chain 4 PR-2: one writer of buyer rows, for the mirror now and the chain next
+- Chain 4 PR-2: app.buyer_gender.decided_at is compared every morning
+- Chain 4 PR-2: a chain's disagreement is stamped only on the tables this job ships
+- Chain 4 PR-2: buyer_contacts leaves MONOTONE, a shrinking list is not a loss
+
+
 ## 3.0.261
 
 

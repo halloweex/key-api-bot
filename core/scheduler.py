@@ -1120,9 +1120,30 @@ class BackgroundScheduler:
             # would report a difference the ordering created. Cheap on an
             # ordinary tick: the pending query returns the ~19 buyers a day
             # KeyCRM adds, and KeyCRM has no gender field for any of them.
+            #
+            # Under chain 4 the verdicts are written in Postgres
+            # (`core/pg_buyers_write.py`) and the copy below stands down for
+            # them, so the derivation follows the chain's one answer: Postgres,
+            # DuckDB, or — a KS_WRITE_BUYERS nobody can read — neither, said
+            # rather than guessed. Its own `try`: both derivations never raise,
+            # and a fault in choosing between them must not cost the copy of
+            # tables nothing can rebuild either.
+            from core import pg_buyers_write
             from core.gender_backfill import derive_gender
 
-            gender = await derive_gender(store)
+            try:
+                gender_mode = pg_buyers_write.mode()
+                if gender_mode == "postgres":
+                    gender = await pg_buyers_write.derive_gender_pg()
+                elif gender_mode == "duckdb":
+                    gender = await derive_gender(store)
+                else:
+                    gender = {"stood_down": f"{pg_buyers_write.WRITE_ENV} is not "
+                                            "understood; no verdict was derived"}
+            except Exception as exc:  # noqa: BLE001 — carried, not raised
+                logger.error("gender derivation could not be routed: %s", exc,
+                             exc_info=True)
+                gender = {"error": f"{type(exc).__name__}: {exc}"}
             result = await replicate_operational(store)
             result["gender"] = gender
             # `data/bot.db` rides the same job rather than getting one of its
@@ -1260,28 +1281,28 @@ class BackgroundScheduler:
             # b2b: a b2b caller got the same shared rows. Until sales_type is
             # part of the keys, the shared rows mean retail.
             #
-            # The suggestions come FIRST, and that order is the whole of
-            # DN-20c here. They are the only read in this job that goes
-            # through a router (`/goals`' own), so under KS_READ_FALLBACK=off
-            # they are the only one that can be refused — and they write
-            # nothing and read neither table the other two write. Asked
-            # after `calculate_seasonality_indices`, a refusal left the new
-            # `seasonal_indices` beside last week's `growth_metrics`; asked
-            # first, it defers the whole job with nothing written.
+            # Nothing is written until everything has been read (DN-20c, and
+            # chain 7b's one-transaction persist). Under KS_READ_FALLBACK=off
+            # a read here can be refused — the suggestions go through
+            # `/goals`' router — and a refusal must leave last week's
+            # `seasonal_indices` and `growth_metrics` whole, never this week's
+            # indices beside last week's growth. `recalculate_goal_tables`
+            # computes both before its single transaction, so a refusal
+            # anywhere defers the whole job with nothing written. The weekly
+            # patterns are not stored here: the job never did (OQ-2).
             from core import read_fallback
             try:
                 retail_goals = await store.calculate_suggested_goals(
                     sales_type="retail", growth_factor=1.10)
+                tables = await store.recalculate_goal_tables(include_weekly=False)
             except read_fallback.ReadUnavailable as exc:
                 return {"skipped": True, **read_fallback.answered(
                     "seasonality_calc", exc,
                     "nothing written; seasonal_indices and growth_metrics "
                     "keep their previous values")}
-            retail_indices = await store.calculate_seasonality_indices("retail")
-            await store.calculate_yoy_growth("retail")
 
             result = {
-                "retail_months": len(retail_indices),
+                "retail_months": len(tables["seasonal"]),
                 "retail_goals": retail_goals,
             }
             logger.info(
