@@ -1201,6 +1201,23 @@ class TestTheManagersStep:
         assert health["failures_since_ok"] == 0 and health["last_ok_at"]
 
     @pytest.mark.asyncio
+    async def test_the_full_sync_is_not_taken_down_either(
+            self, monkeypatch, every_precondition_met):
+        """`full_sync` calls `sync_managers` first and directly, not through
+        the tick's step: one classification store must not cost a week's
+        orders. Mutation: let `sync_managers` re-raise under the chain."""
+        from unittest.mock import AsyncMock
+
+        from core import pg_managers_write
+
+        every_precondition_met.setenv(pg_managers_write.WRITE_ENV, "postgres")
+        svc, store = _tick(monkeypatch,
+                           upsert=AsyncMock(side_effect=OSError("postgres gone")))
+        assert await svc.sync_managers() == 0
+        assert not _stamped(store)
+        assert svc.managers_step_health()["last_error"] == "OSError"
+
+    @pytest.mark.asyncio
     async def test_on_duckdb_a_failure_escapes_exactly_as_before(self, monkeypatch, flags):
         """Mutation: apply the containment in duckdb mode — production's
         behaviour would change with the flag off."""

@@ -42,7 +42,7 @@ import pytest_asyncio
 
 from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-    pg_goals_write, pg_inventory_write, write_chains,
+    pg_goals_write, pg_inventory_write, pg_managers_write, write_chains,
 )
 
 DSN = os.getenv("KS_PG_DSN")
@@ -54,6 +54,9 @@ pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_P
 _WRITTEN = ("bronze.offers", "app.manual_expenses", "app.revenue_goals",
             "bronze.expense_types", "bronze.buyer_contacts", "app.buyer_gender",
             "bronze.buyers")
+
+# Chain 5's two, apart from the literal above so a merge stays a union.
+_WRITTEN += ("app.manager_classifications", "bronze.managers")
 
 STOCK = {"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
          "quantity": 40, "reserve": 0}
@@ -201,6 +204,21 @@ async def _derive(_store):
     return await pg_buyers_write.derive_gender_pg()
 
 
+async def _classify(store):
+    """Chain 5's classification, of a manager Postgres holds — without one it
+    refuses before the latch, which is the point of reading first. Seeded
+    through the pool the test hands out, which serves anybody but the
+    writer's module the live pool."""
+    from core.pg import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO bronze.managers (id, name, is_retail) VALUES (34, 'M', FALSE) "
+            "ON CONFLICT (id) DO NOTHING")
+    return await store.set_manager_retail_status(34, True, date(2026, 10, 7), 1, "x")
+
+
 # Writers that return their failure rather than raise it — chain 4's
 # derivation, `derive_gender`'s contract. A cancellation still goes through.
 NEVER_RAISES = {"derive_gender_pg"}
@@ -228,6 +246,10 @@ WRITERS = {
         [{"id": 1, "name": "Delivery"}])),
     "upsert_buyers": (pg_buyers_write, lambda s: s.upsert_buyers([_buyer()])),
     "derive_gender_pg": (pg_buyers_write, _derive),
+    "upsert_managers": (pg_managers_write, lambda s: s.upsert_managers(
+        [{"id": 1, "name": "M1"}])),
+    "update_manager_stats": (pg_managers_write, lambda s: s.update_manager_stats()),
+    "set_manager_retail_status": (pg_managers_write, _classify),
 }
 
 
@@ -248,6 +270,10 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
         monkeypatch.setenv(reader, "postgres")
+    # Chain 5 is held on DuckDB by facts no environment variable sets (the
+    # goal bridge, step 13, chain 3); this harness proves where its latch is
+    # taken, not whether it may move.
+    monkeypatch.setattr(pg_managers_write, "unmet_precondition", lambda: None)
     store = DuckDBStore(db_path=tmp_path / "latch-acquire.duckdb")
     await store.connect()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
@@ -440,6 +466,7 @@ FIRST_WRITES = {
     "pg_goals_write": ("set_goal", "app.revenue_goals", "period_type", "daily"),
     "pg_expense_types_write": ("upsert_expense_types", "bronze.expense_types", "id", 1),
     "pg_buyers_write": ("upsert_buyers", "bronze.buyers", "id", 1),
+    "pg_managers_write": ("upsert_managers", "bronze.managers", "id", 1),
 }
 
 
