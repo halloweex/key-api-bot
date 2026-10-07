@@ -3249,13 +3249,20 @@ Gold's), P4 the three mutations (a deleted Silver row, a landed order, an
 unknown sales_type via a trigger on the copy), P5 both DQ jobs under the
 stand-down, P6 restarts — graceful, after the kill, graceful — and one
 resolve, P7 one precondition broken and the canary paging, P8 the way back.
-P3, P6 and D1 judge the stops the container shows, not the ones the script
-meant: `docker inspect` after each stop and start (exit 0, or exit 137 after
-the rehearsal's `docker kill` and not the OOM killer), and P6 counts the
+P3, P6, P8 and D1 judge the stops the container shows, not the ones the
+script meant: `docker inspect` after each stop and start (exit 0, or exit 137
+after the rehearsal's `docker kill` and not the OOM killer), and P6 counts the
 restart after the kill only when its SIGKILL is the one `p3.json` records.
-Every graceful stop gets production's grace — compose's 10 s default for web
-(`STOP_GRACE_S`, pinned to `docker-compose.yml`) — and one that outruns it is
-recorded as the kill a deploy would have made.
+Every stop of reh-web gets production's grace — compose's 10 s default for
+web (`STOP_GRACE_S`, pinned to `docker-compose.yml`) — and records the
+container's state after it, so one that outruns the grace is recorded as the
+kill a deploy would have made: P6 and D1 read F5s's and F7's, P8 the stop
+the way back starts from and its own last one, and a stop that outran the
+grace is UNKNOWN until somebody has read why web did not stop in time. Three
+stops recorded nothing until 2026-10-08 — both around the way back, and the
+one after a run that did not flip — while phase 0's had already taken 7 of
+its 10 s on 400 orders. A test walks the script for a stop of reh-web
+without a state file, and for a record or a judge fed another phase's.
 Plus D1 (what P3's kill cost DuckDB's indexes, below), K0 (KeyCRM never
 called) and Z0 (no other container on the host moved). Z0 records every other container's
 `StartedAt`, `RestartCount` and `OOMKilled`, not just its id: a restart
@@ -3325,12 +3332,18 @@ image built from this branch (3.0.261, revision 0033) with `--build`,
 passed P1–P8, D1 and K0 in 22 minutes, exit 2 for Z0 alone, UNKNOWN for
 other sessions' containers. P4a and P5 judged F4's runs as F5s read them,
 both whole through `fetch_run_issues`; D1 swept 23 indexes at both stops
-and found none short. That PASS said less than it read as: F5s's graceful
-stop had checkpointed F4's runs before F6's kill, so nothing the sweep
-asked was within the kill's reach, and the sweep asked single-column
-indexes only — 23 of the 57, the rest empty or one-valued on the seed —
-and none of the 12 composite ones. Its P6 counted a `kill` restart the
-script recorded whether or not F6 had killed anything; that run's P3 shows
+and found none short. That PASS said less than it read as. F5s's graceful
+stop had checkpointed F4's runs before F6's kill, so of what the sweep
+asked only the fixture's fourth version — landed by F6 after that
+checkpoint and before the kill — was within the kill's reach, asked of the
+single-column indexes on `orders` and `order_products` (`idx_orders_status`
+among them); it survived because the sync touches `orders` after a
+restart, not because the kill could not reach it. And the sweep asked
+single-column indexes only: 23 of the 57, the other 34 the 12 composite
+ones and 22 left empty by the seed (counted on the 10-07 run, whose seed is
+the same deterministic one; none was one-valued). Its P6 counted a `kill`
+restart the script recorded whether or not F6 had killed anything; that
+run's P3 shows
 the kill landed, but P6 could not have told. The run the day before, on
 the same image with P4a and P5 read after the kill, failed both on the
 DuckDB defect below and on nothing else: the live process showed both
@@ -3353,9 +3366,14 @@ minutes and failed D1 as predicted: after the kill and F7's checkpoint,
 run, `fetch_run_issues` returned 0 of its 1 finding, and deleting the run's
 rows from `data_quality_issues` and `data_quality_runs` was DuckDB's FATAL.
 The fixture order and its line came out of every index on `orders` and
-`order_products`, the four composite ones included: after a restart the
-sync touches `orders`, and nothing touches the DQ journal. Z0 failed on
-another session's ClickHouse container, stopped (exit 0, not the OOM
+`order_products` that holds them — after a restart the sync touches
+`orders`, and nothing touches the DQ journal — but that is two of the four
+composite indexes on `orders`, not all four as this note first said: the
+fixture has no buyer and no manager, and DuckDB keeps no index entry for a
+row with a NULL in any key column, so `idx_orders_buyer_date`,
+`idx_orders_manager_date` and their single-column twins never held it and
+the DELETE asked them nothing. Z0 failed on another session's ClickHouse
+container, stopped (exit 0, not the OOM
 killer, no restart policy) and started again 12 s into the run. What the
 local run cannot answer is production's own readiness — whether the copy's
 preconditions hold, the way back's full rebuild inside 1.5 GB, and the
@@ -3429,15 +3447,23 @@ file.
 **D1 asks what the kill cost of the rows it could cost** — those written
 after F5s's checkpoint, since a graceful stop puts everything before it out
 of a kill's reach: one integrity run F5w triggers, and the fixture's fourth
-version F6 lands (an order, its line, and the four composite indexes on
-`orders`). After the kill and F7's graceful stop — the checkpoint that
-writes the loss down; a read-only open before it still sees every row the
-WAL holds — the run is read by `fetch_run_issues` beside a scan. At the end,
-on the copy about to be removed, the window's rows are deleted table by
-table in a process each, found by a predicate no index serves: a `DELETE`
-must take each row out of every index on its table, so a lost entry is
-DuckDB's FATAL, and that is the only question a composite index answers — on
-1.5.5 none serves a read. Every single-column index is also swept at both
+version F6 lands (an order and its line). An index holds no row with a NULL
+in any key column — measured on 1.5.5 by losing every entry across a kill
+and deleting each row: only a row with every key set is the FATAL — and the
+fixture has no buyer and no manager, so it is in two of the four composite
+indexes on `orders` (`idx_orders_source_date`, `idx_orders_status_date`),
+and the buyer and manager ones cannot be asked about it. `window_rows`
+reads which index holds how many of the window's rows (`held`), D1 counts
+only those as asked and names the rest, and an index whose holding was not
+read leaves the row UNKNOWN. After the kill and F7's graceful stop — the
+checkpoint that writes the loss down; a read-only open before it still sees
+every row the WAL holds — the run is read by `fetch_run_issues` beside a
+scan. At the end, on the copy about to be removed, the window's rows are
+deleted table by table in a process each, found by a predicate no index
+serves: a `DELETE` must take each row out of every index on its table that
+holds it, so a lost entry is DuckDB's FATAL, and that is the only question
+a composite index answers — on 1.5.5 none serves a read. Every
+single-column index is also swept at both
 stops (lookup limits lifted, held to `count_if` over the table). A loss
 after the kill is a FAIL labelled **DuckDB 1.5.5's known defect, not a
 step-13 regression** — the switch writes no DuckDB index, and an OOM kill of
