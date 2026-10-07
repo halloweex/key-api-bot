@@ -130,7 +130,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 
 | Endpoint | Description |
 |----------|-------------|
-| `/api/health` | Health check (status, version, uptime, cache stats) |
+| `/api/health` | Health check (status, version, uptime, cache stats); `degraded` while `duckdb.fatal` is set |
 | `/api/summary` | Summary statistics |
 | `/api/revenue/trend` | Revenue time series (+ `include_forecast=true` for ML predictions) |
 | `/api/revenue/forecast` | ML revenue forecast for current month |
@@ -1199,6 +1199,83 @@ The disk watchdog differences at a fixed 168h lag, so emptying a cache that
 returns to its natural size reads as growth a week later. The WARN standing on
 2026-09-13 was made by a `docker builder prune` on 09-09, not by anything new.
 Cap what rebounds; only delete what stays deleted.
+
+### A killed DuckDB writer, and what the next start used to lose
+
+DuckDB 1.5.5 drops index entries across a kill. The rows a killed writer left
+in its WAL are replayed into every `CREATE INDEX` index (not the PK/UNIQUE
+ones) as entries the index has not bound yet, and DuckDB's **own** checkpoint
+— `close()`, or `wal_autocheckpoint` — writes those indexes without them.
+From then on `WHERE col = ?` misses rows a scan still sees, and a write that
+must take such a row out of the index is a FatalException ("Failed to delete
+all rows from index") that invalidates the whole instance. Measured through
+`DuckDBStore.connect()` then `close()`: 45 of 45 single-column indexes short,
+`DELETE FROM t` a FATAL on 26 of 26 indexed tables, composite ones included.
+Every OOM kill and every stop that outlives its grace is such a kill.
+
+**The fix is a CHECKPOINT before anything else runs.**
+`core.duckdb_store.open_read_write` is the one read-write `duckdb.connect` of
+the analytics file, and its first statement is `CHECKPOINT`, which keeps every
+replayed entry. First, not after the SETs: a SET that fails leaves a valid
+instance, and closing a valid instance is the lossy checkpoint. A guard
+checkpoint that fails is itself FATAL, so nothing is written on close and the
+WAL waits for the next open. Free on a clean start; behind a kill, 1.5 / 3.6 /
+8.9 s at 30 / 300 / 900 MB of WAL — the checkpoint the restart would have
+taken anyway, moved to the open. A WAL found at open is logged as a WARNING,
+so every kill is named. Read-only opens replay into memory and answer
+correctly; they neither lose entries nor take the guard.
+
+`tests/unit/test_duckdb_open_guard.py` walks `core/ web/ bot/ scripts/
+deploy/`, not a list of callers: every `duckdb.connect` is read-only,
+in-memory, the opener, or `compact_duckdb.py::phase3_validate` (the file
+phase 2 just built and closed — no WAL — in a do-not-touch script), and every
+ATTACH of a database file says READ_ONLY. `test_duckdb_kill_guard.py` SIGKILLs
+a child that wrote through `DuckDBStore`, and also pins **the defect without
+the guard**: if that half fails after a DuckDB upgrade, re-measure before
+deleting the guard — never just the test.
+
+**web gets 120 s to stop** (`stop_grace_period`; Docker's default is 10 s):
+uvicorn's drain (30 s, handlers run on past their 504), DuckDB work a
+cancelled job left in flight (~30 s, a whole warehouse refresh), `close()`'s
+checkpoint (~7 s at 900 MB) — ~67 s at worst, inside the deploy's 10-minute
+ssh timeout. `weekly_compact.sh` keeps its `--timeout 30`; harmless now.
+
+**A FATAL drops the instance instead of leaving web's DuckDB dead.**
+`connection()` reconnected only when there was no connection, so one FATAL
+failed every later use, the caller queued on the lock included, until a
+restart. Now, whenever a block raises, the instance is asked (`SELECT 1`);
+one DuckDB invalidated is dropped and the next use opens the file again —
+through the guard, since an invalidated instance writes nothing on close and
+leaves its WAL. Asked, not read off the exception: a caller may swallow the
+FATAL and raise something else, and a FatalException can come from another
+instance. **It does not heal**: an index short in the file fails the same
+write after every reconnect — in the sync, an order batch every tick. So
+`/api/health` publishes `duckdb.fatal` (`count`, `kinds` — `index` or `other`
+— `last_at`; never the text) and `status: degraded` until web restarts;
+otherwise the next read answering would resolve the `health_status` page over
+a write that still fails. The existing page, not a new canary key. The log
+line stops before DuckDB's dump of the rows it could not remove: buyers'
+phone and email are indexed.
+
+The lever for `index` is rebuilding every index, which the compaction does —
+Sunday's, or `weekly_compact.sh` by hand; a restart clears the status, not the
+damage. Rebuilding automatically was measured and **not** built (3–3.5 s,
+≤394 MB, DDL at startup, the file growing once by the index footprint) — the
+owner's call. Whether production holds damage from before the guard is
+unknown; the first compaction after it ships clears whatever there is.
+
+**Not fixed: a WAL that cannot be replayed at all.** On 1.5.5 a WAL holding an
+`ALTER TABLE` — add, drop or rename a column — on a table whose column DEFAULT
+calls a function (`nextval(...)`, `CURRENT_TIMESTAMP`: nearly every table
+here) fails every open, read-only included, guard or not: `INTERNAL Error:
+Failure while replaying WAL file … GetDefaultDatabase with no default
+database set`. Neither web nor the compaction opens the file until the WAL is
+removed, and its contents with it. First seen as "a brand-new file killed
+before its first checkpoint" (the first start creates `warehouse_refreshes`,
+then ALTERs it), but production is exposed too: the first start after a
+deploy that adds such a column, until the hourly checkpoint. An `ADD COLUMN
+IF NOT EXISTS` on a column that exists writes nothing. Candidate fix, as a
+separate change: a second CHECKPOINT at the end of `connect()`.
 
 ### How a failure reaches a human
 - **`KS_ALERTS_DISABLED=1` глушит весь исходящий Telegram** (алерты, дайджест,
@@ -3738,4 +3815,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-10-01*
+*Last updated: 2026-10-07*
