@@ -309,9 +309,48 @@ def keycrm_url() -> str:
 
 # ─── The DuckDB copy, read while reh-web is stopped ──────────────────────────
 
-def duckdb_facts(db: str, gate: Optional[str], runs: Sequence[int]) -> Dict[str, Any]:
+def _read_run(con: Any, run_id: int) -> Optional[Dict[str, Any]]:
+    """One DQ run off the copy: its row and its findings by a scan, beside
+    what the product's own reader returns of it. None when the run is not
+    there.
+
+    By the id's text, never `run_id = ?`: a comparison on the column takes
+    the path through `idx_dqi_run`, and that index is what DuckDB 1.5.5 can
+    lose rows from after a SIGKILL (`index_sweep`). The scan is the truth the
+    product's reader is then held to."""
+    row = con.execute("SELECT run_id, layer, status, error_message, CAST(started_at AS VARCHAR), "
+                      "CAST(ended_at AS VARCHAR) FROM data_quality_runs "
+                      "WHERE CAST(run_id AS VARCHAR) = ?", [str(run_id)]).fetchone()
+    if row is None:
+        return None
+    issues = con.execute(
+        "SELECT check_name, table_name, severity, count, sample_ids, description "
+        "FROM data_quality_issues WHERE CAST(run_id AS VARCHAR) = ? ORDER BY check_name",
+        [str(run_id)]).fetchall()
+    return {
+        # And what the product's own reader sees of the same run —
+        # `/api/health/data-quality` and the digest ask exactly this. The
+        # judges compare the two and fail when they differ: a finding only a
+        # scan can find is one nobody is shown.
+        "reader": _product_reader(con, run_id),
+        "run_id": row[0], "layer": row[1], "status": row[2], "error_message": row[3],
+        "started_at": row[4], "ended_at": row[5],
+        "issues": [{
+            "check_name": i[0], "table_name": i[1], "severity": i[2], "count": i[3],
+            "sample_ids": json.loads(i[4]) if i[4] else [],
+            # Only the pairing record's description is kept: it is the JSON
+            # the judge parses. Others can quote data.
+            "description": i[5] if i[0] == "pg_twin_pairing" else None,
+        } for i in issues],
+    }
+
+
+def duckdb_facts(db: str, gate: Optional[str], runs: Sequence[int], *,
+                 window_run: Optional[int] = None,
+                 window_order: Optional[int] = None) -> Dict[str, Any]:
     """What the judges need out of the DuckDB copy. Read-only; never while
-    the process under test holds the file."""
+    the process under test holds the file. With a window run or order, the
+    rows D1 asks of are read too (`window_rows`)."""
     import duckdb
 
     con = duckdb.connect(db, read_only=True)
@@ -330,38 +369,13 @@ def duckdb_facts(db: str, gate: Optional[str], runs: Sequence[int]) -> Dict[str,
                    "FROM warehouse_refreshes ORDER BY id DESC LIMIT 1")
         counts = one("SELECT (SELECT count(*) FROM orders), (SELECT max(id) FROM orders), "
                      "(SELECT count(*) FROM silver_orders), (SELECT count(*) FROM silver_order_utm)")
-        out_runs: Dict[str, Any] = {}
-        # By the id's text, never `run_id = ?`: a comparison on the column
-        # takes the path through `idx_dqi_run`, and that index is what DuckDB
-        # 1.5.5 can lose rows from after a SIGKILL (`index_sweep`). The scan
-        # is the truth the product's reader is then held to.
-        for run_id in runs:
-            row = one("SELECT run_id, layer, status, error_message, CAST(started_at AS VARCHAR), "
-                      "CAST(ended_at AS VARCHAR) FROM data_quality_runs "
-                      "WHERE CAST(run_id AS VARCHAR) = ?", [str(run_id)])
-            if row is None:
-                out_runs[str(run_id)] = None
-                continue
-            issues = con.execute(
-                "SELECT check_name, table_name, severity, count, sample_ids, description "
-                "FROM data_quality_issues WHERE CAST(run_id AS VARCHAR) = ? ORDER BY check_name",
-                [str(run_id)]).fetchall()
-            out_runs[str(run_id)] = {
-                # And what the product's own reader sees of the same run —
-                # `/api/health/data-quality` and the digest ask exactly this.
-                # The judges compare the two and fail when they differ: a
-                # finding only a scan can find is one nobody is shown.
-                "reader": _product_reader(con, run_id),
-                "run_id": row[0], "layer": row[1], "status": row[2], "error_message": row[3],
-                "started_at": row[4], "ended_at": row[5],
-                "issues": [{
-                    "check_name": i[0], "table_name": i[1], "severity": i[2], "count": i[3],
-                    "sample_ids": json.loads(i[4]) if i[4] else [],
-                    # Only the pairing record's description is kept: it is the
-                    # JSON the judge parses. Others can quote data.
-                    "description": i[5] if i[0] == "pg_twin_pairing" else None,
-                } for i in issues],
-            }
+        # The newest DQ run this stop holds — at F5s, the floor F5w's run
+        # must be above to have been written after the checkpoint. An
+        # unfiltered max binds no index.
+        max_run = one("SELECT max(run_id) FROM data_quality_runs")
+        out_runs: Dict[str, Any] = {str(run_id): _read_run(con, run_id) for run_id in runs}
+        window = (window_rows(con, window_run, window_order)
+                  if window_run is not None or window_order is not None else None)
         indexes = index_sweep(con)
     finally:
         con.close()
@@ -387,7 +401,9 @@ def duckdb_facts(db: str, gate: Optional[str], runs: Sequence[int]) -> Dict[str,
             "trigger": last[0], "validation_passed": last[1], "refreshed_at": last[2]},
         "orders": counts[0], "max_order_id": counts[1],
         "silver_orders": counts[2], "silver_order_utm": counts[3],
+        "max_dq_run_id": max_run[0] if max_run else None,
         "runs": out_runs,
+        "window": window,
         "indexes": indexes,
         "gate_delivered": delivered,
     }
@@ -437,9 +453,16 @@ def index_sweep(con: Any) -> Dict[str, Any]:
     Each single-column index is asked for every non-NULL row in two ranges —
     `<=` the smallest value, `>=` the next — with the lookup limits lifted,
     and held to `count_if` over the whole table, which no index can serve.
-    A composite index serves no read in this DuckDB (measured) and a column
-    with one value cannot be asked — the optimizer drops a filter its
-    statistics prove true — so both are listed, not asked."""
+    A composite index serves no read in this DuckDB, measured by what reads
+    return rather than by EXPLAIN (which prints SEQ_SCAN for a lookup that
+    demonstrably goes through a single-column index): after a kill costs a
+    composite index its entries, a filter on its columns still returns every
+    row a scan does, while a single-column index's filter misses them
+    (`test_a_composite_index_serves_no_read_duckdb_1_5_5`). So a read cannot
+    ask one; only a write that must take a row out of it can — D1's
+    `window_delete`. A column with one value cannot be asked either — the
+    optimizer drops a filter its statistics prove true — so both are listed,
+    not asked."""
     swept: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
     try:
@@ -471,6 +494,117 @@ def index_sweep(con: Any) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 — reported, judged UNKNOWN
         return {"error": type(exc).__name__, "swept": swept, "skipped": skipped}
     return {"swept": swept, "skipped": skipped}
+
+
+# The rows D1 asks of: what reh-web wrote after F5s's checkpoint and before
+# F6's kill — F5w's integrity run, and F6's fourth version of the fixture
+# order with its lines. A kill can cost an index only the rows its WAL held,
+# so these are the rows it could cost. Children before parents, the order the
+# end's DELETE takes them in. `(table, column, which id)`.
+WINDOW_TABLES = (
+    ("data_quality_issues", "run_id", "run"),
+    ("data_quality_diffs", "run_id", "run"),
+    ("data_quality_runs", "run_id", "run"),
+    ("order_products", "order_id", "order"),
+    ("orders", "id", "order"),
+)
+
+# Every window predicate compares the id's text with something appended: no
+# index serves that expression, so the row is found by a scan whatever an
+# index lost. A DELETE whose predicate goes through an index that lost the row
+# finds nothing and reports success
+# (`test_a_delete_through_a_lost_index_finds_nothing_duckdb_1_5_5`) — and a
+# bare CAST of a VARCHAR column is folded away and does exactly that. The rows
+# are counted with `count_if` over the whole table, which no index can serve
+# whatever the predicate: the count a DELETE is held to.
+_WINDOW_WHERE = "CAST({col} AS VARCHAR) || '' = ?"
+
+
+def _window_targets(run_id: Optional[int], order_id: Optional[int]) -> List[Tuple[str, str, int]]:
+    ids = {"run": run_id, "order": order_id}
+    return [(table, col, ids[which]) for table, col, which in WINDOW_TABLES
+            if ids[which] is not None]
+
+
+def window_rows(con: Any, run_id: Optional[int], order_id: Optional[int]) -> Dict[str, Any]:
+    """D1's window on the copy after the kill: the rows of each window table
+    by a scan, the indexes on that table — every one, composite included,
+    which the end's DELETE will make give each row up — and the window's run
+    read as P4a's and P5's are, scan beside the product's reader. Never
+    raises: a read that failed is reported by its class, judged UNKNOWN."""
+    try:
+        tables: Dict[str, Any] = {}
+        for table, col, value in _window_targets(run_id, order_id):
+            where = _WINDOW_WHERE.format(col=_ident(col))
+            rows = con.execute(f"SELECT COALESCE(count_if({where}), 0) FROM {_ident(table)}",
+                               [str(value)]).fetchone()[0]
+            indexes = con.execute(
+                "SELECT index_name, expressions FROM duckdb_indexes() "
+                "WHERE schema_name = 'main' AND table_name = ? ORDER BY index_name",
+                [table]).fetchall()
+            tables[table] = {"rows": rows, "indexes": [
+                {"index": name, "columns": len(_index_columns(expr))} for name, expr in indexes]}
+        status = None
+        if order_id is not None:
+            row = con.execute(f"SELECT status_id FROM orders WHERE {_WINDOW_WHERE.format(col='id')}",
+                              [str(order_id)]).fetchone()
+            status = row[0] if row else None
+        return {"run_id": run_id, "order_id": order_id, "order_status": status,
+                "run": _read_run(con, run_id) if run_id is not None else None,
+                "tables": tables}
+    except Exception as exc:  # noqa: BLE001 — reported, judged UNKNOWN
+        return {"run_id": run_id, "order_id": order_id, "error": type(exc).__name__}
+
+
+# One DELETE in a process of its own: a FATAL invalidates the DuckDB instance,
+# and the process's instance cache hands the same dead one to the next
+# `connect()` (measured on 1.5.5), so a second table asked in the same process
+# would only repeat the first one's FATAL.
+_DELETE_ONE = r'''
+import json, sys
+import duckdb
+db, table, where, value = sys.argv[1:5]
+out = {"table": table}
+try:
+    con = duckdb.connect(db)
+    con.execute("SET memory_limit='512MB'")
+    scan = f"SELECT COALESCE(count_if({where}), 0) FROM {table}"
+    out["scanned"] = con.execute(scan, [value]).fetchone()[0]
+    out["deleted"] = con.execute(f"DELETE FROM {table} WHERE {where}", [value]).fetchone()[0]
+    out["left"] = con.execute(scan, [value]).fetchone()[0]
+    con.close()
+except duckdb.FatalException as exc:
+    first = str(exc).splitlines()[0] if str(exc) else ""
+    # The index message carries counts only; anything else is named by class.
+    out["fatal"] = first if "Failed to delete all rows from index" in first else type(exc).__name__
+except Exception as exc:
+    out["error"] = type(exc).__name__
+print(json.dumps(out))
+'''
+
+
+def window_delete(db: str, run_id: Optional[int], order_id: Optional[int]) -> Dict[str, Any]:
+    """D1's last question: the window's rows deleted from each window table,
+    found by a scan, so every index on the table — composite ones, which no
+    read can ask, included — must give each row up at commit. An entry the
+    kill cost is DuckDB's FATAL "Failed to delete all rows from index"; a
+    DELETE that reports fewer rows than the scan found, or leaves any, is a
+    loss too. It changes the copy, so it runs only on one about to be removed."""
+    import subprocess
+
+    results: List[Dict[str, Any]] = []
+    for table, col, value in _window_targets(run_id, order_id):
+        where = _WINDOW_WHERE.format(col=_ident(col))
+        try:
+            proc = subprocess.run([sys.executable, "-c", _DELETE_ONE, db, _ident(table), where,
+                                   str(value)], capture_output=True, text=True, timeout=600)
+            lines = proc.stdout.strip().splitlines()
+            result = json.loads(lines[-1]) if lines else {"error": f"exit {proc.returncode}"}
+        except Exception as exc:  # noqa: BLE001 — reported, judged UNKNOWN
+            result = {"error": type(exc).__name__}
+        result["table"] = table
+        results.append(result)
+    return {"run_id": run_id, "order_id": order_id, "deletes": results}
 
 
 def _product_reader(con: Any, run_id: int) -> Dict[str, Any]:
@@ -558,10 +692,11 @@ def judge_reader(run: Optional[Mapping[str, Any]]) -> Tuple[Optional[str], Optio
     text; `fetch_run_issues` asks `WHERE run_id = ?`, the way the dashboard
     and the digest do, and that takes `idx_dqi_run` — the index DuckDB 1.5.5
     loses rows from after a SIGKILL (`index_sweep`). P4a and P5 read their
-    runs at a graceful stop before the rehearsal's kill, where the two must
-    agree; D1 reads them again after it. A finding only the scan can see is
-    not one the product shows anybody, so a judge that read around it would
-    pass what nobody was told."""
+    runs at F5s, before the rehearsal's kill, where the two must agree; D1
+    reads the run F5w wrote after F5s's checkpoint, after the kill — the one
+    the kill could cost. A finding only the scan can see is not one the
+    product shows anybody, so a judge that read around it would pass what
+    nobody was told."""
     if not run:
         return None, None
     rid = run.get("run_id")
@@ -671,15 +806,21 @@ def judge_p1(ev: Mapping[str, Any]) -> Verdict:
             bad.append(f"log {key}={logs.get(key)}")
     if ev.get("resolved_events") != 1:
         bad.append(f"resolved events with the note={ev.get('resolved_events')}")
+    # The DuckDB copy read at a stop after the flip — F7's, else F5s's. A
+    # read that did not happen is evidence missing, never the product's
+    # failure: UNKNOWN, unless something else already failed.
     d1 = ev.get("d1")
+    unread = None
     if d1 is None:
-        bad.append("the DuckDB writer record was not read")
+        unread = "the DuckDB writer record was not read at any stop after the flip"
     else:
         rec = d1.get("writer") or {}
         if rec.get("writer") != "postgres" or rec.get("resolved") is not True:
             bad.append(f"sync_metadata.warehouse_writer={rec}")
     if bad:
         return FAIL, "; ".join(bad)
+    if unread:
+        return UNKNOWN, unread
     return PASS, (f"mode=postgres unmet=[] warehouse_refresh absent, pg_warehouse_derive present; "
                   f"writer resolved {writer.get('resolved_at')}; resolved+note events=1")
 
@@ -751,12 +892,100 @@ def _parse(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _docker_time(value: Any) -> Optional[datetime]:
+    """Docker's RFC 3339 with up to nine fractional digits, trailing zeros
+    trimmed (`…:19.81198843Z`), as an instant. None when it does not parse."""
+    import re
+
+    m = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)",
+                     str(value or "").strip())
+    if not m:
+        return None
+    frac = (m.group(2) or "")[:6].ljust(6, "0")
+    tz = "+00:00" if m.group(3) == "Z" else m.group(3)
+    try:
+        return datetime.fromisoformat(f"{m.group(1)}.{frac}{tz}")
+    except ValueError:
+        return None
+
+
+def stop_kind(state: Any) -> Optional[str]:
+    """What a stop was, from the container's own state after it (the
+    script's `state_of`), never from what the script meant:
+
+    - `graceful` — exited 0: SIGTERM, and DuckDB closed with a checkpoint;
+    - `kill` — exit 137 after the rehearsal's `docker kill`;
+    - `grace_expired` — exit 137 after a `docker stop`: the process outran
+      the grace (production's, `STOP_GRACE_S`) and Docker killed it — the
+      same state as a kill, told apart only by what was asked;
+    - `oom` — the kernel's OOM killer;
+    - `running` — it never stopped; `not_running` — there was nothing to
+      stop; `exit N` — anything else. None without a state."""
+    if not isinstance(state, Mapping):
+        return None
+    if state.get("was_running") is False:
+        return "not_running"
+    if state.get("running") is not False:
+        return "running"
+    if state.get("oom_killed") is True:
+        return "oom"
+    code, asked = state.get("exit_code"), state.get("asked")
+    if code == 0 and asked != "kill":
+        return "graceful"
+    if code == 137 and asked == "kill":
+        return "kill"
+    if code == 137 and asked == "stop":
+        return "grace_expired"
+    return f"exit {code}"
+
+
+def _describe_stop(state: Any) -> str:
+    kind = stop_kind(state)
+    if kind is None:
+        return "the container's state after it was not read"
+    if kind == "grace_expired":
+        return (f"Docker killed it {state.get('stop_s')} s into a {state.get('grace_s')} s grace "
+                f"(exit 137): the grace production's deploy gives web ran out")
+    return {"running": "it never stopped", "not_running": "it was not running",
+            "oom": "the kernel's OOM killer stopped it (exit 137)"}.get(
+        kind, f"{kind}, asked {state.get('asked') or '?'}")
+
+
+def restart_shown(record: Any) -> Tuple[Optional[str], Optional[str]]:
+    """`(kind, why_not)` for one P6 record: the kind of the stop before the
+    restart as the container showed it, or why the record shows no restart —
+    no state recorded, the container never stopped, or no start after it
+    (`docker start` on a running container changes nothing at all)."""
+    stop = record.get("stop") if isinstance(record, Mapping) else None
+    start = record.get("start") if isinstance(record, Mapping) else None
+    if not isinstance(stop, Mapping) or not isinstance(start, Mapping):
+        return None, "the container's state around it was not recorded"
+    kind = stop_kind(stop)
+    if kind in ("running", "not_running"):
+        return None, _describe_stop(stop)
+    if start.get("running") is not True:
+        return None, "the container did not run after the start"
+    stopped, began = _docker_time(stop.get("finished_at")), _docker_time(start.get("started_at"))
+    if stopped is None or began is None or began <= stopped:
+        return None, (f"no start after the stop (stopped {stop.get('finished_at')}, "
+                      f"started {start.get('started_at')})")
+    return kind, None
+
+
 def judge_p3(ev: Mapping[str, Any]) -> Verdict:
-    """A kill inside the derivation; the owed state survives."""
+    """A kill inside the derivation; the owed state survives.
+
+    The kill is what the container shows after it (`stop`), not that the
+    script sent one: a container the kernel's OOM killer took first, or one
+    still running, is no kill inside the derivation, and judging what
+    followed it would blame the product for a kill that never landed."""
     if not ev.get("flipped"):
         return UNKNOWN, "no flip"
     if not ev.get("seen_blocked"):
         return UNKNOWN, f"the blocked TRUNCATE gold.daily_revenue was not seen in time ({ev.get('why') or 'timeout'})"
+    if stop_kind(ev.get("stop")) != "kill":
+        return UNKNOWN, (f"the blocked TRUNCATE was seen, but reh-web was not left SIGKILLed by the "
+                         f"rehearsal: {_describe_stop(ev.get('stop'))}")
     rk, bk = ev.get("requested"), ev.get("built")
     after = ev.get("after_kill") or {}
     if after.get("rows_above") not in (0, None):
@@ -946,20 +1175,38 @@ def judge_p5(ev: Mapping[str, Any], *, retired: Iterable[str], standalone_twins:
 def judge_p6(ev: Mapping[str, Any]) -> Verdict:
     """Two restarts, one resolve — at least one of them after the kill.
 
-    F5s added a graceful restart before F6, so two graceful ones alone could
-    reach the count with the restart P6 exists for — the one after a kill —
-    missing. A record without a kind predates F5s and is taken as it was."""
+    Each restart is the one the container shows, never the one the script
+    says it made: the record carries the container's state after the stop
+    before it and after the start (`restart_shown`), and the stop's kind is
+    read from that state (`stop_kind`). A record without them shows no
+    restart. F5s added a graceful restart before F6, so two graceful ones
+    alone could reach the count with the restart P6 exists for — the one
+    after the rehearsal's kill — missing. A graceful stop that outran
+    production's grace is a kill a deploy would make: the restart after it
+    still counts, but the row says so and is UNKNOWN until somebody has read
+    why web did not stop in time."""
     if not ev.get("flipped"):
         return UNKNOWN, "no flip"
     t1 = ev.get("resolved_at")
-    restarts = ev.get("restarts") or []
-    if len(restarts) < 2:
-        return UNKNOWN, f"{len(restarts)} of 2 restarts observed"
-    kinds = [r.get("kind") for r in restarts]
-    if all(kinds) and "kill" not in kinds:
-        return UNKNOWN, f"no restart after the kill observed ({_fmt(kinds)})"
+    shown: List[Tuple[int, Mapping[str, Any], str]] = []
+    unknown: List[str] = []
+    for n, r in enumerate(ev.get("restarts") or [], start=1):
+        kind, why = restart_shown(r)
+        if why:
+            unknown.append(f"restart {n}: {why}")
+        else:
+            shown.append((n, r, kind or "?"))
+    kinds = [k for _n, _r, k in shown]
+    if len(shown) < 2:
+        return UNKNOWN, "; ".join([f"{len(shown)} of 2 restarts shown by the container"] + unknown)
+    if "kill" not in kinds:
+        return UNKNOWN, "; ".join([f"no restart after the rehearsal's kill shown ({_fmt(kinds)})"]
+                                  + unknown)
+    for n, r, kind in shown:
+        if kind != "graceful" and kind != "kill":
+            unknown.append(f"restart {n}: {_describe_stop(r.get('stop'))}")
     bad: List[str] = []
-    for n, r in enumerate(restarts, start=1):
+    for n, r, _kind in shown:
         if not r.get("snapshot") or r["snapshot"].get("health_code") != 200:
             bad.append(f"restart {n}: no health")
             continue
@@ -974,12 +1221,14 @@ def judge_p6(ev: Mapping[str, Any]) -> Verdict:
             bad.append(f"restart {n}: log recorded={r.get('recorded_lines')} resolved={r.get('resolved_lines')}")
     gate = ev.get("gate_delivered")
     if gate is None:
-        bad.append("the gate file was not read")
+        unknown.append("the gate file was not read after the restarts")
     elif SEEDED_KEY in gate:
         bad.append("the seeded page is still delivered in the gate file")
     if bad:
         return FAIL, "; ".join(bad)
-    return PASS, (f"{len(restarts)} restarts ({_fmt(r.get('kind') or '?' for r in restarts)}): "
+    if unknown:
+        return UNKNOWN, "; ".join(unknown)
+    return PASS, (f"{len(shown)} restarts the container shows ({_fmt(kinds)}): "
                   f"mode postgres, resolved_at {t1} unchanged, one resolve, gate clear")
 
 
@@ -996,7 +1245,12 @@ def judge_p8(ev: Mapping[str, Any]) -> Verdict:
     b = _block(start)
     if b.get("mode") != "duckdb" or b.get("held") is not True:
         bad.append(f"on start mode={b.get('mode')} held={b.get('held')}")
+    # Whether F3's reclassify noted a Postgres-only re-parse comes from the
+    # DuckDB writer record read after it; None is "not read", which cannot
+    # drop the branch's requirement on the quiet.
     want_reclassify = ev.get("expect_reclassify")
+    unknown = ("the DuckDB writer record was not read after F3, so whether the way back owes "
+               "the reclassify branch is not known" if want_reclassify is None else None)
     if want_reclassify and b.get("reclassify_needed") is not True:
         bad.append("reclassify_needed not raised though the verdicts were re-parsed in Postgres alone")
     if sorted(_cut(start).get("stood_down_duckdb_checks") or []) != sorted(STOOD_DOWN):
@@ -1032,6 +1286,8 @@ def judge_p8(ev: Mapping[str, Any]) -> Verdict:
             bad.append(f"silver_orders {dk.get('silver_orders')} != orders {dk.get('orders')}")
     if bad:
         return FAIL, "; ".join(bad)
+    if unknown:
+        return UNKNOWN, unknown
     return PASS, (f"held with warehouse_dirty=full{' and reclassify_needed' if want_reclassify else ''}; "
                   f"one full tick (dirty_flag) validated and released; writer duckdb; "
                   f"silver_orders={dk.get('silver_orders')} == orders, utm rows {dk.get('silver_order_utm')}")
@@ -1050,18 +1306,117 @@ def _sweep_losses(sweep: Any) -> Tuple[Optional[List[str]], Optional[str]]:
             for s in sweep["swept"] if s.get("missing")], None
 
 
+def _window_reads(ev: Mapping[str, Any], pre: Mapping[str, Any], post: Mapping[str, Any],
+                  bad: List[str], unknown: List[str]) -> Dict[str, Any]:
+    """D1's window read after the kill: that it holds rows the kill could
+    reach, and that the product's reader sees the window's run whole."""
+    ids = ev.get("window_ids") or {}
+    window = post.get("window")
+    rid, oid = ids.get("run_id"), ids.get("order_id")
+    seen: Dict[str, Any] = {"run": rid, "order": oid, "findings": None, "lines": None}
+    if not isinstance(window, Mapping):
+        unknown.append("the window was not read after the kill")
+        return seen
+    if window.get("error"):
+        unknown.append(f"reading the window after the kill raised {window.get('error')}")
+        return seen
+    floor = pre.get("max_dq_run_id")
+    if rid is None:
+        unknown.append("F5w wrote no integrity run after F5s's checkpoint")
+    elif not isinstance(floor, int):
+        unknown.append("the newest run F5s's checkpoint holds was not read, so run "
+                       f"#{rid} is not known to have been written after it")
+    elif rid <= floor:
+        unknown.append(f"run #{rid} was already at F5s's checkpoint (its newest run is "
+                       f"#{floor}): out of the kill's reach")
+    else:
+        run = window.get("run")
+        if not run:
+            unknown.append(f"run #{rid} is not in the copy after the kill")
+        elif not run.get("issues"):
+            unknown.append(f"run #{rid} filed no finding, so idx_dqi_run was asked of no row")
+        else:
+            seen["findings"] = len(run["issues"])
+            blind, unread = judge_reader(run)
+            if blind:
+                bad.append(f"after the kill: {blind}")
+            elif unread:
+                unknown.append(f"after the kill: {unread}")
+    tables = window.get("tables") or {}
+    if oid is None:
+        unknown.append("the fixture order of the window is not known")
+    elif (tables.get("orders") or {}).get("rows") != 1:
+        unknown.append(f"order #{oid} is not in the copy after the kill")
+    elif window.get("order_status") != ids.get("order_status"):
+        unknown.append(f"order #{oid} is at status {window.get('order_status')}, not the fourth "
+                       f"version's {ids.get('order_status')}: it did not land before the kill")
+    elif not (tables.get("order_products") or {}).get("rows"):
+        unknown.append(f"order #{oid} has no lines in the copy")
+    else:
+        seen["lines"] = tables["order_products"]["rows"]
+    return seen
+
+
+def _window_deletes(ev: Mapping[str, Any], post: Mapping[str, Any],
+                    bad: List[str], unknown: List[str]) -> Tuple[int, int]:
+    """The end's DELETE of the window's rows: every index on each window
+    table, composite included, giving each row up. `(tables, composite)`
+    asked."""
+    done = ev.get("delete")
+    if not isinstance(done, Mapping):
+        unknown.append("the window's rows were not deleted at the end, so no composite index "
+                       "was asked")
+        return 0, 0
+    if done.get("skipped"):
+        unknown.append(f"the window's rows were not deleted ({done.get('skipped')}), so no "
+                       f"composite index was asked")
+        return 0, 0
+    indexes = {t: v.get("indexes") or [] for t, v in
+               (((post.get("window") or {}).get("tables")) or {}).items() if isinstance(v, Mapping)}
+    asked = composite = 0
+    for d in done.get("deletes") or []:
+        table = d.get("table")
+        names = _fmt(i.get("index") for i in indexes.get(table, []))
+        if d.get("fatal"):
+            bad.append(f"deleting the window's rows from {table} is DuckDB's FATAL "
+                       f"({d.get('fatal')}): an index on it lost them — one of [{names}]")
+        elif d.get("error") or not isinstance(d.get("scanned"), int):
+            unknown.append(f"deleting the window's rows from {table} raised {d.get('error') or '?'}")
+        elif d.get("deleted") != d["scanned"] or d.get("left"):
+            bad.append(f"the DELETE from {table} took {d.get('deleted')} of the {d['scanned']} "
+                       f"rows a scan finds, {d.get('left')} left: an index on it answered for "
+                       f"fewer — one of [{names}]")
+        else:
+            asked += 1
+            composite += sum(1 for i in indexes.get(table, []) if (i.get("columns") or 0) > 1)
+            continue
+    if not (done.get("deletes") or []):
+        unknown.append("the end deleted no window table")
+    return asked, composite
+
+
 def judge_d1(ev: Mapping[str, Any]) -> Verdict:
-    """DuckDB answers through its indexes after the kill as it did before.
+    """What P3's kill cost DuckDB's indexes.
 
     The rehearsal's F6 is the shape of an OOM kill of the live web, and
-    DuckDB 1.5.5 can lose index entries across one (`index_sweep`). P4a and
-    P5 read their runs at the graceful stop before it; this row is where
-    the kill's cost is reported instead of read around: every index swept
-    whole at both stops, and the same runs read whole by the product's
-    reader after the kill."""
+    DuckDB 1.5.5 can lose index entries across one (`index_sweep`). A kill
+    can cost only what its WAL held — the rows written after the last
+    checkpoint, which is F5s's graceful stop — so this row asks of exactly
+    those: F5w's integrity run and F6's fourth version of the fixture order
+    (`window_rows`). After the kill, the run read by the product's reader as
+    the dashboard and the digest read it; at the end, the window's rows
+    deleted through every index on their tables (`window_delete`), the one
+    question a composite index answers. And every single-column index swept
+    whole at both stops, for whatever else the window wrote.
+
+    The read after the kill means something only after the checkpoint that
+    follows the restart: a read-only open sees every row the WAL holds,
+    whatever the index lost (`test_a_read_only_read_after_a_kill_sees_every_row`),
+    so a stop at F7 that was not graceful leaves the row UNKNOWN. P4a and P5
+    read at F5s before the kill, read-only, and need nothing of it."""
     if not ev.get("flipped"):
         return UNKNOWN, "no flip"
-    if not ev.get("killed"):
+    if not ev.get("seen_blocked") or stop_kind(ev.get("kill_stop")) != "kill":
         return UNKNOWN, "no kill landed inside the derivation (see P3)"
     pre, post = ev.get("pre"), ev.get("post")
     if not pre or not post:
@@ -1077,30 +1432,35 @@ def judge_d1(ev: Mapping[str, Any]) -> Verdict:
             continue
         swept = max(swept, len(facts["indexes"]["swept"]))
         if losses:
-            bad.append(f"{when}, read through their indexes: {'; '.join(losses)}")
-    runs_pre = pre.get("runs") or {}
-    runs_post = post.get("runs") or {}
-    for rid in sorted(runs_pre, key=str):
-        if not runs_pre[rid]:
-            continue
-        after = runs_post.get(rid)
-        if not after:
-            unknown.append(f"run #{rid} not read after the kill")
-            continue
-        blind, unread = judge_reader(after)
-        if blind:
-            bad.append(f"after the kill: {blind}")
-        elif unread:
-            unknown.append(f"after the kill: {unread}")
+            # Before the rehearsal's kill a loss is the copy's own — a kill
+            # production's web took before the backup — or a stop of phase 0
+            # that outran the grace; the state of that stop says which.
+            why = ""
+            if when == "before the kill" and stop_kind(ev.get("p0_stop")) not in (None, "graceful"):
+                why = f" (phase 0's stop: {_describe_stop(ev.get('p0_stop'))})"
+            bad.append(f"{when}, read through their indexes: {'; '.join(losses)}{why}")
+    seen = _window_reads(ev, pre, post, bad, unknown)
+    tables, composite = _window_deletes(ev, post, bad, unknown)
+    f7 = stop_kind(ev.get("f7_stop"))
+    if f7 != "graceful":
+        unknown.append(f"F7's stop was no checkpoint ({_describe_stop(ev.get('f7_stop'))}): the "
+                       f"read after it shows what the WAL holds, not what the kill cost")
     if bad:
         return FAIL, "; ".join(bad)
     if unknown:
         return UNKNOWN, "; ".join(unknown)
-    skipped = len((post.get("indexes") or {}).get("skipped") or [])
-    runs = _fmt(f"#{r}" for r in sorted(runs_pre, key=str) if runs_pre[r])
-    return PASS, (f"{swept} single-column indexes answer for every row at the stop before the "
-                  f"kill and the stop after it ({skipped} composite, empty or one-valued, not "
-                  f"asked); runs {runs} read whole by fetch_run_issues after the kill")
+    window_tables = {t for t, _c, _w in WINDOW_TABLES}
+    skipped = (post.get("indexes") or {}).get("skipped") or []
+    elsewhere = sum(1 for s in skipped if s.get("why") == "composite"
+                    and str(s.get("index")).split(".")[0] not in window_tables)
+    rest = sum(1 for s in skipped if s.get("why") != "composite")
+    return PASS, (f"the kill cost nothing it could reach: run #{seen['run']} ({seen['findings']} "
+                  f"findings) read whole by fetch_run_issues after it; its rows and order "
+                  f"#{seen['order']}'s ({seen['lines']} lines) given up by every index on their "
+                  f"{tables} tables at the end, {composite} composite among them; {swept} "
+                  f"single-column indexes answer for every row at both stops. Not asked: "
+                  f"{elsewhere} composite indexes on tables outside the window, {rest} on an "
+                  f"empty or one-valued column")
 
 
 def judge_k0(ev: Mapping[str, Any]) -> Verdict:
@@ -1244,16 +1604,19 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
         if rid and isinstance(runs.get(str(rid)), Mapping) and isinstance(live, Mapping) \
                 and live.get("run_id") == rid and isinstance(live.get("issue_names"), list):
             runs[str(rid)] = {**runs[str(rid)], "live_names": live["issue_names"]}
-    record = (d1 or {}).get("writer") or {}
+    # The writer record as the last stop after F3 read it — F7's, else F5s's.
+    # Neither read leaves the branch unknown (None), never quietly not owed.
+    after_f3 = d1 or d_pre
     p8 = L("p8.json") or {}
     if "expect_reclassify" not in p8:
-        p8 = {**p8, "expect_reclassify": bool(record.get("utm_reparsed_at"))}
+        p8 = {**p8, "expect_reclassify": None if after_f3 is None else
+              bool((after_f3.get("writer") or {}).get("utm_reparsed_at"))}
     return {
         "P7": {"snapshot": L("p7_snapshot.json"), "canary": L("p7_canary.json"),
                "log_unmet": (L("p7_log.json") or {}).get("unmet"), "d0": d0},
         "P1": {"snapshot": f1, "seeded": (L("seed_gate.json") or {}).get("seeded"),
                "log": L("f1_log.json"), "resolved_events": (L("f1_pg.json") or {}).get("resolved_events"),
-               "d1": d1},
+               "d1": d1 or d_pre},
         "P2": {"flipped": is_flipped, "d0": d0, "d_pre": d_pre, "d1": d1,
                "frozen_samples": frozen,
                "runs_ok": (L("p2_pg.json") or {}).get("runs_ok"),
@@ -1275,8 +1638,11 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
                "restarts": restarts, "gate_delivered": (d1 or {}).get("gate_delivered")},
         "P8": {**p8, "flipped": is_flipped, "dk": dz,
                "r0": ((d0 or {}).get("refreshes") or {}).get("max_refreshed_at")},
-        "D1": {"flipped": is_flipped, "killed": p3.get("seen_blocked") is True,
-               "pre": d_pre, "post": d1},
+        "D1": {"flipped": is_flipped, "seen_blocked": p3.get("seen_blocked") is True,
+               "kill_stop": p3.get("stop"), "pre": d_pre, "post": d1,
+               "f7_stop": L("f7_stop_state.json"), "p0_stop": L("p0_stop_state.json"),
+               "window_ids": L("d1_window.json"),
+               "delete": L("d1_delete.json")},
         "K0": L("k0.json") or {},
         "Z0": L("z0.json") or {},
     }
@@ -1318,7 +1684,11 @@ def _retired() -> List[str]:
 
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI the script calls. Every call the script makes is parsed with
+    this in `tests/unit/test_step13_rehearsal_script.py`, so a flag the
+    script passes and the probe lacks fails there — not as an exit 2 an hour
+    into a run, swallowed by an `|| true` that leaves the evidence empty."""
     parser = argparse.ArgumentParser(prog="probe.py")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("api")
@@ -1350,13 +1720,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--db", required=True)
     p.add_argument("--gate")
     p.add_argument("--run", type=int, action="append", default=[])
+    p.add_argument("--window-run", type=int, default=None)
+    p.add_argument("--window-order", type=int, default=None)
+    p = sub.add_parser("window-delete")
+    p.add_argument("--db", required=True)
+    p.add_argument("--window-run", type=int, default=None)
+    p.add_argument("--window-order", type=int, default=None)
     p = sub.add_parser("seed-gate")
     p.add_argument("--gate", required=True)
     sub.add_parser("derive-latches")
     p = sub.add_parser("judge")
     p.add_argument("--evidence", required=True)
     p.add_argument("--floor", type=int, required=True)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
 
     out: Any
     if args.cmd == "api":
@@ -1393,7 +1773,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(keycrm_url())
         return 0
     elif args.cmd == "duckdb-facts":
-        out = duckdb_facts(args.db, args.gate, args.run)
+        out = duckdb_facts(args.db, args.gate, args.run, window_run=args.window_run,
+                           window_order=args.window_order)
+    elif args.cmd == "window-delete":
+        out = window_delete(args.db, args.window_run, args.window_order)
     elif args.cmd == "seed-gate":
         out = seed_gate(args.gate)
     elif args.cmd == "derive-latches":

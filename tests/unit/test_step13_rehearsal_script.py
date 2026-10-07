@@ -35,7 +35,8 @@ NAME_VARS = ("REH_NET", "REH_PG", "REH_CH", "REH_KEYCRM", "REH_WEB", "REH_SEED",
              "REH_PROBE", "REH_MIGRATE")
 CONTAINER_VARS = tuple(v for v in NAME_VARS if v != "REH_NET")
 # Helpers whose first argument is the container they act on.
-CONTAINER_HELPERS = ("start_web", "running", "oom_killed", "wait_health", "save_log", "stop_web")
+CONTAINER_HELPERS = ("start_web", "running", "oom_killed", "wait_health", "save_log", "stop_web",
+                     "state_of", "wait_stopped", "kill_web", "start_stopped")
 
 
 def _code_lines() -> List[Tuple[int, str]]:
@@ -833,3 +834,450 @@ def test_cleanup_is_not_cut_short_by_a_second_signal():
                if l.strip() and not l.strip().startswith("#")]
     assert cleanup[0] == "local rc=$?"
     assert cleanup[1] == "trap '' TERM INT HUP"
+
+
+# ─── 11. A stop, a kill and a start are what the container shows ────────────
+#
+# P3, P6 and D1 judge the container's own state after each stop and start,
+# never what the script meant to do. These run the script's functions against
+# a `docker` that keeps one container's state — running, exit code, OOM, when
+# it started and finished — and changes it the way Docker does: `kill` and
+# `stop` end it (at once, or a few inspects later, as Docker records an exit
+# after `docker kill` returns), `start` on a running container changes
+# nothing.
+
+STATE_STUB = r'''#!{python}
+import json, os, sys
+d = os.environ["STUB_DIR"]
+path = os.path.join(d, "state.json")
+with open(os.path.join(d, "docker.log"), "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\n")
+st = json.load(open(path))
+
+def now():
+    st["clock"] = st.get("clock", 0) + 1
+    return "2026-10-02T09:%02d:%02d.25Z" % divmod(st["clock"], 60)
+
+def end(code, oom=False):
+    st.update(running=False, exit_code=code, oom_killed=oom, finished_at=now())
+
+cmd, args = sys.argv[1], sys.argv[2:]
+if cmd == "inspect":
+    left = st.get("stops_after_inspects")
+    if st["running"] and isinstance(left, int):
+        st["stops_after_inspects"] = left - 1
+        if left - 1 <= 0:
+            st.pop("stops_after_inspects")
+            end(st.get("exit_on_stop", 137))
+    fmt = args[args.index("-f") + 1]
+    for key, value in (("{{.State.Running}}", str(st["running"]).lower()),
+                       ("{{.State.ExitCode}}", str(st["exit_code"])),
+                       ("{{.State.OOMKilled}}", str(st["oom_killed"]).lower()),
+                       ("{{.State.StartedAt}}", st["started_at"]),
+                       ("{{.State.FinishedAt}}", st["finished_at"]),
+                       ("{{.RestartCount}}", "0")):
+        fmt = fmt.replace(key, value)
+    print(fmt)
+elif cmd == "kill" and st["running"]:
+    how = st.get("on_kill", "kill")
+    if how == "kill":
+        end(137)
+    elif how == "late":
+        st.update(stops_after_inspects=3, exit_on_stop=137)
+    elif how == "oom":
+        end(137, oom=True)
+elif cmd == "stop" and st["running"]:
+    end(0 if st.get("on_stop", "graceful") == "graceful" else 137)
+elif cmd == "start" and not st["running"]:
+    st.update(running=True, oom_killed=False, started_at=now())
+json.dump(st, open(path, "w"))
+'''
+
+RUNNING = {"running": True, "exit_code": 0, "oom_killed": False,
+           "started_at": "2026-10-02T08:59:00.5Z", "finished_at": "0001-01-01T00:00:00Z"}
+STATE_FUNCTIONS = ("running", "state_of", "wait_stopped", "sigkilled", "json_field", "kill_web",
+                   "start_stopped", "stop_web", "save_log", "log_count", "restart_record",
+                   "p3_record", "window_run", "max_int")
+
+
+def _state_run(tmp_path: Path, body: str, state: Optional[dict] = None, **env_over):
+    """Runs `body` after the script's own state functions, against a
+    `docker` that keeps one container's state. Returns (process, docker
+    calls, final state)."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "docker"
+    stub.write_text(STATE_STUB.replace("{python}", sys.executable))
+    stub.chmod(0o755)
+    (tmp_path / "state.json").write_text(json.dumps(state or RUNNING))
+    for d in ("ev", "logs"):
+        (tmp_path / d).mkdir(exist_ok=True)
+    (tmp_path / "logs" / "flip.log").write_text("")
+    names = "\n".join(f"{v}={ASSIGN[v]}" for v in NAME_VARS)
+    functions = "".join(_function_text(f) for f in STATE_FUNCTIONS)
+    script = tmp_path / "state.sh"
+    script.write_text(f"""set -Eeuo pipefail
+{names}
+STOP_GRACE_S={ASSIGN["STOP_GRACE_S"]}
+KILL_WAIT_S=2
+STEP_TIMEOUT=5
+EV={tmp_path}/ev
+LOG_DIR={tmp_path}/logs
+RESOLVED_SQL="SELECT 1"
+say() {{ printf '[reh] %s\\n' "$*" >&2; }}
+pgq() {{ echo 1; }}
+{functions}
+{body}
+""")
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "STUB_DIR": str(tmp_path),
+           **env_over}
+    proc = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True,
+                          timeout=60)
+    calls = (tmp_path / "docker.log").read_text().splitlines() \
+        if (tmp_path / "docker.log").exists() else []
+    return proc, calls, json.loads((tmp_path / "state.json").read_text())
+
+
+def _probe_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "reh_probe_for_script", REPO / "deploy" / "step13_rehearsal" / "probe.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+PROBE = _probe_module()
+
+
+@pytest.mark.parametrize("state, killed", [
+    ({"running": False, "exit_code": 137, "oom_killed": False}, True),
+    ({"running": False, "exit_code": 0, "oom_killed": False}, False),
+    ({"running": False, "exit_code": 137, "oom_killed": True}, False),
+    ({"running": True, "exit_code": 0, "oom_killed": False}, False),
+    (None, False),
+])
+def test_sigkilled_is_a_sigkill_and_nothing_else(tmp_path, state, killed):
+    """Kills: "sigkilled ignores the exit code", "…ignores the OOM killer"."""
+    import json
+
+    (tmp_path / "s.json").write_text(json.dumps(state))
+    proc, _calls, _st = _state_run(tmp_path, f"sigkilled {tmp_path}/s.json")
+    assert (proc.returncode == 0) is killed, proc.stderr
+
+
+def test_wait_stopped_waits_for_the_recorded_exit_and_gives_up(tmp_path):
+    """`docker kill` returns before Docker records the exit; a state read at
+    once still says running.
+    Kills: "wait_stopped never waits"."""
+    proc, calls, st = _state_run(tmp_path, 'wait_stopped "$REH_WEB" 10',
+                                 {**RUNNING, "stops_after_inspects": 3})
+    assert proc.returncode == 0 and st["running"] is False, proc.stderr
+    assert sum(c.startswith("inspect") for c in calls) >= 3
+    proc, _calls, st = _state_run(tmp_path / "x" if (tmp_path / "x").mkdir() is None else tmp_path,
+                                  'wait_stopped "$REH_WEB" 1')
+    assert proc.returncode == 1 and st["running"] is True
+
+
+@pytest.mark.parametrize("on_kill, state, landed, kind", [
+    ("kill", RUNNING, True, "kill"),
+    ("late", RUNNING, True, "kill"),
+    ("oom", RUNNING, False, "oom"),
+    ("ignore", RUNNING, False, "running"),
+    ("kill", {**RUNNING, "running": False, "exit_code": 137,
+              "finished_at": "2026-10-02T08:59:30.5Z"}, False, "not_running"),
+])
+def test_kill_web_lands_only_what_the_container_shows(tmp_path, on_kill, state, landed, kind):
+    """The kill P3 and D1 judge is the one in this file, read with the
+    probe's own `stop_kind`.
+    Kills: "KILLED is set without the container's word", "the state is
+    read before Docker has recorded the exit"."""
+    import json
+
+    proc, calls, _st = _state_run(
+        tmp_path, f'kill_web "$REH_WEB" {tmp_path}/ev/kill.json',
+        {**state, "on_kill": on_kill})
+    assert (proc.returncode == 0) is landed, proc.stderr
+    recorded = json.loads((tmp_path / "ev" / "kill.json").read_text())
+    assert recorded["asked"] == "kill"
+    assert PROBE.stop_kind(recorded) == kind, recorded
+    assert any(c.startswith("kill ") for c in calls)
+
+
+@pytest.mark.parametrize("state, starts", [
+    (RUNNING, False),
+    ({**RUNNING, "running": False, "exit_code": 137}, True),
+])
+def test_start_stopped_starts_only_what_stopped(tmp_path, state, starts):
+    """Kills: "docker start runs on a container that never stopped"."""
+    proc, calls, st = _state_run(tmp_path, 'start_stopped "$REH_WEB"', state)
+    assert proc.returncode == 0 and st["running"] is True, proc.stderr
+    assert any(c.startswith("start ") for c in calls) is starts, calls
+
+
+@pytest.mark.parametrize("on_stop, kind", [("graceful", "graceful"), ("expired", "grace_expired")])
+def test_stop_web_records_how_the_stop_ended(tmp_path, on_stop, kind):
+    """A stop that outruns its grace ends exit 137, a kill's state: told
+    apart only by what was asked, which the file carries.
+    Kills: "a stop's state carries no `asked`", "a graceful stop is given
+    a grace other than production's"."""
+    import json
+
+    proc, calls, _st = _state_run(
+        tmp_path, f'stop_web "$REH_WEB" flip {tmp_path}/ev/stop.json', {**RUNNING, "on_stop": on_stop})
+    assert proc.returncode == 0, proc.stderr
+    assert f"stop -t {ASSIGN['STOP_GRACE_S']} {ASSIGN['REH_WEB']}" in calls
+    recorded = json.loads((tmp_path / "ev" / "stop.json").read_text())
+    assert recorded["grace_s"] == int(ASSIGN["STOP_GRACE_S"]) and recorded["was_running"] is True
+    assert PROBE.stop_kind(recorded) == kind
+
+
+def test_restart_record_writes_only_a_restart_the_container_shows(tmp_path):
+    """The record P6 counts carries both states, and is not written when
+    there is no restart to record: a `kill` record once followed a kill
+    that was never sent and a `docker start` that did nothing.
+    Kills: "the record is written whatever the stop showed", "the record
+    drops the stop", "…drops the start"."""
+    import json
+
+    killed = {"running": False, "exit_code": 137, "oom_killed": False, "asked": "kill",
+              "was_running": True, "started_at": "2026-10-02T08:59:00.5Z",
+              "finished_at": "2026-10-02T09:00:00.25Z"}
+    (tmp_path / "snap.json").write_text(json.dumps({"health_code": 200}))
+    (tmp_path / "ev" / "kill.json").parent.mkdir(exist_ok=True)
+    (tmp_path / "ev" / "kill.json").write_text(json.dumps(killed))
+    proc, _calls, _st = _state_run(
+        tmp_path, f'restart_record {tmp_path}/snap.json {tmp_path}/ev/r.json {tmp_path}/ev/kill.json',
+        {**RUNNING, "started_at": "2026-10-02T09:00:03.5Z"})
+    assert proc.returncode == 0, proc.stderr
+    record = json.loads((tmp_path / "ev" / "r.json").read_text())
+    assert record["stop"] == killed and record["start"]["running"] is True
+    assert record["snapshot"] == {"health_code": 200}
+    assert PROBE.restart_shown(record) == ("kill", None)
+
+    for n, (stop, now) in enumerate([
+            (None, RUNNING),                                   # nothing was killed
+            ({**killed, "running": True}, RUNNING),            # it never stopped
+            (killed, {**RUNNING, "running": False})]):         # it does not run again
+        (tmp_path / "ev" / "kill.json").write_text(json.dumps(stop))
+        (tmp_path / "ev" / "r.json").unlink(missing_ok=True)
+        proc, _calls, _st = _state_run(
+            tmp_path, f'restart_record {tmp_path}/snap.json {tmp_path}/ev/r.json {tmp_path}/ev/kill.json', now)
+        assert proc.returncode == 0, proc.stderr
+        assert not (tmp_path / "ev" / "r.json").exists(), (n, stop, now)
+
+
+def test_p3_record_carries_the_kills_state(tmp_path):
+    """Kills: "p3.json drops the kill's state"."""
+    import json
+
+    killed = {"running": False, "exit_code": 137, "oom_killed": False, "asked": "kill",
+              "was_running": True}
+    (tmp_path / "ev").mkdir(exist_ok=True)
+    (tmp_path / "ev" / "kill.json").write_text(json.dumps(killed))
+    proc, _calls, _st = _state_run(
+        tmp_path, f"p3_record {tmp_path}/ev/p3.json {tmp_path}/ev/kill.json 41 40 4 "
+                  "'{\"requested\": 41, \"built\": 40, \"rows_above\": 0}' '' 41")
+    assert proc.returncode == 0, proc.stderr
+    rec = json.loads((tmp_path / "ev" / "p3.json").read_text())
+    assert rec["stop"] == killed and rec["seen_blocked"] is True
+    assert (rec["requested"], rec["built"], rec["first_after_restart"]) == (41, 40, None)
+    assert PROBE.stop_kind(rec["stop"]) == "kill"
+
+
+WPROBE_STUB = r'''
+wprobe() {
+    echo "wprobe $*" >> "$EV/wprobe.log"
+    case "$1" in
+        dq-last) [ -n "${DQ_LAST:-}" ] || return 1; echo "{\"run_id\": $DQ_LAST}" ;;
+        trigger-wait) [ "${TRIGGER_OK:-1}" = 1 ] || { echo '{"done": false}'; return 1; }; echo '{"done": true}' ;;
+        wait-dq) echo "{\"run_id\": $WAIT_DQ, \"ended_at\": \"x\"}" ;;
+    esac
+}
+'''
+
+
+@pytest.mark.parametrize("env, floor, expect, after", [
+    # The reviewer's case: the live read fails, the trigger does not run,
+    # and the newest ended run is F4's #6, at F5s's checkpoint.
+    ({"TRIGGER_OK": "0", "WAIT_DQ": "6"}, 6, "", None),
+    # The trigger ran but the newest run is still the checkpoint's.
+    ({"WAIT_DQ": "6"}, 6, "", "6"),
+    # A failed trigger is no run of ours, whatever comes along.
+    ({"TRIGGER_OK": "0", "WAIT_DQ": "9"}, 6, "", None),
+    # The live read is above the checkpoint's floor: the wait starts there.
+    ({"DQ_LAST": "7", "WAIT_DQ": "8"}, 6, "8", "7"),
+    ({"WAIT_DQ": "9"}, 6, "9", "6"),
+])
+def test_window_run_names_only_a_run_written_after_the_checkpoint(tmp_path, env, floor,
+                                                                  expect, after):
+    """Kills: "the floor is the live read alone", "trigger-wait's exit is
+    ignored", "a run at the floor is taken"."""
+    proc, _calls, _st = _state_run(tmp_path, WPROBE_STUB + f"window_run {floor}", **env)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expect, (proc.stdout, proc.stderr)
+    log = (tmp_path / "ev" / "wprobe.log").read_text()
+    waits = re.findall(r"wait-dq integrity --after (\d+)", log)
+    assert waits == ([after] if after else []), log
+
+
+def test_max_int_takes_only_whole_numbers():
+    import subprocess
+
+    out = subprocess.run(["bash", "-c", _function_text("max_int")
+                          + 'max_int "" null 5 12 x7 3; max_int'],
+                         capture_output=True, text=True).stdout.split()
+    assert out == ["12", "0"]
+
+
+def test_the_window_floor_is_every_run_the_checkpoint_holds():
+    """F5w's floor reads F5s's DuckDB read, not only the live API: the read
+    that failed once and let F4's run through."""
+    stmt = next(s for _n, s in STATEMENTS if s.startswith("WIN_RUN="))
+    assert 'json_field "$EV/d_pre.json" max_dq_run_id' in stmt
+    assert '"$INT_RUN" "$ML_RUN"' in stmt
+
+
+# ─── 12. Every call the script makes is one the probe accepts ────────────────
+
+_PROBE_HELPERS = ("wprobe", "probe_offline", "probe_keycrm_dir")
+
+
+def _shell_arrays() -> Dict[str, List[str]]:
+    found: Dict[str, List[str]] = {}
+    for _n, stmt in STATEMENTS:
+        for m in re.finditer(r"\b([A-Z_][A-Z0-9_]*)\+?=\(([^)]*)\)", stmt):
+            found.setdefault(m.group(1), []).extend(_words(m.group(2)))
+    return found
+
+
+def _expand(fragment: str, arrays: Dict[str, List[str]], positional: Optional[str]) -> List[str]:
+    """The words of one call with every expansion stood in for: arrays by
+    what they are ever given, `${X:+…}` by its words, `${X:-d}` by `d`, and
+    any other variable by `1` — a value every int and str argument takes."""
+    def array(m):
+        return " ".join(shlex.quote(w) for w in arrays.get(m.group(1), []))
+
+    fragment = re.split(r"\s\d*[<>]|\s\|\|?\s|\s&&\s|;", fragment)[0]
+    fragment = re.sub(r'\$\{([A-Z_][A-Z0-9_]*)\[@\]\+"\$\{\1\[@\]\}"\}', array, fragment)
+    fragment = re.sub(r'"\$\{([A-Z_][A-Z0-9_]*)\[@\]\}"', array, fragment)
+    fragment = re.sub(r"\$\{[A-Za-z_]\w*:\+([^}]*)\}", r"\1", fragment)
+    fragment = re.sub(r"\$\{[A-Za-z_]\w*:-([^}]*)\}", lambda m: m.group(1) or "1", fragment)
+    if positional is not None:
+        fragment = fragment.replace('"$1"', positional)
+    fragment = re.sub(r"\$\{?[A-Za-z_]\w*\}?", "1", fragment)
+    return _words(fragment)
+
+
+def _probe_calls() -> List[Tuple[int, List[str]]]:
+    arrays = _shell_arrays()
+    image_names = _function_lines("image_names")
+    lists = sorted(set(re.findall(r"image_names (\w+)", TEXT)))
+    calls: List[Tuple[int, List[str]]] = []
+    for n, stmt in STATEMENTS:
+        for m in re.finditer(r"/reh/probe\.py\s+", stmt):
+            rest = stmt[m.end():]
+            if rest.startswith('"$@"'):
+                continue
+            for positional in (lists if n in image_names else [None]):
+                calls.append((n, _expand(rest, arrays, positional)))
+        for helper in _PROBE_HELPERS:
+            if stmt.startswith(f"{helper}()"):
+                continue
+            for m in re.finditer(rf"(?:^|[\s;(|&!`$\"]){helper}\s+", stmt):
+                calls.append((n, _expand(stmt[m.end():], arrays, None)))
+    return calls
+
+
+def test_every_probe_call_parses_under_the_probes_own_cli():
+    """The script once passed `duckdb-facts --window-order/--window-run` and
+    called `window-delete`, neither of which the probe defined: exit 2,
+    swallowed by `|| true`, an empty `d1.json`, and P1, P6 failed and D1,
+    P2 unknown on a run that had nothing wrong with it. Every call is parsed
+    here with the probe's own parser.
+    Kills: "a flag or a subcommand the script uses is missing from the
+    probe"."""
+    import contextlib
+    import io
+
+    calls = _probe_calls()
+    bad = []
+    for n, words in calls:
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                PROBE.build_parser().parse_args(words)
+            except SystemExit:
+                bad.append(f"line {n}: probe.py {' '.join(words)}: {err.getvalue().strip()[-200:]}")
+    assert not bad, "\n".join(bad)
+    used = {words[0] for _n, words in calls if words}
+    assert {"duckdb-facts", "window-delete", "fixture", "wait-dq", "trigger-wait", "dq-last",
+            "snapshot", "canary", "readers", "judge", "seed-gate", "derive-latches",
+            "wait-health", "api", "keycrm-url"} <= used, used
+    facts = [w for _n, w in calls if w and w[0] == "duckdb-facts"]
+    assert any("--window-run" in w and "--window-order" in w for w in facts)
+    assert any("--run" in w for w in facts)
+
+
+def test_the_cli_walk_sees_a_flag_the_probe_lacks():
+    """The walk above must be able to fail: a flag no subcommand defines."""
+    import contextlib
+    import io
+
+    with contextlib.redirect_stderr(io.StringIO()), pytest.raises(SystemExit):
+        PROBE.build_parser().parse_args(_expand('duckdb-facts --db x --window-col "$A"', {}, None))
+
+
+# ─── 13. Production's versions and production's grace ───────────────────────
+
+def _compose():
+    import yaml
+
+    return yaml.safe_load((REPO / "docker-compose.yml").read_text())
+
+
+def test_the_store_images_are_productions():
+    """The dump is restored into the server that wrote it: docker-compose's
+    postgres, and the ClickHouse the stores' gate pins as production's. A
+    drift here restores production's dump into a different server and every
+    other test still passes.
+    Kills: "PG_IMAGE or CH_IMAGE moves off production's"."""
+    assert ASSIGN["PG_IMAGE"] == _compose()["services"]["postgres"]["image"]
+    gate = (REPO / "deploy" / "gate_with_stores.sh").read_text()
+    pinned = set(re.findall(r"clickhouse/clickhouse-server:[\w.\-]+", gate))
+    assert pinned == {ASSIGN["CH_IMAGE"]}, pinned
+    for n, line in _code_lines():
+        if re.match(r"(PG|CH)_IMAGE=", line):
+            continue
+        assert not re.search(r"postgres:\d|clickhouse-server:", line), (
+            f"line {n}: a store image named outside PG_IMAGE/CH_IMAGE")
+
+
+def _seconds(value: str) -> int:
+    total = 0
+    for amount, unit in re.findall(r"(\d+)(h|ms|m|s)", str(value)):
+        total += int(amount) * {"h": 3600, "m": 60, "s": 1, "ms": 0}[unit]
+    return total
+
+
+def test_a_graceful_stop_gets_exactly_productions_grace():
+    """A deploy's `docker compose up -d` stops web with compose's grace —
+    its `stop_grace_period`, 10 s when it sets none — and nothing in the
+    workflow passes another. Every graceful stop of reh-web gets the same,
+    so the checkpoint a phase calls a deploy's is one, and a stop that
+    outruns it is the kill a deploy would make.
+    Kills: "stop_web's grace drifts from production's"."""
+    web = _compose()["services"]["web"]
+    expected = _seconds(web["stop_grace_period"]) if "stop_grace_period" in web else 10
+    assert int(ASSIGN["STOP_GRACE_S"]) == expected
+    deploy = (REPO / ".github" / "workflows" / "deploy.yml").read_text()
+    ups = re.findall(r"docker compose (?:up|stop|restart|down)[^\n]*", deploy)
+    assert ups and not any(re.search(r"\s(-t|--timeout)\b", u) for u in ups), ups
+    assert 'docker stop -t "$STOP_GRACE_S" "$1"' in _function_body("stop_web")
+    stops = [(n, w) for n, sub, w in DOCKER if sub == "stop" and "$REH_WEB" in w]
+    assert all(n in _function_lines("cleanup") for n, _w in stops), stops

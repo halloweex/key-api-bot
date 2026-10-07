@@ -144,10 +144,19 @@ def test_p1_names_the_unmet_keys_when_there_was_no_flip():
     {"log": {"not_registered": 1, "holds": 1, "recorded": 2}},
     {"snapshot": snap(jobs=("pg_warehouse_derive", "warehouse_refresh"))},
     {"d1": {**DUCK1, "writer": {"writer": "postgres", "resolved": False}}},
-    {"d1": None},
 ])
 def test_p1_fails_on_each_broken_half(change):
     assert probe.judge_p1(p1_ev(**change))[0] == FAIL
+
+
+def test_p1_with_no_duckdb_read_after_the_flip_is_unknown_not_fail():
+    """A probe call that died at F7 left `d1.json` empty, and P1 read that as
+    the product failing to record the writer. Evidence that is missing is
+    UNKNOWN; it is FAIL only beside a failure the evidence does show.
+    Kills: "a missing writer read is appended to the failures"."""
+    verdict, detail = probe.judge_p1(p1_ev(d1=None))
+    assert verdict == UNKNOWN and "not read" in detail
+    assert probe.judge_p1(p1_ev(d1=None, resolved_events=2))[0] == FAIL
 
 
 # ─── P2 ──────────────────────────────────────────────────────────────────────
@@ -198,9 +207,30 @@ def test_a_timestamp_is_compared_as_an_instant_across_renderings():
 
 # ─── P3 ──────────────────────────────────────────────────────────────────────
 
+def stop_state(kind="graceful", **over):
+    """The script's `state_of` after a stop, as the container shows it: a
+    graceful stop exits 0; the rehearsal's `docker kill` and a `docker stop`
+    whose grace ran out both exit 137, told apart by what was asked."""
+    code, asked = {"graceful": (0, "stop"), "kill": (137, "kill"),
+                   "grace_expired": (137, "stop"), "oom": (137, "kill"),
+                   "running": (0, "kill")}[kind]
+    state = {"running": kind == "running", "exit_code": code, "oom_killed": kind == "oom",
+             "started_at": "2026-10-01T10:50:00.1Z", "finished_at": "2026-10-01T10:55:00.25Z",
+             "restart_count": 0, "asked": asked, "was_running": True}
+    if asked == "stop":
+        state.update(grace_s=10, stop_s=11 if kind == "grace_expired" else 2)
+    state.update(over)
+    return state
+
+
+START = {"running": True, "exit_code": 0, "oom_killed": False,
+         "started_at": "2026-10-01T10:55:03.5Z", "finished_at": "2026-10-01T10:55:00.25Z",
+         "restart_count": 0}
+
+
 def p3_ev(**over):
-    ev = {"flipped": True, "seen_blocked": True, "requested": 41, "built": 40,
-          "silver_version": 4,
+    ev = {"flipped": True, "seen_blocked": True, "stop": stop_state("kill"),
+          "requested": 41, "built": 40, "silver_version": 4,
           "after_kill": {"requested": 41, "built": 40, "rows_above": 0},
           "first_after_restart": {"id": 77, "trigger": "signal", "requested_seen": 41,
                                   "validation_passed": True, "error": None},
@@ -234,6 +264,42 @@ def test_p3_is_unknown_when_the_kill_did_not_land_inside_the_derivation():
     # The statement timeout beat the kill: a journal row for the killed run.
     assert probe.judge_p3(p3_ev(after_kill={"requested": 41, "built": 40,
                                             "rows_above": 1}))[0] == UNKNOWN
+
+
+@pytest.mark.parametrize("stop", [
+    stop_state("oom"), stop_state("running"), stop_state("grace_expired"),
+    stop_state("kill", was_running=False), None,
+])
+def test_p3_judges_the_kill_the_container_shows_not_the_one_sent(stop):
+    """The TRUNCATE was seen blocked, but the container was not left
+    SIGKILLed by the rehearsal — the OOM killer took it first, or it never
+    stopped. What followed is no restart after a kill inside the
+    derivation, and judging it would blame the product ("no derivation ran
+    after the restart") for a kill that never landed.
+    Kills: "P3 trusts seen_blocked and never reads the kill's state"."""
+    ev = p3_ev(stop=stop, after_kill=None, first_after_restart=None)
+    verdict, detail = probe.judge_p3(ev)
+    assert verdict == UNKNOWN and "not left SIGKILLed" in detail, detail
+
+
+def test_a_stops_kind_is_read_from_the_container_state():
+    kinds = {k: probe.stop_kind(stop_state(k)) for k in
+             ("graceful", "kill", "grace_expired", "oom", "running")}
+    assert kinds == {"graceful": "graceful", "kill": "kill", "grace_expired": "grace_expired",
+                     "oom": "oom", "running": "running"}
+    assert probe.stop_kind(stop_state("kill", was_running=False)) == "not_running"
+    assert probe.stop_kind(stop_state("graceful", exit_code=143)) == "exit 143"
+    assert probe.stop_kind(None) is None
+    assert "ran out" in probe._describe_stop(stop_state("grace_expired"))
+
+
+def test_docker_times_are_read_whole_whatever_their_digits():
+    a = probe._docker_time("2026-10-02T09:27:19.81198843Z")
+    b = probe._docker_time("2026-10-02T09:27:19.811988431Z")
+    assert a is not None and a == b
+    assert probe._docker_time("2026-10-02T09:27:19Z") < a
+    assert probe._docker_time("0001-01-01T00:00:00Z").year == 1
+    assert probe._docker_time("not a time") is None
 
 
 # ─── P4 ──────────────────────────────────────────────────────────────────────
@@ -461,30 +527,35 @@ def test_p5_is_unknown_without_both_runs():
 
 # ─── P6 ──────────────────────────────────────────────────────────────────────
 
-def restart(**over):
-    r = {"snapshot": snap(), "resolved_events": 1, "recorded_lines": 1, "resolved_lines": 1}
+def restart(kind="graceful", **over):
+    """One P6 record as `restart_record` writes it: the container's state
+    after the stop before the restart, and after the start."""
+    r = {"stop": stop_state(kind), "start": dict(START), "snapshot": snap(),
+         "resolved_events": 1, "recorded_lines": 1, "resolved_lines": 1}
     r.update(over)
     return r
 
 
 def p6_ev(**over):
-    ev = {"flipped": True, "resolved_at": T1, "restarts": [restart(), restart()],
+    ev = {"flipped": True, "resolved_at": T1,
+          "restarts": [restart("graceful"), restart("kill"), restart("graceful")],
           "gate_delivered": []}
     ev.update(over)
     return ev
 
 
-def test_p6_passes_on_two_restarts_and_one_resolve():
+def test_p6_passes_on_three_shown_restarts_and_one_resolve():
     verdict, detail = probe.judge_p6(p6_ev())
     assert verdict == PASS, detail
+    assert "3 restarts the container shows (graceful,kill,graceful)" in detail
 
 
 @pytest.mark.parametrize("change", [
-    {"restarts": [restart(), restart(resolved_events=2)]},
-    {"restarts": [restart(resolved_lines=2), restart()]},
-    {"restarts": [restart(), restart(snapshot=snap(writer={"writer": "postgres", "resolved": True,
-                                                            "resolved_at": "2026-10-01T11:30:00+00:00"}))]},
-    {"restarts": [restart(snapshot=snap("duckdb")), restart()]},
+    {"restarts": [restart(), restart("kill", resolved_events=2), restart()]},
+    {"restarts": [restart(resolved_lines=2), restart("kill"), restart()]},
+    {"restarts": [restart(), restart("kill", snapshot=snap(writer={
+        "writer": "postgres", "resolved": True, "resolved_at": "2026-10-01T11:30:00+00:00"}))]},
+    {"restarts": [restart(snapshot=snap("duckdb")), restart("kill")]},
     {"gate_delivered": ["warehouse:validation_retrying"]},
 ])
 def test_p6_fails_on_a_second_resolve_or_a_lost_flip(change):
@@ -492,45 +563,128 @@ def test_p6_fails_on_a_second_resolve_or_a_lost_flip(change):
 
 
 def test_p6_is_unknown_with_one_restart():
-    assert probe.judge_p6(p6_ev(restarts=[restart()]))[0] == UNKNOWN
+    assert probe.judge_p6(p6_ev(restarts=[restart("kill")]))[0] == UNKNOWN
 
 
-def test_p6_names_each_restart_and_judges_all_three():
-    three = [restart(kind="graceful"), restart(kind="kill"), restart(kind="graceful")]
-    verdict, detail = probe.judge_p6(p6_ev(restarts=three))
-    assert verdict == PASS and "3 restarts (graceful,kill,graceful)" in detail
-    three[2] = restart(kind="graceful", resolved_events=2)
+def test_p6_judges_all_three():
+    three = [restart(), restart("kill"), restart(resolved_events=2)]
     assert probe.judge_p6(p6_ev(restarts=three))[0] == FAIL
 
 
 def test_p6_without_the_restart_after_the_kill_is_unknown_never_pass():
     """F5s's graceful restart and F7's make two; without the one after F6's
     kill they are not the two P6 is about."""
-    two = [restart(kind="graceful"), restart(kind="graceful")]
-    verdict, detail = probe.judge_p6(p6_ev(restarts=two))
-    assert verdict == UNKNOWN and "no restart after the kill" in detail
+    verdict, detail = probe.judge_p6(p6_ev(restarts=[restart(), restart()]))
+    assert verdict == UNKNOWN and "no restart after the rehearsal's kill" in detail
+
+
+@pytest.mark.parametrize("second", [
+    # A record the script labelled a kill, whose container never stopped.
+    {"kind": "kill", "stop": stop_state("running"), "start": dict(START)},
+    # The same, with `docker start` on a running container: nothing moved.
+    {"kind": "kill", "stop": stop_state("kill"),
+     "start": {**START, "started_at": "2026-10-01T10:50:00.1Z"}},
+    # The kernel's OOM killer, not the rehearsal's kill.
+    {"stop": stop_state("oom")},
+    # A record with no container state at all — what the script wrote before.
+    {"kind": "kill", "stop": None, "start": None},
+])
+def test_p6_counts_the_kill_the_container_shows_not_the_label(second):
+    """The script once wrote a `kill` record for a restart that never
+    happened — no TRUNCATE seen, nothing killed, `docker start` on a running
+    container — and P6 passed "graceful,kill,graceful" on it. The kind is
+    read from the container's own state now, and a record that shows no
+    stop and start is no restart.
+    Kills: "P6 reads the record's kind", "P6 counts a record without the
+    container's state", "P6 counts a start that did not move"."""
+    verdict, detail = probe.judge_p6(p6_ev(restarts=[restart(), restart(**second), restart()]))
+    assert verdict == UNKNOWN, detail
+    assert "no restart after the rehearsal's kill" in detail
+
+
+def test_p6_a_graceful_stop_that_outran_the_grace_is_said_and_unknown():
+    """`docker stop` past its grace ends exit 137, the state a kill leaves.
+    With production's grace that is what a deploy would do to web: the
+    restart still counts, and the row says why it is not a PASS.
+    Kills: "P6 takes any exit 137 for the kill it asked for", "P6 never
+    requires a graceful stop to have exited 0"."""
+    verdict, detail = probe.judge_p6(p6_ev(restarts=[
+        restart("grace_expired"), restart("kill"), restart()]))
+    assert verdict == UNKNOWN and "restart 1:" in detail and "ran out" in detail, detail
+
+
+def test_p6_with_the_gate_file_unread_is_unknown_not_fail():
+    verdict, detail = probe.judge_p6(p6_ev(gate_delivered=None))
+    assert verdict == UNKNOWN and "gate file was not read" in detail
 
 
 # ─── D1 ──────────────────────────────────────────────────────────────────────
 
 SWEEP = {"swept": [{"index": "data_quality_issues.idx_dqi_run", "rows": 9, "missing": 0},
                    {"index": "orders.idx_orders_status", "rows": 401, "missing": 0}],
-         "skipped": [{"index": "orders.idx_orders_buyer_date", "why": "composite"}]}
+         "skipped": [{"index": "orders.idx_orders_buyer_date", "why": "composite"},
+                     {"index": "gold_daily_revenue.idx_gold_rev_date", "why": "composite"},
+                     {"index": "data_quality_diffs.idx_dqd_run", "why": "empty"}]}
+WIN, FLOOR, FIX, V4 = 41, 32, 900500, 9
+
+
+def _indexes(*names):
+    return [{"index": n, "columns": 2 if n.endswith("_date") else 1} for n in names]
+
+
+def window_read(**over):
+    """`window_rows` on the copy after the kill: F5w's run, read by a scan
+    and by the product's reader, and the window's rows by table."""
+    w = {"run_id": WIN, "order_id": FIX, "order_status": V4,
+         "run": {**integrity_run(), "run_id": WIN},
+         "tables": {
+             "data_quality_issues": {"rows": 2, "indexes": _indexes("idx_dqi_run")},
+             "data_quality_diffs": {"rows": 0, "indexes": _indexes("idx_dqd_run")},
+             "data_quality_runs": {"rows": 1, "indexes": _indexes("idx_dqr_layer",
+                                                                  "idx_dqr_started_at")},
+             "order_products": {"rows": 1, "indexes": _indexes("idx_order_products_order",
+                                                               "idx_order_products_product")},
+             "orders": {"rows": 1, "indexes": _indexes(
+                 "idx_orders_buyer", "idx_orders_buyer_date", "idx_orders_manager",
+                 "idx_orders_manager_date", "idx_orders_ordered_at", "idx_orders_source",
+                 "idx_orders_source_date", "idx_orders_status", "idx_orders_status_date")}}}
+    w.update(over)
+    return w
+
+
+def deletes(**over):
+    """`window_delete` at the end: each window table's rows found by a scan,
+    and every one of them given up by every index on it."""
+    out = [{"table": table, "scanned": n, "deleted": n, "left": 0}
+           for table, n in (("data_quality_issues", 2), ("data_quality_diffs", 0),
+                            ("data_quality_runs", 1), ("order_products", 1), ("orders", 1))]
+    for d in out:
+        if d["table"] in over:
+            d.update(over[d["table"]])
+            for key in [k for k, v in d.items() if v is None]:
+                d.pop(key)
+    return {"run_id": WIN, "order_id": FIX, "deletes": out}
 
 
 def d1_ev(**over):
-    runs = {"31": integrity_run(), "32": mirror_run()}
-    ev = {"flipped": True, "killed": True,
-          "pre": {**DUCK1, "runs": runs, "indexes": SWEEP},
-          "post": {**DUCK1, "runs": runs, "indexes": SWEEP}}
+    ev = {"flipped": True, "seen_blocked": True, "kill_stop": stop_state("kill"),
+          "pre": {**DUCK1, "max_dq_run_id": FLOOR, "indexes": SWEEP,
+                  "runs": {"31": integrity_run(), "32": mirror_run()}},
+          "post": {**DUCK1, "max_dq_run_id": WIN, "indexes": SWEEP, "window": window_read()},
+          "f7_stop": stop_state("graceful"), "p0_stop": stop_state("graceful"),
+          "window_ids": {"run_id": WIN, "order_id": FIX, "order_status": V4},
+          "delete": deletes()}
     ev.update(over)
     return ev
 
 
-def test_d1_passes_when_every_index_and_both_runs_read_whole_after_the_kill():
+def test_d1_passes_when_the_kill_cost_nothing_it_could_reach():
     verdict, detail = probe.judge_d1(d1_ev())
     assert verdict == PASS, detail
-    assert "2 single-column indexes" in detail and "#31,#32" in detail
+    assert f"run #{WIN} (2 findings)" in detail and f"order #{FIX}'s (1 lines)" in detail
+    assert "5 tables at the end, 4 composite among them" in detail
+    assert "2 single-column indexes" in detail
+    assert "1 composite indexes on tables outside the window, 1 on an empty" in detail
 
 
 def test_d1_fails_on_an_index_the_kill_left_short():
@@ -543,27 +697,52 @@ def test_d1_fails_on_an_index_the_kill_left_short():
 
 
 def test_d1_fails_on_a_loss_already_there_before_the_kill():
-    ev = d1_ev()
+    ev = d1_ev(p0_stop=stop_state("grace_expired"))
     ev["pre"] = {**ev["pre"], "indexes": {**SWEEP, "swept": [{**SWEEP["swept"][1], "missing": 1}]}}
     verdict, detail = probe.judge_d1(ev)
-    assert verdict == FAIL and "before the kill" in detail
+    assert verdict == FAIL and "before the kill" in detail and "phase 0's stop" in detail
 
 
-def test_d1_fails_when_the_products_reader_is_blind_after_the_kill():
-    ev = d1_ev()
-    ev["post"] = {**ev["post"], "runs": {"31": integrity_run(reader={"names": []}),
-                                         "32": mirror_run()}}
+def test_d1_fails_when_the_products_reader_is_blind_to_the_windows_run():
+    ev = d1_ev(post={**d1_ev()["post"], "window": window_read(
+        run={**integrity_run(reader={"names": []}), "run_id": WIN})})
     verdict, detail = probe.judge_d1(ev)
     assert verdict == FAIL and "fetch_run_issues returns 0 of the" in detail
 
 
+def test_d1_fails_on_a_delete_an_index_could_not_follow():
+    """The one question a composite index answers: taking a row out of it.
+    Kills: "D1 never reads the end's DELETE"."""
+    fatal = "FATAL Error: Invalid Input Error: Failed to delete all rows from index. Only deleted 0 out of 1 rows."
+    verdict, detail = probe.judge_d1(d1_ev(delete=deletes(orders={
+        "fatal": fatal, "scanned": None, "deleted": None, "left": None})))
+    assert verdict == FAIL and "from orders is DuckDB's FATAL" in detail
+    assert "idx_orders_status_date" in detail
+
+
+def test_d1_fails_on_a_delete_that_said_ok_and_left_the_rows():
+    """DuckDB 1.5.5: a DELETE whose predicate goes through an index that
+    lost the rows finds none and reports success. The scan beside it is
+    what says they are still there.
+    Kills: "D1 trusts the DELETE's own count"."""
+    verdict, detail = probe.judge_d1(d1_ev(delete=deletes(data_quality_issues={
+        "scanned": 2, "deleted": 0, "left": 2})))
+    assert verdict == FAIL and "took 0 of the 2 rows a scan finds, 2 left" in detail
+
+
 @pytest.mark.parametrize("change", [
     {"flipped": False},
-    {"killed": False},
+    {"seen_blocked": False},
+    {"kill_stop": stop_state("oom")},
+    {"kill_stop": stop_state("running")},
+    {"kill_stop": None},
     {"pre": None},
     {"post": None},
 ])
-def test_d1_without_a_kill_or_both_reads_is_unknown_never_pass(change):
+def test_d1_without_a_kill_the_container_shows_or_both_reads_is_unknown(change):
+    """Seen blocked is not killed: the reviewer's case had the OOM killer
+    take reh-web first, and D1 then judged a kill that never landed.
+    Kills: "D1's kill is seen_blocked"."""
     assert probe.judge_d1(d1_ev(**change))[0] == UNKNOWN
 
 
@@ -578,11 +757,67 @@ def test_d1_with_no_sweep_to_judge_is_unknown(sweep):
     assert probe.judge_d1(ev)[0] == UNKNOWN
 
 
-def test_d1_with_a_run_not_read_after_the_kill_is_unknown():
+@pytest.mark.parametrize("ids, why", [
+    ({"run_id": FLOOR, "order_id": FIX, "order_status": V4}, "already at F5s's checkpoint"),
+    ({"run_id": 6, "order_id": FIX, "order_status": V4}, "already at F5s's checkpoint"),
+    ({"run_id": None, "order_id": FIX, "order_status": V4}, "F5w wrote no integrity run"),
+])
+def test_d1_asks_only_of_a_run_written_after_the_checkpoint(ids, why):
+    """F5w once took F4's run — checkpointed at F5s, out of the kill's
+    reach — when the live API's read of the newest run failed and the
+    trigger did not run. The run D1 asks of must be above every run F5s's
+    read found.
+    Kills: "D1 takes whatever run F5w names"."""
+    verdict, detail = probe.judge_d1(d1_ev(window_ids=ids))
+    assert verdict == UNKNOWN and why in detail, detail
+
+
+def test_d1_without_the_checkpoints_newest_run_cannot_place_the_window():
     ev = d1_ev()
-    ev["post"] = {**ev["post"], "runs": {"31": integrity_run()}}
+    ev["pre"] = {k: v for k, v in ev["pre"].items() if k != "max_dq_run_id"}
     verdict, detail = probe.judge_d1(ev)
-    assert verdict == UNKNOWN and "#32" in detail
+    assert verdict == UNKNOWN and "not known to have been written after it" in detail
+
+
+@pytest.mark.parametrize("window, why", [
+    (None, "the window was not read"),
+    ({"error": "CatalogException"}, "raised CatalogException"),
+    (window_read(run=None), "not in the copy after the kill"),
+    (window_read(run={**integrity_run(), "run_id": WIN, "issues": [],
+                      "reader": {"names": []}}), "filed no finding"),
+    (window_read(order_status=8), "did not land before the kill"),
+    (window_read(tables={**window_read()["tables"], "orders": {"rows": 0, "indexes": []}}),
+     f"order #{FIX} is not in the copy"),
+])
+def test_d1_with_nothing_in_the_window_to_ask_is_unknown(window, why):
+    ev = d1_ev()
+    ev["post"] = {**ev["post"], "window": window}
+    verdict, detail = probe.judge_d1(ev)
+    assert verdict == UNKNOWN and why in detail, detail
+
+
+@pytest.mark.parametrize("done, why", [
+    (None, "not deleted at the end"),
+    ({"skipped": "--keep leaves the copy as it is"}, "--keep"),
+    (deletes(orders={"error": "IOException", "scanned": None, "deleted": None, "left": None}),
+     "raised IOException"),
+    ({"run_id": WIN, "order_id": FIX, "deletes": []}, "deleted no window table"),
+])
+def test_d1_without_the_ends_delete_is_unknown(done, why):
+    verdict, detail = probe.judge_d1(d1_ev(delete=done))
+    assert verdict == UNKNOWN and why in detail, detail
+
+
+@pytest.mark.parametrize("f7", [stop_state("grace_expired"), stop_state("kill"), None])
+def test_d1_after_a_stop_that_was_no_checkpoint_is_unknown(f7):
+    """A read-only open sees every row the WAL holds whatever an index
+    lost; only the close of a graceful stop writes the loss down. A read
+    after F7's stop says what the kill cost only when that stop was one.
+    Kills: "D1 never asks how F7's stop ended"."""
+    verdict, detail = probe.judge_d1(d1_ev(f7_stop=f7))
+    assert verdict == UNKNOWN and "F7's stop was no checkpoint" in detail, detail
+    ev = d1_ev(f7_stop=f7, delete=deletes(orders={"scanned": 1, "deleted": 0, "left": 1}))
+    assert probe.judge_d1(ev)[0] == FAIL
 
 
 _KILLED_WRITER = """
@@ -594,11 +829,12 @@ os.kill(os.getpid(), signal.SIGKILL)
 """
 
 
-def _killed_copy(tmp_path, duckdb, *, kill):
+def _killed_copy(tmp_path, duckdb, *, kill, restart=True):
     """A file whose last twelve rows a SIGKILL caught in the WAL, then
     replayed by a read-write session that touched nothing and closed — the
     shape of an OOM-killed web restarted and then stopped for a deploy. With
-    `kill=False`, the same rows written by a clean session instead."""
+    `kill=False`, the same rows written by a clean session instead; with
+    `restart=False`, no session after the kill at all."""
     import subprocess
     import sys
 
@@ -618,7 +854,8 @@ def _killed_copy(tmp_path, duckdb, *, kill):
         con = duckdb.connect(db)
         con.execute("INSERT INTO t SELECT 100000 + r, r % 3, 'late' || r, 1 FROM range(12) x(r)")
         con.close()
-    duckdb.connect(db).close()
+    if restart:
+        duckdb.connect(db).close()
     return duckdb.connect(db, read_only=True)
 
 
@@ -649,6 +886,212 @@ def test_the_sweep_finds_what_a_kill_costs_duckdb_1_5_5(tmp_path):
     finally:
         con.close()
     assert {s["index"]: s["missing"] for s in sweep["swept"]} == {"t.i_k": 12, "t.i_s": 12}
+
+
+def test_a_read_only_read_after_a_kill_sees_every_row(tmp_path):
+    """What makes F7's stop matter to D1, and F5s's not to P4a and P5: a
+    read-only open replays the WAL in memory and loses nothing; the loss is
+    written by the first checkpoint a read-write session takes after the
+    restart — the close of a graceful stop. A read after a stop that was no
+    checkpoint therefore sees every row, whatever the kill cost."""
+    duckdb = pytest.importorskip("duckdb")
+    con = _killed_copy(tmp_path, duckdb, kill=True, restart=False)
+    try:
+        sweep = probe.index_sweep(con)
+    finally:
+        con.close()
+    assert {s["index"]: s["missing"] for s in sweep["swept"]} == {"t.i_k": 0, "t.i_s": 0}
+    duckdb.connect(str(tmp_path / "killed.duckdb")).close()
+    con = duckdb.connect(str(tmp_path / "killed.duckdb"), read_only=True)
+    try:
+        sweep = probe.index_sweep(con)
+    finally:
+        con.close()
+    assert {s["index"]: s["missing"] for s in sweep["swept"]} == {"t.i_k": 12, "t.i_s": 12}
+
+
+_KILLED_TWO = """
+import os, signal, sys
+import duckdb
+con = duckdb.connect(sys.argv[1])
+for table in ("c", "s"):
+    con.execute(f"INSERT INTO {table} SELECT 100000 + r, 7, 'late' || r FROM range(4) x(r)")
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+def test_a_composite_index_serves_no_read_duckdb_1_5_5(tmp_path):
+    """Measured by what reads return, not by EXPLAIN — which prints
+    SEQ_SCAN for a lookup that demonstrably goes through a single-column
+    index. After a kill costs both kinds their entries, a filter on the
+    composite index's columns still returns what a scan does, and the
+    single-column index's filter misses the rows: so no read can ask a
+    composite index, and D1 asks it with a DELETE instead."""
+    duckdb = pytest.importorskip("duckdb")
+    import subprocess
+    import sys
+
+    db = str(tmp_path / "two.duckdb")
+    con = duckdb.connect(db)
+    for table, index in (("c", "CREATE INDEX i_cab ON c(a, b)"), ("s", "CREATE INDEX i_sa ON s(a)")):
+        con.execute(f"CREATE TABLE {table} (id BIGINT PRIMARY KEY, a BIGINT, b VARCHAR)")
+        con.execute(index)
+        con.execute(f"INSERT INTO {table} SELECT r, r % 5, 'early' || r FROM range(1, 3001) x(r)")
+    con.close()
+    assert subprocess.run([sys.executable, "-c", _KILLED_TWO, db]).returncode == -9
+    duckdb.connect(db).close()
+    con = duckdb.connect(db, read_only=True)
+    try:
+        for stmt in probe.SWEEP_SETTINGS:
+            con.execute(stmt)
+
+        def both(table, where):
+            return (con.execute(f"SELECT count(*) FROM {table} WHERE {where}").fetchone()[0],
+                    con.execute(f"SELECT count_if({where}) FROM {table}").fetchone()[0])
+
+        assert both("c", "a = 7 AND b = 'late1'") == (1, 1)
+        assert both("c", "a = 7") == (4, 4)
+        assert both("c", "a >= 6") == (4, 4)
+        assert both("s", "a = 7") == (0, 4)
+        assert both("s", "a >= 6") == (0, 4)
+    finally:
+        con.close()
+
+
+def test_a_delete_through_a_lost_index_finds_nothing_duckdb_1_5_5(tmp_path):
+    """Why `window_delete` finds its rows by the id's text with something
+    appended: a committed DELETE whose predicate the lost index serves finds
+    no row, reports success and leaves them — a bare CAST of a VARCHAR
+    column is folded into exactly that — where the same rows found by a
+    scan must come out of the index too, and that is DuckDB's FATAL.
+    Kills: "the window predicate is `col = ?`" and "…a bare CAST"."""
+    duckdb = pytest.importorskip("duckdb")
+    db = str(tmp_path / "killed.duckdb")
+    _killed_copy(tmp_path, duckdb, kill=True).close()
+    con = duckdb.connect(db)
+    try:
+        assert con.execute("DELETE FROM t WHERE s = 'late3'").fetchone()[0] == 0
+        assert con.execute("SELECT count_if(s = 'late3') FROM t").fetchone()[0] == 1
+    finally:
+        con.close()
+    import subprocess
+    import sys
+
+    for col, value in (("s", "late3"), ("k", "1")):
+        proc = subprocess.run([sys.executable, "-c", probe._DELETE_ONE, db, "t",
+                               probe._WINDOW_WHERE.format(col=col), value],
+                              capture_output=True, text=True)
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert result.get("fatal", "").startswith(
+            "FATAL Error: Invalid Input Error: Failed to delete all rows from index"), result
+
+
+_WINDOW_WRITER = """
+import os, signal, sys
+import duckdb
+con = duckdb.connect(sys.argv[1])
+rid, oid = int(sys.argv[2]), int(sys.argv[3])
+con.execute("INSERT INTO data_quality_runs (run_id, started_at, ended_at, as_of, window_start, "
+            "window_end, layer, status) VALUES (?, now(), now(), now(), current_date, "
+            "current_date, 'integrity', 'WARN')", [rid])
+con.execute("INSERT INTO data_quality_issues VALUES "
+            "(?, 'pg_silver_missing_rows', 'silver.orders', 'WARN', 1, '[5]', NULL), "
+            "(?, 'pg_twin_pairing', 'silver.orders', 'INFO', 1, '[]', '{}')", [rid, rid])
+con.execute("INSERT INTO orders VALUES (?, 1, 9, TIMESTAMP '2026-10-01 10:00:00')", [oid])
+con.execute("INSERT INTO order_products VALUES (?, ?, 77)", [oid * 1000 + 1, oid])
+if sys.argv[4] == "kill":
+    os.kill(os.getpid(), signal.SIGKILL)
+con.close()
+"""
+
+
+def _window_copy(tmp_path, duckdb, *, kill):
+    """A copy with production's DQ journal (its own migration) and an order
+    table whose one index is composite, with history checkpointed and then
+    D1's window — one run, one order with a line — written by a process
+    SIGKILLed before it closed (or closing cleanly), and a restart that
+    touched nothing and closed: F5w and F6, the kill, F7."""
+    import subprocess
+    import sys
+
+    from core import migrations
+
+    db = str(tmp_path / f"window-{kill}.duckdb")
+    con = duckdb.connect(db)
+
+    class _Store:
+        _connection = con
+
+    migrations._m0023_data_quality_tables(_Store())
+    con.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, source_id INTEGER, "
+                "status_id INTEGER, ordered_at TIMESTAMP)")
+    con.execute("CREATE INDEX idx_orders_source_date ON orders(source_id, ordered_at)")
+    con.execute("CREATE TABLE order_products (id BIGINT PRIMARY KEY, order_id INTEGER, "
+                "product_id INTEGER)")
+    con.execute("CREATE INDEX idx_order_products_order ON order_products(order_id)")
+    con.execute("CREATE TABLE sync_metadata (key VARCHAR, value VARCHAR, updated_at TIMESTAMP)")
+    con.execute("CREATE TABLE warehouse_refreshes (id INTEGER, trigger VARCHAR, "
+                "validation_passed BOOLEAN, refreshed_at TIMESTAMP)")
+    for name in ("silver_orders", "silver_order_utm"):
+        con.execute(f"CREATE TABLE {name} (id INTEGER)")
+    con.execute("INSERT INTO data_quality_runs (run_id, started_at, ended_at, as_of, window_start, "
+                "window_end, layer, status) SELECT r, now(), now(), now(), current_date, "
+                "current_date, CASE WHEN r % 2 = 0 THEN 'integrity' ELSE 'mirror_landing' END, "
+                "'WARN' FROM range(1, 31) x(r)")
+    con.execute("INSERT INTO data_quality_issues SELECT r, 'pg_twin_pairing', 'silver.orders', "
+                "'INFO', 1, '[]', '{}' FROM range(1, 31) x(r)")
+    con.execute("INSERT INTO orders SELECT r, 1 + r % 3, 1 + r % 4, "
+                "TIMESTAMP '2026-01-01' + to_minutes(r) FROM range(1, 3001) x(r)")
+    con.execute("INSERT INTO order_products SELECT r * 1000 + 1, r, 7 FROM range(1, 3001) x(r)")
+    con.close()
+    proc = subprocess.run([sys.executable, "-c", _WINDOW_WRITER, db, str(WIN), str(FIX),
+                           "kill" if kill else "close"])
+    assert proc.returncode == (-9 if kill else 0)
+    duckdb.connect(db).close()
+    return db
+
+
+@pytest.mark.parametrize("kill", [False, True])
+def test_the_window_is_asked_of_duckdb_itself(tmp_path, monkeypatch, kill):
+    """`window_rows` after the kill and `window_delete` at the end, run on
+    DuckDB 1.5.5 itself, judged as D1 judges them. On a clean file every
+    index gives every window row up; across a SIGKILL the product's reader
+    is blind to the run, and the DELETE of each table that holds the
+    window's rows is DuckDB's FATAL — the order's too, whose one index is
+    composite and which no read can ask.
+    Kills: "window_delete finds its rows through an index" (a DELETE that
+    found nothing would report ok, and the FATAL asserted here would not
+    come), and the script's flags meeting nothing in the probe."""
+    duckdb = pytest.importorskip("duckdb")
+    monkeypatch.setattr(probe, "APP_DIR", str(REPO))
+    db = _window_copy(tmp_path, duckdb, kill=kill)
+    assert probe.main(["duckdb-facts", "--db", db, "--window-run", str(WIN),
+                       "--window-order", str(FIX)]) == 0
+    facts = probe.duckdb_facts(db, None, [], window_run=WIN, window_order=FIX)
+    window = facts["window"]
+    assert {t: v["rows"] for t, v in window["tables"].items()} == {
+        "data_quality_issues": 2, "data_quality_diffs": 0, "data_quality_runs": 1,
+        "order_products": 1, "orders": 1}
+    assert window["order_status"] == V4 and facts["max_dq_run_id"] == WIN
+    assert [i["columns"] for i in window["tables"]["orders"]["indexes"]] == [2]
+    done = probe.window_delete(db, WIN, FIX)
+    by_table = {d["table"]: d for d in done["deletes"]}
+    ev = d1_ev(post={**DUCK1, "indexes": SWEEP, "window": window}, delete=done)
+    verdict, detail = probe.judge_d1(ev)
+    if not kill:
+        assert window["run"]["reader"] == {"names": ["pg_silver_missing_rows", "pg_twin_pairing"]}
+        assert all(d.get("deleted") == d.get("scanned") and d.get("left") == 0
+                   for d in done["deletes"]), done
+        assert verdict == PASS, detail
+    else:
+        assert window["run"]["reader"] == {"names": []}
+        for table in ("data_quality_issues", "data_quality_runs", "order_products", "orders"):
+            assert "Failed to delete all rows from index" in by_table[table].get("fatal", ""), (
+                table, by_table[table])
+        assert by_table["data_quality_diffs"] == {
+            "table": "data_quality_diffs", "scanned": 0, "deleted": 0, "left": 0}
+        assert verdict == FAIL and "from orders is DuckDB's FATAL" in detail
+        assert "fetch_run_issues returns 0 of the 2 findings" in detail
 
 
 def test_the_sweep_says_why_it_could_not_ask():
@@ -789,6 +1232,41 @@ def test_assemble_derives_the_reclassify_branch_from_the_recorded_writer(tmp_pat
     assert probe.assemble(tmp_path)["P8"]["expect_reclassify"] is True
     (tmp_path / "d1.json").write_text(json.dumps({**DUCK1, "writer": {"writer": "postgres"}}))
     assert probe.assemble(tmp_path)["P8"]["expect_reclassify"] is False
+    # F7's read lost: F5s's, also after F3, says it instead.
+    (tmp_path / "d1.json").write_text("")
+    (tmp_path / "d_pre.json").write_text(json.dumps(DUCK1))
+    assert probe.assemble(tmp_path)["P8"]["expect_reclassify"] is True
+    # Neither read: not known, which P8 cannot pass on.
+    (tmp_path / "d_pre.json").unlink()
+    assert probe.assemble(tmp_path)["P8"]["expect_reclassify"] is None
+    verdict, detail = probe.judge_p8(p8_ev(expect_reclassify=None))
+    assert verdict == UNKNOWN and "reclassify branch is not known" in detail
+
+
+def test_a_lost_read_at_f7_costs_no_row_a_false_verdict(tmp_path):
+    """The reviewer's case: the probe call at F7 died (exit 2, swallowed by
+    `|| true`) and left `d1.json` empty. P1 then failed the product for a
+    writer record nobody read, P6 failed it for a gate file nobody read, and
+    P8 quietly dropped the reclassify branch it read out of the same file.
+    A read that did not happen is UNKNOWN where it decides a row, and F5s's
+    read — also after the flip and after F3 — answers where it can.
+    Kills: "P1 reads F7's copy alone", "P8's branch is read from F7's copy
+    alone", "an unread gate file is a FAIL"."""
+    for name, body in (("f1_snapshot.json", snap()), ("seed_gate.json", {"seeded": True}),
+                       ("f1_log.json", {"not_registered": 1, "holds": 1, "recorded": 1}),
+                       ("f1_pg.json", {"resolved_events": 1}),
+                       ("d0.json", DUCK0), ("d_pre.json", {**DUCK1, "indexes": SWEEP}),
+                       ("p3.json", p3_ev()),
+                       ("p6_restart1.json", restart()), ("p6_restart2.json", restart("kill")),
+                       ("p6_restart3.json", restart())):
+        (tmp_path / name).write_text(json.dumps(body))
+    (tmp_path / "d1.json").write_text("")
+    rows = {label.split()[0]: (v, d) for label, v, d in probe.judge_all(
+        tmp_path, floor_s=60, retired=RETIRED, standalone_twins=TWINS)}
+    assert rows["P1"][0] == PASS, rows["P1"]
+    assert rows["P6"] == (UNKNOWN, "the gate file was not read after the restarts")
+    assert rows["D1"][0] == UNKNOWN and rows["P2"][0] == UNKNOWN
+    assert probe.assemble(tmp_path)["P8"]["expect_reclassify"] is True
 
 
 def test_assemble_reads_the_jobs_list_for_the_mirror_run_and_the_live_view(tmp_path):
@@ -814,7 +1292,7 @@ def test_p4_and_p5_read_their_runs_before_the_kill_and_d1_after_it(tmp_path):
     what the kill left of them is D1's to report, never P4's or P5's to pass
     or fail on — and a run read only after the kill is no run for them."""
     (tmp_path / "f4_runs.json").write_text(json.dumps({"integrity": 31, "mirror_landing": 32}))
-    (tmp_path / "p3.json").write_text(json.dumps({"seen_blocked": True}))
+    (tmp_path / "p3.json").write_text(json.dumps({"seen_blocked": True, "stop": stop_state("kill")}))
     blind = {"31": integrity_run(reader={"names": []}), "32": mirror_run(reader={"names": []})}
     (tmp_path / "d1.json").write_text(json.dumps({**DUCK1, "runs": blind}))
     ev = probe.assemble(tmp_path)
@@ -826,7 +1304,25 @@ def test_p4_and_p5_read_their_runs_before_the_kill_and_d1_after_it(tmp_path):
     ev = probe.assemble(tmp_path)
     assert ev["P4"]["a"]["run"] == whole["31"]
     assert ev["P5"]["integrity"] == whole["31"] and ev["P5"]["mirror"] == whole["32"]
-    assert ev["D1"]["pre"]["runs"] == whole and ev["D1"]["killed"] is True
+    assert ev["D1"]["pre"]["runs"] == whole and ev["D1"]["seen_blocked"] is True
+    assert probe.stop_kind(ev["D1"]["kill_stop"]) == "kill"
+
+
+def test_assemble_hands_d1_the_kill_the_window_and_the_stops(tmp_path):
+    """D1's kill is the one p3.json's container state shows; its window and
+    its stops come from the files the script writes for them."""
+    files = {"p3.json": {"seen_blocked": True, "stop": stop_state("oom")},
+             "d1_window.json": {"run_id": WIN, "order_id": FIX, "order_status": V4},
+             "d1_delete.json": deletes(), "f7_stop_state.json": stop_state("graceful"),
+             "p0_stop_state.json": stop_state("grace_expired")}
+    for name, body in files.items():
+        (tmp_path / name).write_text(json.dumps(body))
+    ev = probe.assemble(tmp_path)["D1"]
+    assert ev["window_ids"] == files["d1_window.json"] and ev["delete"] == files["d1_delete.json"]
+    assert ev["f7_stop"] == files["f7_stop_state.json"]
+    assert ev["p0_stop"] == files["p0_stop_state.json"]
+    assert probe.judge_d1({**ev, "flipped": True}) == (
+        UNKNOWN, "no kill landed inside the derivation (see P3)")
 
 
 def test_the_copys_runs_are_read_by_the_products_reader_too(tmp_path, monkeypatch):

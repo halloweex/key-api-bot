@@ -12,13 +12,20 @@
 #   P4  the design's mutations are caught: a deleted Silver row, a landed
 #       order, an unknown sales_type
 #   P5  dq_mirror_landing and dq_integrity_check under the stand-down
-#   P6  two restarts, one resolve
+#   P6  two restarts, one resolve — each one a stop and a start the
+#       container's own state shows, the stop before one of them the
+#       rehearsal's SIGKILL (exit 137)
 #   P7  one precondition broken: runs as duckdb, the canary pages
 #   P8  the way back: a full DuckDB rebuild owed, held, released
-# plus D1 (DuckDB's indexes answer for every row after P3's kill, as they did
-# at the graceful stop before it — DuckDB 1.5.5 can lose index entries across
-# a SIGKILL, so P4 and P5 read their runs at that earlier stop), K0 (KeyCRM
-# never called) and Z0 (nothing else on the host moved).
+# plus D1 (what P3's kill cost DuckDB's indexes: the rows reh-web wrote after
+# the graceful stop before it — one integrity run and the fixture's fourth
+# version — read through the product's reader after the kill and deleted at
+# the end through every index on their tables, composite ones included, and
+# every single-column index swept at both stops; DuckDB 1.5.5 can lose index
+# entries across a SIGKILL, so P4 and P5 read their runs at that earlier
+# stop), K0 (KeyCRM never called) and Z0 (nothing else on the host moved).
+# Every graceful stop gets production's grace (STOP_GRACE_S), so it is the
+# stop a deploy makes, and one that outruns it is recorded as the kill it is.
 #
 # HOW IT STAYS AWAY FROM PRODUCTION
 #   - Its own containers only, every one named reh-*, on its own network
@@ -55,6 +62,7 @@
 # 13:15–14:00 Kyiv in practice; ~75 min):
 #   bash /opt/key-api-bot/deploy/step13_rehearsal.sh
 #   ... --keep           leave the containers stopped and the copies in place
+#                        (D1 then does not delete the rows it asks of: UNKNOWN)
 #   ... --cleanup-only   remove whatever a killed run left, and stop
 #   ... --any-hour       skip the window guard
 #   ... --build          rehearse the tree instead of the deployed image
@@ -89,8 +97,21 @@ REH_SEED=reh-seed
 REH_PROBE=reh-probe
 REH_MIGRATE=reh-migrate
 
+# Production's own versions, so the dump is restored into the server that
+# wrote it: docker-compose.yml's postgres, and the ClickHouse the stores'
+# gate pins as production's (both held there by the script's tests).
 PG_IMAGE=postgres:17.2-alpine
 CH_IMAGE=clickhouse/clickhouse-server:24.8.14.39-alpine
+
+# The grace every graceful stop of reh-web gets: production's. Its web service
+# sets no stop_grace_period, so a deploy's `up -d` stops it as compose does by
+# default — SIGTERM, and SIGKILL 10 s later. A stop that outruns it here ends
+# exit 137, the state a kill leaves, and is judged as the kill a deploy would
+# have made, never as the checkpoint the phase wanted (probe.py `stop_kind`).
+STOP_GRACE_S=10
+# How long a `docker kill` may take to show as an exit before the kill is
+# taken as one that did not land.
+KILL_WAIT_S=30
 
 # The caps, and what the start guard asks the host to have free beyond them.
 WEB_MEM=1536m
@@ -120,7 +141,7 @@ for arg in "$@"; do
         --cleanup-only) CLEANUP_ONLY=1 ;;
         --build) BUILD=1 ;;
         --any-hour) ANY_HOUR=1 ;;
-        -h|--help) sed -n '2,67p' "$0"; exit 0 ;;
+        -h|--help) awk 'NR > 1 && /^set -Eeuo/ { exit } NR > 1' "$0"; exit 0 ;;
         *) echo "unknown argument: $arg" >&2; exit 3 ;;
     esac
 done
@@ -408,6 +429,69 @@ oom_killed() {
     [ "$(docker inspect -f '{{.State.OOMKilled}}' "$1" 2>/dev/null || echo false)" = true ]
 }
 
+state_of() {
+    # $1 container, $2 (optional) more members, `"k": v, ...`: its state as
+    # one JSON object — whether it runs, how its last stop ended, when it
+    # last started. P3's and P6's proof that a stop and a start happened, and
+    # which kind: `docker start` on a running container is a no-op that says
+    # nothing, so a record of a restart must carry what the container shows.
+    # StartedAt moves on every start; RestartCount moves only for a restart
+    # policy, which these do not have.
+    docker inspect -f '{"running": {{.State.Running}}, "exit_code": {{.State.ExitCode}}, "oom_killed": {{.State.OOMKilled}}, "started_at": "{{.State.StartedAt}}", "finished_at": "{{.State.FinishedAt}}", "restart_count": {{.RestartCount}}'"${2:+, $2}"'}' \
+        "$1" 2>/dev/null || echo null
+}
+
+wait_stopped() {
+    # $1 container, $2 timeout seconds: until it no longer runs. `docker
+    # kill` returns once the signal is sent, before the exit is recorded.
+    local name="$1" deadline=$((SECONDS + $2))
+    while running "$name"; do
+        [ "$SECONDS" -lt "$deadline" ] || return 1
+        sleep 0.5
+    done
+}
+
+sigkilled() {
+    # $1 a `state_of` file: stopped, exit 137, and not by the kernel's OOM
+    # killer. After `kill_web`, the rehearsal's own SIGKILL and nothing else;
+    # the judges read the same file and decide for themselves (`stop_kind`).
+    [ "$(json_field "$1" running)" = false ] \
+        && [ "$(json_field "$1" exit_code)" = 137 ] \
+        && [ "$(json_field "$1" oom_killed)" = false ]
+}
+
+kill_web() {
+    # $1 container, $2 a file for its state after the kill. SIGKILL, then the
+    # exit as Docker records it (`docker kill` returns before that), and the
+    # state with what was asked; succeeds only when the container shows the
+    # rehearsal's SIGKILL. A container that was not running is not killed.
+    local was=false
+    running "$1" && was=true
+    docker kill "$1" >/dev/null 2>&1 || true
+    wait_stopped "$1" "$KILL_WAIT_S" || say "$1 still runs $KILL_WAIT_S s after the kill"
+    state_of "$1" "\"asked\": \"kill\", \"was_running\": $was" > "$2"
+    [ "$was" = true ] && sigkilled "$2"
+}
+
+start_stopped() {
+    # $1 container: a start only where something stopped. On a running
+    # container `docker start` does nothing, and nothing it did may be
+    # recorded as a restart.
+    running "$1" || docker start "$1" >/dev/null
+}
+
+max_int() {
+    # The largest of the arguments that are whole numbers; 0 when none is.
+    local m=0 v
+    for v in "$@"; do
+        case "$v" in
+            ''|*[!0-9]*) ;;
+            *) [ "$v" -gt "$m" ] && m="$v" ;;
+        esac
+    done
+    echo "$m"
+}
+
 wait_health() {
     # $1 container, $2 timeout seconds. Fails when the container dies first.
     local name="$1" deadline=$((SECONDS + $2))
@@ -445,16 +529,58 @@ poll_pg() {
 
 restart_record() {
     # P6's record of one restart of the flipped reh-web: $1 the snapshot it
-    # answered with, $2 how the stop before it went (graceful | kill), $3 the
-    # file. The log lines are counted over every start of the container, so
-    # each record says how many there have been by then.
-    printf '{"kind": "%s", "snapshot": %s, "resolved_events": %s, "recorded_lines": %s, "resolved_lines": %s}\n' \
-        "$2" \
+    # answered with, $2 the file, $3 the `state_of` file written right after
+    # the stop before it. Written only for a restart the container shows —
+    # that stop left it stopped, and it runs now — and with both states in
+    # it, the start's read here: P6 reads the stop's kind out of the
+    # container's state (exit 0, the rehearsal's SIGKILL, a grace that ran
+    # out), never out of the script. The log lines are counted over every
+    # start of the container, so each record says how many there have been
+    # by then.
+    if [ "$(json_field "$3" running)" != false ] || ! running "$REH_WEB"; then
+        say "no restart of $REH_WEB to record in $(basename "$2"): it was not stopped, or does not run"
+        return 0
+    fi
+    printf '{"stop": %s, "start": %s, "snapshot": %s, "resolved_events": %s, "recorded_lines": %s, "resolved_lines": %s}\n' \
+        "$(cat "$3")" \
+        "$(state_of "$REH_WEB")" \
         "$(cat "$1" 2>/dev/null || echo null)" \
         "$(pgq "$RESOLVED_SQL")" \
         "$(log_count "$LOG_DIR/flip.log" 'warehouse writer recorded as postgres')" \
         "$(grep -F 'suppressed (KS_ALERTS_DISABLED)' "$LOG_DIR/flip.log" | grep -cF 'Resolved:' || true)" \
-        > "$3"
+        > "$2"
+}
+
+p3_record() {
+    # P3's evidence once the blocked TRUNCATE was seen: $1 the file, $2 the
+    # kill's `state_of` file, then requested and built at the kill, the
+    # fixture version Silver held, and the three reads after it (JSON). The
+    # kill's state goes in whole: P3 and D1 judge a kill the container
+    # showed, not one the script sent.
+    printf '{"seen_blocked": true, "stop": %s, "requested": %s, "built": %s, "silver_version": %s, "after_kill": %s, "first_after_restart": %s, "built_after": %s}\n' \
+        "$(cat "$2" 2>/dev/null || echo null)" "${3:-null}" "${4:-null}" "${5:-null}" \
+        "${6:-null}" "${7:-null}" "${8:-null}" > "$1"
+}
+
+window_run() {
+    # F5w: $1 the floor — the newest DQ run F5s's checkpoint holds, or F4's
+    # own when that was not read. Triggers one integrity run and prints its
+    # id only when the trigger ran and the run is above the floor: a failed
+    # trigger, or a read of the newest run that comes back with an older
+    # one, is no run written after the checkpoint.
+    local floor="$1" before id
+    before="$(wprobe dq-last integrity 2>/dev/null | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
+    floor="$(max_int "$floor" "$before")"
+    if ! wprobe trigger-wait dq_integrity_check --timeout "$STEP_TIMEOUT" > "$EV/f5w_integrity_job.json" 2>&1; then
+        say "F5w: the integrity job did not run (see f5w_integrity_job.json)"
+        return 0
+    fi
+    id="$(wprobe wait-dq integrity --after "$floor" --timeout 60 2>/dev/null \
+        | tee "$EV/f5w_integrity_live.json" | grep -o '"run_id": [0-9]*' | grep -o '[0-9]*' || true)"
+    if [ -n "$id" ] && [ "$id" -gt "$floor" ]; then
+        echo "$id"
+    fi
+    return 0
 }
 
 json_field() {
@@ -552,9 +678,19 @@ probe_keycrm_dir() {
 }
 
 stop_web() {
-    # $1 container, $2 log name: graceful, so DuckDB is closed cleanly.
+    # $1 container, $2 log name, $3 (optional) a file for its state after
+    # the stop. Graceful within production's grace, so DuckDB is closed —
+    # and checkpointed — where a deploy would close it, and killed where a
+    # deploy would kill it. The state says which, with what was asked and
+    # how long the stop took.
+    local was=false t0
     save_log "$1" "$2"
-    docker stop -t 60 "$1" >/dev/null 2>&1 || true
+    running "$1" && was=true
+    t0=$SECONDS
+    docker stop -t "$STOP_GRACE_S" "$1" >/dev/null 2>&1 || true
+    if [ -n "${3:-}" ]; then
+        state_of "$1" "\"asked\": \"stop\", \"was_running\": $was, \"grace_s\": $STOP_GRACE_S, \"stop_s\": $((SECONDS - t0))" > "$3"
+    fi
     save_log "$1" "$2"
 }
 
@@ -818,7 +954,7 @@ if wait_health "$REH_WEB" "$HEALTH_TIMEOUT"; then
 else
     say "phase 0: reh-web never answered"
 fi
-stop_web "$REH_WEB" phase0
+stop_web "$REH_WEB" phase0 "$EV/p0_stop_state.json"
 probe_offline duckdb-facts --db /app/data/analytics.duckdb --gate /app/data/alert-gate-web.json \
     > "$EV/d0.json" 2>>"$LOG_DIR/probe.err" || true
 probe_offline seed-gate --gate /app/data/alert-gate-web.json > "$EV/seed_gate.json" 2>>"$LOG_DIR/probe.err" || true
@@ -967,7 +1103,7 @@ if [ "$FLIPPED" = 1 ]; then
     fi
     wprobe snapshot > "$EV/flip_snap_f5.json" 2>/dev/null || true
 
-    # ─── F5s: a graceful stop before any kill (P4a, P5, D1; restart 1 of P6) ──
+    # ─── F5s: a graceful stop before any kill (P4a, P5; restart 1 of P6) ─────
     #
     # F4's two DQ runs are read here, before F6 kills anything. DuckDB 1.5.5
     # drops from a CREATE INDEX the rows a SIGKILL caught in the WAL, when the
@@ -975,25 +1111,42 @@ if [ "$FLIPPED" = 1 ]; then
     # or past wal_autocheckpoint) and nothing touched the table first — and
     # `fetch_run_issues` reads through `idx_dqi_run`. Read after the kill,
     # P4a and P5 would judge what that defect left of their runs; read here,
-    # at the checkpoint a deploy takes, they judge the runs as the product
-    # wrote them. F7 reads the same runs and sweeps every index again after
-    # the kill, and D1 reports any loss there — the defect is a finding of
-    # its own, never read around. The kill stays where P3 needs it, inside a
-    # live derivation, and F7's read stays after it for P2 and P6.
+    # read-only and before the kill, they judge the runs as the product wrote
+    # them — a read-only open sees every row the WAL holds, so they need
+    # nothing of this stop beyond its being before the kill. The stop is the
+    # one a deploy makes (production's grace); a graceful one is a
+    # checkpoint, which puts F4's runs out of the kill's reach, so they say
+    # nothing about what it costs: D1 asks that of the rows written after
+    # this stop (F5w, F6). The kill stays where P3 needs it, inside a live
+    # derivation, and F7's read stays after it for P2 and P6.
     say "F5s: a graceful stop, F4's DQ runs and every index read, a start"
-    stop_web "$REH_WEB" flip
+    stop_web "$REH_WEB" flip "$EV/f5s_stop_state.json"
     RUN_ARGS=()
     [ -n "$INT_RUN" ] && RUN_ARGS+=(--run "$INT_RUN")
     [ -n "$ML_RUN" ] && RUN_ARGS+=(--run "$ML_RUN")
     probe_offline duckdb-facts --db /app/data/analytics.duckdb --gate /app/data/alert-gate-web.json \
         ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} > "$EV/d_pre.json" 2>>"$LOG_DIR/probe.err" || true
-    docker start "$REH_WEB" >/dev/null
+    start_stopped "$REH_WEB"
     if wait_health "$REH_WEB" "$HEALTH_TIMEOUT"; then
         sleep 5
         wprobe snapshot > "$EV/flip_snap_r1.json" 2>/dev/null || true
         save_log "$REH_WEB" flip
-        restart_record "$EV/flip_snap_r1.json" graceful "$EV/p6_restart1.json"
+        restart_record "$EV/flip_snap_r1.json" "$EV/p6_restart1.json" "$EV/f5s_stop_state.json"
     fi
+
+    # ─── F5w: rows written after that checkpoint, for D1 ─────────────────────
+    #
+    # A kill can cost only what reached DuckDB after the last checkpoint. One
+    # integrity run is written here, into the DQ journal the defect bites —
+    # nothing the product runs at start touches that table again — and F6
+    # lands the fixture's fourth version, an order and its lines, whose table
+    # carries four of the composite indexes. F7 reads them after the kill
+    # with the product's reader; the end deletes them through every index.
+    # The run must be above every run F5s's checkpoint holds: F4's two, and
+    # the newest the read there found, whatever the live API answers now.
+    say "F5w: one integrity run written after F5s's checkpoint (D1)"
+    WIN_RUN="$(window_run "$(max_int "$(json_field "$EV/d_pre.json" max_dq_run_id)" "$INT_RUN" "$ML_RUN")")"
+    [ -n "$WIN_RUN" ] || say "F5w: no integrity run was written after the checkpoint"
 
     # ─── F6: kill inside the derivation, start again (P3, restart 2 of P6) ───
     say "F6: holding Gold's TRUNCATE, then killing reh-web inside the derivation"
@@ -1007,6 +1160,8 @@ if [ "$FLIPPED" = 1 ]; then
     probe_keycrm_dir fixture --id "$FIX_ID" --version 4 --out /keycrm ${PRODUCT_ID:+--product-id "$PRODUCT_ID"} \
         > "$EV/fixture_v4.json" 2>>"$LOG_DIR/probe.err"
     V4_STATUS="$(json_field "$EV/fixture_v4.json" status_id)"
+    printf '{"run_id": %s, "order_id": %s, "order_status": %s}\n' \
+        "${WIN_RUN:-null}" "$FIX_ID" "${V4_STATUS:-null}" > "$EV/d1_window.json"
     BLOCKED=""
     deadline=$((SECONDS + LAND_TIMEOUT + DERIVE_TIMEOUT))
     while [ "$SECONDS" -lt "$deadline" ]; do
@@ -1016,29 +1171,38 @@ if [ "$FLIPPED" = 1 ]; then
         [ -n "$BLOCKED" ] && break
         sleep 0.5
     done
+    # KILLED is what the container shows after the kill, not that it was
+    # sent. It only spares the reads that mean nothing without a kill: P3
+    # and D1 read the same state out of p3.json and decide for themselves.
+    KILLED=0
+    echo null > "$EV/f6_kill_state.json"
     if [ -n "$BLOCKED" ]; then
         AT_KILL="$(pgq "SELECT requested || '|' || built FROM meta.derivation_signal WHERE layer = 'warehouse'")"
         JK="$(pgq "SELECT COALESCE(max(id), 0) FROM meta.derivation_runs")"
         SILVER_AT_KILL="$(pgq "SELECT status_id FROM silver.orders WHERE id = $FIX_ID")"
-        docker kill "$REH_WEB" >/dev/null
-        say "F6: killed with requested|built $AT_KILL; Silver at status $SILVER_AT_KILL"
+        if kill_web "$REH_WEB" "$EV/f6_kill_state.json"; then
+            KILLED=1
+            say "F6: killed with requested|built $AT_KILL; Silver at status $SILVER_AT_KILL"
+        else
+            say "F6: reh-web was not left SIGKILLed: $(cat "$EV/f6_kill_state.json")"
+        fi
     else
-        say "F6: the blocked TRUNCATE was not seen"
+        say "F6: the blocked TRUNCATE was not seen; nothing was killed"
     fi
     pgq "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity
           WHERE application_name = 'reh-lock' OR usename = 'ks_app'" >/dev/null
     save_log "$REH_WEB" flip
-    if [ -n "$BLOCKED" ]; then
+    if [ "$KILLED" = 1 ]; then
         AFTER_KILL="$(pgq "SELECT json_build_object('requested', requested, 'built', built,
                     'rows_above', (SELECT count(*) FROM meta.derivation_runs WHERE id > $JK))
                 FROM meta.derivation_signal WHERE layer = 'warehouse'")"
     fi
-    docker start "$REH_WEB" >/dev/null
+    start_stopped "$REH_WEB"
     FIRST=""
     if wait_health "$REH_WEB" "$HEALTH_TIMEOUT"; then
         sleep 5
         wprobe snapshot > "$EV/flip_snap_r2.json" 2>/dev/null || true
-        if [ -n "$BLOCKED" ]; then
+        if [ "$KILLED" = 1 ]; then
             FIRST="$(poll_pg "SELECT json_build_object('id', id, 'trigger', trigger,
                         'requested_seen', requested_seen, 'validation_passed', validation_passed,
                         'error', error)
@@ -1046,39 +1210,45 @@ if [ "$FLIPPED" = 1 ]; then
                     ORDER BY id LIMIT 1" $((FLOOR_S + 180)) 3 || true)"
         fi
         save_log "$REH_WEB" flip
-        restart_record "$EV/flip_snap_r2.json" kill "$EV/p6_restart2.json"
+        # Recorded only if the container shows a stop and a start, and with
+        # the kill's state: a kill that did not land is no restart after one.
+        restart_record "$EV/flip_snap_r2.json" "$EV/p6_restart2.json" "$EV/f6_kill_state.json"
     fi
     if [ -n "$BLOCKED" ]; then
         BUILT_AFTER="$(pgq "SELECT built FROM meta.derivation_signal WHERE layer = 'warehouse'")"
         silver_version=null
         [ "$SILVER_AT_KILL" = "$V4_STATUS" ] && silver_version=4
-        printf '{"seen_blocked": true, "requested": %s, "built": %s, "silver_version": %s, "after_kill": %s, "first_after_restart": %s, "built_after": %s}\n' \
-            "${AT_KILL%%|*}" "${AT_KILL##*|}" "$silver_version" "${AFTER_KILL:-null}" "${FIRST:-null}" "${BUILT_AFTER:-null}" \
-            > "$EV/p3.json"
+        p3_record "$EV/p3.json" "$EV/f6_kill_state.json" "${AT_KILL%%|*}" "${AT_KILL##*|}" \
+            "$silver_version" "${AFTER_KILL:-}" "${FIRST:-}" "${BUILT_AFTER:-}"
     else
-        echo '{"seen_blocked": false, "why": "no TRUNCATE gold.daily_revenue waited on the lock in time"}' > "$EV/p3.json"
+        echo '{"seen_blocked": false, "stop": null, "why": "no TRUNCATE gold.daily_revenue waited on the lock in time"}' > "$EV/p3.json"
     fi
 
     # ─── F7: stop, read DuckDB, start again (P2, D1, restart 3 of P6) ────────
     #
     # The read after the kill: P2's frozen state, P6's gate file, and D1's —
-    # the same runs F5s read, and every index swept again.
+    # the window's run through the product's reader, the window's rows by a
+    # scan with every index on their tables, and every index swept again.
+    # D1 needs this stop to be a graceful one: its close is the checkpoint
+    # that writes what the kill cost, and a read after any other stop sees
+    # the rows the WAL still holds.
     say "F7: a graceful stop, the DuckDB copy read after the kill, and a third start"
     F7_STOP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '{"runs_ok": %s}\n' "$(pgq "SELECT count(*) FROM meta.derivation_runs WHERE id > $N0 AND error IS NULL")" > "$EV/p2_pg.json"
-    stop_web "$REH_WEB" flip
+    stop_web "$REH_WEB" flip "$EV/f7_stop_state.json"
     probe_offline duckdb-facts --db /app/data/analytics.duckdb --gate /app/data/alert-gate-web.json \
-        ${RUN_ARGS[@]+"${RUN_ARGS[@]}"} > "$EV/d1.json" 2>>"$LOG_DIR/probe.err" || true
+        --window-order "$FIX_ID" ${WIN_RUN:+--window-run "$WIN_RUN"} \
+        > "$EV/d1.json" 2>>"$LOG_DIR/probe.err" || true
     printf '{"refreshing": %s, "sync_ticks": %s}\n' \
         "$(log_count "$LOG_DIR/flip.log" 'Warehouse dirty — refreshing')" \
         "$(docker logs --since "$F1_START" --until "$F7_STOP" "$REH_KEYCRM" 2>&1 | grep -cF 'REH-KEYCRM GET /v1/order?' || true)" \
         > "$EV/p2_log.json"
-    docker start "$REH_WEB" >/dev/null
+    start_stopped "$REH_WEB"
     if wait_health "$REH_WEB" "$HEALTH_TIMEOUT"; then
         sleep 30
         wprobe snapshot > "$EV/flip_snap_r3.json" 2>/dev/null || true
         save_log "$REH_WEB" flip
-        restart_record "$EV/flip_snap_r3.json" graceful "$EV/p6_restart3.json"
+        restart_record "$EV/flip_snap_r3.json" "$EV/p6_restart3.json" "$EV/f7_stop_state.json"
     fi
     BASE_URL="$(wprobe keycrm-url 2>/dev/null || true)"
     stop_web "$REH_WEB" flip
@@ -1112,6 +1282,20 @@ if [ "$FLIPPED" = 1 ]; then
     fi
     stop_web "$REH_WEB" back
     probe_offline duckdb-facts --db /app/data/analytics.duckdb > "$EV/dz.json" 2>>"$LOG_DIR/probe.err" || true
+    # D1's last question, and the copy's last use: the window's rows deleted
+    # through every index on their tables. Composite indexes serve no read
+    # in DuckDB 1.5.5 and answer only a write — a DELETE takes each row out
+    # of each index at commit, and an entry the kill cost is DuckDB's FATAL
+    # "Failed to delete all rows from index". The DELETE finds its rows by
+    # the id's text, which no index serves: through an index that lost them
+    # it would find none and report success. It changes the copy, so it runs
+    # on one about to be removed, and --keep keeps the copy as it is instead.
+    if [ "$KEEP" = 1 ]; then
+        echo '{"skipped": "--keep leaves the copy as it is"}' > "$EV/d1_delete.json"
+    elif [ "$KILLED" = 1 ]; then
+        probe_offline window-delete --db /app/data/analytics.duckdb --window-order "$FIX_ID" \
+            ${WIN_RUN:+--window-run "$WIN_RUN"} > "$EV/d1_delete.json" 2>>"$LOG_DIR/probe.err" || true
+    fi
     printf '{"oom": %s, "start": %s, "final": %s, "log": {"way_back": %s, "emptied": %s, "full_tick": %s, "released": %s}}\n' \
         "$OOM" "$START_SNAP" "$FINAL_SNAP" \
         "$(log_count "$LOG_DIR/back.log" 'warehouse writer back to duckdb from postgres')" \
