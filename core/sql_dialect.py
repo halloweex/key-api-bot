@@ -1824,3 +1824,48 @@ def inventory_view_selects(dialect: Dialect) -> tuple[tuple[str, str], ...]:
         )
         for name, select in _INVENTORY_VIEWS
     )
+
+
+# ─── The managers' order statistics, one body (chain 5) ─────────────────────
+#
+# `first_order_date`, `last_order_date` and `order_count`, recomputed from the
+# orders. DuckDB's `update_manager_stats` ran this with `DATE(ordered_at)`,
+# which casts a TIMESTAMPTZ in the PROCESS's timezone: right in production only
+# because the web container runs `TZ=Europe/Kyiv` (docker-compose.yml), a day
+# early on a UTC laptop or in CI, and a day early in Postgres, whose session is
+# UTC — for every order between 00:00 and 03:00 Kyiv. Measured on a throwaway
+# DuckDB 1.5.5 and PostgreSQL 17.2 (chain 5's design, M3): orders at 22:30 UTC
+# on 28.02 and 21:15 UTC on 31.07 gave 02-28 and 07-31 under UTC, 03-01 and
+# 08-01 under Kyiv.
+#
+# So the date is spelled the way Silver spells it — `Dialect.kyiv_date`, the
+# zone named in the statement — and production's answer does not move: under
+# its `TZ=Europe/Kyiv` the two spellings are the same date. One text for both
+# engines, so the chain's Postgres writer and DuckDB's cannot come to count a
+# manager's orders differently. Silver reads none of these three columns, which
+# is why neither writer raises the derivation signal for them
+# (`core/pg_managers_write.py`).
+_MANAGER_STATS_BODY = """
+    UPDATE {managers} m
+    SET
+        first_order_date = stats.first_order,
+        last_order_date = stats.last_order,
+        order_count = stats.order_cnt
+    FROM (
+        SELECT
+            manager_id,
+            MIN({ordered_on}) AS first_order,
+            MAX({ordered_on}) AS last_order,
+            COUNT(*) AS order_cnt
+        FROM {orders}
+        WHERE manager_id IS NOT NULL
+        GROUP BY manager_id
+    ) stats
+    WHERE m.id = stats.manager_id
+"""
+
+
+def manager_stats_sql(dialect: Dialect) -> str:
+    """The managers' order statistics for one engine — see the body above."""
+    return render_tables(_MANAGER_STATS_BODY, dialect,
+                         ordered_on=dialect.kyiv_date("ordered_at"))

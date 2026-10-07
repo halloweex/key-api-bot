@@ -3103,11 +3103,17 @@ class DuckDBStore(
         if not managers:
             return 0
 
+        # One reading of the payload for both stores (`core.landing_rows`):
+        # the name's fallbacks and the retail seed are spelled there once.
+        from core.landing_rows import manager_rows
+
+        rows = manager_rows(managers)
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
                 count = 0
-                for mgr in managers:
+                for row in rows:
                     conn.execute("""
                         INSERT INTO managers
                         (id, name, email, status, is_retail, synced_at)
@@ -3119,13 +3125,7 @@ class DuckDBStore(
                             -- EXCLUDED, not CURRENT_TIMESTAMP: DuckDB binds a
                             -- bare name on this side as a column reference.
                             synced_at = EXCLUDED.synced_at
-                    """, [
-                        mgr.get("id"),
-                        mgr.get("name") or mgr.get("full_name", "Unknown"),
-                        mgr.get("email"),
-                        mgr.get("status"),  # 'active', 'blocked', 'pending'
-                        mgr.get("id") in RETAIL_MANAGER_IDS,  # seed for new rows only
-                    ])
+                    """, list(row))
                     count += 1
 
                 conn.execute("COMMIT")
@@ -3364,26 +3364,13 @@ class DuckDBStore(
         Returns:
             Number of managers updated
         """
+        from core.sql_dialect import DUCKDB, manager_stats_sql
+
         async with self.connection() as conn:
-            # Update stats for managers who have orders
-            result = conn.execute("""
-                UPDATE managers m
-                SET
-                    first_order_date = stats.first_order,
-                    last_order_date = stats.last_order,
-                    order_count = stats.order_cnt
-                FROM (
-                    SELECT
-                        manager_id,
-                        MIN(DATE(ordered_at)) as first_order,
-                        MAX(DATE(ordered_at)) as last_order,
-                        COUNT(*) as order_cnt
-                    FROM orders
-                    WHERE manager_id IS NOT NULL
-                    GROUP BY manager_id
-                ) stats
-                WHERE m.id = stats.manager_id
-            """)
+            # Update stats for managers who have orders. The one body both
+            # engines run, with the order's date spelled in Kyiv rather than
+            # taken from the process's timezone (`core.sql_dialect`).
+            result = conn.execute(manager_stats_sql(DUCKDB))
             count = result.fetchone()
             logger.info(f"Updated manager statistics")
             updated = count[0] if count else 0

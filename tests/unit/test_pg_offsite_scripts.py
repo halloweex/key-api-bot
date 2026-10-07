@@ -598,6 +598,9 @@ LIVE = {
     "FAKE_LIVE_BRONZE_BUYER_CONTACTS": 34379,
     "FAKE_LIVE_APP_BUYER_GENDER": 20656,
 }
+# Chain 5's two, synthetic: a few dozen managers and their intervals.
+LIVE.update({"FAKE_LIVE_BRONZE_MANAGERS": 41,
+             "FAKE_LIVE_APP_MANAGER_CLASSIFICATIONS": 44})
 RESTORED = {
     "FAKE_RESTORED_APP_ORDER_VERSIONS": 52400,
     "FAKE_RESTORED_APP_MANUAL_EXPENSES": 0,
@@ -607,6 +610,8 @@ RESTORED = {
     "FAKE_RESTORED_BRONZE_BUYER_CONTACTS": 34350,
     "FAKE_RESTORED_APP_BUYER_GENDER": 20640,
 }
+RESTORED.update({"FAKE_RESTORED_BRONZE_MANAGERS": 40,
+                 "FAKE_RESTORED_APP_MANAGER_CLASSIFICATIONS": 43})
 
 
 class TestTheRemoteDrill:
@@ -718,6 +723,22 @@ class TestTheRemoteDrill:
         restored = dict(RESTORED, FAKE_RESTORED_BRONZE_BUYER_CONTACTS=34400)
         run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **restored)
         assert run.code == 0 and "ROWS MISSING FROM LIVE" not in run.out, run.out
+
+    def test_chain_5s_tables_are_counted_and_only_grow(self, world):
+        """Once chain 5 writes them this dump is the only backup of a
+        classification made after the flip, and neither table's key set
+        shrinks under its writer — so more in the dump than in live is a loss.
+        Mutation: drop the two lines from DRILL_TABLES."""
+        self._shipped(world)
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **RESTORED)
+        assert run.code == 0, run.out
+        for table in ("bronze.managers", "app.manager_classifications"):
+            assert table in run.out, run.out
+
+        for var in ("BRONZE_MANAGERS", "APP_MANAGER_CLASSIFICATIONS"):
+            restored = dict(RESTORED, **{f"FAKE_RESTORED_{var}": 5000})
+            run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **restored)
+            assert run.code != 0 and "ROWS MISSING FROM LIVE" in run.out, (var, run.out)
 
     def test_a_table_that_may_shrink_still_has_a_margin(self, world):
         """`either` relaxes the direction, not the size: a restored copy far

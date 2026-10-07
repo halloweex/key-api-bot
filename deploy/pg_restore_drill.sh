@@ -115,6 +115,15 @@ DRILL_TABLES=(
     "bronze.buyer_contacts:either"
     "app.buyer_gender:grows"
 )
+# Chain 5's two (KS_WRITE_MANAGERS). Nothing deletes a manager, and the chain's
+# writer replaces a same-day classification only by deleting it and inserting
+# its replacement in one transaction, so neither table's key set shrinks under
+# it. Once the chain writes them this dump is the only backup of a
+# classification an admin made after the flip.
+DRILL_TABLES+=(
+    "bronze.managers:grows"
+    "app.manager_classifications:grows"
+)
 # Absolute floor first, because two of these tables are small and a percentage
 # of a small number is not a margin. app.order_versions gains ~100 rows a day
 # and app.stock_movements a few hundred, so a day of lag is well inside both.

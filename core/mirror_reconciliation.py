@@ -4650,3 +4650,15 @@ async def reconcile_buyers(
             ),
         ))
     return issues
+
+
+# Chain 5's two tables, as the daily comparison already describes them — the
+# replicated pair in `MIRRORED_TABLES`, looked up rather than hoisted into
+# constants of their own, so the literal above stays the one place they are
+# spelled. `core.chain_transfer.chain_specs` reads this as its fourth source,
+# beside `core.pg_replication.REPLICATED_SHAPES`, the shipping shape.
+from core.pg_replication import MANAGER_UNIT as _MANAGER_UNIT  # noqa: E402
+
+REPLICATED_TABLES: Tuple[MirroredTable, ...] = tuple(
+    spec for spec in MIRRORED_TABLES if spec.pg_table in _MANAGER_UNIT
+)
