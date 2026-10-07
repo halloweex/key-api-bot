@@ -532,12 +532,31 @@ def _window_targets(run_id: Optional[int], order_id: Optional[int]) -> List[Tupl
             if ids[which] is not None]
 
 
+def _held(con: Any, table: str, where: str, value: str, cols: List[str],
+          known: Iterable[str]) -> Optional[int]:
+    """How many of the window's rows in `table` an index on `cols` holds: those
+    whose every key column is non-NULL. DuckDB 1.5.5 keeps no index entry for a
+    row with a NULL in any key column — measured by losing every entry across a
+    kill and deleting each row: only a row with all of them set is the FATAL
+    (`test_an_index_holds_no_row_with_a_null_key_duckdb_1_5_5`) — so a DELETE
+    asks an index only of the rows it holds. None when a key is not a column
+    of the table (an expression index), which the caller cannot count."""
+    known = set(known)
+    if not cols or any(c not in known for c in cols):
+        return None
+    keyed = " AND ".join(f"{_ident(c)} IS NOT NULL" for c in cols)
+    return con.execute(f"SELECT COALESCE(count_if({where} AND {keyed}), 0) FROM {_ident(table)}",
+                       [value]).fetchone()[0]
+
+
 def window_rows(con: Any, run_id: Optional[int], order_id: Optional[int]) -> Dict[str, Any]:
     """D1's window on the copy after the kill: the rows of each window table
-    by a scan, the indexes on that table — every one, composite included,
-    which the end's DELETE will make give each row up — and the window's run
-    read as P4a's and P5's are, scan beside the product's reader. Never
-    raises: a read that failed is reported by its class, judged UNKNOWN."""
+    by a scan, the indexes on that table with how many of those rows each
+    holds (`held`) — the end's DELETE makes an index give up only the rows it
+    holds, and none holds a row with a NULL key: the fixture order has no
+    buyer and no manager — and the window's run read as P4a's and P5's are,
+    scan beside the product's reader. Never raises: a read that failed is
+    reported by its class, judged UNKNOWN."""
     try:
         tables: Dict[str, Any] = {}
         for table, col, value in _window_targets(run_id, order_id):
@@ -548,8 +567,15 @@ def window_rows(con: Any, run_id: Optional[int], order_id: Optional[int]) -> Dic
                 "SELECT index_name, expressions FROM duckdb_indexes() "
                 "WHERE schema_name = 'main' AND table_name = ? ORDER BY index_name",
                 [table]).fetchall()
-            tables[table] = {"rows": rows, "indexes": [
-                {"index": name, "columns": len(_index_columns(expr))} for name, expr in indexes]}
+            known = [r[0] for r in con.execute(
+                "SELECT column_name FROM duckdb_columns() "
+                "WHERE schema_name = 'main' AND table_name = ?", [table]).fetchall()]
+            entries = []
+            for name, expr in indexes:
+                cols = _index_columns(expr)
+                entries.append({"index": name, "columns": len(cols),
+                                "held": _held(con, table, where, str(value), cols, known)})
+            tables[table] = {"rows": rows, "indexes": entries}
         status = None
         if order_id is not None:
             row = con.execute(f"SELECT status_id FROM orders WHERE {_WINDOW_WHERE.format(col='id')}",
@@ -591,8 +617,9 @@ print(json.dumps(out))
 
 def window_delete(db: str, run_id: Optional[int], order_id: Optional[int]) -> Dict[str, Any]:
     """D1's last question: the window's rows deleted from each window table,
-    found by a scan, so every index on the table — composite ones, which no
-    read can ask, included — must give each row up at commit. An entry the
+    found by a scan, so every index on the table that holds them — composite
+    ones, which no read can ask, included — must give each row up at commit
+    (an index holds no row with a NULL key, `window_rows`). An entry the
     kill cost is DuckDB's FATAL "Failed to delete all rows from index"; a
     DELETE that reports fewer rows than the scan found, or leaves any, is a
     loss too. It changes the copy, so it runs only on one about to be removed."""
@@ -1281,7 +1308,16 @@ def judge_p6(ev: Mapping[str, Any]) -> Verdict:
 
 
 def judge_p8(ev: Mapping[str, Any]) -> Verdict:
-    """The way back."""
+    """The way back.
+
+    From the stop a deploy makes, to the stop after it: both are read from
+    the container's state (`stop_kind`), as P6 reads its restarts. In
+    production the way back is a deploy that unsets the variable, and its
+    stop of the flipped web gets compose's grace; one that outran the grace
+    here was the SIGKILL a deploy would have sent, and the way back then
+    started from a kill — said, and UNKNOWN until somebody has read why web
+    did not stop in time, as is the way back's own last stop, before the
+    end's read of the copy. A stop not recorded is UNKNOWN too."""
     if not ev.get("flipped"):
         return UNKNOWN, "no flip"
     if ev.get("oom"):
@@ -1334,8 +1370,13 @@ def judge_p8(ev: Mapping[str, Any]) -> Verdict:
             bad.append(f"silver_orders {dk.get('silver_orders')} != orders {dk.get('orders')}")
     if bad:
         return FAIL, "; ".join(bad)
-    if unknown:
-        return UNKNOWN, unknown
+    unread = [unknown] if unknown else []
+    for what, state in (("the stop the way back started from", ev.get("pre_stop")),
+                        ("the way back's own stop", ev.get("stop"))):
+        if stop_kind(state) != "graceful":
+            unread.append(f"{what}: {_describe_stop(state)}")
+    if unread:
+        return UNKNOWN, "; ".join(unread)
     return PASS, (f"held with warehouse_dirty=full{' and reclassify_needed' if want_reclassify else ''}; "
                   f"one full tick (dirty_flag) validated and released; writer duckdb; "
                   f"silver_orders={dk.get('silver_orders')} == orders, utm rows {dk.get('silver_order_utm')}")
@@ -1416,26 +1457,33 @@ def _window_reads(ev: Mapping[str, Any], pre: Mapping[str, Any], post: Mapping[s
 
 
 def _window_deletes(ev: Mapping[str, Any], post: Mapping[str, Any],
-                    bad: List[str], unknown: List[str]) -> Tuple[int, int]:
+                    bad: List[str], unknown: List[str]) -> Dict[str, Any]:
     """The end's DELETE of the window's rows: every index on each window
-    table, composite included, giving each row up. `(tables, composite)`
-    asked — a table whose DELETE found no row asked none of its indexes, and
-    is not counted."""
+    table that holds them, composite included, giving each row up. What was
+    asked, counted by index: a table whose DELETE found no row asked none of
+    its indexes, and an index holds no row with a NULL key (`window_rows`'
+    `held`), so one holding none of the window's rows was not asked whatever
+    its table — the fixture order, with no buyer and no manager, is in two of
+    `orders`' four composite indexes. An index whose holding was not read
+    cannot be counted either way."""
+    asked: Dict[str, Any] = {"tables": 0, "indexes": 0, "composite": 0, "not_held": []}
     done = ev.get("delete")
     if not isinstance(done, Mapping):
         unknown.append("the window's rows were not deleted at the end, so no composite index "
                        "was asked")
-        return 0, 0
+        return asked
     if done.get("skipped"):
         unknown.append(f"the window's rows were not deleted ({done.get('skipped')}), so no "
                        f"composite index was asked")
-        return 0, 0
+        return asked
     indexes = {t: v.get("indexes") or [] for t, v in
                (((post.get("window") or {}).get("tables")) or {}).items() if isinstance(v, Mapping)}
-    asked = composite = answered = 0
+    answered = 0
+    unread: List[str] = []
     for d in done.get("deletes") or []:
         table = d.get("table")
-        names = _fmt(i.get("index") for i in indexes.get(table, []))
+        # The suspects of a loss: an index holding none of the rows gave none up.
+        names = _fmt(i.get("index") for i in indexes.get(table, []) if i.get("held") != 0)
         if d.get("fatal"):
             bad.append(f"deleting the window's rows from {table} is DuckDB's FATAL "
                        f"({d.get('fatal')}): an index on it lost them — one of [{names}]")
@@ -1448,14 +1496,25 @@ def _window_deletes(ev: Mapping[str, Any], post: Mapping[str, Any],
         else:
             answered += 1
             if d["scanned"] > 0:
-                asked += 1
-                composite += sum(1 for i in indexes.get(table, []) if (i.get("columns") or 0) > 1)
+                asked["tables"] += 1
+                for i in indexes.get(table, []):
+                    held = i.get("held")
+                    if not isinstance(held, int):
+                        unread.append(f"{table}.{i.get('index')}")
+                    elif held > 0:
+                        asked["indexes"] += 1
+                        asked["composite"] += (i.get("columns") or 0) > 1
+                    else:
+                        asked["not_held"].append(f"{table}.{i.get('index')}")
+    if unread:
+        unknown.append(f"which of [{_fmt(unread)}] hold the window's rows was not read, so "
+                       f"whether the end's DELETE asked them is not known")
     if not (done.get("deletes") or []):
         unknown.append("the end deleted no window table")
-    elif answered == len(done["deletes"]) and not asked:
+    elif answered == len(done["deletes"]) and not asked["tables"]:
         unknown.append("the end's DELETE found none of the window's rows, so no index on their "
                        "tables was asked")
-    return asked, composite
+    return asked
 
 
 def judge_d1(ev: Mapping[str, Any]) -> Verdict:
@@ -1468,9 +1527,13 @@ def judge_d1(ev: Mapping[str, Any]) -> Verdict:
     those: F5w's integrity run and F6's fourth version of the fixture order
     (`window_rows`). After the kill, the run read by the product's reader as
     the dashboard and the digest read it; at the end, the window's rows
-    deleted through every index on their tables (`window_delete`), the one
-    question a composite index answers. And every single-column index swept
-    whole at both stops, for whatever else the window wrote.
+    deleted through every index on their tables that holds them
+    (`window_delete`), the one question a composite index answers. An index
+    holds no row with a NULL key, and the fixture order has no buyer and no
+    manager, so the buyer and manager indexes on `orders` — two of its four
+    composite ones — are not asked, and the PASS names them. And every
+    single-column index swept whole at both stops, for whatever else the
+    window wrote.
 
     The read after the kill means something only after the checkpoint that
     follows the restart: a read-only open sees every row the WAL holds,
@@ -1519,7 +1582,7 @@ def judge_d1(ev: Mapping[str, Any]) -> Verdict:
             why = f" (phase 0's stop: {_describe_stop(ev.get('p0_stop'))})"
         bad.append(f"{when}, read through their indexes: {'; '.join(losses)}{why}")
     seen = _window_reads(ev, pre, post, defect, unknown)
-    tables, composite = _window_deletes(ev, post, defect, unknown)
+    asked = _window_deletes(ev, post, defect, unknown)
     f7 = stop_kind(ev.get("f7_stop"))
     if f7 != "graceful":
         unknown.append(f"F7's stop was no checkpoint ({_describe_stop(ev.get('f7_stop'))}): the "
@@ -1534,13 +1597,17 @@ def judge_d1(ev: Mapping[str, Any]) -> Verdict:
     elsewhere = sum(1 for s in skipped if s.get("why") == "composite"
                     and str(s.get("index")).split(".")[0] not in window_tables)
     rest = sum(1 for s in skipped if s.get("why") != "composite")
+    not_held = asked["not_held"]
+    nulls = (f"{len(not_held)} indexes on those tables that hold none of them, a NULL key in "
+             f"each [{_fmt(not_held)}]; " if not_held else "")
     return PASS, (f"nothing lost of what D1 asks after the kill: run #{seen['run']} "
                   f"({seen['findings']} findings) read whole by fetch_run_issues; its rows and "
-                  f"order #{seen['order']}'s ({seen['lines']} lines) given up at the end by every "
-                  f"index on the {tables} tables holding them, {composite} composite among them; "
-                  f"{swept} single-column indexes answer for every row at both stops. Not asked: "
-                  f"{elsewhere} composite indexes on tables outside the window, {rest} on an "
-                  f"empty or one-valued column")
+                  f"order #{seen['order']}'s ({seen['lines']} lines) given up at the end by the "
+                  f"{asked['indexes']} indexes holding them on the {asked['tables']} tables they "
+                  f"are in, {asked['composite']} composite among them; {swept} single-column "
+                  f"indexes answer for every row at both stops. Not asked: {nulls}{elsewhere} "
+                  f"composite indexes on tables outside the window, {rest} on an empty or "
+                  f"one-valued column")
 
 
 def judge_k0(ev: Mapping[str, Any]) -> Verdict:
@@ -1719,7 +1786,9 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
                # The kill P3 records, which the restart after it must show.
                "kill_stop": p3.get("stop") if p3.get("seen_blocked") is True else None},
         "P8": {**p8, "flipped": is_flipped, "dk": dz,
-               "r0": ((d0 or {}).get("refreshes") or {}).get("max_refreshed_at")},
+               "r0": ((d0 or {}).get("refreshes") or {}).get("max_refreshed_at"),
+               # The stop the way back starts from, and its own last one.
+               "pre_stop": L("b_pre_stop_state.json"), "stop": L("b_stop_state.json")},
         "D1": {"flipped": is_flipped, "seen_blocked": p3.get("seen_blocked") is True,
                "kill_stop": p3.get("stop"), "pre": d_pre, "post": d1,
                "f7_stop": L("f7_stop_state.json"), "p0_stop": L("p0_stop_state.json"),

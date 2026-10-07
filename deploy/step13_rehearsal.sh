@@ -20,12 +20,17 @@
 # plus D1 (what P3's kill cost DuckDB's indexes: the rows reh-web wrote after
 # the graceful stop before it — one integrity run and the fixture's fourth
 # version — read through the product's reader after the kill and deleted at
-# the end through every index on their tables, composite ones included, and
-# every single-column index swept at both stops; DuckDB 1.5.5 can lose index
-# entries across a SIGKILL, so P4 and P5 read their runs at that earlier
-# stop), K0 (KeyCRM never called) and Z0 (nothing else on the host moved).
-# Every graceful stop gets production's grace (STOP_GRACE_S), so it is the
-# stop a deploy makes, and one that outruns it is recorded as the kill it is.
+# the end through every index on their tables that holds them, and every
+# single-column index swept at both stops. An index holds no row with a NULL
+# key: the fixture has no buyer and no manager, so it is in two of the four
+# composite indexes on orders, and D1 names the ones it could not ask.
+# DuckDB 1.5.5 can lose index entries across a SIGKILL, so P4 and P5 read
+# their runs at that earlier stop), K0 (KeyCRM never called) and Z0 (nothing
+# else on the host moved).
+# Every stop of reh-web gets production's grace (STOP_GRACE_S), so it is the
+# stop a deploy makes, and records the container's state after it, so one
+# that outruns the grace is recorded as the kill it is: P6 and D1 read F5s's
+# and F7's, P8 the two around the way back.
 #
 # HOW IT STAYS AWAY FROM PRODUCTION
 #   - Its own containers only, every one named reh-*, on its own network
@@ -682,11 +687,12 @@ probe_keycrm_dir() {
 }
 
 stop_web() {
-    # $1 container, $2 log name, $3 (optional) a file for its state after
-    # the stop. Graceful within production's grace, so DuckDB is closed —
-    # and checkpointed — where a deploy would close it, and killed where a
-    # deploy would kill it. The state says which, with what was asked and
-    # how long the stop took.
+    # $1 container, $2 log name, $3 a file for its state after the stop —
+    # every stop of reh-web passes one (the seed's alone does not), and a
+    # test holds the script to it. Graceful within production's grace, so
+    # DuckDB is closed — and checkpointed — where a deploy would close it,
+    # and killed where a deploy would kill it. The state says which, with
+    # what was asked and how long the stop took.
     local was=false t0
     save_log "$1" "$2"
     running "$1" && was=true
@@ -1151,8 +1157,9 @@ if [ "$FLIPPED" = 1 ]; then
     # integrity run is written here, into the DQ journal the defect bites —
     # nothing the product runs at start touches that table again — and F6
     # lands the fixture's fourth version, an order and its lines, whose table
-    # carries four of the composite indexes. F7 reads them after the kill
-    # with the product's reader; the end deletes them through every index.
+    # carries four of the composite indexes — the order is in two of them,
+    # having no buyer and no manager. F7 reads them after the kill with the
+    # product's reader; the end deletes them through every index holding them.
     # The run must be above every run F5s's checkpoint holds: F4's two, and
     # the newest the read there found, whatever the live API answers now.
     say "F5w: one integrity run written after F5s's checkpoint (D1)"
@@ -1244,7 +1251,8 @@ if [ "$FLIPPED" = 1 ]; then
     #
     # The read after the kill: P2's frozen state, P6's gate file, and D1's —
     # the window's run through the product's reader, the window's rows by a
-    # scan with every index on their tables, and every index swept again.
+    # scan with every index on their tables and which of them hold the rows,
+    # and every index swept again.
     # D1 needs this stop to be a graceful one: its close is the checkpoint
     # that writes what the kill cost, and a read after any other stop sees
     # the rows the WAL still holds.
@@ -1267,7 +1275,10 @@ if [ "$FLIPPED" = 1 ]; then
         restart_record "$EV/flip_snap_r3.json" "$EV/p6_restart3.json" "$EV/f7_stop_state.json"
     fi
     BASE_URL="$(wprobe keycrm-url 2>/dev/null || true)"
-    stop_web "$REH_WEB" flip
+    # The stop the way back starts from: production's is the deploy that
+    # unsets the variable, and one that outruns its grace is a SIGKILL P8
+    # must say it started from.
+    stop_web "$REH_WEB" flip "$EV/b_pre_stop_state.json"
     docker rm -f -v "$REH_WEB" >/dev/null 2>&1 || true
 
     # ─── B: the way back (P8) ─────────────────────────────────────────────────
@@ -1296,10 +1307,11 @@ if [ "$FLIPPED" = 1 ]; then
     else
         oom_killed "$REH_WEB" && OOM=true
     fi
-    stop_web "$REH_WEB" back
+    stop_web "$REH_WEB" back "$EV/b_stop_state.json"
     probe_offline duckdb-facts --db /app/data/analytics.duckdb > "$EV/dz.json" 2>>"$LOG_DIR/probe.err" || true
     # D1's last question, and the copy's last use: the window's rows deleted
-    # through every index on their tables. Composite indexes serve no read
+    # through every index on their tables that holds them (none holds a row
+    # with a NULL key). Composite indexes serve no read
     # in DuckDB 1.5.5 and answer only a write — a DELETE takes each row out
     # of each index at commit, and an entry the kill cost is DuckDB's FATAL
     # "Failed to delete all rows from index". The DELETE finds its rows by
@@ -1322,7 +1334,7 @@ if [ "$FLIPPED" = 1 ]; then
 else
     say "F1: no flip — P2–P6 and P8 cannot be rehearsed; P7 and K0 still answer"
     BASE_URL="$(wprobe keycrm-url 2>/dev/null || true)"
-    stop_web "$REH_WEB" flip
+    stop_web "$REH_WEB" flip "$EV/f1_stop_state.json"
 fi
 
 # ─── Z: K0, Z0, the table ─────────────────────────────────────────────────────

@@ -678,8 +678,15 @@ SWEEP = {"swept": [{"index": "data_quality_issues.idx_dqi_run", "rows": 9, "miss
 WIN, FLOOR, FIX, V4 = 41, 32, 900500, 9
 
 
+# The fixture order has no buyer and no manager, and DuckDB keeps no index
+# entry for a row with a NULL key: these hold none of the window's rows.
+NULL_KEYED = ("idx_orders_buyer", "idx_orders_buyer_date", "idx_orders_manager",
+              "idx_orders_manager_date")
+
+
 def _indexes(*names):
-    return [{"index": n, "columns": 2 if n.endswith("_date") else 1} for n in names]
+    return [{"index": n, "columns": 2 if n.endswith("_date") else 1,
+             "held": 0 if n in NULL_KEYED else 1} for n in names]
 
 
 def window_read(**over):
@@ -731,15 +738,47 @@ def d1_ev(**over):
 def test_d1_passes_when_nothing_it_asks_was_lost():
     """The PASS says what was asked and what was not — never that the kill
     cost nothing at all: a table whose DELETE found no row asked none of its
-    indexes, and composite indexes outside the window were never asked.
-    Kills: "D1 counts a table the DELETE found empty as asked"."""
+    indexes, an index holding none of the window's rows (a NULL key) was not
+    asked whatever its table, and composite indexes outside the window were
+    never asked. The fixture order has no buyer and no manager, so of the
+    four composite indexes on `orders` the DELETE asks two — the reviewer's
+    reading of the 10-07 evidence, which this PASS once called "4 composite
+    among them".
+    Kills: "D1 counts a table the DELETE found empty as asked", "D1 counts
+    an index holding none of the window's rows as asked"."""
     verdict, detail = probe.judge_d1(d1_ev())
     assert verdict == PASS, detail
     assert f"run #{WIN} (2 findings)" in detail and f"order #{FIX}'s (1 lines)" in detail
-    assert "every index on the 4 tables holding them, 4 composite among them" in detail
+    assert ("given up at the end by the 10 indexes holding them on the 4 tables they are in, "
+            "2 composite among them") in detail
+    assert ("Not asked: 4 indexes on those tables that hold none of them, a NULL key in each "
+            "[orders.idx_orders_buyer,orders.idx_orders_buyer_date,orders.idx_orders_manager,"
+            "orders.idx_orders_manager_date]") in detail
     assert "2 single-column indexes" in detail
     assert "1 composite indexes on tables outside the window, 1 on an empty" in detail
-    assert "cost nothing" not in detail
+    assert "cost nothing" not in detail and "4 composite" not in detail
+
+
+def test_d1_without_which_indexes_hold_the_window_cannot_count_them():
+    """Evidence read before `held` existed — the 10-07 run's — says which
+    indexes a table has, not which of them hold its window row; counting all
+    of them is how the PASS claimed four composite indexes where the DELETE
+    asked two. An index whose holding was not read leaves the row UNKNOWN.
+    Kills: "an index whose holding was not read counts as asked"."""
+    ev = d1_ev()
+    tables = {t: {**v, "indexes": [{k: x for k, x in i.items() if k != "held"}
+                                   for i in v["indexes"]]}
+              for t, v in ev["post"]["window"]["tables"].items()}
+    ev["post"] = {**ev["post"], "window": window_read(tables=tables)}
+    verdict, detail = probe.judge_d1(ev)
+    assert verdict == UNKNOWN, detail
+    assert ("orders.idx_orders_buyer,orders.idx_orders_buyer_date,orders.idx_orders_manager,"
+            "orders.idx_orders_manager_date,orders.idx_orders_ordered_at,orders.idx_orders_source,"
+            "orders.idx_orders_source_date,orders.idx_orders_status,orders.idx_orders_status_date] "
+            "hold the window's rows was not read") in detail
+    assert detail.count("was not read") == 1, detail
+    # A table whose DELETE found nothing asked none of its indexes either way.
+    assert "data_quality_diffs" not in detail
 
 
 def test_d1_fails_on_an_index_the_kill_left_short():
@@ -830,6 +869,8 @@ def test_d1_fails_on_a_delete_an_index_could_not_follow():
         "fatal": fatal, "scanned": None, "deleted": None, "left": None})))
     assert verdict == FAIL and "from orders is DuckDB's FATAL" in detail
     assert "idx_orders_status_date" in detail
+    # An index holding none of the rows gave none up, so it is no suspect.
+    assert "idx_orders_buyer_date" not in detail
 
 
 def test_d1_fails_on_a_delete_that_said_ok_and_left_the_rows():
@@ -1109,7 +1150,8 @@ con.execute("INSERT INTO data_quality_runs (run_id, started_at, ended_at, as_of,
 con.execute("INSERT INTO data_quality_issues VALUES "
             "(?, 'pg_silver_missing_rows', 'silver.orders', 'WARN', 1, '[5]', NULL), "
             "(?, 'pg_twin_pairing', 'silver.orders', 'INFO', 1, '[]', '{}')", [rid, rid])
-con.execute("INSERT INTO orders VALUES (?, 1, 9, TIMESTAMP '2026-10-01 10:00:00')", [oid])
+# No buyer, as the fixture: no index on buyer_id holds the order.
+con.execute("INSERT INTO orders VALUES (?, 1, 9, TIMESTAMP '2026-10-01 10:00:00', NULL)", [oid])
 con.execute("INSERT INTO order_products VALUES (?, ?, 77)", [oid * 1000 + 1, oid])
 if sys.argv[4] == "kill":
     os.kill(os.getpid(), signal.SIGKILL)
@@ -1119,10 +1161,12 @@ con.close()
 
 def _window_copy(tmp_path, duckdb, *, kill):
     """A copy with production's DQ journal (its own migration) and an order
-    table whose one index is composite, with history checkpointed and then
-    D1's window — one run, one order with a line — written by a process
-    SIGKILLed before it closed (or closing cleanly), and a restart that
-    touched nothing and closed: F5w and F6, the kill, F7."""
+    table whose two indexes are composite — production's
+    `idx_orders_source_date` and `idx_orders_buyer_date` — with history
+    checkpointed and then D1's window — one run, one order with a line and,
+    as the fixture, no buyer — written by a process SIGKILLed before it
+    closed (or closing cleanly), and a restart that touched nothing and
+    closed: F5w and F6, the kill, F7."""
     import subprocess
     import sys
 
@@ -1136,8 +1180,9 @@ def _window_copy(tmp_path, duckdb, *, kill):
 
     migrations._m0023_data_quality_tables(_Store())
     con.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, source_id INTEGER, "
-                "status_id INTEGER, ordered_at TIMESTAMP)")
+                "status_id INTEGER, ordered_at TIMESTAMP, buyer_id INTEGER)")
     con.execute("CREATE INDEX idx_orders_source_date ON orders(source_id, ordered_at)")
+    con.execute("CREATE INDEX idx_orders_buyer_date ON orders(buyer_id, ordered_at)")
     con.execute("CREATE TABLE order_products (id BIGINT PRIMARY KEY, order_id INTEGER, "
                 "product_id INTEGER)")
     con.execute("CREATE INDEX idx_order_products_order ON order_products(order_id)")
@@ -1153,7 +1198,7 @@ def _window_copy(tmp_path, duckdb, *, kill):
     con.execute("INSERT INTO data_quality_issues SELECT r, 'pg_twin_pairing', 'silver.orders', "
                 "'INFO', 1, '[]', '{}' FROM range(1, 31) x(r)")
     con.execute("INSERT INTO orders SELECT r, 1 + r % 3, 1 + r % 4, "
-                "TIMESTAMP '2026-01-01' + to_minutes(r) FROM range(1, 3001) x(r)")
+                "TIMESTAMP '2026-01-01' + to_minutes(r), 1 + r % 50 FROM range(1, 3001) x(r)")
     con.execute("INSERT INTO order_products SELECT r * 1000 + 1, r, 7 FROM range(1, 3001) x(r)")
     con.close()
     proc = subprocess.run([sys.executable, "-c", _WINDOW_WRITER, db, str(WIN), str(FIX),
@@ -1169,11 +1214,14 @@ def test_the_window_is_asked_of_duckdb_itself(tmp_path, monkeypatch, kill):
     DuckDB 1.5.5 itself, judged as D1 judges them. On a clean file every
     index gives every window row up; across a SIGKILL the product's reader
     is blind to the run, and the DELETE of each table that holds the
-    window's rows is DuckDB's FATAL — the order's too, whose one index is
-    composite and which no read can ask.
+    window's rows is DuckDB's FATAL — the order's too, whose indexes are
+    composite and which no read can ask. The order has no buyer, so
+    `idx_orders_buyer_date` holds none of it and is not asked: the PASS
+    names it instead of counting it.
     Kills: "window_delete finds its rows through an index" (a DELETE that
     found nothing would report ok, and the FATAL asserted here would not
-    come), and the script's flags meeting nothing in the probe."""
+    come), "window_rows counts a NULL-keyed row as held", and the script's
+    flags meeting nothing in the probe."""
     duckdb = pytest.importorskip("duckdb")
     monkeypatch.setattr(probe, "APP_DIR", str(REPO))
     db = _window_copy(tmp_path, duckdb, kill=kill)
@@ -1185,7 +1233,9 @@ def test_the_window_is_asked_of_duckdb_itself(tmp_path, monkeypatch, kill):
         "data_quality_issues": 2, "data_quality_diffs": 0, "data_quality_runs": 1,
         "order_products": 1, "orders": 1}
     assert window["order_status"] == V4 and facts["max_dq_run_id"] == WIN
-    assert [i["columns"] for i in window["tables"]["orders"]["indexes"]] == [2]
+    assert window["tables"]["orders"]["indexes"] == [
+        {"index": "idx_orders_buyer_date", "columns": 2, "held": 0},
+        {"index": "idx_orders_source_date", "columns": 2, "held": 1}]
     done = probe.window_delete(db, WIN, FIX)
     by_table = {d["table"]: d for d in done["deletes"]}
     ev = d1_ev(post={**DUCK1, "indexes": SWEEP, "window": window}, delete=done)
@@ -1195,6 +1245,8 @@ def test_the_window_is_asked_of_duckdb_itself(tmp_path, monkeypatch, kill):
         assert all(d.get("deleted") == d.get("scanned") and d.get("left") == 0
                    for d in done["deletes"]), done
         assert verdict == PASS, detail
+        assert "1 composite among them" in detail
+        assert "a NULL key in each [orders.idx_orders_buyer_date]" in detail
     else:
         assert window["run"]["reader"] == {"names": []}
         for table in ("data_quality_issues", "data_quality_runs", "order_products", "orders"):
@@ -1205,6 +1257,82 @@ def test_the_window_is_asked_of_duckdb_itself(tmp_path, monkeypatch, kill):
         assert verdict == FAIL and "from orders is DuckDB's FATAL" in detail
         assert "fetch_run_issues returns 0 of the 2 findings" in detail
         assert detail.startswith(probe.KNOWN_DEFECT), detail
+
+
+_KILLED_PAIR = """
+import os, signal, sys
+import duckdb
+con = duckdb.connect(sys.argv[1])
+con.execute("INSERT INTO orders VALUES (900401, NULL, NULL, 9, TIMESTAMP '2026-10-07 12:46:00')")
+con.execute("INSERT INTO orders VALUES (900402, 7, NULL, 9, TIMESTAMP '2026-10-07 12:46:00')")
+con.execute("INSERT INTO orders VALUES (900403, 7, 3, 9, NULL)")
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+@pytest.mark.parametrize("cols", [("buyer_id",), ("buyer_id", "ordered_at"),
+                                  ("manager_id", "ordered_at"), ("status_id", "ordered_at"),
+                                  ("ordered_at", "buyer_id")])
+def test_an_index_holds_no_row_with_a_null_key_duckdb_1_5_5(tmp_path, cols):
+    """What `held` stands on, on DuckDB itself: after a SIGKILL costs an
+    index every entry the WAL held, deleting a row by a scan is the FATAL
+    exactly when the index held it — every key column set — and a clean
+    delete otherwise, whatever the index lost. So the end's DELETE asks an
+    index only of the rows it holds, and `window_rows` must say which: the
+    fixture order, with no buyer and no manager, is in `idx_orders_status_date`
+    and `idx_orders_source_date`, and in neither the buyer nor the manager
+    ones (the reviewer's 10-07 reading: 2 of the 4 composite indexes asked).
+    If an upgrade changes which rows an index holds, this fails first.
+    Kills: "held counts the window's rows whatever their keys"."""
+    duckdb = pytest.importorskip("duckdb")
+    import subprocess
+    import sys
+
+    db = str(tmp_path / "null.duckdb")
+    con = duckdb.connect(db)
+    con.execute("CREATE TABLE orders (id INTEGER, buyer_id INTEGER, manager_id INTEGER, "
+                "status_id INTEGER, ordered_at TIMESTAMP)")
+    con.execute("CREATE TABLE order_products (id BIGINT, order_id INTEGER)")
+    con.execute(f"CREATE INDEX i ON orders({', '.join(cols)})")
+    con.execute("INSERT INTO orders SELECT r, 1 + r % 50, 1 + r % 9, 1 + r % 4, "
+                "TIMESTAMP '2026-01-01' + to_minutes(r) FROM range(1, 3001) x(r)")
+    con.close()
+    assert subprocess.run([sys.executable, "-c", _KILLED_PAIR, db]).returncode == -9
+    duckdb.connect(db).close()
+    rows = {900401: {"buyer_id": None, "manager_id": None, "status_id": 9, "ordered_at": 1},
+            900402: {"buyer_id": 7, "manager_id": None, "status_id": 9, "ordered_at": 1},
+            900403: {"buyer_id": 7, "manager_id": 3, "status_id": 9, "ordered_at": None}}
+    for oid, row in rows.items():
+        ro = duckdb.connect(db, read_only=True)
+        try:
+            window = probe.window_rows(ro, None, oid)
+        finally:
+            ro.close()
+        held = window["tables"]["orders"]["indexes"][0]["held"]
+        assert held == (1 if all(row[c] is not None for c in cols) else 0), (oid, window)
+        proc = subprocess.run([sys.executable, "-c", probe._DELETE_ONE, db, "orders",
+                               probe._WINDOW_WHERE.format(col="id"), str(oid)],
+                              capture_output=True, text=True)
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+        assert ("fatal" in result) is (held == 1), (oid, cols, result)
+        if not held:
+            assert (result["scanned"], result["deleted"], result["left"]) == (1, 1, 0), result
+
+
+def test_held_is_none_for_a_key_that_is_no_column():
+    """An expression index names no column `held` can test for NULL, so its
+    holding is not read rather than guessed — and D1 then cannot count it."""
+    duckdb = pytest.importorskip("duckdb")
+    con = duckdb.connect()
+    con.execute("CREATE TABLE orders (id INTEGER, status_id INTEGER, note VARCHAR)")
+    con.execute("CREATE TABLE order_products (id BIGINT, order_id INTEGER)")
+    con.execute("CREATE INDEX i_expr ON orders((lower(note)))")
+    con.execute("CREATE INDEX i_status ON orders(status_id)")
+    con.execute("INSERT INTO orders VALUES (5, 9, 'x')")
+    window = probe.window_rows(con, None, 5)
+    assert window["tables"]["orders"]["indexes"] == [
+        {"index": "i_expr", "columns": 1, "held": None},
+        {"index": "i_status", "columns": 1, "held": 1}]
 
 
 def test_the_sweep_says_why_it_could_not_ask():
@@ -1235,7 +1363,8 @@ def p8_ev(**over):
           "dk": {**DUCK0, "writer": {"writer": "duckdb", "since": "2026-10-01T12:00:00+00:00"},
                  "last_refresh": {"trigger": "dirty_flag", "validation_passed": True,
                                   "refreshed_at": "2026-10-01 12:04:00"}},
-          "r0": "2026-10-01 07:58:00.123456"}
+          "r0": "2026-10-01 07:58:00.123456",
+          "pre_stop": stop_state("graceful"), "stop": stop_state("graceful")}
     ev.update(over)
     return ev
 
@@ -1265,6 +1394,32 @@ def test_p8_fails_when_the_way_back_is_not_held_or_not_released(change):
 
 def test_p8_out_of_memory_is_unknown_not_fail():
     assert probe.judge_p8(p8_ev(oom=True))[0] == UNKNOWN
+
+
+@pytest.mark.parametrize("which", ["pre_stop", "stop"])
+@pytest.mark.parametrize("state, why", [
+    (stop_state("grace_expired"), "Docker killed it 11 s into a 10 s grace (exit 137)"),
+    (stop_state("oom"), "the kernel's OOM killer stopped it"),
+    (stop_state("running"), "it never stopped"),
+    (None, "the container's state after it was not read"),
+])
+def test_p8_says_a_stop_around_the_way_back_that_was_no_deploys(which, state, why):
+    """The stop before the way back and the way back's own were the two
+    stops of reh-web no file recorded: one that outran production's grace
+    was a SIGKILL the way back then started from, and nothing said so. Each
+    is now read from the container's state, as P6 reads its restarts: said,
+    and UNKNOWN until somebody has read why web did not stop in time; a
+    FAIL stays a FAIL.
+    Kills: "P8 never reads the stop the way back starts from", "…its own
+    last stop"."""
+    verdict, detail = probe.judge_p8(p8_ev(**{which: state}))
+    assert verdict == UNKNOWN, detail
+    what = ("the stop the way back started from" if which == "pre_stop"
+            else "the way back's own stop")
+    assert f"{what}: " in detail and why in detail, detail
+    broken = p8_ev(**{which: state}, log={"way_back": 1, "emptied": 1, "full_tick": 0,
+                                          "released": 1})
+    assert probe.judge_p8(broken)[0] == FAIL
 
 
 def test_p8_without_the_reparse_does_not_demand_the_reclassify_branch():
@@ -1434,6 +1589,12 @@ def test_assemble_hands_d1_the_kill_the_window_and_the_stops(tmp_path):
     assert ev["window_ids"] == files["d1_window.json"] and ev["delete"] == files["d1_delete.json"]
     assert ev["f7_stop"] == files["f7_stop_state.json"]
     assert ev["p0_stop"] == files["p0_stop_state.json"]
+    # P8's two stops, by the files the script writes around the way back.
+    (tmp_path / "b_pre_stop_state.json").write_text(json.dumps(stop_state("grace_expired")))
+    (tmp_path / "b_stop_state.json").write_text(json.dumps(stop_state("graceful")))
+    p8 = probe.assemble(tmp_path)["P8"]
+    assert probe.stop_kind(p8["pre_stop"]) == "grace_expired"
+    assert probe.stop_kind(p8["stop"]) == "graceful"
     assert probe.judge_d1({**ev, "flipped": True}) == (
         UNKNOWN, "no kill landed inside the derivation (see P3)")
 

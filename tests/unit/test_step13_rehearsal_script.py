@@ -1441,3 +1441,245 @@ def test_writer_mode_reads_only_the_writers_mode(snapshot, out, code):
     proc = subprocess.run([sys.executable, str(REPO / "deploy" / "step13_rehearsal" / "probe.py"),
                            "writer-mode"], input=text, capture_output=True, text=True, timeout=60)
     assert (proc.stdout.strip(), proc.returncode) == (out, code), proc.stderr
+
+
+# ─── 15. Every state file reaches the record and the judge it is for ─────────
+#
+# The judges read the container's state after each stop out of files the
+# script names by hand, and a mutation review found the wiring unpinned:
+# p3.json fed F7's stop instead of F6's kill, restart 1's record fed the
+# kill, F7's stop recording nothing, d1_window.json written without its run,
+# and --keep's skip removed — each left every test green. Three stops of
+# reh-web recorded no state at all, so one that outran production's grace
+# before the way back was a SIGKILL nothing said.
+
+def _ev_name(word: str) -> Optional[str]:
+    m = re.fullmatch(r"\$\{?EV\}?/(.+)", word)
+    return m.group(1) if m else None
+
+
+def _state_events() -> List[Tuple[int, str, List[str]]]:
+    """In script order: every stop and kill of reh-web with the state file
+    it writes, every start of it, and every record a stop's state is fed
+    into — `(line, kind, files)`."""
+    events = []
+    for n, stmt in STATEMENTS:
+        s = re.sub(r"^(if|elif)\s+", "", stmt.strip())
+        if re.match(r"^\w+\(\)\s*\{", s):
+            continue
+        words = _words(s)
+        if not words:
+            continue
+        head, args = words[0], words[1:]
+        if head == "stop_web" and args[:1] == ["$REH_WEB"]:
+            events.append((n, "stop", [_ev_name(a) for a in args[2:3]]))
+        elif head == "kill_web" and args[:1] == ["$REH_WEB"]:
+            events.append((n, "kill", [_ev_name(a) for a in args[1:2]]))
+        elif head == "start_stopped" and args[:1] == ["$REH_WEB"]:
+            events.append((n, "start", []))
+        elif head == "start_web" and args[:1] == ["$REH_WEB"]:
+            events.append((n, "start_web", args[1:]))
+        elif head == "restart_record":
+            events.append((n, "record", [_ev_name(a) for a in args[1:3]]))
+        elif head == "p3_record":
+            events.append((n, "p3", [_ev_name(a) for a in args[0:2]]))
+    return events
+
+
+def test_every_stop_of_reh_web_records_its_state():
+    """`stop_web "$REH_WEB"` without a state file is a stop whose kind
+    nothing can read: the stop before the way back, the way back's own,
+    and the one after a run that did not flip were that.
+    Kills: "a stop of reh-web records no state" (F7's included), "two stops
+    share one file"."""
+    stops = [(n, files) for n, kind, files in _state_events() if kind in ("stop", "kill")]
+    assert len(stops) >= 7, stops
+    missing = [n for n, files in stops if not files or not files[0]]
+    assert not missing, f"stops of reh-web with no state file, lines {missing}"
+    names = [files[0] for _n, files in stops]
+    assert len(set(names)) == len(names), names
+    assert all(name.endswith("_state.json") for name in names), names
+
+
+def _fed_stop(events, at: int) -> Optional[str]:
+    """The state file of the last stop before the last start before line `at`."""
+    start = max((n for n, kind, _f in events if kind == "start" and n < at), default=None)
+    if start is None:
+        return None
+    stops = [f[0] for n, kind, f in events if kind in ("stop", "kill") and n < start]
+    return stops[-1] if stops else None
+
+
+def test_each_stop_state_feeds_the_record_and_the_judge_it_belongs_to(tmp_path):
+    """Each restart record carries the state of the stop just before its
+    start, P3 the state of the kill, and each judge reads the stop its phase
+    made: D1 F7's and phase 0's, P8 the two around the way back. Checked by
+    the script's order of statements and then by `assemble` itself, over
+    files that name themselves.
+    Kills: "p3.json is fed another stop than the kill", "a restart record is
+    fed another stop than its own", "a judge reads another phase's stop"."""
+    import json
+
+    events = _state_events()
+    records = [(n, f) for n, kind, f in events if kind == "record"]
+    assert [f[0] for _n, f in records] == ["p6_restart1.json", "p6_restart2.json",
+                                           "p6_restart3.json"], records
+    for n, (out, fed) in records:
+        assert fed == _fed_stop(events, n), (n, out, fed, _fed_stop(events, n))
+    kills = [(n, f[0]) for n, kind, f in events if kind == "kill"]
+    assert len(kills) == 1, kills
+    p3 = [(n, f) for n, kind, f in events if kind == "p3"]
+    assert p3 and all(f == ["p3.json", kills[0][1]] and n > kills[0][0] for n, f in p3), p3
+    assert dict((f[0], f[1]) for _n, f in records)["p6_restart2.json"] == kills[0][1]
+
+    stops = [(n, f[0]) for n, kind, f in events if kind in ("stop", "kill")]
+    starts = {" ".join(f): n for n, kind, f in events if kind == "start_web"}
+    f1 = starts["-e KS_WRITE_WAREHOUSE=postgres -e KS_READ_FALLBACK=off"]
+    way_back = starts["-e KS_READ_FALLBACK=off"]
+    expect = {
+        ("D1", "p0_stop"): [s for n, s in stops if n < f1][-1],
+        ("D1", "f7_stop"): dict((f[0], f[1]) for _n, f in records)["p6_restart3.json"],
+        ("P8", "pre_stop"): [s for n, s in stops if n < way_back][-1],
+        ("P8", "stop"): [s for n, s in stops if n > way_back][0],
+    }
+    assert expect[("D1", "p0_stop")] == "p0_stop_state.json"
+    for _n, name in stops:
+        (tmp_path / name).write_text(json.dumps({"marker": name}))
+    ev = PROBE.assemble(tmp_path)
+    for (judge, key), name in expect.items():
+        assert (ev[judge].get(key) or {}).get("marker") == name, (judge, key, ev[judge].get(key))
+    (tmp_path / "p3.json").write_text(json.dumps(
+        {"seen_blocked": True, "stop": {"marker": kills[0][1]}}))
+    ev = PROBE.assemble(tmp_path)
+    assert ev["D1"]["kill_stop"] == ev["P6"]["kill_stop"] == {"marker": kills[0][1]}
+
+
+def _evidence_writes() -> List[str]:
+    """Every evidence file the script writes, `$k` and the like as `*`."""
+    out = []
+    for _n, stmt in STATEMENTS:
+        for m in re.finditer(r'(?:>|\btee|\bcp\s+"[^"]*")\s+"\$EV/([^"]+)"', stmt):
+            out.append(m.group(1))
+    for _n, kind, files in _state_events():
+        if kind in ("stop", "kill"):
+            out.extend(f for f in files[:1] if f)
+        elif kind == "record":
+            out.extend(f for f in files[:1] if f)
+        elif kind == "p3":
+            out.extend(f for f in files[:1] if f)
+    return [re.sub(r"\$\{?\w+\}?", "*", name) for name in out]
+
+
+def _assemble_reads() -> List[str]:
+    import ast
+
+    tree = ast.parse((REPO / "deploy" / "step13_rehearsal" / "probe.py").read_text())
+    fn = next(node for node in ast.walk(tree)
+              if isinstance(node, ast.FunctionDef) and node.name == "assemble")
+    return sorted({node.value for node in ast.walk(fn)
+                   if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                   and re.fullmatch(r"[\w*]+\.(json|log)", node.value)})
+
+
+def test_every_evidence_file_the_judges_read_is_one_the_script_writes():
+    """A judge reading a file nobody writes judges None, which reads as
+    "the container's state was not read" — what F7's stop recording no
+    state would have looked like, a run of UNKNOWNs nobody could trace.
+    `frozen_samples.json` is the one file a caller supplies instead of the
+    snapshots, and the script never does.
+    Kills: "a state file a judge reads is no longer written"."""
+    import fnmatch
+
+    writes = _evidence_writes()
+    reads = [r for r in _assemble_reads() if r != "frozen_samples.json"]
+    assert {"f7_stop_state.json", "p0_stop_state.json", "b_pre_stop_state.json",
+            "b_stop_state.json", "p3.json", "d1_window.json", "d1_delete.json"} <= set(reads)
+    unwritten = [r for r in reads
+                 if not any(fnmatch.fnmatch(w, r) or fnmatch.fnmatch(r, w) for w in writes)]
+    assert not unwritten, unwritten
+
+
+def _statement_writing(name: str) -> str:
+    found = [s for _n, s in STATEMENTS if f'> "$EV/{name}"' in s]
+    assert len(found) == 1, found
+    return found[0]
+
+
+@pytest.mark.parametrize("win_run, expect", [("41", 41), ("", None)])
+def test_d1_window_carries_the_run_the_order_and_the_status(tmp_path, win_run, expect):
+    """The ids D1 asks of, as the script writes them and `assemble` reads
+    them: F5w's run (null when it wrote none, which D1 reads as UNKNOWN),
+    F6's order and its fourth version's status.
+    Kills: "d1_window.json is written without the window's run"."""
+    import os
+    import subprocess
+
+    stmt = _statement_writing("d1_window.json")
+    env = {**os.environ, "EV": str(tmp_path), "WIN_RUN": win_run, "FIX_ID": "900500",
+           "V4_STATUS": "9"}
+    proc = subprocess.run(["bash", "-c", f"set -Eeuo pipefail\n{stmt}"], env=env,
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert PROBE.assemble(tmp_path)["D1"]["window_ids"] == {
+        "run_id": expect, "order_id": 900500, "order_status": 9}
+
+
+def _block_with(needle: str) -> str:
+    """The `if [ "$KEEP" = 1 ]; then … fi` holding `needle`, as written."""
+    lines = TEXT.splitlines()
+    at = next(i for i, l in enumerate(lines) if needle in l)
+    start = max(i for i in range(at) if lines[i].strip() == 'if [ "$KEEP" = 1 ]; then')
+    depth = 0
+    for i in range(start, len(lines)):
+        s = lines[i].strip()
+        if re.match(r"if\s", s) and s.endswith("; then"):
+            depth += 1
+        elif s == "fi":
+            depth -= 1
+            if depth == 0:
+                return "\n".join(lines[start:i + 1])
+    raise AssertionError("unbalanced block")
+
+
+@pytest.mark.parametrize("keep, killed, deletes", [
+    ("1", "1", False),   # --keep: the copy stays as it is
+    ("0", "1", True),    # a kill to ask about, a copy about to go
+    ("0", "0", False),   # nothing killed: nothing to ask
+])
+def test_keep_leaves_the_copy_undeleted(tmp_path, keep, killed, deletes):
+    """`--keep` promises the copy left in place, and D1 UNKNOWN for it: the
+    end's DELETEs change the copy and end in DuckDB's FATAL on a loss.
+    Run as the script runs it, against a `probe_offline` that records.
+    Kills: "--keep runs the window's DELETEs", "the DELETEs run without a
+    kill"."""
+    import json
+    import os
+    import subprocess
+
+    block = _block_with(" window-delete ")
+    body = f"""set -Eeuo pipefail
+probe_offline() {{ echo "$*" >> "$EV/calls"; echo '{{"deletes": []}}'; }}
+{block}
+"""
+    env = {**os.environ, "EV": str(tmp_path), "LOG_DIR": str(tmp_path), "KEEP": keep,
+           "KILLED": killed, "FIX_ID": "900500", "WIN_RUN": "41"}
+    proc = subprocess.run(["bash", "-c", body], env=env, capture_output=True, text=True,
+                          timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    calls = (tmp_path / "calls").read_text().splitlines() if (tmp_path / "calls").exists() else []
+    assert bool(calls) is deletes, calls
+    if deletes:
+        assert calls[0].startswith("window-delete ") and "--window-order 900500" in calls[0]
+    done = tmp_path / "d1_delete.json"
+    if keep == "1":
+        record = json.loads(done.read_text())
+        assert record == {"skipped": "--keep leaves the copy as it is"}
+        verdict, detail = PROBE.judge_d1({"flipped": True, "seen_blocked": True,
+                                          "kill_stop": {"running": False, "exit_code": 137,
+                                                        "oom_killed": False, "asked": "kill",
+                                                        "was_running": True},
+                                          "pre": {"indexes": {}}, "post": {"indexes": {}},
+                                          "delete": record})
+        assert verdict == "UNKNOWN" and "--keep" in detail, detail
+    elif not deletes:
+        assert not done.exists()
