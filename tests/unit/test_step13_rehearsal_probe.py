@@ -786,6 +786,25 @@ def test_a_loss_after_the_kill_is_labelled_the_known_defect(change):
     assert f"; {probe.KNOWN_DEFECT}: after the kill, " in detail
 
 
+def test_a_shortfall_the_copy_carried_is_not_the_kills():
+    """An index already short at F5s is still short after the kill; the
+    sweep after it reports only what was lost since, so the copy's own loss
+    is not labelled the kill's — and a further loss is.
+    Kills: "the post-kill sweep reports the pre-kill loss again as the
+    defect"."""
+    short = lambda n: {**SWEEP, "swept": [SWEEP["swept"][0], {**SWEEP["swept"][1], "missing": n}]}  # noqa: E731
+    ev = d1_ev()
+    ev["pre"] = {**ev["pre"], "indexes": short(1)}
+    ev["post"] = {**ev["post"], "indexes": short(1)}
+    verdict, detail = probe.judge_d1(ev)
+    assert verdict == FAIL and detail.startswith("before the kill"), detail
+    assert probe.KNOWN_DEFECT not in detail
+    ev["post"] = {**ev["post"], "indexes": short(3)}
+    verdict, detail = probe.judge_d1(ev)
+    assert verdict == FAIL and "idx_orders_status misses 3 of 401 (1 already before the kill)" in detail
+    assert f"{probe.KNOWN_DEFECT}: after the kill, " in detail
+
+
 def test_d1_with_a_delete_that_found_no_window_row_is_unknown():
     """Every DELETE answered and none found a row: no index on the window's
     tables was asked, so nothing is known of what the kill cost them.

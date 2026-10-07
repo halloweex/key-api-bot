@@ -1324,17 +1324,27 @@ def judge_p8(ev: Mapping[str, Any]) -> Verdict:
                   f"silver_orders={dk.get('silver_orders')} == orders, utm rows {dk.get('silver_order_utm')}")
 
 
-def _sweep_losses(sweep: Any) -> Tuple[Optional[List[str]], Optional[str]]:
+def _sweep_losses(sweep: Any, before: Any = None) -> Tuple[Optional[List[str]], Optional[str]]:
     """`(losses, unread)` out of one `index_sweep`: each index short of its
-    rows, or why the sweep cannot be judged."""
+    rows, or why the sweep cannot be judged. With `before`, an earlier sweep,
+    only what an index lost since: a shortfall it already had there is that
+    sweep's to report, not this one's."""
     if not isinstance(sweep, Mapping) or not isinstance(sweep.get("swept"), list):
         return None, "not swept"
     if sweep.get("error"):
         return None, f"the sweep raised {sweep.get('error')}"
     if not sweep["swept"]:
         return None, "no index could be asked"
-    return [f"{s.get('index')} misses {s.get('missing')} of {s.get('rows')}"
-            for s in sweep["swept"] if s.get("missing")], None
+    had = {s.get("index"): s.get("missing") or 0
+           for s in ((before or {}).get("swept") or []) if isinstance(s, Mapping)} \
+        if isinstance(before, Mapping) else {}
+    out = []
+    for s in sweep["swept"]:
+        missing, already = s.get("missing") or 0, had.get(s.get("index"), 0)
+        if missing > already:
+            since = f" ({already} already before the kill)" if already else ""
+            out.append(f"{s.get('index')} misses {missing} of {s.get('rows')}{since}")
+    return out, None
 
 
 def _window_reads(ev: Mapping[str, Any], pre: Mapping[str, Any], post: Mapping[str, Any],
@@ -1471,7 +1481,10 @@ def judge_d1(ev: Mapping[str, Any]) -> Verdict:
     unknown: List[str] = []
     swept = 0
     for when, facts in (("before the kill", pre), ("after the kill", post)):
-        losses, unread = _sweep_losses(facts.get("indexes"))
+        # After the kill, only what an index lost since the stop before it:
+        # a shortfall the copy already carried is reported once, as its own.
+        losses, unread = _sweep_losses(
+            facts.get("indexes"), pre.get("indexes") if when == "after the kill" else None)
         if unread:
             unknown.append(f"indexes {when}: {unread}")
             continue
