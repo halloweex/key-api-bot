@@ -367,6 +367,37 @@ class TestPlantedDefectsReachTheWatch:
         issues = inv.check_chain_invariants(await _facts(written))
         assert _names(issues) == {(inv.CATALOGUE_EMPTY, CATEGORIES, "CRITICAL")}
 
+    @pytest.mark.asyncio
+    async def test_a_host_clock_ahead_of_postgres_still_judges_lost(self, stores):
+        """"Lost" waits for the chain's own full write: `last_ok_at` at or
+        after the handover. Both are read off Postgres's clock. Mutation:
+        compare `last_ok_at` with the local marker's stamp — the web host's
+        clock, taken just before the latching transaction begins — and a host
+        a few ms ahead of Postgres reads the latching write as older than the
+        handover, so a deleted row goes unjudged (it did, on a laptop's Docker
+        VM: one suite run in two, the latching write was ~1 ms after the
+        marker). Five seconds here, so the outcome does not hang on this
+        machine's skew."""
+        class Ahead(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz) + timedelta(seconds=5)
+
+        store, pool, env = stores
+        env.setattr(chain_latch, "datetime", Ahead)
+        env.setenv(chain.WRITE_ENV, "postgres")
+        await store.upsert_products(PAYLOAD)
+        await store.upsert_categories([{"id": 10, "name": "Care", "parent_id": None}])
+        (state,) = await _pg(pool, "SELECT last_ok_at FROM meta.mirror_state "
+                                   "WHERE table_name = $1", PRODUCTS)
+        assert state["last_ok_at"] < datetime.fromisoformat(
+            chain_latch.latched_at(chain.CHAIN)), "the marker is not ahead"
+        assert inv.check_chain_invariants(await _facts(pool)) == []
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM bronze.products WHERE id = 2")
+        issues = inv.check_chain_invariants(await _facts(pool))
+        assert _names(issues) == {(inv.CATALOGUE_ROWS_LOST, PRODUCTS, "CRITICAL")}
+
 
 async def _record(pool, table=PRODUCTS):
     rows = await _pg(pool, "SELECT value FROM meta.chain_watermarks WHERE key = $1",
