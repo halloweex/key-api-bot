@@ -44,6 +44,7 @@ from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
     pg_goals_write, pg_inventory_write, write_chains,
 )
+from core import pg_forecast_write, read_fallback
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -53,7 +54,9 @@ pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_P
 # next module as a chain owning a table with no local marker.
 _WRITTEN = ("bronze.offers", "app.manual_expenses", "app.revenue_goals",
             "bronze.expense_types", "bronze.buyer_contacts", "app.buyer_gender",
-            "bronze.buyers")
+            "bronze.buyers",
+            "app.seasonal_indices", "app.growth_metrics", "app.weekly_patterns",
+            "app.revenue_predictions")
 
 STOCK = {"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
          "quantity": 40, "reserve": 0}
@@ -228,6 +231,14 @@ WRITERS = {
         [{"id": 1, "name": "Delivery"}])),
     "upsert_buyers": (pg_buyers_write, lambda s: s.upsert_buyers([_buyer()])),
     "derive_gender_pg": (pg_buyers_write, _derive),
+    # Chain 7b-3. The recalculation reads its history first, through
+    # `core.pg_goals_read` — which is served the live pool — so only the
+    # writer's own acquire is interfered with.
+    "persist_goal_tables": (pg_forecast_write, lambda s: s.recalculate_goal_tables(
+        include_weekly=True)),
+    "store_predictions": (pg_forecast_write, lambda s: s.store_predictions(
+        [{"date": "2026-10-07", "predicted_revenue": 1.0}], "retail",
+        {"mae": 1, "mape": 1, "wape": 1})),
 }
 
 
@@ -248,6 +259,14 @@ async def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
         monkeypatch.setenv(reader, "postgres")
+    # Chain 7b-3's four preconditions: its inputs on Postgres, and the
+    # fallback off as configured. The goal history then reads an empty
+    # `silver.orders`, which still writes a placeholder growth row.
+    monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
+    monkeypatch.setenv("KS_READ_GOALS", "postgres")
+    monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
+    monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
+    monkeypatch.setattr(read_fallback, "_mode_error", None)
     store = DuckDBStore(db_path=tmp_path / "latch-acquire.duckdb")
     await store.connect()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
@@ -440,6 +459,8 @@ FIRST_WRITES = {
     "pg_goals_write": ("set_goal", "app.revenue_goals", "period_type", "daily"),
     "pg_expense_types_write": ("upsert_expense_types", "bronze.expense_types", "id", 1),
     "pg_buyers_write": ("upsert_buyers", "bronze.buyers", "id", 1),
+    "pg_forecast_write": ("store_predictions", "app.revenue_predictions",
+                          "sales_type", "retail"),
 }
 
 
