@@ -125,6 +125,31 @@ The buyers (chain 4):
   90 minutes, and a second limit on the stamp the same step writes would say
   one stall twice (`pg_buyers_write.CHAIN_WATERMARK_MAX_AGE_MIN`).
 
+The manager classification (chain 5):
+
+* **Not empty.** The writer upserts and never deletes a manager, so a table
+  found empty is somebody else's statement — and every retail-status call
+  answers 404, the screen lists nobody, and the baseline seed has nothing to
+  seed. CRITICAL.
+* **Exactly one open interval per classified manager.** With none open every
+  order from the last `valid_to` on resolves `internal`, which is admin-only;
+  with two open the answer is whichever is retail. CRITICAL.
+* **Every manager classified, from the latch on.** The chain's writer seeds a
+  baseline in the transaction that lands a manager, so after the handover a
+  manager with no interval is a write that went round it. Before the latch the
+  replica legitimately carries such managers until DuckDB's next boot (the
+  design's M2). WARN: its orders still resolve by `is_retail`.
+* **An unbroken history.** One manager's intervals must end where the next
+  begins — an overlap answers a date twice, a gap not at all. WARN, because a
+  backdate DuckDB accepted before the chain (M1) leaves exactly this, and only
+  a human can decide which answer the past should have.
+* **`is_retail` agrees with the latest open interval.** The screen shows one
+  and Silver uses the other. WARN.
+* **`set_at`** — the copy-back's handover clock, which the Postgres column has
+  no default for (`chain_required_column_null`).
+* **Not its watermark.** The sync is daily; `_freshness_check` judges
+  `last_sync_managers` at 192 h from `meta.chain_watermarks`.
+
 WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
 
 A chain is watched when `core.write_chains.chain_modes()` says its writes go to
@@ -355,7 +380,25 @@ class Buyers:
     contact_missing_sample: Tuple[int, ...] = ()
 
 
-Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Unwatched, None]
+@dataclass(frozen=True)
+class Managers:
+    """The shape of the classification, from one read of both tables
+    (`pg_managers_write.SHAPE_SQL`). Ids, sorted, at most what the read
+    returned. `unclassified` is judged only once the chain has written here
+    (`latched_at`)."""
+    nulls: Nulls
+    latched_at: Optional[datetime] = None
+    managers: int = 0
+    intervals: int = 0
+    unclassified: Tuple[int, ...] = ()
+    open_wrong: Tuple[int, ...] = ()
+    broken: Tuple[int, ...] = ()
+    disagree: Tuple[int, ...] = ()
+    orphans: Tuple[int, ...] = ()
+
+
+Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Managers,
+              Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -380,6 +423,8 @@ class Facts:
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
     # here knows what is true of their tables.
     unread: Tuple[str, ...] = ()
+    # Chain 5's two tables.
+    managers: Group = None
 
     @classmethod
     def blind(cls, watched: Tuple[str, ...], reason: str) -> "Facts":
@@ -399,6 +444,11 @@ DICTIONARY_EMPTY = "chain_dictionary_empty"
 NAME_UNRESOLVED = "chain_name_unresolved"
 BUYER_ORPHANS = "chain_buyer_orphan_rows"
 CONTACT_MISSING = "chain_buyer_contact_missing"
+MANAGERS_EMPTY = "chain_managers_empty"
+MANAGER_OPEN_INTERVAL = "chain_manager_open_interval"
+MANAGER_UNCLASSIFIED = "chain_manager_unclassified"
+MANAGER_INTERVALS_BROKEN = "chain_manager_intervals_broken"
+MANAGER_RETAIL_DISAGREES = "chain_manager_retail_disagrees"
 UNWATCHED = "chain_invariants_unwatched"
 
 # What a blind run holds rather than resolves — `data_quality`'s
@@ -407,6 +457,11 @@ CONDITIONS: Tuple[str, ...] = (
     SEQUENCE_BEHIND, COLUMN_NULL, INITIAL_BURST, FIRST_SEEN_RESET,
     ROLLUP_MISSING, SNAPSHOT_SHORT, WATERMARK_STALE,
     DICTIONARY_EMPTY, NAME_UNRESOLVED, BUYER_ORPHANS, CONTACT_MISSING,
+)
+# Chain 5's, held and resolved with the rest.
+CONDITIONS += (
+    MANAGERS_EMPTY, MANAGER_OPEN_INTERVAL, MANAGER_UNCLASSIFIED,
+    MANAGER_INTERVALS_BROKEN, MANAGER_RETAIL_DISAGREES,
 )
 
 # The family name every condition above carries, and the key the integrity
@@ -461,14 +516,15 @@ def _reader_groups() -> Dict[str, str]:
     """
     from core import (
         pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-        pg_goals_write, pg_inventory_write,
+        pg_goals_write, pg_inventory_write, pg_managers_write,
     )
 
     return {pg_expenses_write.CHAIN: "expenses",
             pg_inventory_write.CHAIN: "inventory",
             pg_goals_write.CHAIN: "goals",
             pg_expense_types_write.CHAIN: "expense_types",
-            pg_buyers_write.CHAIN: "buyers"}
+            pg_buyers_write.CHAIN: "buyers",
+            pg_managers_write.CHAIN: "managers"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -727,6 +783,26 @@ async def _read_buyers(conn, latched_at: Optional[datetime] = None) -> Buyers:
                   orphan_sample=tuple(int(i) for i in orphans["sample"]))
 
 
+async def _read_managers(conn, latched_at: Optional[datetime] = None) -> Managers:
+    """One read of both tables — `pg_managers_write.SHAPE_SQL`, which the
+    preflight asks too, so the question before the flip and the watch after it
+    cannot come to judge different shapes."""
+    from core.pg_managers_write import SHAPE_SQL
+
+    row = await conn.fetchrow(SHAPE_SQL)
+
+    def ids(column: str) -> Tuple[int, ...]:
+        return tuple(int(i) for i in (row[column] or ()))
+
+    return Managers(
+        nulls=Nulls(table="app.manager_classifications",
+                    counts={"set_at": int(row["set_at_null"])}),
+        latched_at=latched_at, managers=int(row["managers"]),
+        intervals=int(row["intervals"]), unclassified=ids("unclassified"),
+        open_wrong=ids("open_wrong"), broken=ids("broken"),
+        disagree=ids("disagree"), orphans=ids("orphans"))
+
+
 async def _read_inventory(conn, latched_at: Optional[datetime],
                           today: date) -> Inventory:
     from core.landing_rows import MOVEMENT_INITIAL
@@ -865,6 +941,7 @@ async def read_facts(*, pool=None) -> Facts:
 
     from core import (
         pg_buyers_write, pg_expenses_write, pg_goals_write, pg_inventory_write,
+        pg_managers_write,
     )
 
     groups: Dict[str, Group] = {}
@@ -887,6 +964,8 @@ async def read_facts(*, pool=None) -> Facts:
                     "expense_types": _read_expense_types,
                     "buyers": lambda c: _read_buyers(
                         c, _stamp(watched.get(pg_buyers_write.CHAIN))),
+                    "managers": lambda c: _read_managers(
+                        c, _stamp(watched.get(pg_managers_write.CHAIN))),
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -925,7 +1004,7 @@ async def read_facts(*, pool=None) -> Facts:
                  expense_types=groups.get("expense_types"),
                  buyers=groups.get("buyers"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
-                 unread=unread)
+                 unread=unread, managers=groups.get("managers"))
 
 
 def _stamp(value: Optional[str]) -> Optional[datetime]:
@@ -1210,6 +1289,75 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
     return issues
 
 
+def _shown(ids: Tuple[int, ...]) -> str:
+    return ", ".join(str(i) for i in ids[:10]) + (
+        f" (+{len(ids) - 10} more)" if len(ids) > 10 else "")
+
+
+def _manager_issues(m: Managers, chain: str) -> List:
+    from core.data_quality import Severity
+
+    issues: List = []
+    if not m.managers:
+        issues.append(_issue(
+            check_name=MANAGERS_EMPTY, table_name="bronze.managers",
+            severity=Severity.CRITICAL, count=1,
+            description=(
+                f"bronze.managers holds no rows, and {chain} writes it: the "
+                "managers screen lists nobody, every retail-status call answers "
+                "404, and the baseline seed has nothing to seed. The writer "
+                "upserts and never deletes a manager, so something else emptied "
+                "it. The daily manager sync lands them again; the "
+                "classification intervals are what cannot be re-fetched.")))
+    if m.open_wrong:
+        issues.append(_issue(
+            check_name=MANAGER_OPEN_INTERVAL, table_name="app.manager_classifications",
+            severity=Severity.CRITICAL, count=len(m.open_wrong),
+            sample_ids=m.open_wrong[:10],
+            description=(
+                f"{len(m.open_wrong)} manager(s) have intervals and not exactly "
+                f"one open (e.g. {_shown(m.open_wrong)}). With none open every "
+                "order from the last valid_to on resolves to internal, which is "
+                "admin-only; with two the answer is whichever one is retail. "
+                f"{chain}'s writer closes the open interval in the transaction "
+                "that opens the next, under one lock, so this is a write that "
+                "went round it — or a backdate DuckDB accepted before the chain.")))
+    if m.latched_at is not None and m.unclassified:
+        issues.append(_issue(
+            check_name=MANAGER_UNCLASSIFIED, table_name="app.manager_classifications",
+            severity=Severity.WARN, count=len(m.unclassified),
+            sample_ids=m.unclassified[:10],
+            description=(
+                f"{len(m.unclassified)} manager(s) have no classification "
+                f"interval at all (e.g. {_shown(m.unclassified)}). {chain}'s "
+                "writer seeds a baseline in the transaction that lands each "
+                "manager, so since the handover this is a write that went "
+                "round it. Their orders still resolve by is_retail, so no "
+                "number is wrong yet; the next manager sync seeds them.")))
+    if m.broken:
+        issues.append(_issue(
+            check_name=MANAGER_INTERVALS_BROKEN, table_name="app.manager_classifications",
+            severity=Severity.WARN, count=len(m.broken),
+            sample_ids=m.broken[:10],
+            description=(
+                f"{len(m.broken)} manager(s) have a history whose intervals "
+                f"overlap or leave a gap (e.g. {_shown(m.broken)}): a date is "
+                "answered twice, or not at all. A backdate DuckDB accepted "
+                "before chain 5 leaves exactly this, and which answer the past "
+                "should have is a human's decision, per id.")))
+    if m.disagree:
+        issues.append(_issue(
+            check_name=MANAGER_RETAIL_DISAGREES, table_name="bronze.managers",
+            severity=Severity.WARN, count=len(m.disagree),
+            sample_ids=m.disagree[:10],
+            description=(
+                f"{len(m.disagree)} manager(s) carry an is_retail that disagrees "
+                f"with their latest open interval (e.g. {_shown(m.disagree)}): "
+                "the managers screen shows one answer and Silver decides by the "
+                f"other. {chain}'s writer sets both in one transaction.")))
+    return issues
+
+
 def _watermark_issues(marks: Tuple[WatermarkAge, ...]) -> List:
     from core.data_quality import Severity
 
@@ -1256,7 +1404,7 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     """
     from core import (
         pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-        pg_goals_write, pg_inventory_write,
+        pg_goals_write, pg_inventory_write, pg_managers_write,
     )
 
     if facts is None:
@@ -1316,6 +1464,14 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
         issues += _null_issues(facts.buyers.nulls, pg_buyers_write.CHAIN,
                                facts.buyers.latched_at)
         issues += _buyer_issues(facts.buyers, pg_buyers_write.CHAIN)
+
+    if isinstance(facts.managers, Unwatched):
+        issues.append(unwatched_issue(facts.managers.reason,
+                                      (pg_managers_write.CHAIN,)))
+    elif isinstance(facts.managers, Managers):
+        issues += _null_issues(facts.managers.nulls, pg_managers_write.CHAIN,
+                               facts.managers.latched_at)
+        issues += _manager_issues(facts.managers, pg_managers_write.CHAIN)
 
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(

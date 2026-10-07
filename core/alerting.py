@@ -316,6 +316,17 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "the orphaned rows are corrected or their buyers land — a human, not a job"),
     "chain_buyer_contact_missing": _c(
         "the next write of each buyer rewrites its contacts"),
+    # Chain 5's classification. The sync lands managers again; an interval a
+    # human decided is corrected by a human, never re-derived.
+    "chain_managers_empty": _c("the next manager sync lands the managers again"),
+    "chain_manager_open_interval": _c(
+        "each manager has exactly one open interval again — a human, not a job"),
+    "chain_manager_unclassified": _c(
+        "the next manager sync seeds a baseline for each"),
+    "chain_manager_intervals_broken": _c(
+        "a human decides each history and corrects the intervals"),
+    "chain_manager_retail_disagrees": _c(
+        "a classification through the retail-status route sets both again"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 

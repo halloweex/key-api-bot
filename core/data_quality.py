@@ -1955,6 +1955,18 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Find the write that skipped core.pg_buyers_write; never delete a buyer's contacts to clear it"),
     ("chain_buyer_contact_missing",
      "POST /api/duckdb/sync-all-buyers rewrites every buyer and its contacts; find what deleted the list first"),
+    # Chain 5's classification. Only the sync can re-land managers; only a
+    # human can decide an interval, and nothing here may re-derive one.
+    ("chain_managers_empty",
+     "Find what deleted bronze.managers; the next manager sync lands them, but the intervals are not re-fetchable — restore those from the nightly dump"),
+    ("chain_manager_open_interval",
+     "Per id: a forward classification through POST /api/managers/{id}/retail-status closes the extra open interval; none open needs one"),
+    ("chain_manager_unclassified",
+     "Find the write that skipped core.pg_managers_write.upsert_managers; its next run seeds the baseline"),
+    ("chain_manager_intervals_broken",
+     "A human decides each overlap or gap per id — it changes past sales_type; never let a job rewrite history"),
+    ("chain_manager_retail_disagrees",
+     "Reclassify the manager through POST /api/managers/{id}/retail-status, which sets both in one transaction"),
     ("chain_invariants_unwatched",
      "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),
@@ -2118,6 +2130,11 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "ch_reconcile_pending": "ClickHouse copy lagging",
     "gold_values_unwatched": "Gold not re-checked by a second engine",
     "freshness_orders": "orders not arriving",
+    "chain_managers_empty": "no managers in Postgres",
+    "chain_manager_open_interval": "a manager without exactly one classification in force",
+    "chain_manager_unclassified": "managers with no classification",
+    "chain_manager_intervals_broken": "a manager's classification history overlaps or gaps",
+    "chain_manager_retail_disagrees": "a manager's retail flag ≠ its classification",
 }
 
 

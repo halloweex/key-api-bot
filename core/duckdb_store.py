@@ -3109,6 +3109,18 @@ class DuckDBStore(
 
         rows = manager_rows(managers)
 
+        # Chain 5: under `KS_WRITE_MANAGERS=postgres` the managers land in
+        # Postgres with their baselines, and DuckDB's copy stops. Asked before
+        # the DuckDB connection is taken; a flag nobody can read raises here
+        # and stops this chain alone (DN-01) — the sync step contains it.
+        from core import pg_managers_write
+
+        if pg_managers_write.writes_postgres():
+            from datetime import timezone
+
+            return await pg_managers_write.upsert_managers(
+                rows, set_at=datetime.now(timezone.utc))
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
@@ -3366,6 +3378,13 @@ class DuckDBStore(
         """
         from core.sql_dialect import DUCKDB, manager_stats_sql
 
+        # Chain 5: the same body, against `bronze.orders`, and no replica
+        # after it — the replica stands down while the chain writes.
+        from core import pg_managers_write
+
+        if pg_managers_write.writes_postgres():
+            return await pg_managers_write.update_manager_stats()
+
         async with self.connection() as conn:
             # Update stats for managers who have orders. The one body both
             # engines run, with the order's date spelled in Kyiv rather than
@@ -3432,6 +3451,23 @@ class DuckDBStore(
         if effective_from is None:
             effective_from = datetime.now(ZoneInfo(DISPLAY_TIMEZONE)).date()
 
+        # Chain 5: the decision is written where it is derived, in one
+        # Postgres transaction that also raises the derivation signal — and
+        # then the DuckDB mark below, which is a no-op unless DuckDB derives:
+        # the warehouse is marked dirty on whichever engine derives it. A
+        # backdate behind the manager's latest change is refused there
+        # (`BackdateBehindLatest`, OD-C5-1 (a)); DuckDB's own path is as it was.
+        from core import pg_managers_write
+
+        if pg_managers_write.writes_postgres():
+            from datetime import timezone
+
+            await pg_managers_write.set_manager_retail_status(
+                manager_id, is_retail, effective_from, set_by, note,
+                set_at=datetime.now(timezone.utc))
+            await self.mark_warehouse_dirty(None)
+            return
+
         async with self.connection() as conn:
             # One transaction. As four autocommit statements, a failure between
             # closing the open interval and opening the new one left the
@@ -3487,6 +3523,13 @@ class DuckDBStore(
         Returns:
             List of manager dicts with id, name, status, is_retail, order_count, etc.
         """
+        # Chain 5: from Postgres once the chain owns the tables, with no
+        # fallback — DuckDB's copy is frozen then (`core/pg_managers_read.py`).
+        from core import pg_managers_read, pg_managers_write
+
+        if pg_managers_write.reads_postgres():
+            return await pg_managers_read.fetch_all_managers()
+
         async with self.connection() as conn:
             result = conn.execute("""
                 SELECT

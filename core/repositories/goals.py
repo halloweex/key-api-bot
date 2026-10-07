@@ -138,10 +138,13 @@ _FORECAST_PREDICTED_SQL = """
 # while DuckDB still holds the classification (chain 5) and the orders (chain
 # 3). The chain 7b port replaces it: `KS_GOALS_HISTORY=silver` reads the same
 # history from Silver (below), and the bridge is what `bridge` — the default,
-# today's numbers — still runs. Until the bridge is deleted (7b-4) a tripwire
-# in that same test fails the moment `core/write_chains.WRITE_CHAINS`
-# registers a chain owning `bronze.orders`, `bronze.managers` or
-# `app.manager_classifications` while this file still renders the DuckDB case.
+# today's numbers — still runs. Until the bridge is deleted (7b-4) a chain
+# owning `bronze.orders`, `bronze.managers` or `app.manager_classifications`
+# must not MOVE: a tripwire in that same test fails unless every such chain
+# holds itself on DuckDB while this file still renders the DuckDB case (chain
+# 3's `goals_bridge` precondition is the first). Registering one is not moving
+# it — with its flag off it writes DuckDB as before, and the bridge reads what
+# it always read.
 #
 # The step-13 readiness (`core/warehouse_cutover.py`, DN-28) asks the run-time
 # half: `goals_bridge` is met only once `KS_GOALS_HISTORY` names `silver`, and
@@ -156,14 +159,29 @@ SALES_TYPE_BRIDGE_TABLES = frozenset(
 
 
 def sales_type_bridge_owners() -> Dict[str, Tuple[str, ...]]:
-    """`{chain: tables}` for every registered write chain that owns a table
-    the bridge reads from DuckDB. Empty is the tripwire green."""
-    from core.write_chains import WRITE_CHAINS, chain_name
+    """`{chain: tables}` for every registered write chain that has MOVED a
+    table the bridge reads from DuckDB — writes it to Postgres, is latched, or
+    has a flag nobody can read (`write_chains`' stood-down rule). Empty is the
+    tripwire green.
+
+    Moved, not declared: a registered chain whose writes still go to DuckDB
+    leaves the bridge reading what it always read. Chain 3 registered on
+    2026-10-01 with its flag off, and asked of the declaration this would have
+    failed step 13's `goals_bridge` at the next start — a full DuckDB rebuild
+    owed to a chain that moved nothing. Never raises; a chain whose state
+    cannot be read counts as moved, the louder answer."""
+    from core.write_chains import WRITE_CHAINS, _chain_state, chain_name
 
     owners: Dict[str, Tuple[str, ...]] = {}
     for chain in WRITE_CHAINS:
         owned = frozenset(getattr(chain, "CHAIN_TABLES", ())) & SALES_TYPE_BRIDGE_TABLES
-        if owned:
+        if not owned:
+            continue
+        try:
+            moved = _chain_state(chain)["mode"] != "duckdb"
+        except Exception:  # noqa: BLE001 — unreadable is moved
+            moved = True
+        if moved:
             owners[chain_name(chain)] = tuple(sorted(owned))
     return owners
 

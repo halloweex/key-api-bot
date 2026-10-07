@@ -74,6 +74,11 @@ class TestTheClockIsDerived:
             "bronze.buyers": ("updated_at",),
             "bronze.buyer_contacts": (),
             "app.buyer_gender": ("decided_at",),
+            # Chain 5. `set_at` is when a human decided, carried by both
+            # stores as a value and stamped by both writers from the web
+            # container's clock; the managers carry no shared per-row clock.
+            "bronze.managers": (),
+            "app.manager_classifications": ("set_at",),
         }
 
 

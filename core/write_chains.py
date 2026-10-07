@@ -28,7 +28,7 @@ from typing import Dict, FrozenSet, Iterable, Optional, Tuple
 
 from core import (
     pg_buyers_write, pg_expense_types_write, pg_expenses_write, pg_goals_write,
-    pg_inventory_write,
+    pg_inventory_write, pg_managers_write,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,8 +44,14 @@ logger = logging.getLogger(__name__)
 # `bronze.buyer_contacts` and `app.buyer_gender`, off by default, and held on
 # DuckDB until every reader of the buyers reads Postgres
 # (`unmet_precondition`).
+#
+# Chain 5 (`pg_managers_write`): `bronze.managers` and
+# `app.manager_classifications`, off by default (`KS_WRITE_MANAGERS`), and held
+# on DuckDB until the goal bridge is gone, step 13 and chain 3 are in force and
+# `KS_READ_FALLBACK=off` (`unmet_precondition`). Registered with the flag off,
+# it stands nothing down.
 WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
-                pg_expense_types_write, pg_buyers_write)
+                pg_expense_types_write, pg_buyers_write, pg_managers_write)
 
 # A KS_WRITE_* value no chain understands must stop that chain and nothing
 # else. The registry used to evaluate every chain's flag for every question, so
