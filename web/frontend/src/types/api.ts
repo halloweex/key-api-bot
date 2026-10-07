@@ -1348,6 +1348,8 @@ export interface MarketingReportResponse {
   }
   brands: MarketingBrandRow[]
   sources: MarketingSourceRow[]
+  /** Set when a brand or category narrowed every section to its lines. */
+  product_filter: { category_id: number | null; brand: string | null } | null
 }
 
 // ─── SMS Campaigns ───────────────────────────────────────────────────────────

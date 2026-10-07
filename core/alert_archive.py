@@ -75,10 +75,36 @@ async def _write_fired(
                          last_fired_at, fired_count, suppressed_count, instance)
                     VALUES ($1, $2, $3, now(), now(), 1, $4, $5)
                     ON CONFLICT (condition_key) DO UPDATE SET
+                        -- A condition that fires after it was resolved is a
+                        -- NEW incident: it starts its own clock and count,
+                        -- and inherits no acknowledgement. Every right-hand
+                        -- side here reads the row as it was before this
+                        -- statement, so `state = 'resolved'` means the same
+                        -- thing on each line. See CYCLE_START_SQL for what
+                        -- carrying the old cycle forward cost.
+                        first_fired_at = CASE WHEN app.alert_series.kind = 'condition'
+                                               AND app.alert_series.state = 'resolved'
+                                              THEN now()
+                                              ELSE app.alert_series.first_fired_at END,
                         last_fired_at    = now(),
-                        fired_count      = app.alert_series.fired_count + 1,
-                        suppressed_count = app.alert_series.suppressed_count
-                                           + EXCLUDED.suppressed_count,
+                        fired_count = CASE WHEN app.alert_series.kind = 'condition'
+                                            AND app.alert_series.state = 'resolved'
+                                           THEN 1
+                                           ELSE app.alert_series.fired_count + 1 END,
+                        suppressed_count = CASE WHEN app.alert_series.kind = 'condition'
+                                                 AND app.alert_series.state = 'resolved'
+                                                THEN EXCLUDED.suppressed_count
+                                                ELSE app.alert_series.suppressed_count
+                                                     + EXCLUDED.suppressed_count END,
+                        acknowledged_by = CASE WHEN app.alert_series.state = 'resolved'
+                                               THEN NULL
+                                               ELSE app.alert_series.acknowledged_by END,
+                        acknowledged_at = CASE WHEN app.alert_series.state = 'resolved'
+                                               THEN NULL
+                                               ELSE app.alert_series.acknowledged_at END,
+                        acknowledged_reason = CASE WHEN app.alert_series.state = 'resolved'
+                                                   THEN NULL
+                                                   ELSE app.alert_series.acknowledged_reason END,
                         state = CASE WHEN app.alert_series.kind = 'condition'
                                      THEN 'firing'
                                      ELSE app.alert_series.state END,
@@ -114,6 +140,43 @@ async def _write_fired(
     if _standing_down:
         _standing_down = False
         logger.info("alert archive: writes succeeding again")
+
+
+# Where the current firing cycle of series `s` begins: the first fire the
+# ledger recorded after its last resolution, or its first fire if it never
+# resolved.
+#
+# The ledger keeps one row per condition for good, and until 2026-09-25 that
+# row's `first_fired_at` was the first fire EVER. Readers took it, or the last
+# resolution, as the start of "this" incident — and both are wrong once a
+# condition has cleared and come back: the healthy days in between were
+# counted as firing. freshness_orders resolved 09-21 10:00 and returned 09-25
+# 04:00; the escalator called it "90h" and escalated it ten minutes in, the
+# digest called it "4d". Measured over every escalation ever sent: 8 of 11 came
+# 0.0-0.2 h into their incident, against a six-hour bar — every one of them the
+# second or later incident of a condition.
+#
+# Derived from the events as well as the row, because every row written
+# before the fix still carries the first fire ever: production's
+# freshness_orders row read four days while its events said ten minutes. From
+# the fix on the two agree — `_write_fired` opens the row's new cycle and
+# writes the fire's event in one transaction, on one `now()` — so GREATEST
+# picks between equals. It cannot be asked to cover a resolve that half
+# landed: `_write_resolved` updates the row and writes the event in one
+# transaction too, and a resolve that missed its budget is not lost but
+# retried — `write_resolved_now` answers False and the Gate keeps the key.
+CYCLE_START_SQL = """
+    GREATEST(
+        s.first_fired_at,
+        COALESCE(
+            (SELECT min(f.at) FROM app.alert_events f
+              WHERE f.condition_key = s.condition_key
+                AND f.event_type = 'fired'
+                AND f.at > (SELECT max(r.at) FROM app.alert_events r
+                             WHERE r.condition_key = s.condition_key
+                               AND r.event_type = 'resolved')),
+            s.first_fired_at))
+"""
 
 
 async def _write_resolved(keys, message, delivered) -> None:
@@ -442,18 +505,23 @@ async def fetch_digest_tail() -> "Optional[str]":
         async def _read():
             async with pool.acquire() as conn:
                 firing = await conn.fetch(
-                    """
-                    SELECT s.condition_key, s.first_fired_at, s.fired_count,
+                    f"""
+                    SELECT c.condition_key, c.cycle_start AS first_fired_at,
+                           c.fired_count,
                            EXISTS (
                                SELECT 1 FROM app.alert_events e
-                               WHERE e.condition_key = s.condition_key
+                               WHERE e.condition_key = c.condition_key
                                  AND e.event_type = 'escalated'
-                                 AND e.at > s.first_fired_at
+                                 AND e.at > c.cycle_start
                            ) AS escalated
-                    FROM app.alert_series s
-                    WHERE s.kind = 'condition' AND s.state = 'firing'
-                      AND s.acknowledged_at IS NULL
-                    ORDER BY s.first_fired_at
+                    FROM (
+                        SELECT s.condition_key, s.fired_count,
+                               {CYCLE_START_SQL} AS cycle_start
+                        FROM app.alert_series s
+                        WHERE s.kind = 'condition' AND s.state = 'firing'
+                          AND s.acknowledged_at IS NULL
+                    ) c
+                    ORDER BY c.cycle_start
                     """
                 )
                 resolved = await conn.fetchval(

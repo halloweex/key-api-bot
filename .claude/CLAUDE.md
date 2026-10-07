@@ -2706,9 +2706,9 @@ an outage as "Forecast not available yet", a model nobody had trained.
 **Everything else a refusal can reach answers it itself** (DN-20c), and
 never with a DuckDB number. The two weekly reports defer: no message, no
 ledger row, and tomorrow's tick asks again. The Monday goals job
-(`seasonality_calc`) asks its one routed read — the suggestions — *before*
-it writes `seasonal_indices`, so a refusal defers it whole instead of
-leaving new indices beside last week's `growth_metrics`. Training is skipped
+(`seasonality_calc`) reads everything before it writes anything, in one
+transaction (chain 7b-1), so a refusal at any of its reads defers it whole
+instead of leaving new indices beside last week's `growth_metrics`. Training is skipped
 and the previous model stands; `_train_impl` lets the refusal through its
 `except Exception`, so `POST /api/revenue/forecast/train` answers 503 like
 every route rather than 200 `"status": "error"`. The search index and the
@@ -3205,8 +3205,9 @@ revision, the landing mirror on, every Silver/Gold/UTM read switch on
 `postgres` (a test reads every string in `core/`, `web/` and `bot/` for a
 `KS_READ_*` or `KS_*_STORE` name, so a new one has to be put on the list or
 excluded by name — `KS_SMS_STORE` is read inline and the first walk missed
-it), cohorts on ClickHouse with `KS_CH_URL`, no write chain owning a table
-the goals bridge reads (DN-12), **`bronze.expenses` holding its history**
+it), cohorts on ClickHouse with `KS_CH_URL`, **the goal calculators off the
+DN-12 bridge** (`goals_bridge`: `KS_GOALS_HISTORY=silver`, see "Chain 7b"),
+**`bronze.expenses` holding its history**
 (`expenses_backfilled` — see "OD-10: the DuckDB-only doors"), **no door OD-10
 has not answered** (`od10_doors`: `OD10_DOORS` is every function in `web/`
 naming DuckDB's Silver, its order-lines view, Gold, UTM or an inventory view
@@ -3547,6 +3548,111 @@ proves it per writer against a live pool: no marker while it waits, none and
 no owner row after a refused reconnect, a cancellation or a closed pool; no
 owner row after a write that rolls back; and a first write takes the marker
 and claims its owner rows in the transaction that writes the row.
+
+### Chain 7b: the goals read Silver, and a GET never writes (OD-14)
+
+The goal calculators — seasonality, YoY, weekly patterns, the growth cap, and
+a smart goal's last-year and recent-months reads — read the whole order
+history, and since DN-12 they read it through a bridge: DuckDB `orders`
+narrowed by `silver_sales_type_case` rendered over DuckDB's `managers` and
+`manager_classifications`. Step 13 freezes all three. Two changes, neither of
+which moves a number in production by itself.
+
+**7b-1 — compute, then store once.** The calculators return and store
+nothing; `recalculate_goal_tables` is the one writer of `seasonal_indices`,
+`growth_metrics` and `weekly_patterns`, reached from the Monday job (the
+first two, as always) and `POST /api/goals/recalculate` (all three, retail
+only — the tables carry no `sales_type`, so the rows mean retail and any other
+value is a 400). It reads everything first and writes in **one** DuckDB
+transaction: they were twelve autocommitted upserts then twelve autocommitted
+YoY updates, so a failure between them left this week's indices beside last
+week's growth. `GET /api/goals/smart` used to recompute and store all three
+whenever `seasonal_indices` held fewer than twelve rows, for any viewer and
+with the viewer's `sales_type`; `GET /api/goals/forecast?recalculate=true`
+did it on request. Neither does now: the smart goal reads only, a short
+table falls back per month as it always did, and `recalculate=true` is a 400
+naming the POST, for an admin too. **The trade, taken knowingly:**
+`weekly_patterns` has no automatic writer now — the Monday job stores the
+other two (OQ-2) and only the POST stores it — so on a host whose goal
+tables start empty, milestone weeks use the default weights (0.23 a week,
+0.08 for the fifth) until an admin POSTs, where the first page view used to
+fill them. Production holds all three (12/60/1 rows), and the Sunday
+compaction exports them: none is in its `DERIVED_TABLES`. A sweep runs every GET under `/api` with
+`seasonal_indices` emptied and every optional boolean switched on, and fails
+on any that changes a goal table. **The YoY crash it fixed** would have come on
+2026-11-02: from the first order dated 1 November the running year has eleven
+months and counted as "full", a second pair of years appeared, and the
+recency weighting multiplied DuckDB `Decimal`s by float weights —
+`TypeError`, in the Monday job and in `GET /api/goals/growth`. The yearly
+read now never takes the current Kyiv year, and every term is a float.
+
+**7b-2 — `KS_GOALS_HISTORY` chooses which orders count**: `bridge` (default,
+today's) or `silver` — every history read over `{silver_orders}` through
+`_goals_run`, so the engine is `KS_READ_GOALS`', and DN-20's counting and
+refusal cover it. An unknown value raises at the read, never at import —
+counting another set of orders in silence would be the worse failure — and
+since every goal read then answers 500 and the Monday job fails, neither of
+which pages anybody, `/api/health` publishes `goals_history {mode, error}`
+and the canary pages `goals_history_mode_invalid`, CRITICAL like
+`write_chain_flag_invalid`, with the variable as its lever. Not
+`KS_READ_GOALS` reused: that is `postgres` in production already, so a reuse
+would have moved the reads at the deploy; it names an engine, this names a
+row set; and an engine switch put back must never change semantics. Not
+`KS_READ_*` either — the step-13 walk reads those as engines.
+**`is_active_source` is deliberately absent** (OQ-1, the owner's): source 3
+is the 2024 website on Opencart — 2 055 retail orders, ₴5.0M, July to
+December 2024, before Shopify took over — and dropping it shrinks 2024, so
+retail YoY would move from 0.50 to 0.82 and October's retail goal from ₴4.0M
+to ₴4.2M. Without it, Silver selects exactly the bridge's orders.
+
+Measured with the built code on the 2026-08-31 production backup, as of
+2026-10-01: the orders each side counts are identical for every sales type
+(retail 42 054), and **1 207 numbers — every calculator for every sales type,
+the Monday job's store and the smart goal for four months — show 0
+differences**. The one rule that could differ is the return: KeyCRM's status
+group decides before the status list (0 orders in production). On a real
+Postgres the same bodies answer the bridge's numbers to 1e-6
+(`tests/integration/test_goals_history_two_engines.py`), including with
+DuckDB's orders, classification, Silver and Gold refused at the statement and
+with DuckDB's Silver emptied.
+
+**The flip**: `KS_GOALS_HISTORY=silver` with `KS_READ_GOALS=postgres`, after
+`scripts/goals_semantics_dryrun.py --backup <that day's backup>` exits 0,
+run as the web service (`docker compose run --rm --no-deps -T web`) once
+that morning's 07:30 `mirror_landing` run has reached the journal copy
+(hourly); not before 04:00 on a Monday, so the first Monday job under
+`silver` is watched. **Exit 0 needs both halves.** The backup half runs the
+real goal methods both ways over a read-only in-memory copy and files every
+difference under its cause — but it reads DuckDB's Silver on both sides,
+and the flip reads Postgres', so a Postgres Silver missing or misclassifying
+orders would have read clean there (review of 7b-2). The Postgres half
+reads, as `ks_readonly` through `utm_reclassify_dryrun.py`'s door (never
+`KS_PG_DSN`), the verdict of the one comparison that sets the two Silvers
+against each other at one instant: the latest `mirror_landing` run's
+`reconcile_silver`, from Postgres' copy of the quality journal. Clean only
+when the copy is under 75 min old and not failing, the run under 30 h (chain
+1's preflight limits, read from it), the run did not fail in
+`reconcile_silver`, `setup` or unparseably, it filed nothing against
+`silver.orders`, and neither switch that stands `reconcile_silver` down is
+set here — `KS_MIRROR_LANDING` off, or `KS_WRITE_WAREHOUSE` anything but
+`duckdb` — since it files nothing then. A backup whose
+`sync_metadata.warehouse_writer` reads `postgres` (switched, or a way back
+still owed its validated full tick) is refused: its Silver is frozen and the
+comparison stood down, so neither half could answer. Before the warehouse
+switch neither can hold, since `goals_bridge` is one of its preconditions;
+a re-flip after one is when they would. Exit 1 is a difference or Postgres Silver not proved,
+each named; 2 a refusal (no read-only login, one that can write, Postgres
+unreachable, a backup after the switch); `--backup-only` skips the Postgres half and exits 3 on a clean
+backup, never 0. What the verdict cannot see is a Postgres Silver that went
+wrong after that run, which is why it is the flip day's run. Rollback is unsetting the
+variable and `up -d web`, number-neutral by the same measurement, while the
+bridge exists. `goals_bridge` in step 13's readiness is **met only under
+`silver`** — DuckDB's orders freeze at the switch whoever owns them — and its
+detail names any write chain already owning a bridge table, which is when
+retail goals start diverging. The CI tripwire in
+`tests/unit/test_goals_off_duckdb_silver.py` stays until the bridge is
+deleted (7b-4, after the flip's soak); chains 3 and 5 wait for that. The
+three goal tables' writer moving to Postgres is 7b-3's.
 
 ### Every other shipper asks too, and a walk finds them (DN-22b)
 

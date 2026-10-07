@@ -23,6 +23,17 @@
 -- - findings on the derived tables: the two stores' Silver or Gold disagree.
 --   `app.data_quality_issues.description` names the columns.
 --
+-- A VERDICT STILL INSIDE ITS GRACE IS NOT A DISAGREEMENT EITHER
+-- `pg_order_utm_in_flight` (INFO, on silver.order_utm) counts orders written
+-- in the last 20 minutes whose UTM verdict has not landed yet, and its own
+-- description says "Not a defect yet". Since KS_UTM_PARSE=postgres (30.09) the
+-- 07:30 run files one nearly every morning, so counting it made D8 FAIL daily
+-- on a state that is the design. It is excluded from the findings at INFO
+-- only, and the PASS says how many there were; the "UTM gap" check judges
+-- the same verdicts past their grace, and `pg_order_utm_missing` / `_stale`,
+-- the CRITICALs past it, still FAIL here. A test holds the list to checks
+-- core files at INFO and nothing else.
+--
 -- A COMPARISON THAT COULD NOT LOOK IS UNKNOWN, NOT A DISAGREEMENT
 -- ClickHouse's Gold comparison files on these tables too, and three of its
 -- findings say only that it did not compare: `gold_values_unwatched` (OD-08
@@ -84,9 +95,19 @@ derived AS (
                            'gold_missing_cells', 'gold_orphan_cells',
                            'gold_cell_values', 'customer_profile_mismatch')
 ),
+grace_checks AS (
+    SELECT unnest(ARRAY['pg_order_utm_in_flight']) AS check_name
+),
+graced AS (
+    SELECT d.* FROM derived d
+    WHERE d.check_name IN (SELECT check_name FROM grace_checks)
+      AND d.severity = 'INFO'
+),
 findings AS (
     SELECT d.* FROM derived d
     WHERE d.check_name NOT IN (SELECT check_name FROM blind_checks)
+      AND NOT (d.check_name IN (SELECT check_name FROM grace_checks)
+               AND d.severity = 'INFO')
 ),
 blind AS (
     SELECT d.* FROM derived d
@@ -104,7 +125,8 @@ agg AS (
            (SELECT count(*) FROM blind) AS n_blind,
            (SELECT string_agg(format('%s %s', check_name, severity), ', '
                               ORDER BY check_name)
-              FROM blind) AS blind_listed
+              FROM blind) AS blind_listed,
+           (SELECT COALESCE(sum(count), 0) FROM graced) AS n_graced
 )
 SELECT 'D8 mirror_landing (derived)'::text AS "check",
        CASE
@@ -131,5 +153,9 @@ SELECT 'D8 mirror_landing (derived)'::text AS "check",
                                                  agg.blind_listed), 400)
            ELSE format('%s run(s) since %s Kyiv, no error, zero findings on the derived tables',
                        agg.n_runs, to_char(slot.starts AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
+                || CASE WHEN agg.n_graced > 0
+                        THEN format('; %s UTM verdict(s) in flight inside their grace (the UTM gap check judges them)',
+                                    agg.n_graced)
+                        ELSE '' END
        END AS detail
 FROM dq_copy CROSS JOIN slot CROSS JOIN agg;
