@@ -91,9 +91,14 @@ and it is `scripts/utm_reclassify_dryrun.py`'s door: `KS_PG_READONLY_DSN`
 anything is refused before a row is read, the session is read-only by
 default, the transaction is declared READ ONLY, and before it ends the server
 is asked whether it assigned a transaction id. Nothing it computes reads
-`revenue_goals`, the one table a write chain could route regardless of the
-flag. It needs the database file to itself only if it is the live one, which
-web holds; a backup is not.
+`revenue_goals`, chain 7a's table. Chain 7b-3's four tables it does read and
+write — the Monday job's store and the smart goal — and that chain routes
+them to Postgres once it is flagged or latched, through `KS_PG_DSN`, and
+latches itself in web's `./data` on the first write. So `measure` pins both
+of the chain's answers to DuckDB and replaces its pool with one that raises:
+whatever the flag or the latch says, the store goes to the in-memory copy.
+It needs the database file to itself only if it is the live one, which web
+holds; a backup is not.
 """
 from __future__ import annotations
 
@@ -648,10 +653,20 @@ async def measure(backup: Path, today: date) -> Report:
         raise RuntimeError("the dry run routed a goal read to Postgres; it "
                            "compares the backup's copy with itself only")
 
+    async def _no_forecast_pool():
+        raise RuntimeError("the dry run reached chain 7b-3's Postgres writer; "
+                           "it stores into the in-memory copy only")
+
     report = Report(backup=str(backup), today=today.isoformat())
     results: Dict[str, Any] = {}
+    # Chain 7b-3 routes the Monday job's store and the smart goal's read to
+    # Postgres once flagged or latched; here both stay on the copy, and the
+    # writer's pool raises as a second wall (module docstring).
     with patch.dict(os.environ, {"KS_READ_GOALS": "duckdb"}), \
             patch("core.pg_goals_read.fetch", _no_postgres), \
+            patch("core.pg_forecast_write.writes_postgres", lambda: False), \
+            patch("core.pg_forecast_write.reads_postgres", lambda: False), \
+            patch("core.pg_forecast_write._pool", _no_forecast_pool), \
             patch("core.repositories.goals.datetime", frozen_clock(today)):
         for side in SIDES:
             conn = copy_backup(backup)

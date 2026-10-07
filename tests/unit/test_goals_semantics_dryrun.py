@@ -149,6 +149,37 @@ class TestTheDryRun:
         assert dryrun.main(["--backup", str(backup), "--today", TODAY]) == 0
         assert read_fallback.counts() == {}, "a goal read was routed off the copy"
 
+    @pytest.mark.parametrize("latched", [True, False])
+    def test_chain_7b3_stays_on_the_copy(self, tmp_path, monkeypatch, capsys,
+                                         latched):
+        """Run as the web service, the dry run has `KS_PG_DSN` and web's
+        `./data`. With chain 7b-3 latched (or flagged with everything it
+        needs), the Monday job's store and the smart goal's read would go to
+        production Postgres, and the first write would latch the chain from a
+        one-off container. `measure` pins both answers to DuckDB and makes the
+        writer's pool raise. Mutation: drop either pin and the run fails here
+        — the store reaches the raising pool, or the read the raising fetch."""
+        from core import chain_latch, pg_forecast_write
+
+        backup = _backup(tmp_path)
+        reached = []
+
+        async def _recording_pool():
+            reached.append("pool")
+            raise RuntimeError("reached production Postgres")
+
+        monkeypatch.setattr(pg_forecast_write, "_pool", _recording_pool)
+        monkeypatch.setenv(pg_forecast_write.WRITE_ENV, "postgres")
+        monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://ks_app:x@127.0.0.1:9/ks")
+        monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
+        if latched:
+            chain_latch.latch(pg_forecast_write.CHAIN, pg_forecast_write.WRITE_ENV)
+        assert dryrun.main(["--backup", str(backup), "--today", TODAY]) == 0
+        assert reached == []
+        assert chain_latch.latched(pg_forecast_write.CHAIN) is latched
+        assert read_fallback.counts() == {}
+
     def test_a_missing_backup_is_refused(self, tmp_path, capsys):
         assert dryrun.main(["--backup", str(tmp_path / "none.duckdb")]) == 2
         assert "refused" in capsys.readouterr().err

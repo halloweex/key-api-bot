@@ -199,6 +199,49 @@ class TestNoGetWrites:
         assert "/api/goals/smart" in {e.path for e in routes}
         assert "/api/goals/forecast" in {e.path for e in routes}
 
+    def test_under_chain_7b3_no_get_reaches_its_postgres_writers(
+        self, sweep_client, no_network, fresh_read_fallback, monkeypatch,
+    ):
+        """The same sweep with chain 7b-3 latched: the goal tables' writes
+        then go to Postgres, so a GET that stored again would not show in
+        DuckDB at all. Both of the chain's writers are replaced by recorders
+        that raise, and every Postgres read answers nothing.
+
+        Mutation: give `generate_smart_goals` back a store and the smart
+        goal's GET reaches `persist_goal_tables`, named here."""
+        from core import chain_latch, pg_forecast_write
+        from web.main import app
+        from web.ratelimit import limiter
+
+        reached = []
+
+        async def _recorder(*a, **kw):
+            reached.append(a)
+            raise AssertionError("a GET reached chain 7b-3's writer")
+
+        async def _nothing(sql, params=()):
+            return []
+
+        monkeypatch.setattr(pg_forecast_write, "persist_goal_tables", _recorder)
+        monkeypatch.setattr(pg_forecast_write, "store_predictions", _recorder)
+        monkeypatch.setattr("core.pg_goals_read.fetch", _nothing)
+        _history(monkeypatch, "bridge")
+        chain_latch.latch(pg_forecast_write.CHAIN, pg_forecast_write.WRITE_ENV)
+        assert pg_forecast_write.writes_postgres()
+
+        _seed_app_store(_seed_history, _seed_goal_tables)
+        conn = _app_connection(sweep_client)
+        before = _fingerprint(conn)
+        routes = swept_routes(app)
+        for endpoint in routes:
+            path, params = _request_for(endpoint)
+            for extra in ({}, _switched_on(endpoint)):
+                limiter.reset()
+                sweep_client.get(path, params={**params, **extra})
+        assert reached == []
+        assert _fingerprint(conn) == before
+        assert "/api/goals/smart" in {e.path for e in routes}
+
     def test_the_sweep_switches_recalculate_on(self):
         """The second request per route is not vacuous for the one GET that
         used to take a write switch."""

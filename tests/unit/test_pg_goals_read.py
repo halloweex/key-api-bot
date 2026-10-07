@@ -75,6 +75,12 @@ ROUTED = ("get_goals", "get_smart_goals", "get_historical_revenue",
 # year's month and the recent months — which read `{silver_orders}`. None of
 # the four names a table Postgres holds only as a replica, so the three
 # seasonality tables stay read where they are written.
+#
+# Since chain 7b-3 "where they are written" has two answers, and
+# `_goal_tables_run` asks that chain for it — DuckDB while it writes DuckDB,
+# Postgres once it writes there — and never `KS_READ_GOALS`, which is what this
+# walk forbids: it does not reach `_goals_run`.
+# `tests/unit/test_goals_reads_follow_chain.py` holds the other half.
 NOT_ROUTED = ("generate_smart_goals",)
 ROUTED_ONLY_VIA = {"generate_smart_goals": (
     "_get_ml_forecast_total", "_dynamic_growth_cap", "_last_year_month_revenue",
@@ -305,19 +311,26 @@ class TestTheBoundary:
         assert POSTGRES.revenue_predictions == "app.revenue_predictions"
         assert DUCKDB.revenue_predictions == "revenue_predictions"
 
-    def test_the_other_three_are_still_only_a_replication_target(self):
-        """They have a Postgres home too, and no dialect entry — deliberately.
-        Nothing reads them through a routed body: `generate_smart_goals` writes
-        them before reading, so it stays whole on DuckDB until the writes
-        move."""
-        from core.sql_dialect import POSTGRES
+    def test_the_other_three_follow_their_writer_not_this_flag(self):
+        """This used to assert the three had no dialect entry: nothing could
+        read them through a routed body while `generate_smart_goals` wrote
+        them before reading. Chain 7b-1 took that write out, and chain 7b-3
+        moves their writer, so they have entries now — and the one body that
+        carries them goes to `_goal_tables_run`, which asks the chain, never
+        to `_goals_run`, which asks `KS_READ_GOALS` and would read the hourly
+        replica while DuckDB is still the writer."""
+        from core.sql_dialect import DUCKDB, POSTGRES
 
         for name in ("seasonal_indices", "weekly_patterns", "growth_metrics"):
-            assert not hasattr(POSTGRES, name), (
-                f"{name} gained a dialect entry — if something now reads it "
-                f"through the router, `generate_smart_goals`' compute-then-read "
-                f"loop has to be resolved first"
-            )
+            assert getattr(POSTGRES, name) == f"app.{name}"
+            assert getattr(DUCKDB, name) == name
+        source = REPOSITORY.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        routers = {c.func.attr for c in ast.walk(tree)
+                   if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                   and c.args and isinstance(c.args[0], ast.Name)
+                   and c.args[0].id == "_SHARED_GOAL_TABLES_SQL"}
+        assert routers == {"_goal_tables_run"}
 
 
 class TestItDoesNotTakeTheDuckDbLock:

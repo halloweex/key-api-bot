@@ -116,6 +116,30 @@ _FORECAST_PREDICTED_SQL = """
       AND prediction_date <= ?
 """
 
+# What a smart goal reads of the three shared goal tables, in ONE statement:
+# their writer stores them in one transaction, so one statement reads one
+# committed set in either engine — what a single hold of DuckDB's store lock
+# gave the three separate reads this replaced. `part` says which table a row
+# came from. `CAST(NULL AS INTEGER)` and not a bare NULL: Postgres types a
+# UNION's column from its first branch and refuses `text` against `integer`
+# (measured, 17.2); both engines accept the cast. Read through
+# `_goal_tables_run`, which follows chain 7b-3.
+_SHARED_GOAL_TABLES_SQL = """
+    SELECT 'seasonal' AS part, CAST(NULL AS INTEGER) AS week,
+           seasonality_index AS a, avg_revenue AS b, yoy_growth AS c,
+           confidence AS d
+    FROM {seasonal_indices}
+    WHERE month = ?
+    UNION ALL
+    SELECT 'growth', NULL, value, NULL, NULL, NULL
+    FROM {growth_metrics}
+    WHERE metric_type = 'yoy_overall'
+    UNION ALL
+    SELECT 'weekly', week_of_month, weight, NULL, NULL, NULL
+    FROM {weekly_patterns}
+    WHERE month = ?
+"""
+
 
 # ─── Which orders a goal calculator counts ──────────────────────────────────
 #
@@ -584,13 +608,20 @@ class GoalsMixin:
         Postgres, DuckDB's copy is frozen, and a fallback would show the goal
         from before the flip as if it were current. `core/pg_goals_write.py`
         has the reasoning; every other statement here keeps the flag.
+
+        Chain 7b-3 (`KS_WRITE_FORECAST`) does the same for a statement
+        reading `{revenue_predictions}` — the forecast a smart goal and
+        `/api/revenue/forecast` read: Postgres, with no fallback, while that
+        chain writes there, and this flag as before while it does not.
         """
         from core.sql_dialect import DUCKDB, POSTGRES, render_tables
 
         from core import pg_goals_read, pg_goals_write
+        from core import pg_forecast_write
 
         params = list(params or [])
-        if pg_goals_write.reads_the_chain(sql):
+        if (pg_goals_write.reads_the_chain(sql)
+                or pg_forecast_write.reads_the_chain(sql)):
             return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
         read_fallback.no_address("goals", pg_goals_read)
         if pg_goals_read.enabled() and pg_goals_read.available():
@@ -600,6 +631,29 @@ class GoalsMixin:
             except Exception as exc:  # noqa: BLE001
                 read_fallback.fall_back("goals", exc)
 
+        async with self.connection() as conn:
+            return conn.execute(render_tables(sql, DUCKDB), params).fetchall()
+
+    async def _goal_tables_run(self, sql: str, params=None):
+        """Read the three shared goal tables from whichever store writes them.
+
+        Not `_goals_run`, on purpose. While chain 7b-3 writes DuckDB these
+        tables are read in DuckDB, where they are written, whatever
+        `KS_READ_GOALS` says: that flag is `postgres` in production, and
+        following it would read the hourly replica and show a POSTed
+        recalculation up to an hour late. While the chain writes Postgres they
+        are read there with no fallback — DuckDB's copy is then frozen, not
+        older (`core/pg_forecast_write.py`). No `try`, so there is nothing to
+        fall back from and nothing for DN-20a's walk to require.
+        """
+        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+
+        from core import pg_goals_read
+        from core import pg_forecast_write
+
+        params = list(params or [])
+        if pg_forecast_write.reads_the_chain(sql):
+            return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
         async with self.connection() as conn:
             return conn.execute(render_tables(sql, DUCKDB), params).fetchall()
 
@@ -1161,6 +1215,22 @@ class GoalsMixin:
         ]
         weekly_rows = [list(row) + [now] for row in (tables.get("weekly_rows") or [])]
 
+        # Chain 7b-3 (`KS_WRITE_FORECAST`): the same rows, the same statements
+        # and the same placeholder rule, in one Postgres transaction. Routed
+        # here, where the Monday job and the POST both arrive, rather than in
+        # either of them. Asked after everything is computed, so a flag nobody
+        # can read raises with nothing written in either store.
+        from core import pg_forecast_write
+
+        if pg_forecast_write.writes_postgres():
+            await pg_forecast_write.persist_goal_tables(
+                [row[:7] for row in seasonal_rows],
+                (tables["yoy_overall"], start, end, yoy["sample_size"]),
+                yoy["monthly_yoy"],
+                [row[:4] for row in weekly_rows],
+                now)
+            return
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
@@ -1460,25 +1530,22 @@ class GoalsMixin:
             target_year, target_month, sales_type)
         recent_3_month_avg = await self._recent_three_month_average(sales_type)
 
-        # ── The three shared tables, in one hold of the lock: their writer
-        # stores them in one transaction, so this reads one set of them.
-        async with self.connection() as conn:
-            seasonality_result = conn.execute("""
-                SELECT seasonality_index, avg_revenue, yoy_growth, confidence
-                FROM seasonal_indices
-                WHERE month = ?
-            """, [target_month]).fetchone()
-
-            yoy_result = conn.execute("""
-                SELECT value FROM growth_metrics WHERE metric_type = 'yoy_overall'
-            """).fetchone()
-
-            weekly_patterns = conn.execute("""
-                SELECT week_of_month, weight
-                FROM weekly_patterns
-                WHERE month = ?
-                ORDER BY week_of_month
-            """, [target_month]).fetchall()
+        # ── The three shared tables, in one statement: their writer stores
+        # them in one transaction, so this reads one set of them, from
+        # whichever store chain 7b-3 says writes them. Asked after the
+        # history reads above, which take DuckDB's store lock themselves on
+        # their DuckDB path — and so does this one; it is not reentrant.
+        shared = await self._goal_tables_run(
+            _SHARED_GOAL_TABLES_SQL, [target_month, target_month])
+        seasonality_result = next(
+            ((r[2], r[3], r[4], r[5]) for r in shared if r[0] == "seasonal"), None)
+        yoy_result = next(((r[2],) for r in shared if r[0] == "growth"), None)
+        # Sorted here, not by the statement: a UNION's order is the engine's,
+        # and the week order is part of the answer — the residual below goes
+        # to `max(...)`, which breaks a tie by insertion order.
+        weekly_patterns = sorted(
+            ((int(r[1]), r[2]) for r in shared if r[0] == "weekly"),
+            key=lambda row: row[0])
 
         if seasonality_result:
             seasonality_index = float(seasonality_result[0] or 1.0)
@@ -1693,7 +1760,11 @@ class GoalsMixin:
         sales_type: str = "retail",
         metrics: Optional[Dict[str, float]] = None,
     ) -> int:
-        """Store revenue predictions in DuckDB.
+        """Store revenue predictions where chain 7b-3 says they are written.
+
+        DuckDB, or under `KS_WRITE_FORECAST` (`core/pg_forecast_write.py`)
+        Postgres: the same DELETE over the range and INSERT, in one
+        transaction, stamped with this call's clock.
 
         Args:
             predictions: List of dicts with 'date' and 'predicted_revenue' keys.
@@ -1705,6 +1776,14 @@ class GoalsMixin:
         """
         if not predictions:
             return 0
+
+        from core import pg_forecast_write
+
+        if pg_forecast_write.writes_postgres():
+            from datetime import timezone
+
+            return await pg_forecast_write.store_predictions(
+                predictions, sales_type, metrics, datetime.now(timezone.utc))
 
         mae = metrics.get('mae', 0) if metrics else 0
         mape = metrics.get('mape', 0) if metrics else 0
@@ -1756,8 +1835,10 @@ class GoalsMixin:
         gave `revenue_predictions` a Postgres home. `generate_smart_goals`,
         which the audit filed beside it, was not a read at all until chain
         7b-1: it recomputed the three seasonality tables in DuckDB and read
-        them back. It reads only now, and those three tables are still read
-        where they are written, in DuckDB, until their writer moves (7b-3).
+        them back. It reads only now, through `_goal_tables_run`, from the
+        store chain 7b-3 says writes them. This read follows the same chain
+        through `_goals_run`: Postgres with no fallback while it writes there,
+        `KS_READ_GOALS` while it does not.
         """
         rows = await self._goals_run(
             _PREDICTIONS_SQL, [sales_type, start_date, end_date])

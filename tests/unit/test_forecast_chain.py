@@ -635,3 +635,250 @@ class TestTheWatchIsRegistered:
             if table != "app.weekly_patterns":   # read by nothing it judges
                 assert table in sql, table
         assert inv.check_chain_invariants(facts) == []
+
+
+# ─── The repository routes ──────────────────────────────────────────────────
+
+from core.duckdb_store import DuckDBStore  # noqa: E402
+from core.repositories.goals import GoalsMixin  # noqa: E402
+
+TABLES = {
+    "seasonal": {
+        1: {"month": 1, "seasonality_index": 0.95, "sample_size": 3,
+            "avg_revenue": 1000.0, "min_revenue": 800.0, "max_revenue": 1200.0,
+            "std_dev": 1.0, "confidence": "high"},
+        2: {"month": 2, "seasonality_index": 1.05, "sample_size": 2,
+            "avg_revenue": 1100.0, "min_revenue": 900.0, "max_revenue": 1300.0,
+            "std_dev": 1.0, "confidence": "medium"},
+    },
+    "yoy": {"overall_yoy": 0.5019, "monthly_yoy": {1: 0.25, 2: 0.3},
+            "yearly_data": [], "sample_size": 1},
+    "yoy_overall": 0.50186,
+    "history_bounds": (date(2023, 12, 2), date(2026, 10, 6)),
+    "weekly_rows": [[1, 1, 0.25, 3], [1, 2, 0.24, 3]],
+}
+
+
+def _goal_rows(store_path):
+    async def read():
+        store = DuckDBStore(db_path=store_path)
+        await store.connect()
+        try:
+            async with store.connection() as conn:
+                return {t: conn.execute(f"SELECT * FROM {t} ORDER BY 1").fetchall()
+                        for t in ("seasonal_indices", "growth_metrics",
+                                  "weekly_patterns", "revenue_predictions")}
+        finally:
+            await store.close()
+    return asyncio.run(read())
+
+
+def _with_store(path, step):
+    async def run():
+        store = DuckDBStore(db_path=path)
+        await store.connect()
+        try:
+            return await step(store)
+        finally:
+            await store.close()
+    return asyncio.run(run())
+
+
+class TestTheRepositoryRoutes:
+    """Routed in the repository, where the Monday job and the POST both
+    arrive (and `predict_month` for the forecast) — never in a route, where
+    one caller would be missed."""
+
+    def test_under_the_chain_the_goal_tables_go_to_postgres_and_duckdb_is_untouched(
+            self, ready, tmp_path):
+        ready.setenv(chain.WRITE_ENV, "postgres")
+        path = tmp_path / "g.duckdb"
+        before = _goal_rows(path)
+        writer = AsyncMock(return_value={})
+        with patch.object(chain, "persist_goal_tables", new=writer):
+            _with_store(path, lambda s: s._persist_goal_tables(TABLES, NOW))
+        (seasonal, yoy, monthly, weekly, now), _ = writer.await_args
+        assert [list(r) for r in seasonal] == [
+            [1, 0.95, 3, 1000.0, 800.0, 1200.0, "high"],
+            [2, 1.05, 2, 1100.0, 900.0, 1300.0, "medium"]]
+        assert tuple(yoy) == (0.50186, date(2023, 12, 2), date(2026, 10, 6), 1)
+        assert monthly == {1: 0.25, 2: 0.3}
+        assert [list(r) for r in weekly] == [[1, 1, 0.25, 3], [1, 2, 0.24, 3]]
+        assert now is NOW
+        assert _goal_rows(path) == before
+
+    def test_off_the_writer_is_not_called_and_duckdb_is_written(self, ready, tmp_path):
+        path = tmp_path / "g.duckdb"
+        writer = AsyncMock(side_effect=AssertionError("routed while off"))
+        with patch.object(chain, "persist_goal_tables", new=writer):
+            _with_store(path, lambda s: s._persist_goal_tables(TABLES, NOW))
+        rows = _goal_rows(path)
+        assert [r[0] for r in rows["seasonal_indices"]] == [1, 2]
+        assert len(rows["weekly_patterns"]) == 2 and rows["growth_metrics"]
+
+    def test_flagged_but_held_writes_duckdb(self, ready, tmp_path):
+        ready.setenv(chain.WRITE_ENV, "postgres")
+        ready.setattr(read_fallback, "_mode", read_fallback.DUCKDB)
+        path = tmp_path / "g.duckdb"
+        writer = AsyncMock(side_effect=AssertionError("routed while held"))
+        with patch.object(chain, "persist_goal_tables", new=writer):
+            _with_store(path, lambda s: s._persist_goal_tables(TABLES, NOW))
+        assert len(_goal_rows(path)["seasonal_indices"]) == 2
+
+    def test_a_flag_nobody_can_read_writes_neither_store(self, ready, tmp_path):
+        ready.setenv(chain.WRITE_ENV, "postgre")
+        path = tmp_path / "g.duckdb"
+        before = _goal_rows(path)
+        with pytest.raises(RuntimeError, match=chain.WRITE_ENV):
+            _with_store(path, lambda s: s._persist_goal_tables(TABLES, NOW))
+        assert _goal_rows(path) == before
+
+    PREDICTIONS = [{"date": "2026-10-07", "predicted_revenue": 1000.0},
+                   {"date": "2026-10-08", "predicted_revenue": 1100.0}]
+    METRICS = {"mae": 1.0, "mape": 2.0, "wape": 3.0}
+
+    def test_under_the_chain_the_forecast_goes_to_postgres_stamped_now(
+            self, ready, tmp_path):
+        ready.setenv(chain.WRITE_ENV, "postgres")
+        path = tmp_path / "p.duckdb"
+        writer = AsyncMock(return_value=2)
+        before = datetime.now(timezone.utc)
+        with patch.object(chain, "store_predictions", new=writer):
+            n = _with_store(path, lambda s: s.store_predictions(
+                self.PREDICTIONS, "retail", self.METRICS))
+        assert n == 2
+        (preds, sales_type, metrics, created_at), _ = writer.await_args
+        assert preds == self.PREDICTIONS and sales_type == "retail"
+        assert metrics == self.METRICS
+        assert created_at.tzinfo is not None and created_at >= before
+        assert _goal_rows(path)["revenue_predictions"] == []
+
+    def test_off_the_forecast_goes_to_duckdb(self, ready, tmp_path):
+        path = tmp_path / "p.duckdb"
+        writer = AsyncMock(side_effect=AssertionError("routed while off"))
+        with patch.object(chain, "store_predictions", new=writer):
+            _with_store(path, lambda s: s.store_predictions(
+                self.PREDICTIONS, "retail", self.METRICS))
+        assert len(_goal_rows(path)["revenue_predictions"]) == 2
+
+    def test_nothing_to_store_asks_no_chain(self, ready, tmp_path):
+        ready.setenv(chain.WRITE_ENV, "postgre")      # would raise if asked
+        assert _with_store(tmp_path / "p.duckdb",
+                           lambda s: s.store_predictions([], "retail")) == 0
+
+
+class TestPredictionsStored:
+    """`predict_month` swallows a failed store — policy unchanged — and
+    `_train_impl` now says whether it landed, for /api/jobs and the POST."""
+
+    @staticmethod
+    def _service(monkeypatch, store):
+        from core import prediction_service as ps
+        from tests.unit.test_audit_fixes import _valid_training_df
+
+        svc = ps.PredictionService()
+
+        async def fake_get_store():
+            return store
+
+        monkeypatch.setattr("core.duckdb_store.get_store", fake_get_store)
+        monkeypatch.setattr(svc, "_query_daily_revenue",
+                            AsyncMock(return_value=_valid_training_df()))
+        monkeypatch.setattr(ps, "_train_model", lambda df: (
+            object(), {"wape": 27.66, "mape": 30.0, "mae": 1.0}, {}, 1.0))
+        monkeypatch.setattr(svc, "_save_model", lambda: None)
+        monkeypatch.setattr(ps, "_predict_future", lambda *a, **k: [
+            {"date": "2026-10-07", "predicted_revenue": 1000.0}])
+        return svc
+
+    def test_a_store_that_fails_is_reported(self, monkeypatch):
+        store = AsyncMock()
+        store.store_predictions.side_effect = RuntimeError("Postgres refused")
+        svc = self._service(monkeypatch, store)
+        result = asyncio.run(svc._train_impl("retail"))
+        assert result["status"] == "success"
+        assert result["predictions_stored"] is False
+
+    def test_a_store_that_lands_is_reported(self, monkeypatch):
+        store = AsyncMock()
+        svc = self._service(monkeypatch, store)
+        result = asyncio.run(svc._train_impl("retail"))
+        assert result["predictions_stored"] is True
+        store.store_predictions.assert_awaited_once()
+
+    def test_a_second_run_does_not_inherit_the_first_verdict(self, monkeypatch):
+        store = AsyncMock()
+        svc = self._service(monkeypatch, store)
+        assert asyncio.run(svc._train_impl("retail"))["predictions_stored"] is True
+        store.store_predictions.side_effect = RuntimeError("down")
+        assert asyncio.run(svc._train_impl("retail"))["predictions_stored"] is False
+
+
+# ─── The smart goal reads one set ───────────────────────────────────────────
+
+
+class _Smart(GoalsMixin):
+    """The history reads answered, the shared tables from `rows`."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.asked = []
+
+    async def _get_ml_forecast_total(self, *a, **k):
+        return 0.0
+
+    async def _dynamic_growth_cap(self, *a, **k):
+        return 0.35
+
+    async def _last_year_month_revenue(self, *a, **k):
+        return 3_000_000.0
+
+    async def _recent_three_month_average(self, *a, **k):
+        return 3_200_000.0
+
+    async def _goal_tables_run(self, sql, params=None):
+        self.asked.append((sql, params))
+        return list(self.rows)
+
+
+SHARED = [("seasonal", None, 1.0, 1000.0, 0.2, "high"),
+          ("growth", None, 0.25, None, None, None),
+          ("weekly", 1, 0.3333, None, None, None),
+          ("weekly", 2, 0.3333, None, None, None),
+          ("weekly", 3, 0.3333, None, None, None)]
+
+
+class TestTheSmartGoalReadsOneSet:
+    def test_one_statement_both_params_the_month(self):
+        smart = _Smart(SHARED)
+        asyncio.run(smart.generate_smart_goals(2026, 10, "retail"))
+        ((sql, params),) = smart.asked
+        for hole in ("{seasonal_indices}", "{growth_metrics}", "{weekly_patterns}"):
+            assert hole in sql
+        assert params == [10, 10]
+
+    def test_the_week_order_is_not_the_engines(self):
+        """Three equal weights and a residual of ₴10 000: `max` breaks the tie
+        by insertion order, so a breakdown built in the engine's row order
+        would hand the residual to week 3 for one engine and week 1 for the
+        other."""
+        straight = asyncio.run(_Smart(SHARED).generate_smart_goals(2026, 10))
+        flipped = asyncio.run(_Smart(
+            SHARED[:2] + SHARED[2:][::-1]).generate_smart_goals(2026, 10))
+        assert list(straight["weekly"]["breakdown"].items()) == \
+            list(flipped["weekly"]["breakdown"].items())
+        breakdown = straight["weekly"]["breakdown"]
+        assert sum(breakdown.values()) == straight["monthly"]["goal"]
+        assert breakdown[1] > breakdown[3], "the residual landed on week 1"
+
+    def test_the_values_are_read_as_before(self):
+        result = asyncio.run(_Smart(SHARED).generate_smart_goals(2026, 10))
+        assert result["monthly"]["seasonalityIndex"] == 1.0
+        assert result["monthly"]["growthRate"] == 0.2
+        assert result["monthly"]["confidence"] == "high"
+
+    def test_an_empty_set_falls_back_as_it_always_did(self):
+        result = asyncio.run(_Smart([]).generate_smart_goals(2026, 10))
+        assert result["monthly"]["confidence"] == "low"
+        assert result["monthly"]["seasonalityIndex"] == 1.0
+        assert set(result["weekly"]["breakdown"]) == {1, 2, 3, 4, 5}
