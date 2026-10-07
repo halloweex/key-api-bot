@@ -23,7 +23,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -166,13 +166,48 @@ def open_read_write(path) -> "duckdb.DuckDBPyConnection":
         raise
     if replayed:
         # A clean close leaves no WAL, so one here means the last read-write
-        # process did not close: an OOM kill, or a stop that ran out of grace.
+        # instance did not close cleanly: an OOM kill, a stop that ran out of
+        # grace, or this process reopening after a FATAL invalidated it (an
+        # invalidated instance writes nothing on close).
         logger.warning(
-            "DuckDB replayed %.1f MB of WAL that a writer left without closing "
-            "(killed?) and checkpointed it in %.1f s before anything else ran: %s",
+            "DuckDB replayed %.1f MB of WAL that a writer left without a clean "
+            "close (killed, or invalidated by a FATAL) and checkpointed it in "
+            "%.1f s before anything else ran: %s",
             replayed / 1e6, time.monotonic() - started, path,
         )
     return con
+
+
+def _invalidated(conn) -> "Optional[duckdb.FatalException]":
+    """The FatalException a statement on `conn` raises once DuckDB has
+    invalidated its instance, or None while it answers.
+
+    A FatalException invalidates the whole instance, and from then on every
+    statement on it raises FatalException "database has been invalidated
+    because of a previous fatal error", whose text carries the original error
+    (measured on 1.5.5). Asked of the instance rather than read off the
+    exception in hand, because the exception in hand can mislead both ways: a
+    caller may have swallowed the FATAL and raised something else, or wrapped
+    it with no chain left to read; and a FatalException in the chain may have
+    come from some other instance the caller opened.
+    """
+    try:
+        conn.execute("SELECT 1").fetchall()
+    except duckdb.FatalException as exc:
+        return exc
+    except Exception:  # noqa: BLE001 — e.g. an aborted transaction: still valid
+        return None
+    return None
+
+
+def _fatal_kind(echo: BaseException) -> str:
+    """`index` — an index short in the file, the damage a killed writer's WAL
+    left before `open_read_write` (the lever is rebuilding every CREATE INDEX
+    index); `other` — anything else. Read off the "invalidated" echo, which
+    quotes the original error."""
+    if "delete all rows from index" in str(echo).lower():
+        return "index"
+    return "other"
 
 
 # The one definition of what a Gold revenue cell contains. Both the rebuild and
@@ -559,6 +594,10 @@ class DuckDBStore(
     # __init__ still read cleanly.
     _last_stuck_rebuild: "float | None" = None
 
+    # FatalExceptions this store has seen, for /api/health; None until one.
+    # Class-level for the same reason.
+    _fatal: "Optional[Dict[str, Any]]" = None
+
     def __init__(self, db_path: Optional[Path] = None):
         # Resolved here rather than bound as a default argument. A default is
         # evaluated once, when this function is defined, so `db_path=DB_PATH`
@@ -673,8 +712,13 @@ class DuckDBStore(
         changes to the main database file and resets the WAL.
         """
         async with self._lock:
-            if self._connection:
-                self._connection.execute("CHECKPOINT")
+            conn = self._connection
+            if conn:
+                try:
+                    conn.execute("CHECKPOINT")
+                except Exception:
+                    self._drop_if_invalidated(conn)
+                    raise
                 logger.info("DuckDB checkpoint completed")
 
     @asynccontextmanager
@@ -684,11 +728,93 @@ class DuckDBStore(
         Acquires lock to ensure single-threaded DuckDB access.
         DuckDB connections are NOT thread-safe - only one thread can use
         a connection at a time.
+
+        A FatalException invalidates the DuckDB instance: every later
+        statement on it raises "database has been invalidated". It used to
+        stay in place — reconnection happened only when there was no
+        connection — so one FATAL left web's DuckDB dead until a restart,
+        the caller queued on the lock included. Now, whenever the block
+        raises, the instance is asked whether it still answers
+        (`_invalidated`), and one that does not is dropped, so the next use
+        opens the file again. A FATAL a caller swallowed is dropped by the
+        next use that raises, which is every use of an invalidated instance.
+
+        What that does not do is heal: a FATAL from a short index (see
+        `open_read_write`) comes back on the same write every time, because
+        the index is short in the file. `fatal_status()` keeps /api/health
+        degraded, and the page standing, until a restart.
         """
-        if self._connection is None:
-            await self.connect()
-        async with self._lock:
-            yield self._connection
+        while True:
+            if self._connection is None:
+                await self.connect()
+            async with self._lock:
+                conn = self._connection
+                if conn is None:
+                    # A FATAL dropped it while this caller waited for the lock.
+                    continue
+                try:
+                    yield conn
+                except Exception:
+                    # Not BaseException: a cancellation can leave the executor
+                    # thread on `conn`, and the probe must not join it there.
+                    self._drop_if_invalidated(conn)
+                    raise
+                return
+
+    def _drop_if_invalidated(self, conn) -> None:
+        """Forget `conn` if DuckDB invalidated its instance, so the next use
+        opens the file again.
+
+        Called with the lock held, after the statement that raised has come
+        off the executor thread. Closing an invalidated instance writes
+        nothing — the WAL stays, and the next open replays and checkpoints it
+        through `open_read_write` — and a fresh `duckdb.connect` of the same
+        file in the same process gets a new instance, even while a cursor of
+        the old one is alive (both measured on 1.5.5).
+        """
+        echo = _invalidated(conn)
+        if echo is None:
+            return
+        if self._connection is conn:
+            self._connection = None
+            executor, self._executor = self._executor, None
+            if executor:
+                executor.shutdown(wait=False)
+        with contextlib.suppress(Exception):
+            conn.close()
+        kind = _fatal_kind(echo)
+        seen = self._fatal or {"count": 0, "kinds": {}}
+        count = seen["count"] + 1
+        kinds = {**seen["kinds"], kind: seen["kinds"].get(kind, 0) + 1}
+        self._fatal = {
+            "count": count,
+            "kinds": kinds,
+            "last_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        lever = (
+            " An index is short in the file, and the write that met it fails "
+            "again until every CREATE INDEX index is rebuilt: the Sunday "
+            "compaction, or scripts/weekly_compact.sh by hand. A restart does "
+            "not heal it." if kind == "index" else ""
+        )
+        # Up to the chunk dump: an index FATAL prints the rows it could not
+        # remove, and buyers' phone and email columns are indexed.
+        error = " ".join(str(echo).split("\nChunk:")[0].split())[:400]
+        logger.error(
+            "DuckDB FATAL #%d (%s): the instance is dropped and the next use "
+            "opens the file again.%s %s", count, kind, lever, error,
+        )
+
+    def fatal_status(self) -> "Optional[Dict[str, Any]]":
+        """The invalidations this store has seen: how many, of which kind
+        (`_fatal_kind`), and when the last one was.
+
+        None until one. Published on /api/health, which reads degraded while
+        it is set — without that, the reconnect above would let a dead write
+        look healthy as soon as the next read answered."""
+        if not self._fatal:
+            return None
+        return {**self._fatal, "kinds": dict(self._fatal["kinds"])}
 
     # ─── Query Execution with Timeout ────────────────────────────────────────
 

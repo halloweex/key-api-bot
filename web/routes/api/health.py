@@ -470,6 +470,18 @@ async def health_check(request: Request):
     if ledger_error:
         logger.warning(f"Health check schema ledger error: {ledger_error}")
 
+    # A DuckDB FatalException this process has seen. Read live, not from the
+    # 60 s stats cache: the store drops the invalidated instance and the next
+    # read reconnects and answers, so without this the page a dead DuckDB
+    # raises would resolve over a write that still fails. Counts and a kind,
+    # never the exception text — this endpoint is public.
+    try:
+        store = await get_store()
+        duckdb_fatal = store.fatal_status()
+    except Exception as e:
+        logger.warning(f"Health check DuckDB fatal status error: {e}")
+        duckdb_fatal = None
+
     # The copy that carries the money. Its own watchdog lives in bot/canary.py,
     # out of this container — a mirror that stopped shipping used to wait for
     # the 07:30 comparison, which is a whole day of silence at the main copy.
@@ -494,7 +506,7 @@ async def health_check(request: Request):
     return {
         "status": (
             "degraded" if not duckdb_stats or migrations.get("status") == "failed"
-            else "healthy"
+            or duckdb_fatal else "healthy"
         ),
         "version": VERSION,
         "uptime_seconds": uptime_seconds,
@@ -502,7 +514,8 @@ async def health_check(request: Request):
         "duckdb": {
             "status": duckdb_status,
             "latency_ms": db_latency_ms,
-            **stats
+            **stats,
+            "fatal": duckdb_fatal,
         },
         "migrations": migrations,
         "sync": sync_status,
