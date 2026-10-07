@@ -43,20 +43,20 @@ logger = logging.getLogger(__name__)
 # Standing this long unresolved and unacknowledged earns the one loud repeat.
 ESCALATE_AFTER_S = 6 * 3600
 
-_DUE_QUERY = """
-WITH last_resolved AS (
-    SELECT condition_key, max(at) AS at
-    FROM app.alert_events
-    WHERE event_type = 'resolved'
-    GROUP BY condition_key
-),
-cycles AS (
+# The cycle starts at the first fire after the last resolution — not at the
+# resolution itself, which is what this used to take. The difference is every
+# healthy hour between two incidents, counted as standing: a condition that
+# cleared on Monday and returned on Friday was escalated ten minutes in, as
+# "90h". The definition lives in `core.alert_archive`, beside the ledger it
+# reads, so the digest's age and this bar cannot come to disagree.
+from core.alert_archive import CYCLE_START_SQL  # noqa: E402
+
+_DUE_QUERY = f"""
+WITH cycles AS (
     SELECT s.condition_key,
            s.fired_count,
-           GREATEST(s.first_fired_at, COALESCE(lr.at, s.first_fired_at))
-               AS cycle_start
+           {CYCLE_START_SQL} AS cycle_start
     FROM app.alert_series s
-    LEFT JOIN last_resolved lr USING (condition_key)
     WHERE s.kind = 'condition'
       AND s.state = 'firing'
       AND s.acknowledged_at IS NULL

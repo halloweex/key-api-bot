@@ -454,6 +454,7 @@
   "marketing.orders": "К-сть замовлень",
   "marketing.ordersPct": "% замовлень",
   "marketing.previousMonth": "Попередній місяць",
+  "marketing.productFilterNote": "Лише обраний бренд або категорія: виручка — сума їхніх позицій, замовлення й клієнти — ті, у чиїх кошиках вони були. Ціль місяця приховано.",
   "marketing.returnRate": "% повернення",
   "marketing.returningCustomers": "Клієнти, що повернулись",
   "marketing.revenue": "Виручка (грн)",

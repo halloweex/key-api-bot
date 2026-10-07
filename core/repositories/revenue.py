@@ -279,6 +279,58 @@ def _at_least_the_root(category_id: int, found: List[int]) -> List[int]:
     return found or [category_id]
 
 
+# The monthly report's eleven figures when a brand or category is chosen.
+#
+# Gold carries no product dimension, so this reads the order lines — and it
+# reproduces Gold's grain rather than improving on it. Gold's customer counts
+# are `COUNT(DISTINCT buyer_id)` per (date, sales_type) cell and the report
+# SUMs the cells, so "customers" has always meant buyer-days. Counting distinct
+# buyers over the whole window here would make a filtered report and an
+# unfiltered one disagree about what the same word means. Orders sum exactly
+# either way: an order has one date and one sales type.
+#
+# Revenue is the matching lines' `line_amount`, not the orders' grand totals —
+# a brand's sales, not the value of every basket it appeared in. That is what
+# `/api/summary` has always shown under the same filter.
+#
+# The column order is `_MONTH_SQL`'s, which `_fetch_month` unpacks.
+_MARKETING_LINES_PERIOD_SQL = """
+    WITH cells AS (
+        SELECT
+            COALESCE(SUM(l.line_amount), 0) AS revenue,
+            COUNT(DISTINCT l.order_id) AS orders,
+            COUNT(DISTINCT l.buyer_id) AS customers,
+            COUNT(DISTINCT CASE WHEN l.is_new_customer THEN l.buyer_id END) AS new_customers,
+            COUNT(DISTINCT CASE WHEN NOT l.is_new_customer THEN l.buyer_id END) AS returning_customers,
+            COALESCE(SUM(CASE WHEN l.source_id = 1 THEN l.line_amount END), 0) AS instagram_revenue,
+            COALESCE(SUM(CASE WHEN l.source_id = 2 THEN l.line_amount END), 0) AS telegram_revenue,
+            COALESCE(SUM(CASE WHEN l.source_id = 4 THEN l.line_amount END), 0) AS shopify_revenue,
+            COUNT(DISTINCT CASE WHEN l.source_id = 1 THEN l.order_id END) AS instagram_orders,
+            COUNT(DISTINCT CASE WHEN l.source_id = 2 THEN l.order_id END) AS telegram_orders,
+            COUNT(DISTINCT CASE WHEN l.source_id = 4 THEN l.order_id END) AS shopify_orders
+        FROM {order_lines} l
+        WHERE NOT l.is_return
+          AND l.is_active_source
+          AND l.order_date BETWEEN ? AND ?
+          AND {where}
+        GROUP BY l.order_date, l.sales_type
+    )
+    SELECT
+        COALESCE(SUM(revenue), 0),
+        COALESCE(SUM(orders), 0),
+        COALESCE(SUM(customers), 0),
+        COALESCE(SUM(new_customers), 0),
+        COALESCE(SUM(returning_customers), 0),
+        COALESCE(SUM(instagram_revenue), 0),
+        COALESCE(SUM(telegram_revenue), 0),
+        COALESCE(SUM(shopify_revenue), 0),
+        COALESCE(SUM(instagram_orders), 0),
+        COALESCE(SUM(telegram_orders), 0),
+        COALESCE(SUM(shopify_orders), 0)
+    FROM cells
+"""
+
+
 class RevenueMixin:
 
     # ── Which engine answers `/reports` ────────────────────────────────────
@@ -2103,8 +2155,15 @@ class RevenueMixin:
         start_date: date,
         end_date: date,
         sales_type: str = "retail",
+        category_id: Optional[int] = None,
+        brand: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Get marketing report for arbitrary date range with previous period and YoY comparison."""
+        """Get marketing report for arbitrary date range with previous period and YoY comparison.
+
+        `category_id` and `brand` narrow every section to the matching order
+        lines. Gold has no product dimension, so a narrowed report reads the
+        line level instead — see `_MARKETING_LINES_PERIOD_SQL`.
+        """
         from datetime import timedelta
 
         period_days = (end_date - start_date).days + 1
@@ -2132,10 +2191,35 @@ class RevenueMixin:
             WHERE date BETWEEN ? AND ? AND %s
         """ % sales_where
 
+        # A product filter: the same eleven figures from the order lines.
+        # Resolved before any read, and through the routed `_category_ids`,
+        # because `_marketing_run` holds no connection to pass the older one.
+        product_filtered = bool(category_id or brand)
+        line_filter_sql = ""
+        line_filter_params: list = []
+        if product_filtered:
+            fragments = []
+            if category_id:
+                cat_ids = await self._category_ids(category_id)
+                fragments.append(
+                    f"l.category_id IN ({','.join('?' * len(cat_ids))})")
+                line_filter_params.extend(cat_ids)
+            if brand:
+                fragments.append(brand_where(brand, line_filter_params, "l"))
+            line_filter_sql = "".join(f" AND {f}" for f in fragments)
+        lines_sales_where = "l.sales_type = ?" if sales_type != "all" else "1=1"
+        _LINES_SQL = _MARKETING_LINES_PERIOD_SQL.replace(
+            "{where}", lines_sales_where + line_filter_sql)
+
         async def _fetch_month(sd, ed):
-                rows = await self._marketing_run(
-                    _MONTH_SQL, [sd, ed] + sales_params,
-                )
+                if product_filtered:
+                    rows = await self._marketing_run(
+                        _LINES_SQL, [sd, ed] + sales_params + line_filter_params,
+                    )
+                else:
+                    rows = await self._marketing_run(
+                        _MONTH_SQL, [sd, ed] + sales_params,
+                    )
                 row = rows[0]
 
                 revenue = float(row[0])
@@ -2175,8 +2259,8 @@ class RevenueMixin:
         # `COUNT(DISTINCT order_id)` per brand is a different, smaller number —
         # correct-looking and not the one this report has always shown. So the
         # grain is reproduced first and summed after.
-        brand_where = "l.sales_type = ?" if sales_type != "all" else "1=1"
-        brand_params = [start_date, end_date] + sales_params
+        brand_sales_where = ("l.sales_type = ?" if sales_type != "all" else "1=1") + line_filter_sql
+        brand_params = [start_date, end_date] + sales_params + line_filter_params
         brand_results = await self._marketing_run(f"""
             WITH product_days AS (
                 SELECT
@@ -2188,7 +2272,7 @@ class RevenueMixin:
                 WHERE NOT l.is_return
                   AND l.is_active_source
                   AND l.order_date BETWEEN ? AND ?
-                  AND {brand_where}
+                  AND {brand_sales_where}
                 GROUP BY
                     l.order_date, l.sales_type, l.source_id, l.product_id,
                     l.product_name, l.brand, l.category_id, l.category_name,
@@ -2269,8 +2353,13 @@ class RevenueMixin:
                 "current": current,
                 "previous": previous,
                 "year_ago": year_ago,
-                "monthly_goal": monthly_goal if is_full_month else None,
+                # The goal is the whole shop's; beside one brand it would
+                # read as that brand's target.
+                "monthly_goal": (monthly_goal if is_full_month and not product_filtered
+                                 else None),
             },
+            "product_filter": ({"category_id": category_id, "brand": brand}
+                               if product_filtered else None),
             "brands": brands,
             "sources": sources,
         }
