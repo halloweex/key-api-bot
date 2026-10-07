@@ -3249,6 +3249,13 @@ Gold's), P4 the three mutations (a deleted Silver row, a landed order, an
 unknown sales_type via a trigger on the copy), P5 both DQ jobs under the
 stand-down, P6 restarts — graceful, after the kill, graceful — and one
 resolve, P7 one precondition broken and the canary paging, P8 the way back.
+P3, P6 and D1 judge the stops the container shows, not the ones the script
+meant: `docker inspect` after each stop and start (exit 0, or exit 137 after
+the rehearsal's `docker kill` and not the OOM killer), and P6 counts the
+restart after the kill only when its SIGKILL is the one `p3.json` records.
+Every graceful stop gets production's grace — compose's 10 s default for web
+(`STOP_GRACE_S`, pinned to `docker-compose.yml`) — and one that outruns it is
+recorded as the kill a deploy would have made.
 Plus D1 (what P3's kill cost DuckDB's indexes, below), K0 (KeyCRM never
 called) and Z0 (no other container on the host moved). Z0 records every other container's
 `StartedAt`, `RestartCount` and `OOMKilled`, not just its id: a restart
@@ -3318,17 +3325,41 @@ image built from this branch (3.0.261, revision 0033) with `--build`,
 passed P1–P8, D1 and K0 in 22 minutes, exit 2 for Z0 alone, UNKNOWN for
 other sessions' containers. P4a and P5 judged F4's runs as F5s read them,
 both whole through `fetch_run_issues`; D1 swept 23 indexes at both stops
-and found none short — that kill cost nothing, which D1 says rather than
-assumes. The run the day before, on the same image with P4a and P5 read
-after the kill, failed both on the DuckDB defect below and on nothing else:
-the live process showed both runs' findings at F4, and after F6's kill
-`fetch_run_issues` returned none of them. An earlier note here said a run
-had passed everything on an image of main at 3.0.264, revision 0034; the
-image it ran was built at revision 0033, and its P4a and P5 had read around
-the defect. What the local run cannot answer is
-production's own readiness — whether the copy's preconditions hold, the way
-back's full rebuild inside 1.5 GB, and the timings at 47 k orders — which is
-what the host run is for.
+and found none short. That PASS said less than it read as: F5s's graceful
+stop had checkpointed F4's runs before F6's kill, so nothing the sweep
+asked was within the kill's reach, and the sweep asked single-column
+indexes only — 23 of the 57, the rest empty or one-valued on the seed —
+and none of the 12 composite ones. Its P6 counted a `kill` restart the
+script recorded whether or not F6 had killed anything; that run's P3 shows
+the kill landed, but P6 could not have told. The run the day before, on
+the same image with P4a and P5 read after the kill, failed both on the
+DuckDB defect below and on nothing else: the live process showed both
+runs' findings at F4, and after F6's kill `fetch_run_issues` returned none
+of them. An earlier note here said a run had passed everything on an image
+of main at 3.0.264, revision 0034; the image it ran was built at revision
+0033, and its P4a and P5 had read around the defect.
+
+On 2026-10-07, with P6 and D1 reworked and main merged (an image built from
+this branch, 3.0.267, revision 0034), the first local run did not flip:
+chain 7b had added `goals_bridge` (`KS_GOALS_HISTORY=silver`) to the
+preconditions and reh-web's list lacked it — and the script, deciding the
+flip with a grep that `utm_parse`'s `"mode": "postgres"` matched, ran every
+phase after F1 anyway. The script now asks the probe for the writer's mode
+out of the snapshot P1 judges, and a test runs this tree's
+`evaluate_preconditions` over the list: F1 must leave nothing unmet, phase
+0 exactly `read_fallback_off`. The next run passed P1–P8 and K0 in 22
+minutes and failed D1 as predicted: after the kill and F7's checkpoint,
+`idx_dqi_run`, `idx_dqr_layer` and `idx_dqr_started_at` each missed F5w's
+run, `fetch_run_issues` returned 0 of its 1 finding, and deleting the run's
+rows from `data_quality_issues` and `data_quality_runs` was DuckDB's FATAL.
+The fixture order and its line came out of every index on `orders` and
+`order_products`, the four composite ones included: after a restart the
+sync touches `orders`, and nothing touches the DQ journal. Z0 failed on
+another session's ClickHouse container, stopped (exit 0, not the OOM
+killer, no restart policy) and started again 12 s into the run. What the
+local run cannot answer is production's own readiness — whether the copy's
+preconditions hold, the way back's full rebuild inside 1.5 GB, and the
+timings at 47 k orders — which is what the host run is for.
 
 **P5 reads the stand-down off the job, not off its silence.**
 `dq_mirror_landing` names every check it asked, verdict or raise, as
@@ -3393,13 +3424,32 @@ it.** F5s stops reh-web gracefully after F5 — the checkpoint a deploy
 takes — and reads F4's two runs there, scan and `fetch_run_issues` side by
 side; P4a and P5 judge that read. The kill stays inside a live derivation
 for P3, and F7 still reads after it for P2's frozen state and P6's gate
-file. **D1** is that post-kill read's honesty: every single-column index
-swept whole at both stops (lookup limits lifted, held to `count_if` over the
-table — a composite one serves no read in 1.5.5, and a one-valued column
-cannot be asked) and F4's runs read again by the product's reader. A loss is
-a FAIL naming the index — the defect reported, never read around. Two
-earlier notes here called it one odd segment, then a DQ-journal matter, and
-the judges first read P4a and P5 after the kill, which passed what the
+file.
+
+**D1 asks what the kill cost of the rows it could cost** — those written
+after F5s's checkpoint, since a graceful stop puts everything before it out
+of a kill's reach: one integrity run F5w triggers, and the fixture's fourth
+version F6 lands (an order, its line, and the four composite indexes on
+`orders`). After the kill and F7's graceful stop — the checkpoint that
+writes the loss down; a read-only open before it still sees every row the
+WAL holds — the run is read by `fetch_run_issues` beside a scan. At the end,
+on the copy about to be removed, the window's rows are deleted table by
+table in a process each, found by a predicate no index serves: a `DELETE`
+must take each row out of every index on its table, so a lost entry is
+DuckDB's FATAL, and that is the only question a composite index answers — on
+1.5.5 none serves a read. Every single-column index is also swept at both
+stops (lookup limits lifted, held to `count_if` over the table). A loss
+after the kill is a FAIL labelled **DuckDB 1.5.5's known defect, not a
+step-13 regression** — the switch writes no DuckDB index, and an OOM kill of
+the live web costs the same; a loss already there before the kill is the
+copy's own and is not given that label. Nothing the product runs at start
+touches the DQ journal, so on 1.5.5 as the store opens today D1 fails on
+the window's run — the 2026-10-07 run above did, on the DQ journal alone. A
+`CHECKPOINT` of the replayed WAL before anything else runs — the change on
+the `duckdb-kill-guard` branch, not merged when this was written — should
+turn it PASS, and nothing here depends on it.
+Two earlier notes here called it one odd segment, then a DQ-journal matter,
+and the judges first read P4a and P5 after the kill, which passed what the
 product could not show anyone.
 `test_the_sweep_finds_what_a_kill_costs_duckdb_1_5_5` holds the loss on
 DuckDB itself: if an upgrade makes it zero, re-measure before changing it.
