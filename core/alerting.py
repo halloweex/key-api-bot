@@ -316,6 +316,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "the orphaned rows are corrected or their buyers land — a human, not a job"),
     "chain_buyer_contact_missing": _c(
         "the next write of each buyer rewrites its contacts"),
+    # Chain 7b-3's goal and forecast tables. Every value can be computed
+    # again, so each clears on the writer storing a full set.
+    "chain_goal_tables_incomplete": _c(
+        "a recalculation stores twelve months, every YoY and a measured overall"),
+    "chain_goal_tables_stale": _c(
+        "a seasonality_calc run (the Monday job or its trigger) stores"),
+    "chain_forecast_stale": _c("a training stores a retail forecast"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 

@@ -74,6 +74,15 @@ class TestTheClockIsDerived:
             "bronze.buyers": ("updated_at",),
             "bronze.buyer_contacts": (),
             "app.buyer_gender": ("decided_at",),
+            # Chain 7b-3. Each table's stamp is the daily spec's
+            # `synced_column` and also in its `ignore_columns` — one stamp per
+            # writer run, compared by nothing — so it orders nothing across
+            # the two stores. After the latch every difference is taken as
+            # Postgres newer, which `--handover` before the flip makes true.
+            "app.revenue_predictions": (),
+            "app.seasonal_indices": (),
+            "app.weekly_patterns": (),
+            "app.growth_metrics": (),
         }
 
 
@@ -134,7 +143,23 @@ class TestEveryWrittenColumnIsCompared:
                     assert spec.compare.ignore_columns == \
                         daily[spec.pg_table].ignore_columns, spec.pg_table
         assert forgiven == {("bronze.offers", "synced_at"),
-                            ("app.sku_inventory_status", "updated_at")}
+                            ("app.sku_inventory_status", "updated_at"),
+                            # Chain 7b-3, four more of the same kind. Each is
+                            # ONE stamp per writer run — the goal tables are
+                            # written in one transaction with one `now`, and
+                            # DuckDB stamps one `created_at` per transaction
+                            # (measured, 1.5.5: 61 rows, 1 value) — so it
+                            # records when the writer last ran, nothing about
+                            # a month or a day. Nothing in DuckDB reads them:
+                            # the only reader is the chain's standing watch,
+                            # which reads Postgres and stands down with the
+                            # release, and the writer's next run restamps every
+                            # row (Monday 04:00, Mon/Thu 03:30, or the two
+                            # POSTs). A per-row fact here would not qualify.
+                            ("app.seasonal_indices", "updated_at"),
+                            ("app.growth_metrics", "updated_at"),
+                            ("app.weekly_patterns", "updated_at"),
+                            ("app.revenue_predictions", "created_at")}
 
 
 class TestAKeyOnlyDuckdbHolds:

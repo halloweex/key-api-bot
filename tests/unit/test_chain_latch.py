@@ -651,6 +651,11 @@ class TestEveryWriterLatchesFirst:
         # Chain 4: the buyers' writer, and the derivation that reads what is
         # pending before it latches.
         assert set(_writers(pg_buyers_write)) == {"upsert_buyers", "derive_gender_pg"}
+        # Chain 7b-3: the three goal tables in one transaction, and the forecast.
+        from core import pg_forecast_write
+
+        assert set(_writers(pg_forecast_write)) == {
+            "persist_goal_tables", "store_predictions"}
 
     def test_every_registered_chain_has_a_writer_the_walk_can_see(self):
         """The guards below are parametrised over `WRITE_CHAINS`; a chain whose

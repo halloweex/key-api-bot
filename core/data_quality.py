@@ -1955,6 +1955,14 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Find the write that skipped core.pg_buyers_write; never delete a buyer's contacts to clear it"),
     ("chain_buyer_contact_missing",
      "POST /api/duckdb/sync-all-buyers rewrites every buyer and its contacts; find what deleted the list first"),
+    # Chain 7b-3's four tables. Recomputable, so the lever is the writer; what
+    # to read first is the job's own result in /api/jobs.
+    ("chain_goal_tables_incomplete",
+     "POST /api/goals/recalculate stores all three tables at once; if it recurs, read seasonality_calc in /api/jobs"),
+    ("chain_goal_tables_stale",
+     "Read seasonality_calc in /api/jobs (skipped? error?), then POST /api/jobs/seasonality_calc/trigger"),
+    ("chain_forecast_stale",
+     "Read revenue_prediction_train in /api/jobs (rejected? predictions_stored false?), then trigger it again"),
     ("chain_invariants_unwatched",
      "Nothing else watches these tables: read the reason, then check KS_PG_DSN and that the integrity job still reads the facts"),
     ("orders_without_line_items", "halfwritten_repair re-fetches within 2h; one cycle is fine"),

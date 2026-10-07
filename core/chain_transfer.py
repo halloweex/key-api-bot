@@ -102,6 +102,14 @@ a bad copy of either could cost a wrong "as of" on /inventory until then
 `recorded_at` would date a movement wrongly for good.
 `tests/unit/test_chain_transfer.py` computes the set, so a third cannot join
 it silently.
+
+Chain 7b-3 added four of the same kind, deliberately and with the reason in
+that test: `seasonal_indices`, `growth_metrics` and `weekly_patterns`
+`.updated_at` and `revenue_predictions.created_at`. Each is one stamp per
+writer run — the goal tables are written in one transaction with one `now`,
+and DuckDB stamps one `created_at` per transaction — read by nothing in DuckDB,
+and restamped on every row by the writer's next run. The daily spec already
+forgives all four, and this list stays its list.
 """
 from __future__ import annotations
 
