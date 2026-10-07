@@ -375,10 +375,34 @@ def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
                 pg_select=buyer_contacts_select("postgres") if joined else None,
             ))
             continue
+        # The fourth source (chain 5): the manager classification, which
+        # `core.pg_replication.replicate_managers` full-replaces out of DuckDB
+        # — not `replicate_operational`, so it is in neither of the lists
+        # above. Its shipping shape and its daily spec are both declared where
+        # those writers live and only read here.
+        from core.mirror_reconciliation import REPLICATED_TABLES
+        from core.pg_replication import REPLICATED_SHAPES
+
+        shapes = {pg: (dk, cols, order) for pg, dk, cols, order in REPLICATED_SHAPES}
+        if table in shapes:
+            dk_table, columns, order_by = shapes[table]
+            source = next((s for s in REPLICATED_TABLES if s.pg_table == table), None)
+            if source is None:
+                raise LookupError(
+                    f"{table} is replicated by replicate_managers but has no "
+                    "entry in REPLICATED_TABLES; the copy-back cannot prove it "
+                    "landed"
+                )
+            out.append(TableTransfer(
+                pg_table=table, dk_table=dk_table, columns=columns,
+                order_by=order_by, compare=_compare_spec(source, (), columns),
+                clock=_shared_clock(source), kind="replicated",
+            ))
+            continue
         raise LookupError(
             f"{table} is in {chain.CHAIN} but in none of _FULL_REPLACE, "
-            "_APPEND_ABOVE or MIRRORED_LANDING_TABLES: nothing knows how to "
-            "carry it in either direction"
+            "_APPEND_ABOVE, MIRRORED_LANDING_TABLES or REPLICATED_SHAPES: "
+            "nothing knows how to carry it in either direction"
         )
     return tuple(out)
 
@@ -506,6 +530,13 @@ def classify_handover(
       handover's CRITICALs are exactly what `--execute` refuses on.
     """
     table, dk_table = spec.pg_table, spec.dk_table
+    if spec.kind == "replicated":
+        # Chain 5: the full-replace rule, with what differs about a table
+        # `replicate_managers` copies — see `_replicated_handover`.
+        return _replicated_handover(spec, classify_handover(
+            dataclasses.replace(spec, kind="operational"), dk_rows, pg_rows,
+            moved_on=moved_on, max_samples=max_samples, required=required,
+        ), moved_on=moved_on)
     issues: List[IntegrityIssue] = []
 
     def owned_by_rewritten(row: Tuple[Any, ...]) -> bool:
@@ -1118,6 +1149,13 @@ async def copy_back(
                 # them beside its own two copies.
                 _write_duckdb(conn, spec, rows.pop(spec.pg_table))
             _write_sync_keys(conn, watermarks)
+            # Chain 5: `sales_type` is materialised into Silver at rebuild
+            # time, and an incremental rebuild re-derives only the order ids
+            # it is handed — so a classification carried back owes DuckDB a
+            # FULL rebuild, marked with the rows or not at all.
+            if getattr(chain, "CHAIN_COPY_BACK_OWES_FULL_REBUILD", False):
+                _owe_full_rebuild(conn)
+                plan["full_rebuild_owed"] = True
             # Inside the transaction, so a crash cannot leave the rows
             # committed below an allocator that still hands out their ids.
             # Measured on 1.5.5: a burn committed with the rows survives a
@@ -1197,6 +1235,7 @@ def _marker_only(chain: ModuleType, name: str, marker: str) -> str:
         "stopped feeding when the marker appeared. Nothing was written.\n"
         "To clear it, with web and bot still stopped:\n"
         + "\n".join(_marker_steps(chain, name))
+        + "".join("\n" + line for line in _replicated_marker_note(chain))
     )
 
 
@@ -1338,6 +1377,7 @@ def _after_commit(
             "refuses this state as a rewind. Next, with web and bot still "
             "stopped:",
             *_marker_steps(chain, name),
+            *_replicated_marker_note(chain),
         ]
     else:
         lines += [
@@ -1673,6 +1713,8 @@ def _runbook(chain: ModuleType, *, executed: bool, released: bool = False) -> Li
     """
     name = chain.WRITE_ENV
     soak = _SOAK_AFTER_RELEASE.get(name) or _soak_without_a_check(chain)
+    if executed and released and _replicated_tables(chain):
+        return _replicated_runbook(chain)
     if not executed:
         return [
             "This was a dry run. Nothing was written and nothing released.",
@@ -1717,4 +1759,162 @@ def _runbook(chain: ModuleType, *, executed: bool, released: bool = False) -> Li
            "its watermarks must be moving."),
         "4. The `owner:` rows and the local marker are gone. /api/health's "
         "write_chains block should show latched: false and mismatch: false.",
+    ]
+
+
+# ─── Chain 5: the replicated pair ────────────────────────────────────────────
+#
+# `bronze.managers` and `app.manager_classifications` are shipped by neither
+# `replicate_operational` nor a landing mirror: `core.pg_replication.
+# replicate_managers` full-replaces both out of DuckDB at web's start, on the
+# daily manager sync, after the 03:00 `manager_stats` job and on every
+# classification. Three things about them differ from an operational table,
+# and each is said here rather than bent into the operational sentences.
+
+
+def _replicated_tables(chain: ModuleType) -> Tuple[str, ...]:
+    """The chain's tables `replicate_managers` ships."""
+    from core.pg_replication import REPLICATED_SHAPES
+
+    shipped = {pg for pg, _dk, _cols, _order in REPLICATED_SHAPES}
+    return tuple(t for t in chain.CHAIN_TABLES if t in shipped)
+
+
+# What brings Postgres back level with DuckDB before a flip: the copy runs at
+# web's start, and the manager_stats job runs it again on demand.
+_REPLICATED_LEVER = (
+    "Bring web back with the flag unchanged — its startup copy "
+    "(replicate_managers) runs at once, and "
+    "POST /api/jobs/manager_stats/trigger runs it again now — stop it, and "
+    "ask again."
+)
+
+
+def _replicated_handover(
+    spec: TableTransfer,
+    issues: Sequence[IntegrityIssue],
+    *,
+    moved_on: bool,
+) -> List[IntegrityIssue]:
+    """The operational verdicts, said for a table `replicate_managers` copies.
+
+    Three changes, each a defect the plain rule had for this pair:
+
+    - **Before a flip, a key only Postgres holds is CRITICAL, not INFO.** The
+      operational rule calls it a row DuckDB deleted that "the next full
+      replace removes" — and after a flip there is no next full replace. A
+      ghost interval would stay in the store a flip makes the source of truth,
+      and silently reclassify the orders it covers.
+    - **The pre-flip lever names this pair's shipper.** `replicate_operational`
+      never ships these tables, so sending an operator to let it run sent them
+      to wait for nothing.
+    - **After the latch, a key only DuckDB holds is said for what it is.** The
+      chain's writer never removes a key: a same-day classification is deleted
+      only to insert its replacement in the same transaction. So such a key
+      was written to DuckDB after the latch — the marker lost with the flag
+      back at duckdb, an image older than the chain, a boot's baseline seed —
+      and a copy-back would delete it.
+
+    Every other verdict — differences, clocks, NULLs DuckDB could not take —
+    is the operational one, unchanged.
+    """
+    table, dk_table = spec.pg_table, spec.dk_table
+    out: List[IntegrityIssue] = []
+    for issue in issues:
+        check = issue.check_name
+        if check == "handover_rows_missing" and moved_on:
+            issue = dataclasses.replace(issue, description=(
+                f"{issue.count} row(s) in DuckDB's {dk_table} have no "
+                f"counterpart in {table}. The chain's writer never removes a "
+                "key from these tables — a same-day classification is deleted "
+                "only to insert its replacement in one transaction — so these "
+                "were written to DuckDB after the latch: the local marker lost "
+                "with the flag back at duckdb, an image older than the chain, "
+                "or a boot's baseline seed (_m0006) that did not see the "
+                "latch. A copy-back would delete them. Decide per id — a "
+                "classification somebody made goes into Postgres through "
+                "POST /api/managers/{id}/retail-status, anything else is "
+                "deleted from DuckDB — and ask again."))
+        elif check == "handover_rows_missing":
+            issue = dataclasses.replace(issue, description=(
+                f"{issue.count} row(s) in DuckDB's {dk_table} have no "
+                f"counterpart in {table}. replicate_managers stands down the "
+                "moment this chain routes to Postgres, and these tables have "
+                "no backfill, so a flip now strands them. A (manager, "
+                "1970-01-01) baseline is usually _m0006 having seeded a "
+                "manager synced since web's last start — this script's own "
+                "connect runs it. " + _REPLICATED_LEVER))
+        elif check == "handover_rows_differ" and not moved_on:
+            issue = dataclasses.replace(issue, description=(
+                f"{issue.count} row(s) differ between DuckDB's {dk_table} and "
+                f"{table}. Postgres has no writer yet but replicate_managers' "
+                "copy of DuckDB, so it cannot be newer: the two must agree, "
+                "and a flip now would freeze these values in the store that "
+                "decides sales_type. " + _REPLICATED_LEVER))
+        elif check == "handover_rows_ahead" and not moved_on:
+            issue = dataclasses.replace(issue, severity=Severity.CRITICAL, description=(
+                f"{issue.count} row(s) in {table} are not in DuckDB's "
+                f"{dk_table}. Nothing writes Postgres here but "
+                "replicate_managers' full replace of DuckDB, and after a flip "
+                "there is no next full replace to remove them: a ghost "
+                "interval would stay in the store a flip makes the source of "
+                "truth and reclassify the orders it covers. " + _REPLICATED_LEVER))
+        out.append(issue)
+    return out
+
+
+def _owe_full_rebuild(conn) -> None:
+    """Mark DuckDB's warehouse dirty in full, on the copy's own connection.
+
+    The flag `DuckDBStore.mark_warehouse_dirty(None)` writes, spelled here
+    because the store method takes the store's lock, which the copy's
+    transaction already holds. While Postgres alone derives nobody reads it —
+    the refresh job is not registered — and step 13's way back marks the
+    warehouse full anyway; it matters when the way back is taken in the
+    wrong order, after this chain's copy-back has already put an older
+    classification under a DuckDB that derives again.
+    """
+    conn.execute(
+        "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
+        "VALUES ('warehouse_dirty', 'full', CURRENT_TIMESTAMP)"
+    )
+
+
+def _replicated_marker_note(chain: ModuleType) -> List[str]:
+    """The marker-only steps' last word for a chain `replicate_managers`
+    ships: the copy that resumes is not the hourly one."""
+    if not _replicated_tables(chain):
+        return []
+    return [
+        "  For this chain the copy that resumes in step 4 is replicate_managers, "
+        "not the hourly one: it runs at web's start, on the daily manager sync "
+        "and after the 03:00 manager_stats job — "
+        "POST /api/jobs/manager_stats/trigger runs it now.",
+    ]
+
+
+def _replicated_runbook(chain: ModuleType) -> List[str]:
+    """After a release, for a chain whose tables `replicate_managers` ships."""
+    tables = ", ".join(_replicated_tables(chain))
+    return [
+        f"1. Set {chain.WRITE_ENV}=duckdb in /opt/key-api-bot/.env. The chain "
+        "is no longer latched, so this variable decides again — and the next "
+        "write re-latches the chain if it still says postgres.",
+        "2. docker compose up -d web bot",
+        f"3. At +2 min read meta.mirror_state for {tables}: replicate_managers "
+        "stamps both at web's start — see failures_since_ok at 0 and "
+        "last_ok_at moved, and its web-log line `replicate:` no longer saying "
+        "stood down. POST /api/jobs/manager_stats/trigger runs it again now. "
+        "deploy/stage4_soak.sh's M1 and M2 judge the chain while it writes "
+        "Postgres and read not applicable after a release, which proves "
+        "nothing about the way back.",
+        "4. The `owner:` rows and the local marker are gone. /api/health's "
+        "write_chains block should show latched: false and mismatch: false.",
+        "5. A full DuckDB rebuild is owed: the copy wrote warehouse_dirty=full "
+        "in the same transaction, because sales_type is materialised at "
+        "rebuild time and an incremental rebuild never re-derives an order "
+        "whose classification moved. It runs on the next warehouse_refresh "
+        "wherever DuckDB derives — and if KS_WRITE_WAREHOUSE is still "
+        "postgres, step 13's own way back marks it full again. Take the way "
+        "back in order: this chain, then chain 3, then step 13.",
     ]
