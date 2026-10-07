@@ -20,7 +20,11 @@ differs. Proved here on a backup written for the purpose:
     backup recording Postgres as the warehouse writer is refused, and
     `KS_WRITE_WAREHOUSE` other than duckdb — like `KS_MIRROR_LANDING` off —
     is a reason, read by the real `postgres_half` from its environment
-    (mutations MW1–MW6).
+    (mutations MW1–MW6);
+  * once chain 9 writes the quality journal in Postgres, the stood-down
+    hourly copy's frozen mark is no reason, and the run's own age and
+    findings still are — judged, and read by the real `postgres_half` from
+    the chain's flag or its latch (mutations MJ1–MJ3).
 """
 from __future__ import annotations
 
@@ -325,6 +329,40 @@ class TestThePostgresVerdict:
         assert len(reasons) == 1 and reasons[0].startswith("KS_MIRROR_LANDING is off")
 
 
+    @pytest.mark.parametrize("ok_at,failures", [
+        (None, 0), (NOW - timedelta(minutes=5), 2), (NOW - timedelta(hours=9), 0),
+    ], ids=["never", "failing", "stale"])
+    def test_a_direct_journal_is_not_gated_on_its_stood_down_copy(
+            self, ok_at, failures):
+        """Chain 9 writing the journal in Postgres stands its hourly copy down,
+        so `last_ok_at` freezes and every flip after it would be refused —
+        chain 1's preflight drops the same reason. Mutation MJ1: keep the
+        copy's reasons whatever `journal_direct` says."""
+        state = _state(journal_ok_at=ok_at, journal_failures=failures)
+        gated = dryrun.judge_postgres(state, landing_on=True)
+        assert len(gated.reasons) == 1 and "quality journal" in gated.reasons[0]
+        direct = dryrun.judge_postgres(state, landing_on=True, journal_direct=True)
+        assert direct.clean, direct.reasons
+        assert direct.journal_copy_age_s is None
+        assert direct.notes == [
+            "chain 9 writes the quality journal in Postgres: the run is read "
+            "from the writer, not from its stood-down copy"]
+
+    def test_a_direct_journal_still_asks_the_run(self):
+        """Only the copy's age goes. Mutation MJ2: return clean early under
+        `journal_direct` — an old run, or one with findings against Silver,
+        would prove nothing and read clean."""
+        old = dryrun.judge_postgres(
+            _state(run={"run_id": 4242, "started_at": NOW - timedelta(hours=31),
+                        "error_message": None}),
+            landing_on=True, journal_direct=True)
+        assert old.reasons == ["the latest mirror_landing run (4242) is 31 h old (limit 30)"]
+        found = dryrun.judge_postgres(
+            _state(findings=[("mirror_row_values", "critical", 3)]),
+            landing_on=True, journal_direct=True)
+        assert len(found.reasons) == 1 and "silver.orders" in found.reasons[0]
+
+
 class TestTheGate:
     """Exit 0 only when both halves are clean and the Postgres one was
     asked. Mutations: `Report.clean` ignoring `postgres` (an unproved
@@ -545,3 +583,31 @@ class TestTheEnvironmentItRunsIn:
         verdict = asyncio.run(dryrun.postgres_half())
         assert len(verdict.reasons) == 1 and verdict.reasons[0].startswith(head), \
             verdict.reasons
+
+    @pytest.mark.parametrize("how", ["flag", "latch"])
+    def test_chain_9_in_this_environment_drops_the_copys_age(self, monkeypatch, how):
+        """A journal copy 9 h old — the hourly copy stood down with chain 9 —
+        refuses while the chain writes DuckDB and does not once it writes
+        Postgres, by its flag or by its latch with the flag put back (OD-19
+        (a)). Mutation MJ3: `postgres_half` not passing `journal_direct`, or
+        reading the flag where the latch decides."""
+        from core import pg_dq_journal_write as chain9
+
+        async def stale_copy(conn):
+            return _state(journal_ok_at=NOW - timedelta(hours=9))
+
+        monkeypatch.setattr(dryrun, "read_postgres_state", stale_copy)
+        verdict = asyncio.run(dryrun.postgres_half())
+        assert len(verdict.reasons) == 1 and "quality journal" in verdict.reasons[0]
+        if how == "flag":
+            monkeypatch.setenv(chain9.WRITE_ENV, "postgres")
+            verdict = asyncio.run(dryrun.postgres_half())
+        else:
+            monkeypatch.setenv(chain9.WRITE_ENV, "duckdb")
+            chain9.chain_latch.latch(chain9.CHAIN)
+            try:
+                verdict = asyncio.run(dryrun.postgres_half())
+            finally:
+                chain9.chain_latch.release(chain9.CHAIN)
+        assert verdict.clean, verdict.reasons
+        assert verdict.journal_copy_age_s is None

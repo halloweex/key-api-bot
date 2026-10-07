@@ -121,11 +121,16 @@ _EXEMPT_CALLS = {
 # SQL naming the journal: the router, the stores' own machinery (DDL,
 # migrations, the hourly copy and its comparison, the copy-back, the snapshot
 # validation), the Postgres-side readers that already read the writer (chain
-# 1's preflight, the standing invariants).
+# 1's preflight, the standing invariants, chain 7b's goals dry run). The two
+# that gate on the hourly copy's age drop that gate under
+# `pg_dq_journal_write.reads_postgres()` — the copy stands down with the
+# chain — which `TestChainOnesPreflight` here and
+# `tests/unit/test_goals_semantics_dryrun.py` (MJ1–MJ3) hold them to.
 _SQL_ALLOWED = _ROUTER | {
     "core/migrations.py", "core/mirror_reconciliation.py", "core/pg_operational.py",
     "core/chain_transfer.py", "core/snapshot_validation.py",
     "core/pg_inventory_write.py", "core/pg_chain_invariants.py",
+    "scripts/goals_semantics_dryrun.py",
 }
 _JOURNAL_SQL = re.compile(
     r"\b(SELECT|INSERT|UPDATE|DELETE|FROM)\b[\s\S]*\b"
