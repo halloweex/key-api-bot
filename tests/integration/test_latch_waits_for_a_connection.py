@@ -44,6 +44,11 @@ from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
     pg_goals_write, pg_inventory_write, pg_orders_write, write_chains,
 )
+from core import pg_catalogue_write
+from core import (  # noqa: E402 — the shadow chains' block
+    pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
+    pg_weekly_ledger_write,
+)
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -54,7 +59,14 @@ pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_P
 _WRITTEN = ("bronze.offers", "app.manual_expenses", "app.revenue_goals",
             "bronze.expense_types", "bronze.buyer_contacts", "app.buyer_gender",
             "bronze.buyers", "bronze.order_products", "bronze.expenses",
-            "bronze.orders", "app.order_backfill_misses")
+            "bronze.orders", "app.order_backfill_misses",
+            # The shadow chains (OD-02 (c)).
+            "app.data_quality_issues", "app.data_quality_diffs",
+            "app.data_quality_runs",
+            "app.disk_samples", "app.data_dir_samples", "app.memory_samples",
+            "app.weekly_report_sends", "app.traffic_report_sends")
+# Chain 6's two tables, and the watermark row each write stamps beside them.
+_WRITTEN += ("bronze.products", "bronze.categories")
 
 # Chain 3's order, and the archive rows its write captures: `app.order_versions`
 # is append-only for every writer in the repository, so only this order's are
@@ -70,7 +82,10 @@ async def _clean(pool):
         for table in _WRITTEN:
             await conn.execute(f"DELETE FROM {table}")
         await conn.execute("DELETE FROM app.order_versions WHERE order_id = $1", ORDER_ID)
-        await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
+        await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%' "
+                           "OR key = 'dq_digest_last_sent'")
+        await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                           list(pg_catalogue_write.CHAIN_TABLES))
 
 
 def _caller(depth: int = 2) -> str:
@@ -230,6 +245,51 @@ def _sync_orders(store):
     return SyncService(store)._upsert_orders_with_expenses([_order_payload()])
 
 
+def _journal_run(_store):
+    """Chain 9's writer, with the values the router would hand it."""
+    from datetime import datetime, timezone
+
+    from core.data_quality import run_values
+
+    now = datetime.now(timezone.utc)
+    values = run_values(started_at=now, ended_at=now, as_of=now,
+                        window_start=now.date(), window_end=now.date(),
+                        layer="integrity", issues=[], discrepancies=[])
+    return pg_dq_journal_write.persist_run(values, [], [])
+
+
+def _disk_tick(_store):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    sample = {"sampled_at": now, "db_size_mb": 10.0, "disk_pct_used": 40.0,
+              "disk_free_gb": 100.0}
+    return pg_watchdog_write.disk_tick(
+        sample, {"duckdb": 1024, "unattributed": 2048}, now=now,
+        dir_sampled_at=now, disk_cutoff=now - timedelta(days=14),
+        dir_cutoff=now - timedelta(days=21))
+
+
+def _memory_tick(_store):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    mem = {"working_set": 512 * 1024 * 1024, "page_cache": 0,
+           "limit": 1024 * 1024 * 1024, "oom_kills": 0}
+    return pg_watchdog_write.memory_tick(mem, now=now, sampled_at=now,
+                                         cutoff=now - timedelta(days=14))
+
+
+def _ledger(chain):
+    def call(_store):
+        from datetime import date, datetime, timezone
+        from decimal import Decimal
+
+        return chain.mark_sent(date(2026, 9, 21), "retail", Decimal("10.00"), 3,
+                               datetime.now(timezone.utc))
+    return call
+
+
 # Writers that return their failure rather than raise it — chain 4's
 # derivation, `derive_gender`'s contract. A cancellation still goes through.
 NEVER_RAISES = {"derive_gender_pg"}
@@ -264,7 +324,28 @@ WRITERS = {
     # NULL comment to fill it still opens its transaction and claims.
     "restore_manager_comments": (pg_orders_write, lambda _s: (
         pg_orders_write.restore_manager_comments({ORDER_ID: "utm_source=ig"}))),
+    "upsert_products": (pg_catalogue_write, lambda s: s.upsert_products(
+        [{"id": 1, "name": "Toner", "category_id": 10, "sku": "T-1", "price": 250}])),
+    "upsert_categories": (pg_catalogue_write, lambda s: s.upsert_categories(
+        [{"id": 10, "name": "Care", "parent_id": None}])),
+    # Chain 9 (OD-02 (c)): driven at the chain module rather than through
+    # `dq_journal.journal_run`, which would also hand DuckDB the shadow — the
+    # latch is the writer's alone.
+    "persist_run": (pg_dq_journal_write, _journal_run),
+    "set_digest_marker": (pg_dq_journal_write, lambda s: pg_dq_journal_write
+                          .set_digest_marker("2026-10-01T06:00:00+00:00")),
+    # Chain 10, at the chain module for the same reason.
+    "disk_tick": (pg_watchdog_write, _disk_tick),
+    "memory_tick": (pg_watchdog_write, _memory_tick),
+    # Chains 11a/11b share one writer's name, so the key carries the chain
+    # after a colon; the coverage test below compares (chain, writer) pairs.
+    "mark_sent:weekly": (pg_weekly_ledger_write, _ledger(pg_weekly_ledger_write)),
+    "mark_sent:traffic": (pg_traffic_ledger_write, _ledger(pg_traffic_ledger_write)),
 }
+
+
+def _writer_name(key: str) -> str:
+    return key.split(":", 1)[0]
 
 
 @pytest_asyncio.fixture
@@ -288,6 +369,10 @@ async def stores(tmp_path, monkeypatch):
     # evidence hold (`pg_orders_write.unmet_precondition`); none of them is
     # what this module is about, and every one is a local read.
     monkeypatch.setattr(pg_orders_write, "unmet_precondition", lambda: None)
+    # Chain 6's precondition taken as met: setting KS_WRITE_INVENTORY=postgres
+    # here would move chain 1's own calls; the precondition itself is proved
+    # in tests/unit/test_catalogue_chain.py.
+    monkeypatch.setattr(pg_catalogue_write, "unmet_precondition", lambda: None)
     store = DuckDBStore(db_path=tmp_path / "latch-acquire.duckdb")
     await store.connect()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
@@ -384,10 +469,12 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
     through another module's function is past what the walk follows."""
     from tests.unit.test_chain_latch import _writers
 
-    found = {name for chain in write_chains.WRITE_CHAINS for name in _writers(chain)}
-    assert set(WRITERS) == found
-    for name, (chain, _call) in WRITERS.items():
-        assert name in _writers(chain), f"{name} is not {chain.__name__}'s writer"
+    found = {(chain.__name__, name) for chain in write_chains.WRITE_CHAINS
+             for name in _writers(chain)}
+    driven = {(chain.__name__, _writer_name(key)) for key, (chain, _call) in WRITERS.items()}
+    assert driven == found
+    for key, (chain, _call) in WRITERS.items():
+        assert _writer_name(key) in _writers(chain), f"{key} is not {chain.__name__}'s writer"
 
 
 class TestAnAcquireThatFailsLeavesTheChainUnlatched:
@@ -481,6 +568,11 @@ FIRST_WRITES = {
     "pg_expense_types_write": ("upsert_expense_types", "bronze.expense_types", "id", 1),
     "pg_buyers_write": ("upsert_buyers", "bronze.buyers", "id", 1),
     "pg_orders_write": ("upsert_orders_with_expenses", "bronze.orders", "id", ORDER_ID),
+    "pg_catalogue_write": ("upsert_products", "bronze.products", "id", 1),
+    "pg_dq_journal_write": ("persist_run", "app.data_quality_runs", "run_id", 1),
+    "pg_watchdog_write": ("memory_tick", "app.memory_samples", None, None),
+    "pg_weekly_ledger_write": ("mark_sent:weekly", "app.weekly_report_sends", None, None),
+    "pg_traffic_ledger_write": ("mark_sent:traffic", "app.traffic_report_sends", None, None),
 }
 
 

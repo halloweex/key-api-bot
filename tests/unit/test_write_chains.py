@@ -852,7 +852,10 @@ _SPEC_TYPES = {"MirroredTable", "BucketedTable"}
 # Reading a spec's Postgres copy, or comparing the two: what makes a function
 # a comparison rather than a reader of DuckDB's side.
 _PG_COMPARE = {"fetch_pg_rows", "pg_fingerprints", "_read_pg_bucket",
-               "compare_table", "compare_bucket"}
+               "compare_table", "compare_bucket",
+               # The shadow chains' comparison, facing Postgres→DuckDB
+               # (OD-02 (c)) — a comparison of the same copies all the same.
+               "fetch_pg_rows_with_clock", "compare_shadow"}
 
 
 def _spec_tables(modules) -> dict:
@@ -2169,8 +2172,13 @@ def landing_chain(flags):
         fake.WRITE_ENV = "KS_WRITE_LANDING"
         fake.CHAIN_TABLES = tuple(tables)
         fake.env_writes_postgres = env
-        flags.setattr(write_chains, "WRITE_CHAINS",
-                      write_chains.WRITE_CHAINS + (fake,))
+        # The fake is the only chain declaring its tables, as a table belongs
+        # to one chain in any build: a real chain declaring one of them too
+        # (chain 6, the catalogue) would widen an owner row of the fake's to
+        # that chain's other tables, which is not what these tests model.
+        flags.setattr(write_chains, "WRITE_CHAINS", tuple(
+            c for c in write_chains.WRITE_CHAINS
+            if not set(tables) & set(c.CHAIN_TABLES)) + (fake,))
         return fake
 
     return register

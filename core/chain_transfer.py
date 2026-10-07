@@ -34,6 +34,21 @@ each row once, and a Postgres row below the append watermark the copy never
 reads. The dry run asks the same question, so it says what `--execute` will
 refuse.
 
+A ROW THAT IS IN NEITHER STORE: THE REPORT LEDGERS' SPOOL
+
+Chains 11a/11b record a delivery after it happened, and a record Postgres
+refused three times waits in a file (`core/report_ledger.py`). That week is in
+neither store, so a comparison of the two cannot see it, and the first draft
+of the ledgers' way back released the latch with it still in the file — after
+which the gate under `duckdb` read DuckDB alone and sent the week again. A
+chain module that keeps such a spool says so with two hooks, `pending()` and
+`land_pending(store)`. The handover reports what is spooled (INFO, and a file
+no drain can parse as CRITICAL — a human writes that row first); `--execute`
+lands the spool in Postgres, the writer while the chain is latched, before it
+reads a row, and refuses if anything is still spooled after that. Landing is a
+write to Postgres made before a refusal can come, and it is the one the job's
+next tick would have made: the record of a delivery that happened.
+
 THE WRITE AND ITS PROOF ARE ONE TRANSACTION
 
 Everything the copy writes — every table, the watermarks, the id allocator — and
@@ -196,6 +211,20 @@ class TableTransfer:
     # None reads the table whole.
     dk_select: Optional[str] = None
     pg_select: Optional[str] = None
+    # A table both stores sweep by age (the watchdog samples): the column the
+    # sweep keys on, so a row only DuckDB holds that is older than everything
+    # Postgres still holds reads as retention — DuckDB's prune lagging the
+    # writer's — and not as a stranded row. Derived from the daily spec's
+    # `prunes_by_age` and its clock; None everywhere else.
+    prune_clock: Optional[str] = None
+    # A mirrored table only, and only chain 6's: the table whose recorded
+    # write instants (`_RECORDED_CLOCKS`) say a row is the chain's — each
+    # catalogue table its own. None for every table `_REWRITE_STAMP` dates by
+    # `mirrored_at` alone (chains 4 and 3; `rewrite_clock` is their landing).
+    clock_table: Optional[str] = None
+    # A mirrored table only: what the handover tells an operator to do, where
+    # it is not chain 4's buyer texts (`MirroredTexts`). None for the buyers.
+    texts: Optional["MirroredTexts"] = None
 
     @property
     def is_append(self) -> bool:
@@ -239,6 +268,7 @@ class TableTransfer:
 # Declared, because nothing else says it: `chain_specs` raises for a mirrored
 # table missing here rather than guessing, the rule the rest of this module
 # keeps for the shipping shapes.
+_REWRITE_CLOCK_TABLE = "bronze.buyers"
 BUYER_CONTACTS_SPEC_TABLE = "bronze.buyer_contacts"
 _REWRITTEN_BY = {"bronze.buyers": "id", "bronze.buyer_contacts": "buyer_id",
                  "bronze.orders": "id", "bronze.order_products": "order_id",
@@ -459,6 +489,124 @@ def _words(spec: "TableTransfer") -> _MirrorWords:
     return _WORDS[spec.rewrite_clock]
 
 
+# Chain 6, the catalogue (`core.pg_catalogue_write`). Each table dates its own
+# rows: the chain re-stamps every row KeyCRM serves with `mirrored_at = now()`
+# on every full write, hourly for the products and weekly for the categories,
+# and the owner row is `now()` in the latching transaction — one Postgres
+# clock, as for the buyers. But "at or after the latch" is not "the chain's":
+# a write round the chain after the latch is that too, and the copy-back
+# carried one into DuckDB and released (the chain-6 review). So for these two
+# tables "the chain wrote this row" is `mirrored_at` being one of the instants
+# the chain RECORDED writing at (`pg_catalogue_write.record_key`, in the
+# writing transaction) — `_recorded_since_latch`. A row it did not write is one
+# KeyCRM retired (OD-15 (a)) or one written round it, and either refuses if it
+# differs. No source clock: KeyCRM serves no `updated_at` for a product, so a
+# version DuckDB holds can never be shown later than Postgres's — which is safe
+# here, because both stores were only ever written from the same payload
+# (`pg_catalogue_write`, module docstring).
+#
+# Each table is its own landing and its own stamp: `_REWRITE_CLOCK_OF` stands
+# where `_REWRITE_CLOCK` stands for chains 4 and 3 — the owner the latch dates
+# — while its sentences and its shipper are `_MIRRORED_TEXTS`, not `_WORDS`
+# and `_MIRRORS`. Its stamps join `_REWRITE_STAMP`, so one reading of the
+# owner rows serves every mirrored table (`_handover_issues`).
+_REWRITTEN_BY.update({"bronze.products": "id", "bronze.categories": "id"})
+_REWRITE_CLOCK_OF = {"bronze.products": "bronze.products",
+                     "bronze.categories": "bronze.categories"}
+_RECORDED_CLOCKS = frozenset(_REWRITE_CLOCK_OF.values())
+_REWRITE_STAMP.update({t: (clock, "id") for t, clock in _REWRITE_CLOCK_OF.items()})
+
+
+@dataclass(frozen=True)
+class MirroredTexts:
+    """What the handover says about a mirrored table that is not a buyer
+    table — the levers differ by who ships the table, and sending an operator
+    to the buyers' backfill for a product would send them to wait for a row
+    that lever can never carry. One field per finding the handover can file."""
+    # Before the flip.
+    missing_preflip: str      # a key only DuckDB holds
+    differ_preflip: str       # a row both hold, differently
+    ahead_preflip: str        # a key only Postgres holds
+    # After the latch.
+    missing_after: str        # a key only DuckDB holds
+    differ_carried: str       # differs, and the chain wrote it since the latch
+    differ_unexplained: str   # differs, and the chain has not written it
+    ahead_written: str        # only Postgres, written by the chain since
+    ahead_older: str          # only Postgres, and older than the latch
+    # What `_marker_steps` and the soak sentence say of the table's shipper.
+    resumes: str
+    soak: str
+
+
+def _catalogue_texts(rows: str, sync: str) -> MirroredTexts:
+    """Chain 6's texts for one table: `rows` names what it holds, `sync` the
+    full write that ships it."""
+    return MirroredTexts(
+        missing_preflip=(
+            "The mirror stands down the moment this chain routes to Postgres, "
+            "and nothing ships a row KeyCRM no longer serves, so a flip now "
+            "strands them. Bring web back with the flag unchanged and run "
+            "POST /api/mirror/backfill/catalogue?dry_run=false — it carries "
+            "every row the daily comparison calls retired (product 1055) — "
+            f"while a row DuckDB wrote after the mirror's last shipment is "
+            f"shipped by {sync}. Then check again."),
+        differ_preflip=(
+            f" Bring web back with the flag unchanged: {sync} re-ships "
+            "KeyCRM's payload to both stores. A retired row that differs is "
+            "re-shipped by nothing — decide it per id. Then check again."),
+        ahead_preflip=(
+            f"If KeyCRM still serves them, {sync} writes them to DuckDB too; "
+            "otherwise decide per id — delete them from Postgres, or find the "
+            "writer that put them there."),
+        missing_after=(
+            f"The chain's writer never deletes {rows}, so DuckDB holds "
+            "something Postgres never had — stranded at the flip (the carry "
+            "was not run) or written to DuckDB since the latch — and a "
+            f"copy-back would delete it. If KeyCRM still serves it, {sync} "
+            "writes it through the chain; if it is retired, insert it into "
+            "Postgres by id with a mirrored_at before "
+            "meta.mirror_state.last_ok_at, so it still reads as retired. "
+            "Then ask again."),
+        differ_carried=(
+            "and the chain's writer has written them since the latch — the "
+            "work a copy-back carries."),
+        differ_unexplained=(
+            "and no write the chain recorded carries their mirrored_at: "
+            f"{rows} KeyCRM retired before the flip, which Postgres holds as "
+            "the mirror or the carry last wrote them, or rows written round "
+            "the chain since the latch (the standing watch names those "
+            "chain_catalogue_written_around). DuckDB holds something else, "
+            "neither store says which is right, and a copy-back would "
+            "overwrite DuckDB's. Decide per id — restore the Postgres row "
+            "from DuckDB, mirrored_at included, or, if KeyCRM still serves "
+            f"it, let {sync} rewrite it through the chain — and ask again."),
+        ahead_written=(
+            "and the chain's writer wrote them since the latch — the size of "
+            "the copy-back."),
+        ahead_older=(
+            "and no write the chain recorded carries their mirrored_at: "
+            "Postgres held them before the flip and DuckDB did not, which a "
+            "clean pre-flip handover would have refused, or something "
+            "inserted them round the chain since the latch. A copy-back would "
+            "carry them into DuckDB as if they were the chain's. Decide per "
+            "id — delete them from Postgres if nothing should hold them — "
+            "and ask again."),
+        resumes=(
+            f"The mirror resumes with it: {sync} ships the catalogue again."),
+        soak=(
+            "meta.mirror_state.last_ok_at moved by " + sync),
+    )
+
+
+_MIRRORED_TEXTS = {
+    "bronze.products": _catalogue_texts(
+        "products", "the next hourly products sync"),
+    "bronze.categories": _catalogue_texts(
+        "categories", "the next full sync (POST "
+        "/api/jobs/full_sync_weekly/trigger runs it now)"),
+}
+
+
 def _compare_spec(source: MirroredTable | BucketedTable,
                   keys: Sequence[str],
                   written: Sequence[str]) -> MirroredTable:
@@ -535,6 +683,20 @@ def _shared_clock(source: MirroredTable | BucketedTable) -> Tuple[str, ...]:
     return ()
 
 
+def _prune_clock(source: MirroredTable, columns: Sequence[str]) -> Optional[str]:
+    """The column a by-age sweep keys on, for a spec that declares one.
+
+    Only a plain column both the daily spec and the copy carry: the rule
+    compares a DuckDB row's value with Postgres's oldest, so it needs the
+    value on both sides of the handover, not an expression one store reads.
+    """
+    stamp = source.synced_column
+    if (source.prunes_by_age and stamp and _IDENTIFIER.fullmatch(stamp)
+            and stamp in source.columns and stamp in columns):
+        return stamp
+    return None
+
+
 def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
     """Every table of one chain, in the order the copy-back writes them.
 
@@ -583,21 +745,24 @@ def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
                 pg_table=table, dk_table=dk_table, columns=columns,
                 order_by=order_by, compare=_compare_spec(source, (), columns),
                 clock=_shared_clock(source),
+                prune_clock=_prune_clock(source, columns),
             ))
             continue
         if table in mirrored:
             source = mirrored[table]
             owner = _REWRITTEN_BY.get(table)
-            clock_table = _REWRITE_CLOCK.get(table)
+            # Chain 6's catalogue tables are their own landing
+            # (`_REWRITE_CLOCK_OF`); every other one is `_REWRITE_CLOCK`'s.
+            landing = _REWRITE_CLOCK.get(table) or _REWRITE_CLOCK_OF.get(table)
             stamp = _REWRITE_STAMP.get(table)
-            if owner is None or clock_table is None or stamp is None:
+            if owner is None or landing is None or stamp is None:
                 raise LookupError(
                     f"{table} is a mirrored landing table with no entry in "
-                    "_REWRITTEN_BY, _REWRITE_CLOCK or _REWRITE_STAMP; the "
-                    "copy-back cannot tell a row the chain rewrote from one it "
-                    "never touched"
+                    "_REWRITTEN_BY, _REWRITE_CLOCK (or _REWRITE_CLOCK_OF) or "
+                    "_REWRITE_STAMP; the copy-back cannot tell a row the chain "
+                    "rewrote from one it never touched"
                 )
-            for dating in (clock_table, stamp[0]):
+            for dating in (landing, stamp[0]):
                 if dating not in chain.CHAIN_TABLES:
                     raise LookupError(
                         f"{table} is dated by {dating}, which {chain.CHAIN} "
@@ -609,16 +774,20 @@ def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
                 pg_table=table, dk_table=source.dk_table,
                 columns=tuple(source.columns),
                 order_by=", ".join(source.key_columns),
-                # The copy writes every row Postgres holds, so a key on one
-                # side only is a failed copy, whatever the daily check calls it
-                # (the expenses' daily spec is an upserting mirror's).
+                # `full_replace` in this direction whatever the daily spec
+                # says: the expenses' daily spec is an upserting mirror's and
+                # the catalogue's keeps a retired category (KeyCRM stops
+                # serving a row), and a copy writes every row Postgres holds,
+                # so a key on one side only is a failed copy.
                 compare=dataclasses.replace(
                     _compare_spec(source, (), source.columns), full_replace=True),
                 clock=_SOURCE_CLOCK.get(table, ()),
-                kind="mirrored", rewritten_by=owner, rewrite_clock=clock_table,
+                kind="mirrored", rewritten_by=owner, rewrite_clock=landing,
                 rewrite_stamp=stamp,
                 dk_select=buyer_contacts_select("duckdb") if joined else None,
                 pg_select=buyer_contacts_select("postgres") if joined else None,
+                clock_table=_REWRITE_CLOCK_OF.get(table),
+                texts=_MIRRORED_TEXTS.get(table),
             ))
             continue
         raise LookupError(
@@ -800,7 +969,37 @@ def classify_handover(
             ))
 
     missing = sorted(dk_rows.keys() - pg_rows.keys(), key=_sortable)
-    if missing and spec.is_mirrored and moved_on:
+    # A table both stores sweep by age (the watchdog samples, chain 10): the
+    # writer prunes in its own transaction and DuckDB's shadow prune follows,
+    # so DuckDB can hold rows older than anything Postgres still does. Those
+    # are retention, not stranded rows — the copy-back's full replace deletes
+    # them exactly as the next prune would — and refusing on them would
+    # refuse every flip and every way back whose shadow prune lagged.
+    # Derived like `_pruned_by_age`: older than Postgres's oldest, no
+    # retention period restated. A row newer than that stays a refusal.
+    if missing and spec.prune_clock:
+        at = spec.compare.columns.index(spec.prune_clock)
+        floor = min((v for v in (_as_utc(r[at]) for r in pg_rows.values())
+                     if v is not None), default=None)
+        aged = [k for k in missing if floor is not None
+                and (_as_utc(dk_rows[k][at]) or floor) < floor]
+        if aged:
+            info("handover_rows_pruned", aged, (
+                f"{len(aged)} row(s) in DuckDB's {dk_table} are older than "
+                f"anything {table} holds, on a table both stores sweep by "
+                f"age by {spec.prune_clock}: the writer pruned them and "
+                "DuckDB's prune has not yet. A copy-back deletes them, as "
+                "retention would."
+            ))
+            missing = [k for k in missing if k not in set(aged)]
+    if missing and spec.texts is not None and moved_on:
+        # Chain 6: nothing explains one. Its writer never deletes, and a row
+        # only DuckDB holds has no Postgres row the chain could have rewritten.
+        critical("handover_rows_missing", missing, (
+            f"{len(missing)} row(s) in DuckDB's {dk_table} have no "
+            f"counterpart in {table}. {spec.texts.missing_after}"
+        ))
+    elif missing and spec.is_mirrored and moved_on:
         # Only a child row — a contact, a line item — can be one the chain's
         # writer dropped: it rewrites them whole with their owner. An owning
         # row (a buyer, an order, an expense) is never deleted by it, so one
@@ -826,6 +1025,8 @@ def classify_handover(
                 "so it can neither carry them nor delete them, and its "
                 "comparison would never be clean."
             )
+        elif spec.texts is not None:
+            why = spec.texts.missing_preflip
         elif spec.is_mirrored:
             why = _words(spec).missing_before
         elif moved_on:
@@ -871,7 +1072,12 @@ def classify_handover(
             "running this again gives the same answer."
         ))
     elif differing and not moved_on:
-        lever = _words(spec).differ_before if spec.is_mirrored else ""
+        # Chain 6's catalogue says its own lever; every other mirrored
+        # table its landing's (`_words`).
+        if spec.texts is not None:
+            lever = spec.texts.differ_preflip
+        else:
+            lever = _words(spec).differ_before if spec.is_mirrored else ""
         critical("handover_rows_differ", differing, (
             f"{len(differing)} row(s) differ between DuckDB's {dk_table} "
             f"and {table}. Postgres has no writer yet but the "
@@ -879,6 +1085,19 @@ def classify_handover(
             + ", so it cannot be newer: the two must agree, and a flip now "
             f"would freeze these values in Postgres.{lever}"
         ))
+    elif differing and spec.texts is not None:
+        carried = [k for k in differing if owned_by_rewritten(pg_rows[k])]
+        unexplained = [k for k in differing if k not in set(carried)]
+        if carried:
+            info("handover_rows_differ", carried, (
+                f"{len(carried)} row(s) differ between DuckDB's {dk_table} "
+                f"and {table}, {spec.texts.differ_carried}"
+            ))
+        if unexplained:
+            critical("handover_rows_differ", unexplained, (
+                f"{len(unexplained)} row(s) differ between DuckDB's "
+                f"{dk_table} and {table}, {spec.texts.differ_unexplained}"
+            ))
     elif differing and spec.is_mirrored:
         # First the source's own clock: a version DuckDB holds that KeyCRM
         # dated later is an edit written to DuckDB after the latch, which the
@@ -954,7 +1173,29 @@ def classify_handover(
                 ))
             unreachable = set(behind)
             ahead = [key for key in ahead if key not in unreachable]
-    if ahead and spec.is_mirrored and not moved_on:
+    if ahead and spec.texts is not None:
+        written = ([k for k in ahead if owned_by_rewritten(pg_rows[k])]
+                   if moved_on else [])
+        older = [k for k in ahead if k not in set(written)]
+        if written:
+            info("handover_rows_ahead", written, (
+                f"{len(written)} row(s) in {table} are not in DuckDB's "
+                f"{dk_table}, {spec.texts.ahead_written}"
+            ))
+        if older and moved_on:
+            critical("handover_rows_ahead", older, (
+                f"{len(older)} row(s) in {table} are not in DuckDB's "
+                f"{dk_table}, {spec.texts.ahead_older}"
+            ))
+        elif older:
+            critical("handover_rows_ahead", older, (
+                f"{len(older)} row(s) in {table} are not in DuckDB's "
+                f"{dk_table}. Nothing writes Postgres here but the mirror, "
+                "which ships what DuckDB is handed in the same call, so they "
+                "would stay in the store a flip makes the source of truth. "
+                f"{spec.texts.ahead_preflip} Then ask again."
+            ))
+    elif ahead and spec.is_mirrored and not moved_on:
         lever = (_words(spec).ahead_lever_child
                  if spec.pg_table != spec.rewrite_clock else
                  _words(spec).ahead_lever_owner)
@@ -1009,7 +1250,9 @@ async def _handover_issues(
     mirrored = [s for s in specs if s.is_mirrored and s.rewrite_stamp]
     clocks = sorted({s.rewrite_clock for s in mirrored})
     # Each stamp read once, and remembered with the owning table its ids name:
-    # an order's header and its line items are two stamps of one owner.
+    # an order's header and its line items are two stamps of one owner. Chain
+    # 4's tables share the buyers' clock; chain 6's are each their own, read
+    # through the chain's record of its write instants (`_RECORDED_CLOCKS`).
     owner_of = {s.rewrite_stamp: s.rewrite_clock for s in mirrored}
     rewritten: Dict[Tuple[str, str], FrozenSet[Any]] = (
         {stamp: await _rewritten_since_latch(pool, *stamp)
@@ -1037,6 +1280,13 @@ async def _handover_issues(
                 if owner == spec.pg_table and later:
                     rewritten[stamp] = rewritten[stamp] - later
     return issues
+
+
+def _clock_table(spec: TableTransfer) -> str:
+    """The table whose owner row dates the latch for `spec`'s rows — the
+    landing it belongs to (`rewrite_clock`): the buyers for chain 4's, the
+    orders or the expenses for chain 3's, each catalogue table its own."""
+    return spec.rewrite_clock or spec.clock_table or _REWRITE_CLOCK_TABLE
 
 
 def _fetch_dk(conn, spec: TableTransfer) -> Dict[Any, Tuple[Any, ...]]:
@@ -1083,19 +1333,30 @@ def _not_null_columns(conn, spec: TableTransfer) -> Tuple[str, ...]:
     return tuple(c for c in spec.columns if c in declared)
 
 
-async def _rewritten_since_latch(pool, table: str = "bronze.buyers",
+class UnknownRewriteStamp(LookupError, ValueError):
+    """`_rewritten_since_latch` was asked for a `(table, column)` that is not
+    one of `_REWRITE_STAMP`'s values. Both a lookup that failed and a value
+    nobody declared — the two names chain 4's, 3's and 6's tests have
+    asked for it by."""
+
+
+async def _rewritten_since_latch(pool, table: str = _REWRITE_CLOCK_TABLE,
                                  column: str = "id") -> FrozenSet[Any]:
     """The owners whose rows in `table` its chain's writer has written since
     the latch: `column` of every row of `table` whose `mirrored_at` is at or
     after `table`'s owner row — a buyer's or an order's own id, or the order
     a line item belongs to (`_REWRITE_STAMP` says why each dates its rows).
-    Empty when the table has no owner row: then nothing can be shown to be
-    the chain's, and every difference in a table it dates stays CRITICAL.
-    `(table, column)` is one of `_REWRITE_STAMP`'s values, never input."""
+    For chain 6's catalogue tables (`_RECORDED_CLOCKS`) "at or after the
+    latch" is not enough: only an instant the chain recorded writing at is
+    the chain's (`_recorded_since_latch`). Empty when the table has no owner
+    row: then nothing can be shown to be the chain's, and every difference in
+    a table it dates stays CRITICAL. `(table, column)` is one of
+    `_REWRITE_STAMP`'s values, never input."""
     from core import chain_latch
 
     if (table, column) not in set(_REWRITE_STAMP.values()):
-        raise ValueError(f"{(table, column)!r} is not a rewrite stamp")
+        raise UnknownRewriteStamp(
+            f"{(table, column)!r} is not a declared rewrite stamp")
     async with pool.acquire() as conn:
         latched = await conn.fetchval(
             "SELECT updated_at FROM meta.chain_watermarks WHERE key = $1",
@@ -1103,11 +1364,35 @@ async def _rewritten_since_latch(pool, table: str = "bronze.buyers",
         )
         if latched is None:
             return frozenset()
-        rows = await conn.fetch(
-            f"SELECT DISTINCT {column} AS id FROM {table} WHERE mirrored_at >= $1",
-            latched,
-        )
+        if table in _RECORDED_CLOCKS:
+            rows = await _recorded_since_latch(conn, table, latched)
+        else:
+            rows = await conn.fetch(
+                f"SELECT DISTINCT {column} AS id FROM {table} "
+                "WHERE mirrored_at >= $1",
+                latched,
+            )
     return frozenset(row["id"] for row in rows)
+
+
+async def _recorded_since_latch(conn, clock_table: str, latched):
+    """Chain 6: the rows of `clock_table` whose `mirrored_at` is one of the
+    chain's recorded write instants at or after the latch. No record is an
+    empty one — nothing is then the chain's, and every difference after the
+    latch stays CRITICAL. One nobody can parse raises
+    (`WriteRecordUnreadable`): the copy-back stops before writing anything."""
+    from core import pg_catalogue_write as catalogue
+
+    value = await conn.fetchval(
+        "SELECT value FROM meta.chain_watermarks WHERE key = $1",
+        catalogue.record_key(clock_table),
+    )
+    stamps = [] if value is None else sorted(catalogue.parse_record(value).stamps)
+    return await conn.fetch(
+        f"SELECT id FROM {clock_table} WHERE mirrored_at >= $1 "
+        f"AND {catalogue.STAMP_SQL} = ANY($2::bigint[])",
+        latched, stamps,
+    )
 
 
 async def _owned_since(pool, name: str) -> Optional[str]:
@@ -1115,6 +1400,73 @@ async def _owned_since(pool, name: str) -> Optional[str]:
     from core import chain_latch
 
     return chain_latch.claimed_chains(await chain_latch.read_owners(pool)).get(name)
+
+
+def _spool_issues(chain: ModuleType) -> List[IntegrityIssue]:
+    """What the chain's spool holds, as the handover reports it — empty for a
+    chain that keeps none (no `pending()` hook).
+
+    A readable entry is INFO, in both directions: the gate counts it as sent
+    under either flag and lands it in the store it writes, and `--execute`
+    lands it in Postgres before it reads. A file that will not parse is
+    CRITICAL: no drain will ever land it, so a human writes that week's row
+    and deletes the file before anything here goes ahead.
+    """
+    pending = getattr(chain, "pending", None)
+    if not callable(pending):
+        return []
+    state = pending()
+    unreadable = list(state.get("unreadable") or ())
+    readable = [w for w in state.get("weeks") or () if w not in set(unreadable)]
+    table = chain.CHAIN_TABLES[0]
+    folder = f"data/report-ledger-pending/{chain.CHAIN}/"
+    issues: List[IntegrityIssue] = []
+    if readable:
+        issues.append(IntegrityIssue(
+            check_name="handover_ledger_spooled", table_name=table,
+            severity=Severity.INFO, count=len(readable), sample_ids=(),
+            description=(
+                f"{len(readable)} delivered week(s) of {table} are spooled in "
+                f"{folder} and held by neither store: {', '.join(readable)}. "
+                "The message went out and its record has not landed. The gate "
+                "counts them as sent under either flag and lands them in the "
+                "store it writes; --execute lands them in Postgres before it "
+                "reads, so the copy carries them back.")))
+    if unreadable:
+        issues.append(IntegrityIssue(
+            check_name="handover_ledger_spool_unreadable", table_name=table,
+            severity=Severity.CRITICAL, count=len(unreadable), sample_ids=(),
+            description=(
+                f"{len(unreadable)} file(s) in {folder} cannot be parsed: "
+                f"{', '.join(unreadable)}. Each is a delivered week no drain "
+                "will land — the gate counts it as sent by its name alone. "
+                f"Write its row into {table} by hand (week_start, sales_type, "
+                "revenue, orders, sent_at, from the report's message), delete "
+                "the file, and ask again.")))
+    return issues
+
+
+async def _land_spool(store, chain: ModuleType) -> int:
+    """Land the chain's spool in Postgres, the writer while it is latched;
+    refuse if anything is left. Returns how many landed."""
+    land = getattr(chain, "land_pending", None)
+    if not callable(land):
+        return 0
+    landed = await land(store)
+    left = chain.pending()
+    if left.get("count"):
+        raise CopyBackRefused(
+            f"{chain.CHAIN}: {left['count']} delivered week(s) are still "
+            f"spooled after landing the spool in Postgres "
+            f"({', '.join(left.get('weeks') or ())}); {landed} landed. A copy "
+            "now would release the chain with those weeks in neither store. "
+            "Nothing was copied into DuckDB and the latch is where it was; "
+            "the weeks that landed are in Postgres, where the job's next tick "
+            "would have put them. Look for 'report ledger:' in this output — "
+            "Postgres refused the record, or a file did not parse — and run "
+            "this again.",
+            _spool_issues(chain))
+    return landed
 
 
 async def handover_check(
@@ -1149,9 +1501,10 @@ async def handover_check(
     pool = await get_pool()
     await require_revision()
     moved_on = await _owned_since(pool, chain_name(chain)) is not None
-    return await _handover_issues(
+    issues = await _handover_issues(
         store, pool, chain_specs(chain), moved_on=moved_on, max_samples=max_samples,
     )
+    return issues + _spool_issues(chain)
 
 
 def _sortable(key: Any) -> Tuple[str, Any]:
@@ -1228,6 +1581,11 @@ async def copy_back(
       sentence that clears it, and neither copy is refused into silence.
     - **Nothing the write would destroy.** `handover_check`'s CRITICALs,
       asked before anything is written — see the module docstring.
+    - **No delivered week left in a spool** (chains 11a/11b). After the
+      handover, and only under `--execute`, the chain's `land_pending` lands
+      it in Postgres; anything still spooled refuses the copy. That refusal
+      comes after the weeks that did land were written to Postgres — the
+      record of a delivery, the write the job's next tick would have made.
     - **`KS_WRITE_*` is not a precondition.** Under OD-19 (a) it does not route
       writes while the chain is latched, so requiring it to say anything in
       particular would only add a step that changes nothing. The runbook printed
@@ -1284,7 +1642,7 @@ async def copy_back(
 
     handover = await _handover_issues(
         store, pool, specs, moved_on=True, max_samples=max_samples,
-    )
+    ) + _spool_issues(chain)
     blocking = [i for i in handover if i.severity is Severity.CRITICAL]
     if blocking:
         raise CopyBackRefused(_refusal(name, blocking), blocking)
@@ -1297,6 +1655,11 @@ async def copy_back(
             ).fetchone()[0]
             for spec in specs if spec.is_append
         }
+
+    # Before the read, never after: a delivered week still in the spool is in
+    # neither store, and the copy would release the chain without it (the
+    # module docstring). The dry run only reports it — the INFO above.
+    landed = 0 if dry_run else await _land_spool(store, chain)
 
     rows = {spec.pg_table: await _read_pg(pool, spec, floors.get(spec.pg_table))
             for spec in specs}
@@ -1316,6 +1679,8 @@ async def copy_back(
         # What the copy will overwrite or carry, none of it blocking.
         "handover": [_render(i) for i in handover],
     }
+    if landed:
+        plan["landed_from_spool"] = landed
     if dry_run:
         plan["executed"] = False
         plan["runbook"] = _runbook(chain, executed=False)
@@ -1446,8 +1811,15 @@ def _marker_steps(chain: ModuleType, name: str) -> List[str]:
         "  4. docker compose up -d web bot. With the flag at duckdb the hourly "
         "copy resumes and carries whatever DuckDB wrote before the marker; ask "
         "--handover again, in a stopped window, before any later flip."
-        + "".join(_MIRRORS[clock].resumes for clock in _mirror_clocks(chain)),
+        + "".join(_MIRRORS[clock].resumes for clock in _mirror_clocks(chain))
+        + "".join(" " + t.resumes for t in _texts_of(chain)),
     ]
+
+
+def _texts_of(chain: ModuleType) -> Tuple[MirroredTexts, ...]:
+    """The chain's mirrored tables that carry their own texts (chain 6)."""
+    return tuple(_MIRRORED_TEXTS[t] for t in chain.CHAIN_TABLES
+                 if t in _MIRRORED_TEXTS)
 
 
 async def _latch_state(pool, name: str) -> Dict[str, Any]:
@@ -1628,8 +2000,25 @@ async def _read_sync_keys(pool, chain: ModuleType) -> Dict[str, str]:
     """
     from core.pg_chain_watermarks import read_values
 
-    keys = tuple(getattr(chain, "CHAIN_SYNC_KEYS", ()))
+    keys = _carried_keys(chain)
     return await read_values(keys) if keys else {}
+
+
+def _carried_keys(chain: ModuleType) -> Tuple[str, ...]:
+    """Every `meta.chain_watermarks` value the chain keeps, which the way back
+    carries into DuckDB's `sync_metadata` and the release deletes.
+
+    `CHAIN_SYNC_KEYS` — the `last_sync_*` watermarks a sync resumes from —
+    and `CHAIN_MARKER_KEYS`, a value that is not a sync watermark and must
+    not be judged as one (`_freshness_check` reads every `last_sync_*` key as
+    a stale sync), but lives in the same table for the same reason: the
+    hourly full replace of `app.sync_metadata` would wipe it. Chain 9's
+    digest beat, `dq_digest_last_sent`, is the first. One helper for the
+    three sites, so a key cannot be carried back and then left standing for
+    the next flip to inherit.
+    """
+    return tuple(getattr(chain, "CHAIN_SYNC_KEYS", ())) + tuple(
+        getattr(chain, "CHAIN_MARKER_KEYS", ()))
 
 
 async def _read_pg_sequences(
@@ -1801,7 +2190,11 @@ async def release_chain(pool, chain: ModuleType) -> bool:
     from core.write_chains import chain_name
 
     keys = [chain_latch.owner_key(t) for t in chain.CHAIN_TABLES]
-    keys += list(getattr(chain, "CHAIN_SYNC_KEYS", ()))
+    keys += list(_carried_keys(chain))
+    # And any bookkeeping the chain keeps beside them that is released but
+    # never carried into DuckDB (chain 6's record of its own write instants):
+    # it describes writes DuckDB now owns again.
+    keys += list(getattr(chain, "CHAIN_RELEASED_KEYS", ()))
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -1886,9 +2279,13 @@ _MIRRORS = {
 
 def _mirror_clocks(chain: ModuleType) -> Tuple[str, ...]:
     """The rewrite clocks of the chain's mirrored tables, in `CHAIN_TABLES`'
-    order — one shipper each."""
+    order — one shipper each. Not chain 6's catalogue tables, whose shipper
+    their own texts name (`_texts_of`)."""
     out: List[str] = []
     for table in _mirrored_tables(chain):
+        if table in _MIRRORED_TEXTS:
+            # Chain 6's catalogue: its shipper is named by its texts.
+            continue
         clock = _REWRITE_CLOCK[table]
         if clock not in out:
             out.append(clock)
@@ -1919,12 +2316,20 @@ def _soak_without_a_check(chain: ModuleType) -> str:
             "/api/jobs/replicate_operational/trigger runs it now; its web-log "
             "line must list them under `replaced` again, not `stood_down`)"
         )
+    # Chain 6's catalogue tables name their own shipper (`_MIRRORED_TEXTS`);
+    # every other mirrored table its landing's (`_MIRRORS`).
+    own = [t for t in mirrored if t in _MIRRORED_TEXTS]
     for clock in _mirror_clocks(chain):
-        tables = [t for t in mirrored if _REWRITE_CLOCK[t] == clock]
+        tables = [t for t in mirrored if _REWRITE_CLOCK.get(t) == clock]
         parts.append(
             f"read meta.mirror_state for {', '.join(tables)}: "
             f"{_MIRRORS[clock].stamps}; see failures_since_ok at 0 and "
             "last_ok_at moved"
+        )
+    for table in own:
+        parts.append(
+            f"read meta.mirror_state for {table}: see failures_since_ok at 0 "
+            f"and {_MIRRORED_TEXTS[table].soak}"
         )
     return "; and ".join(parts)
 
@@ -1974,7 +2379,10 @@ def _runbook(chain: ModuleType, *, executed: bool, released: bool = False) -> Li
         "re-latches the chain if it still says postgres.",
         "2. docker compose up -d web bot",
         f"3. At +2 min {soak}: "
-        + ("each of this chain's tables must be shipped again by its own "
+        + ("each of this chain's tables must be shipped again by its mirror, "
+           "and its watermark moving."
+           if _texts_of(chain) and not _mirror_clocks(chain) else
+           "each of this chain's tables must be shipped again by its own "
            f"shipper — the hourly copy for the replicated ones, "
            f"{_mirror_names(chain)} for the rest — and its watermark moving."
            if _mirrored_tables(chain) else

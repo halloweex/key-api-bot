@@ -285,6 +285,78 @@ async def backfill_mirror_expenses(
         raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
 
 
+@router.post("/mirror/backfill/catalogue")
+@limiter.limit("5/minute")
+async def backfill_mirror_catalogue(
+    request: Request,
+    dry_run: bool = Query(True, description="Say what would be carried; write nothing"),
+    admin: dict = Depends(require_admin),
+):
+    """Carry the catalogue rows only DuckDB holds into Postgres — the ones the
+    daily comparison calls retired (`mirror_retired_rows`; product 1055).
+    A dry run by default. Chain 6's pre-flip lever (OD-15 (a)).
+
+    Foreground: production carries about one row. The carried rows keep a
+    `mirrored_at` before the mirror's last whole-catalogue success, so they
+    still read as retired, and `meta.mirror_state` is not touched
+    (`core.pg_landing.carry_retired_catalogue`).
+
+    The expenses route's order, for its reasons: 409 with the mirror off,
+    before Postgres is asked anything; 409 once a write chain owns either
+    table, on the local answer and then on the owner rows after
+    `require_revision()`; 503 when the owner rows cannot be read.
+    """
+    from core.pg_landing import (
+        CatalogueCarryRefused, carry_retired_catalogue, enabled,
+        tables_stood_down, tables_stood_down_or_owned,
+    )
+
+    if not enabled():
+        raise HTTPException(
+            status_code=409, detail="KS_MIRROR_LANDING is off; nothing was carried")
+
+    catalogue = ("bronze.products", "bronze.categories")
+    moved = frozenset().union(*(tables_stood_down((t,)) for t in catalogue))
+    if not moved:
+        from core.pg import get_pool, require_revision
+
+        try:
+            pool = await get_pool()
+            await require_revision()
+            for table in catalogue:
+                moved |= await tables_stood_down_or_owned(pool, (table,))
+        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
+            logger.error("Catalogue carry: cannot read who owns the catalogue: "
+                         "%s: %s", type(e).__name__, e)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Cannot tell whether a write chain owns the catalogue, so "
+                    f"nothing was carried: {type(e).__name__}: {e}"
+                ),
+            ) from e
+    if moved:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{', '.join(sorted(moved))} is written by a write chain, not "
+                "shipped by the mirror; a row only DuckDB holds is the copy-back "
+                "handover's to decide now (scripts/chain_copy_back.py catalogue "
+                "--handover)."
+            ),
+        )
+
+    store = await get_store()
+    try:
+        stats = await carry_retired_catalogue(store, dry_run=dry_run)
+    except CatalogueCarryRefused as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        logger.error(f"Catalogue carry failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Carry failed: {e}")
+    return {"status": "dry_run" if dry_run else "success", "stats": stats}
+
+
 @router.post("/mirror/backfill/buyers")
 @limiter.limit("2/hour")
 async def backfill_mirror_buyers(

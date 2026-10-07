@@ -83,7 +83,10 @@ DQ_MAX_AGE_S = {
     # DuckDB stops being fed. It is not independent of DuckDB yet: the job
     # runs it only after the DuckDB extraction succeeded, inside the same try,
     # and journals it in DuckDB's data_quality_runs, which is where the age
-    # /api/health publishes comes from. So a DuckDB failure silences it too,
+    # /api/health publishes comes from — until chain 9 (KS_WRITE_DQ_JOURNAL,
+    # OD-02 (c)) moves the journal to Postgres, when the age comes from there;
+    # the job's dependence on the DuckDB extraction stays. So a DuckDB failure
+    # silences it too,
     # and since DN-21 that pages under this key as well as `reconciliation`.
     # Decoupling it belongs with step 13.
     # DN-21's opt-in rested on what the stage-4 soak checked on 18.09: a
@@ -512,6 +515,30 @@ def check_write_chain_precondition(payload: Optional[dict]) -> "list[tuple[str, 
     if not parts:
         return []
     return [("write_chain_precondition_unmet", "write chains: " + "; ".join(parts))]
+
+
+def check_report_ledger_pending(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """A report that went out and whose ledger row is still spooled (chains
+    11a/11b, OD-16 (a)): `write_chains.<chain>.pending.count` above zero.
+
+    Warn: nothing is lost and nothing will be sent twice — the gate counts a
+    spooled week as sent, and the report's next daily tick drains the spool
+    into Postgres. What it says is that Postgres refused three times after a
+    delivery, and that the local disk is now the only record of the week until
+    the drain. Judged from the published block alone.
+    """
+    block = (payload or {}).get("write_chains")
+    if not isinstance(block, dict):
+        return []
+    parts = []
+    for name, state in sorted(block.items()):
+        pending = state.get("pending") if isinstance(state, dict) else None
+        if isinstance(pending, dict) and pending.get("count"):
+            weeks = ", ".join(pending.get("weeks") or ()) or f"{pending['count']} row(s)"
+            parts.append(f"{name}: {weeks}")
+    if not parts:
+        return []
+    return [("report_ledger_pending", "report ledgers spooled: " + "; ".join(parts))]
 
 
 # The buyers step, published by web as `buyer_sync` (chain 4, PR-1). The step
@@ -1315,6 +1342,12 @@ async def run_canary(
             fail(key, message)
         if precondition_failures and severity == "ok":
             severity = "warn"
+        # A delivered report whose ledger row is spooled: warn.
+        ledger_failures = check_report_ledger_pending(payload)
+        for key, message in ledger_failures:
+            fail(key, message)
+        if ledger_failures and severity == "ok":
+            severity = "warn"
         # The buyers step: warn. Its own reasons are in check_buyer_sync.
         buyer_failures = check_buyer_sync(payload)
         for key, message in buyer_failures:
@@ -1398,6 +1431,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "grep web's log for 'UTM layer refresh failed'; then POST /api/warehouse/refresh — a full tick whose parse finishes ends it"),
     ("write_chain_precondition_unmet",
      "Set the read flag the message names to postgres, then docker compose up -d web"),
+    ("report_ledger_pending",
+     "Nothing to resend: the next daily tick drains data/report-ledger-pending into the ledger, under either flag; grep -i 'report ledger' in web's log"),
     ("utm_parse_mode_invalid",
      "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
     ("goals_history_mode_invalid",

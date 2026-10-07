@@ -920,3 +920,29 @@ class TestReadiness:
                    AsyncMock(return_value=REQUIRED_REVISION)):
             body = asyncio.run(wc.readiness(MET_ENV))
         assert "ks_app:x" not in repr(body) and "http://ch:8123" not in repr(body)
+
+
+class TestTheReadersNotOnPostgresAreOneReading:
+    """`readers_not_on_postgres` is what the switch files as `reader:*` and
+    what chain 6 holds its catalogue writes on (`pg_catalogue_write`). One
+    reading, so the two cannot disagree about which readers still read DuckDB."""
+
+    @pytest.mark.parametrize("off", [(), ("KS_READ_GOLD",),
+                                     ("KS_SMS_STORE", "KS_READ_CHAT"),
+                                     tuple(wc.WAREHOUSE_READERS)])
+    def test_it_is_exactly_the_reader_keys_the_switch_files(self, off):
+        env = {**MET_ENV, **{name: "duckdb" for name in off}}
+        filed = {u.key for u in wc.evaluate_preconditions(env, MET_FACTS)
+                 if u.key.startswith("reader:")}
+        assert filed == {f"reader:{n}" for n in wc.readers_not_on_postgres(env)}
+        assert set(wc.readers_not_on_postgres(env)) == set(off)
+
+    def test_unset_and_a_typo_are_not_postgres_and_case_is(self):
+        env = dict(MET_ENV)
+        env.pop("KS_READ_GOLD")
+        env["KS_READ_SILVER"] = "postgress"
+        env["KS_READ_DASHBOARD"] = " PostgreS "
+        assert wc.readers_not_on_postgres(env) == ("KS_READ_GOLD", "KS_READ_SILVER")
+
+    def test_in_the_lists_order(self):
+        assert wc.readers_not_on_postgres({}) == tuple(wc.WAREHOUSE_READERS)

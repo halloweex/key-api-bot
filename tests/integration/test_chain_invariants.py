@@ -610,7 +610,7 @@ class TestOneUnreadableTable:
         assert facts.watermarks_unread is None and facts.watermarks
         issues = check_chain_invariants(facts)
         assert sorted((i.check_name, i.table_name) for i in issues) == sorted([
-            (inv.UNWATCHED, "(write chains)"),
+            (inv.UNWATCHED, "(pg_expenses_write)"),
             (inv.SEQUENCE_BEHIND, "app.stock_movements")])
         (unwatched,) = [i for i in issues if i.check_name == inv.UNWATCHED]
         assert "pg_expenses_write" in unwatched.description

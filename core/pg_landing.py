@@ -123,6 +123,15 @@ ON CONFLICT (table_name) DO UPDATE SET
     last_rows         = EXCLUDED.last_rows
 """
 
+# The statement that says "a whole catalogue landed at this instant", public
+# because two writers stamp it: the mirror here, and chain 6's writer
+# (`core/pg_catalogue_write.py`), which takes the catalogue's writes from it.
+# One text, so `last_ok_at` means the same thing whichever of them wrote it —
+# the instant every row of the last full write carries as its `mirrored_at`,
+# which is what tells a product KeyCRM retired from one that was lost
+# (owner decision OD-15 (a)).
+WATERMARK_OK_SQL = _WATERMARK_OK
+
 
 def _record_ok(table: str, rows: int) -> None:
     _failures.pop(table, None)
@@ -408,6 +417,159 @@ async def mirror_expenses(orders_with_expenses: List[Dict[str, Any]]) -> MirrorO
 
     rows = [tuple(r) for r in expense_rows(orders_with_expenses)]
     return await _mirror("bronze.expenses", EXPENSE_COLUMNS, rows)
+
+
+# ─── The catalogue rows no mirror can ship again (chain 6, OD-15) ────────────
+#
+# `upsert_products` never deletes, so DuckDB keeps every product KeyCRM ever
+# served, and the mirror — fed by KeyCRM payloads — ships only what is served
+# today. A product KeyCRM retired before the mirror existed is therefore in
+# DuckDB and nowhere else: product 1055, last synced 2026-06-13, is the whole
+# 1,004-against-1,003 gap the daily comparison files as `mirror_retired_rows`.
+# Once chain 6 writes the catalogue to Postgres, DuckDB's copy freezes and that
+# row would be named by DuckDB alone for as long as anything still read it —
+# and a Postgres read of an order line on it already shows no name or brand.
+#
+# The owner's decision (OD-15 (a)) is to carry it, and every other row the
+# comparison calls retired, before the flip. This is that carry, and a human
+# runs it: it changes what Postgres holds.
+#
+# THE SELECTION IS THE COMPARISON'S OWN RULE
+#
+# A row DuckDB holds and Postgres does not is retired when DuckDB last wrote it
+# at or before the mirror's last whole-catalogue success (`compare_table`'s
+# branch, `synced <= last_ok_at`): the mirror shipped everything KeyCRM served
+# after that, so KeyCRM no longer serves it. Anything written after it is in
+# flight — or lost, past the comparison's grace — and is not carried: the next
+# mirror ships it if KeyCRM still serves it, and if not, the next comparison
+# names it. One rule, so the carry cannot disagree with the check that named
+# the row.
+#
+# THE CARRIED ROW STILL READS AS RETIRED
+#
+# It lands with `mirrored_at` before `meta.mirror_state.last_ok_at` — DuckDB's
+# own stamp, or a microsecond before the watermark when that is later — and
+# the watermark is not touched: this is not a whole catalogue, and only a whole
+# catalogue may move it. So under chain 6's rule (`mirrored_at` below the last
+# full write's `last_ok_at` is retired) the row is still what it was.
+# `ON CONFLICT DO NOTHING`: a row the mirror shipped meanwhile is served, and
+# the mirror's copy wins.
+
+class CatalogueCarryRefused(RuntimeError):
+    """The carry did not run: the mirror is off, or a write chain owns one of
+    the catalogue tables. Nothing was read from DuckDB and nothing written."""
+
+
+def retired_rows(
+    rows: Mapping[Any, tuple],
+    synced: Mapping[Any, Any],
+    held: FrozenSet[Any],
+    last_ok_at,
+) -> "tuple[List[Any], List[Any]]":
+    """`(retired, in_flight)`: the keys DuckDB holds and Postgres does not,
+    split by `compare_table`'s rule against the mirror's last success. Pure.
+
+    A missing DuckDB stamp counts as retired, as it does there; a naive one is
+    read as UTC, as it is there."""
+    from datetime import timezone
+
+    held = set(held)
+    retired: List[Any] = []
+    in_flight: List[Any] = []
+    for key in sorted(rows.keys() - held):
+        stamp = synced.get(key)
+        if stamp is not None and stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        if stamp is None or stamp <= last_ok_at:
+            retired.append(key)
+        else:
+            in_flight.append(key)
+    return retired, in_flight
+
+
+async def carry_retired_catalogue(store, *, dry_run: bool = True) -> Dict[str, Dict[str, Any]]:
+    """Carry into Postgres the catalogue rows only DuckDB holds and KeyCRM no
+    longer serves. Dry run by default: it says what it would carry.
+
+    Refuses (`CatalogueCarryRefused`) with the mirror off, and on either copy
+    of the latch for either table: after chain 6's flip, a row only DuckDB
+    holds is the copy-back handover's business, not this lever's. Per table it
+    returns `would_carry`, `carried` (0 on a dry run), `in_flight` and the
+    first ten `ids`; a table the mirror has never shipped whole is `refused`,
+    because nothing can be called retired against no watermark.
+    """
+    from datetime import timedelta, timezone
+
+    from core.mirror_reconciliation import (
+        CATEGORIES_SPEC, PRODUCTS_SPEC, fetch_duckdb_rows, fetch_watermarks,
+    )
+
+    if not enabled():
+        raise CatalogueCarryRefused(f"{MIRROR_ENV} is off; nothing was carried")
+    specs = (PRODUCTS_SPEC, CATEGORIES_SPEC)
+    for spec in specs:
+        moved = tables_stood_down(unit_of(spec.pg_table))
+        if moved:
+            raise CatalogueCarryRefused(stood_down_reason(moved))
+
+    from core.pg import get_pool, require_revision
+
+    pool = await get_pool()
+    await require_revision()
+    # The owner rows too: this holds a pool, and a lost marker leaves only them
+    # to say the catalogue changed hands (DN-06).
+    for spec in specs:
+        moved = await tables_stood_down_or_owned(pool, unit_of(spec.pg_table))
+        if moved:
+            raise CatalogueCarryRefused(stood_down_reason(moved))
+
+    # DuckDB first, and its lock released before any Postgres await.
+    async with store.connection() as conn:
+        duck = {spec.pg_table: fetch_duckdb_rows(conn, spec) for spec in specs}
+    marks = await fetch_watermarks(pool)
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for spec in specs:
+        table = spec.pg_table
+        rows, synced = duck[table]
+        last_ok_at = (marks.get(table) or {}).get("last_ok_at")
+        result: Dict[str, Any] = {"would_carry": 0, "carried": 0, "in_flight": 0,
+                                  "ids": [], "last_ok_at": None}
+        out[table] = result
+        if last_ok_at is None:
+            result["refused"] = (
+                f"meta.mirror_state has no successful shipment of {table}: "
+                "nothing can be told retired from in flight against no watermark")
+            continue
+        result["last_ok_at"] = last_ok_at.isoformat()
+        async with pool.acquire() as conn:
+            held = frozenset(r["id"] for r in await conn.fetch(f"SELECT id FROM {table}"))
+        retired, in_flight = retired_rows(rows, synced, held, last_ok_at)
+        result.update(would_carry=len(retired), in_flight=len(in_flight),
+                      ids=retired[:10])
+        if dry_run or not retired:
+            continue
+        columns = tuple(spec.columns)
+        sql = (
+            f"INSERT INTO {table} ({', '.join(columns)}, mirrored_at) "
+            f"VALUES ({', '.join(f'${i}' for i in range(1, len(columns) + 2))}) "
+            "ON CONFLICT (id) DO NOTHING"
+        )
+        before = last_ok_at - timedelta(microseconds=1)
+        carried = 0
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for key in retired:
+                    stamp = synced.get(key)
+                    if stamp is not None and stamp.tzinfo is None:
+                        stamp = stamp.replace(tzinfo=timezone.utc)
+                    mirrored_at = before if stamp is None else min(stamp, before)
+                    status = await conn.execute(sql, *rows[key], mirrored_at)
+                    carried += int(status.rsplit(" ", 1)[-1])
+        result["carried"] = carried
+        logger.info("catalogue carry: %d of %d retired row(s) carried into %s, "
+                    "ids %s", carried, len(retired), table, retired[:10])
+    return out
 
 
 # ─── Orders ───────────────────────────────────────────────────────────────────

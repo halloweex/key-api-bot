@@ -251,6 +251,20 @@ class MirroredTable:
     # there is a separate question this flag does not answer.
     one_failure_warns: bool = False
 
+    # The Postgres side's own clock, where `synced_column` cannot be read there.
+    #
+    # `synced_column` is interpolated into the DuckDB SELECT only — the copy
+    # direction never needed Postgres to say when a row was written, because
+    # Postgres only ever held what the copy put there. A shadow chain
+    # (`core.write_chains.compared_in_shadow`) turns the comparison round:
+    # Postgres is the writer and DuckDB the receiver, so a row Postgres alone
+    # holds is in flight or a failed shadow write, and only Postgres's clock
+    # can tell which (`compare_shadow`). For a plain column in `columns` the
+    # same name serves both stores and this stays None; it is set where the
+    # DuckDB clock is an expression naming DuckDB's tables — the journal's two
+    # children, which borrow their run's `started_at`.
+    pg_synced_column: Optional[str] = None
+
     @property
     def stamp_is_per_row(self) -> bool:
         """Whether `synced_column` dates *this row* or the whole rebuild.
@@ -305,19 +319,28 @@ _COPIED_FROM_SQLITE = (
 )
 
 
+# The catalogue, as constants rather than inline, because three readers need
+# the one description: the daily comparison below, the carry of the rows it
+# calls retired (`core.pg_landing.carry_retired_catalogue`), and chain 6's
+# copy-back (`core.chain_transfer.chain_specs`), which reads these tables the
+# other way — the buyers' arrangement (`BUYERS_SPEC`).
+PRODUCTS_SPEC = MirroredTable(
+    pg_table="bronze.products",
+    dk_table="products",
+    columns=tuple(PRODUCT_COLUMNS),
+    numeric=("price",),
+)
+
+CATEGORIES_SPEC = MirroredTable(
+    pg_table="bronze.categories",
+    dk_table="categories",
+    columns=tuple(CATEGORY_COLUMNS),
+)
+
 # Order matters only for reporting. Products first: it is the table that moves.
 MIRRORED_TABLES: Tuple[MirroredTable, ...] = (
-    MirroredTable(
-        pg_table="bronze.products",
-        dk_table="products",
-        columns=tuple(PRODUCT_COLUMNS),
-        numeric=("price",),
-    ),
-    MirroredTable(
-        pg_table="bronze.categories",
-        dk_table="categories",
-        columns=tuple(CATEGORY_COLUMNS),
-    ),
+    PRODUCTS_SPEC,
+    CATEGORIES_SPEC,
     # Not a mirror — a replica. `is_retail` and the effective-dated intervals
     # are decisions KeyCRM cannot supply, so `core/pg_replication.py` copies
     # what DuckDB holds rather than re-deriving them. `full_replace` because
@@ -458,6 +481,56 @@ async def fetch_pg_rows(pool, spec: MirroredTable) -> Dict[Any, Tuple[Any, ...]]
             row, spec.columns, spec.numeric, spec.ignore_columns,
         )
     return out
+
+
+def pg_clock_expr(spec: MirroredTable) -> Optional[str]:
+    """What dates a row in Postgres, for a comparison facing Postgres→DuckDB.
+
+    `pg_synced_column` where the spec declares one; otherwise `synced_column`
+    when it is a plain column both stores carry, which every per-row clock of
+    a shadow chain's tables is (`started_at`, `sampled_at`, `sent_at`); None
+    when neither holds — an expression naming DuckDB's tables cannot be run
+    here, and a guessed clock would forgive the wrong rows.
+    """
+    if spec.pg_synced_column:
+        return spec.pg_synced_column
+    stamp = spec.synced_column
+    if stamp and stamp in spec.columns:
+        return stamp
+    return None
+
+
+async def fetch_pg_rows_with_clock(
+    pool, spec: MirroredTable,
+) -> Tuple[Dict[Any, Tuple[Any, ...]], Dict[Any, Optional[datetime]]]:
+    """`fetch_pg_rows`, plus when Postgres wrote each row — the shadow
+    comparison's input, in `fetch_duckdb_rows`' shape.
+
+    Raises `LookupError` for a spec with no Postgres clock: the shadow
+    comparison's grace is per row and has nothing to read otherwise, and a
+    table with no clock compared without one would report every row in
+    flight as lost."""
+    clock = pg_clock_expr(spec)
+    if clock is None:
+        raise LookupError(
+            f"{spec.pg_table} has no clock Postgres can read; a shadow "
+            "comparison needs one (MirroredTable.pg_synced_column)")
+    cols = ", ".join(spec.columns)
+    async with pool.acquire() as conn:
+        records = await conn.fetch(
+            f"SELECT {cols}, {clock} AS _shadow_clock FROM {spec.pg_table}")
+    values: Dict[Any, Tuple[Any, ...]] = {}
+    synced: Dict[Any, Optional[datetime]] = {}
+    for record in records:
+        row = [record[c] for c in spec.columns]
+        if any(record[c] is None for c in spec.key_columns):
+            continue
+        key = _row_key(spec, row)
+        values[key] = _normalise_row(
+            row, spec.columns, spec.numeric, spec.ignore_columns,
+        )
+        synced[key] = record["_shadow_clock"]
+    return values, synced
 
 
 # The tables whose freshness a watchdog outside this container is expected to
@@ -894,6 +967,163 @@ def compare_table(
             ),
         ))
 
+    return issues
+
+
+# What a disagreement means for a table a shadow chain writes (OD-02 (c)):
+# Postgres committed the row and DuckDB was handed the same values after it,
+# from the one call that wrote both. Neither store copies the other.
+_SHADOWED = (
+    "This table is written to Postgres first and handed to DuckDB from the "
+    "same values right after the commit (core/shadow_writes.py), so there is "
+    "no copy between them that could drift — a disagreement is a round-trip "
+    "defect in one store's statement, or a second writer."
+)
+
+
+def compare_shadow(
+    spec: MirroredTable,
+    dk_rows: Mapping[Any, Tuple[Any, ...]],
+    dk_synced: Mapping[Any, Optional[datetime]],
+    pg_rows: Mapping[Any, Tuple[Any, ...]],
+    pg_synced: Mapping[Any, Optional[datetime]],
+    *,
+    now: Optional[datetime] = None,
+    grace_minutes: Optional[int] = None,
+    max_samples: int = 10,
+) -> List[IntegrityIssue]:
+    """One table of a shadow chain, facing Postgres→DuckDB. No I/O.
+
+    `compare_table` with the direction turned round, and four differences,
+    each because the writer moved:
+
+    - **No watermark gate.** The hourly copy stands down for these tables, so
+      its frozen `last_ok_at` — and any failure the shipper stamped on a
+      mismatched chain — says nothing about whether DuckDB is receiving.
+    - **A row only DuckDB holds is a defect.** DuckDB is written only after a
+      Postgres commit, from the same values, so DuckDB ⊆ Postgres holds by
+      construction: such a row was written round the chain — an image older
+      than it, a script, a row a flip stranded by skipping `--handover`.
+      CRITICAL (`shadow_duckdb_only_rows`), past the grace on DuckDB's own
+      clock. The one exception is a table that sweeps by age: Postgres prunes
+      in its writing transaction and DuckDB in the shadow after it, so a row
+      older than everything Postgres still holds is a prune that lagged —
+      INFO (`shadow_pruned_rows`), `_pruned_by_age`'s rule with the sides
+      swapped, no retention restated.
+    - **A row only Postgres holds is a shadow write that failed** — WARN
+      (`shadow_missing_in_duckdb`), past the grace on Postgres's clock.
+      Postgres is the writer of record, so nothing is lost; DuckDB is only
+      the way back's input, and the copy-back carries the row.
+    - **A differing row is CRITICAL** (`shadow_row_values`) unless either
+      side's clock is inside the grace: the window is between the Postgres
+      commit and the shadow's, and between the two reads.
+
+    New names rather than the `mirror_*` ones, because `REMEDIATION`'s
+    `mirror_` lever ("wait for the hourly re-ship") is wrong here: there is
+    no re-ship, and there must not be one.
+    """
+    now = now or datetime.now(timezone.utc)
+    # The operational grace unless told otherwise: these tables were the
+    # hourly copy's, and one table keeps one number for its grace.
+    if grace_minutes is None:
+        grace_minutes = OPERATIONAL_GRACE_MINUTES
+    issues: List[IntegrityIssue] = []
+    table = spec.pg_table
+    cutoff = now - timedelta(minutes=int(grace_minutes))
+
+    def recent(stamp: Any) -> bool:
+        value = _as_utc(stamp)
+        return value is not None and value > cutoff
+
+    # ── DuckDB has it, Postgres does not ──
+    dk_only = sorted(dk_rows.keys() - pg_rows.keys())
+    pruned = _pruned_by_age(spec, pg_synced, dk_rows, dk_only)
+    stranded = [k for k in dk_only
+                if k not in pruned and not recent(dk_synced.get(k))]
+    if pruned:
+        issues.append(IntegrityIssue(
+            check_name="shadow_pruned_rows",
+            table_name=table,
+            severity=Severity.INFO,
+            count=len(pruned),
+            sample_ids=_sample(spec, sorted(pruned), max_samples),
+            description=(
+                f"{len(pruned)} row(s) in DuckDB's {spec.dk_table} are older "
+                f"than anything {table} still holds, on a table both stores "
+                "sweep by age: Postgres pruned them in its writing "
+                "transaction and DuckDB's shadow prune has not caught up, or "
+                "failed. The next tick's shadow prune removes them. Not a "
+                "defect; a count worth watching."
+            ),
+        ))
+    if stranded:
+        issues.append(IntegrityIssue(
+            check_name="shadow_duckdb_only_rows",
+            table_name=table,
+            severity=Severity.CRITICAL,
+            count=len(stranded),
+            sample_ids=_sample(spec, stranded, max_samples),
+            description=(
+                f"{len(stranded)} row(s) are in DuckDB's {spec.dk_table} and "
+                f"not in {table}, older than the {int(grace_minutes)}-minute "
+                "grace. DuckDB receives a row only after Postgres committed "
+                "it, so these were written round the chain — an image older "
+                "than it, a script, or a row a flip stranded by skipping "
+                "--handover. Postgres is the writer of record; find the "
+                "writer, and never re-ship this table from DuckDB."
+            ),
+        ))
+
+    # ── Postgres has it, DuckDB does not ──
+    pg_only = sorted(pg_rows.keys() - dk_rows.keys())
+    missing = [k for k in pg_only if not recent(pg_synced.get(k))]
+    if missing:
+        issues.append(IntegrityIssue(
+            check_name="shadow_missing_in_duckdb",
+            table_name=table,
+            severity=Severity.WARN,
+            count=len(missing),
+            sample_ids=_sample(spec, missing, max_samples),
+            description=(
+                f"{len(missing)} row(s) in {table} never reached DuckDB's "
+                f"{spec.dk_table}: the shadow write after the Postgres commit "
+                "failed, or the process stopped between the two. Postgres "
+                "holds them, so nothing is lost; DuckDB is the way back's "
+                "input, and scripts/chain_copy_back.py carries them. The "
+                "chain's shadow_failures in /api/health says when."
+            ),
+        ))
+
+    # ── both hold it, and disagree ──
+    offenders: Dict[str, int] = {}
+    differing: List[Any] = []
+    for key in dk_rows.keys() & pg_rows.keys():
+        dk_row, pg_row = dk_rows[key], pg_rows[key]
+        if dk_row == pg_row:
+            continue
+        if spec.stamp_is_per_row and (
+                recent(dk_synced.get(key)) or recent(pg_synced.get(key))):
+            continue
+        differing.append(key)
+        for column, dk_value, pg_value in zip(spec.columns, dk_row, pg_row):
+            if dk_value != pg_value:
+                offenders[column] = offenders.get(column, 0) + 1
+    if differing:
+        worst = ", ".join(
+            f"{c} ({n})"
+            for c, n in sorted(offenders.items(), key=lambda kv: -kv[1])[:5]
+        )
+        issues.append(IntegrityIssue(
+            check_name="shadow_row_values",
+            table_name=table,
+            severity=Severity.CRITICAL,
+            count=len(differing),
+            sample_ids=_sample(spec, sorted(differing), max_samples),
+            description=(
+                f"{len(differing)} row(s) are in both stores and disagree. "
+                f"Columns: {worst}. {_SHADOWED}"
+            ),
+        ))
     return issues
 
 
@@ -2655,6 +2885,13 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
             "(SELECT r.started_at FROM data_quality_runs r "
             "WHERE r.run_id = data_quality_issues.run_id)"
         ),
+        # The same borrowed clock, spelled for Postgres: the expression above
+        # names DuckDB's tables. Read only when a shadow chain turns the
+        # comparison round (`compare_shadow`).
+        pg_synced_column=(
+            "(SELECT r.started_at FROM app.data_quality_runs r "
+            "WHERE r.run_id = data_quality_issues.run_id)"
+        ),
         full_replace=True,
         one_failure_warns=True,
     ),
@@ -2666,6 +2903,10 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         key_columns=("run_id", "month", "source_id", "diff_class", "field"),
         synced_column=(
             "(SELECT r.started_at FROM data_quality_runs r "
+            "WHERE r.run_id = data_quality_diffs.run_id)"
+        ),
+        pg_synced_column=(
+            "(SELECT r.started_at FROM app.data_quality_runs r "
             "WHERE r.run_id = data_quality_diffs.run_id)"
         ),
         # dk_value and kc_value stay floats on both sides — DOUBLE against
@@ -3800,7 +4041,19 @@ async def reconcile_operational(
     # `chain_owner_unregistered` below says which tables and why.
     stood_down = stood_down | chain_latch.owned_tables(owners)
 
+    # The third state (OD-02 (c)): a shadow chain writing Postgres still
+    # hands DuckDB every row, so its tables come back off the stood-down set
+    # and are compared facing the other way (`compare_shadow`). The shipper
+    # keeps them stood down — it reads the set above, not this one. A shadow
+    # chain the flag cannot route, or one held only by owner rows, is not in
+    # `compared_in_shadow()` and stays stood down with its own page.
+    from core.write_chains import compared_in_shadow
+
+    shadowed = compared_in_shadow()
+    stood_down = stood_down - shadowed
+
     whole = tuple(s for s in OPERATIONAL_TABLES if s.pg_table not in stood_down)
+    shadow_specs = tuple(s for s in whole if s.pg_table in shadowed)
 
     # ── what the chains themselves say, before any row is read ──
     #
@@ -3814,11 +4067,23 @@ async def reconcile_operational(
     issues += _chain_latch_findings(owners, watermarks)
 
     # ── the four read whole ──
+    # A shadowed table is read in Postgres FIRST: a write landing between the
+    # two reads then shows as DuckDB-only with a fresh DuckDB clock, the case
+    # the grace forgives on the side that always has a clock.
+    pg_first = {spec.pg_table: await fetch_pg_rows_with_clock(pool, spec)
+                for spec in shadow_specs}
     async with store.connection() as conn:
         dk_side = read_duckdb_side(conn, whole)
 
     for spec in whole:
         dk_rows, dk_synced = dk_side[spec.pg_table]
+        if spec.pg_table in pg_first:
+            pg_rows, pg_synced = pg_first[spec.pg_table]
+            issues += compare_shadow(
+                spec, dk_rows, dk_synced, pg_rows, pg_synced,
+                now=now, grace_minutes=grace_minutes, max_samples=max_samples,
+            )
+            continue
         pg_rows = await fetch_pg_rows(pool, spec)
         issues += compare_table(
             spec, dk_rows, dk_synced, pg_rows,
@@ -4560,6 +4825,9 @@ ORDER_PRODUCTS_SPEC = MirroredTable(
 # order-level expenses, which the sync's mirrors ship from the same payload.
 MIRRORED_LANDING_TABLES = (BUYERS_SPEC, BUYER_CONTACTS_SPEC,
                            ORDERS_SPEC, ORDER_PRODUCTS_SPEC, EXPENSES_TABLE)
+# Chain 6: the catalogue, which `MIRRORED_TABLES` compares daily and the
+# copy-back reads the other way — the same two specs, not a second description.
+MIRRORED_LANDING_TABLES += (PRODUCTS_SPEC, CATEGORIES_SPEC)
 
 # A contact is part of the landing only with its buyer. Neither store declares
 # a foreign key, and this check has always read DuckDB's contacts through a

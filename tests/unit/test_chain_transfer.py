@@ -84,6 +84,28 @@ class TestTheClockIsDerived:
             "bronze.order_products": (),
             "bronze.expenses": (),
             "app.order_backfill_misses": ("checked_at",),
+            # Chain 6. KeyCRM serves no `updated_at` for a product or a
+            # category, and DuckDB's `synced_at` against Postgres's
+            # `mirrored_at` is each store's own bookkeeping: nothing orders
+            # two versions, and the rewrite clock dates the chain's writes.
+            "bronze.products": (),
+            "bronze.categories": (),
+            # Chain 9 (OD-02 (c)). A run is dated by its own `started_at`,
+            # which both stores are handed as one value; its findings carry no
+            # clock of their own (the daily comparison borrows the run's
+            # through a subquery, which the copy-back does not ship).
+            "app.data_quality_runs": ("started_at",),
+            "app.data_quality_issues": (),
+            "app.data_quality_diffs": (),
+            # Chain 10. A sample is dated by its own `sampled_at`, the one
+            # value the router hands both stores — it is also the key.
+            "app.disk_samples": ("sampled_at",),
+            "app.data_dir_samples": ("sampled_at",),
+            "app.memory_samples": ("sampled_at",),
+            # Chains 11a/11b. A delivery is dated by `sent_at`, the moment
+            # the message went out, which the router hands both stores.
+            "app.weekly_report_sends": ("sent_at",),
+            "app.traffic_report_sends": ("sent_at",),
         }
 
 

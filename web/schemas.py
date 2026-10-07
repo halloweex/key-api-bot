@@ -141,7 +141,15 @@ class HealthResponse(BaseModel):
             "a chain's own condition for moving that does not hold (chain 6a: "
             "KS_READ_EXPENSES=postgres) — an unlatched chain then writes duckdb "
             "whatever its variable says, and a latched one writes Postgres "
-            "while its readers read DuckDB. Chain 1's entry also "
+            "while its readers read DuckDB. `shadow` says the chain keeps "
+            "feeding DuckDB after it moves (OD-02 (c): chains 9, 10 and 11 — "
+            "Postgres writes first and DuckDB is handed the same row after the "
+            "commit, so the hourly copy stands down while the daily comparison "
+            "keeps comparing); such an entry carries `shadow_failures`, the "
+            "DuckDB halves that failed since start (count, last_at, error "
+            "class), and a report ledger's carries `pending`, the delivered "
+            "weeks whose ledger row is still spooled (`unreadable`: the files "
+            "no drain will land, whose row a human writes). Chain 1's entry also "
             "carries `preflight` (DN-24): `ok` and the `reasons` it may not "
             "be switched to Postgres yet, null once it already is, with "
             "`notes` that do not block it; and "
@@ -152,7 +160,9 @@ class HealthResponse(BaseModel):
             "precondition while its flag is still off, and `sync_step` is "
             "the order step — failures in a row, ages, the last error's "
             "class and how many orders Postgres would refuse — judged by the "
-            "canary as `orders_sync_failing` once the chain writes Postgres."
+            "canary as `orders_sync_failing` once the chain writes Postgres. "
+            "Chain 6's entry (the catalogue) carries the same `sync_step` for "
+            "its hourly products step."
         ),
     )
     backups: Optional[Dict[str, Optional[float]]] = Field(

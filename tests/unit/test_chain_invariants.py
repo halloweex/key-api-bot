@@ -323,7 +323,11 @@ class TestAChainWithNoInvariants:
                    if chain_name(c) not in readers]
         assert not missing, f"no chain invariants for {missing}"
         assert set(readers.values()) <= {"expenses", "inventory", "goals",
-                                         "expense_types", "buyers", "orders"}
+                                         "expense_types", "buyers", "orders",
+                                         "catalogue",
+                                         # The shadow chains (OD-02 (c)).
+                                         "journal", "watchdogs",
+                                         "weekly_ledger", "traffic_ledger"}
         # And each names a field `Facts` actually carries — a reader whose
         # group the verdict never looks at is read and then judged by nothing.
         import dataclasses
@@ -726,7 +730,7 @@ class TestBlindnessIsReported:
         assert facts.watermarks_unread is None
         issues = inv.check_chain_invariants(facts)
         assert [(i.check_name, i.table_name) for i in issues] == [
-            (inv.UNWATCHED, "(write chains)"),
+            (inv.UNWATCHED, "(pg_expenses_write)"),
             (inv.SEQUENCE_BEHIND, "app.stock_movements")]
 
     def test_a_blind_run_holds_every_condition(self):

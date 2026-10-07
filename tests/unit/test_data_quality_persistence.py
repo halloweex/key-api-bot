@@ -526,11 +526,16 @@ class TestTheDigestBaselineIsWhatYouLastRead:
 
         import core.data_quality as dq
 
+        # The statement is a constant both stores render (chain 9's readers
+        # follow the writer, OD-02 (c)), so the ranking is asserted on the
+        # texts `fetch_latest_run` executes.
         src = inspect.getsource(dq.fetch_latest_run)
-        assert "ORDER BY run_id DESC" in src, (
-            "fetch_latest_run no longer ranks by run_id, so the digest "
-            "baseline reconstruction is only coincidentally correct"
-        )
+        for name in ("LATEST_RUN_SQL", "LATEST_RUN_OF_LAYER_SQL"):
+            assert name in src, f"fetch_latest_run no longer reads {name}"
+            assert "ORDER BY run_id DESC" in getattr(dq, name), (
+                f"{name} no longer ranks by run_id, so the digest "
+                "baseline reconstruction is only coincidentally correct"
+            )
 
 
 class TestTheWorstComesFirst:

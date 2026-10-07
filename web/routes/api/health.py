@@ -200,6 +200,42 @@ def _read_fallback_mode() -> dict:
     return block
 
 
+# The layer ages, out of Postgres while chain 9 writes the journal there
+# (OD-02 (c)). DuckDB's ages ride in the cached stats; these replace them, on
+# the same TTL, and only a successful read is cached — an error is answered
+# again on the next probe rather than remembered for a minute.
+_journal_ages_cache: dict = {"data": None, "expires_at": 0}
+_journal_ages_lock = asyncio.Lock()
+_JOURNAL_AGES_TIMEOUT_S = 5
+
+
+async def _journal_ages(from_duckdb):
+    """`data_quality` for the canary, from the store that writes the journal.
+
+    Under `KS_WRITE_DQ_JOURNAL=duckdb` (or unset) it is DuckDB's answer,
+    untouched. Under `postgres` it is Postgres's, or None when Postgres
+    cannot answer — never DuckDB's: a fallback would read "journal fine" to
+    the canary at the moment the journal's writer is what failed, and a
+    missing block is what the canary pages (`dq_block_missing`)."""
+    from core import dq_journal
+
+    if not dq_journal.reads_postgres():
+        return from_duckdb
+    now = time.time()
+    async with _journal_ages_lock:
+        if _journal_ages_cache["data"] is not None and now < _journal_ages_cache["expires_at"]:
+            return _journal_ages_cache["data"]
+        try:
+            data = await asyncio.wait_for(
+                dq_journal.last_success_ages_pg(), _JOURNAL_AGES_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001 — public endpoint: class only
+            logger.warning(f"data-quality freshness from Postgres failed: {type(e).__name__}")
+            return None
+        _journal_ages_cache["data"] = data
+        _journal_ages_cache["expires_at"] = now + _STATS_CACHE_TTL
+        return data
+
+
 # Chain 1's answer to "may it be switched to Postgres now?" (DN-24), on the same
 # TTL as the watermarks. Its own cache, because it is the one part of the
 # `write_chains` block that reads Postgres: the rest is local state and must
@@ -316,11 +352,56 @@ async def _write_chains_block() -> dict:
     if isinstance(orders, dict):
         orders["preflight"] = preflights[1]
         orders["sync_step"] = await _orders_sync_step()
+    # Chain 6's hourly products step off DuckDB, in chain 1's shape: recorded
+    # instead of ending the tick. Not judged by the canary — the freshness
+    # check watches `last_sync_products` at 48 h.
+    from core import pg_catalogue_write
+
+    entry = block.get(pg_catalogue_write.CHAIN)
+    if isinstance(entry, dict):
+        entry["sync_step"] = await _catalogue_sync_step()
+    _shadow_entries(block)
     return block
 
 
 async def _nothing() -> None:
     return None
+
+
+def _shadow_entries(block: dict) -> None:
+    """Under every shadow chain's entry (OD-02 (c)), `shadow_failures`: the
+    DuckDB halves of its writes that failed since this process started —
+    count, when, and the error class, never the text (this endpoint is
+    public). Postgres held each of those rows; the daily comparison finds
+    them as `shadow_missing_in_duckdb`, and this says when to look in the
+    log. A chain that declares `pending()` — the report ledgers' spool —
+    also publishes what is waiting to be recorded. Local state, no I/O."""
+    from core import shadow_writes
+    from core.write_chains import WRITE_CHAINS, chain_name, is_shadow
+
+    for chain in WRITE_CHAINS:
+        entry = block.get(chain_name(chain))
+        if not isinstance(entry, dict) or not is_shadow(chain):
+            continue
+        entry["shadow_failures"] = shadow_writes.failures_of(chain_name(chain))
+        pending = getattr(chain, "pending", None)
+        if callable(pending):
+            try:
+                entry["pending"] = pending()
+            except Exception as exc:  # noqa: BLE001 — published by class
+                entry["pending"] = {"error_class": type(exc).__name__}
+
+
+async def _catalogue_sync_step() -> "dict | None":
+    """What chain 6's hourly products step last did off DuckDB. Local state,
+    no I/O; null when the sync service cannot be had."""
+    try:
+        from core.sync_service import get_sync_service
+
+        return (await get_sync_service()).catalogue_step_health()
+    except Exception as e:
+        logger.debug(f"Catalogue sync step unavailable: {e}")
+        return None
 
 
 def _warehouse_writer_mode() -> dict:
@@ -538,7 +619,12 @@ async def health_check(request: Request):
     # Its absence is meaningful (bot/canary.py treats a missing block as a
     # failure), so never substitute an empty dict for "we could not tell".
     stats = dict(duckdb_stats or {})
-    data_quality = _mark_stood_down(stats.pop("data_quality", None))
+    data_quality = stats.pop("data_quality", None)
+    # Chain 9: from the store that writes the journal (`_journal_ages`).
+    data_quality = await _journal_ages(data_quality)
+    # Chain 3: the layers it stood down marked, on whichever store answered —
+    # per response, after the journal's own cache.
+    data_quality = _mark_stood_down(data_quality)
 
     # The schema ledger. A migration that fails is retried on the next boot and
     # never recorded as applied, so it cannot be skipped past — but somebody has
@@ -730,64 +816,14 @@ async def get_data_quality_health(request: Request):
       - last_run: when the watchdog last produced a verdict
       - counts: how many issues / discrepancies were found
     """
-    from core.data_quality import fetch_latest_run, fetch_run_diffs, fetch_run_issues
+    from core import dq_journal
 
     try:
         store = await get_store()
-        async with store.connection() as conn:
-            integrity = fetch_latest_run(conn, layer="integrity")
-            reconciliation = fetch_latest_run(conn, layer="reconciliation")
-
-            # Include top-N drilldown for the recon run so admins can see
-            # WHICH (month, source) drifted without making a second call.
-            reconciliation_diffs = []
-            if reconciliation:
-                reconciliation_diffs = fetch_run_diffs(
-                    conn, reconciliation["run_id"], limit=20,
-                )
-            integrity_issues = []
-            if integrity:
-                integrity_issues = fetch_run_issues(
-                    conn, integrity["run_id"], limit=20,
-                )
-
-            # The two layers that arrived after this endpoint was written.
-            # Found by an audit standing exactly where on-call would stand: a
-            # WARN verdict in the mirror-landing log line, and no way to see
-            # WHICH findings without opening the database — which the
-            # single-writer rule forbids from outside the process. The layer
-            # holding the most comparisons must not be the one invisible here.
-            mirror_landing = fetch_latest_run(conn, layer="mirror_landing")
-            mirror_issues = []
-            if mirror_landing:
-                mirror_issues = fetch_run_issues(
-                    conn, mirror_landing["run_id"], limit=20,
-                )
-            reconciliation_pg = fetch_latest_run(conn, layer="reconciliation_pg")
-            reconciliation_pg_diffs = []
-            if reconciliation_pg:
-                reconciliation_pg_diffs = fetch_run_diffs(
-                    conn, reconciliation_pg["run_id"], limit=20,
-                )
-
-        return {
-            "integrity": {
-                "last_run": integrity,
-                "issues": integrity_issues,
-            },
-            "reconciliation": {
-                "last_run": reconciliation,
-                "diffs": reconciliation_diffs,
-            },
-            "mirror_landing": {
-                "last_run": mirror_landing,
-                "issues": mirror_issues,
-            },
-            "reconciliation_pg": {
-                "last_run": reconciliation_pg,
-                "diffs": reconciliation_pg_diffs,
-            },
-        }
+        # The block that stood here, moved to `core.dq_journal` so it reads
+        # whichever store writes the journal (chain 9) — DuckDB's one
+        # connection by default, Postgres with no fallback once it moves.
+        return await dq_journal.health_runs(store)
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
 

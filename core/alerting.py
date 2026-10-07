@@ -160,6 +160,9 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_*, or latched while its readers read DuckDB (DN-26).
     "write_chain_precondition_unmet": _c(
         "the read flag the chain names is set to postgres and web restarts"),
+    # A report delivered and its ledger row still spooled (chains 11a/11b,
+    # OD-16 (a)): the next tick of that report drains it into Postgres.
+    "report_ledger_pending": _c("the report's next daily tick lands the spooled row"),
     # The buyers step stopped succeeding: no success for 90 min, or three
     # failures in a row that are neither KeyCRM nor data errors (chain 4 PR-1).
     "buyer_sync_stalled": _c("a buyers step that completes"),
@@ -236,6 +239,17 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # what matters — a sweep that suddenly takes far more than usual is the
     # one thing this cannot tell apart from a loss.
     "mirror_pruned_rows": _c("the next full replace removes them"),
+    # The shadow chains' comparison (OD-02 (c)): Postgres writes, DuckDB is
+    # handed each row after the commit. Nothing re-ships these tables, so
+    # none clears by a job running again — each clears when the rows on the
+    # two sides agree, which for a failed shadow is the copy-back.
+    "shadow_duckdb_only_rows": _c(
+        "the writer that went round the chain is found and its rows decided "
+        "— a human, not a job"),
+    "shadow_missing_in_duckdb": _c(
+        "scripts/chain_copy_back.py carries the rows, or they age out"),
+    "shadow_row_values": _c("the two stores agree on the row again"),
+    "shadow_pruned_rows": _c("the next shadow prune removes them"),
     # Not a data defect: the writer moved and its watchdog did not. It
     # clears when the check is ported or the flag goes back to duckdb.
     "inventory_continuity_unwatched": _c(
@@ -322,6 +336,31 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # human corrects the row.
     "chain_expense_orphans": _c(
         "the orders land, or a human corrects the rows — not a job"),
+    # Chain 6's catalogue (OD-15 (a)). Retired is a fact about KeyCRM, not a
+    # defect; the rest are writes that went round the chain, or a short page.
+    "chain_catalogue_empty": _c(
+        "a products sync or a full sync lands the catalogue again"),
+    "chain_catalogue_written_around": _c(
+        "the next full write re-stamps a row KeyCRM serves; one it does not "
+        "stays named until a human deletes or restores it — after finding "
+        "the writer that went round the chain"),
+    "chain_catalogue_rows_lost": _c(
+        "the next full write restores what KeyCRM still serves; a human finds "
+        "the statement that deleted them"),
+    "chain_catalogue_retired": _c(
+        "KeyCRM serves the rows again — or never; it is not a defect"),
+    "chain_catalogue_short_write": _c(
+        "the next full write carries the whole catalogue"),
+    # The shadow chains' standing watch (OD-02 (c)). Chain 9: a finding whose
+    # run is gone stays until a human finds the writer and the rows.
+    "chain_orphan_children": _c(
+        "the orphaned findings are corrected or their run restored — a human, not a job"),
+    # Chain 10: the next stored sample clears the first; the next prune the
+    # second.
+    "chain_samples_stale": _c("the watchdog stores a sample again"),
+    "chain_retention_unbounded": _c("the prune in the watchdog's tick runs again"),
+    # Chains 11a/11b: the week's row lands — a delivery, or a drained spool.
+    "chain_report_week_missing": _c("the week's row lands in the ledger"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 
