@@ -1210,9 +1210,14 @@ if [ "$FLIPPED" = 1 ]; then
                     ORDER BY id LIMIT 1" $((FLOOR_S + 180)) 3 || true)"
         fi
         save_log "$REH_WEB" flip
-        # Recorded only if the container shows a stop and a start, and with
-        # the kill's state: a kill that did not land is no restart after one.
-        restart_record "$EV/flip_snap_r2.json" "$EV/p6_restart2.json" "$EV/f6_kill_state.json"
+        # P6's restart after the kill, written under KILLED alone — the
+        # SIGKILL the container showed — and with that kill's state in it.
+        # With no kill, `start_stopped` started nothing (or a container the
+        # OOM killer took), and a record here once let P6 pass
+        # "graceful,kill,graceful" on a kill that was never sent.
+        if [ "$KILLED" = 1 ]; then
+            restart_record "$EV/flip_snap_r2.json" "$EV/p6_restart2.json" "$EV/f6_kill_state.json"
+        fi
     fi
     if [ -n "$BLOCKED" ]; then
         BUILT_AFTER="$(pgq "SELECT built FROM meta.derivation_signal WHERE layer = 'warehouse'")"

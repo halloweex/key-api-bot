@@ -539,7 +539,7 @@ def restart(kind="graceful", **over):
 def p6_ev(**over):
     ev = {"flipped": True, "resolved_at": T1,
           "restarts": [restart("graceful"), restart("kill"), restart("graceful")],
-          "gate_delivered": []}
+          "gate_delivered": [], "kill_stop": stop_state("kill")}
     ev.update(over)
     return ev
 
@@ -618,6 +618,56 @@ def test_p6_with_the_gate_file_unread_is_unknown_not_fail():
     assert verdict == UNKNOWN and "gate file was not read" in detail
 
 
+@pytest.mark.parametrize("kill_stop, why", [
+    (None, "P3 records no kill"),
+    (stop_state("oom"), "P3's kill is not one"),
+    (stop_state("kill", finished_at="2026-10-01T11:20:00.5Z"), "is not P3's"),
+])
+def test_p6_counts_only_the_kill_p3_records(kill_stop, why):
+    """The restart after the kill is the one P3's evidence shows: the script
+    writes one state file at F6 into both, so a `kill` record whose SIGKILL
+    P3 does not record — none at all, or another one — proves no restart
+    after the rehearsal's kill, however well-formed the record is.
+    Kills: "P6 never reads P3's kill", "P6 accepts any SIGKILL"."""
+    verdict, detail = probe.judge_p6(p6_ev(kill_stop=kill_stop))
+    assert verdict == UNKNOWN, detail
+    assert "no restart after the rehearsal's kill" in detail and why in detail, detail
+
+
+def _write_evidence(ev_dir, files):
+    for name, body in files.items():
+        (ev_dir / name).write_text(body if isinstance(body, str) else json.dumps(body))
+
+
+@pytest.mark.parametrize("records", [
+    # What the script wrote before it read the container: labels alone.
+    [{"kind": k, "snapshot": snap(), "resolved_events": 1, "recorded_lines": 1,
+      "resolved_lines": 1} for k in ("graceful", "kill", "graceful")],
+    # The same restarts recorded with the containers' states, the kill's
+    # well-formed — nothing but P3 says it was never sent.
+    [restart("graceful"), restart("kill"), restart("graceful")],
+], ids=["labels", "states"])
+def test_the_fake_kill_run_does_not_pass_p6(tmp_path, records):
+    """The reviewer's repro: F6 saw no blocked TRUNCATE, so nothing was
+    killed and `docker start` on the running reh-web did nothing — yet the
+    script wrote a `kill` restart record inside `if wait_health`, and P6
+    passed "3 restarts (graceful,kill,graceful)". Judged off the evidence
+    files as the script leaves them, P6, P3 and D1 must all say no kill.
+    Kills: "P6 passes graceful,kill,graceful beside a P3 that saw nothing"."""
+    files = {"f1_snapshot.json": snap(), "d1.json": {**DUCK1, "gate_delivered": []},
+             "p3.json": {"seen_blocked": False, "stop": None,
+                         "why": "no TRUNCATE gold.daily_revenue waited on the lock in time"}}
+    files.update({f"p6_restart{n}.json": r for n, r in enumerate(records, start=1)})
+    _write_evidence(tmp_path, files)
+    rows = {label.split()[0]: (v, d) for label, v, d in probe.judge_all(
+        tmp_path, floor_s=60, retired=RETIRED, standalone_twins=TWINS)}
+    assert rows["P6"][0] == UNKNOWN, rows["P6"]
+    assert "no restart after the rehearsal's kill" in rows["P6"][1] \
+        or "of 2 restarts shown" in rows["P6"][1], rows["P6"]
+    assert rows["P3"][0] == UNKNOWN and "not seen" in rows["P3"][1], rows["P3"]
+    assert rows["D1"] == (UNKNOWN, "no kill landed inside the derivation (see P3)")
+
+
 # ─── D1 ──────────────────────────────────────────────────────────────────────
 
 SWEEP = {"swept": [{"index": "data_quality_issues.idx_dqi_run", "rows": 9, "missing": 0},
@@ -678,13 +728,18 @@ def d1_ev(**over):
     return ev
 
 
-def test_d1_passes_when_the_kill_cost_nothing_it_could_reach():
+def test_d1_passes_when_nothing_it_asks_was_lost():
+    """The PASS says what was asked and what was not — never that the kill
+    cost nothing at all: a table whose DELETE found no row asked none of its
+    indexes, and composite indexes outside the window were never asked.
+    Kills: "D1 counts a table the DELETE found empty as asked"."""
     verdict, detail = probe.judge_d1(d1_ev())
     assert verdict == PASS, detail
     assert f"run #{WIN} (2 findings)" in detail and f"order #{FIX}'s (1 lines)" in detail
-    assert "5 tables at the end, 4 composite among them" in detail
+    assert "every index on the 4 tables holding them, 4 composite among them" in detail
     assert "2 single-column indexes" in detail
     assert "1 composite indexes on tables outside the window, 1 on an empty" in detail
+    assert "cost nothing" not in detail
 
 
 def test_d1_fails_on_an_index_the_kill_left_short():
@@ -701,6 +756,44 @@ def test_d1_fails_on_a_loss_already_there_before_the_kill():
     ev["pre"] = {**ev["pre"], "indexes": {**SWEEP, "swept": [{**SWEEP["swept"][1], "missing": 1}]}}
     verdict, detail = probe.judge_d1(ev)
     assert verdict == FAIL and "before the kill" in detail and "phase 0's stop" in detail
+    # The copy's own loss is not what the rehearsal's kill did.
+    assert probe.KNOWN_DEFECT not in detail
+
+
+@pytest.mark.parametrize("change", [
+    {"post": {**d1_ev()["post"], "indexes": {**SWEEP, "swept": [
+        {**SWEEP["swept"][0], "missing": 7}, SWEEP["swept"][1]]}}},
+    {"post": {**d1_ev()["post"], "window": window_read(
+        run={**integrity_run(reader={"names": []}), "run_id": WIN})}},
+    {"delete": deletes(orders={"fatal": "FATAL Error: Failed to delete all rows from index",
+                               "scanned": None, "deleted": None, "left": None})},
+])
+def test_a_loss_after_the_kill_is_labelled_the_known_defect(change):
+    """What the rehearsal's kill costs DuckDB 1.5.5 is the defect measured
+    apart from the rehearsal, which an OOM kill of the live web would cost
+    the same way; the switch to Postgres writes no DuckDB index. The row
+    stays FAIL — the defect is production's — and says it is that one, not
+    a step-13 regression, beside a loss the copy already carried.
+    Kills: "D1's FAIL does not say which defect it is", "a pre-kill loss is
+    labelled the kill's"."""
+    verdict, detail = probe.judge_d1(d1_ev(**change))
+    assert verdict == FAIL and detail.startswith(probe.KNOWN_DEFECT), detail
+    assert "not a step-13 regression" in detail
+    ev = d1_ev(**change)
+    ev["pre"] = {**ev["pre"], "indexes": {**SWEEP, "swept": [{**SWEEP["swept"][1], "missing": 1}]}}
+    verdict, detail = probe.judge_d1(ev)
+    assert verdict == FAIL and detail.startswith("before the kill"), detail
+    assert f"; {probe.KNOWN_DEFECT}: after the kill, " in detail
+
+
+def test_d1_with_a_delete_that_found_no_window_row_is_unknown():
+    """Every DELETE answered and none found a row: no index on the window's
+    tables was asked, so nothing is known of what the kill cost them.
+    Kills: "a DELETE of nothing passes"."""
+    nothing = {t: {"scanned": 0, "deleted": 0, "left": 0} for t in
+               ("data_quality_issues", "data_quality_runs", "order_products", "orders")}
+    verdict, detail = probe.judge_d1(d1_ev(delete=deletes(**nothing)))
+    assert verdict == UNKNOWN and "found none of the window's rows" in detail, detail
 
 
 def test_d1_fails_when_the_products_reader_is_blind_to_the_windows_run():
@@ -1092,6 +1185,7 @@ def test_the_window_is_asked_of_duckdb_itself(tmp_path, monkeypatch, kill):
             "table": "data_quality_diffs", "scanned": 0, "deleted": 0, "left": 0}
         assert verdict == FAIL and "from orders is DuckDB's FATAL" in detail
         assert "fetch_run_issues returns 0 of the 2 findings" in detail
+        assert detail.startswith(probe.KNOWN_DEFECT), detail
 
 
 def test_the_sweep_says_why_it_could_not_ask():

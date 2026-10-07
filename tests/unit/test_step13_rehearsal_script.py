@@ -1144,6 +1144,71 @@ def test_the_window_floor_is_every_run_the_checkpoint_holds():
     assert '"$INT_RUN" "$ML_RUN"' in stmt
 
 
+def _enclosing_ifs(line: int) -> List[str]:
+    """The `if` conditions the statement starting at `line` sits under,
+    outermost first, read off the parsed statements: `if …; then` opens one,
+    `elif …; then` and `else` replace the innermost, `fi` closes it. A
+    one-line `if …; fi` opens nothing."""
+    stack: List[str] = []
+    for n, stmt in STATEMENTS:
+        if n >= line:
+            break
+        s = stmt.strip()
+        if re.match(r"if\s", s) and s.endswith("; then"):
+            stack.append(s)
+        elif re.match(r"elif\s", s) and s.endswith("; then"):
+            stack[-1] = s
+        elif s == "else":
+            stack[-1] = f"else of {stack[-1]}"
+        elif s == "fi":
+            stack.pop()
+    return stack
+
+
+def test_the_if_walk_is_balanced():
+    """The walk below must see every `if` closed, or what it says sits
+    under KILLED is read off a stack that drifted."""
+    assert _enclosing_ifs(len(TEXT.splitlines()) + 1) == []
+    assert any(s == 'if [ "$KILLED" = 1 ]; then' for _n, s in STATEMENTS)
+
+
+def test_what_means_something_only_after_a_kill_sits_under_killed():
+    """F6's evidence of a kill — P6's restart record after it, the journal
+    read after it, the first derivation after the restart, the end's DELETE
+    of D1's window — is written under `KILLED=1` alone, and KILLED is set
+    only where `kill_web` succeeded inside the blocked derivation: the
+    container showed the rehearsal's SIGKILL. The script once wrote the
+    `kill` restart record inside `if wait_health`; with no TRUNCATE seen,
+    nothing killed and `docker start` a no-op, P6 passed "3 restarts
+    (graceful,kill,graceful)" on it.
+    Kills: "the kill record is written whatever F6 did", "KILLED is set
+    without kill_web", "kill_web runs without a blocked TRUNCATE"."""
+    under_killed = ('if [ "$KILLED" = 1 ]; then', 'elif [ "$KILLED" = 1 ]; then')
+    targets = {
+        "the restart record after the kill":
+            lambda s: s.startswith("restart_record ") and "p6_restart2.json" in s,
+        "the journal read after the kill": lambda s: s.startswith("AFTER_KILL="),
+        "the first derivation after the restart":
+            lambda s: s.startswith("FIRST=") and "poll_pg" in s,
+        "the end's DELETE of the window": lambda s: " window-delete " in s,
+    }
+    for what, match in targets.items():
+        found = [n for n, s in STATEMENTS if match(s)]
+        assert found, f"{what}: not in the script"
+        for n in found:
+            ifs = _enclosing_ifs(n)
+            assert ifs and ifs[-1] in under_killed, (what, n, ifs)
+    # Nothing else names P6's second record.
+    assert [n for n, s in STATEMENTS if "p6_restart2.json" in s] == [
+        n for n, s in STATEMENTS if targets["the restart record after the kill"](s)]
+    assert [s for _n, s in STATEMENTS if re.match(r"KILLED=", s)] == ["KILLED=0", "KILLED=1"]
+    one = next(n for n, s in STATEMENTS if s == "KILLED=1")
+    assert _enclosing_ifs(one)[-1] == 'if kill_web "$REH_WEB" "$EV/f6_kill_state.json"; then'
+    for n, s in STATEMENTS:
+        if re.match(r"(if )?kill_web ", s):
+            assert 'if [ -n "$BLOCKED" ]; then' in _enclosing_ifs(n), (n, s)
+
+
 # ─── 12. Every call the script makes is one the probe accepts ────────────────
 
 _PROBE_HELPERS = ("wprobe", "probe_offline", "probe_keycrm_dir")

@@ -63,6 +63,12 @@ RETIRED_COMPARISONS = ("reconcile_silver", "reconcile_order_utm", "reconcile_gol
 INTERNAL_CHECK = "pg_gold_internal_check"
 # The job's completion line, which carries `checks_run` (core.scheduler).
 MIRROR_COMPLETE = "Mirror reconciliation complete"
+# What D1 calls a loss the rehearsal's kill made (`judge_d1`). The defect is
+# DuckDB's and production's, measured apart from the rehearsal (CLAUDE.md,
+# "The step-13 rehearsal"); the switch to Postgres writes no DuckDB index.
+KNOWN_DEFECT = ("DuckDB 1.5.5's known defect, not a step-13 regression — index entries a "
+                "SIGKILL left in the WAL, dropped by the first checkpoint DuckDB takes on its own "
+                "after the restart; a CHECKPOINT of the replayed WAL as the store opens keeps them")
 
 
 def _app_path() -> None:
@@ -972,6 +978,24 @@ def restart_shown(record: Any) -> Tuple[Optional[str], Optional[str]]:
     return kind, None
 
 
+def unproven_kill(stop: Any, kill_stop: Any) -> Optional[str]:
+    """Why a restart whose stop reads as the rehearsal's kill is not the kill
+    P3's evidence records, or None when it is. The script writes one state
+    file at F6 (`f6_kill_state.json`) into both `p3.json` and the restart
+    record after it, so the two must show the same SIGKILL, at the same
+    instant: a `kill` record beside a P3 that saw no blocked TRUNCATE is the
+    fake-kill run, where P6 passed "graceful,kill,graceful" on a kill that was
+    never sent."""
+    if stop_kind(kill_stop) != "kill":
+        return ("P3 records no kill" if kill_stop is None
+                else f"P3's kill is not one: {_describe_stop(kill_stop)}")
+    at, p3_at = _docker_time((stop or {}).get("finished_at")), _docker_time(kill_stop.get("finished_at"))
+    if at is None or p3_at is None or at != p3_at:
+        return (f"its SIGKILL (finished {(stop or {}).get('finished_at')}) is not P3's "
+                f"(finished {kill_stop.get('finished_at')})")
+    return None
+
+
 def judge_p3(ev: Mapping[str, Any]) -> Verdict:
     """A kill inside the derivation; the owed state survives.
 
@@ -1184,7 +1208,10 @@ def judge_p6(ev: Mapping[str, Any]) -> Verdict:
     after the rehearsal's kill — missing. A graceful stop that outran
     production's grace is a kill a deploy would make: the restart after it
     still counts, but the row says so and is UNKNOWN until somebody has read
-    why web did not stop in time."""
+    why web did not stop in time. And the restart after the kill counts only
+    when its SIGKILL is the one P3's evidence records (`unproven_kill`): the
+    container's word on one file is not enough when the other says nothing
+    was killed."""
     if not ev.get("flipped"):
         return UNKNOWN, "no flip"
     t1 = ev.get("resolved_at")
@@ -1192,6 +1219,10 @@ def judge_p6(ev: Mapping[str, Any]) -> Verdict:
     unknown: List[str] = []
     for n, r in enumerate(ev.get("restarts") or [], start=1):
         kind, why = restart_shown(r)
+        if not why and kind == "kill":
+            unproven = unproven_kill(r.get("stop"), ev.get("kill_stop"))
+            if unproven:
+                why = f"a SIGKILL P3 does not show ({unproven})"
         if why:
             unknown.append(f"restart {n}: {why}")
         else:
@@ -1361,7 +1392,8 @@ def _window_deletes(ev: Mapping[str, Any], post: Mapping[str, Any],
                     bad: List[str], unknown: List[str]) -> Tuple[int, int]:
     """The end's DELETE of the window's rows: every index on each window
     table, composite included, giving each row up. `(tables, composite)`
-    asked."""
+    asked — a table whose DELETE found no row asked none of its indexes, and
+    is not counted."""
     done = ev.get("delete")
     if not isinstance(done, Mapping):
         unknown.append("the window's rows were not deleted at the end, so no composite index "
@@ -1373,7 +1405,7 @@ def _window_deletes(ev: Mapping[str, Any], post: Mapping[str, Any],
         return 0, 0
     indexes = {t: v.get("indexes") or [] for t, v in
                (((post.get("window") or {}).get("tables")) or {}).items() if isinstance(v, Mapping)}
-    asked = composite = 0
+    asked = composite = answered = 0
     for d in done.get("deletes") or []:
         table = d.get("table")
         names = _fmt(i.get("index") for i in indexes.get(table, []))
@@ -1387,11 +1419,15 @@ def _window_deletes(ev: Mapping[str, Any], post: Mapping[str, Any],
                        f"rows a scan finds, {d.get('left')} left: an index on it answered for "
                        f"fewer — one of [{names}]")
         else:
-            asked += 1
-            composite += sum(1 for i in indexes.get(table, []) if (i.get("columns") or 0) > 1)
-            continue
+            answered += 1
+            if d["scanned"] > 0:
+                asked += 1
+                composite += sum(1 for i in indexes.get(table, []) if (i.get("columns") or 0) > 1)
     if not (done.get("deletes") or []):
         unknown.append("the end deleted no window table")
+    elif answered == len(done["deletes"]) and not asked:
+        unknown.append("the end's DELETE found none of the window's rows, so no index on their "
+                       "tables was asked")
     return asked, composite
 
 
@@ -1413,7 +1449,15 @@ def judge_d1(ev: Mapping[str, Any]) -> Verdict:
     follows the restart: a read-only open sees every row the WAL holds,
     whatever the index lost (`test_a_read_only_read_after_a_kill_sees_every_row`),
     so a stop at F7 that was not graceful leaves the row UNKNOWN. P4a and P5
-    read at F5s before the kill, read-only, and need nothing of it."""
+    read at F5s before the kill, read-only, and need nothing of it.
+
+    A loss after the kill is FAIL and is labelled for what it is: DuckDB
+    1.5.5's known defect (`KNOWN_DEFECT`), which the rehearsal's kill
+    exercises the way an OOM kill of the live web would — not something the
+    switch to Postgres did, which writes no DuckDB index. Nothing the product
+    runs at start touches the DQ journal, so on 1.5.5 as the store opens it
+    today, this row is expected to fail on the window's run. A loss already
+    there before the kill is the copy's own, and is not given that label."""
     if not ev.get("flipped"):
         return UNKNOWN, "no flip"
     if not ev.get("seen_blocked") or stop_kind(ev.get("kill_stop")) != "kill":
@@ -1422,7 +1466,8 @@ def judge_d1(ev: Mapping[str, Any]) -> Verdict:
     if not pre or not post:
         return UNKNOWN, (f"the DuckDB copy was not read at both stops around the kill "
                          f"(before={bool(pre)}, after={bool(post)})")
-    bad: List[str] = []
+    bad: List[str] = []      # a loss the rehearsal's kill did not make
+    defect: List[str] = []   # what the kill cost: the known defect
     unknown: List[str] = []
     swept = 0
     for when, facts in (("before the kill", pre), ("after the kill", post)):
@@ -1431,22 +1476,27 @@ def judge_d1(ev: Mapping[str, Any]) -> Verdict:
             unknown.append(f"indexes {when}: {unread}")
             continue
         swept = max(swept, len(facts["indexes"]["swept"]))
-        if losses:
-            # Before the rehearsal's kill a loss is the copy's own — a kill
-            # production's web took before the backup — or a stop of phase 0
-            # that outran the grace; the state of that stop says which.
-            why = ""
-            if when == "before the kill" and stop_kind(ev.get("p0_stop")) not in (None, "graceful"):
-                why = f" (phase 0's stop: {_describe_stop(ev.get('p0_stop'))})"
-            bad.append(f"{when}, read through their indexes: {'; '.join(losses)}{why}")
-    seen = _window_reads(ev, pre, post, bad, unknown)
-    tables, composite = _window_deletes(ev, post, bad, unknown)
+        if not losses:
+            continue
+        if when == "after the kill":
+            defect.append(f"read through their indexes: {'; '.join(losses)}")
+            continue
+        # Before the rehearsal's kill a loss is the copy's own — a kill
+        # production's web took before the backup — or a stop of phase 0
+        # that outran the grace; the state of that stop says which.
+        why = ""
+        if stop_kind(ev.get("p0_stop")) not in (None, "graceful"):
+            why = f" (phase 0's stop: {_describe_stop(ev.get('p0_stop'))})"
+        bad.append(f"{when}, read through their indexes: {'; '.join(losses)}{why}")
+    seen = _window_reads(ev, pre, post, defect, unknown)
+    tables, composite = _window_deletes(ev, post, defect, unknown)
     f7 = stop_kind(ev.get("f7_stop"))
     if f7 != "graceful":
         unknown.append(f"F7's stop was no checkpoint ({_describe_stop(ev.get('f7_stop'))}): the "
                        f"read after it shows what the WAL holds, not what the kill cost")
-    if bad:
-        return FAIL, "; ".join(bad)
+    if bad or defect:
+        return FAIL, "; ".join(bad + ([f"{KNOWN_DEFECT}: after the kill, {'; '.join(defect)}"]
+                                      if defect else []))
     if unknown:
         return UNKNOWN, "; ".join(unknown)
     window_tables = {t for t, _c, _w in WINDOW_TABLES}
@@ -1454,11 +1504,11 @@ def judge_d1(ev: Mapping[str, Any]) -> Verdict:
     elsewhere = sum(1 for s in skipped if s.get("why") == "composite"
                     and str(s.get("index")).split(".")[0] not in window_tables)
     rest = sum(1 for s in skipped if s.get("why") != "composite")
-    return PASS, (f"the kill cost nothing it could reach: run #{seen['run']} ({seen['findings']} "
-                  f"findings) read whole by fetch_run_issues after it; its rows and order "
-                  f"#{seen['order']}'s ({seen['lines']} lines) given up by every index on their "
-                  f"{tables} tables at the end, {composite} composite among them; {swept} "
-                  f"single-column indexes answer for every row at both stops. Not asked: "
+    return PASS, (f"nothing lost of what D1 asks after the kill: run #{seen['run']} "
+                  f"({seen['findings']} findings) read whole by fetch_run_issues; its rows and "
+                  f"order #{seen['order']}'s ({seen['lines']} lines) given up at the end by every "
+                  f"index on the {tables} tables holding them, {composite} composite among them; "
+                  f"{swept} single-column indexes answer for every row at both stops. Not asked: "
                   f"{elsewhere} composite indexes on tables outside the window, {rest} on an "
                   f"empty or one-valued column")
 
@@ -1635,7 +1685,9 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
                                            ids.get("mirror_landing")),
                "derivations_after_bump": (L("p4a.json") or {}).get("derivations_after_bump")},
         "P6": {"flipped": is_flipped, "resolved_at": (_cut(f1).get("writer") or {}).get("resolved_at"),
-               "restarts": restarts, "gate_delivered": (d1 or {}).get("gate_delivered")},
+               "restarts": restarts, "gate_delivered": (d1 or {}).get("gate_delivered"),
+               # The kill P3 records, which the restart after it must show.
+               "kill_stop": p3.get("stop") if p3.get("seen_blocked") is True else None},
         "P8": {**p8, "flipped": is_flipped, "dk": dz,
                "r0": ((d0 or {}).get("refreshes") or {}).get("max_refreshed_at")},
         "D1": {"flipped": is_flipped, "seen_blocked": p3.get("seen_blocked") is True,
