@@ -34,6 +34,7 @@
 # The second form is for chain 1's flip day; see 15_i1_inventory_copy_stood_down.sql.
 # The third is chain 4's: the flip time, and how many human overrides of a
 # gender verdict there were that day (25_b3_gender_coverage.sql).
+# Chain 5's flip day: SOAK_MANAGERS_FLIP_AT='<latch time>' (30_m1_managers_copy_stood_down.sql).
 #
 # Exit: 0 when every check passes, 1 on any FAIL, 2 when nothing failed but at
 # least one check is UNKNOWN.
@@ -146,6 +147,25 @@ elif [ "$BUYERS_ON" = "1" ] && [ "$BUYERS_LATCHED" = "unknown" ]; then
     BUYERS_ON=unknown
 fi
 
+# Chain 5 (`pg_managers_write`) cannot be judged held from here: its
+# preconditions are the goal bridge, step 13, chain 3 and KS_READ_FALLBACK,
+# and the first is a code constant only web can read. So a flag that says
+# postgres on a chain that has not latched is `pending` — the first tick after
+# the flip writes, and latches, within a minute — and M1 names where web
+# publishes why it is held. Latched outranks the flag, as everywhere here.
+MANAGERS_ON="$(flag_state KS_WRITE_MANAGERS postgres duckdb)"
+MANAGERS_LATCHED="$(latch_state pg_managers_write)"
+MANAGERS_FLIP_AT="${SOAK_MANAGERS_FLIP_AT:-}"
+MANAGERS_NOTE=""
+if [ "$MANAGERS_LATCHED" = "1" ] && [ "$MANAGERS_ON" != "1" ]; then
+    MANAGERS_NOTE=" (latched: chain 5 owns its tables in Postgres, and KS_WRITE_MANAGERS says otherwise — only scripts/chain_copy_back.py undoes that)"
+    MANAGERS_ON=1
+elif [ "$MANAGERS_ON" = "1" ] && [ "$MANAGERS_LATCHED" = "0" ]; then
+    MANAGERS_ON=pending
+elif [ "$MANAGERS_ON" = "1" ] && [ "$MANAGERS_LATCHED" = "unknown" ]; then
+    MANAGERS_ON=unknown
+fi
+
 # The latch wins, exactly as `writes_postgres()` resolves it — including over
 # `invalid`, because a latched chain with a misspelt variable goes on writing
 # Postgres and its stand-down still has to hold. The typo does not disappear
@@ -202,6 +222,8 @@ run_check() {
             -v buyers_flip_at="$BUYERS_FLIP_AT" \
             -v buyers_held_by="$BUYERS_HELD_BY" \
             -v buyers_override_floor="$BUYERS_OVERRIDE_FLOOR" \
+            -v managers_on="$MANAGERS_ON" \
+            -v managers_flip_at="$MANAGERS_FLIP_AT" \
             < "$file" 2>&1)"; then
         rc=0
     else
@@ -238,6 +260,7 @@ fi
 echo "Stage 4 soak report · $(hostname 2>/dev/null || echo '?') · $(date -u '+%F %H:%M UTC')"
 echo "flags as the checks see them: inventory_on=$INVENTORY_ON (KS_WRITE_INVENTORY)${INVENTORY_NOTE}, dq_pg_warehouse_on=$DQ_PG_WAREHOUSE_ON (KS_DQ_PG_WAREHOUSE)${INVENTORY_FLIP_AT:+, inventory flip at $INVENTORY_FLIP_AT}"
 echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
+echo "  managers_on=$MANAGERS_ON (KS_WRITE_MANAGERS)${MANAGERS_NOTE}${MANAGERS_FLIP_AT:+, managers flip at $MANAGERS_FLIP_AT}"
 echo
 printf '%s' "$ROWS" | awk '
     { lines[NR] = $0; c = $0; sub(/\|.*/, "", c); if (length(c) > w) w = length(c) }
