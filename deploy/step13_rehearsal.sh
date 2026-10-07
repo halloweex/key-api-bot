@@ -620,7 +620,10 @@ APP_DSN="postgresql://ks_app:$APP_PW@$REH_PG:5432/ks"
 # reh-web's environment: an explicit list, never an env file. The copy's
 # readers come from the image itself (`probe.py readers`), so the list cannot
 # drift from the code under test; the chain flags are read from production's
-# .env by exact name, nothing else of it.
+# .env by exact name, nothing else of it. Every other switch the cutover's
+# preconditions name is set here, and a test runs the tree's own
+# `evaluate_preconditions` over this list with F1's and phase 0's additions:
+# KS_GOALS_HISTORY came with chain 7b, was missing, and held the flip back.
 WEB_ENV=(
     -e TZ=Europe/Kyiv
     -e KS_ROLE=web
@@ -642,6 +645,7 @@ WEB_ENV=(
     -e KS_PG_DERIVE=own
     -e KS_DQ_PG_WAREHOUSE=on
     -e KS_UTM_PARSE=postgres
+    -e KS_GOALS_HISTORY=silver
     -e KS_READ_COHORTS=clickhouse
     -e "KS_PG_SILVER_INTERVAL_S=$FLOOR_S"
 )
@@ -980,7 +984,14 @@ if wait_health "$REH_WEB" "$HEALTH_TIMEOUT"; then
         "$(log_count "$LOG_DIR/flip.log" 'warehouse writer recorded as postgres')" > "$EV/f1_log.json"
     RESOLVED_SQL="SELECT count(*) FROM app.alert_events WHERE event_type = 'resolved' AND instance = 'reh-step13' AND message LIKE '%DuckDB derivation retired (KS_WRITE_WAREHOUSE=postgres)%'"
     printf '{"resolved_events": %s}\n' "$(pgq "$RESOLVED_SQL")" > "$EV/f1_pg.json"
-    grep -qF '"mode": "postgres"' "$EV/f1_snapshot.json" && FLIPPED=1
+    # The flip as P1's judge reads it, out of the same file: the writer's
+    # mode and nothing else. A grep for `"mode": "postgres"` matched
+    # `utm_parse` — postgres before any flip — and ran F2 to B over a
+    # process that had not flipped.
+    if docker exec -i "$REH_WEB" python /reh/probe.py writer-mode \
+            < "$EV/f1_snapshot.json" >/dev/null 2>>"$LOG_DIR/probe.err"; then
+        FLIPPED=1
+    fi
 fi
 
 if [ "$FLIPPED" = 1 ]; then

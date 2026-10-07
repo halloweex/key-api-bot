@@ -691,6 +691,23 @@ def flipped(snap: Optional[Mapping[str, Any]]) -> bool:
     return _block(snap).get("mode") == "postgres"
 
 
+def writer_mode(text: str) -> Tuple[Optional[str], bool]:
+    """`(mode, flipped)` out of a `snapshot` the script saved, read the way
+    P1's judge reads it: `warehouse_writer_mode.mode` and nothing else. The
+    script decides whether F2–B run on this, never on a grep of the file —
+    `utm_parse` and `derivation` carry a `mode` too, and `KS_UTM_PARSE` is
+    `postgres` before any flip, so a grep for `"mode": "postgres"` ran every
+    phase after F1 over a process that had not flipped."""
+    try:
+        snap = json.loads(text or "null")
+    except ValueError:
+        return None, False
+    if not isinstance(snap, Mapping):
+        return None, False
+    mode = _block(snap).get("mode")
+    return (mode if isinstance(mode, str) else None), flipped(snap)
+
+
 def judge_reader(run: Optional[Mapping[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
     """Whether the product's reader sees what the scan found in one DQ run.
 
@@ -1791,6 +1808,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", required=True)
     p.add_argument("--window-run", type=int, default=None)
     p.add_argument("--window-order", type=int, default=None)
+    # A saved snapshot on stdin: prints the writer's mode, exit 0 when flipped.
+    sub.add_parser("writer-mode")
     p = sub.add_parser("seed-gate")
     p.add_argument("--gate", required=True)
     sub.add_parser("derive-latches")
@@ -1837,6 +1856,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif args.cmd == "keycrm-url":
         print(keycrm_url())
         return 0
+    elif args.cmd == "writer-mode":
+        mode, is_flipped = writer_mode(sys.stdin.read())
+        print(mode or "")
+        return 0 if is_flipped else 1
     elif args.cmd == "duckdb-facts":
         out = duckdb_facts(args.db, args.gate, args.run, window_run=args.window_run,
                            window_order=args.window_order)

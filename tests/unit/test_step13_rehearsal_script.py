@@ -1346,3 +1346,98 @@ def test_a_graceful_stop_gets_exactly_productions_grace():
     assert 'docker stop -t "$STOP_GRACE_S" "$1"' in _function_body("stop_web")
     stops = [(n, w) for n, sub, w in DOCKER if sub == "stop" and "$REH_WEB" in w]
     assert all(n in _function_lines("cleanup") for n, _w in stops), stops
+
+
+# ─── 14. The flip the script acts on is the flip the judges read ─────────────
+
+def _env_words(words: List[str]) -> Dict[str, str]:
+    """`-e NAME=value` pairs out of a command's words, in order."""
+    env: Dict[str, str] = {}
+    for i, word in enumerate(words[:-1]):
+        if word == "-e" and "=" in words[i + 1]:
+            name, value = words[i + 1].split("=", 1)
+            env[name] = value
+    return env
+
+
+def _phase_env(extra: List[str], monkeypatch) -> Dict[str, str]:
+    """reh-web's environment for one `start_web "$REH_WEB" ...`: the list,
+    the readers the image names (`probe.py readers`, as the script asks),
+    and the phase's own `-e` flags. Shell variables stand for themselves —
+    each is a non-empty value at run time."""
+    monkeypatch.setattr(PROBE, "APP_DIR", str(REPO))
+    env = _env_words(_words(_web_env()))
+    env.update({name: "postgres" for name in PROBE.readers()["readers"]})
+    env.update(_env_words(extra))
+    return env
+
+
+def _web_starts() -> Dict[str, List[str]]:
+    starts = [_words(s[len("start_web "):]) for _n, s in STATEMENTS
+              if s.startswith('start_web "$REH_WEB"')]
+    by_flags = {" ".join(w[1:]): w[1:] for w in starts}
+    assert set(by_flags) == {
+        "-e KS_WRITE_WAREHOUSE=postgres",                              # phase 0
+        "-e KS_WRITE_WAREHOUSE=postgres -e KS_READ_FALLBACK=off",      # F1
+        "-e KS_READ_FALLBACK=off",                                     # B
+    }, by_flags
+    return by_flags
+
+
+def test_the_rehearsal_sets_every_switch_the_cutover_names(monkeypatch):
+    """F1 must be the flip with every precondition, and phase 0 every one
+    but `read_fallback_off` — exactly what P1 and P7 demand. Run through
+    this tree's own `evaluate_preconditions`, with every fact a Postgres
+    read supplies taken as met, so a precondition main adds and the list
+    lacks fails here and not an hour into a run: chain 7b's
+    `KS_GOALS_HISTORY=silver` did exactly that — `no flip: mode=duckdb
+    unmet=[goals_bridge]`.
+    Kills: "WEB_ENV drops a switch the cutover requires"."""
+    from core import warehouse_cutover as wc
+
+    facts = wc.Facts(revision="r", required_revision="r", expenses_backfilled=True,
+                     bridge_owners={}, open_retired={}, od10_doors=())
+    starts = _web_starts()
+    f1 = _phase_env(starts["-e KS_WRITE_WAREHOUSE=postgres -e KS_READ_FALLBACK=off"], monkeypatch)
+    assert [u.key for u in wc.evaluate_preconditions(f1, facts)] == []
+    phase0 = _phase_env(starts["-e KS_WRITE_WAREHOUSE=postgres"], monkeypatch)
+    assert [u.key for u in wc.evaluate_preconditions(phase0, facts)] == ["read_fallback_off"]
+    assert wc.evaluate_preconditions(
+        {**f1, "KS_GOALS_HISTORY": "bridge"}, facts)[0].key == "goals_bridge"
+
+
+def test_the_flip_is_read_the_way_p1_reads_it():
+    """The script runs F2 to B only on a flip, and decides it with the
+    probe's `writer-mode` over the same snapshot P1 judges — never a grep:
+    the snapshot's `utm_parse` block reads `"mode": "postgres"` before any
+    flip, and a grep for that ran every phase after F1 over a process the
+    table then called unflipped.
+    Kills: "FLIPPED is set off a grep of the snapshot"."""
+    sets = [n for n, s in STATEMENTS if s == "FLIPPED=1"]
+    assert len(sets) == 1, sets
+    assert any("/reh/probe.py writer-mode" in s and '"$EV/f1_snapshot.json"' in s
+               for s in _enclosing_ifs(sets[0])), _enclosing_ifs(sets[0])
+    for n, s in STATEMENTS:
+        assert not ("grep" in s and '"mode"' in s), f"line {n} greps a mode: {s}"
+
+
+@pytest.mark.parametrize("snapshot, out, code", [
+    # Before a flip: the UTM parse is postgres, the writer is not.
+    ({"health_code": 200, "health": {"warehouse_writer_mode": {"mode": "duckdb"},
+                                     "utm_parse": {"mode": "postgres"},
+                                     "derivation": {"mode": "own"}}}, "duckdb", 1),
+    ({"health_code": 200, "health": {"warehouse_writer_mode": {"mode": "postgres"},
+                                     "utm_parse": {"mode": "postgres"}}}, "postgres", 0),
+    (None, "", 1),
+    ("not json", "", 1),
+    ([1, 2], "", 1),
+])
+def test_writer_mode_reads_only_the_writers_mode(snapshot, out, code):
+    import json
+    import subprocess
+    import sys
+
+    text = snapshot if isinstance(snapshot, str) else ("" if snapshot is None else json.dumps(snapshot))
+    proc = subprocess.run([sys.executable, str(REPO / "deploy" / "step13_rehearsal" / "probe.py"),
+                           "writer-mode"], input=text, capture_output=True, text=True, timeout=60)
+    assert (proc.stdout.strip(), proc.returncode) == (out, code), proc.stderr
