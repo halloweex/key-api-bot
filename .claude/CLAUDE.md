@@ -3607,7 +3607,10 @@ record with the latch.
 **The standing watch** reads both tables four times a day: empty and written
 round (CRITICAL), rows lost (`last_rows − current − around`, CRITICAL, judged
 only once the chain's own write stamped the watermark — the mirror's
-`last_rows` counts a repeated payload id twice), retired (INFO, with ids —
+`last_rows` counts a repeated payload id twice; "the chain's own" is
+`last_ok_at` at or after the owner rows' `updated_at`, both Postgres's clock,
+never the local marker's stamp, which a host clock a millisecond ahead of
+Postgres put after its own latching write), retired (INFO, with ids —
 product 1055 in production) and a short write (WARN when the last write left
 out over 5% and 10 rows of what the write before it carried — the record's
 `previous`: the sync's pagination stops on the first short page, so a

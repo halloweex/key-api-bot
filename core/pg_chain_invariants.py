@@ -418,7 +418,9 @@ class CatalogueTable:
 class Catalogue:
     """Chain 6's two tables. `latched_at` None is a chain flagged that has not
     written here yet: "lost" is not judged then, because the last full write
-    was the mirror's, whose `last_rows` counts a repeated payload id twice."""
+    was the mirror's, whose `last_rows` counts a repeated payload id twice.
+    Read off Postgres's clock (`_read_catalogue`), since it is compared with
+    `meta.mirror_state.last_ok_at`."""
     tables: Tuple[CatalogueTable, ...] = ()
     latched_at: Optional[datetime] = None
 
@@ -806,6 +808,10 @@ WHERE e.mirrored_at < now() - interval '1 day'
 # chain's own constant, never input; `{stamp}` is `STAMP_SQL`.
 _CATALOGUE_STATE_SQL = (
     "SELECT last_ok_at, last_rows FROM meta.mirror_state WHERE table_name = $1")
+# The handover on Postgres's clock: `chain_latch.claim` inserts every owner
+# row in the latching transaction with `now()`, and never moves one after.
+_CATALOGUE_HANDOVER_SQL = (
+    "SELECT min(updated_at) FROM meta.chain_watermarks WHERE key = ANY($1::text[])")
 _CATALOGUE_RECORD_SQL = (
     "SELECT (SELECT updated_at FROM meta.chain_watermarks WHERE key = $1) AS latched, "
     "(SELECT value FROM meta.chain_watermarks WHERE key = $2) AS record")
@@ -1027,6 +1033,19 @@ async def _read_catalogue(conn, latched_at: Optional[datetime] = None) -> Catalo
             around_sample=tuple(int(i) for i in (row["around_sample"] or ())),
             recorded=latched is not None, dropped=int(row["dropped"]),
             dropped_sample=tuple(int(i) for i in (row["dropped_sample"] or ()))))
+    # "Lost" asks whether the last full write is the chain's own — at or after
+    # the handover — so both sides of it are Postgres's clock: the owner rows'
+    # `updated_at` is the latching transaction's `now()`, the instant that
+    # write stamps on `meta.mirror_state.last_ok_at`. Never the local marker's
+    # stamp, which is the web host's clock and is taken just before that
+    # transaction begins: a Postgres clock a millisecond behind the host's read
+    # the latching write as older than the handover, and a deleted row went
+    # unjudged until the next full write (a laptop's Docker VM did). No owner
+    # row is a chain that has not written here, whatever the marker says.
+    if latched_at is not None:
+        latched_at = await conn.fetchval(
+            _CATALOGUE_HANDOVER_SQL,
+            [chain_latch.owner_key(t) for t in CHAIN_TABLES])
     return Catalogue(tables=tuple(tables), latched_at=latched_at)
 
 
