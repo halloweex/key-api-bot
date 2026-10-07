@@ -3768,7 +3768,8 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
 **Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
 since its owner rows; H2 (`29_h2`) — the 07:30 run filed no `shadow_*` above
 INFO. D8, 20, 21 and 22 stop gating on the journal's copy once chain 9 writes
-it directly (the flag, the latch, or its owner row). Every guard names its
+it directly (the flag, the latch, or its owner row); chain 1's preflight and
+chain 7b's goals dry run do the same on the flag or the latch. Every guard names its
 mutation; a run over all of them found five that did not catch theirs, now
 closed in the tests.
 
@@ -3853,7 +3854,10 @@ reads, as `ks_readonly` through `utm_reclassify_dryrun.py`'s door (never
 `KS_PG_DSN`), the verdict of the one comparison that sets the two Silvers
 against each other at one instant: the latest `mirror_landing` run's
 `reconcile_silver`, from Postgres' copy of the quality journal. Clean only
-when the copy is under 75 min old and not failing, the run under 30 h (chain
+when the copy is under 75 min old and not failing — unless chain 9 writes the
+journal in Postgres (`reads_postgres()`: its flag or its latch), when the run
+is read from the writer and the stood-down copy's frozen mark is no reason,
+as in chain 1's preflight — the run under 30 h (chain
 1's preflight limits, read from it), the run did not fail in
 `reconcile_silver`, `setup` or unparseably, it filed nothing against
 `silver.orders`, and neither switch that stands `reconcile_silver` down is
