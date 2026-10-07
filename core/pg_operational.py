@@ -145,7 +145,9 @@ SYNC_METADATA_TABLE = "app.sync_metadata"
 # they came first out of the sixteen with no Postgres home: `get_predictions`
 # and `generate_smart_goals` were the last two dashboard reads tied to DuckDB.
 # `get_predictions` moved with #183; the smart goal's reads of the other three
-# stay where they are written until their writer moves (chain 7b-3).
+# stay where they are written. Chain 7b-3 (`core/pg_forecast_write.py`,
+# `KS_WRITE_FORECAST`) moves the writer of all four: once it writes Postgres,
+# the replace below stands down for them like any chain's tables.
 PREDICTIONS_TABLE = "app.revenue_predictions"
 SEASONAL_TABLE = "app.seasonal_indices"
 WEEKLY_PATTERNS_TABLE = "app.weekly_patterns"
@@ -404,6 +406,8 @@ _FULL_REPLACE: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
     # type — so replacing them whole is the same set of rows and additionally
     # corrects one that is present and wrong. 313 rows in total; the cost of
     # the decision is nothing and the alternative leaves a stale row standing.
+    # Shipped only while chain 7b-3 writes DuckDB; under the chain they stand
+    # down here, and the chain's writer is their only one.
     (PREDICTIONS_TABLE, "revenue_predictions", PREDICTION_COLUMNS, "prediction_date"),
     (SEASONAL_TABLE, "seasonal_indices", SEASONAL_COLUMNS, "month"),
     (WEEKLY_PATTERNS_TABLE, "weekly_patterns", WEEKLY_PATTERN_COLUMNS, "month"),

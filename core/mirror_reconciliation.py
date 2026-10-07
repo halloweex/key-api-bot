@@ -2470,7 +2470,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         synced_column="created_at",
         # Shipped and never compared — a whole-table stamp.
         # `store_predictions` DELETEs the forecast and INSERTs it whole after each
-        # daily retrain, so every row carries one stamp from one run.
+        # retrain (Mon and Thu 03:30), so every row carries one stamp from one
+        # run — in either store, since chain 7b-3's writer stamps once per run.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
         # identical. `app.sku_inventory_status` is the same
