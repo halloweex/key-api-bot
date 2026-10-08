@@ -905,7 +905,8 @@ def check_read_refusals(
     (`READ_REFUSED_RECENT_S`), so the page stands only while reads are being
     refused — unlike a fallback, a refusal left no wrong number behind to
     explain. A timestamp that cannot be read counts as recent. Published under
-    `off` alone; today, under `duckdb`, there is nothing to judge.
+    `off`, and under `duckdb` only for a read of a table a write chain owns,
+    which has no fallback in either mode (`read_fallback.chain_refusal`).
     """
     block = (payload or {}).get("read_fallback_mode")
     refused = block.get("refused") if isinstance(block, dict) else None

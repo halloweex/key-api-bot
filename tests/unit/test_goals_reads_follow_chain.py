@@ -48,10 +48,15 @@ ASKS = "reads_the_chain"
 HOLE_HOME = "core/pg_goals_write.py"
 
 # `(chain name, holes, the module that defines them, the constant they live
-# in)`. The router must ask `<chain name>.reads_the_chain`.
+# in)`. The router must ask `<chain name>.reads_the_chain`. Chain 7b-3's holes
+# are derived from the tables it owns, not read from `TABLE_HOLES`: the walk
+# taking its holes from the module under test would shrink with it, and a
+# hole dropped there is exactly a table whose reads stop following the chain
+# (`test_forecast_chain.py::TestReadsTheChain` pins the two equal).
 CHAINS = {
     "pg_goals_write": ((pg_goals_write.TABLE_HOLE,), HOLE_HOME, "TABLE_HOLE"),
-    "pg_forecast_write": (tuple(pg_forecast_write.TABLE_HOLES),
+    "pg_forecast_write": (tuple("{%s}" % t.split(".", 1)[1]
+                                for t in pg_forecast_write.CHAIN_TABLES),
                           "core/pg_forecast_write.py", "TABLE_HOLES"),
 }
 # String methods a statement passes through on its way to a router; the

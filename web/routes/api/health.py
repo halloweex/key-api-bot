@@ -168,9 +168,10 @@ def _read_fallback_mode() -> dict:
     (OD-07).
 
     Under `off`, also `refused` — `{surface: {count, last_at}}`, the reads
-    answered 503 rather than from DuckDB (DN-20b). Only under `off`: nothing
-    can be refused under `duckdb`, and the block keeps the shape it has
-    always had there."""
+    answered 503 rather than from DuckDB (DN-20b). Under `duckdb` only once
+    something was refused: the one refusal that mode knows is a read of a
+    table a write chain owns (`read_fallback.chain_refusal`), and without it
+    the block keeps the shape it has always had there."""
     from core import read_fallback
 
     block = {
@@ -179,7 +180,7 @@ def _read_fallback_mode() -> dict:
         "misconfigured": read_fallback.misconfigured(),
         "no_engine": read_fallback.no_engine_routes(),
     }
-    if read_fallback.refusing():
+    if read_fallback.refusing() or read_fallback.refusals():
         block["refused"] = read_fallback.refusals()
     return block
 

@@ -216,6 +216,59 @@ class TestUnderTheFlag:
         assert len(duck[SEASONAL]) == 12 and len(duck[WEEKLY]) == 60
 
     @pytest.mark.asyncio
+    async def test_over_the_hourly_copys_rows_every_column_is_rewritten(self, stores):
+        """The flip's real first write. Postgres already holds the hourly
+        copy's rows for all three goal tables, so every row of every write
+        after the flip takes the ON CONFLICT branch — the test above, on empty
+        tables, takes only the INSERT. Seeded here with every non-key column
+        different from what the recalculation computes, and an old stamp; the
+        stored set must equal the DuckDB branch's in every column, under one
+        new stamp. Mutations: any one column dropped from a SET list — weekly
+        `weight` or `sample_size`, growth `value`, `period_start`,
+        `period_end` or `sample_size`, seasonal `confidence`, `avg_revenue`,
+        `min_revenue`, `max_revenue` or `sample_size` — leaves that column at
+        the copy's value beside a fresh stamp, which the standing watch,
+        judging presence and stamps, would not notice."""
+        store, pool, env = stores
+        await store.recalculate_goal_tables(include_weekly=True)     # DuckDB
+        duck = await _all_duck(store)
+        assert len(duck[SEASONAL]) == 12 and len(duck[WEEKLY]) == 60
+        assert duck[GROWTH][0][4] > 0, "a measured rate, so the row is rewritten"
+        old = NOW - timedelta(days=30)
+        tenth = Decimal("0.1")
+        async with pool.acquire() as conn:
+            await conn.executemany(
+                f"INSERT INTO {SEASONAL} (month, seasonality_index, sample_size, "
+                f"avg_revenue, min_revenue, max_revenue, yoy_growth, confidence, "
+                f"updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, 'stale', $8)",
+                [(m, i + tenth, n + 1, a + 1, lo + 1, hi + 1, y + tenth, old)
+                 for m, i, n, a, lo, hi, y, _c in duck[SEASONAL]])
+            ((metric, value, start, end, sample),) = duck[GROWTH]
+            await conn.execute(
+                f"INSERT INTO {GROWTH} (metric_type, value, period_start, "
+                f"period_end, sample_size, updated_at) "
+                f"VALUES ($1, $2, $3, $4, $5, $6)",
+                metric, value + tenth, start - timedelta(days=7),
+                end - timedelta(days=7), sample + 1, old)
+            await conn.executemany(
+                f"INSERT INTO {WEEKLY} (month, week_of_month, weight, "
+                f"sample_size, updated_at) VALUES ($1, $2, $3, $4, $5)",
+                [(m, w, weight + tenth, n + 1, old)
+                 for m, w, weight, n in duck[WEEKLY]])
+        seeded = await _all_pg(pool)
+        for table in (SEASONAL, GROWTH, WEEKLY):
+            assert not set(seeded[table]) & set(duck[table]), table
+
+        _flag(env)
+        await store.recalculate_goal_tables(include_weekly=True)     # Postgres
+
+        stored = await _all_pg(pool, stamps=True)
+        assert {t: [r[:-1] for r in stored[t]] for t in (SEASONAL, GROWTH, WEEKLY)} \
+            == {t: duck[t] for t in (SEASONAL, GROWTH, WEEKLY)}
+        stamps = {r[-1] for t in (SEASONAL, GROWTH, WEEKLY) for r in stored[t]}
+        assert len(stamps) == 1 and stamps.pop() > old
+
+    @pytest.mark.asyncio
     async def test_the_owner_rows_for_all_four_share_the_writes_transaction(self, stores):
         store, pool, env = stores
         _flag(env)
@@ -280,9 +333,12 @@ class TestTheGoalTablesTransaction:
         await pg_forecast_write.persist_goal_tables(
             [ROW], (0.5, date(2023, 12, 2), date(2025, 12, 31), 1), {}, [], NOW)
 
-        (row,) = await _pg(pool, SEASONAL)
+        (row,) = await _pg(pool, SEASONAL, stamps=True)
         assert row[1] == Decimal("0.9500"), "the index was not rewritten"
         assert row[6] == Decimal("0.4200"), "the stored YoY was lost"
+        # Restamped by the upsert itself: no YoY UPDATE ran for this month to
+        # do it. Mutation: `updated_at` dropped from the upsert's SET list.
+        assert row[-1] == NOW
 
     @pytest.mark.asyncio
     async def test_the_placeholder_never_overwrites_a_measured_rate(self, stores):
@@ -552,6 +608,9 @@ class TestTheReadsFollowTheChain:
     @pytest.mark.parametrize("table", [SEASONAL, PREDICTIONS])
     async def test_a_postgres_failure_raises_rather_than_reading_duckdb(
             self, stores, table):
+        """Refused, not raised raw: a counted refusal naming `goals`, what the
+        same failure was before the flip under the chain's `off`. Raw, the
+        forecast's and the smart goal's broad handlers would swallow it."""
         from core import pg_goals_read
 
         store, pool, env = stores
@@ -566,12 +625,15 @@ class TestTheReadsFollowTheChain:
             return await real(sql, params)
 
         with patch.object(pg_goals_read, "fetch", new=down):
-            with pytest.raises(ConnectionError, match="pg down"):
+            with pytest.raises(read_fallback.ReadUnavailable) as raised:
                 if table == SEASONAL:
                     await store.generate_smart_goals(2026, 10, "retail")
                 else:
                     await store.get_predictions(date(2026, 10, 7), date(2026, 10, 11))
+        assert raised.value.surface == "goals"
+        assert isinstance(raised.value.__cause__, ConnectionError)
         assert "goals" not in read_fallback.counts(), "it fell back to DuckDB"
+        assert read_fallback.refusals()["goals"]["count"] == 1
 
 
 # ─── The hourly replace ─────────────────────────────────────────────────────
@@ -678,6 +740,43 @@ class TestTheCopyBack:
         assert await _pg(pool, SEASONAL, stamps=True) == written[SEASONAL]
 
     @pytest.mark.asyncio
+    async def test_the_stamps_no_run_restamps_arrive_exactly(self, stores):
+        """The copy-back's comparison forgives the four stamps (the daily
+        spec's `ignore_columns`, `test_chain_transfer.py` says why), so what
+        it carries is pinned here. Two of them outlive the next run: the
+        Monday job never restamps `weekly_patterns` — only the POST stores
+        them — and a training replaces only the range it predicts, so a past
+        day keeps its `created_at` for good. Built that way under the flag —
+        the POST, then the Monday job; two trainings over overlapping ranges
+        — and carried back: every stamp arrives as Postgres held it, row by
+        row."""
+        store, pool, env = stores
+        _flag(env)
+        await store.recalculate_goal_tables(include_weekly=True)    # the POST
+        posted = await _all_pg(pool, stamps=True)
+        await store.recalculate_goal_tables(include_weekly=False)   # Monday
+        await store.store_predictions(FORECAST, "retail", METRICS)
+        later = [{"date": (date(2026, 10, 9) + timedelta(days=n)).isoformat(),
+                  "predicted_revenue": 2000.0 + n} for n in range(5)]
+        await store.store_predictions(later, "retail", METRICS)
+        written = await _all_pg(pool, stamps=True)
+
+        # The two facts the forgiving has to live with.
+        assert written[WEEKLY] == posted[WEEKLY], "the Monday job stored weeks"
+        assert {r[-1] for r in written[SEASONAL]}.isdisjoint(
+            {r[-1] for r in posted[SEASONAL]}), "the Monday job did not restamp"
+        stamp = {r[0]: r[-1] for r in written[PREDICTIONS]}
+        kept = {stamp[date(2026, 10, 7)], stamp[date(2026, 10, 8)]}
+        fresh = {stamp[date(2026, 10, 9) + timedelta(days=n)] for n in range(5)}
+        assert len(kept) == 1 and len(fresh) == 1 and kept != fresh
+        assert len(written[PREDICTIONS]) == 7
+
+        result = await copy_back(store, pg_forecast_write, dry_run=False)
+
+        assert result["findings"] == [] and result["released"] is True
+        assert await _all_duck(store, stamps=True) == written
+
+    @pytest.mark.asyncio
     async def test_a_dry_run_writes_nothing_and_releases_nothing(self, stores):
         store, _pool, env = stores
         _flag(env)
@@ -751,8 +850,18 @@ class TestTheStandingWatchReadsItsFacts:
     async def test_read_forecast_on_seeded_tables(self, stores):
         from core import pg_chain_invariants as inv
 
+        """Each judgement fed by its own table's stamp. The goal tables were
+        stamped by Monday's job, the retail forecast by an older training, and
+        a b2b forecast — `POST /api/revenue/forecast/train?sales_type=b2b` —
+        was trained after both and reaches further. Mutations: `seasonal_at`
+        read from the forecast's stamp (a missed Monday job hidden by a
+        training), and `forecast_at`, the horizon or the unstamped count read
+        across every sales type (a stale retail forecast hidden by a fresh
+        b2b one)."""
         _store, pool, _env = stores
         stamp = datetime(2026, 10, 5, 1, 1, tzinfo=timezone.utc)
+        trained = datetime(2026, 10, 1, 0, 31, tzinfo=timezone.utc)
+        b2b = datetime(2026, 10, 7, 9, 0, tzinfo=timezone.utc)
         async with pool.acquire() as conn:
             await conn.executemany(
                 f"INSERT INTO {SEASONAL} VALUES ($1, 1.0, 3, 1, 1, 1, $2, 'high', $3)",
@@ -764,13 +873,17 @@ class TestTheStandingWatchReadsItsFacts:
             await conn.executemany(
                 f"INSERT INTO {PREDICTIONS} VALUES ($1, 'retail', 1, 1, 1, 1, $2)",
                 [(date(2026, 10, 1) + timedelta(days=n),
-                  None if n == 9 else stamp) for n in range(10)])
+                  None if n == 9 else trained) for n in range(10)])
+            await conn.executemany(
+                f"INSERT INTO {PREDICTIONS} VALUES ($1, 'b2b', 1, 1, 1, 1, $2)",
+                [(date(2026, 10, 7) + timedelta(days=n),
+                  None if n == 20 else b2b) for n in range(30)])
             facts = await inv._read_forecast(conn, None, date(2026, 10, 7))
 
         assert facts == inv.Forecast(
             latched_at=None, months=11, yoy_null=1, seasonal_at=stamp,
             seasonal_unstamped=1, yoy_rows=1, yoy_overall=0.1, yoy_sample=0,
-            yoy_from=date(2023, 12, 2), forecast_at=stamp,
+            yoy_from=date(2023, 12, 2), forecast_at=trained,
             horizon=date(2026, 10, 10), forecast_unstamped=1)
         issues = inv.check_chain_invariants(inv.Facts(
             watched=(CHAIN,), now=datetime(2026, 10, 8, 10, 0, tzinfo=timezone.utc),

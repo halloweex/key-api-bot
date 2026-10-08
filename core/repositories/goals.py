@@ -612,7 +612,13 @@ class GoalsMixin:
         Chain 7b-3 (`KS_WRITE_FORECAST`) does the same for a statement
         reading `{revenue_predictions}` — the forecast a smart goal and
         `/api/revenue/forecast` read: Postgres, with no fallback, while that
-        chain writes there, and this flag as before while it does not.
+        chain writes there, and this flag as before while it does not. A
+        failure there is a counted refusal (`read_fallback.chain_refusal`),
+        what the same failure was before the flip under the chain's `off`:
+        raw, it reached `get_forecast_data` and `_get_ml_forecast_total`,
+        which let `ReadUnavailable` through and contain everything else, so
+        the forecast read "not available yet" and the goal lost its ML signal
+        with nothing counted.
         """
         from core.sql_dialect import DUCKDB, POSTGRES, render_tables
 
@@ -620,9 +626,14 @@ class GoalsMixin:
         from core import pg_forecast_write
 
         params = list(params or [])
-        if (pg_goals_write.reads_the_chain(sql)
-                or pg_forecast_write.reads_the_chain(sql)):
+        if pg_goals_write.reads_the_chain(sql):
             return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
+        if pg_forecast_write.reads_the_chain(sql):
+            try:
+                return await pg_goals_read.fetch(
+                    render_tables(sql, POSTGRES), params)
+            except Exception as exc:  # noqa: BLE001 — refused, never DuckDB
+                raise read_fallback.chain_refusal("goals", exc) from exc
         read_fallback.no_address("goals", pg_goals_read)
         if pg_goals_read.enabled() and pg_goals_read.available():
             try:
@@ -643,8 +654,8 @@ class GoalsMixin:
         following it would read the hourly replica and show a POSTed
         recalculation up to an hour late. While the chain writes Postgres they
         are read there with no fallback — DuckDB's copy is then frozen, not
-        older (`core/pg_forecast_write.py`). No `try`, so there is nothing to
-        fall back from and nothing for DN-20a's walk to require.
+        older (`core/pg_forecast_write.py`) — and a failure is a counted
+        refusal, a 503 naming `goals`, as in `_goals_run`.
         """
         from core.sql_dialect import DUCKDB, POSTGRES, render_tables
 
@@ -653,7 +664,11 @@ class GoalsMixin:
 
         params = list(params or [])
         if pg_forecast_write.reads_the_chain(sql):
-            return await pg_goals_read.fetch(render_tables(sql, POSTGRES), params)
+            try:
+                return await pg_goals_read.fetch(
+                    render_tables(sql, POSTGRES), params)
+            except Exception as exc:  # noqa: BLE001 — refused, never DuckDB
+                raise read_fallback.chain_refusal("goals", exc) from exc
         async with self.connection() as conn:
             return conn.execute(render_tables(sql, DUCKDB), params).fetchall()
 
@@ -1305,7 +1320,9 @@ class GoalsMixin:
         then absent from the blend. A Postgres failure alone does not return
         0: that read falls back to DuckDB, and the sum may then take its two
         halves from two engines (see `_FORECAST_ACTUAL_SQL`). An unknown
-        `KS_READ_GOALS` raises, as it does for every goal read.
+        `KS_READ_GOALS` raises, as it does for every goal read. Under chain
+        7b-3 the forecast half has no fallback, and its failure is a refusal
+        that passes through like any other (`_goals_run`), never a 0.
 
         **Called without the store lock.** Both halves go through `_goals_run`,
         which takes that lock itself on the DuckDB path and the lock is not

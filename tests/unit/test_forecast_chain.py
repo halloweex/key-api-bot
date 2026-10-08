@@ -246,6 +246,22 @@ class TestReadsTheChain:
     def test_off_keeps_todays_engine(self, ready, hole):
         assert chain.reads_the_chain(f"SELECT * FROM {hole}") is False
 
+    @pytest.mark.parametrize("table", chain.CHAIN_TABLES)
+    def test_each_table_the_chain_owns_follows_once_latched(self, ready, table):
+        """Parametrised over `CHAIN_TABLES`, not `TABLE_HOLES`, so a hole
+        dropped from the second is a failure here rather than a case that
+        quietly disappears. Mutation: `{growth_metrics}` removed from
+        `TABLE_HOLES` — a read of that table would go by `KS_READ_GOALS`, with
+        a fallback, to DuckDB's frozen copy."""
+        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
+        hole = "{%s}" % table.split(".", 1)[1]
+        assert chain.reads_the_chain(f"SELECT * FROM {hole}") is True
+
+    def test_the_holes_are_the_tables_the_chain_owns(self):
+        assert {"app." + h.strip("{}") for h in chain.TABLE_HOLES} == \
+            set(chain.CHAIN_TABLES)
+        assert len(chain.TABLE_HOLES) == len(chain.CHAIN_TABLES)
+
     def test_the_holes_are_the_dialects(self):
         """Every hole is a field `render_tables` fills, in both engines."""
         from core.sql_dialect import DUCKDB, POSTGRES, render_tables
@@ -877,8 +893,156 @@ class TestTheSmartGoalReadsOneSet:
         assert result["monthly"]["growthRate"] == 0.2
         assert result["monthly"]["confidence"] == "high"
 
+    def test_a_month_that_shrank_takes_the_overall_rate(self):
+        """A month whose own YoY is negative takes the overall rate — the
+        `growth` row of the statement, never the `seasonal` row beside it.
+        Every other fixture here has a positive monthly rate, where the overall
+        one is never read. Mutation: `yoy_result` taken from the `seasonal`
+        part, whose third column is the index (1.0) — the cap, 0.35, instead
+        of 0.25."""
+        rows = [("seasonal", None, 1.0, 1000.0, -0.1, "high"),
+                ("growth", None, 0.25, None, None, None)] + SHARED[2:]
+        result = asyncio.run(_Smart(rows).generate_smart_goals(2026, 10))
+        assert result["monthly"]["growthRate"] == 0.25
+        assert result["metadata"]["overallYoY"] == 0.25
+        assert result["metadata"]["monthlyYoY"] == -0.1
+
     def test_an_empty_set_falls_back_as_it_always_did(self):
         result = asyncio.run(_Smart([]).generate_smart_goals(2026, 10))
         assert result["monthly"]["confidence"] == "low"
         assert result["monthly"]["seasonalityIndex"] == 1.0
         assert set(result["weekly"]["breakdown"]) == {1, 2, 3, 4, 5}
+
+
+# ─── A failed read under the chain is a refusal, never a quiet answer ───────
+
+from tests.unit.test_read_fallback_sites import (  # noqa: E402,F401 — fixtures
+    admin_client,
+    fresh_read_fallback,
+)
+
+def _failing_on(table):
+    """`pg_goals_read.fetch` failing only for a statement naming `table` — a
+    statement timeout or a lock wait on one table while the rest of Postgres
+    answers, which is what lets the Gold read before it succeed."""
+    async def fetch(sql, params=()):
+        if table in sql:
+            raise ConnectionError(f"statement timeout on app.{table}")
+        return [(1000.0,)]
+    return fetch
+
+
+class _NoDuckDB(GoalsMixin):
+    def connection(self):
+        raise AssertionError("DuckDB was read; under the chain its copy is frozen")
+
+
+@pytest.fixture
+def latched(ready):
+    ready.setenv(chain.WRITE_ENV, "postgres")
+    chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
+    read_fallback.reset_counts()
+    yield ready
+    read_fallback.reset_counts()
+
+
+def _forecast(fetch):
+    from web.services import dashboard_service
+
+    with patch("core.duckdb_store.get_store",
+               new=AsyncMock(return_value=_NoDuckDB())), \
+            patch("core.pg_goals_read.fetch", new=fetch):
+        return asyncio.run(dashboard_service.get_forecast_data("retail"))
+
+
+class TestAFailedChainReadIsRefused:
+    """Before the flip, under the precondition's `KS_READ_FALLBACK=off`, a
+    failed forecast read was `fall_back`'s: a counted refusal, a 503 naming
+    `goals`. The flip must not turn it into a raw exception, which the two
+    handlers built to let `ReadUnavailable` through and contain everything
+    else then swallow, counting nothing. Mutation: the chain branch of
+    `_goals_run` (or `_goal_tables_run`) without its `try` —
+    `get_forecast_data` returns None, the route's 200 "Forecast not available
+    yet", and `_get_ml_forecast_total` 0.0, a goal without its ML signal."""
+
+    def test_the_forecast_is_refused_not_unavailable(self, latched):
+        with pytest.raises(read_fallback.ReadUnavailable) as raised:
+            _forecast(_failing_on("revenue_predictions"))
+        assert raised.value.surface == "goals"
+        assert read_fallback.refusals()["goals"]["count"] == 1
+        assert read_fallback.counts() == {}, "nothing was answered from DuckDB"
+
+    def test_the_smart_goal_is_not_computed_without_its_ml_signal(self, latched):
+        now = datetime.now(KYIV)
+        with patch("core.pg_goals_read.fetch",
+                   new=_failing_on("revenue_predictions")):
+            with pytest.raises(read_fallback.ReadUnavailable):
+                asyncio.run(_NoDuckDB()._get_ml_forecast_total(
+                    now.year, now.month, "retail"))
+        assert read_fallback.refusals()["goals"]["count"] == 1
+
+    def test_the_goal_tables_read_is_refused_too(self, latched):
+        from core.repositories.goals import _SHARED_GOAL_TABLES_SQL
+
+        with patch("core.pg_goals_read.fetch", new=_failing_on("growth_metrics")):
+            with pytest.raises(read_fallback.ReadUnavailable) as raised:
+                asyncio.run(_NoDuckDB()._goal_tables_run(
+                    _SHARED_GOAL_TABLES_SQL, [10, 10]))
+        assert raised.value.surface == "goals"
+        assert read_fallback.refusals()["goals"]["count"] == 1
+
+    def test_a_read_that_answers_is_not_touched(self, latched):
+        """Non-vacuity: with Postgres answering, the forecast is read from it."""
+        async def fetch(sql, params=()):
+            if "revenue_predictions" in sql:
+                return [(date.today(), 1234.0, 1.0, 2.0, 3.0)]
+            return [(1000.0,)]
+
+        result = _forecast(fetch)
+        assert result and result["predicted_remaining"] == 1234.0
+        assert read_fallback.refusals() == {}
+
+    def test_under_duckdb_a_latched_chain_still_refuses_and_says_so(self, latched):
+        """A latched chain whose precondition has lapsed — a restart with
+        `KS_READ_FALLBACK` back at duckdb. DuckDB has nothing to answer with but
+        the pre-flip copy, so the read is refused all the same, and
+        /api/health publishes the refusal under duckdb too, where the block
+        used to carry none (the canary's `read_refused` reads it there)."""
+        from web.routes.api.health import _read_fallback_mode
+
+        latched.setattr(read_fallback, "_mode", read_fallback.DUCKDB)
+        assert _read_fallback_mode().get("refused") is None
+        with pytest.raises(read_fallback.ReadUnavailable):
+            _forecast(_failing_on("revenue_predictions"))
+        assert read_fallback.counts() == {}
+        block = _read_fallback_mode()
+        assert block["mode"] == "duckdb"
+        assert block["refused"]["goals"]["count"] == 1
+
+
+class TestTheForecastRouteUnderTheChain:
+    """The same failure through the real app: 503 naming `goals`, never 200
+    "Forecast not available yet"."""
+
+    def test_a_failed_forecast_read_is_a_503(self, admin_client, fresh_read_fallback,
+                                            monkeypatch):
+        monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
+        monkeypatch.setenv("KS_READ_GOALS", "postgres")
+        monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
+        monkeypatch.setenv("KS_PG_DSN", DSN)
+        monkeypatch.setenv("KS_READ_FALLBACK", "off")
+        monkeypatch.setenv(chain.WRITE_ENV, "postgres")
+        fresh_read_fallback.configure_mode()
+        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
+        monkeypatch.setattr("core.pg_goals_read.fetch",
+                            _failing_on("revenue_predictions"))
+
+        response = admin_client.get("/api/revenue/forecast")
+
+        assert response.status_code == 503, response.text
+        assert response.json()["surface"] == "goals"
+        assert "statement timeout" not in response.text
+        assert fresh_read_fallback.refusals()["goals"]["count"] == 1
+        health = admin_client.get("/api/health").json()
+        assert health["read_fallbacks"] == {}
+        assert health["read_fallback_mode"]["refused"]["goals"]["count"] == 1
