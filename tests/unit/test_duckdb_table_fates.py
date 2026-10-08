@@ -318,8 +318,17 @@ def duckdb_names(sites: List[DdlSite]) -> Dict[str, str]:
 
 # ── who can open DuckDB at all ──
 
-_OPENER_MODULES = ("duckdb", "core.duckdb_store")
-_OPENER_NAMES = frozenset({"DuckDBStore", "get_store"})
+# The application's one opener — `core.duckdb_switch.open_file` since the
+# stage-4 integration made the kill guard's and the week of silence's one
+# function — read from the guard's walk rather than spelled here: this walk
+# predated it, knew only `duckdb` and the store, and passed a `bot/` module
+# that opened the file through `open_file` and created a table in it, which
+# the DDL walk then never read (batch-E review).
+from tests.unit.test_duckdb_open_guard import OPENER as _GUARD_OPENER  # noqa: E402
+
+_OPENER_MODULE = _GUARD_OPENER[0][:-len(".py")].replace("/", ".")
+_OPENER_MODULES = ("duckdb", "core.duckdb_store", _OPENER_MODULE)
+_OPENER_NAMES = frozenset({"DuckDBStore", "get_store", _GUARD_OPENER[1]})
 
 
 def _names_opener(module: str) -> bool:
@@ -329,13 +338,14 @@ def _names_opener(module: str) -> bool:
 def duckdb_openers(rel: str, source: str) -> List[str]:
     """Every way one module can reach DuckDB, as `line: what`.
 
-    Any import of `duckdb` or `core.duckdb_store` — `from core import
-    duckdb_store` included, which the first walk missed by reading only the
-    module of an ImportFrom and never its names — a relative import resolved
-    against the file's package, `importlib.import_module`/`__import__` of
-    either, and of a name computed at run time (it could be either), and the
-    store's two doors, `DuckDBStore` and `get_store`, by name wherever they
-    were imported from."""
+    Any import of `duckdb`, `core.duckdb_store` or the opener's module,
+    `core.duckdb_switch` — `from core import duckdb_store` included, which
+    the first walk missed by reading only the module of an ImportFrom and
+    never its names — a relative import resolved against the file's package,
+    `importlib.import_module`/`__import__` of any of them, and of a name
+    computed at run time (it could be any), and the three doors —
+    `DuckDBStore`, `get_store` and `open_file` — by name wherever they were
+    imported from."""
     tree = ast.parse(source)
     package = rel.split("/")[:-1]
     found = []
@@ -366,7 +376,8 @@ def duckdb_openers(rel: str, source: str) -> List[str]:
         elif isinstance(node, ast.Name) and node.id in _OPENER_NAMES:
             found.append(f"{line}: {node.id}")
         elif (isinstance(node, ast.Attribute)
-                and node.attr in _OPENER_NAMES | {"duckdb_store"}):
+                and node.attr in _OPENER_NAMES | {m.rsplit(".", 1)[-1]
+                                                  for m in _OPENER_MODULES[1:]}):
             found.append(f"{line}: .{node.attr}")
     return found
 
@@ -1183,9 +1194,27 @@ class TestEveryNameHasAFate:
         ("bot/x.py", "import core\ncore.duckdb_store"),
         ("core/x.py", "from . import duckdb_store"),
         ("core/repositories/x.py", "from ..duckdb_store import DuckDBStore"),
+        # The one opener, every way the review's probes reached it.
+        ("bot/x.py", "from core import duckdb_switch\n"
+                     "def peek(p):\n    return duckdb_switch.open_file(p)"),
+        ("migrations/x.py", "from core.duckdb_switch import open_file"),
+        ("bot/x.py", "import core.duckdb_switch"),
+        ("bot/x.py", "import core\ncore.duckdb_switch.open_file('x')"),
+        ("bot/x.py", 'import importlib\nimportlib.import_module("core.duckdb_switch")'),
+        ("bot/x.py", "from core.somewhere import open_file\nopen_file('x')"),
     ])
     def test_the_opener_walk_reads_every_way_in(self, rel, source):
         assert duckdb_openers(rel, source)
+
+    def test_the_opener_is_the_guards_own(self):
+        """Read off the kill guard, so the two walks cannot name two openers.
+        Mutation: spell this walk's opener as a literal and move the guard's."""
+        from core import duckdb_switch
+
+        assert _GUARD_OPENER == ("core/duckdb_switch.py", "open_file")
+        assert _OPENER_MODULE == duckdb_switch.__name__
+        assert callable(getattr(duckdb_switch, _GUARD_OPENER[1]))
+        assert _GUARD_OPENER[1] in _OPENER_NAMES
 
     @pytest.mark.parametrize("source", [
         "from core import duckdb_constants",
