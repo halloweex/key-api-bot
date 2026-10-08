@@ -1006,6 +1006,48 @@ class TestThePreflight:
         assert {"goals_bridge", "step13", "chain1", "postgres"} <= keys
 
     @pytest.mark.asyncio
+    async def test_each_precondition_is_one_reason(self, flags):
+        """The real chain 3, flag off, nothing stood in but the backup
+        markers: the goal bridge's reason carries its lever after a "; ", and
+        the preflight used to split the joined answer on it — `/api/health`
+        published "port chain 7b first (OD-14)" as a precondition of its own
+        (batch-E review, findings 3 and 7). Mutation: split
+        `unmet_precondition()` on "; " again."""
+        flags.setattr(pow_, "_backup_unmet", lambda: ["pitr_drill: never"])
+        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("no pg"))):
+            out = await pow_.preflight()
+        assert [r.split(":", 1)[0] for r in out["reasons"]] == [
+            "goals_bridge", "step13", "chain1", "pitr_drill", "postgres"]
+        assert "; port chain 7b first (OD-14)" in out["reasons"][0]
+
+    @pytest.mark.asyncio
+    async def test_a_retired_page_and_the_hold_are_one_reason_each(self, flags):
+        """`landing_pages_clear` carries its lever after a "; ", and the hold
+        quotes every reason it held on, joined. Mutation: as above."""
+        from core import alerting
+
+        met = flags
+        for name in ("_goals_bridge_unmet", "_step13_unmet", "_chain1_unmet"):
+            met.setattr(pow_, name, lambda: None)
+        met.setattr(pow_, "_backup_unmet", lambda: [])
+        # The real check, over a delivered page a stood-down check reported.
+        met.setattr(alerting, "delivered_conditions",
+                    lambda: {sorted(pow_.retired_conditions())[0]: "dq:integrity"})
+        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("no pg"))):
+            out = await pow_.preflight()
+        assert [r.split(":", 1)[0] for r in out["reasons"]] == [
+            "landing_pages_clear", "postgres"]
+        met.setenv("KS_WRITE_ORDERS", "postgres")
+        met.setattr(pow_, "_backup_unmet", lambda: ["pitr_drill: old", "pg_offsite: old"])
+        assert pow_.writes_postgres() is False                  # held, on three
+        met.setattr(pow_, "_landing_pages_unmet", lambda: None)
+        met.setattr(pow_, "_backup_unmet", lambda: [])
+        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("no pg"))):
+            out = await pow_.preflight()
+        assert [r.split(":", 1)[0] for r in out["reasons"]] == [pow_.HELD_KEY, "postgres"]
+        assert "pitr_drill: old; pg_offsite: old" in out["reasons"][0]
+
+    @pytest.mark.asyncio
     async def test_it_asks_postgres_for_the_landing_it_inherits(self, met):
         class _Conn:
             async def fetch(self, sql, tables):

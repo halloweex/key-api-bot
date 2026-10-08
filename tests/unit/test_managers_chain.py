@@ -701,6 +701,25 @@ class TestTheRealChain3:
         assert [r.split(":")[0] for r in out["reasons"]] == [
             "goals_bridge", "step13", "chain3", "read_fallback_off"]
 
+    @pytest.mark.asyncio
+    async def test_a_reason_with_a_semicolon_is_still_one(self, flags, monkeypatch):
+        """Structurally, not by every reason's wording: chain 3's goal-bridge
+        reason carried a "; " and its preflight published the lever after it
+        as a precondition of its own (batch-E review). Mutation: split the
+        joined `unmet_precondition()` on "; " again."""
+        from unittest.mock import AsyncMock
+
+        from core import pg_managers_write
+
+        monkeypatch.setattr("core.pg.get_pool",
+                            AsyncMock(side_effect=AssertionError("Postgres was asked")))
+        monkeypatch.setattr(pg_managers_write, "_CHECKS", (
+            ("goals_bridge", lambda: "goals_bridge: the bridge reads it; port 7b first"),
+            ("step13", lambda: "step13: not in force")))
+        out = await pg_managers_write.preflight()
+        assert out["reasons"] == ["goals_bridge: the bridge reads it; port 7b first",
+                                  "step13: not in force"]
+
 
 # ─── The writers, as code ───────────────────────────────────────────────────
 

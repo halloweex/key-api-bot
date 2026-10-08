@@ -354,7 +354,21 @@ def _flag_says_postgres() -> bool:
 
 
 def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_ORDERS=postgres` must not move the writes yet, or None.
+    """Why `KS_WRITE_ORDERS=postgres` must not move the writes yet, or None:
+    `unmet_reasons()` joined with "; ", the form the registry publishes and
+    the canary pages. Never raises."""
+    reasons = unmet_reasons()
+    return "; ".join(reasons) if reasons else None
+
+
+def unmet_reasons() -> List[str]:
+    """Every reason `KS_WRITE_ORDERS=postgres` must not move the writes yet,
+    one entry per precondition, in order; empty when none. What the
+    preflight publishes, entry for entry. A reason may carry a "; " of its
+    own — the goal bridge's lever, the retired pages', and the hold, which
+    quotes every reason it held on — so the joined `unmet_precondition()`
+    cannot be split back into them: split, `/api/health` published "port
+    chain 7b first (OD-14)" as a precondition of its own (batch-E review).
 
     Never raises and never asks Postgres (module docstring): every fact is a
     cached verdict, an environment variable, a marker file or this process's
@@ -391,7 +405,7 @@ def unmet_precondition() -> Optional[str]:
     global _held
 
     found = _live_unmet()
-    live = "; ".join(why for _key, why in found) or None
+    live = [why for _key, why in found]
     if chain_latch.latched(CHAIN):
         return live
     if _held is None:
@@ -406,10 +420,10 @@ def unmet_precondition() -> Optional[str]:
     if live:
         return live
     since, reason = _held
-    return (f"{HELD_KEY}: this process held the chain on DuckDB at {since} "
+    return [f"{HELD_KEY}: this process held the chain on DuckDB at {since} "
             f"({reason}), and every precondition has held since — the flip "
             "happens only at a start: stop web, ask "
-            "scripts/chain_copy_back.py orders --handover, and start it again")
+            "scripts/chain_copy_back.py orders --handover, and start it again"]
 
 
 def settle_hold() -> Optional[str]:
@@ -524,10 +538,8 @@ async def preflight() -> Dict[str, Any]:
     the gate: read this first, then stop web and ask the handover."""
     if mode() == "postgres":
         return {"ok": None, "reasons": []}
-    reasons: List[str] = []
-    unmet = unmet_precondition()
-    if unmet:
-        reasons.extend(unmet.split("; "))
+    # One entry per precondition, never the joined form split back apart.
+    reasons: List[str] = list(unmet_reasons())
     try:
         pool = await _pool()
         async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:

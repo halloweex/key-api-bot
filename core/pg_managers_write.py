@@ -291,7 +291,17 @@ def unmet_precondition() -> Optional[str]:
     for the life of a process — a constant, a verdict cached at start — so the
     answer cannot come good mid-process and flip the chain with nobody
     watching; a fact that could would need chain 3's `held_until_restart`.
+    `unmet_reasons()` joined with "; ".
     """
+    reasons = unmet_reasons()
+    return "; ".join(reasons) if reasons else None
+
+
+def unmet_reasons() -> List[str]:
+    """Every unmet precondition, one entry each, in `_CHECKS` order; empty
+    when none. What the preflight publishes — never the joined form split
+    back apart, which only works while no reason carries a "; " of its own
+    (chain 3's did, batch-E review). Never raises."""
     reasons: List[str] = []
     for key, check in _CHECKS:
         try:
@@ -301,7 +311,7 @@ def unmet_precondition() -> Optional[str]:
             why = f"{key}: could not be read ({type(exc).__name__})"
         if why:
             reasons.append(why)
-    return "; ".join(reasons) if reasons else None
+    return reasons
 
 
 def _warn_unmet(reason: str) -> None:
@@ -754,16 +764,17 @@ async def preflight() -> Dict[str, Any]:
     if mode() == "postgres":
         return {"ok": None, "reasons": []}
     reasons: List[str] = []
-    unmet = unmet_precondition()
+    unmet = unmet_reasons()
     if unmet:
         # Postgres is not asked while a local precondition is unmet: until
         # they all hold the flag cannot move the writes whatever the replica
         # or the shape say, and while chain 3 writes DuckDB — its default —
         # that holds for good, so `/api/health` asks Postgres nothing on this
-        # chain's behalf by default. One reason per precondition: no reason
-        # carries a "; " of its own (`TestTheRealChain3`). The shape is then asked the minute after the last one
-        # clears, before anybody sets the flag.
-        return {"ok": False, "reasons": unmet.split("; ")}
+        # chain's behalf by default. One reason per precondition, as
+        # `unmet_reasons()` lists them (`TestTheRealChain3`). The shape is
+        # then asked the minute after the last one clears, before anybody
+        # sets the flag.
+        return {"ok": False, "reasons": unmet}
     try:
         pool = await _pool()
         async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
