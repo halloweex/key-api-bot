@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.270
+
+- Step 13 rehearsal: CLAUDE.md says which indexes D1 asks, and corrects the 10-02 account
+- Step 13 rehearsal: D1 counts the indexes that hold its rows, and every stop of reh-web is recorded
+- Step 13 rehearsal: CLAUDE.md says what D1 asks, and what the 10-07 run found
+- Step 13 rehearsal: the flip it acts on is the flip P1 reads, with chain 7b's switch set
+- Step 13 rehearsal: D1 reports after the kill only what an index lost since
+- Step 13 rehearsal: the kill P6 counts is the one P3 records; D1 names the defect
+- WIP step 13 rehearsal: P6/D1 rework, half done, do not run
+- Step 13 rehearsal: CLAUDE.md records the re-run with P4a and P5 read before the kill
+- Step 13 rehearsal: CLAUDE.md says what the kill costs DuckDB in production, and where P4 and P5 read now
+- Step 13 rehearsal: P6 counts the restart after the kill, not just two
+- Step 13 rehearsal: P4a and P5 read their runs at a graceful stop before the kill; D1 reports what the kill cost
+- Step 13 rehearsal: CLAUDE.md says what the re-run found, on which image, and why
+- Step 13 rehearsal: judges hold the product's reader to the scan, and P5 to the job's own list
+- Step 13 rehearsal: the watchdog frees the host itself, and never holds the lock
+- dq_mirror_landing names the checks it asked on its completion line
+- Step 13 rehearsal: CLAUDE.md says what the local run proved, and on which image
+- Step 13 rehearsal: Z0 sees a live container restarted in place
+- Step 13 rehearsal: no container goes unnamed, not even a one-off
+- Step 13 rehearsal: CLAUDE.md records what the first local run found outside it
+- Step 13 rehearsal: each mutation alone before the run that must see it; DQ issues read by the id's text
+- Step 13 rehearsal: the host-lock walk finds it, and CLAUDE.md says what it proves and how it stays off production
+- Step 13 rehearsal: parse guards on the script, the judges held to their three outcomes
+- Step 13 rehearsal: the host orchestrator and the copy's mutations
+- Step 13 rehearsal: the in-container probe, the KeyCRM stub and the synthetic seed
+
+
 ## 3.0.269
 
 - Cohorts: a ClickHouse memory refusal is asked again before falling back
