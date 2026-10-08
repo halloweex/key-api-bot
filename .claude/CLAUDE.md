@@ -2677,6 +2677,11 @@ caught a process under two hours old, and the fallbacks of older ones went
 with their logs. So a routine fallback — a Postgres timeout under a heavy
 job — would page after the merge and hold F1's week at zero until explained.
 The plan's grep over the oldest surviving log line answers it on the host.
+The first one came on 2026-10-06 06:18 UTC, a cohort read: ClickHouse's
+server is shared with other projects, its total memory limit was spent, and
+its OvercommitTracker stopped our query with code 241. Our own hourly ship had
+finished 18 minutes earlier. `ch_cohorts.fetch` now asks again after 1 s and
+3 s on code 241 alone, and only the last refusal reaches the fallback.
 
 `KS_READ_FALLBACK` (`duckdb` default | `off`) is read in `configure_modes()`,
 before the boot sync. **Under `off`, `fall_back` raises `ReadUnavailable`**

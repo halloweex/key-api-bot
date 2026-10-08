@@ -25,6 +25,7 @@ second copy of that is how the two Silver definitions diverged in a day.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, List, Sequence, Tuple
@@ -88,6 +89,24 @@ def _typed(row: Sequence[str], types: Sequence[str]) -> tuple:
     return tuple(out)
 
 
+# The ClickHouse server is shared with other projects on the host, and its
+# total memory limit is the server's, spent by their queries as much as ours.
+# When it is full the OvercommitTracker stops a query of its choosing with
+# code 241 (MEMORY_LIMIT_EXCEEDED). On 2026-10-06 06:18 UTC that was a cohort
+# read, 18 min after our own hourly ship had finished; it fell back to DuckDB
+# and restarted the clean week `KS_READ_FALLBACK=off` waits for, and under
+# `off` it would have been a 503. A full server is a moment, not a fault, so
+# the read is asked again after each delay below and only the last refusal
+# reaches the caller's fallback. Only 241, and only here: any other error is
+# the caller's at once, and the shippers keep their own failure accounting.
+MEMORY_RETRY_DELAYS_S: Tuple[float, ...] = (1.0, 3.0)
+
+
+def _memory_refused(exc: BaseException) -> bool:
+    """ClickHouse refused the query for want of memory (code 241)."""
+    return isinstance(exc, RuntimeError) and "Code: 241." in str(exc)
+
+
 async def fetch(
     sql: str, params: Sequence[Any], types: Sequence[str] = (),
 ) -> List[Tuple]:
@@ -114,7 +133,17 @@ async def fetch(
 
     # TabSeparated is what `execute` returns; the caller unpacks positionally,
     # so the row shape has to match DuckDB's `fetchall()` — see `_typed`.
-    raw = await execute(rendered + "\nFORMAT TabSeparated")
+    for attempt, delay in enumerate((*MEMORY_RETRY_DELAYS_S, None), start=1):
+        try:
+            raw = await execute(rendered + "\nFORMAT TabSeparated")
+            break
+        except RuntimeError as exc:
+            if delay is None or not _memory_refused(exc):
+                raise
+            logger.warning(
+                "ClickHouse refused a cohort read for want of memory "
+                "(attempt %d); asking again in %.0f s", attempt, delay)
+            await asyncio.sleep(delay)
     rows = [line.split("\t") for line in raw.splitlines() if line]
     if not types:
         return [tuple(r) for r in rows]

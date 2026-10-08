@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.269
+
+- Cohorts: a ClickHouse memory refusal is asked again before falling back
+
+
+## 3.0.268
+
+- Alerts: each incident of a condition runs its own clock
+
+
 ## 3.0.267
 
 - Soak D8: a UTM verdict inside its grace is not a disagreement
