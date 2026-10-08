@@ -1245,8 +1245,9 @@ phase 2 just built and closed — no WAL — in a do-not-touch script),
 including one written out in a string a module runs elsewhere (`python -c`,
 a subprocess), which the AST never sees inside — the step-13 rehearsal's D1
 DELETE hid there, merged in after the walk was written. Such a program is
-read the way a module is when it parses, so `import duckdb as d;
-d.connect(p)` does not pass where the literal `duckdb.connect(` did, and
+read the way a module is when it parses, so the driver imported under an
+alias and connected through the alias does not pass where the first form,
+which searched for the literal call, let it through, and
 the week of silence's walk reads it too: it runs in another process, past
 the in-process count, and a read-only open changes no byte the hash sees
 (batch-E review); the
@@ -1269,9 +1270,12 @@ uvicorn's drain (30 s, handlers run on past their 504), DuckDB work a
 cancelled job left in flight (~30 s, a whole warehouse refresh), `close()`'s
 checkpoint (~7 s at 900 MB) — ~67 s for an ordinary request. **Not for a slow
 one**: the eight `SLOW_ENDPOINTS` (`web/middleware.py`) get 300 s, uvicorn
-drains them too, and three write DuckDB (`/api/duckdb/resync`,
-`/api/duckdb/refresh-statuses`, `/api/traffic/reclassify`). One in flight at a
-stop is killed. Covering them (~340 s) would leave a deploy — pull, stop,
+drains them too, and five write DuckDB (`/api/duckdb/resync`,
+`/api/duckdb/refresh-statuses`, `/api/traffic/reclassify`, and — until chain
+7b-3's `KS_WRITE_FORECAST=postgres` moves their tables — `/api/goals/recalculate`
+and `/api/revenue/forecast/train`). The list was kept by hand and named three;
+it is derived from the code now (`test_web_stop_grace.py` walks each handler
+to a store method executing a write). One in flight at a stop is killed. Covering them (~340 s) would leave a deploy — pull, stop,
 migrate, the 180 s health gate — no margin inside its 10-minute ssh timeout,
 so the grace makes kills rarer and `open_file`'s checkpoint is what makes
 them harmless. `test_web_stop_grace.py` pins both halves, the endpoints by name.

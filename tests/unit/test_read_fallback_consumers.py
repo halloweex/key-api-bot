@@ -286,6 +286,11 @@ class Graph:
     # `func=self._run_x` handed to the scheduler. Each is an entry point
     # whether or not something also calls it.
     referenced: Set[Fn] = field(default_factory=set)
+    # The calls resolved by name alone: `x.m()` on a receiver nothing types,
+    # taken for the one method of that name in the repository. Sound for the
+    # refusal walk, which must over-reach; a walk that must not — the slow
+    # endpoints' DuckDB writes (`test_web_stop_grace.py`) — leaves them out.
+    guessed: Set[ast.Call] = field(default_factory=set)
 
 
 def _parse(tops) -> Dict[str, ast.Module]:
@@ -449,6 +454,8 @@ def build_graph(tops=WALKED) -> Graph:
                         out[node.targets[0].id] = cls
         return out
 
+    guessed: Set[ast.Call] = set()
+
     def resolve(fn: Fn) -> List[Tuple[ast.Call, Set[Fn]]]:
         modules, names, aliases = scope(fn)
         objects = bound(fn, modules, names)
@@ -483,6 +490,7 @@ def build_graph(tops=WALKED) -> Graph:
             elif (len(other_methods.get(attr, ())) == 1
                   and not (isinstance(recv, ast.Name) and recv.id in aliases)):
                 out.add(other_methods[attr][0])
+                guessed.add(call)
         return found
 
     def references(fn: Fn) -> Set[Fn]:
@@ -539,7 +547,8 @@ def build_graph(tops=WALKED) -> Graph:
             if fn not in reaching and targets & reaching:
                 reaching.add(fn)
                 changed = True
-    return Graph(functions, calls, callers, reaching, store, trees, sites, referenced)
+    return Graph(functions, calls, callers, reaching, store, trees, sites, referenced,
+                 guessed)
 
 
 def _in_router_layer(fn: Fn, graph: Graph) -> bool:

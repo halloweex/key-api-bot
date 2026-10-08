@@ -426,7 +426,9 @@ services:
     # cancelled job left in flight (a whole warehouse refresh, ~30 s on one
     # CPU), then close()'s checkpoint (~7 s with a 900 MB WAL): ~67 s for an
     # ordinary request. NOT for the eight SLOW_ENDPOINTS in web/middleware.py
-    # (300 s; resync, refresh-statuses and reclassify write DuckDB): one in
+    # (300 s; resync, refresh-statuses, reclassify, and under today's
+    # KS_WRITE_FORECAST goals/recalculate and forecast/train write DuckDB —
+    # the list is derived in tests/unit/test_web_stop_grace.py): one in
     # flight outlasts this and is killed. Covering them (~340 s, plus the
     # pull, the migration and the 180 s health gate) would leave a deploy no
     # margin in its 10-minute ssh timeout. A kill leaves a WAL, which the one
