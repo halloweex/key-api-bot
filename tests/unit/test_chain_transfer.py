@@ -228,6 +228,119 @@ class TestAKeyOnlyDuckdbHolds:
         assert missing.sample_ids == (2,)
 
 
+def _operational_full_replace_specs():
+    """Every chain table the hourly copy replaces whole — the tables the
+    pre-flip rule below is about — derived from the registry, so a chain
+    added later is judged by it without being named here."""
+    from core.write_chains import WRITE_CHAINS
+
+    return [s for chain in WRITE_CHAINS
+            for s in chain_transfer.chain_specs(chain)
+            if s.kind == "operational" and not s.is_append]
+
+
+class TestAKeyOnlyPostgresHolds:
+    """F6 (review of #265). Before a flip, Postgres is the hourly copy of
+    DuckDB and nothing else, so a key only Postgres holds is one DuckDB
+    deleted after the copy last ran. It used to be INFO — "the next full
+    replace removes" it — but the copy stands down the moment the chain
+    routes to Postgres, so after the flip there is no next one: the review
+    reproduced a withdrawn expense back on /expenses and in the ad spend,
+    3 500 where 1 000 was typed."""
+
+    def _expense(self, id):
+        spec = _spec(pg_expenses_write, "app.manual_expenses")
+        return _row(spec, id=id, expense_date=date(2026, 9, 15),
+                    category="marketing", expense_type="Facebook Ads",
+                    amount=Decimal("2500.00"), currency="UAH", created_at=T0,
+                    updated_at=None)
+
+    def test_before_a_flip_it_is_refused_with_the_copy_as_its_lever(self):
+        """Mutation killed: the INFO `handover_rows_ahead` ("which the next
+        full replace removes") this was before the fix."""
+        spec = _spec(pg_expenses_write, "app.manual_expenses")
+        (issue,) = classify_handover(spec, {1: self._expense(1)},
+                                     {1: self._expense(1), 2: self._expense(2)},
+                                     moved_on=False)
+        assert (issue.check_name, issue.severity.value) == (
+            "handover_rows_ahead", "CRITICAL")
+        assert issue.sample_ids == (2,)
+        assert "POST /api/jobs/replicate_operational/trigger" in issue.description
+        assert "flag unchanged" in issue.description
+        assert "next full replace removes" not in issue.description
+
+    def test_after_the_latch_it_is_the_writer_s_row(self):
+        """Postgres is the writer once owner rows exist, so the same key is its
+        later write — the size of the copy-back. Mutation killed: the new rule
+        applied on both sides of the latch."""
+        spec = _spec(pg_expenses_write, "app.manual_expenses")
+        (issue,) = classify_handover(spec, {1: self._expense(1)},
+                                     {1: self._expense(1), 2: self._expense(2)},
+                                     moved_on=True)
+        assert (issue.check_name, issue.severity.value) == (
+            "handover_rows_ahead", "INFO")
+        assert "since the chain was latched" in issue.description
+
+    @pytest.mark.parametrize(
+        "spec", _operational_full_replace_specs(), ids=lambda s: s.pg_table)
+    def test_every_full_replace_table_of_every_chain(self, spec):
+        """The rule is the table's shape, not chain 8's: every table the hourly
+        copy replaces whole loses that copy at the flip. No DuckDB row at all,
+        so even a by-age sweep has no floor to excuse it. Mutation killed: the
+        CRITICAL scoped to `app.manual_expenses` alone."""
+        key = ("pg-only",)
+        row = tuple(object() for _ in spec.compare.columns)
+        issues = classify_handover(spec, {}, {key: row}, moved_on=False)
+        assert {(i.check_name, i.severity.value) for i in issues} == {
+            ("handover_rows_ahead", "CRITICAL")}, spec.pg_table
+
+    def test_a_row_the_sweep_removed_is_retention_and_a_newer_one_is_not(self):
+        """Chain 10's samples are swept by age every thirty minutes in DuckDB
+        and followed by the hourly copy, so a Postgres row older than anything
+        DuckDB still holds is the sweep having run since — and after a flip
+        Postgres's own writer sweeps it by the same rule. A row newer than that
+        is not retention. Mutations killed: drop the exception (every chain-10
+        handover refuses on a lagging sweep), or apply it to the newer row."""
+        spec = _spec_of("app.memory_samples")
+        assert spec.prune_clock == "sampled_at"
+        oldest_kept = T0
+        aged, newer = T0 - timedelta(days=15), T0 + timedelta(minutes=5)
+        sample = lambda at: _row(spec, sampled_at=at)  # noqa: E731
+        dk = {oldest_kept: sample(oldest_kept)}
+        pg = {aged: sample(aged), oldest_kept: sample(oldest_kept),
+              newer: sample(newer)}
+        issues = classify_handover(spec, dk, pg, moved_on=False)
+        found = {(i.check_name, i.severity.value): i.count for i in issues}
+        assert found == {("handover_rows_ahead", "INFO"): 1,
+                         ("handover_rows_ahead", "CRITICAL"): 1}
+        (info,) = [i for i in issues if i.severity.value == "INFO"]
+        assert "sweep" in info.description and "sampled_at" in info.description
+
+    def test_an_append_table_keeps_its_own_rule(self):
+        """Out of F6's scope and unchanged: the copy never deletes from an
+        append table, so its lever would not clear one. Pinned so the new
+        branch cannot swallow it."""
+        spec = _spec(pg_inventory_write, "app.stock_movements")
+        row = lambda i: _row(spec, id=i, offer_id=1, product_id=101,  # noqa: E731
+                             movement_type="stock_out", quantity_before=40,
+                             quantity_after=37, delta=-3, reserve_before=2,
+                             reserve_after=2, recorded_at=T0, source="sync")
+        (issue,) = classify_handover(spec, {1: row(1)}, {1: row(1), 9: row(9)},
+                                     moved_on=False)
+        assert (issue.check_name, issue.severity.value) == (
+            "handover_rows_ahead", "INFO")
+        assert "next full replace" not in issue.description
+
+
+def _spec_of(table):
+    """A chain table's spec by name, whichever chain declares it."""
+    from core.write_chains import WRITE_CHAINS
+
+    (spec,) = [s for chain in WRITE_CHAINS
+               for s in chain_transfer.chain_specs(chain) if s.pg_table == table]
+    return spec
+
+
 class TestAppendTablesHaveNoNewer:
     @staticmethod
     def _movement(spec, id, after=37, at=T0):

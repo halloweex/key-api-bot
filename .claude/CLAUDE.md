@@ -1986,11 +1986,12 @@ key).
 **The way back** is `scripts/chain_copy_back.py managers`. `chain_specs`
 derives the pair from a fourth source — `pg_replication.REPLICATED_SHAPES`
 and `mirror_reconciliation.REPLICATED_TABLES` — and the handover differs from
-an operational table's in three places: before a flip a key only Postgres
-holds is **CRITICAL** (there is no next full replace to remove a ghost
-interval), the pre-flip lever is `replicate_managers` and
-`POST /api/jobs/manager_stats/trigger`, and after the latch a key only DuckDB
-holds is a DuckDB write after it. Expect one pre-flip CRITICAL naming a
+an operational table's in two places: the pre-flip lever is
+`replicate_managers` and `POST /api/jobs/manager_stats/trigger`, and after the
+latch a key only DuckDB holds is a DuckDB write after it. Before a flip a key
+only Postgres holds is **CRITICAL** (there is no next full replace to remove a
+ghost interval) — this pair's rule first, and every full-replace operational
+table's since F6 (review of #265). Expect one pre-flip CRITICAL naming a
 `(manager, 1970-01-01)` baseline: the script's own connect runs `_m0006` for
 a manager synced since web's last start; `up -d web` ships it. A chain
 declaring `CHAIN_COPY_BACK_OWES_FULL_REBUILD` gets `warehouse_dirty='full'`
@@ -3322,6 +3323,13 @@ stand — in the dry run as well — and any CRITICAL refuses before anything is
 written:
 
 - a key only DuckDB holds;
+- before a flip, a key only Postgres holds in a table the hourly copy replaces
+  whole: a row DuckDB deleted after the copy last ran. The copy would remove
+  it, but it stands down at the flip, so the flip would keep it in the store
+  the page reads — the review of #265 (F6) reproduced a withdrawn expense back
+  in the ad spend. The lever is the copy itself. One exception: on a table both
+  stores sweep by age (chain 10's samples), a row older than anything DuckDB
+  still holds is its sweep, which Postgres's own writer repeats after a flip;
 - in an append-only table, two different rows under one key. There is no
   "newer" there: they are two events, and the usual one is a movement id both
   allocators issued, because Postgres floors its sequence on its own MAX(id);
@@ -3401,7 +3409,8 @@ docker compose run --rm --no-deps -T web \
 # BEFORE A FLIP: first, with web still up, /api/health must show
 #   write_chains.pg_inventory_write.preflight.ok = true (DN-24). Then this:
 #   exit 0, or do not flip. A CRITICAL is a row the flip would
-#   strand: up -d web with the flag unchanged, let replicate_operational ship
+#   strand, or one DuckDB deleted that the flip would keep: up -d web with the
+#   flag unchanged, let replicate_operational ship
 #   (POST /api/jobs/replicate_operational/trigger), stop, ask again.
 # TO ROLL BACK: the same command with --dry-run (also the default), then with
 #   --execute. Exit 0 released. 1 not committed (a difference rolled back, or

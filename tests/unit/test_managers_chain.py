@@ -330,9 +330,13 @@ class TestTheHandoverOfAReplicatedTable:
         assert ("handover_rows_unwritable", "CRITICAL") in {
             (i.check_name, i.severity.value) for i in issues}
 
-    def test_the_operational_tables_are_judged_as_before(self):
-        """The dispatch is by kind: an operational table's pre-flip key only
-        Postgres holds stays INFO."""
+    def test_the_operational_tables_keep_their_own_lever(self):
+        """The dispatch is by kind: an operational table keeps the operational
+        sentence and lever, never this pair's. Since F6 (review of #265) its
+        pre-flip key only Postgres holds is CRITICAL too, for the same reason
+        — the copy that would remove it stands down at the flip — so what
+        tells the two apart is the lever, not the severity. Mutation: the
+        replicated rewrite applied to every table."""
         from core import pg_goals_write
         from core.chain_transfer import chain_specs, classify_handover
 
@@ -340,8 +344,10 @@ class TestTheHandoverOfAReplicatedTable:
         row = _crow(spec, period_type="daily", goal_amount=1, is_custom=True,
                     updated_at=T0)
         (issue,) = classify_handover(spec, {}, {"daily": row}, moved_on=False)
-        assert issue.severity.value == "INFO"
+        assert (issue.check_name, issue.severity.value) == (
+            "handover_rows_ahead", "CRITICAL")
         assert "replicate_managers" not in issue.description
+        assert "replicate_operational" in issue.description
 
 
 class _Conn:

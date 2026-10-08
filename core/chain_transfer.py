@@ -928,7 +928,15 @@ def classify_handover(
     - **Mutable tables before a flip** must be equal. DuckDB is the only
       writer and Postgres is fed only by copying it, so Postgres cannot
       legitimately be newer — every difference is the copy being broken, and
-      the right answer is to refuse.
+      the right answer is to refuse. That includes a key only Postgres holds:
+      a row DuckDB deleted after the copy last ran (F6, review of #265). The
+      copy's full replace would remove it, but it stands down the moment the
+      chain routes to Postgres, so after the flip nothing does and the row
+      stays in the new source of truth. The lever is the copy itself — web
+      up with the flag unchanged, `replicate_operational` ships, ask again.
+      One exception, on a table both stores sweep by age (`prune_clock`): a
+      row older than anything DuckDB still holds is its sweep having run
+      since the copy, which Postgres's own writer repeats after a flip — INFO.
     - **Mutable tables after the latch**: Postgres is the writer, so a
       difference is its later write — INFO, the work the copy-back carries —
       unless the row's own clock, carried by both stores, says DuckDB's version
@@ -937,6 +945,8 @@ def classify_handover(
       no shared clock exists the difference is taken as Postgres being newer
       and the description says so; `--handover` clean before the flip is what
       makes that true by construction, which is why the runbook requires it.
+      A key only Postgres holds is the writer's row for the same reason —
+      INFO, the size of the copy-back.
     - **Mirrored tables** (chain 4's buyers and contacts) are stricter, because
       they can be: Postgres dates every write of a buyer (`_REWRITTEN_BY`).
       Before a flip, a key only Postgres holds is CRITICAL as well — nothing
@@ -1255,19 +1265,64 @@ def classify_handover(
         if older:
             critical("handover_rows_ahead", older,
                      say(_words(spec).ahead_older, older))
-    elif ahead:
+    elif ahead and moved_on:
         info("handover_rows_ahead", ahead, (
             f"{len(ahead)} row(s) in {table} are not in DuckDB's "
-            f"{dk_table}. "
-            + ("Written since the chain was latched — the size of the "
-               "copy-back."
-               if moved_on else
-               "Nothing writes Postgres here but the hourly copy of "
-               "DuckDB, so these are rows DuckDB has deleted since it "
-               "last ran, which the next full replace removes — or, for "
-               "an append-only table that never deletes, a writer that "
-               "is not the copy.")
+            f"{dk_table}. Written since the chain was latched — the size of "
+            "the copy-back."
         ))
+    elif ahead and spec.is_append:
+        info("handover_rows_ahead", ahead, (
+            f"{len(ahead)} row(s) in {table} are not in DuckDB's "
+            f"{dk_table}, above its MAX({spec.append.watermark}). Nothing "
+            "writes Postgres here but the hourly copy of DuckDB, and nothing "
+            "deletes from an append-only table, so a writer that is not the "
+            "copy put them there."
+        ))
+    elif ahead:
+        # Before a flip, a table the hourly copy replaces whole. Postgres is
+        # that copy of DuckDB and nothing else, so a key only it holds is one
+        # DuckDB deleted after the copy last ran (or a writer round the copy).
+        # The copy would remove it on its next run — but it stands down the
+        # moment the chain routes to Postgres, so after the flip there is no
+        # next run, and the row stays in the store the flip makes the source
+        # of truth: the review's withdrawn expense, back in the ad spend. One
+        # exception, derived like the DuckDB side's `handover_rows_pruned`: on
+        # a table both stores sweep by age, a row older than anything DuckDB
+        # still holds is its sweep having run since the copy, and after a
+        # flip Postgres's own writer sweeps it by the same rule.
+        aged: List[Any] = []
+        if spec.prune_clock:
+            at = spec.compare.columns.index(spec.prune_clock)
+            floor = min((v for v in (_as_utc(r[at]) for r in dk_rows.values())
+                         if v is not None), default=None)
+            aged = [k for k in ahead if floor is not None
+                    and (_as_utc(pg_rows[k][at]) or floor) < floor]
+        if aged:
+            info("handover_rows_ahead", aged, (
+                f"{len(aged)} row(s) in {table} are not in DuckDB's "
+                f"{dk_table} and are older than anything it still holds, on "
+                f"a table both stores sweep by age by {spec.prune_clock}: "
+                "DuckDB's sweep removed them after the hourly copy last ran. "
+                "The next copy removes them before a flip, and Postgres's own "
+                "writer sweeps them by the same rule after one."
+            ))
+        swept = set(aged)
+        ghosts = [k for k in ahead if k not in swept]
+        if ghosts:
+            critical("handover_rows_ahead", ghosts, (
+                f"{len(ghosts)} row(s) in {table} are not in DuckDB's "
+                f"{dk_table}. Nothing writes Postgres here but the hourly "
+                "copy of DuckDB, so DuckDB deleted them after that copy last "
+                "ran, or a writer that is not the copy put them there. The "
+                "copy's full replace would remove them, but it stands down "
+                "the moment this chain routes to Postgres: after a flip "
+                "nothing removes them, and they stay in the store the flip "
+                "makes the source of truth. Bring web back up with the flag "
+                "unchanged, let replicate_operational ship "
+                "(POST /api/jobs/replicate_operational/trigger), stop it, and "
+                "ask again."
+            ))
     return issues
 
 
@@ -2480,13 +2535,17 @@ def _replicated_handover(
 ) -> List[IntegrityIssue]:
     """The operational verdicts, said for a table `replicate_managers` copies.
 
-    Three changes, each a defect the plain rule had for this pair:
+    Three changes, each found as a defect the plain rule had for this pair:
 
-    - **Before a flip, a key only Postgres holds is CRITICAL, not INFO.** The
-      operational rule calls it a row DuckDB deleted that "the next full
-      replace removes" — and after a flip there is no next full replace. A
-      ghost interval would stay in the store a flip makes the source of truth,
-      and silently reclassify the orders it covers.
+    - **Before a flip, a key only Postgres holds is said for this pair.** It
+      is CRITICAL here as in the operational rule — after a flip there is no
+      next full replace to remove it — and a ghost interval would stay in the
+      store a flip makes the source of truth and silently reclassify the
+      orders it covers. This pair found that first; the operational rule
+      called the same key INFO until F6 (review of #265) made it CRITICAL for
+      every table the hourly copy replaces whole. The severity is still set
+      here, so the pair does not depend on the rule it was first stricter
+      than.
     - **The pre-flip lever names this pair's shipper.** `replicate_operational`
       never ships these tables, so sending an operator to let it run sent them
       to wait for nothing.

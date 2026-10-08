@@ -1075,6 +1075,46 @@ class TestHandoverCheck:
         assert await handover_check(store, pg_inventory_write) == []
 
     @pytest.mark.asyncio
+    async def test_a_deletion_the_copy_missed_fails_it_until_the_copy_ships(
+        self, stores,
+    ):
+        """F6 (review of #265), end to end. A typed expense withdrawn in
+        DuckDB while the immediate copy failed is still in Postgres. The
+        hourly copy would remove it, but it stands down at the flip — the
+        review flipped here and read the withdrawn spend back on the page,
+        3 500 for 1 000, kept by the chain's first write. So `--handover`
+        refuses (exit 1), and the lever it names clears it (exit 0).
+        Mutation killed: the INFO "which the next full replace removes",
+        under which this handover exited 0."""
+        from core import pg_operational
+
+        store, pool, env = stores
+        kept = await store.add_expense(date(2026, 9, 1), "marketing",
+                                       "Facebook Ads", 1000, platform="facebook")
+        withdrawn = await store.add_expense(date(2026, 9, 2), "marketing",
+                                            "Facebook Ads", 2500, platform="facebook")
+
+        async def blip(*_args, **_kwargs):
+            raise ConnectionError("a Postgres blip")
+
+        with patch.object(pg_operational, "replicate_operational", new=blip):
+            assert await store.delete_expense(withdrawn["id"]) is True
+        pg_ids = [r["id"] for r in await _pg(pool, f"SELECT id FROM {EXPENSES} ORDER BY id")]
+        assert pg_ids == [kept["id"], withdrawn["id"]]
+
+        issues = await handover_check(store, pg_expenses_write)
+        assert [(i.check_name, i.severity.value, i.sample_ids) for i in issues] == [
+            ("handover_rows_ahead", "CRITICAL", (withdrawn["id"],))]
+        assert "POST /api/jobs/replicate_operational/trigger" in issues[0].description
+        assert await _script(store, env, "expenses", "--handover") == 1
+
+        # The lever, as the runbook says it: web up with the flag unchanged,
+        # the hourly copy ships, stop, ask again.
+        assert "error" not in await pg_operational.replicate_operational(store)
+        assert await handover_check(store, pg_expenses_write) == []
+        assert await _script(store, env, "expenses", "--handover") == 0
+
+    @pytest.mark.asyncio
     async def test_once_latched_a_difference_is_the_size_of_the_copy_back(
         self, stores,
     ):
