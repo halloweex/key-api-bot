@@ -1128,6 +1128,48 @@ class TestThePreflight:
             assert block[chain]["preflight"]["ok"] is False
             assert "did not answer" in block[chain]["preflight"]["reasons"][0]
 
+    @pytest.mark.asyncio
+    async def test_the_bound_holds_when_the_cancel_itself_hangs(self, flags):
+        """A Postgres read cut inside a query unwinds into asyncpg's cancel
+        request, which a paused server does not answer: unshielded, the
+        "5 s" answer came after 60 s for chain 3 and 30 s for chain 1, and
+        each held its cache lock — and every later /api/health — meanwhile
+        (batch-E review). A hang that cancels promptly, as above, cannot see
+        it. Mutation: a bare `asyncio.wait_for(preflight(), bound)`."""
+        import time
+
+        from core import pg_inventory_write, pg_managers_write
+        from web.routes.api import health
+
+        bound, unwind = 0.3, 2.0
+
+        async def cancel_hangs():
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                await asyncio.sleep(unwind)        # the cancel request, unanswered
+                raise
+
+        caches = (health._preflight_cache, health._orders_preflight_cache,
+                  health._managers_preflight_cache)
+        for cache in caches:
+            cache.update(data=None, expires_at=0)
+        try:
+            with patch.object(pg_inventory_write, "preflight", cancel_hangs), \
+                    patch.object(pow_, "preflight", cancel_hangs), \
+                    patch.object(pg_managers_write, "preflight", cancel_hangs), \
+                    patch.object(health, "_PREFLIGHT_TIMEOUT_S", bound):
+                started = time.monotonic()
+                block = await health._write_chains_block()
+                took = time.monotonic() - started
+                await asyncio.sleep(unwind + 0.2)    # let the left-behind reads end
+        finally:
+            for cache in caches:
+                cache.update(data=None, expires_at=0)
+        assert took < 1.7 * bound, f"{took:.2f} s for preflights bounded at {bound} s"
+        for chain in (pg_inventory_write.CHAIN, pow_.CHAIN, pg_managers_write.CHAIN):
+            assert "did not answer" in block[chain]["preflight"]["reasons"][0]
+
 
 class TestTheDefaultShipsWhatMainShipped:
     """With the flag at its default every order shipment out of DuckDB runs

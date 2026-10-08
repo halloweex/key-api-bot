@@ -261,6 +261,34 @@ _preflight_cache_lock = asyncio.Lock()
 _PREFLIGHT_TIMEOUT_S = 5
 
 
+def _retrieved(task: "asyncio.Future") -> None:
+    """Read a left-behind preflight's outcome, so an error it unwinds into is
+    not logged as never retrieved."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _bounded_preflight(preflight) -> dict:
+    """`preflight()` within `_PREFLIGHT_TIMEOUT_S`, behind a shield — the DN-05a
+    form the sync tick uses. A bare `wait_for` waits for the cancelled read to
+    unwind, and a Postgres read cut inside a query unwinds into asyncpg's
+    cancel request to a server that may not answer: with Postgres paused,
+    chain 3's preflight returned its "5 s" answer after 60 s, and chain 1's
+    after 30, holding its cache lock — and every later /api/health — the
+    whole time (batch-E review). Shielded, this returns at the bound, and the
+    read is cancelled and left to unwind on its own. Never raises for the
+    bound; a preflight that raises (each promises not to) still does."""
+    task = asyncio.ensure_future(preflight())
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), _PREFLIGHT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return {"ok": False, "reasons": [
+            f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
+    finally:
+        task.cancel()
+        task.add_done_callback(_retrieved)
+
+
 async def _inventory_preflight() -> dict:
     """`pg_inventory_write.preflight()`, cached. Never raises: a Postgres that
     does not answer in time is an answer of its own, `ok: false`."""
@@ -270,12 +298,7 @@ async def _inventory_preflight() -> dict:
     async with _preflight_cache_lock:
         if _preflight_cache["data"] is not None and now < _preflight_cache["expires_at"]:
             return _preflight_cache["data"]
-        try:
-            data = await asyncio.wait_for(
-                pg_inventory_write.preflight(), _PREFLIGHT_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            data = {"ok": False, "reasons": [
-                f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
+        data = await _bounded_preflight(pg_inventory_write.preflight)
         _preflight_cache["data"] = data
         _preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
         return data
@@ -323,12 +346,7 @@ async def _orders_preflight() -> dict:
         if (_orders_preflight_cache["data"] is not None
                 and now < _orders_preflight_cache["expires_at"]):
             return _orders_preflight_cache["data"]
-        try:
-            data = await asyncio.wait_for(pg_orders_write.preflight(),
-                                          _PREFLIGHT_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            data = {"ok": False, "reasons": [
-                f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
+        data = await _bounded_preflight(pg_orders_write.preflight)
         _orders_preflight_cache["data"] = data
         _orders_preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
         return data
@@ -348,12 +366,7 @@ async def _managers_preflight() -> dict:
         if (_managers_preflight_cache["data"] is not None
                 and now < _managers_preflight_cache["expires_at"]):
             return _managers_preflight_cache["data"]
-        try:
-            data = await asyncio.wait_for(pg_managers_write.preflight(),
-                                          _PREFLIGHT_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            data = {"ok": False, "reasons": [
-                f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
+        data = await _bounded_preflight(pg_managers_write.preflight)
         _managers_preflight_cache["data"] = data
         _managers_preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
         return data
@@ -400,7 +413,9 @@ async def _write_chains_block() -> dict:
     # The preflights at once, never one after the other: each is bounded at
     # `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row cost twice
     # that — 10 s, the canary's whole `HEALTH_TIMEOUT_S` (the chain-3 review).
-    # Concurrently they cost one bound, however many chains ask.
+    # Concurrently they cost one bound, however many chains ask — a bound
+    # that holds because each is shielded (`_bounded_preflight`): unshielded,
+    # a hung Postgres held them for asyncpg's cancel round trip instead.
     preflights = await asyncio.gather(
         _inventory_preflight() if isinstance(inventory, dict) else _nothing(),
         _orders_preflight() if isinstance(orders, dict) else _nothing(),
