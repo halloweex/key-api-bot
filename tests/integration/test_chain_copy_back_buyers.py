@@ -18,7 +18,12 @@ What they prove, in the plan's numbering:
 6. the refusals: a NULL name, a buyer only DuckDB holds, a contact of a buyer
    the chain never rewrote, and before a flip a contact only Postgres holds;
 7. a whitespace name is written back without complaint;
-8. the reship clears what the pre-flip handover refused on.
+8. the reship clears what the pre-flip handover refused on — a number of a
+   buyer DuckDB holds with none included (F2);
+9. the reship's loop keeps its docstring's promises: a guard that says stop
+   stops it, it ships in portions of `chunk`, a latch taken between portions
+   stops the next one, a mirror switched off refuses, and its writer takes
+   contacts as any iterable (F9, review of #265).
 
 The copy-back reads WHOLE tables, so the three tables are emptied around each
 test — `test_buyer_writes_mirror`'s precedent on this shared database.
@@ -393,6 +398,139 @@ class TestTheReship:
         await _latch_and_write(pool, [_buyer(1)])
         with pytest.raises(RuntimeError, match="is written by a write chain"):
             await reship_buyers(store)
+
+    # ── The loop the docstring promises (F9, review of #265) ──
+    #
+    # Every case above used the default guard, chunk=1 over two buyers, and a
+    # latch already standing before the first portion; six mutations of the
+    # loop passed all of them. Postgres's names are changed first, so a buyer
+    # the reship did not reach still says so afterwards.
+
+    @staticmethod
+    def _guard(calls, *, answers=(), on_entry=None):
+        """A portion guard that counts its entries, answers `answers[n]` on
+        the n-th (True past the end), and runs `on_entry(n)` first."""
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def guard():
+            calls.append(len(calls))
+            n = calls[-1]
+            if on_entry is not None:
+                await on_entry(n)
+            yield answers[n] if n < len(answers) else True
+
+        return guard
+
+    @staticmethod
+    async def _names(pool):
+        return {r["id"]: r["full_name"] for r in await _pg(
+            pool, "SELECT id, full_name FROM bronze.buyers ORDER BY id")}
+
+    @staticmethod
+    async def _renamed_in_postgres(pool):
+        async with pool.acquire() as conn:
+            await conn.execute("UPDATE bronze.buyers SET full_name = 'PG-' || id")
+
+    @pytest.mark.asyncio
+    async def test_a_guard_that_says_stop_stops_the_run(self, stores):
+        """Mutation killed: `if not go:` that never fires — the run writing on
+        without the lock it was told it could not have."""
+        from core.pg_buyers import reship_buyers
+
+        store, pool, _chain, _env = stores
+        await _mirrored(store, pool, [_buyer(1), _buyer(2), _buyer(3)])
+        await self._renamed_in_postgres(pool)
+        calls = []
+
+        result = await reship_buyers(
+            store, chunk=1, portion_guard=self._guard(calls, answers=(True, False)))
+
+        assert (result["status"], result["buyers_shipped"], result["buyers_total"]) == (
+            "stopped", 1, 3), result
+        assert len(calls) == 2
+        assert await self._names(pool) == {1: "Покупець 1", 2: "PG-2", 3: "PG-3"}
+
+    @pytest.mark.asyncio
+    async def test_it_ships_in_portions_of_chunk(self, stores):
+        """Five buyers at chunk=2 are three portions, each behind the guard,
+        and the counts are what was written. Mutations killed: `chunk`
+        ignored (one portion), and `contacts_shipped` not counted."""
+        from core.pg_buyers import reship_buyers
+
+        store, pool, _chain, _env = stores
+        await _mirrored(store, pool, [_buyer(i) for i in range(1, 6)])
+        await self._renamed_in_postgres(pool)
+        calls = []
+
+        result = await reship_buyers(store, chunk=2, portion_guard=self._guard(calls))
+
+        assert (result["status"], result["buyers_shipped"],
+                result["contacts_shipped"]) == ("done", 5, 5), result
+        assert len(calls) == 3
+        assert await self._names(pool) == {i: f"Покупець {i}" for i in range(1, 6)}
+
+    @pytest.mark.asyncio
+    async def test_a_latch_taken_mid_run_stops_the_next_portion(self, stores):
+        """"Asked before the first portion and again before each": a chain
+        that takes the buyers between two portions — its owner rows claimed,
+        as a second process's first write would — stops the run before it
+        writes over them. Mutation killed: the in-loop `refuse_if_owned()`
+        removed."""
+        from core import chain_latch
+        from core.pg_buyers import reship_buyers
+
+        store, pool, _chain, _env = stores
+        await _mirrored(store, pool, [_buyer(1), _buyer(2)])
+        await self._renamed_in_postgres(pool)
+
+        async def latched_before_the_second(n):
+            if n == 1:
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        await chain_latch.claim(
+                            conn, TABLES, datetime.now(timezone.utc).isoformat())
+
+        with pytest.raises(RuntimeError, match="is written by a write chain"):
+            await reship_buyers(store, chunk=1, portion_guard=self._guard(
+                [], on_entry=latched_before_the_second))
+        assert await self._names(pool) == {1: "Покупець 1", 2: "PG-2"}
+
+    @pytest.mark.asyncio
+    async def test_with_the_mirror_off_it_refuses_and_writes_nothing(self, stores):
+        """Mutation killed: the `pg_landing.enabled()` refusal dropped."""
+        from core import pg_landing
+        from core.pg_buyers import reship_buyers
+
+        store, pool, _chain, env = stores
+        await _mirrored(store, pool, [_buyer(1)])
+        await self._renamed_in_postgres(pool)
+        env.setenv(pg_landing.MIRROR_ENV, "0")
+
+        with pytest.raises(RuntimeError, match="KS_MIRROR_LANDING is off"):
+            await reship_buyers(store)
+        assert await self._names(pool) == {1: "PG-1"}
+
+    @pytest.mark.asyncio
+    async def test_the_writer_takes_contacts_as_any_iterable(self, stores):
+        """`_write` counts the contacts and then hands them on, so it lists
+        them first: a generator would be spent by the count and its contacts
+        silently never written. Mutation killed:
+        `contacts_by_buyer = list(contacts_by_buyer)` removed."""
+        from core import pg_buyers
+
+        _store, pool, _chain, _env = stores
+        parsed = parse_buyers([_buyer(1, phones=["+380501", "+380502"])])
+
+        await pg_buyers._write(parsed.rows, (pair for pair in parsed.contacts))
+
+        assert sorted(r["value"] for r in await _pg(
+            pool, "SELECT value FROM bronze.buyer_contacts WHERE buyer_id = 1")) == [
+            "+380501", "+380502"]
+        (rows,) = [r["last_rows"] for r in await _pg(
+            pool, "SELECT last_rows FROM meta.mirror_state WHERE table_name = $1",
+            CONTACTS)]
+        assert rows == 2
 
 
 class TestTheReviewsCases:
