@@ -482,16 +482,24 @@ class TestTheMarkerKeysTravelWithTheSyncKeys:
 
     @pytest.mark.asyncio
     async def test_the_release_deletes_the_marker_keys(self, flags):
+        """The release's DELETE carries the marker keys with the owner rows.
+        The same transaction also writes the release's lever record
+        (core/lever_journal.py, OD-17 (a)), so the fake reads the DELETE's
+        keys off the DELETE alone and holds the record to the same
+        connection."""
+        from core import lever_journal
         from core.chain_transfer import release_chain
 
-        deleted = []
+        deleted, statements = [], []
 
         class Conn:
             def transaction(self):
                 return _Ctx()
 
-            async def execute(self, sql, keys):
-                deleted.extend(keys)
+            async def execute(self, sql, *args):
+                statements.append((sql, args))
+                if sql.startswith("DELETE FROM meta.chain_watermarks"):
+                    deleted.extend(args[0])
 
         class Pool:
             def acquire(self):
@@ -503,6 +511,8 @@ class TestTheMarkerKeysTravelWithTheSyncKeys:
         await release_chain(Pool(), chain)
         assert "dq_digest_last_sent" in deleted
         assert "owner:app.data_quality_runs" in deleted
+        assert [args[0] for sql, args in statements if "alert_events" in sql] == [
+            lever_journal.lever_key(lever_journal.CHAIN_COPY_BACK)]
 
     def test_every_site_reads_through_the_one_helper(self):
         """`_read_sync_keys` and `release_chain` both ask `_carried_keys`, so a
