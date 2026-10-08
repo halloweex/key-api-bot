@@ -149,16 +149,22 @@ class TestTheDryRun:
         assert dryrun.main(["--backup", str(backup), "--today", TODAY]) == 0
         assert read_fallback.counts() == {}, "a goal read was routed off the copy"
 
-    @pytest.mark.parametrize("latched", [True, False])
+    @pytest.mark.parametrize("latched", [True, False], ids=["latched", "flagged_and_ready"])
     def test_chain_7b3_stays_on_the_copy(self, tmp_path, monkeypatch, capsys,
                                          latched):
         """Run as the web service, the dry run has `KS_PG_DSN` and web's
-        `./data`. With chain 7b-3 latched (or flagged with everything it
-        needs), the Monday job's store and the smart goal's read would go to
+        `./data`. With chain 7b-3 latched, or flagged with everything it
+        needs, the Monday job's store and the smart goal's read would go to
         production Postgres, and the first write would latch the chain from a
-        one-off container. `measure` pins both answers to DuckDB and makes the
-        writer's pool raise. Mutation: drop either pin and the run fails here
-        — the store reaches the raising pool, or the read the raising fetch."""
+        one-off container. `measure` pins both answers to DuckDB.
+
+        "Everything it needs" cannot happen for real inside `measure`, which
+        sets `KS_READ_GOALS=duckdb` and so leaves clause 2 unmet; it is stood
+        in for by `unmet_precondition` answering None, or the unlatched case
+        would pass with the pins or without them. Mutation: drop either pin
+        and both cases fail here — the store reaches the dry run's raising
+        pool, or the read its raising fetch. The pool itself, the second
+        wall, is `test_the_writers_pool_is_a_wall_of_its_own`'s."""
         from core import chain_latch, pg_forecast_write
 
         backup = _backup(tmp_path)
@@ -175,10 +181,47 @@ class TestTheDryRun:
         monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
         if latched:
             chain_latch.latch(pg_forecast_write.CHAIN, pg_forecast_write.WRITE_ENV)
+        else:
+            monkeypatch.setattr(pg_forecast_write, "unmet_precondition", lambda: None)
+            # Outside the dry run, this is a chain that writes Postgres.
+            assert pg_forecast_write.writes_postgres() is True
+            assert pg_forecast_write.reads_postgres() is True
         assert dryrun.main(["--backup", str(backup), "--today", TODAY]) == 0
         assert reached == []
         assert chain_latch.latched(pg_forecast_write.CHAIN) is latched
         assert read_fallback.counts() == {}
+
+    def test_the_writers_pool_is_a_wall_of_its_own(self, monkeypatch):
+        """Inside the pins, either writer reached by a route that never asks
+        `writes_postgres` raises the dry run's own error — before it acquires
+        a connection, so before it latches — and never reaches the pool
+        beneath. Mutation: the `_pool` patch dropped from `held_off_chain_7b3`
+        — the writer reaches that pool."""
+        from datetime import timezone
+
+        from core import chain_latch, pg_forecast_write
+
+        reached = []
+
+        async def _recording_pool():
+            reached.append("pool")
+            raise RuntimeError("reached production Postgres")
+
+        monkeypatch.setattr(pg_forecast_write, "_pool", _recording_pool)
+        now = datetime.now(timezone.utc)
+        with dryrun.held_off_chain_7b3():
+            assert pg_forecast_write.writes_postgres() is False
+            assert pg_forecast_write.reads_postgres() is False
+            with pytest.raises(RuntimeError, match="in-memory copy only"):
+                asyncio.run(pg_forecast_write.persist_goal_tables(
+                    [(1, 1.0, 3, 1000.0, 900.0, 1100.0, "high")],
+                    (0.1, None, None, 0), {}, [], now))
+            with pytest.raises(RuntimeError, match="in-memory copy only"):
+                asyncio.run(pg_forecast_write.store_predictions(
+                    [{"date": "2026-10-08", "predicted_revenue": 1.0}],
+                    "retail", {}, now))
+        assert reached == []
+        assert not chain_latch.latched(pg_forecast_write.CHAIN)
 
     def test_a_missing_backup_is_refused(self, tmp_path, capsys):
         assert dryrun.main(["--backup", str(tmp_path / "none.duckdb")]) == 2

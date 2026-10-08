@@ -107,7 +107,7 @@ import asyncio
 import json
 import os
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -645,6 +645,29 @@ def _leaves(value) -> int:
     return 1
 
 
+NOT_THE_COPY = ("the dry run reached chain 7b-3's Postgres writer; it stores "
+                "into the in-memory copy only")
+
+
+@contextmanager
+def held_off_chain_7b3():
+    """Chain 7b-3's two answers pinned to DuckDB, and its writer's pool made
+    to raise, for as long as the block runs (module docstring).
+
+    The pins are the first wall: the Monday job's store and the smart goal's
+    read ask them and stay on the copy. The pool is the second, for a route
+    to either writer that does not ask `writes_postgres`: it raises before the
+    writer acquires a connection, so before the latch is taken.
+    """
+    async def _no_forecast_pool():
+        raise RuntimeError(NOT_THE_COPY)
+
+    with patch("core.pg_forecast_write.writes_postgres", lambda: False), \
+            patch("core.pg_forecast_write.reads_postgres", lambda: False), \
+            patch("core.pg_forecast_write._pool", _no_forecast_pool):
+        yield
+
+
 async def measure(backup: Path, today: date) -> Report:
     from core.duckdb_constants import KNOWN_SALES_TYPES
     from core import pg_goals_read
@@ -653,10 +676,6 @@ async def measure(backup: Path, today: date) -> Report:
         raise RuntimeError("the dry run routed a goal read to Postgres; it "
                            "compares the backup's copy with itself only")
 
-    async def _no_forecast_pool():
-        raise RuntimeError("the dry run reached chain 7b-3's Postgres writer; "
-                           "it stores into the in-memory copy only")
-
     report = Report(backup=str(backup), today=today.isoformat())
     results: Dict[str, Any] = {}
     # Chain 7b-3 routes the Monday job's store and the smart goal's read to
@@ -664,9 +683,7 @@ async def measure(backup: Path, today: date) -> Report:
     # writer's pool raises as a second wall (module docstring).
     with patch.dict(os.environ, {"KS_READ_GOALS": "duckdb"}), \
             patch("core.pg_goals_read.fetch", _no_postgres), \
-            patch("core.pg_forecast_write.writes_postgres", lambda: False), \
-            patch("core.pg_forecast_write.reads_postgres", lambda: False), \
-            patch("core.pg_forecast_write._pool", _no_forecast_pool), \
+            held_off_chain_7b3(), \
             patch("core.repositories.goals.datetime", frozen_clock(today)):
         for side in SIDES:
             conn = copy_backup(backup)
