@@ -401,6 +401,35 @@ class TestAppendTablesHaveNoNewer:
         assert by_name["handover_rows_behind_watermark"].count == 1
         assert by_name["handover_rows_ahead"].count == 1
 
+    def test_the_finding_says_which_side_of_the_watermark_the_copy_reads(self):
+        """F15 (review of #265). The copy reads `>=` an inclusive watermark and
+        `>` an exclusive one, so what it can never bring back is a row below
+        the first and at or below the second. The finding said "at or below"
+        and "only from that MAX upwards" for both, which misstated the rule
+        for exactly the table `inclusive` exists for. Mutation killed: the
+        one fixed wording."""
+        movements = _spec(pg_inventory_write, "app.stock_movements")
+        assert movements.append.inclusive is False
+        moved = lambda i: self._movement(movements, i)  # noqa: E731
+        (exclusive,) = [i for i in classify_handover(
+            movements, {5: moved(5)}, {3: moved(3), 5: moved(5)}, moved_on=True)
+            if i.check_name == "handover_rows_behind_watermark"]
+        assert "sit at or below" in exclusive.description
+        assert "only above that MAX" in exclusive.description
+
+        history = _spec(pg_inventory_write, "app.inventory_sku_history")
+        assert history.append.inclusive is True
+        day = date(2026, 9, 17)
+        snap = lambda d, o: _row(history, date=d, offer_id=o, quantity=5,  # noqa: E731
+                                 reserve=0, price=Decimal("90.00"))
+        (inclusive,) = [i for i in classify_handover(
+            history, {(day, 1): snap(day, 1)},
+            {(day, 1): snap(day, 1), (day - timedelta(days=1), 2): snap(day - timedelta(days=1), 2)},
+            moved_on=True) if i.check_name == "handover_rows_behind_watermark"]
+        assert "sit below" in inclusive.description
+        assert "at or below" not in inclusive.description
+        assert "the MAX included" in inclusive.description
+
 
 class TestMutableTablesAreEqualOrNewer:
     def _expense(self, amount, updated_at):

@@ -28,11 +28,14 @@ with an offer catalogued in DuckDB after the last hourly shipment, and the
 So `copy_back` asks the handover question of the two stores **as they stand,
 before anything is written** — the same classification `handover_check` runs —
 and refuses on any CRITICAL. What it refuses is anything the write would
-destroy and cannot bring back: a key only DuckDB holds, a DuckDB value that is
-provably later than Postgres's, two rows under one key in a table that writes
-each row once, and a Postgres row below the append watermark the copy never
-reads. The dry run asks the same question, so it says what `--execute` will
-refuse.
+destroy and cannot bring back: a key only DuckDB holds — bar the two it may
+delete, a row a by-age sweep has already removed from Postgres and a contact
+or line item the chain's rewrite of its owner dropped (`classify_handover`
+says when each holds) — a DuckDB value that is provably later than
+Postgres's, two rows under one key in a table that writes each row once, and
+a Postgres row the append copy never reads, below its watermark (or at it,
+where the copy reads strictly above). The dry run asks the same question, so
+it says what `--execute` will refuse.
 
 A ROW THAT IS IN NEITHER STORE: THE REPORT LEDGERS' SPOOL
 
@@ -661,11 +664,18 @@ def _shared_clock(source: MirroredTable | BucketedTable) -> Tuple[str, ...]:
     only when every column it names is also **shipped and compared** — carried
     as a value, so the Postgres copy holds the same stamp DuckDB wrote, and
     Postgres's own writer stamps it the same way when it rewrites the row.
-    Today that is `app.manual_expenses` (`COALESCE(updated_at, created_at)`)
-    and `app.inventory_history` (`recorded_at`).
+    Which tables that gives is the derivation's answer, not a list kept here:
+    `tests/unit/test_chain_transfer.py::TestTheClockIsDerived` pins it table
+    by table, with why — `app.manual_expenses`
+    (`COALESCE(updated_at, created_at)`) and `app.inventory_history`
+    (`recorded_at`) first, and every chain since that declares one
+    (`app.revenue_goals`, `app.buyer_gender`, the journal, the samples, the
+    ledgers, ...). Chain 5's replicated tables take theirs here too
+    (`chain_specs`); the mirrored tables do not — a buyer's and an order's
+    clock is KeyCRM's own `updated_at`, declared in `_SOURCE_CLOCK`.
 
-    Everywhere else the stamp orders nothing across the two stores:
-    `offer_stocks.synced_at` is DuckDB's alone, against Postgres's
+    Everywhere else the stamp orders nothing across the two stores, for
+    example: `offer_stocks.synced_at` is DuckDB's alone, against Postgres's
     `mirrored_at`; `offers.synced_at` is shipped but never compared, because
     one sync stamps every row it touched with one transaction-stable value;
     `sku_inventory_status.updated_at` is restamped on all rows by every
@@ -929,16 +939,27 @@ def classify_handover(
     of Postgres by key, and mutable tables in Postgres are equal or newer", and
     this is that contract, table shape by table shape:
 
-    - **A key only DuckDB holds** is CRITICAL in both states. Before a flip it
-      is a row the flip would strand: the shipper stands down the moment the
-      chain routes to Postgres and these tables have no backfill. After one, a
-      full-replace copy-back would delete it, and an append table would keep
-      it on one side only, so the comparison could never be clean.
+    - **A key only DuckDB holds** is CRITICAL in both states, with two
+      exceptions, each INFO and each a row the copy-back deletes. On a table
+      both stores sweep by age (`prune_clock`), a row older than anything
+      Postgres still holds is retention — DuckDB's sweep lagging the
+      writer's — in either state. After the latch, a child row of a mirrored
+      table (a contact, a line item) whose owner the chain's writer rewrote
+      is one that rewrite dropped (see Mirrored tables). Otherwise: before a
+      flip it is a row the flip would strand — the shipper stands down the
+      moment the chain routes to Postgres and these tables have no backfill;
+      after one, a full-replace copy-back would delete it, and an append
+      table would keep it on one side only, so the comparison could never be
+      clean.
     - **Append-only tables** have no "newer": a row is written once, so the
       same key with different values is two events, CRITICAL in both states.
-      A Postgres row at or below DuckDB's watermark that DuckDB does not hold
-      is CRITICAL too — the copy-back reads only above it, so that row can
-      never come back.
+      A Postgres row DuckDB does not hold that the copy-back cannot read is
+      CRITICAL too, because it can never come back: the copy reads from
+      DuckDB's watermark upwards — `>=` for an inclusive one
+      (`inventory_sku_history`, a day written whole), `>` otherwise
+      (`stock_movements`) — so that is a row below the watermark, or at it
+      for an exclusive one. A row at an inclusive watermark is read back, and
+      is the copy's work.
     - **Mutable tables before a flip** must be equal. DuckDB is the only
       writer and Postgres is fed only by copying it, so Postgres cannot
       legitimately be newer — every difference is the copy being broken, and
@@ -1223,15 +1244,19 @@ def classify_handover(
                 or (not spec.append.inclusive and pg_rows[key][position] == floor)
             ]
             if behind:
+                where, reads = (("below", "from that MAX upwards, the MAX "
+                                 "included")
+                                if spec.append.inclusive else
+                                ("at or below", "only above that MAX"))
                 critical("handover_rows_behind_watermark", behind, (
-                    f"{len(behind)} row(s) in {table} sit at or below "
+                    f"{len(behind)} row(s) in {table} sit {where} "
                     f"DuckDB's MAX({spec.append.watermark}) = {floor} and "
                     f"are not in DuckDB's {dk_table}. Nothing deletes from "
                     "an append-only table, so DuckDB lost them or "
                     "something other than the shipper and the chain's own "
                     "writer put them in Postgres — and a copy-back, which "
-                    "carries this table only from that MAX upwards, could "
-                    "never bring them back."
+                    f"carries this table {reads}, could never bring them "
+                    "back."
                 ))
             ahead = _minus(ahead, behind)
     if ahead and spec.texts is not None:

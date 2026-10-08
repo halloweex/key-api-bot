@@ -11,8 +11,10 @@ what chain 4's writer will run. These pin what both depend on:
 - a shrunk contact list shrinks in Postgres, an emptied one empties;
 - the derivation signal rises once for a batch that wrote something, never for
   an empty one;
-- the core alone never touches `meta.mirror_state`, because the chain must not
-  stamp the mirror's watermark.
+- the core alone never stamps the buyers' rows of `meta.mirror_state`, because
+  the chain must not stamp the mirror's watermark. (A dropped derivation mark
+  is recorded there under `meta.derivation_signal`, which is
+  `core.pg_derivation`'s row, not the mirror's.)
 
 Ids come from far above production's range and are removed afterwards; the
 watermark rows and the signal are compared as deltas or restored, because the
@@ -215,7 +217,7 @@ async def test_the_signal_rises_once_for_a_batch_and_never_for_an_empty_one(pg):
 
 
 @pytest.mark.asyncio
-async def test_the_core_alone_never_touches_mirror_state(pg):
+async def test_the_core_alone_never_stamps_the_buyers_watermarks(pg):
     from core.pg_buyer_rows import _write_buyer_rows
     from core.pg_buyers import _write
 

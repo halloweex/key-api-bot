@@ -1547,10 +1547,12 @@ routed differently:
 - **One writer of buyer rows**, `core.pg_buyer_rows._write_buyer_rows` — the
   mirror and, since PR-3, the chain both run it. The rows go on the caller's
   transaction (the chain proves its first write by the owner row sharing an
-  `xmin` with the row) and it never touches `meta.mirror_state`, which stays
-  the mirror's. It lives outside the chain module on purpose: the registry
-  walk derives `BUYER_UNIT` from the function that writes it and skips chain
-  modules.
+  `xmin` with the row) and it never stamps the buyers' rows of
+  `meta.mirror_state`, which stay the mirror's — a dropped derivation mark is
+  recorded there, but under `meta.derivation_signal`, `core.pg_derivation`'s
+  own row, on a connection outside the caller's transaction. It lives
+  outside the chain module on purpose: the registry walk derives
+  `BUYER_UNIT` from the function that writes it and skips chain modules.
 - **`app.buyer_gender.decided_at` is compared** every morning (decision 7):
   the hourly derive restamps only the verdicts it writes and the copy ships
   the value as it stands. Per row now, so a re-derive is forgiven for the
@@ -3322,7 +3324,10 @@ DuckDB had catalogued after the last shipment deleted by the copy it then
 stand — in the dry run as well — and any CRITICAL refuses before anything is
 written:
 
-- a key only DuckDB holds;
+- a key only DuckDB holds — bar two the copy may delete, each INFO: a row
+  older than anything Postgres holds on a table both stores sweep by age
+  (DuckDB's sweep lagging the writer's), and after the latch a contact or
+  line item the chain's rewrite of its owner dropped (decision 6, below);
 - before a flip, a key only Postgres holds in a table the hourly copy replaces
   whole: a row DuckDB deleted after the copy last ran. The copy would remove
   it, but it stands down at the flip, so the flip would keep it in the store
@@ -3333,11 +3338,16 @@ written:
 - in an append-only table, two different rows under one key. There is no
   "newer" there: they are two events, and the usual one is a movement id both
   allocators issued, because Postgres floors its sequence on its own MAX(id);
-- in an append-only table, a Postgres row at or below DuckDB's watermark, which
-  a copy reading only above it can never bring back;
+- in an append-only table, a Postgres row the copy can never read back: below
+  DuckDB's watermark, or at it where the copy reads strictly above
+  (`stock_movements`; `inventory_sku_history` re-reads its watermark day with
+  `>=`, so a row on that day is carried);
 - a DuckDB version later than Postgres's by a clock both stores carry as a value
-  (`manual_expenses`, `inventory_history`, `revenue_goals` — whose two writers
-  stamp `updated_at` from the web container's clock for exactly this reason).
+  — derived per table from the daily spec (`_shared_clock`; `manual_expenses`
+  and `inventory_history` first, then every chain that carries one, such as
+  `revenue_goals`, whose two writers stamp `updated_at` from the web
+  container's clock for exactly this reason), and for a buyer or an order
+  KeyCRM's own `updated_at`. `TestTheClockIsDerived` lists every one.
 
 Any other difference after the latch is taken as Postgres being newer, and that
 is true by construction only when `--handover` was clean before the flip —

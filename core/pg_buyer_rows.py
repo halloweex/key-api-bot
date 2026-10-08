@@ -26,14 +26,22 @@ What it does, on the caller's connection and in the caller's transaction:
   locks in the same order;
 - the derivation mark last, and only when a buyer was written.
 
-What it does not do: open a transaction of its own around the rows, or touch
-`meta.mirror_state`. The rows go on the caller's transaction because chain 4
-proves its first write by the owner row sharing an `xmin` with the row it was
-taken for, and a savepoint would give the rows a subtransaction's XID. The
-watermark belongs to the mirror — the chain must never stamp it, or the daily
-comparison reads the chain's writes as the mirror shipping over them. Only the
-mark sits in a savepoint of its own, which `mark()` opens anyway and the
-derivation guard reads.
+What it does not do: open a transaction of its own around the rows, or stamp
+the buyers' watermarks — the `bronze.buyers` and `bronze.buyer_contacts` rows
+of `meta.mirror_state`. The rows go on the caller's transaction because chain
+4 proves its first write by the owner row sharing an `xmin` with the row it
+was taken for, and a savepoint would give the rows a subtransaction's XID. The
+watermarks belong to the mirror — the chain must never stamp them, or the
+daily comparison reads the chain's writes as the mirror shipping over them.
+Only the mark sits in a savepoint of its own, which `mark()` opens anyway and
+the derivation guard reads.
+
+One write to `meta.mirror_state` can follow from here, and it is not a
+watermark of these tables: a mark that is dropped (its one-second lock
+timeout, say) is recorded by `core.pg_derivation.mark` as a failure under
+`meta.derivation_signal`, on a pool connection of its own — outside the
+caller's transaction, so it stands even if the caller rolls back. That is
+`core.pg_derivation`'s documented trade; the rows commit either way.
 """
 from __future__ import annotations
 
