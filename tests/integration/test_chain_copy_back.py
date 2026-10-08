@@ -104,14 +104,18 @@ async def _script(store, env, *argv):
     `main` is `asyncio.run(_run(...))`, which cannot nest inside the test's
     loop, so this awaits `_run` — which is everything `main` does besides.
     The script opens the file itself with `DuckDBStore()` on `DB_PATH` and
-    closes it on the way out, so the fixture's store lets go first; it
-    reopens on its next use.
+    closes it on the way out, so the fixture's store lets go first, and is
+    opened again by name once the script has let go in turn: `close()` is
+    final, and a later use does not reopen a closed store by itself.
     """
     from scripts import chain_copy_back as script
 
     await store.close()
     env.setattr("core.duckdb_store.DB_PATH", store.db_path)
-    return await script._run(script._parse(list(argv)))
+    try:
+        return await script._run(script._parse(list(argv)))
+    finally:
+        await store.connect()
 
 
 class _Hop:

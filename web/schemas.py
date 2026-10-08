@@ -31,6 +31,19 @@ class DuckDBStats(BaseModel):
     categories: Optional[int] = None
     managers: Optional[int] = None
     db_size_mb: Optional[float] = None
+    fatal: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "DuckDB instances a FatalException invalidated in this process: "
+            "`count`, `kinds` (count per kind) and `last_at` (UTC). `index` is "
+            "an index short in the file — the write that met it fails again "
+            "until every CREATE INDEX index is rebuilt (the Sunday compaction, "
+            "or weekly_compact.sh by hand); `other` is any other FATAL. Each "
+            "invalidated instance is dropped and the next use opens the file "
+            "again, so DuckDB keeps answering; `status` reads degraded until a "
+            "restart. Null until one. Never the exception text."
+        ),
+    )
 
 
 class DataQualityFreshness(BaseModel):

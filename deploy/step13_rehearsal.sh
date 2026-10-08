@@ -110,11 +110,12 @@ PG_IMAGE=postgres:17.2-alpine
 CH_IMAGE=clickhouse/clickhouse-server:24.8.14.39-alpine
 
 # The grace every graceful stop of reh-web gets: production's. Its web service
-# sets no stop_grace_period, so a deploy's `up -d` stops it as compose does by
-# default — SIGTERM, and SIGKILL 10 s later. A stop that outruns it here ends
-# exit 137, the state a kill leaves, and is judged as the kill a deploy would
-# have made, never as the checkpoint the phase wanted (probe.py `stop_kind`).
-STOP_GRACE_S=10
+# sets stop_grace_period: 120s in docker-compose.yml (the DuckDB kill guard;
+# compose's default was 10 s), so a deploy's `up -d` stops it with SIGTERM,
+# and SIGKILL 120 s later. A stop that outruns it here ends exit 137, the
+# state a kill leaves, and is judged as the kill a deploy would have made,
+# never as the checkpoint the phase wanted (probe.py `stop_kind`).
+STOP_GRACE_S=120
 # How long a `docker kill` may take to show as an exit before the kill is
 # taken as one that did not land.
 KILL_WAIT_S=30
