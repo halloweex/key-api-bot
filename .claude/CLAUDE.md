@@ -4096,7 +4096,11 @@ decision to restart both clocks, said out loud.
   standing), step 13 given back (`warehouse_writer` = duckdb with `since` in
   the day), and `warehouse_preconditions_unmet` — but only once a period is
   declared or web runs `off`, because before the step-13 flip that page means
-  "held back", not "rolled back". UNKNOWN when nothing says a page could
+  "held back", not "rolled back". And `warehouse_way_back_refused`, always:
+  while chain 3 or 5 owns what DuckDB derives from, the way back is refused
+  and pages that key *instead of* the one above — in the parallel period,
+  with every chain latched, the only page a way back can raise — and it can
+  only happen after a flip. UNKNOWN when nothing says a page could
   have been journaled: the pages reach `app.alert_events` only through the
   bot's fire-and-forget alert archive (nothing without `KS_PG_DSN`, standing
   down while Postgres is slow), whose proof of life is the

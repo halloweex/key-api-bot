@@ -94,6 +94,7 @@ breach_keys AS (
                  ('write_chain_flag_mismatch', 'a lever page'),
                  ('warehouse_hold_stuck', 'a lever page'),
                  ('warehouse_preconditions_unmet', 'a lever page'),
+                 ('warehouse_way_back_refused', 'a lever page'),
                  ('read_fallback_used', 'a read served from DuckDB'),
                  ('read_routed_to_duckdb', 'a read served from DuckDB'))
          AS v (condition_key, kind)

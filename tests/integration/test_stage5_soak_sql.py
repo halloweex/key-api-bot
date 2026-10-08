@@ -33,7 +33,7 @@ F1 = "22_f1_read_fallbacks.sql"
 
 TRIPWIRE = "duckdb_opened_while_off"
 LEVER_PAGES = ("write_chain_flag_mismatch", "warehouse_hold_stuck",
-               "warehouse_preconditions_unmet")
+               "warehouse_preconditions_unmet", "warehouse_way_back_refused")
 FALLBACK_PAGES = ("read_fallback_used", "read_routed_to_duckdb")
 WATCHES = ("watch:duckdb_switch", "watch:read_fallbacks")
 
@@ -145,7 +145,11 @@ class TestTheFilesReadWhatTheCodeWrites:
             for key in keys:
                 assert key in REGISTRY, (name, key)
 
-    def test_the_lever_pages_are_the_same_three_everywhere(self):
+    def test_the_lever_pages_are_the_same_four_everywhere(self):
+        """The fourth is chain 5's: while a chain owns what DuckDB derives
+        from, step 13's way back is refused and pages
+        `warehouse_way_back_refused` in place of
+        `warehouse_preconditions_unmet`. Mutation: drop it from any clock."""
         for name in (P2, P3, P4):
             found = set(re.findall(r"\('((?:write_chain|warehouse)_[a-z_]+)'", self.code(name)))
             assert found == set(LEVER_PAGES), (name, found)
@@ -384,6 +388,28 @@ class TestP2RollbackLevers:
         assert v == "FAIL" and "still paging" in detail, detail
 
     @pytest.mark.asyncio
+    async def test_a_way_back_refused_by_a_latched_chain_is_a_lever(self, pool):
+        """Chain 5 made step 13's way back refuse while a chain owns what
+        DuckDB derives from, and page `warehouse_way_back_refused` instead of
+        `warehouse_preconditions_unmet` — in the parallel period, with every
+        chain latched, the only page a way back can raise. It happens only
+        after a flip, so it counts with no period declared. Mutation: drop
+        the key from `lever_pages`."""
+        for variables in ({}, {"parallel_from": "2030-05-01 10:00+03"}):
+            async with scenario(pool) as conn:
+                await clear(conn)
+                await journal(conn)
+                await page(conn, "warehouse_way_back_refused", at=ago(hours=3))
+                v, detail = await verdict(conn, P2, **variables)
+            assert v == "FAIL" and "warehouse_way_back_refused" in detail, (variables, detail)
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await journal(conn)
+            await series(conn, "warehouse_way_back_refused", state="firing", first=ago(days=2))
+            v, detail = await verdict(conn, P2)
+        assert v == "FAIL" and "still paging: warehouse_way_back_refused" in detail, detail
+
+    @pytest.mark.asyncio
     async def test_held_back_counts_only_once_a_period_runs(self, pool):
         """Before step 13's flip `warehouse_preconditions_unmet` is a first
         flip held back; after it, the way back. Mutation: make the key count
@@ -537,6 +563,23 @@ class TestP3ParallelPeriod:
             await lever(conn, at=ago(hours=2))
             v, detail = await verdict(conn, P3, parallel_from=DECLARED)
         assert v == "FAIL" and "the 30 days start again" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_refused_way_back_restarts_it(self, pool):
+        """Mutation: drop `warehouse_way_back_refused` from `breach_keys`."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.watched(conn)
+            await page(conn, "warehouse_way_back_refused", at=ago(hours=2))
+            v, detail = await verdict(conn, P3, parallel_from=DECLARED)
+        assert v == "FAIL" and "warehouse_way_back_refused" in detail, detail
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.watched(conn)
+            await series(conn, "warehouse_way_back_refused", state="resolved",
+                         first=ago(days=6), resolved=ago(days=5))
+            v, detail = await verdict(conn, P3, parallel_from=DECLARED)
+        assert v == "PASS" and "warehouse_way_back_refused, resolved)): 5 d 0 h" in detail, detail
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("key", FALLBACK_PAGES)
@@ -855,6 +898,7 @@ class TestP4WeekOfSilence:
     async def test_levers_and_fallbacks_break_it_too(self, pool):
         for seed in (lambda c: lever(c, at=ago(hours=1)),
                      lambda c: page(c, "warehouse_preconditions_unmet", at=ago(hours=1)),
+                     lambda c: page(c, "warehouse_way_back_refused", at=ago(hours=1)),
                      lambda c: page(c, "read_fallback_used", at=ago(hours=1))):
             async with scenario(pool) as conn:
                 await clear(conn)

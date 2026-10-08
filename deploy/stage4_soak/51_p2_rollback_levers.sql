@@ -23,6 +23,13 @@
 --   (SOAK_PARALLEL_FROM) or web runs KS_DUCKDB=off, `warehouse_preconditions_unmet`
 --   is the way back too — after the flip, any precondition lost is one. Before
 --   that it can only mean a first flip held back, which is not a lever.
+--   While a chain owns what DuckDB derives from (chain 3's orders, chain 5's
+--   classification) the way back is refused and pages
+--   `warehouse_way_back_refused` instead of `warehouse_preconditions_unmet`:
+--   it moves nothing, like a flag put back, but somebody reached for the
+--   lever, or a start lost a precondition after the flip. Only ever after a
+--   flip — both chains hold themselves on DuckDB until step 13 is in force —
+--   so it counts whether or not a period is declared.
 --
 -- WHAT EACH VERDICT MEANS
 -- FAIL: a lever recorded in the day, a lever page fired, escalated or resolved
@@ -71,6 +78,7 @@ lever_pages AS (
     SELECT v.condition_key
     FROM (VALUES ('write_chain_flag_mismatch', false),
                  ('warehouse_hold_stuck', false),
+                 ('warehouse_way_back_refused', false),
                  ('warehouse_preconditions_unmet', true)) AS v (condition_key, in_period_only)
     CROSS JOIN running
     WHERE NOT v.in_period_only OR running.period
