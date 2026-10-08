@@ -628,31 +628,40 @@ class DuckDBStore(
                     f"the DuckDB store is closed (shutdown): {self.db_path}")
             self._closed = False
             if self._connection is None:
+                # Enable disk spilling: DuckDB writes to disk instead of OOM crash.
+                tmp_dir = Path(self.db_path).parent / "duckdb_tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
                 # Through the one opener: it refuses under KS_DUCKDB=off
                 # before the driver can open — or create — the file, and
                 # otherwise CHECKPOINTs whatever WAL a killed writer left,
                 # before the SETs below (core/duckdb_switch.py `open_file`).
-                self._connection = duckdb_switch.open_file(self.db_path)
+                #
+                # The memory limit and the spill directory are the instance's
+                # from its first moment, not SETs after it. The open replays
+                # that WAL and the opener checkpoints it before any SET could
+                # run, so as SETs they bound neither: both ran under DuckDB's
+                # default — 80% of the memory it detects, ~5.6 GB in web's 7 GB
+                # container — after exactly the kill (an OOM kill, likeliest)
+                # that leaves a large WAL (batch-E review).
+                #
+                # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
+                # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
+                # (also exercises full export). 2GB OOMs WAL flush — keep 3GB as floor.
+                #
+                # 3GB was too tight: on 2026-08-02 seven consecutive warehouse refreshes died
+                # at 2.7/2.7 GiB while the container sat at ~950 MiB of its 7g budget, and the
+                # first refresh to complete afterwards left Gold truncated by 763 revenue rows.
+                # The ceiling is now configurable so it can be raised without a code deploy.
+                self._connection = duckdb_switch.open_file(
+                    self.db_path, config={"memory_limit": _memory_limit(),
+                                          "temp_directory": str(tmp_dir)})
                 try:
-                    # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
-                    # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
-                    # (also exercises full export). 2GB OOMs WAL flush — keep 3GB as floor.
-                    #
-                    # 3GB was too tight: on 2026-08-02 seven consecutive warehouse refreshes died
-                    # at 2.7/2.7 GiB while the container sat at ~950 MiB of its 7g budget, and the
-                    # first refresh to complete afterwards left Gold truncated by 763 revenue rows.
-                    # The ceiling is now configurable so it can be raised without a code deploy.
-                    self._connection.execute(f"SET memory_limit='{_memory_limit()}'")
                     # Reduce memory usage for bulk operations
                     self._connection.execute("SET preserve_insertion_order=false")
                     # Large WAL threshold; rely on the explicit 6h CHECKPOINT job.
                     # 2MB caused checkpoint-during-write races on DuckDB 1.5.x
                     # (corrupted in-memory column: row group rows mismatched column rows).
                     self._connection.execute("SET wal_autocheckpoint='1GB'")
-                    # Enable disk spilling: DuckDB writes to disk instead of OOM crash
-                    tmp_dir = Path(self.db_path).parent / "duckdb_tmp"
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    self._connection.execute(f"SET temp_directory='{tmp_dir}'")
 
                     await self._init_schema()
 

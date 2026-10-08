@@ -69,7 +69,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Mapping, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +199,8 @@ def guard() -> None:
     raise DuckDBOpenedWhileOff(site, count)
 
 
-def open_file(path: Union[str, Path], *, read_only: bool = False) -> Any:
+def open_file(path: Union[str, Path], *, read_only: bool = False,
+              config: Optional[Mapping[str, str]] = None) -> Any:
     """The one way the application opens a DuckDB database, and the one
     read-write `duckdb.connect` of an analytics file. Two guards, in order.
 
@@ -239,6 +240,15 @@ def open_file(path: Union[str, Path], *, read_only: bool = False) -> Any:
     memory and answers correctly; it can neither lose entries nor take this,
     so it returns the connection as opened.
 
+    **`config` is the instance's from its first moment** — what DuckDB
+    takes at the open, before the replay and before the CHECKPOINT here, so
+    a memory limit given there bounds both, where a SET after the open bounds
+    neither (the store's limit, batch-E review). A value DuckDB refuses
+    raises before any instance exists: nothing is replayed, nothing to close.
+    Every in-process open of one file must pass the same `config`, or DuckDB
+    refuses the second ("a different configuration"); only the store opens
+    the live file in web.
+
     ONE driver call, for both modes: `tests/unit/test_duckdb_switch.py` holds
     the application to exactly one reach for the driver, here, and
     `tests/unit/test_duckdb_open_guard.py` holds every read-write open in the
@@ -252,7 +262,7 @@ def open_file(path: Union[str, Path], *, read_only: bool = False) -> Any:
         replayed = 0 if read_only else wal.stat().st_size
     except OSError:
         replayed = 0
-    con = duckdb.connect(str(path), read_only=read_only)
+    con = duckdb.connect(str(path), read_only=read_only, config=dict(config or {}))
     if read_only:
         return con
     started = time.monotonic()

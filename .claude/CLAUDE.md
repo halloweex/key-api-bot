@@ -1234,7 +1234,16 @@ on every failed exit is what stops it, and every failed exit closes: an
 instance left to the exception's traceback holds the file's lock against
 every other process. Free on a clean start; behind a kill, 1.5 / 3.6 /
 8.9 s at 30 / 300 / 900 MB of WAL — the checkpoint the restart would have
-taken anyway, moved to the open. A WAL found at open is logged as a WARNING,
+taken anyway, moved to the open. **The store's memory limit and spill
+directory are given to the open** (`open_file(config=...)`), not SET after
+it: the open replays the WAL and the guard checkpoints it before any SET can
+run, so as SETs they bounded neither, and both ran under DuckDB's default —
+80% of detected memory, ~5.6 GB in web's 7 GB container — after exactly the
+kill that leaves a large WAL (batch-E review; not measured at production WAL
+sizes). A limit DuckDB refuses there raises before any instance exists, the
+WAL whole for the next open. DuckDB refuses a second in-process open of one
+file under a different configuration; only the store opens the live file in
+web. A WAL found at open is logged as a WARNING,
 so every kill is named. Read-only opens replay into memory and answer
 correctly; they neither lose entries nor take the guard.
 

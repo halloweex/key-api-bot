@@ -265,21 +265,105 @@ async def test_without_the_guard_the_same_restart_loses_them(killed_file, tmp_pa
     assert seen == [0 for _ in _ISSUES_PER_RUN]
 
 
+class _FailingSetting:
+    """A connection on which every SET fails — what DuckDB does with a value
+    it refuses. The guard's CHECKPOINT passes through."""
+
+    def __init__(self, con):
+        self._con = con
+
+    def execute(self, sql, *args, **kwargs):
+        if sql.strip().upper().startswith("SET "):
+            raise duckdb.InvalidInputException("a setting DuckDB refuses")
+        return self._con.execute(sql, *args, **kwargs)
+
+    def close(self):
+        return self._con.close()
+
+
 @pytest.mark.asyncio
 async def test_a_setting_that_fails_after_the_replay_costs_nothing(
         killed_file, tmp_path, monkeypatch):
     """Why the guard is the first statement. `connect()` closes the instance
     when anything after the open raises, and closing a valid instance is
     DuckDB's lossy checkpoint — so a failing SET must find the WAL already
-    checkpointed."""
+    checkpointed. The SETs after the open (the memory limit moved into the
+    open itself, below), each refused."""
     path = _copy(killed_file, tmp_path / "db")
+    real_connect = duckdb.connect
+    monkeypatch.setattr(duckdb, "connect", lambda database, *a, **k: _FailingSetting(
+        real_connect(database, *a, **k)))
+    store = DuckDBStore(db_path=path)
+    with pytest.raises(duckdb.Error, match="refuses"):
+        await store.connect()
+    monkeypatch.setattr(duckdb, "connect", real_connect)
+    assert store._connection is None
+    fatal, seen = _judge(path, killed_file, tmp_path)
+    assert fatal == [] and seen == list(_ISSUES_PER_RUN)
+
+
+@pytest.mark.asyncio
+async def test_a_memory_limit_duckdb_refuses_costs_nothing_either(
+        killed_file, tmp_path, monkeypatch):
+    """The limit is part of the open now, and a value DuckDB refuses there
+    raises before any instance exists: nothing replayed, nothing to close,
+    the WAL whole for the next open."""
+    path = _copy(killed_file, tmp_path / "db")
+    real_limit = duckdb_store._memory_limit
     monkeypatch.setattr(duckdb_store, "_memory_limit", lambda: "a lot")
     store = DuckDBStore(db_path=path)
     with pytest.raises(duckdb.Error):
         await store.connect()
     assert store._connection is None
+    assert Path(f"{path}.wal").stat().st_size > 0, "refused, yet something replayed it"
+    monkeypatch.setattr(duckdb_store, "_memory_limit", real_limit)
+    await (await _connect(path)).close()
     fatal, seen = _judge(path, killed_file, tmp_path)
     assert fatal == [] and seen == list(_ISSUES_PER_RUN)
+
+
+class _LimitAtCheckpoint:
+    """The store's connection, recording the memory limit in force when the
+    guard's CHECKPOINT runs."""
+
+    def __init__(self, con, seen):
+        self._con, self._seen = con, seen
+
+    def execute(self, sql, *args, **kwargs):
+        if sql.strip().upper() == "CHECKPOINT":
+            self._seen.append(self._con.execute(
+                "SELECT current_setting('memory_limit')").fetchone()[0])
+        return self._con.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+
+@pytest.mark.asyncio
+async def test_the_replay_and_the_guard_run_under_the_stores_memory_limit(
+        killed_file, tmp_path, monkeypatch):
+    """After a kill — an OOM kill likeliest, and the largest WAL — the open
+    replays it and the guard checkpoints it before any SET can run. As a SET,
+    the limit bounded neither: both ran under DuckDB's default, 80% of the
+    memory it detects, ~5.6 GB in web's 7 GB container instead of its 4 GB
+    (batch-E review). Mutation: SET the limit after the open again."""
+    path = _copy(killed_file, tmp_path / "db")
+    monkeypatch.setenv("DUCKDB_MEMORY_LIMIT", "300MB")
+    seen: list = []
+    real_connect = duckdb.connect
+    monkeypatch.setattr(duckdb, "connect", lambda database, *a, **k: _LimitAtCheckpoint(
+        real_connect(database, *a, **k), seen))
+    store = DuckDBStore(db_path=path)
+    await store.connect()
+    try:
+        limit = store._connection.execute(
+            "SELECT current_setting('memory_limit')").fetchone()[0]
+    finally:
+        await store.close()
+        monkeypatch.setattr(duckdb, "connect", real_connect)
+    assert seen and seen[0] == limit, f"the guard ran under {seen}, the store under {limit}"
+    fatal, seen_issues = _judge(path, killed_file, tmp_path)
+    assert fatal == [] and seen_issues == list(_ISSUES_PER_RUN)
 
 
 @pytest.mark.parametrize("abort", ["before_truncate", "before_header", "after_free_list_write"])
