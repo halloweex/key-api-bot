@@ -84,7 +84,7 @@ def _critical(name):
     )
 
 
-async def _run(outcomes, mocks=None, held=None, hook=None):
+async def _run(outcomes, mocks=None, held=None, hook=None, returned=None):
     """Run the real job with every check stubbed to `outcomes[name]`.
 
     An outcome is a list of issues, or an Exception to raise. Returns what the
@@ -92,7 +92,8 @@ async def _run(outcomes, mocks=None, held=None, hook=None):
     dict as `mocks` to get each check's stub back by name, to ask how the job
     called it, a list as `held` to collect the conditions each resolution
     was told it could not re-examine (`unverified`), and a callable as `hook`
-    to break something after the stubs are in place and before the job runs.
+    to break something after the stubs are in place and before the job runs,
+    and a list as `returned` to get what the job returned.
     """
     from core.scheduler import BackgroundScheduler
 
@@ -148,7 +149,9 @@ async def _run(outcomes, mocks=None, held=None, hook=None):
     try:
         if hook is not None:
             hook()
-        await scheduler._run_dq_mirror_landing()
+        result = await scheduler._run_dq_mirror_landing()
+        if returned is not None:
+            returned.append(result)
     finally:
         for p_ in reversed(patches):
             p_.stop()
@@ -274,3 +277,60 @@ class TestTheGoldRollUpStandsAloneUnderPostgres:
     def test_it_sits_right_after_reconcile_gold(self):
         order = check_order()
         assert order.index("pg_gold_internal_check") == order.index("reconcile_gold") + 1
+
+
+class TestTheRunSaysWhichChecksItAsked:
+    """A stand-down cannot be read off absent findings: `compare_gold` excuses
+    every cell whose orders synced inside its grace, so a `reconcile_gold`
+    that ran when it should have stood down files nothing on a morning after
+    a busy sync. The step-13 rehearsal ran into exactly that (its P5 could not
+    fail), so the job names what it asked, raise or verdict, on the one line
+    a reader outside the process has."""
+
+    @pytest.mark.asyncio
+    async def test_while_duckdb_derives_it_names_the_three_comparisons(self, monkeypatch):
+        from core import warehouse_cutover
+
+        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
+        returned = []
+        await _run({}, returned=returned)
+        asked = returned[0]["checks_run"]
+        assert asked == [c for c in check_order() if c != "pg_gold_internal_check"]
+        assert set(warehouse_cutover.RETIRED_COMPARISONS) <= set(asked)
+
+    @pytest.mark.asyncio
+    async def test_under_postgres_it_names_the_internal_check_and_none_retired(
+        self, monkeypatch,
+    ):
+        from core import warehouse_cutover
+
+        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
+        returned = []
+        await _run({}, returned=returned)
+        asked = returned[0]["checks_run"]
+        assert "pg_gold_internal_check" in asked
+        assert not set(warehouse_cutover.RETIRED_COMPARISONS) & set(asked)
+        assert asked == [c for c in check_order()
+                         if c not in warehouse_cutover.RETIRED_COMPARISONS]
+
+    @pytest.mark.asyncio
+    async def test_a_check_that_raised_was_still_asked(self, monkeypatch):
+        from core import warehouse_cutover
+
+        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
+        returned = []
+        await _run({"reconcile_gold": ValueError("boom")}, returned=returned)
+        assert "reconcile_gold" in returned[0]["checks_run"]
+
+    def test_it_is_on_the_completion_line(self):
+        """`extra=result` is how the formatter puts it on the line; a key a
+        LogRecord already has would raise there instead."""
+        import logging
+
+        source = inspect.getsource(
+            __import__("core.scheduler", fromlist=["BackgroundScheduler"])
+            .BackgroundScheduler._run_dq_mirror_landing)
+        assert 'logger.info("Mirror reconciliation complete", extra=result)' in source
+        assert '"checks_run": list(checks_run)' in source
+        assert "checks_run" not in logging.LogRecord(
+            "x", logging.INFO, "f", 1, "m", None, None).__dict__
