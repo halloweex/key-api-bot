@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.271
+
+- Step 13 rehearsal: a failed judge keeps its reason and its evidence
+
+
 ## 3.0.270
 
 - Step 13 rehearsal: CLAUDE.md says which indexes D1 asks, and corrects the 10-02 account
