@@ -172,6 +172,18 @@ def _read_fallbacks() -> dict:
     return read_fallback.counts()
 
 
+def _duckdb_switch() -> dict:
+    """KS_DUCKDB as this process understood it, the error when it was not
+    understood (ran as `on`), and every open of the DuckDB file refused under
+    `off` — `{site: {count, last_at}}`, a site being the `module:function`
+    that asked. Local state, no I/O, no exception text: this endpoint is
+    public. The canary pages a non-empty `opened_while_off` CRITICAL and
+    writes the week of silence's watch from it (`core/duckdb_switch.py`)."""
+    from core import duckdb_switch
+
+    return duckdb_switch.health_block()
+
+
 def _read_fallback_mode() -> dict:
     """KS_READ_FALLBACK as this process understood it at start, the error when
     it was not understood, and every read switch naming an engine this process
@@ -758,6 +770,7 @@ async def health_check(request: Request):
         "write_chains": await _write_chains_block(),
         "read_fallbacks": _read_fallbacks(),
         "read_fallback_mode": _read_fallback_mode(),
+        "duckdb_switch": _duckdb_switch(),
         "warehouse_writer_mode": _warehouse_writer_mode(),
         "utm_parse": _utm_parse_mode(),
         "goals_history": _goals_history(),

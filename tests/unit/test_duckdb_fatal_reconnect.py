@@ -10,7 +10,7 @@ instance is asked whether it still answers whenever a block raises.
 
 The FATAL here is the real one, on a production-shaped file: the schema
 checkpointed by `DuckDBStore`, then `order_products`' index made short the
-way it happened before `open_read_write` — a writer killed with rows in its
+way it happened before `open_file` — a writer killed with rows in its
 WAL, and a restart that opened and closed the file without checkpointing
 first. Dropping the instance does not heal that: the index is short in the
 file, so the same write fails again after every reconnect. That is why the
@@ -72,7 +72,7 @@ def _child(path: str, what: str) -> None:
 def _damage(path: Path, what: str) -> Path:
     """The schema checkpointed by the store, a child that wrote `what` and was
     killed, and a restart that opened and closed the file without the guard —
-    the order of events that left indexes short before `open_read_write`."""
+    the order of events that left indexes short before `open_file`."""
     async def seed():
         store = await _connect(path)
         try:
@@ -251,7 +251,7 @@ async def test_a_checkpoint_fatal_is_other_and_the_reconnect_loses_nothing(tmp_p
     """A FATAL that is not an index: the checkpoint aborted by DuckDB's own
     debug switch. Everything committed before it sits in the WAL, which the
     invalidated instance leaves behind and the reconnect replays — through
-    `open_read_write`, which checkpoints it first and names it.
+    `open_file`, which checkpoints it first and names it.
 
     The schema is checkpointed first, as on every production file: a WAL
     holding the first start's `ALTER TABLE ... ADD COLUMN` on a table with a

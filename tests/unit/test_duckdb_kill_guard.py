@@ -6,8 +6,8 @@ checkpoint — `close()`, or `wal_autocheckpoint` — writes those indexes
 *without* them unless something bound the index first. From then on a lookup
 by the indexed column misses rows a scan sees, and any write that must take
 such a row out of the index is a FatalException that invalidates the
-instance. `core.duckdb_store.open_read_write` CHECKPOINTs right after the
-replay, which keeps every entry.
+instance. `core.duckdb_switch.open_file`, the one opener, CHECKPOINTs right
+after the replay, which keeps every entry.
 
 Everything here runs through the product: the schema `DuckDBStore.connect()`
 builds (every index it creates, composite ones included), a child process
@@ -41,7 +41,8 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from core import duckdb_store  # noqa: E402
-from core.duckdb_store import DuckDBStore, open_read_write  # noqa: E402
+from core.duckdb_store import DuckDBStore  # noqa: E402
+from core.duckdb_switch import open_file  # noqa: E402
 
 _ISSUES_PER_RUN = (2, 5)
 
@@ -296,7 +297,7 @@ def test_a_guard_checkpoint_that_fails_leaves_the_wal_for_the_next_open(
 
     monkeypatch.setattr(duckdb, "connect", aborting)
     with pytest.raises(duckdb.Error) as failed:
-        open_read_write(path)
+        open_file(path)
     monkeypatch.undo()
     assert Path(f"{path}.wal").stat().st_size > 0, "the failed guard lost the WAL"
     # Closed, not left to the traceback: while `failed` lives, an instance
@@ -304,7 +305,7 @@ def test_a_guard_checkpoint_that_fails_leaves_the_wal_for_the_next_open(
     assert _another_process_opens(path) == "opened"
     del failed
 
-    con = open_read_write(path)
+    con = open_file(path)
     con.close()
     fatal, seen = _judge(path, killed_file, tmp_path)
     assert fatal == [] and seen == list(_ISSUES_PER_RUN)
@@ -327,13 +328,13 @@ def test_an_interrupted_guard_checkpoint_leaves_the_wal_for_the_next_open(
     monkeypatch.setattr(duckdb, "connect", lambda database, *a, **k: _InterruptedCheckpoint(
         real_connect(database, *a, **k), interrupt))
     with pytest.raises((duckdb.InterruptException, KeyboardInterrupt)) as failed:
-        open_read_write(path)
+        open_file(path)
     monkeypatch.undo()
     assert Path(f"{path}.wal").stat().st_size > 0, "the interrupted guard's close checkpointed"
     assert _another_process_opens(path) == "opened"
     del failed
 
-    con = open_read_write(path)
+    con = open_file(path)
     con.close()
     fatal, seen = _judge(path, killed_file, tmp_path)
     assert fatal == [] and seen == list(_ISSUES_PER_RUN)

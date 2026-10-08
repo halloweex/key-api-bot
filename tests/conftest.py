@@ -156,6 +156,22 @@ def _no_write_chain_flag_from_outside(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _duckdb_switch_on_and_forgotten(monkeypatch):
+    """Every test starts with KS_DUCKDB unset and the switch's cache and counts
+    empty (core/duckdb_switch.py), and leaves them so.
+
+    A developer's shell or `.env` carrying `KS_DUCKDB=off` would refuse every
+    store the suite opens, and a test that switched it off must not hand the
+    refusal to the next one. Tests that mean `off` set it after this ran."""
+    from core import duckdb_switch
+
+    monkeypatch.delenv(duckdb_switch.ENV, raising=False)
+    duckdb_switch.reset()
+    yield
+    duckdb_switch.reset()
+
+
+@pytest.fixture(autouse=True)
 def _never_the_real_chain_latch(monkeypatch, tmp_path):
     """No test may latch a write chain in the real data directory.
 

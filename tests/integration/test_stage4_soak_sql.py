@@ -45,7 +45,14 @@ VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
 VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on": "0",
              "buyers_on": "0", "buyers_flip_at": "", "buyers_held_by": "",
              "buyers_override_floor": "", "dq_journal_direct": "0",
-             "watchdogs_on": "0", "weekly_ledger_on": "0", "traffic_ledger_on": "0"}
+             "watchdogs_on": "0", "weekly_ledger_on": "0", "traffic_ledger_on": "0",
+             # Stage 5's clocks (OD-17 (a)); tests/integration/test_stage5_soak_sql.py.
+             "duckdb_off": "0", "parallel_from": "", "duckdb_file_last": "none",
+             "duckdb_file_since": "", "duckdb_file_since_reason": "",
+             "duckdb_file_checked_at": "", "duckdb_file_missing_at": "",
+             # What `.env` tells the host-cron sidecars (P4): off, so a test
+             # that turns web off is not also testing `.env`.
+             "duckdb_off_env": "1", "duckdb_env_changed_at": ""}
 # Chain 5's two (30_m1, 31_m2).
 VARIABLES.update({"managers_on": "0", "managers_flip_at": ""})
 RUN_AS_OWNER = "-- soak:run-as ks_app"

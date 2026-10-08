@@ -237,6 +237,18 @@ class HealthResponse(BaseModel):
             "process started."
         ),
     )
+    duckdb_switch: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "KS_DUCKDB, the week of silence's switch: `mode` as run (on, the "
+            "default, or off — this process must not open the DuckDB file), "
+            "`value` as read, `error` naming a value that was not understood "
+            "and ran as on. `opened_while_off` is `{site: {count, last_at}}` "
+            "for every open refused under off since the process started, a "
+            "site being the `module:function` that asked; never an "
+            "exception's text. Paged CRITICAL by the canary when non-empty."
+        ),
+    )
     warehouse_writer_mode: Optional[Dict[str, Any]] = Field(
         None,
         description=(

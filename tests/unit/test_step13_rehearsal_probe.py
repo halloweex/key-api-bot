@@ -1175,7 +1175,7 @@ def test_a_delete_through_a_lost_index_finds_nothing_duckdb_1_5_5(tmp_path):
 def test_the_ends_delete_costs_no_index_of_its_own_duckdb_1_5_5(tmp_path, monkeypatch):
     """`window_delete` behind a stop that left a WAL — a grace that ran out
     after P3's kill — asks one table per process, and each opens the copy
-    through the product's guard (`open_read_write`), as the product's next
+    through the product's guard (`open_file`), as the product's next
     start would. So the first process's close is not DuckDB's lossy
     checkpoint of the next table's index: every DELETE comes clean, and a
     loss D1 reports is one the product left. A bare read-write connect there

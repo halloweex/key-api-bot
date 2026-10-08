@@ -2227,7 +2227,7 @@ async def release_chain(pool, chain: ModuleType) -> bool:
     flip and is stale by then, which would resume a sync from a point DuckDB
     has long passed.
     """
-    from core import chain_latch
+    from core import chain_latch, lever_journal
     from core.write_chains import chain_name
 
     keys = [chain_latch.owner_key(t) for t in chain.CHAIN_TABLES]
@@ -2242,6 +2242,14 @@ async def release_chain(pool, chain: ModuleType) -> bool:
                 "DELETE FROM meta.chain_watermarks WHERE key = ANY($1::text[])",
                 keys,
             )
+            # The one durable trace a release leaves (OD-17 (a)): without it
+            # the release is only an absence of owner rows, which no soak
+            # check can date. In this transaction, so a release whose record
+            # cannot be written does not commit (core/lever_journal.py).
+            await lever_journal.record(
+                conn, lever_journal.CHAIN_COPY_BACK, subject=chain_name(chain),
+                outcome=lever_journal.RELEASED,
+                detail={"tables": list(chain.CHAIN_TABLES)})
     # The return says the CHAIN is released, not that a file was unlinked.
     # `chain_latch.release` answers False when the marker was already gone,
     # which is the very case this function is reached in when only the owner

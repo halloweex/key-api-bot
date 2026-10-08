@@ -19,7 +19,7 @@ uvicorn drains them too, and three write DuckDB (`SLOW_DUCKDB_WRITERS`). One
 in flight at a stop keeps web draining past the grace, and Docker kills it.
 Covering them would take ~340 s of grace, and with the same margin the
 ordinary case gets, a deploy — pull, stop, migrate, a 180 s health gate —
-would no longer fit the ssh step's 10-minute `command_timeout`. What makes the kill survivable is `open_read_write`: the
+would no longer fit the ssh step's 10-minute `command_timeout`. What makes the kill survivable is `open_file`: the
 WAL it leaves is checkpointed whole at the next start (see
 `test_duckdb_kill_guard.py`); the grace only makes the kill rarer. dockerd
 logged three forced kills in thirty days at the 10 s default. Verified on a
@@ -80,7 +80,7 @@ def test_web_waits_for_an_ordinary_shutdown():
 
 def test_a_slow_endpoint_outlasts_the_grace_and_is_named():
     """The arithmetic the earlier version of this file left out: a slow
-    endpoint in flight at a stop is killed, and the kill is `open_read_write`'s
+    endpoint in flight at a stop is killed, and the kill is `open_file`'s
     to absorb. If the timeout or the grace ever change so that the grace
     covers it, this fails — and the docs saying it does not must change."""
     from web.middleware import SLOW_ENDPOINT_TIMEOUT, SLOW_ENDPOINTS

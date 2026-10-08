@@ -436,6 +436,7 @@ def main() -> None:
             return
 
         from bot.canary import (
+            DUCKDB_SWITCH_WATCH_GAP_S, DUCKDB_SWITCH_WATCH_KEY,
             READ_FALLBACK_WATCH_GAP_S, READ_FALLBACK_WATCH_KEY, defer_flaky,
         )
         from core.alert_archive import record_watch
@@ -450,6 +451,14 @@ def main() -> None:
             record_watch(
                 READ_FALLBACK_WATCH_KEY, clean=result.read_fallbacks_clean,
                 gap_s=READ_FALLBACK_WATCH_GAP_S,
+                web_uptime_s=result.web_uptime_s,
+            )
+        # The week of silence's watch (OD-17 (a)), on the same terms — but only
+        # while web runs KS_DUCKDB=off: under `on`, today, nothing is written.
+        if result.duckdb_silent is not None:
+            record_watch(
+                DUCKDB_SWITCH_WATCH_KEY, clean=result.duckdb_silent,
+                gap_s=DUCKDB_SWITCH_WATCH_GAP_S,
                 web_uptime_s=result.web_uptime_s,
             )
 

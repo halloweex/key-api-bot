@@ -593,16 +593,18 @@ def window_rows(con: Any, run_id: Optional[int], order_id: Optional[int]) -> Dic
 # `connect()` (measured on 1.5.5), so a second table asked in the same process
 # would only repeat the first one's FATAL.
 #
-# Opened through the product's own guard (`core.duckdb_store.open_read_write`,
-# from the image under test), never a bare read-write connect: behind a stop
-# that left a WAL, a bare open replays it and its `close()` is DuckDB's lossy
-# checkpoint, so the first table's process would cost the next table's index
-# the WAL's entries and D1 would report a loss it made itself — measured on
-# 1.5.5, a killed writer's rows in two tables: the first DELETE clean, the
-# second the FATAL. The guard checkpoints first, which is how the product's
-# next start opens the file, so what D1 finds is what the product left. On a
-# file with no WAL (every graceful stop) the two opens are the same. An image
-# without the guard cannot import it: D1 is then UNKNOWN, never a raw open.
+# Opened through the product's own guard (`core.duckdb_switch.open_file`, the
+# one opener, from the image under test), never a bare read-write connect:
+# behind a stop that left a WAL, a bare open replays it and its `close()` is
+# DuckDB's lossy checkpoint, so the first table's process would cost the next
+# table's index the WAL's entries and D1 would report a loss it made itself —
+# measured on 1.5.5, a killed writer's rows in two tables: the first DELETE
+# clean, the second the FATAL. The guard checkpoints first, which is how the
+# product's next start opens the file, so what D1 finds is what the product
+# left. On a file with no WAL (every graceful stop) the two opens are the
+# same. An image without the guard cannot import it: D1 is then UNKNOWN,
+# never a raw open — and so it is under KS_DUCKDB=off, which the opener
+# refuses.
 _DELETE_ONE = r'''
 import json, sys
 import duckdb
@@ -610,8 +612,8 @@ db, table, where, value, app = sys.argv[1:6]
 sys.path.insert(0, app)
 out = {"table": table}
 try:
-    from core.duckdb_store import open_read_write
-    con = open_read_write(db)
+    from core.duckdb_switch import open_file
+    con = open_file(db)
     con.execute("SET memory_limit='512MB'")
     scan = f"SELECT COALESCE(count_if({where}), 0) FROM {table}"
     out["scanned"] = con.execute(scan, [value]).fetchone()[0]

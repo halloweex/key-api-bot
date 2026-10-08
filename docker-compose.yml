@@ -429,10 +429,10 @@ services:
     # (300 s; resync, refresh-statuses and reclassify write DuckDB): one in
     # flight outlasts this and is killed. Covering them (~340 s, plus the
     # pull, the migration and the 180 s health gate) would leave a deploy no
-    # margin in its 10-minute ssh timeout. A kill leaves a WAL, which
-    # open_read_write checkpoints whole at the next start; this only makes
-    # kills rarer. Deploys (`up -d`) and `docker compose stop` both honour it;
-    # weekly_compact.sh passes its own --timeout.
+    # margin in its 10-minute ssh timeout. A kill leaves a WAL, which the one
+    # opener (duckdb_switch.open_file) checkpoints whole at the next start;
+    # this only makes kills rarer. Deploys (`up -d`) and `docker compose stop`
+    # both honour it; weekly_compact.sh passes its own --timeout.
     stop_grace_period: 120s
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]

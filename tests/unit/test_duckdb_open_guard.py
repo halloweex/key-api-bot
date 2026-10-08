@@ -1,5 +1,12 @@
 """Every read-write open of a DuckDB file goes through the one opener that
-checkpoints first, `core.duckdb_store.open_read_write`.
+checkpoints first, `core.duckdb_switch.open_file`.
+
+It is the application's only opener for a second reason too: it refuses every
+open under `KS_DUCKDB=off` (the week of silence), and
+`tests/unit/test_duckdb_switch.py` holds `core/`, `web/` and `bot/` to it by
+its own walk. One function carries both guards — the refusal first, then the
+checkpoint — so neither walk can be satisfied by an opener the other does not
+see.
 
 That opener is what keeps a killed writer's index entries (see its docstring
 and `test_duckdb_kill_guard.py`). A second read-write `duckdb.connect`
@@ -12,7 +19,7 @@ holds every `duckdb.connect` it reaches through `import duckdb [as x]` or
 
 - `read_only=True` (a literal), or `config={"access_mode": "READ_ONLY"}`;
 - in memory (no target, `""`, `":memory:…"`);
-- inside `open_read_write`;
+- inside `open_file`;
 - a named exemption, each of which must match exactly one call.
 
 `duckdb.connect` passed around as a value fails, because nothing could then
@@ -49,7 +56,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 ROOTS = ("core", "web", "bot", "scripts", "deploy")
 
-OPENER = ("core/duckdb_store.py", "open_read_write")
+OPENER = ("core/duckdb_switch.py", "open_file")
 
 # (file, function) → why it may open read-write without the guard.
 EXEMPT = {
@@ -169,7 +176,7 @@ def scan(source: str, rel: str):
             calls.append((rel, where[1], n.lineno, kind))
             if kind == "read_write" and where != OPENER and where not in EXEMPT:
                 violations.append((rel, where[1], n.lineno,
-                                   "read-write duckdb.connect outside open_read_write"))
+                                   "read-write duckdb.connect outside open_file"))
 
     # ast.walk is breadth-first, so an expression is read before its parts,
     # and the parts of one that yielded text are not read again on their own.
@@ -315,7 +322,7 @@ def test_no_document_tells_anyone_to_open_it_read_write():
     assert not violations, (
         "a document tells an agent or a person to open a DuckDB file "
         "read-write without the checkpoint-first guard (read_only=True, "
-        "-readonly, or core.duckdb_store.open_read_write):\n"
+        "-readonly, or core.duckdb_switch.open_file):\n"
         + "\n".join(f"  {r}:{line}: {why}" for r, line, why in violations)
     )
 
@@ -324,7 +331,7 @@ def test_every_read_write_open_goes_through_the_guard(walked):
     _, violations = walked
     assert not violations, (
         "a DuckDB file opened read-write without the checkpoint-first guard "
-        "(use core.duckdb_store.open_read_write, or read_only=True):\n"
+        "(use core.duckdb_switch.open_file, or read_only=True):\n"
         + "\n".join(f"  {r}:{line} in {fn}: {why}" for r, fn, line, why in violations)
     )
 
@@ -352,7 +359,7 @@ def test_the_opener_checkpoints_before_anything_else():
          and isinstance(n.func, ast.Attribute) and n.func.attr == "execute"),
         key=lambda n: (n.lineno, n.col_offset),
     )
-    assert executes, "open_read_write executes nothing"
+    assert executes, "open_file executes nothing"
     first = executes[0].args[0]
     assert isinstance(first, ast.Constant) and first.value == "CHECKPOINT", (
         "the first statement on the replayed instance must be CHECKPOINT"
@@ -365,9 +372,21 @@ def test_the_store_opens_through_the_guard():
                  if isinstance(n, ast.ClassDef) and n.name == "DuckDBStore")
     connect = next(n for n in store.body
                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "connect")
-    called = {n.func.id for n in ast.walk(connect)
-              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-    assert "open_read_write" in called
+    called = {ast.unparse(n.func) for n in ast.walk(connect) if isinstance(n, ast.Call)}
+    assert "duckdb_switch.open_file" in called, called
+
+
+def test_the_switch_refuses_before_the_checkpoint_opens_anything():
+    """The two guards are one function and the refusal comes first: under
+    `KS_DUCKDB=off` the driver is never reached, so no WAL is replayed and no
+    file is created. Mutation: move `guard()` after `duckdb.connect`."""
+    tree = ast.parse((REPO / OPENER[0]).read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == OPENER[1])
+    calls = sorted((n for n in ast.walk(fn) if isinstance(n, ast.Call)),
+                   key=lambda n: (n.lineno, n.col_offset))
+    names = [ast.unparse(n.func) for n in calls]
+    assert names.index("guard") < names.index("duckdb.connect"), names
 
 
 # ─── the walk itself, on sources written to fool it ─────────────────────────
@@ -412,7 +431,7 @@ def test_the_store_opens_through_the_guard():
     ("run([exe, '-c', f'import duckdb; duckdb.connect({p!r}).execute(q)'])",
      "program held as text"),
     ("PROG = '''\nimport duckdb\ncon = duckdb.connect(db, read_only=True)\n'''", None),
-    ("PROG = '''\nfrom core.duckdb_store import open_read_write\ncon = open_read_write(db)\n'''",
+    ("PROG = '''\nfrom core.duckdb_switch import open_file\ncon = open_file(db)\n'''",
      None),
 ])
 def test_the_walk_sees_what_it_must(source, verdict):

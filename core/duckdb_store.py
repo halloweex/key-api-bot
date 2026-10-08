@@ -34,6 +34,7 @@ if TYPE_CHECKING:  # pragma: no cover — the annotation's name, no import cost
 import duckdb
 import pandas as pd
 
+from core import duckdb_switch
 from core.models import LOST_STATUS_GROUP_ID, Order, OrderStatus
 from core.exceptions import QueryTimeoutError
 from core.observability import cut_row_dumps, without_row_dump
@@ -143,71 +144,6 @@ def _memory_limit() -> str:
     return DEFAULT_DUCKDB_MEMORY_LIMIT
 
 
-def open_read_write(path) -> "duckdb.DuckDBPyConnection":
-    """The one read-write `duckdb.connect` of an analytics file, and it
-    checkpoints before anything else runs.
-
-    DuckDB 1.5.5 loses index entries across a kill. Rows a killed writer left
-    in the WAL are replayed into every `CREATE INDEX` index (not the PK/UNIQUE
-    ones) as entries that index has not bound yet, and DuckDB's *own*
-    checkpoint — the one `close()` runs, or `wal_autocheckpoint` — writes those
-    indexes without them unless something bound the index first. From then on
-    `WHERE col = ?` misses the rows a scan still sees, and a write that must
-    take such a row out of the index is a FatalException ("Failed to delete
-    all rows from index"). An explicit CHECKPOINT here, on the freshly replayed
-    instance, keeps every entry: measured through `DuckDBStore.connect()`, all
-    57 indexes whole instead of 45 of 45 single-column ones short.
-
-    **First, not after the SETs**: a SET that fails leaves the instance valid,
-    and closing a valid instance is the lossy checkpoint. With nothing before
-    it, the only failure left is the CHECKPOINT's own. One that fails inside
-    DuckDB is a FatalException in 1.5.5: the instance writes nothing on
-    close, the WAL stays, and the next open replays it again. One that is
-    *interrupted* is not — `InterruptException`, or Ctrl-C in a CLI that opens
-    through the store, leaves the instance valid with the WAL unapplied
-    (measured), and closing that is the lossy checkpoint. The PRAGMA below is
-    what keeps that close from writing, so no exit from here takes the lossy
-    path. And every exit closes: an instance left open while its exception's
-    traceback lives holds the file's lock against every other process — the
-    compaction, a CLI — until something drops the traceback.
-
-    Free on a clean start — a graceful close leaves no WAL. Behind a kill it
-    is the checkpoint the restart would have taken at close, moved to the
-    open: 1.5 s / 3.6 s / 8.9 s for 30 / 300 / 900 MB of WAL on one CPU, peak
-    memory set by the replay, not by this. A read-only open replays into
-    memory and answers correctly; it can neither lose entries nor take this.
-    `tests/unit/test_duckdb_open_guard.py` holds every opener in the
-    repository to it.
-    """
-    wal = Path(f"{path}.wal")
-    try:
-        replayed = wal.stat().st_size
-    except OSError:
-        replayed = 0
-    con = duckdb.connect(str(path))
-    started = time.monotonic()
-    try:
-        con.execute("CHECKPOINT")
-    except BaseException:
-        with contextlib.suppress(Exception):
-            con.execute("PRAGMA disable_checkpoint_on_shutdown")
-        with contextlib.suppress(Exception):
-            con.close()
-        raise
-    if replayed:
-        # A clean close leaves no WAL, so one here means the last read-write
-        # instance did not close cleanly: an OOM kill, a stop that ran out of
-        # grace, or this process reopening after a FATAL invalidated it (an
-        # invalidated instance writes nothing on close).
-        logger.warning(
-            "DuckDB replayed %.1f MB of WAL that a writer left without a clean "
-            "close (killed, or invalidated by a FATAL) and checkpointed it in "
-            "%.1f s before anything else ran: %s",
-            replayed / 1e6, time.monotonic() - started, path,
-        )
-    return con
-
-
 def _invalidated(conn) -> "Optional[duckdb.FatalException]":
     """The FatalException a statement on `conn` raises once DuckDB has
     invalidated its instance, or None while it answers.
@@ -232,9 +168,9 @@ def _invalidated(conn) -> "Optional[duckdb.FatalException]":
 
 def _fatal_kind(echo: BaseException) -> str:
     """`index` — an index short in the file, the damage a killed writer's WAL
-    left before `open_read_write` (the lever is rebuilding every CREATE INDEX
-    index); `other` — anything else. Read off the "invalidated" echo, which
-    quotes the original error."""
+    left before the open guard (`duckdb_switch.open_file`; the lever is
+    rebuilding every CREATE INDEX index); `other` — anything else. Read off
+    the "invalidated" echo, which quotes the original error."""
     if "delete all rows from index" in str(echo).lower():
         return "index"
     return "other"
@@ -684,9 +620,11 @@ class DuckDBStore(
                     f"the DuckDB store is closed (shutdown): {self.db_path}")
             self._closed = False
             if self._connection is None:
-                # CHECKPOINTs whatever WAL a killed writer left, before the
-                # SETs below — see `open_read_write`.
-                self._connection = open_read_write(self.db_path)
+                # Through the one opener: it refuses under KS_DUCKDB=off
+                # before the driver can open — or create — the file, and
+                # otherwise CHECKPOINTs whatever WAL a killed writer left,
+                # before the SETs below (core/duckdb_switch.py `open_file`).
+                self._connection = duckdb_switch.open_file(self.db_path)
                 try:
                     # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
                     # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
@@ -799,9 +737,9 @@ class DuckDBStore(
         next use that raises, which is every use of an invalidated instance.
 
         What that does not do is heal: a FATAL from a short index (see
-        `open_read_write`) comes back on the same write every time, because
-        the index is short in the file. `fatal_status()` keeps /api/health
-        degraded, and the page standing, until a restart.
+        `duckdb_switch.open_file`) comes back on the same write every time,
+        because the index is short in the file. `fatal_status()` keeps
+        /api/health degraded, and the page standing, until a restart.
 
         A store `close()` has closed is not reopened here: the open is
         `connect(reopen=False)`, which raises `StoreClosedError`. Otherwise a
@@ -852,9 +790,9 @@ class DuckDBStore(
         one, left running, is a worker thread per FATAL waiting forever for
         work nothing will send it. Closing an invalidated instance writes
         nothing — the WAL stays, and the next open replays and checkpoints it
-        through `open_read_write` — and a fresh `duckdb.connect` of the same
-        file in the same process gets a new instance, even while a cursor of
-        the old one is alive (both measured on 1.5.5).
+        through `duckdb_switch.open_file` — and a fresh `duckdb.connect` of
+        the same file in the same process gets a new instance, even while a
+        cursor of the old one is alive (both measured on 1.5.5).
         """
         conn = self._connection
         if conn is None:
@@ -3017,7 +2955,7 @@ class DuckDBStore(
 
             # Validate the copy read-only (outside the lock).
             def _validate() -> int:
-                con = duckdb.connect(str(tmp_path), read_only=True)
+                con = duckdb_switch.open_file(tmp_path, read_only=True)
                 try:
                     return con.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
                 finally:

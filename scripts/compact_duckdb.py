@@ -238,7 +238,17 @@ def _rendered_start(sql):
 def phase1_export() -> dict:
     section("PHASE 1: EXPORT TO PARQUET")
 
-    src = duckdb.connect(str(SOURCE_DB), read_only=True)
+    # Through the application's one opener, not `duckdb.connect`: this is the
+    # only scheduled process outside web that opens the live file, and it
+    # opens it read-only, which changes no byte — so the hourly hash of the
+    # week of silence (deploy/duckdb_silence_check.sh) cannot see it, and
+    # only the switch can. The sidecar is started with the whole `.env`, so
+    # under `KS_DUCKDB=off` it is refused here before the driver runs, and
+    # `main` says why (OD-17 (a)). Under `on` this is `duckdb.connect`.
+    _ensure_app_importable()
+    from core import duckdb_switch
+
+    src = duckdb_switch.open_file(SOURCE_DB, read_only=True)
     src.execute(f"SET memory_limit='{MEM_LIMIT}'")
     tmp_dir = DATA_DIR / "duckdb_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -1018,7 +1028,20 @@ def main():
     log(f"Application code: {APP_ROOT}")
 
     preflight()
-    manifest = phase1_export()
+    from core.duckdb_switch import DuckDBOpenedWhileOff
+
+    try:
+        manifest = phase1_export()
+    except DuckDBOpenedWhileOff:
+        # The last ERROR line is what weekly_compact.sh quotes in its
+        # "Compact aborted" message, so it says what to do: the compaction is
+        # retired at the start of the week of silence, and a cron that still
+        # fires is the reminder that its line was left in root's crontab.
+        log("KS_DUCKDB=off: the weekly compaction is refused before it opens "
+            "the DuckDB file (the week of silence, OD-17 (a)). Nothing was "
+            "read or written. Remove weekly_compact.sh from root's crontab: "
+            "it is retired at the start of the week of silence", "ERROR")
+        sys.exit(1)
     phase2_import(manifest)
     phase3_validate(manifest)
     phase4_swap_if_enabled()

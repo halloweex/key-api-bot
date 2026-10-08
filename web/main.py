@@ -17,6 +17,7 @@ from web.routes import api, pages, auth, chat, websocket
 from web.routes.auth import api_gate, require_admin
 from web.middleware import RequestLoggingMiddleware, RequestTimeoutMiddleware
 from bot.database import init_database
+from core import duckdb_switch
 from core.duckdb_store import get_store, close_store
 from core.sync_service import init_and_sync
 from core.runtime_modes import configure_modes
@@ -189,6 +190,7 @@ async def startup_event():
 
     # Initialize DuckDB analytics store and sync from API
     logger.info("Initializing DuckDB analytics store...")
+    store = None
     try:
         await init_and_sync(full_sync_days=730)
         store = await get_store()
@@ -199,6 +201,18 @@ async def startup_event():
             f"{stats['categories']} categories, "
             f"{stats['db_size_mb']} MB"
         )
+    except duckdb_switch.DuckDBOpenedWhileOff:
+        # KS_DUCKDB=off, and the boot's first act is to open the file. Web
+        # cannot work without it yet — that is stage 5's decoupling — but it
+        # must not die of it either: the refusal is already counted, and only
+        # a web that answers /api/health lets the canary page it
+        # (`duckdb_opened_while_off`). So start with no store, say so, and let
+        # every later path that reaches for one be refused and counted too.
+        # Under `on` this branch cannot be taken: nothing raises it.
+        logger.critical(
+            "KS_DUCKDB=off: web starts with no DuckDB store. Nothing that "
+            "needs one works — order intake included — and every path that "
+            "tries is refused and published under duckdb_switch on /api/health")
     except Exception as e:
         logger.error(f"DuckDB sync failed on startup: {e}", exc_info=True)
         # Don't crash if store has data — serve stale data, scheduler will retry sync
@@ -240,28 +254,30 @@ async def startup_event():
     #
     # The write fills NULLs only, so this is a no-op on every boot after the
     # first, and it can never overwrite a campaign the app recorded itself.
-    try:
-        restored = await store.backfill_sms_campaign_record(
-            campaign="aug-promo-birthday-website",
-            message_text=(
-                "Красуне, нашому сайту 2 роки \u2665 -30%, лише 2 дні: "
-                "koreanstory.com.ua"
-            ),
-            message_parts=1,
-            recipients_sent=8375,
-            price_per_part=1.2744,
-            cost_total=10673.00,
-            notes=(
-                "Текст и стоимость восстановлены вручную: кампания отправлена "
-                "до того, как приложение стало их записывать. 5 550 получателей, "
-                "8 375 сообщений — 2 825 из них дубль от повторной отправки."
-            ),
-        )
-        if restored:
-            logger.info("Restored the August campaign's message and cost")
-    except Exception as e:
-        # A campaign card missing one line must never cost a startup.
-        logger.warning(f"Campaign record restore skipped: {e}")
+    # No store under KS_DUCKDB=off (above): there is nothing to restore into.
+    if store is not None:
+        try:
+            restored = await store.backfill_sms_campaign_record(
+                campaign="aug-promo-birthday-website",
+                message_text=(
+                    "Красуне, нашому сайту 2 роки \u2665 -30%, лише 2 дні: "
+                    "koreanstory.com.ua"
+                ),
+                message_parts=1,
+                recipients_sent=8375,
+                price_per_part=1.2744,
+                cost_total=10673.00,
+                notes=(
+                    "Текст и стоимость восстановлены вручную: кампания отправлена "
+                    "до того, как приложение стало их записывать. 5 550 получателей, "
+                    "8 375 сообщений — 2 825 из них дубль от повторной отправки."
+                ),
+            )
+            if restored:
+                logger.info("Restored the August campaign's message and cost")
+        except Exception as e:
+            # A campaign card missing one line must never cost a startup.
+            logger.warning(f"Campaign record restore skipped: {e}")
 
     # Start background job scheduler (replaces old asyncio background sync)
     try:

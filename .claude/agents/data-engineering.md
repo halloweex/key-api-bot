@@ -231,9 +231,10 @@ class DuckDBStore:
     async def _get_connection(self) -> duckdb.DuckDBPyConnection:
         async with self._lock:
             if self._connection is None:
-                # Never a bare duckdb.connect read-write: open_read_write
+                # Never a bare duckdb.connect read-write: open_file (the one
+                # opener, core/duckdb_switch.py) refuses under KS_DUCKDB=off and
                 # CHECKPOINTs a killed writer's WAL before anything else runs.
-                self._connection = open_read_write(self._db_path)
+                self._connection = duckdb_switch.open_file(self._db_path)
             return self._connection
 
     async def checkpoint(self) -> None:
@@ -558,7 +559,7 @@ PYTHONPATH=. python scripts/force_resync.py --days 365
 # Validate specific date
 PYTHONPATH=. python scripts/check_date.py 2024-01-15
 
-# DuckDB CLI — read-only, for the reason open_read_write gives
+# DuckDB CLI — read-only, for the reason duckdb_switch.open_file gives
 duckdb -readonly data/analytics.duckdb
 
 # Check DB size

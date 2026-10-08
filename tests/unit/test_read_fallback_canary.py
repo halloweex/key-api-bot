@@ -581,28 +581,34 @@ class TestABlindProbeKeepsThePage:
 class TestUnjudgedKeys:
     _CHAIN4 = {"buyer_sync": {"last_ok_age_s": 60},
                "write_chains": {canary.BUYER_CHAIN: {"mode": "duckdb"}}}
+    _SWITCH = {"duckdb_switch": {"mode": "on", "opened_while_off": {}}}
 
     def test_no_payload_judges_none_of_them(self):
         assert canary.unjudged_keys(None) == [
             "read_fallback_used", "read_routed_to_duckdb", "read_refused",
-            "buyer_sync_stalled", "buyer_sync_stalled_chain"]
+            "buyer_sync_stalled", "buyer_sync_stalled_chain",
+            "duckdb_opened_while_off"]
 
     def test_a_payload_with_every_block_judges_all_of_them(self):
         payload = {"read_fallbacks": {}, "read_fallback_mode": {"mode": "duckdb"},
-                   **self._CHAIN4}
+                   **self._CHAIN4, **self._SWITCH}
         assert canary.unjudged_keys(payload) == []
 
     def test_each_block_answers_for_its_own_keys(self):
-        assert canary.unjudged_keys({"read_fallback_mode": {}, **self._CHAIN4}) == [
-            "read_fallback_used"]
-        assert canary.unjudged_keys({"read_fallbacks": {}, **self._CHAIN4}) == [
+        assert canary.unjudged_keys({"read_fallback_mode": {}, **self._CHAIN4,
+                                     **self._SWITCH}) == ["read_fallback_used"]
+        assert canary.unjudged_keys({"read_fallbacks": {}, **self._CHAIN4,
+                                     **self._SWITCH}) == [
             "read_routed_to_duckdb", "read_refused"]
-        both = {"read_fallbacks": {}, "read_fallback_mode": {}}
+        both = {"read_fallbacks": {}, "read_fallback_mode": {}, **self._SWITCH}
         assert canary.unjudged_keys({**both, "buyer_sync": {"last_ok_age_s": 1}}) == [
             "buyer_sync_stalled_chain"], "no chain entry"
         assert canary.unjudged_keys({**both, "buyer_sync": None,
                                      "write_chains": self._CHAIN4["write_chains"]}) == [
             "buyer_sync_stalled", "buyer_sync_stalled_chain"], "no step block"
+        assert canary.unjudged_keys({"read_fallbacks": {}, "read_fallback_mode": {},
+                                     **self._CHAIN4}) == [
+            "duckdb_opened_while_off"], "no switch block"
 
     def test_only_the_od07_keys_and_the_buyers_steps_are_ever_held(self):
         """Every other payload-derived key keeps today's behaviour; each held
@@ -619,6 +625,8 @@ class TestUnjudgedKeys:
             {"buyer_sync": {"last_ok_age_s": canary.BUYER_SYNC_CHAIN_STALE_S + 1,
                             "last_attempt_age_s": 60},
              "write_chains": {canary.BUYER_CHAIN: {"mode": "postgres"}}})}
+        emitted |= {k for k, _ in canary.check_duckdb_switch(
+            {"duckdb_switch": {"opened_while_off": {"a": _entry(1)}}})}
         assert set(canary.unjudged_keys(None)) == emitted
 
     @pytest.mark.asyncio
@@ -661,8 +669,11 @@ class TestTheBotWritesTheWatch:
         under no branch of what the probe found, because a clean probe is the
         one that matters most and pages nothing."""
         job = _canary_job()
+        # This watch's calls: the week of silence's watch sits beside it under
+        # its own key (tests/unit/test_duckdb_switch.py).
         calls = [n for n in ast.walk(job) if isinstance(n, ast.Call)
-                 and isinstance(n.func, ast.Name) and n.func.id == "record_watch"]
+                 and isinstance(n.func, ast.Name) and n.func.id == "record_watch"
+                 and n.args and ast.unparse(n.args[0]) == "READ_FALLBACK_WATCH_KEY"]
         assert len(calls) == 1, "the watch is written once per probe"
         call = calls[0]
         assert [ast.unparse(a) for a in call.args] == ["READ_FALLBACK_WATCH_KEY"]
