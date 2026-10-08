@@ -374,6 +374,83 @@ async def test_run_canary_flags_degraded_status_as_critical():
     assert any("degraded" in f for f in result.failures)
 
 
+async def _judge(payload):
+    future = datetime.now(timezone.utc) + timedelta(days=60)
+    fake_cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+    async with _mock_transport(lambda request: httpx.Response(200, json=payload)) as client:
+        with patch.object(canary, "_fetch_peer_cert", return_value=fake_cert):
+            return await run_canary(DASHBOARD, client=client)
+
+
+def _fatal_payload(fatal, degraded_by=("duckdb_fatal",)):
+    payload = _healthy_payload()
+    payload["status"] = "degraded"
+    payload["degraded_by"] = list(degraded_by)
+    payload["duckdb"]["fatal"] = fatal
+    return payload
+
+
+class TestADuckDBFatalIsNamed:
+    """`/api/health` reads degraded after a DuckDB FATAL (the kill guard's
+    choice: the existing page, `health_status`). The page used to read
+    "Dashboard DOWN", "status=degraded" and "a restart won't fix a
+    migration" — while web answered, for a FATAL the reconnect had already
+    answered past, and for a short index that a restart does not heal and
+    the compaction does (batch-E review). Mutation: judge `health_status` as
+    before, whatever `degraded_by` says."""
+
+    @pytest.mark.asyncio
+    async def test_a_short_index_is_critical_and_names_the_compaction(self):
+        result = await _judge(_fatal_payload({
+            "count": 2, "kinds": {"index": 2}, "last_at": "2026-10-08T10:00:00+00:00",
+            "index_short": {"since": "2026-10-08T09:00:00+00:00", "count": 2}}))
+        assert result.failure_keys == ["health_status"]
+        assert result.severity == "critical" and result.duckdb_fatal == "index"
+        msg = canary.format_alert(result, DASHBOARD)
+        assert msg.splitlines()[0].endswith("<b>DuckDB index short</b>"), msg
+        assert "index is short" in msg and "2026-10-08T09:00:00" in msg
+        assert "weekly_compact.sh" in msg and "migration" not in msg
+
+    @pytest.mark.asyncio
+    async def test_after_a_restart_the_written_down_damage_still_pages(self):
+        """The process that saw the FATAL is gone (`count` 0, no kinds); the
+        file still holds the short index."""
+        result = await _judge(_fatal_payload({
+            "count": 0, "kinds": {}, "last_at": None,
+            "index_short": {"since": "2026-10-08T09:00:00+00:00", "count": 1}}))
+        assert result.duckdb_fatal == "index" and result.severity == "critical"
+        assert "found before web last restarted" in result.failures[0]
+
+    @pytest.mark.asyncio
+    async def test_a_fatal_the_reconnect_answered_past_is_a_warning(self):
+        result = await _judge(_fatal_payload({
+            "count": 1, "kinds": {"other": 1}, "last_at": "2026-10-08T10:00:00+00:00",
+            "index_short": None}))
+        assert result.failure_keys == ["health_status"]
+        assert result.severity == "warn" and result.duckdb_fatal == "other"
+        msg = canary.format_alert(result, DASHBOARD)
+        assert "Dashboard DOWN" not in msg and "Dashboard warning" in msg
+        assert "DuckDB FATAL" in msg and "reads answer" in msg
+        assert "'DuckDB FATAL'" in msg and "migration" not in msg
+
+    @pytest.mark.parametrize("degraded_by", [
+        ("migrations", "duckdb_fatal"), ("duckdb", "duckdb_fatal"), ("migrations",), None])
+    @pytest.mark.asyncio
+    async def test_any_other_cause_is_the_outage_it_always_was(self, degraded_by):
+        """A FATAL beside a failed migration or a store that did not answer
+        is still DOWN, with the old lever — and so is a web that does not
+        say why (`degraded_by` absent: an older build)."""
+        payload = _fatal_payload({"count": 1, "kinds": {"other": 1}, "last_at": "x"},
+                                 degraded_by or ())
+        if degraded_by is None:
+            payload.pop("degraded_by")
+        result = await _judge(payload)
+        assert result.duckdb_fatal is None and result.severity == "critical"
+        assert result.failures[0] == "status=degraded"
+        msg = canary.format_alert(result, DASHBOARD)
+        assert "Dashboard DOWN" in msg and "migration" in msg
+
+
 @pytest.mark.asyncio
 async def test_run_canary_flags_non_200_as_critical():
     def handler(request):

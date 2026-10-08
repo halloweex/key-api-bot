@@ -28,7 +28,9 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import duckdb
 import pytest
@@ -629,6 +631,123 @@ def test_health_reads_degraded_and_names_the_kind(damaged_file, monkeypatch):
     assert body["duckdb"]["orders"] is not None
     assert body["duckdb"]["fatal"]["kinds"] == {"index": 1}
     assert body["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_a_short_index_outlives_a_restart_until_a_compaction_swaps_the_file(
+        damaged_file, tmp_path):
+    """`_fatal` is this process's memory, and the damage is the file's: a
+    restart announced a short index healed while the same write still failed
+    (batch-E review). Written down beside the file, by the file's identity,
+    which the compaction's swap replaces and a restart does not. Mutation:
+    publish `_fatal` alone again."""
+    path = _copy(damaged_file, tmp_path / "db")
+    store = await _connect(path)
+    try:
+        with pytest.raises(duckdb.FatalException):
+            await _write(store)
+        first = store.fatal_status()["index_short"]
+        assert first["count"] == 1 and first["since"] == first["last_at"]
+    finally:
+        await store.close()
+
+    store = await _connect(path)              # the restart
+    try:
+        status = store.fatal_status()
+        assert status["count"] == 0 and status["kinds"] == {}
+        assert status["index_short"] == first
+        with pytest.raises(duckdb.FatalException):
+            await _write(store)               # not healed
+        again = store.fatal_status()["index_short"]
+        assert again["count"] == 2 and again["since"] == first["since"]
+    finally:
+        await store.close()
+
+    # The compaction: a file built afresh, renamed over the live one.
+    clean = tmp_path / "clean" / "analytics.duckdb"
+    clean.parent.mkdir()
+    await (await _connect(clean)).close()
+    os.replace(clean, path)
+    store = await _connect(path)
+    try:
+        assert store.fatal_status() is None
+    finally:
+        await store.close()
+
+
+def _health_then_canary(monkeypatch):
+    """`/api/health` through the app, then the canary's judgement of it."""
+    from fastapi.testclient import TestClient
+
+    from bot import canary
+    from web.main import app
+    from web.ratelimit import limiter
+    from web.routes.api import health as health_routes
+
+    monkeypatch.setitem(health_routes._stats_cache, "data", None)
+    monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
+    limiter.reset()
+    try:
+        body = TestClient(app).get("/api/health").json()
+    finally:
+        limiter.reset()
+        asyncio.run(duckdb_store.close_store())
+
+    async def judge():
+        import httpx
+
+        future = datetime.now(timezone.utc) + timedelta(days=60)
+        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+        async with httpx.AsyncClient(transport=transport) as client:
+            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
+                return await canary.run_canary("https://dash.invalid", client=client)
+
+    return body, asyncio.run(judge()), canary
+
+
+def test_after_a_restart_health_and_the_canary_still_name_the_short_index(
+        damaged_file, monkeypatch):
+    shutil.copy2(damaged_file, duckdb_store.DB_PATH)
+
+    async def fatal_once():
+        store = await duckdb_store.get_store()
+        try:
+            with pytest.raises(duckdb.FatalException):
+                await _write(store)
+        finally:
+            await duckdb_store.close_store()   # the restart: a new store after it
+
+    asyncio.run(fatal_once())
+    body, result, canary = _health_then_canary(monkeypatch)
+    assert body["duckdb"]["status"] == "connected"
+    assert body["duckdb"]["fatal"]["kinds"] == {}
+    assert body["duckdb"]["fatal"]["index_short"]["count"] == 1
+    assert body["status"] == "degraded" and body["degraded_by"] == ["duckdb_fatal"]
+    assert result.duckdb_fatal == "index" and result.severity == "critical"
+    assert "health_status" in result.failure_keys
+    assert canary._title(result) == "DuckDB index short"
+    assert "weekly_compact.sh" in canary._what_to_do(result)
+
+
+def test_a_fatal_the_reconnect_answered_past_is_not_dashboard_down(monkeypatch):
+    """The review's reproduction: one FATAL of kind `other` as
+    `_drop_if_invalidated` records it, a store that answers, and the page it
+    made. Mutation: judge `health_status` whatever `degraded_by` says."""
+    async def other_fatal():
+        store = await duckdb_store.get_store()
+        monkeypatch.setattr(store, "_fatal", {
+            "count": 1, "kinds": {"other": 1}, "last_at": "2026-10-08T10:00:00+00:00"})
+        async with store.connection() as conn:
+            assert conn.execute("SELECT 1").fetchone()[0] == 1
+
+    asyncio.run(other_fatal())
+    body, result, canary = _health_then_canary(monkeypatch)
+    assert body["status"] == "degraded" and body["degraded_by"] == ["duckdb_fatal"]
+    assert result.duckdb_fatal == "other" and result.severity == "warn"
+    assert canary._title(result) == "Dashboard warning"
+    lever = canary._what_to_do(result)
+    assert "DuckDB FATAL" in lever and "migration" not in lever
 
 
 if __name__ == "__main__" and sys.argv[1:2] == ["--child"]:

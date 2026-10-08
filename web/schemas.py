@@ -40,8 +40,12 @@ class DuckDBStats(BaseModel):
             "until every CREATE INDEX index is rebuilt (the Sunday compaction, "
             "or weekly_compact.sh by hand); `other` is any other FATAL. Each "
             "invalidated instance is dropped and the next use opens the file "
-            "again, so DuckDB keeps answering; `status` reads degraded until a "
-            "restart. Null until one. Never the exception text."
+            "again, so DuckDB keeps answering. `index_short` (`since`, "
+            "`last_at`, `count`) is that index damage as written down beside "
+            "the file, and outlives a restart until a compaction replaces the "
+            "file. `status` reads degraded while either is set: a FATAL of "
+            "this process until web restarts, `index_short` until the "
+            "compaction. Null until one. Never the exception text."
         ),
     )
 
@@ -96,6 +100,14 @@ class SyncStatus(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str = Field(description="Service status: healthy or degraded")
+    degraded_by: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Why `status` is degraded, one word per cause: `duckdb` (the store "
+            "did not answer), `migrations` (a step failed), `duckdb_fatal` "
+            "(`duckdb.fatal` is set). Empty when healthy."
+        ),
+    )
     version: str = Field(description="Application version")
     uptime_seconds: int = Field(description="Uptime in seconds")
     correlation_id: Optional[str] = Field(None, description="Request correlation ID")

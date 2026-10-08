@@ -207,6 +207,10 @@ class CanaryResult:
     # Keys this probe could not judge, because it read no block to judge them
     # by: the resolve keeps them firing (see unjudged_keys).
     unjudged_keys: list[str] = field(default_factory=list)
+    # When `health_status` failed for a DuckDB FATAL and nothing else
+    # (`duckdb_fatal_only`): "index" or "other", which set the page's
+    # severity, title and lever. None otherwise.
+    duckdb_fatal: Optional[str] = None
 
 
 # ─── Health probe ───────────────────────────────────────────────────────────
@@ -942,6 +946,36 @@ def read_fallbacks_clean(payload: Optional[dict]) -> Optional[bool]:
     return not block and not _routed_to_duckdb(payload)
 
 
+def duckdb_fatal_only(payload: Optional[dict]) -> "Optional[tuple[str, str]]":
+    """`(kind, message)` when web says it is degraded for a DuckDB FATAL and
+    for nothing else (`degraded_by == ["duckdb_fatal"]`); None otherwise, and
+    for a web that does not say why.
+
+    `index` — an index is short in the file (`duckdb.fatal.index_short`, or an
+    index FATAL in this process): the write that meets it fails until the
+    indexes are rebuilt, which a compaction does and a restart does not.
+    `other` — every other FATAL: the store dropped the instance and opened the
+    file again, so reads answer; the status stays degraded until web
+    restarts. Counts and dates only — the block never carries the text."""
+    payload = payload or {}
+    if payload.get("degraded_by") != ["duckdb_fatal"]:
+        return None
+    fatal = (payload.get("duckdb") or {}).get("fatal")
+    if not isinstance(fatal, dict):
+        return None
+    kinds = fatal.get("kinds") if isinstance(fatal.get("kinds"), dict) else {}
+    index = fatal.get("index_short") if isinstance(fatal.get("index_short"), dict) else None
+    count = _number(fatal.get("count")) or 0
+    if index or _number(kinds.get("index")):
+        since = (index or {}).get("since") or fatal.get("last_at") or "?"
+        seen = (f"{count} FATAL in this process" if count
+                else "found before web last restarted")
+        return ("index", f"DuckDB: an index is short in the file since {since} — "
+                         f"the write that meets it fails ({seen})")
+    return ("other", f"DuckDB FATAL ×{count} in this process, last {fatal.get('last_at') or '?'}"
+                     " — the instance was dropped and the file reopened; reads answer")
+
+
 def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     """The OD-07 keys this probe could not judge, because it read no block to
     judge them by — web did not answer, or answered without the block.
@@ -1331,13 +1365,26 @@ async def run_canary(
     read_fallbacks_seen: Optional[bool] = None
     uptime_seen: Optional[float] = None
     duckdb_silent_seen: Optional[bool] = None
+    duckdb_fatal: Optional[str] = None
     if payload:
         health_status = payload.get("status")
         sync_block = payload.get("sync") or {}
         sync_seconds = sync_block.get("seconds_since_sync")
         if health_status and health_status != "healthy":
-            fail("health_status", f"status={health_status}")
-            severity = "critical"
+            fatal = duckdb_fatal_only(payload)
+            if fatal is None:
+                fail("health_status", f"status={health_status}")
+                severity = "critical"
+            else:
+                # The same key — the page the kill guard chose — named for
+                # what it is: web answers, so it is not "DOWN", and neither
+                # lever is a migration's or a restart's (batch-E review).
+                duckdb_fatal, message = fatal
+                fail("health_status", message)
+                if duckdb_fatal == "index":
+                    severity = "critical"
+                elif severity == "ok":
+                    severity = "warn"
 
         # Only judge freshness when the endpoint answered at all — an
         # unreachable dashboard is already reported above, and piling a
@@ -1552,6 +1599,7 @@ async def run_canary(
         failures=failures,
         failure_keys=failure_keys,
         health_status=health_status,
+        duckdb_fatal=duckdb_fatal,
         http_code=http_code,
         cert_days_remaining=cert_days,
         sync_seconds_since=sync_seconds,
@@ -1630,10 +1678,22 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "names; clears 30 min after the last"),
 )
 
+# `health_status` when web is degraded for a DuckDB FATAL alone
+# (`duckdb_fatal_only`), by kind: what to do is the FATAL's, not a migration's.
+_FATAL_ACTIONS: dict[str, str] = {
+    "index": "Rebuild the indexes: scripts/weekly_compact.sh by hand, or Sunday's "
+             "compaction. A restart does not heal it",
+    "other": "grep web's log for 'DuckDB FATAL': one that repeats on a write is a "
+             "write that keeps failing. The status clears when web restarts",
+}
+
+
 def _what_to_do(result: CanaryResult) -> Optional[str]:
     """The single most useful lever for this result, or None."""
     for prefix, action in _ACTIONS:
         if any(k.startswith(prefix) for k in result.failure_keys):
+            if prefix == "health_status" and result.duckdb_fatal in _FATAL_ACTIONS:
+                return _FATAL_ACTIONS[result.duckdb_fatal]
             return action
     return None
 
@@ -1658,8 +1718,14 @@ def _title(result: CanaryResult) -> str:
     if result.severity != "critical":
         return "Dashboard warning"
     keys = result.failure_keys
-    if not keys or any(key in _OUTAGE_KEYS for key in keys):
+    # `health_status` for a DuckDB FATAL alone is web answering that its store
+    # is damaged, not web down (`duckdb_fatal_only`).
+    outage = [key for key in keys if key in _OUTAGE_KEYS
+              and not (key == "health_status" and result.duckdb_fatal)]
+    if not keys or outage:
         return "Dashboard DOWN"
+    if result.duckdb_fatal == "index":
+        return "DuckDB index short"
     for prefix, title in _CRITICAL_TITLES:
         if any(key.startswith(prefix) for key in keys):
             return title

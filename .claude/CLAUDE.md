@@ -130,7 +130,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 
 | Endpoint | Description |
 |----------|-------------|
-| `/api/health` | Health check (status, version, uptime, cache stats); `degraded` while `duckdb.fatal` is set |
+| `/api/health` | Health check (status, version, uptime, cache stats); `degraded` while `duckdb.fatal` is set, and `degraded_by` says why |
 | `/api/summary` | Summary statistics |
 | `/api/revenue/trend` | Revenue time series (+ `include_forecast=true` for ML predictions) |
 | `/api/revenue/forecast` | ML revenue forecast for current month |
@@ -1295,7 +1295,20 @@ write after every reconnect — in the sync, an order batch every tick. So
 `/api/health` publishes `duckdb.fatal` (`count`, `kinds` — `index` or `other`
 — `last_at`; never the text) and `status: degraded` until web restarts;
 otherwise the next read answering would resolve the `health_status` page over
-a write that still fails. The existing page, not a new canary key.
+a write that still fails. The existing page, not a new canary key — **but
+named for what it is** (batch-E review): it read "Dashboard DOWN",
+"status=degraded" and "a restart won't fix a migration" while web answered.
+`/api/health` says why it is degraded (`degraded_by`: `duckdb`, `migrations`,
+`duckdb_fatal`), and when the FATAL is the only cause the canary pages
+`health_status` as **"DuckDB index short"** (CRITICAL, lever: the compaction)
+for an index, and as a WARN for any other FATAL (the reconnect answered past
+it; lever: web's log). **An index FATAL outlives the restart**: `_fatal` is
+the process's memory and the damage is the file's, so a restart announced a
+short index healed while the same write still failed. It is written down
+beside the file (`data/.duckdb_index_short.json`, under the file's device and
+inode) and published as `duckdb.fatal.index_short` until a compaction swaps
+a new file in. A restore that copies over the file in place keeps the inode:
+delete the marker then.
 
 **DuckDB prints the rows it could not remove** — every column, so a buyer's
 name, phone and email — after `\nChunk:` in the FATAL, and again in every
@@ -1323,8 +1336,8 @@ a cancellation. An aborted transaction is not a FATAL: the probe's
 `TransactionException` keeps the instance.
 
 The lever for `index` is rebuilding every index, which the compaction does —
-Sunday's, or `weekly_compact.sh` by hand; a restart clears the status, not the
-damage. Rebuilding automatically was measured and **not** built (3–3.5 s,
+Sunday's, or `weekly_compact.sh` by hand; a restart clears neither the damage
+nor, since the marker, the status. Rebuilding automatically was measured and **not** built (3–3.5 s,
 ≤394 MB, DDL at startup, the file growing once by the index footprint) — the
 owner's call. Whether production holds damage from before the guard is
 unknown; the first compaction after it ships clears whatever there is.

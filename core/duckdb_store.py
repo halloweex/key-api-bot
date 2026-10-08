@@ -166,6 +166,14 @@ def _invalidated(conn) -> "Optional[duckdb.FatalException]":
     return None
 
 
+# An index FATAL is damage in the FILE, and a restart forgets `_fatal`: so the
+# first one is also written down beside the file, as the file's (device, inode)
+# — which a compaction's swap replaces and a restart does not — and read back
+# by `fatal_status()` while it still describes the file that is there. A
+# restore that copies over the file in place keeps the inode: delete it then.
+INDEX_SHORT_MARKER = ".duckdb_index_short.json"
+
+
 def _fatal_kind(echo: BaseException) -> str:
     """`index` — an index short in the file, the damage a killed writer's WAL
     left before the open guard (`duckdb_switch.open_file`; the lever is
@@ -815,6 +823,8 @@ class DuckDBStore(
             "kinds": kinds,
             "last_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
+        if kind == "index":
+            self._record_index_short(self._fatal["last_at"])
         lever = (
             " An index is short in the file, and the write that met it fails "
             "again until every CREATE INDEX index is rebuilt: the Sunday "
@@ -831,14 +841,81 @@ class DuckDBStore(
 
     def fatal_status(self) -> "Optional[Dict[str, Any]]":
         """The invalidations this store has seen: how many, of which kind
-        (`_fatal_kind`), and when the last one was.
+        (`_fatal_kind`), and when the last one was — and `index_short`, the
+        index damage an index FATAL found in the file that is there now
+        (`since`, `last_at`, `count`), which outlives the process that saw it.
 
-        None until one. Published on /api/health, which reads degraded while
-        it is set — without that, the reconnect above would let a dead write
-        look healthy as soon as the next read answered."""
-        if not self._fatal:
+        None until one, or while neither. Published on /api/health, which
+        reads degraded while it is set — without that, the reconnect above
+        would let a dead write look healthy as soon as the next read
+        answered, and a restart would announce a short index healed: it is
+        not, until a compaction replaces the file (`INDEX_SHORT_MARKER`).
+        Never raises."""
+        index = self._read_index_short()
+        if not self._fatal and not index:
             return None
-        return {**self._fatal, "kinds": dict(self._fatal["kinds"])}
+        seen = self._fatal or {"count": 0, "kinds": {}, "last_at": None}
+        return {**seen, "kinds": dict(seen["kinds"]), "index_short": index}
+
+    def _index_marker(self) -> "Optional[Path]":
+        # `getattr`: a store built without __init__ has no path (see `_fatal`).
+        db_path = getattr(self, "db_path", None)
+        return None if db_path is None else Path(db_path).parent / INDEX_SHORT_MARKER
+
+    def _file_identity(self) -> "Optional[Tuple[int, int]]":
+        db_path = getattr(self, "db_path", None)
+        try:
+            st = Path(db_path).stat() if db_path is not None else None
+        except OSError:
+            return None
+        return None if st is None else (st.st_dev, st.st_ino)
+
+    def _read_index_short(self) -> "Optional[Dict[str, Any]]":
+        """The written-down index damage, if it describes the file that is
+        there now; None otherwise. Never raises: a marker that cannot be read
+        is logged and read as none, since inventing damage would hold the
+        status degraded with nothing to clear it."""
+        path = self._index_marker()
+        if path is None:
+            return None
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            logger.warning("DuckDB index marker %s unreadable: %s", path, type(exc).__name__)
+            return None
+        if not isinstance(record, dict):
+            return None
+        identity = self._file_identity()
+        if identity is None or [record.get("dev"), record.get("ino")] != list(identity):
+            # Another file now — the compaction swapped one in, which rebuilt
+            # every index — so it describes nothing that is there.
+            return None
+        return {"since": record.get("since"), "last_at": record.get("last_at"),
+                "count": record.get("count")}
+
+    def _record_index_short(self, at: str) -> None:
+        """Write the index damage down beside the file. Never raises: the
+        FATAL is already logged and counted in this process."""
+        identity = self._file_identity()
+        if identity is None:
+            return
+        prior = self._read_index_short() or {}
+        record = {"file": Path(self.db_path).name, "dev": identity[0], "ino": identity[1],
+                  "since": prior.get("since") or at, "last_at": at,
+                  "count": int(prior.get("count") or 0) + 1}
+        path = self._index_marker()
+        if path is None:
+            return
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(record), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            logger.error("DuckDB index marker %s could not be written: %s: %s; the "
+                         "damage is published until this process restarts only",
+                         path, type(exc).__name__, exc)
 
     # ─── Query Execution with Timeout ────────────────────────────────────────
 

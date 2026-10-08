@@ -747,11 +747,17 @@ async def health_check(request: Request):
 
     alerting = transport_health()
 
+    # What made it degraded, one word per cause, so the canary can name it:
+    # a FATAL the reconnect answered past is not a web that is down, and its
+    # lever is not a migration's (batch-E review).
+    degraded_by = [cause for cause, degraded in (
+        ("duckdb", not duckdb_stats),
+        ("migrations", migrations.get("status") == "failed"),
+        ("duckdb_fatal", bool(duckdb_fatal)),
+    ) if degraded]
     return {
-        "status": (
-            "degraded" if not duckdb_stats or migrations.get("status") == "failed"
-            or duckdb_fatal else "healthy"
-        ),
+        "status": "degraded" if degraded_by else "healthy",
+        "degraded_by": degraded_by,
         "version": VERSION,
         "uptime_seconds": uptime_seconds,
         "correlation_id": get_correlation_id(),
