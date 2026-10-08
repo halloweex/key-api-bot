@@ -1822,7 +1822,12 @@ force (batch-E review). It still keeps the chain on DuckDB; it is not held on.
 `preflight` adds what Postgres says: the three bronze tables backfilled and
 their mirrors not failing. It is asked beside chain 1's, never after it: each
 is bounded at 5 s, and two in a row with Postgres hung were the canary's whole
-10 s (found in review).
+10 s (found in review). And each is shielded, the sync tick's DN-05a form: a
+bare `wait_for` waits for asyncpg's cancel round trip, and against a paused
+Postgres the "5 s" answer came after 60 s, holding its cache lock — and every
+later `/api/health` — meanwhile (batch-E review). Its `reasons` are one entry
+per precondition by structure (`unmet_reasons()`), never the joined answer
+split on "; ", which two of them carry.
 
 **The way back** is the copy-back generalised from chain 4's mirrored tables:
 the orders, expenses and line items each dated by their own `mirrored_at`,
