@@ -616,6 +616,53 @@ class TestOneRendering:
         assert run_dict(chain._local(pg_row)) == duck
         assert duck["started_at"].endswith("+03:00")
 
+    def test_the_zone_is_duckdbs_own_through_the_one_opener(self, monkeypatch):
+        """The probe goes through `duckdb_switch.open_file`, the one reach for
+        the driver the week of silence allows (test_duckdb_switch walks for
+        any other), and still reads DuckDB's session zone."""
+        import duckdb
+        from zoneinfo import ZoneInfo
+
+        from core import duckdb_switch
+
+        monkeypatch.setattr(chain, "_ZONE", None)
+        con = duckdb.connect(":memory:")
+        try:
+            expected = con.execute("SELECT current_setting('TimeZone')").fetchone()[0]
+        finally:
+            con.close()
+        assert chain._duckdb_zone() == ZoneInfo(expected)
+        assert duckdb_switch.opened() == {}
+
+    def test_under_off_the_zone_is_read_without_duckdb(self, monkeypatch):
+        """Under KS_DUCKDB=off the journal is read from Postgres and every row
+        converted through this zone; asking DuckDB for it would be refused and
+        counted as the file opened while off — CRITICAL, on every read of
+        the journal. Mutation: drop the `is_off()` branch in `_duckdb_zone`."""
+        from zoneinfo import ZoneInfo
+
+        from core import duckdb_switch
+
+        monkeypatch.setattr(chain, "_ZONE", None)
+        monkeypatch.setenv(duckdb_switch.ENV, "off")
+        duckdb_switch.configure_mode()
+        monkeypatch.setenv("TZ", "Europe/Kyiv")
+        assert chain._duckdb_zone() == ZoneInfo("Europe/Kyiv")
+        assert duckdb_switch.opened() == {}
+
+    @pytest.mark.parametrize("tz", [None, "", "not/a zone"])
+    def test_the_host_zone_falls_back_to_the_host(self, monkeypatch, tz):
+        """No usable `TZ`: the host's zone, as ICU reads it next — never a
+        raise on the path every journal row is rendered through."""
+        from zoneinfo import ZoneInfo
+
+        if tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", tz)
+        zone = chain._host_zone()
+        assert isinstance(zone, ZoneInfo)
+
 
 # ─── The allocator's lock ────────────────────────────────────────────────────
 

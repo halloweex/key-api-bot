@@ -236,20 +236,50 @@ def _duckdb_zone():
     which it takes from the process's at start and never sets here. Read once
     from an in-memory connection rather than assumed to be the libc zone:
     the two part company in a process whose `TZ` changed after DuckDB loaded,
-    and the point of converting is to render exactly as DuckDB would."""
+    and the point of converting is to render exactly as DuckDB would.
+
+    The connection is the application's one opener (`duckdb_switch.open_file`)
+    — the only reach for the driver the week of silence allows — and under
+    `KS_DUCKDB=off` it is not asked at all: it would refuse, and a refusal is
+    counted and paged as the file opened while off, on every read of the
+    journal, which is Postgres's by then. With no DuckDB in the process
+    there is nothing to part company with, so the zone is the one DuckDB
+    would take at start, read from where it reads it (`_host_zone`)."""
     global _ZONE
     if _ZONE is None:
         from zoneinfo import ZoneInfo
 
-        import duckdb
+        from core import duckdb_switch
 
-        probe = duckdb.connect(":memory:")
+        if duckdb_switch.is_off():
+            _ZONE = _host_zone()
+            return _ZONE
+        probe = duckdb_switch.open_file(":memory:")
         try:
             name = probe.execute("SELECT current_setting('TimeZone')").fetchone()[0]
         finally:
             probe.close()
         _ZONE = ZoneInfo(name)
     return _ZONE
+
+
+def _host_zone():
+    """The zone DuckDB would take as its session `TimeZone`, read without
+    DuckDB: `TZ` as the process has it, else the host's `/etc/localtime`,
+    else UTC — the order ICU, which DuckDB asks, reads them in."""
+    from zoneinfo import ZoneInfo
+
+    name = (os.environ.get("TZ") or "").strip().lstrip(":")
+    if name:
+        try:
+            return ZoneInfo(name)
+        except Exception:  # noqa: BLE001 — not a zone name; the host decides
+            pass
+    try:
+        with open("/etc/localtime", "rb") as fh:
+            return ZoneInfo.from_file(fh, key="localtime")
+    except Exception:  # noqa: BLE001 — no host zone to read
+        return ZoneInfo("UTC")
 
 
 def _local(row) -> Optional[Tuple[Any, ...]]:
