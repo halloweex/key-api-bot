@@ -1,7 +1,8 @@
--- P3 — the 30-day parallel period: since when it has run clean (OD-17 (a)).
+-- P3 — the 14-day parallel period: since when it has run clean (OD-17 (a),
+-- amended by the owner on 2026-10-08 from 30 days).
 --
 -- WHY IT EXISTS
--- Stage 5 waits for a 30-day parallel period counted from the last write
+-- Stage 5 waits for a 14-day parallel period counted from the last write
 -- flag, restarted by any breach (owner decision OD-17 (a)). Two of OD-17's
 -- four breaches can be measured while DuckDB still runs beside Postgres: a
 -- rollback lever used (P2's evidence) and a read served from DuckDB (F1's).
@@ -44,7 +45,7 @@ WITH clock AS (
 ),
 limits AS (
     SELECT interval '24 hours' AS span,
-           interval '720 hours' AS period,
+           interval '336 hours' AS period,
            interval '35 minutes' AS watch_gap
 ),
 win AS (
@@ -175,7 +176,7 @@ SELECT 'P3 parallel period'::text AS "check",
                        format('the canary''s probe at %s Kyiv found a read served from DuckDB',
                               to_char(last_probe AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
                    END)
-               || '; the 30 days start again (OD-17 (a))', 500)
+               || '; the 14 days start again (OD-17 (a))', 500)
            WHEN NOT watched THEN
                'no watch:read_fallbacks row: nothing durable says reads were watched, so no '
                || 'day of the period can be counted'

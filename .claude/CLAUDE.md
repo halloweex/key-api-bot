@@ -4054,8 +4054,12 @@ still names `pg_revision` alone.
 ### Stage 5's two clocks: the parallel period and the week of silence (OD-17 (a))
 
 Stage 5 — the end of DuckDB — waits for two things in a row (owner decision
-OD-17 (a)): a **30-day parallel period** counted from the last `KS_WRITE_*`
-flag, then a **7-day week of silence**. Four things breach either one and
+OD-17 (a)): a **14-day parallel period** counted from the last `KS_WRITE_*`
+flag, then a **7-day week of silence**. The period was 30 days until the
+owner shortened it on 2026-10-08, with the soak after step 13 and after chain
+3 cut from seven days to three and `KS_READ_FALLBACK=off` taken on the day of
+a clean rehearsal; the week of silence and "no DROP before a week after full
+completion, with a tested way back" were kept. Four things breach either one and
 restart its count: web opens DuckDB, the file's hash changes, a rollback lever
 is used, a read is served from DuckDB. None of the tooling below drops,
 deletes or moves anything — OD-11 (a) forbids any DROP before the owner's week

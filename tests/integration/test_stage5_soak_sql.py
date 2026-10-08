@@ -1,6 +1,6 @@
 """Stage 5's soak checks against a real Postgres: P1–P4 (OD-17 (a)).
 
-The 30-day parallel period and the 7-day week of silence are counted by four
+The 14-day parallel period and the 7-day week of silence are counted by four
 files under `deploy/stage4_soak/` — the DuckDB file's hash record (P1), the
 rollback levers (P2), and the two clocks (P3, P4). Each must say FAIL on the
 breach it exists to catch, PASS next to it, and UNKNOWN where nobody can say
@@ -195,12 +195,13 @@ class TestTheFilesReadWhatTheCodeWrites:
     @pytest.mark.parametrize("name, span, extra", [
         (P1, 24, {"record_max_age": "3 hours"}),
         (P2, 24, {"watch_gap": "35 minutes"}),
-        (P3, 24, {"period": "720 hours"}),
+        (P3, 24, {"period": "336 hours"}),
         (P4, 24, {"week": "168 hours", "record_max_age": "3 hours"}),
     ])
     def test_the_clocks(self, name, span, extra):
-        """A day, the owner's 30 days (OD-17 (a)), the week of silence, and an
-        hourly cron's record allowed three hours."""
+        """A day, the owner's 14 days (OD-17 (a), amended on 2026-10-08 from
+        30), the week of silence, and an hourly cron's record allowed three
+        hours."""
         code = self.code(name)
         assert re.findall(r"interval\s+'(\d+)\s+hours'\s+AS\s+span", code) == [str(span)]
         for alias, value in extra.items():
@@ -495,17 +496,17 @@ class TestP3ParallelPeriod:
         assert "clean since 26.05 12:00 Kyiv (the declared last write flag): 10 d 0 h" in detail
 
     @pytest.mark.asyncio
-    async def test_thirty_days_are_covered(self, pool):
+    async def test_fourteen_days_are_covered(self, pool):
         async with scenario(pool) as conn:
             await clear(conn)
             await self.watched(conn)
-            v, detail = await verdict(conn, P3, parallel_from="2030-05-06 12:00+03")
-        assert v == "PASS" and "the 30 days of the parallel period are covered" in detail
+            v, detail = await verdict(conn, P3, parallel_from="2030-05-22 12:00+03")
+        assert v == "PASS" and "the 14 days of the parallel period are covered" in detail
         async with scenario(pool) as conn:
             await clear(conn)
             await self.watched(conn)
-            v, detail = await verdict(conn, P3, parallel_from="2030-05-06 12:00:01+03")
-        assert v == "PASS" and "29 d 23 h of the 30 days" in detail, detail
+            v, detail = await verdict(conn, P3, parallel_from="2030-05-22 12:00:01+03")
+        assert v == "PASS" and "13 d 23 h of the 14 days" in detail, detail
 
     @pytest.mark.asyncio
     async def test_every_start_is_a_start(self, pool):
@@ -515,19 +516,19 @@ class TestP3ParallelPeriod:
         Mutation: replace any one `starts` branch's instant with NULL."""
         cases = (
             # The F1 watch's clean run began two days ago: before it, reads
-            # were not watched clean, so the 31 declared days are not 30.
-            ("reads watched clean since", "2 d 0 h of the 30 days",
+            # were not watched clean, so the declared days are not the 14.
+            ("reads watched clean since", "2 d 0 h of the 14 days",
              lambda c: c.execute(
                  "UPDATE app.alert_series SET first_fired_at = $1 "
                  "WHERE condition_key = 'watch:read_fallbacks'", ago(days=2)),
              "2030-05-05 12:00+03"),
-            ("step 13 switched to Postgres", "3 d 0 h of the 30 days",
+            ("step 13 switched to Postgres", "3 d 0 h of the 14 days",
              lambda c: writer(c, json.dumps({"writer": "postgres",
                                              "since": ago(days=3).isoformat()})),
              DECLARED),
-            ("a chain latched", "4 d 0 h of the 30 days",
+            ("a chain latched", "4 d 0 h of the 14 days",
              lambda c: owner(c, "app.stock_movements", at=ago(days=4)), DECLARED),
-            ("the declared last write flag", "10 d 0 h of the 30 days",
+            ("the declared last write flag", "10 d 0 h of the 14 days",
              lambda c: owner(c, "app.stock_movements", at=ago(days=20)), DECLARED),
         )
         for what, how_far, seed, declared in cases:
@@ -562,7 +563,7 @@ class TestP3ParallelPeriod:
             await self.watched(conn)
             await lever(conn, at=ago(hours=2))
             v, detail = await verdict(conn, P3, parallel_from=DECLARED)
-        assert v == "FAIL" and "the 30 days start again" in detail, detail
+        assert v == "FAIL" and "the 14 days start again" in detail, detail
 
     @pytest.mark.asyncio
     async def test_a_refused_way_back_restarts_it(self, pool):

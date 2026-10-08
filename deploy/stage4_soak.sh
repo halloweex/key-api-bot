@@ -5,7 +5,7 @@
 # stale Silver rows (D7), the chain-8 stand-down (E1) and a halted order intake
 # (S0), and the only daily verdict on reads served from DuckDB, whose PASS
 # counts the week KS_READ_FALLBACK=off waits for (F1), and the two clocks
-# stage 5 waits for — the 30-day parallel period and the week of silence —
+# stage 5 waits for — the 14-day parallel period and the week of silence —
 # with their breach detectors (P1–P4, OD-17 (a)), and they have to run
 # every day for weeks. Run by hand from a checklist
 # they drift: a query pasted from yesterday's terminal, a precondition skipped

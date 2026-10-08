@@ -1,7 +1,7 @@
 -- P2 — rollback levers pulled in the last 24 h (OD-17 (a)).
 --
 -- WHY IT EXISTS
--- The 30-day parallel period and the 7-day week of silence both start again
+-- The 14-day parallel period and the 7-day week of silence both start again
 -- when "any rollback lever is used". This check is the lever half of that,
 -- a day at a time; P3 and P4 turn the same evidence into the two clocks.
 --
