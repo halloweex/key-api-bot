@@ -730,7 +730,8 @@ def d1_ev(**over):
           "post": {**DUCK1, "max_dq_run_id": WIN, "indexes": SWEEP, "window": window_read()},
           "f7_stop": stop_state("graceful"), "p0_stop": stop_state("graceful"),
           "window_ids": {"run_id": WIN, "order_id": FIX, "order_status": V4},
-          "delete": deletes()}
+          "delete": deletes(),
+          "b_pre_stop": stop_state("graceful"), "b_stop": stop_state("graceful")}
     ev.update(over)
     return ev
 
@@ -871,6 +872,38 @@ def test_d1_fails_on_a_delete_an_index_could_not_follow():
     assert "idx_orders_status_date" in detail
     # An index holding none of the rows gave none up, so it is no suspect.
     assert "idx_orders_buyer_date" not in detail
+
+
+@pytest.mark.parametrize("which, what", [
+    ("b_pre_stop", "the stop the way back started from"),
+    ("b_stop", "the way back's own stop"),
+])
+@pytest.mark.parametrize("state, why", [
+    (stop_state("grace_expired"), "Docker killed it 11 s into a 10 s grace (exit 137)"),
+    (stop_state("oom"), "the kernel's OOM killer stopped it"),
+    (None, "the container's state after it was not read"),
+])
+def test_d1_names_a_way_back_stop_that_was_no_deploys_beside_a_delete_loss(which, what,
+                                                                            state, why):
+    """The end's DELETE runs after the way back, so the copy reaches it
+    through two more stops of reh-web than F7's. One that outran the grace
+    was a SIGKILL of its own: a loss the DELETE finds is still DuckDB's
+    defect and still FAIL, but it may be that kill's and not P3's, and the
+    verdict says so instead of laying it at P3's door. A clean DELETE does
+    not lean on those stops — F7's checkpoint already wrote down what P3's
+    kill cost — so it still passes.
+    Kills: "D1 never reads the stops between F7 and the end's DELETE"."""
+    fatal = "FATAL Error: Invalid Input Error: Failed to delete all rows from index. Only deleted 0 out of 1 rows."
+    loss = deletes(orders={"fatal": fatal, "scanned": None, "deleted": None, "left": None})
+    short = deletes(data_quality_issues={"scanned": 2, "deleted": 0, "left": 2})
+    for delete in (loss, short):
+        verdict, detail = probe.judge_d1(d1_ev(delete=delete, **{which: state}))
+        assert verdict == FAIL and detail.startswith(probe.KNOWN_DEFECT), detail
+        assert f"the copy reached the DELETE through {what} ({why}" in detail, detail
+        assert "a kill after P3's may have cost it" in detail
+        verdict, detail = probe.judge_d1(d1_ev(delete=delete))
+        assert verdict == FAIL and "reached the DELETE" not in detail, detail
+    assert probe.judge_d1(d1_ev(**{which: state}))[0] == PASS
 
 
 def test_d1_fails_on_a_delete_that_said_ok_and_left_the_rows():
@@ -1595,6 +1628,9 @@ def test_assemble_hands_d1_the_kill_the_window_and_the_stops(tmp_path):
     p8 = probe.assemble(tmp_path)["P8"]
     assert probe.stop_kind(p8["pre_stop"]) == "grace_expired"
     assert probe.stop_kind(p8["stop"]) == "graceful"
+    # And D1 reads the same two: they stand between F7's read and its DELETE.
+    d1 = probe.assemble(tmp_path)["D1"]
+    assert (d1["b_pre_stop"], d1["b_stop"]) == (p8["pre_stop"], p8["stop"])
     assert probe.judge_d1({**ev, "flipped": True}) == (
         UNKNOWN, "no kill landed inside the derivation (see P3)")
 
