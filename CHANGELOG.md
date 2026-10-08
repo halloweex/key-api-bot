@@ -2,6 +2,153 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.272
+
+- CI: 40 minutes for the suite, which outgrew 20
+- Tests that read the checkout skip where there is none: the VPS gate
+- Stage 5: the parallel period is 14 days (owner, 2026-10-08)
+- CLAUDE.md: chain 3's preflight is shielded and lists one reason per precondition
+- The WAL replay and the guard's CHECKPOINT run under the store's memory limit
+- The slow endpoints that write DuckDB are derived from the code
+- Both opener walks read a program held as text the way they read a module
+- The table-fate manifest's opener walk sees the one opener
+- The /api/health preflights hold their 5 s bound when Postgres hangs
+- A DuckDB FATAL pages as what it is, and a short index outlives a restart
+- The canary holds chain 3's CRITICAL through a blind probe
+- Chain 3's preflight publishes one reason per precondition, by structure
+- Chain 3's start hold waits for step 13's verdict
+- The release test's fake connection takes the release's lever record too
+- P2-P4 count a step-13 way back that a latched chain refused
+- The manifest names chain 9's marker by its constant, not its spelling
+- Chain 9's zone probe opens through the one opener, and not at all under off
+- The manifest declares every registered chain's tables, shadows included
+- D1's DELETE opens through the kill guard, and the guard's walk sees it
+- CLAUDE.md: what the review of the kill guard corrected
+- compose: the 120 s grace covers an ordinary request, not a slow one
+- Open guard: parse ATTACH options, and read the documents too
+- DuckDB: no row value leaves the store, close() is final, a cancelled read waits
+- Chain 7b-3 review: CLAUDE.md and the forgiven stamps say what is true
+- Chain 7b-3 review: the goals dry run's two walls are each tested
+- Chain 7b-3 review: a failed read under the chain is a counted refusal
+- Chain 3 review: OD-15 declared, the merge's stand-downs pinned by running them
+- Step 13 rehearsal: CLAUDE.md drops an unproven "only" from the 10-02 account
+- Chain 5 review: CLAUDE.md says the way back is refused while a chain is latched
+- Chain 5 review: step 13's way back refused while a chain is latched, and the guards the review found unpinned
+- Chain 5 review: the restore drill counts the classification only once the chain owns it
+- Step 13 rehearsal: D1 names a way-back stop that was no deploy's beside a DELETE loss
+- Chain 5 PR-2: CLAUDE.md says what the classification chain is, and what it is not yet
+- Chain 5 PR-2: the writer against a real Postgres, and the latch harness
+- Chain 7b-3: CLAUDE.md says what the chain moves, holds and watches
+- Chain 5 PR-2: soak checks M1 and M2
+- Chain 5 PR-2: the manager classification writer, registered with KS_WRITE_MANAGERS off
+- Chain 7b-3: the writers against a real Postgres, and the latch harness
+- Chain 7b-3: the goal and forecast writes and reads follow the chain
+- Chain 5 PR-2: the copy-back can carry the classification back
+- Chain 5 PR-2 prep: one manager row, one stats body in Kyiv, the replicated shapes
+- Chain 7b-3: the forecast tables' writer, registered, with its standing watch
+- Chain 7b-3: the two goal/forecast writers' slots are exported constants
+- Chain 6's watch: the handover is read off Postgres's clock
+- CLAUDE.md: a killed DuckDB writer, the guard, and the WAL nothing replays
+- DuckDB: a FATAL drops the instance, and /api/health says so
+- Goals dry run: a journal chain 9 writes is not gated on its stood-down copy
+- compose: web gets 120 s to shut down
+- DuckDB: CHECKPOINT the replayed WAL before anything else runs
+- CLAUDE.md: the catalogue's per-table blindness is a part of its own
+- Chain 6 + 9-11 merge: name the catalogue's per-table blindness apart
+- Stage 5: CLAUDE.md, three wraps this review's edits left ragged
+- Stage 5: rewrap the P1 and P4 headers this review's changes left ragged
+- Stage 5: P2 says UNKNOWN when nothing could have journaled a lever page
+- Stage 5: a MISSING episode survives the file coming back
+- Stage 5: every rule that starts P3's and P4's clocks is pinned
+- Stage 5: P4 asks .env too - what the host-cron sidecars read - and since when
+- Stage 5: the weekly compaction and the nightly snapshot open through the switch; the walk reads the driver however it is reached
+- Chain 6 review: the latch is a floor under the record, and a test says so
+- CLAUDE.md: what the chain-6 review's fixes proved on a real Postgres
+- Chain 6: a stray space in a docstring code span
+- Chain 6 review: the carry's race, its clamp, the event and the reset
+- Chain 6 review: the three bounds that keep the tick moving are tested
+- Chain 6 review: a short write is one write against the one before
+- Chain 6 review: only an instant the chain recorded is the chain's
+- Chains 11a/11b review: the duckdb gate's drain is proved to land the whole spool
+- Chains 9-11 review: the real-Postgres invariants test reads a blind group under its chain's name
+- Chains 11a/11b review: the copy-back's preconditions, its exit 2 and the health schema name the spool
+- Stage 5: CLAUDE.md says what the manifest's guards now read
+- Chains 11a/11b review: a spooled week outlives the flag that wrote it
+- Stage 5: the opener scan's scope and the listing rule have tests of their own
+- Stage 5: the store switches' tables are read off their writers
+- Chains 9-11 review: a blind part of the standing watch is its own finding, and the journal door holds one per key
+- Stage 5: nothing outside the walked trees opens DuckDB, by a walk of the repo
+- Stage 5: the DDL walk reads every shape of a table name, or lists it
+- Stage 5: the host check refuses a file it cannot see, and a stale newest backup
+- Chain 3 review: the default ships what main shipped, and two preflights cost one bound
+- Chain 3 review: a tick queued behind the heavy-job lock is not a stopped one
+- Chain 3 review: an expense under orders in state is written, and the decider's lock is pinned
+- Chain 3 review: the first tick after the flip starts where DuckDB stopped
+- Stage 5: CLAUDE.md says how the parallel period and the week of silence are measured
+- Stage 5: three soak file names that a renumbering left dangling, and the walk that finds them
+- Chain 3 review: a held chain stays held until the process ends
+- Stage 5: the parallel period and the week of silence, counted daily (P1-P4)
+- Chain 3 review: a line item is dated by its own write, never its order's header
+- Chains 9-11: two more guards that named a mutation and did not catch it
+- Stage 5: deploy/duckdb_silence_check.sh — the file's hash, recorded hourly
+- Stage 5: a copy-back leaves a durable record of itself (OD-17 (a))
+- Stage 5: the switch's tests — one opener, refusal counted at the raise, the page
+- Stage 5: the H3 guard excuses the manifest's one bare name, and holds it to "retired"
+- Stage 5: KS_DUCKDB switch and its tripwire (default on, nothing changes)
+- Chains 9-11: CLAUDE.md says what the shadow state is, and how each chain is watched
+- Chains 9-11: the soak reads the shadow chains — H1 the copy stood down, H2 the comparison clean
+- Stage 5: the "every switch off" tests set the switches, not trust the machine
+- Chains 9-11: five guards that named a mutation and did not catch it
+- Stage 5: CLAUDE.md says what the table-fate manifest is and what holds it
+- Stage 5: the host check's by-name refusal has a test of its own
+- Chain 6: the writer's lock order is proved without a race
+- Chain 3: CLAUDE.md names the backups block
+- Chain 3: /api/health publishes the backup evidence the flip waits on
+- Chain 6: /api/health's sync_step for the catalogue is pinned
+- Chain 9: close the probe connection the zone is read from
+- Stage 5: chain 4's tables carry KS_WRITE_BUYERS, and the validator's tiers are walked
+- Chain 9: render a Postgres journal row in DuckDB's session zone, not the libc one
+- Chains 11a/11b PR-S4: tests — one door, duckdb unchanged, retried then spooled, a spooled week is sent, a DuckDB-only week adopted, sent once through the job
+- Chains 11a/11b PR-S4: the two report ledgers behind their own KS_WRITE_* flags, shadowed in DuckDB
+- Chain 10 PR-S3: tests — one door, duckdb unchanged, one set of instants, capacity judged with Postgres down, the shadow compared, the way back
+- Chain 10 PR-S3: the watchdogs' samples behind KS_WRITE_WATCHDOGS, shadowed in DuckDB
+- Chain 9: rewrap the canary note
+- Chain 9 PR-S2: the soak's four journal checks stop gating on a copy that stood down
+- Chain 9 PR-S2: against a real Postgres — one run in two stores, the allocator, readers that agree, the shadow compared, the way back
+- Chain 9 PR-S2: tests — one door, duckdb byte for byte, Postgres first, readers follow, no fallback, one rendering
+- Chain 9 PR-S2: the quality journal behind KS_WRITE_DQ_JOURNAL, shadowed in DuckDB
+- Chain 9 prep: one run's values and rows for both stores, and the journal readers' text with table holes
+- Chains 9-11 PR-S1: the third state's tests, each guard naming its mutation
+- Chains 9-11 PR-S1: copy stops, comparison continues — compare_shadow, the prune rule, carried marker keys
+- Chains 9-11 WIP: the shadow state in the registry, and the DuckDB half of a shadow write
+- Chain 6: no mirror call in the Postgres-path products step
+- CLAUDE.md: chain 6, the catalogue (off)
+- Chain 6: integration — one transaction, one instant, and the way there and back
+- Chain 3 PR-2: a forced refresh of orders Postgres does not hold takes no latch
+- Chain 3 PR-2: CLAUDE.md says what the orders chain moves, how it decides, and what holds it off
+- Chain 6: the flag-off categories failure in full_sync still raises
+- Chain 3 PR-2: DuckDB's landing checks stand down with the chain, by a walk of the scan
+- Chain 6: unit tests — routing, flag, precondition, contract, tick, watch, copy-back
+- Chain 6: route the catalogue writes, and contain them in the sync
+- Chain 3 PR-2: the copy-back's docstring names chain 3's levers
+- Chain 3 PR-2: the orders copy-back against a real Postgres and a real DuckDB
+- Chain 6: the catalogue writer, registered, watched and carried back (flag off)
+- Chain 3 PR-2: the orders writer against a real Postgres
+- Chain 3 PR-2: the latch harness drives chain 3's three writers against a live pool
+- Chain 3 PR-2: the copy-back's chain-3 specs, and an owning row only DuckDB holds is never a dropped one
+- Chain 6 prep: carry the retired catalogue rows, one reading of the readers
+- Chain 3 PR-2: DuckDB's reconciliation arm stands down, the order step is paged
+- Chain 3 PR-2: the CLI backfill configures the modes in the function that writes
+- Chain 3 PR-2: the comment backfills follow the chain, and its tests
+- Chain 3 PR-2: the orders writer, registered with KS_WRITE_ORDERS off
+- Chain 3 PR-0: one off-site provider — OD-01 (c) is cancelled
+- Stage 5: the fate manifest, walked against the code that decides each fate
+- Chain 3 PR-0: the drills and the shipment leave evidence the app can read
+- Stage 5: a read-only host check of a DuckDB copy against the fate manifest
+- Chain 3 PR-1: the order and expense statements run on the caller's transaction
+- Stage 5: the DuckDB table-fate manifest, declared
+
+
 ## 3.0.271
 
 - Step 13 rehearsal: a failed judge keeps its reason and its evidence
