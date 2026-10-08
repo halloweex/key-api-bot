@@ -126,6 +126,81 @@ class TestTheFlag:
         assert pow_.writes_postgres() is False
         assert pow_.unmet_precondition().startswith(pow_.HELD_KEY)
 
+    @pytest.fixture
+    def step13_ready(self, flags):
+        """Every chain-3 precondition but step 13's met, and step 13's own
+        switch ready: `KS_WRITE_WAREHOUSE=postgres` with nothing unmet and a
+        Postgres that answered. `_step13_unmet` is the real one, and so is
+        the goal bridge's owner walk that asks this chain during step 13's
+        start — the path under test."""
+        from core import warehouse_cutover
+
+        for name in ("_goals_bridge_unmet", "_chain1_unmet", "_landing_pages_unmet"):
+            flags.setattr(pow_, name, lambda: None)
+        flags.setattr(pow_, "_backup_unmet", lambda: [])
+        flags.setattr(warehouse_cutover, "_read_postgres_in_a_worker",
+                      lambda env: {"revision": "head", "revision_error": None,
+                                   "unread": False})
+        flags.setattr(warehouse_cutover, "evaluate_preconditions", lambda env, facts: [])
+        flags.setenv("KS_WRITE_WAREHOUSE", "postgres")
+        flags.setenv("KS_WRITE_ORDERS", "postgres")
+        return flags
+
+    def test_step_13s_own_start_does_not_hold_it(self, step13_ready):
+        """Step 13's start gathers the goal bridge's owners, and that asks
+        this chain for its mode — before step 13 has decided, so `step13`
+        read unmet and the hold remembered it: every start that found step
+        13 in force held chain 3 until the process ended (the batch-E review,
+        finding 10). Mutation: hold on `step13` whether or not step 13 has
+        reached its verdict."""
+        from core import warehouse_cutover
+        from core.runtime_modes import configure_modes
+
+        asked_undecided = []
+        real = pow_._step13_unmet
+
+        def spy():
+            asked_undecided.append(not warehouse_cutover.verdict_reached())
+            return real()
+
+        step13_ready.setattr(pow_, "_step13_unmet", spy)
+        configure_modes()
+        assert any(asked_undecided), "the path under test was not taken"
+        assert warehouse_cutover.writes_postgres() is True
+        assert pow_._held is None
+        assert pow_.unmet_precondition() is None
+        assert pow_.writes_postgres() is True and pow_.mode() == "postgres"
+
+    def test_chain_5_is_not_held_through_it_either(self, step13_ready):
+        """Chain 5's precondition is chain 3's mode, and chain 5 is a bridge
+        owner too: asked during step 13's start it asked chain 3, which held.
+        Mutation: as above."""
+        from core import pg_managers_write, read_fallback
+        from core.repositories import goals
+        from core.runtime_modes import configure_modes
+
+        step13_ready.setenv(pg_managers_write.WRITE_ENV, "postgres")
+        # Chain 7b has ported the classification out of the bridge: chain 5's
+        # own `goals_bridge` holds (test_managers_chain.py's arrangement).
+        step13_ready.setattr(goals, "SALES_TYPE_BRIDGE_TABLES", frozenset({"bronze.orders"}))
+        step13_ready.setattr(read_fallback, "refusing", lambda: True)
+        configure_modes()
+        assert pow_._held is None
+        assert pg_managers_write.unmet_precondition() is None
+        assert pg_managers_write.mode() == "postgres"
+
+    def test_a_step_13_that_decided_duckdb_still_holds_it(self, step13_ready):
+        """The verdict reached and against: that is a fact of the start, and
+        held. Mutation: never hold on `step13`."""
+        from core import warehouse_cutover
+        from core.runtime_modes import configure_modes
+
+        step13_ready.setenv("KS_WRITE_WAREHOUSE", "duckdb")
+        configure_modes()
+        assert warehouse_cutover.verdict_reached() and not warehouse_cutover.writes_postgres()
+        assert pow_._held is not None and pow_._held[1].startswith("step13: ")
+        assert pow_.writes_postgres() is False
+
     def test_with_the_flag_off_the_start_reads_nothing_and_holds_nothing(self, flags):
         """Production today: the start verdict costs nothing and records
         nothing, so a later process — the only place a flag can change —

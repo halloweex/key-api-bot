@@ -1782,7 +1782,12 @@ host's drills, and a page resolves, inside a running web, and with the flag
 set the Monday drill's fresh marker used to flip a running web on its next
 write — no stopped window, no `--handover` (found in review). The first unmet
 answer under the flag is remembered, from the start (`configure_modes()`)
-on, so the flip happens only at a start that found everything met.
+on, so the flip happens only at a start that found everything met. **Except
+`step13` before step 13 has decided** (`warehouse_cutover.verdict_reached()`):
+step 13's start gathers the goal bridge's owners by asking this chain its
+mode, before its own verdict exists, and remembering that "unmet" held chain
+3 — and chain 5 through it — for good on every start that found step 13 in
+force (batch-E review). It still keeps the chain on DuckDB; it is not held on.
 `preflight` adds what Postgres says: the three bronze tables backfilled and
 their mirrors not failing. It is asked beside chain 1's, never after it: each
 is bounded at 5 s, and two in a row with Postgres hung were the canary's whole

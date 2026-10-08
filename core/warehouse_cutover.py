@@ -190,6 +190,20 @@ def writes_postgres() -> bool:
     return _mode == POSTGRES
 
 
+def verdict_reached() -> bool:
+    """`configure_mode` has decided this process's mode.
+
+    False before it has run, and **False while it runs**: the facts it
+    gathers for `postgres` include the goal bridge's owners, and those are
+    read by asking every write chain over a bridge table for its mode —
+    which asks that chain's preconditions, step 13's own verdict among them.
+    `writes_postgres()` is False then, and means "not decided yet", never
+    "decided against". A chain that remembers its first unmet answer (chain
+    3's start hold) must not remember that one: it would hold the chain for
+    the life of the process on the very start that found step 13 in force."""
+    return _mode is not None
+
+
 def duckdb_derives() -> bool:
     """DuckDB derives its own Silver and Gold in this process — the predicate
     every production call of `refresh_warehouse_layers` stands behind, and

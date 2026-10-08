@@ -377,18 +377,31 @@ def unmet_precondition() -> Optional[str]:
     (`settle_hold()`, called by `configure_modes()`) to its first write: the
     restart the runbook puts after `--handover`. A latched chain is not held
     — the latch outranks every precondition (OD-19 (a)); what is unmet is
-    published either way."""
+    published either way.
+
+    **Step 13's verdict is a fact only once it has been reached.** Before
+    `warehouse_cutover.configure_mode` has decided — and while it decides,
+    because the goal bridge's owners it gathers are read by asking the write
+    chains for their mode — `step13` reads unmet and means "not decided yet".
+    It still keeps the chain on DuckDB, but it is never held on: held, it
+    made every start under `KS_WRITE_WAREHOUSE=postgres` hold this chain for
+    good, at the very start that found step 13 in force (and chain 5, whose
+    precondition is this chain, with it). The start's verdict
+    (`settle_hold()`) is taken after step 13's."""
     global _held
 
-    live = _live_unmet()
+    found = _live_unmet()
+    live = "; ".join(why for _key, why in found) or None
     if chain_latch.latched(CHAIN):
         return live
     if _held is None:
-        if live and _flag_says_postgres():
-            _held = (_now_utc().isoformat(timespec="seconds"), live)
+        holdable = [why for key, why in found
+                    if key != _STEP13 or _step13_decided()]
+        if holdable and _flag_says_postgres():
+            _held = (_now_utc().isoformat(timespec="seconds"), "; ".join(holdable))
             logger.warning(
                 "%s=postgres, and the chain is held on DuckDB until this "
-                "process restarts: %s", WRITE_ENV, live)
+                "process restarts: %s", WRITE_ENV, _held[1])
         return live
     if live:
         return live
@@ -414,23 +427,38 @@ def settle_hold() -> Optional[str]:
         return None
 
 
-def _live_unmet() -> Optional[str]:
+# The key of step 13's precondition — the one fact that is not a fact until
+# `warehouse_cutover` has reached its verdict (`unmet_precondition`).
+_STEP13 = "step13"
+
+
+def _step13_decided() -> bool:
+    from core import warehouse_cutover
+
+    return warehouse_cutover.verdict_reached()
+
+
+def _live_unmet() -> List[Tuple[str, str]]:
     """The preconditions as they stand now — `unmet_precondition` without the
-    hold. Never raises."""
-    reasons: List[str] = []
-    for check in (_goals_bridge_unmet, _step13_unmet, _chain1_unmet,
-                  _landing_pages_unmet):
+    hold — as `(key, reason)`, one per precondition unmet, in order; empty
+    when every one holds. Never raises."""
+    reasons: List[Tuple[str, str]] = []
+    # The checks are looked up when asked, so a test standing one in is read.
+    for key, check in (("goals_bridge", _goals_bridge_unmet), (_STEP13, _step13_unmet),
+                       ("chain1", _chain1_unmet),
+                       ("landing_pages_clear", _landing_pages_unmet)):
         try:
             why = check()
         except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
             why = f"{check.__name__.strip('_')}: could not be read ({type(exc).__name__})"
         if why:
-            reasons.append(why)
+            reasons.append((key, why))
     try:
-        reasons.extend(_backup_unmet())
+        reasons.extend(("backups", why) for why in _backup_unmet())
     except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        reasons.append(f"backups: the evidence could not be read ({type(exc).__name__})")
-    return "; ".join(reasons) if reasons else None
+        reasons.append(("backups",
+                        f"backups: the evidence could not be read ({type(exc).__name__})"))
+    return reasons
 
 
 def _warn_unmet(reason: str) -> None:
