@@ -36,6 +36,8 @@ from pathlib import Path
 
 import yaml
 
+from tests.repo_tree import needs_checkout
+
 REPO = Path(__file__).resolve().parents[2]
 COMPOSE = yaml.safe_load((REPO / "docker-compose.yml").read_text())
 WORKFLOW = yaml.safe_load((REPO / ".github" / "workflows" / "deploy.yml").read_text())
@@ -212,6 +214,7 @@ def test_the_derivation_sees_a_write_through_a_constant_and_a_mixin():
         derived_slow_duckdb_writers())
 
 
+@needs_checkout
 def test_compose_and_claude_md_name_every_writer():
     """The two places a person reads about the gap say what the list says."""
     compose = (REPO / "docker-compose.yml").read_text()

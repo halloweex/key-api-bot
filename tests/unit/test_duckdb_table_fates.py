@@ -35,6 +35,8 @@ from typing import Callable, Dict, Iterator, List, Set, Tuple
 import duckdb
 import pytest
 
+from tests.repo_tree import needs_checkout
+
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "deploy"))
@@ -1142,6 +1144,7 @@ class TestEveryNameHasAFate:
 
         assert _catalog() == "analytics" == DB_PATH.stem
 
+    @needs_checkout
     def test_nothing_outside_the_walked_trees_opens_duckdb(self):
         """What lets the DDL walk read `DUCKDB_TREES` alone. It used to be a
         check of `bot/` only, reading only `import duckdb` and the module of a
@@ -1170,6 +1173,7 @@ class TestEveryNameHasAFate:
         assert set(openers_outside(files)) == {
             "tools/ledger.py", "bot/x.py", "migrations/env.py", "manage.py"}
 
+    @needs_checkout
     def test_the_opener_walk_sees_every_tree_open_duckdb(self):
         """The scan above is only as good as `duckdb_openers`: each walked
         tree opens DuckDB somewhere, and the walk must see it there."""

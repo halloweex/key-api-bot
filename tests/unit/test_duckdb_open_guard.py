@@ -53,6 +53,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.repo_tree import needs_checkout
+
 REPO = Path(__file__).resolve().parents[2]
 ROOTS = ("core", "web", "bot", "scripts", "deploy")
 
@@ -343,6 +345,7 @@ def walked():
     return walk_repository()
 
 
+@needs_checkout
 def test_no_document_tells_anyone_to_open_it_read_write():
     read, violations = walk_documents()
     # Not blind: the agents' instructions and the host scripts are read.
