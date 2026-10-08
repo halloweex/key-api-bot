@@ -2686,8 +2686,9 @@ the cause stays in the log. One raise, so it refuses every router an HTTP
 route reaches, the filter bar's lookups included, not only the tabs the plan
 named. A refusal is not a fallback: counted apart, logged without the phrase
 a fallback is grepped by, published as `read_fallback_mode.refused` under `off`
-alone, so `read_fallbacks` stays empty there and the block keeps its shape
-under `duckdb`. `off` refuses a *failure*, never a switch left at `duckdb` —
+— and under `duckdb` only once a write chain's read was refused, below — so
+`read_fallbacks` stays empty there and the block keeps its shape under
+`duckdb`. `off` refuses a *failure*, never a switch left at `duckdb` —
 except the cohorts, which have no Postgres body: under `off` a live
 ClickHouse answers them or nobody does (`no_engine`). A switch naming an
 engine this process has **no address** for (`KS_READ_TRAFFIC=postgres`
@@ -2836,9 +2837,15 @@ restamps it wholesale on its next hourly run after `up -d` — a bad copy could
 cost a wrong "as of" on /inventory until then. Keeping the daily list is
 also what keeps the specs derived rather than a second opinion, and a unit
 test computes the set so a third cannot join it quietly. Chain 7b-3 added four
-of the same kind on purpose, with the reason in that test: the goal tables'
-`updated_at` and `revenue_predictions.created_at`, each one stamp per writer
-run, read by nothing in DuckDB and restamped by the next run.
+more on purpose, with the reason in that test: the goal tables' `updated_at`
+and `revenue_predictions.created_at`, each one stamp per writer run and read
+by nothing in DuckDB. Two of them are **not** restamped by the next run —
+`weekly_patterns` is stored only by `POST /api/goals/recalculate`, never by
+the Monday job, and a training replaces only the range it predicts, so a past
+day's `created_at` stands for good — so a mis-copy of either is seen by no
+comparison and corrected by no run. What the copy carries is pinned by the
+suite instead (`test_forecast_writer.py::TestTheCopyBack`, stamps that differ
+by row).
 `stock_movements.recorded_at` is the opposite case and **is** compared: the
 daily check leaves it out only because it is that check's clock, but it dates
 one movement for good, and a review shifted every copied value by an hour and
@@ -3577,8 +3584,16 @@ store, as always, so `_train_impl`'s result (the job's, and `POST
 
 **The reads follow the chain, and only the chain.** While it writes Postgres,
 every statement reading one of the four goes there whatever `KS_READ_GOALS`
-says, with no fallback (7a's rule). While it does not, each keeps today's
-engine: the forecast by `KS_READ_GOALS`, the three goal tables from DuckDB.
+says, with no fallback (7a's rule). A failure there is a **counted refusal**
+in either mode (`read_fallback.chain_refusal`): a 503 naming `goals`, and
+`read_fallback_mode.refused` on `/api/health`, which the canary pages as
+`read_refused` — what the same failure was before the flip under the
+precondition's `off`. Raw, as 7a's reads still are, it reached two handlers
+that let `ReadUnavailable` through and contain everything else:
+`/api/revenue/forecast` answered 200 "Forecast not available yet" and the
+smart goal dropped its ML signal, with nothing counted. While it does not,
+each keeps today's engine: the forecast by `KS_READ_GOALS`, the three goal
+tables from DuckDB.
 The smart goal reads the three in **one** `UNION ALL` statement through
 `_goal_tables_run` — one committed set in either engine, and never
 `KS_READ_GOALS`, which in production would read the replica up to an hour
@@ -3605,9 +3620,11 @@ morning's 07:00 run. **Training is twice weekly, not daily**; a flat limit
 would have to exceed the Thu→Mon gap.
 
 **The goals dry run** (`scripts/goals_semantics_dryrun.py`) pins the chain's
-two answers to DuckDB and makes its pool raise: run as the web service under a
-latched chain it would store into production Postgres and latch from a
-one-off.
+two answers to DuckDB and makes its pool raise (`held_off_chain_7b3`): run as
+the web service under a latched chain it would store into production Postgres
+and latch from a one-off. Each wall is tested on its own — the pins under a
+latched chain and under a flagged one whose precondition holds, the pool by
+calling both writers inside the pins.
 
 **The way back.** Flagged and not yet latched: unset, `up -d web`, free.
 Latched: `scripts/chain_copy_back.py forecast` (specs derived, no sequence,

@@ -144,18 +144,31 @@ class TestEveryWrittenColumnIsCompared:
                         daily[spec.pg_table].ignore_columns, spec.pg_table
         assert forgiven == {("bronze.offers", "synced_at"),
                             ("app.sku_inventory_status", "updated_at"),
-                            # Chain 7b-3, four more of the same kind. Each is
-                            # ONE stamp per writer run — the goal tables are
-                            # written in one transaction with one `now`, and
-                            # DuckDB stamps one `created_at` per transaction
-                            # (measured, 1.5.5: 61 rows, 1 value) — so it
-                            # records when the writer last ran, nothing about
-                            # a month or a day. Nothing in DuckDB reads them:
-                            # the only reader is the chain's standing watch,
-                            # which reads Postgres and stands down with the
-                            # release, and the writer's next run restamps every
-                            # row (Monday 04:00, Mon/Thu 03:30, or the two
-                            # POSTs). A per-row fact here would not qualify.
+                            # Chain 7b-3, four more, each forgiven by its daily
+                            # spec for the race that spec describes. A writer
+                            # run stamps ONE value — the goal tables in one
+                            # transaction with one `now`, a training's forecast
+                            # with one `created_at` (measured, DuckDB 1.5.5: 61
+                            # rows, 1 value) — and nothing in DuckDB reads any
+                            # of them: the only reader is the chain's standing
+                            # watch, which reads Postgres and stands down with
+                            # the release. But the next run does NOT restamp
+                            # every row, and that is the honest limit of
+                            # forgiving them here. `seasonal_indices`: every
+                            # month the Monday job computes. `growth_metrics`:
+                            # only a measured rate (the placeholder never
+                            # overwrites one). `weekly_patterns`: only POST
+                            # /api/goals/recalculate — the Monday job never
+                            # stores weekly rows, and production's have not
+                            # moved since 2026-03-14. `revenue_predictions`:
+                            # only the range a training predicts, today to
+                            # +60; a past day keeps its stamp for good. A
+                            # mis-copy of those two is seen by no comparison
+                            # and corrected by no run, so what the copy carries
+                            # is pinned by the suite instead, on stamps that
+                            # differ row by row (`test_forecast_writer.py::
+                            # TestTheCopyBack::test_the_stamps_no_run_
+                            # restamps_arrive_exactly`).
                             ("app.seasonal_indices", "updated_at"),
                             ("app.growth_metrics", "updated_at"),
                             ("app.weekly_patterns", "updated_at"),

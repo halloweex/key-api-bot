@@ -2468,10 +2468,11 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         columns=PREDICTION_COLUMNS,
         key_columns=("prediction_date", "sales_type"),
         synced_column="created_at",
-        # Shipped and never compared — a whole-table stamp.
-        # `store_predictions` DELETEs the forecast and INSERTs it whole after each
-        # retrain (Mon and Thu 03:30), so every row carries one stamp from one
-        # run — in either store, since chain 7b-3's writer stamps once per run.
+        # Shipped and never compared — a whole-run stamp.
+        # `store_predictions` DELETEs the range it predicts (today to +60) and
+        # INSERTs it after each retrain (Mon and Thu 03:30), so every row of
+        # that range carries one stamp from one run — in either store, since
+        # chain 7b-3's writer stamps once per run. Past days keep theirs.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
         # identical. `app.sku_inventory_status` is the same
@@ -2509,7 +2510,8 @@ OPERATIONAL_TABLES: Tuple[MirroredTable, ...] = (
         key_columns=("month", "week_of_month"),
         synced_column="updated_at",
         # Shipped and never compared — a whole-table stamp.
-        # `recalculate_goal_tables` writes all sixty month-weeks in one pass.
+        # `recalculate_goal_tables` writes all sixty month-weeks in one pass —
+        # from `POST /api/goals/recalculate` only; the Monday job stores none.
         # A re-derivation between the copy and the comparison would then make
         # every row differ on the clock alone, while the values it guards are
         # identical. `app.sku_inventory_status` is the same

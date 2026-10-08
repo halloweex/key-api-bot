@@ -103,13 +103,19 @@ a bad copy of either could cost a wrong "as of" on /inventory until then
 `tests/unit/test_chain_transfer.py` computes the set, so a third cannot join
 it silently.
 
-Chain 7b-3 added four of the same kind, deliberately and with the reason in
-that test: `seasonal_indices`, `growth_metrics` and `weekly_patterns`
-`.updated_at` and `revenue_predictions.created_at`. Each is one stamp per
-writer run — the goal tables are written in one transaction with one `now`,
-and DuckDB stamps one `created_at` per transaction — read by nothing in DuckDB,
-and restamped on every row by the writer's next run. The daily spec already
-forgives all four, and this list stays its list.
+Chain 7b-3 added four more, deliberately and with the reason in that test:
+`seasonal_indices`, `growth_metrics` and `weekly_patterns` `.updated_at` and
+`revenue_predictions.created_at`. Each is one stamp per writer run — the goal
+tables are written in one transaction with one `now`, and DuckDB stamps one
+`created_at` per transaction — and read by nothing in DuckDB. The daily spec
+already forgives all four, and this list stays its list. Not all of them are
+restamped by the next run, though, and that is where the analogy with
+`offers.synced_at` stops: `weekly_patterns` is stored only by
+`POST /api/goals/recalculate`, never by the Monday job, and a training
+replaces only the range it predicts, so a past day's `created_at` stands for
+good. A mis-copy of either would be released here and corrected by nothing;
+what the copy carries is pinned by the suite instead
+(`tests/integration/test_forecast_writer.py`, on stamps that differ by row).
 """
 from __future__ import annotations
 
