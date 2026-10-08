@@ -134,7 +134,10 @@ case "$1" in
                 q=""
                 while [ $# -gt 0 ]; do [ "$1" = "-tAc" ] && q="$2"; shift; done
                 if [ -z "$q" ]; then cat >/dev/null; exit 0; fi
-                tbl="${q##*FROM }"
+                case "$q" in
+                    *"'owner:"*) tbl="chain5.owners" ;;   # CHAIN5_OWNER_SQL
+                    *) tbl="${q##*FROM }" ;;
+                esac
                 key="$(printf '%s' "$tbl" | tr '.a-z' '_A-Z')"
                 if [ "$cname" = ks-postgres ]; then var="FAKE_LIVE_$key"; else var="FAKE_RESTORED_$key"; fi
                 eval "v=\${$var-}"
@@ -598,9 +601,11 @@ LIVE = {
     "FAKE_LIVE_BRONZE_BUYER_CONTACTS": 34379,
     "FAKE_LIVE_APP_BUYER_GENDER": 20656,
 }
-# Chain 5's two, synthetic: a few dozen managers and their intervals.
+# Chain 5's two, synthetic: a few dozen managers and their intervals — and,
+# as in production today, no owner row naming either (CHAIN5_OWNER_SQL).
 LIVE.update({"FAKE_LIVE_BRONZE_MANAGERS": 41,
-             "FAKE_LIVE_APP_MANAGER_CLASSIFICATIONS": 44})
+             "FAKE_LIVE_APP_MANAGER_CLASSIFICATIONS": 44,
+             "FAKE_LIVE_CHAIN5_OWNERS": 0})
 RESTORED = {
     "FAKE_RESTORED_APP_ORDER_VERSIONS": 52400,
     "FAKE_RESTORED_APP_MANUAL_EXPENSES": 0,
@@ -724,21 +729,40 @@ class TestTheRemoteDrill:
         run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **restored)
         assert run.code == 0 and "ROWS MISSING FROM LIVE" not in run.out, run.out
 
-    def test_chain_5s_tables_are_counted_and_only_grow(self, world):
+    @pytest.mark.parametrize("owners", [2, None], ids=["owned", "owner-read-fails"])
+    def test_chain_5s_tables_are_counted_and_only_grow(self, world, owners):
         """Once chain 5 writes them this dump is the only backup of a
         classification made after the flip, and neither table's key set
         shrinks under its writer — so more in the dump than in live is a loss.
-        Mutation: drop the two lines from DRILL_TABLES."""
+        An owner read that fails counts them too: the stricter direction.
+        Mutation: drop the two lines from CHAIN5_DRILL_TABLES."""
         self._shipped(world)
-        run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **RESTORED)
+        live = dict(LIVE, FAKE_LIVE_CHAIN5_OWNERS=owners if owners is not None else "")
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **live, **RESTORED)
         assert run.code == 0, run.out
         for table in ("bronze.managers", "app.manager_classifications"):
             assert table in run.out, run.out
 
         for var in ("BRONZE_MANAGERS", "APP_MANAGER_CLASSIFICATIONS"):
             restored = dict(RESTORED, **{f"FAKE_RESTORED_{var}": 5000})
-            run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **restored)
+            run = world.run("pg_restore_drill.sh", ["--from-remote"], **live, **restored)
             assert run.code != 0 and "ROWS MISSING FROM LIVE" in run.out, (var, run.out)
+
+    def test_chain_5s_tables_are_not_counted_before_it_owns_them(self, world):
+        """With the chain off they are a replica DuckDB full-replaces, and the
+        drill reads what it read before chain 5 existed: no line for either,
+        and a dump holding more than live is not a finding. Mutation: count
+        them unconditionally (the review of chain 5: a default-on change)."""
+        self._shipped(world)
+        restored = dict(RESTORED, FAKE_RESTORED_BRONZE_MANAGERS=5000,
+                        FAKE_RESTORED_APP_MANAGER_CLASSIFICATIONS=5000)
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **restored)
+        assert run.code == 0, run.out
+        for table in ("bronze.managers", "app.manager_classifications"):
+            assert table not in run.out, run.out
+        # The owner question is asked of live, as ks_readonly.
+        asked = [c for c in run.docker if "owner:bronze.managers" in c]
+        assert asked and all("ks-postgres psql -U ks_readonly" in c for c in asked), asked
 
     def test_a_table_that_may_shrink_still_has_a_margin(self, world):
         """`either` relaxes the direction, not the size: a restored copy far
