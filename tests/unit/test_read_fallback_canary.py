@@ -577,17 +577,37 @@ class TestABlindProbeKeepsThePage:
         sent, agent, _ = await self._run([stalled, None, stalled])
         assert len(sent) == 1 and not any("Resolved" in s for s in sent), sent
 
+    @pytest.mark.asyncio
+    async def test_chain_3s_page_is_held_through_a_blind_probe(self):
+        """Under chain 3 the order step is the only writer of orders, and a
+        hung Postgres hangs /api/health too: the blind probe announced the
+        CRITICAL resolved, and the next paged it again as a new incident,
+        agent and all — chain 4's defect, fixed for chain 4 only (batch-E
+        review). Mutation: drop `orders_sync_failing` from
+        `unjudged_keys`."""
+        failing = self._payload({})
+        failing["write_chains"] = {canary.ORDERS_CHAIN: {
+            "mode": "postgres", "sync_step": {
+                "consecutive_failures": canary.ORDERS_SYNC_FAILURES + 2,
+                "last_ok_age_s": 3600, "last_attempt_age_s": 60,
+                "last_error_class": "TimeoutError"}}}
+        sent, agent, _ = await self._run([failing, None, failing])
+        assert len(sent) == 1 and not any("Resolved" in s for s in sent), sent
+        assert agent == ["canary:orders_sync_failing"], agent
+
 
 class TestUnjudgedKeys:
+    # Chains 3 and 4 both on DuckDB: an entry for each, so both are judged.
     _CHAIN4 = {"buyer_sync": {"last_ok_age_s": 60},
-               "write_chains": {canary.BUYER_CHAIN: {"mode": "duckdb"}}}
+               "write_chains": {canary.BUYER_CHAIN: {"mode": "duckdb"},
+                                canary.ORDERS_CHAIN: {"mode": "duckdb"}}}
     _SWITCH = {"duckdb_switch": {"mode": "on", "opened_while_off": {}}}
 
     def test_no_payload_judges_none_of_them(self):
         assert canary.unjudged_keys(None) == [
             "read_fallback_used", "read_routed_to_duckdb", "read_refused",
             "buyer_sync_stalled", "buyer_sync_stalled_chain",
-            "duckdb_opened_while_off"]
+            "duckdb_opened_while_off", "orders_sync_failing"]
 
     def test_a_payload_with_every_block_judges_all_of_them(self):
         payload = {"read_fallbacks": {}, "read_fallback_mode": {"mode": "duckdb"},
@@ -602,7 +622,7 @@ class TestUnjudgedKeys:
             "read_routed_to_duckdb", "read_refused"]
         both = {"read_fallbacks": {}, "read_fallback_mode": {}, **self._SWITCH}
         assert canary.unjudged_keys({**both, "buyer_sync": {"last_ok_age_s": 1}}) == [
-            "buyer_sync_stalled_chain"], "no chain entry"
+            "buyer_sync_stalled_chain", "orders_sync_failing"], "no chain entry"
         assert canary.unjudged_keys({**both, "buyer_sync": None,
                                      "write_chains": self._CHAIN4["write_chains"]}) == [
             "buyer_sync_stalled", "buyer_sync_stalled_chain"], "no step block"
@@ -627,7 +647,25 @@ class TestUnjudgedKeys:
              "write_chains": {canary.BUYER_CHAIN: {"mode": "postgres"}}})}
         emitted |= {k for k, _ in canary.check_duckdb_switch(
             {"duckdb_switch": {"opened_while_off": {"a": _entry(1)}}})}
+        emitted |= {k for k, _ in canary.check_orders_sync_chain(
+            {"write_chains": {canary.ORDERS_CHAIN: {
+                "mode": "postgres", "sync_step": {"consecutive_failures": 9}}}})}
         assert set(canary.unjudged_keys(None)) == emitted
+
+    @pytest.mark.parametrize("entry, held", [
+        (None, True),                                              # no entry at all
+        ({"mode": "postgres"}, True),                              # no step to judge
+        ({"mode": "postgres", "sync_step": None}, True),
+        ({"mode": "postgres", "sync_step": {"consecutive_failures": 0}}, False),
+        ({"mode": "duckdb"}, False),                               # judged: not chain 3's
+        ({"mode": None}, False),
+    ])
+    def test_chain_3s_key_is_held_only_when_it_cannot_be_judged(self, entry, held):
+        payload = {"read_fallbacks": {}, "read_fallback_mode": {}, **self._SWITCH,
+                   "buyer_sync": {"last_ok_age_s": 1},
+                   "write_chains": {canary.BUYER_CHAIN: {"mode": "duckdb"},
+                                    **({canary.ORDERS_CHAIN: entry} if entry else {})}}
+        assert ("orders_sync_failing" in canary.unjudged_keys(payload)) is held
 
     @pytest.mark.asyncio
     async def test_run_canary_publishes_them(self):

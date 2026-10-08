@@ -3023,9 +3023,12 @@ probe could not judge for want of their block, and `canary_job` keeps them in
 `still_firing` — and the buyers step's two keys, `buyer_sync_stalled` when the
 probe read no `buyer_sync` block and chain 4's CRITICAL also when it read no
 entry for the chain: under chain 4 a stall of the only writer of buyers
-outlives the freeze and every recreate, and both keys fire for it.
-Every other payload-derived key keeps today's behaviour, though they share the
-flaw.
+outlives the freeze and every recreate, and both keys fire for it. Chain 3's
+`orders_sync_failing` is held the same way when the probe read no entry for
+the chain, or read it on Postgres with no `sync_step`: the Postgres hang
+that fails the only writer of orders hangs `/api/health` too (batch-E
+review). Every other payload-derived key keeps today's behaviour, though
+they share the flaw.
 
 A page proves a fallback, but it cannot prove that a quiet week was looked at.
 So every probe that read the block also rewrites one row,

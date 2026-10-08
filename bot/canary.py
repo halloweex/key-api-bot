@@ -963,7 +963,12 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     stall outlives the 05:15 freeze and every deploy recreate. Read blind, the
     page was announced resolved and paged again as a new incident each time —
     through the WARN beside it as much as through the CRITICAL, since both
-    fire for one stall (review of chain 4's merge with OD-07)."""
+    fire for one stall (review of chain 4's merge with OD-07).
+
+    Chain 3's `orders_sync_failing` the same way, when the probe read no
+    entry for the chain, or read it on Postgres with no step to judge: under
+    chain 3 the order step is the only writer of orders, and the Postgres
+    hang that fails it hangs this endpoint too (batch-E review)."""
     payload = payload or {}
     keys = []
     if not isinstance(payload.get("read_fallbacks"), dict):
@@ -979,6 +984,17 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     # restarts; a probe that read no switch block cannot say it cleared.
     if not isinstance(payload.get("duckdb_switch"), dict):
         keys.append("duckdb_opened_while_off")
+    # Chain 3's CRITICAL, held the way chain 4's is: under chain 3 the order
+    # step is the only writer of orders, and a hung Postgres — the likeliest
+    # cause of the page — hangs /api/health too, which is exactly a blind
+    # probe. Held when the probe read no entry for the chain, or read the
+    # chain on Postgres with no step to judge; an entry that says duckdb is
+    # judged, and clears it (batch-E review).
+    orders = chains.get(ORDERS_CHAIN) if isinstance(chains, dict) else None
+    if not isinstance(orders, dict) or (
+            orders.get("mode") == "postgres"
+            and not isinstance(orders.get("sync_step"), dict)):
+        keys.append("orders_sync_failing")
     return keys
 
 

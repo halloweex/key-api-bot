@@ -150,8 +150,8 @@ class TestTheFlag:
         """Step 13's start gathers the goal bridge's owners, and that asks
         this chain for its mode — before step 13 has decided, so `step13`
         read unmet and the hold remembered it: every start that found step
-        13 in force held chain 3 until the process ended (the batch-E review,
-        finding 10). Mutation: hold on `step13` whether or not step 13 has
+        13 in force held chain 3 until the process ended (the batch-E
+        review). Mutation: hold on `step13` whether or not step 13 has
         reached its verdict."""
         from core import warehouse_cutover
         from core.runtime_modes import configure_modes
@@ -1011,7 +1011,7 @@ class TestThePreflight:
         markers: the goal bridge's reason carries its lever after a "; ", and
         the preflight used to split the joined answer on it — `/api/health`
         published "port chain 7b first (OD-14)" as a precondition of its own
-        (batch-E review, findings 3 and 7). Mutation: split
+        (batch-E review). Mutation: split
         `unmet_precondition()` on "; " again."""
         flags.setattr(pow_, "_backup_unmet", lambda: ["pitr_drill: never"])
         with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("no pg"))):
