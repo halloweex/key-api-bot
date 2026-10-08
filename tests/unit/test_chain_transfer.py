@@ -374,6 +374,23 @@ class TestAKeyOnlyPostgresHolds:
             "handover_rows_ahead", "INFO")
         assert "next full replace" not in issue.description
 
+    def test_an_append_table_says_what_a_flip_does_with_them(self):
+        """The review of F6: still INFO before a flip, so `--handover` exits
+        0 over them, and the finding read as if they were harmless — "a
+        writer that is not the copy put them there". A flip keeps them as the
+        record, which is right if DuckDB lost them (a restore older than the
+        last copy) and a phantom movement if something wrote round the copy.
+        The severity is the owner's to change; the sentence says both causes
+        and what the flip does. Mutation killed: the old sentence."""
+        spec = _spec(pg_inventory_write, "app.stock_movements")
+        row = lambda i: _row(spec, id=i, offer_id=1, recorded_at=T0)  # noqa: E731
+        (issue,) = classify_handover(spec, {1: row(1)}, {1: row(1), 9: row(9)},
+                                     moved_on=False)
+        assert issue.severity.value == "INFO"
+        assert "A flip keeps them as the record" in issue.description
+        assert "restored" in issue.description
+        assert "by id before flipping" in issue.description
+
 
 def _preflip_criticals():
     """Every CRITICAL the pre-flip rule can file, on every table of every

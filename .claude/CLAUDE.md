@@ -3332,9 +3332,16 @@ written:
   whole: a row DuckDB deleted after the copy last ran. The copy would remove
   it, but it stands down at the flip, so the flip would keep it in the store
   the page reads — the review of #265 (F6) reproduced a withdrawn expense back
-  in the ad spend. The lever is the copy itself. One exception: on a table both
-  stores sweep by age (chain 10's samples), a row older than anything DuckDB
-  still holds is its sweep, which Postgres's own writer repeats after a flip;
+  in the ad spend. The lever is the copy itself, with the chain writing DuckDB
+  (the flag at duckdb, no marker). One exception, and only on a table both
+  stores sweep by age (chain 10's samples): a row older than anything DuckDB
+  still holds is its sweep, which Postgres's own writer repeats after a flip.
+  A row's own clock is no sweep — an older withdrawn expense is a ghost too.
+  An append table's key only Postgres holds, above DuckDB's watermark, stays
+  INFO and is **not** refused: a DuckDB file restored from before the last
+  copy and a writer round the copy look the same there, and refusing the
+  first leaves no lever but deleting real history. The finding says the flip
+  keeps them; whether it should refuse is the owner's to decide;
 - in an append-only table, two different rows under one key. There is no
   "newer" there: they are two events, and the usual one is a movement id both
   allocators issued, because Postgres floors its sequence on its own MAX(id);
