@@ -358,8 +358,8 @@ FATES: Dict[str, TableFate] = {
         MOVED, IRREPLACEABLE, "Split by key, not moved as a table: each "
         "last_sync_* key follows the chain that declares it "
         "(write_chains.chain_for_sync_key) into meta.chain_watermarks; "
-        "warehouse_dirty retires with step 13; dq_digest_last_sent goes with "
-        "chain 9.",
+        "warehouse_dirty retires with step 13; the digest's marker goes with "
+        "chain 9 (pg_dq_journal_write.CHAIN_MARKER_KEYS).",
         successors=("app.sync_metadata", "meta.chain_watermarks")),
 
     # ── moved before stage 4 by a store switch ──────────────────────────────
