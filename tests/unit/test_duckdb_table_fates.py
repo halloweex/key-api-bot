@@ -72,6 +72,9 @@ RENDERED_DDL = {
     ("core/ch_silver.py", "_SILVER_DDL"): "ClickHouse, not DuckDB",
     ("deploy/ark_freeze.py", "dump_schema"):
         "writes the frozen file's own tables out as text; executes nothing",
+    ("scripts/goals_semantics_dryrun.py", "copy_backup"):
+        "copies the tables its TABLES names out of a backup ATTACHed "
+        "READ_ONLY into an in-memory database (`:memory:`) — never the file",
 }
 
 # Switch names in the code that do not decide a DuckDB table's writer.
@@ -426,8 +429,10 @@ def repo_python() -> List[Tuple[str, Path]]:
 #
 # Limits, named: a write whose target is rendered at run time (`f"DELETE FROM
 # {table}"` — the Postgres and ClickHouse shippers, the compaction's import,
-# the copy-back) names no table and is not counted; a guard spelled other than
-# a call of the reader, `not` of one, `and`/`or` of those, or an early
+# the copy-back) names no table and is not counted; a `{name}` template, one
+# text for two engines, is rendered for DuckDB by its module's own function
+# or says what fills its hole (`TEMPLATED_ELSEWHERE`); a guard spelled other
+# than a call of the reader, `not` of one, `and`/`or` of those, or an early
 # `return`/`raise`/`continue` is not seen, which errs toward "unguarded".
 
 # The SQL keywords that write a table. Upper case only: the repository's SQL
@@ -459,6 +464,61 @@ NOT_THE_FILE = {
     ("deploy/measure_dlr_throughput.py", "main"):
         "a benchmark's own DuckDB, created in a temp directory",
 }
+
+# Write statements that name their table as a `{hole}` the module fills per
+# engine — one text for DuckDB and Postgres. The literal pass reads a name
+# only where it can see one, so each is rendered for DuckDB by the module's
+# own function, as a router's statement is, and read like a literal: nothing
+# restated here. Chain 10 wrote the watchdogs' statements so, and every DuckDB
+# write of the three sample tables went dark to the walk until this read them.
+#
+# `{module: renderer}` — `renderer(text)` renders any of the module's texts
+# for DuckDB, its default engine.
+HOLE_RENDERERS = {
+    "core/disk_monitor.py": "sample_sql",
+    "core/memory_monitor.py": "memory_sql",
+}
+# `{(module, constant): renderer}` — a `Dialect` body, rendered by the one
+# function that renders it, as `renderer(sql_dialect.DUCKDB)`.
+DIALECT_BODIES = {
+    ("core/sql_dialect.py", "_SKU_STATUS_REBUILD_BODY"): "sku_status_rebuild_select",
+    ("core/sql_dialect.py", "_MANAGER_STATS_BODY"): "manager_stats_sql",
+}
+# Templated writes nothing above renders, each with what fills its hole. One
+# that is in none of the three fails, and so does a listed one that no longer
+# exists: the next writer of one text for two engines is told, not lost.
+TEMPLATED_ELSEWHERE = {
+    ("core/dashboard_access.py", "GRANT_ACCESS"):
+        "handed to `_users_run`, which renders it; the router pass reads it there",
+    ("core/dashboard_access.py", "SET_FEATURES"):
+        "handed to `_users_run`, which renders it; the router pass reads it there",
+    ("core/pg_landing.py", "_UPSERT"): "Postgres: the landing mirror's tables",
+    ("core/report_ledger.py", "UPSERT_SQL"):
+        "Postgres: the two send ledgers' chain writers (`$n` placeholders); "
+        "DuckDB's half is each report's own literal",
+    ("deploy/step13_rehearsal/probe.py", "_DELETE_ONE"):
+        "the step-13 rehearsal's copy of the file, one `python -c` per table",
+}
+# A write keyword whose table is a named `{hole}`. An f-string's own holes
+# read as `HOLE`, which has no name; `{{name}}` in one reads as `{name}`.
+_TEMPLATED_WRITE = re.compile(_WRITE.pattern + r"\s+\{\w+\}")
+
+
+def _render_template(module: "_Module", owner: Tuple[str, str],
+                     text: str) -> "str | None":
+    """The DuckDB text of a templated write, by the module's own renderer, or
+    None when nothing listed renders it."""
+    if module.rel in HOLE_RENDERERS:
+        mod = importlib.import_module(_module_name(module.rel))
+        return getattr(mod, HOLE_RENDERERS[module.rel])(text)
+    kind, name = owner
+    renderer = DIALECT_BODIES.get((module.rel, name)) if kind == "const" else None
+    if renderer is None:
+        return None
+    from core.sql_dialect import DUCKDB
+
+    mod = importlib.import_module(_module_name(module.rel))
+    return getattr(mod, renderer)(DUCKDB)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -723,10 +783,12 @@ def walk_writes(sources: "List[Tuple[str, str]] | None" = None) -> WriteWalk:
         for node, text in _strings(module.tree):
             if id(node) in handed_ids:
                 continue
-            targets = _write_targets(text)
+            kind, owner = module.owners.get(id(node), ("module", ""))
+            rendered = (_render_template(module, (kind, owner), text)
+                        if _TEMPLATED_WRITE.search(text) else None)
+            targets = _write_targets(rendered if rendered is not None else text)
             if not targets:
                 continue
-            kind, owner = module.owners.get(id(node), ("module", ""))
             if kind == "fn":
                 at = [(module.rel, owner, node)]
             else:
@@ -750,6 +812,20 @@ def walk_writes(sources: "List[Tuple[str, str]] | None" = None) -> WriteWalk:
                                     t, router, call)
                           for t in _write_targets(rendered)]
     return WriteWalk(sites, modules, unread)
+
+
+def templated_writes(sources: "List[Tuple[str, str]] | None" = None) -> Set[Tuple[str, str]]:
+    """`(module, owner)` of every write statement naming its table as a
+    `{hole}` — the owner a constant's name or a function's qualname — except
+    a statement handed straight to a router, which renders it."""
+    routers = {r for _, _, rs in STORE_ROUTERS.values() for r in rs}
+    out = set()
+    for module in _modules(_sources() if sources is None else sources):
+        handed = {id(arg) for _, arg, _ in _handed_statements(module, routers)}
+        for node, text in _strings(module.tree):
+            if id(node) not in handed and _TEMPLATED_WRITE.search(text):
+                out.add((module.rel, module.owners.get(id(node), ("module", ""))[1]))
+    return out
 
 
 def _reader_says(test: ast.AST, reader: str, true_means_duckdb: bool) -> "bool | None":
@@ -1492,6 +1568,63 @@ class TestTheStoreSwitches:
         present = {(s.path, s.owner) for s in writes.sites}
         assert set(NOT_THE_FILE) <= present, set(NOT_THE_FILE) - present
 
+    # ── one text for two engines ──
+
+    def test_the_watchdogs_templates_are_read_as_writes(self, writes):
+        """Chain 10 made each sample statement one `{table}` text for both
+        stores, and the literal pass lost all three tables: `duckdb_written()`
+        said True and the walk said nothing writes them. Mutation: empty
+        `HOLE_RENDERERS`."""
+        expected = {
+            "disk_samples": {("core/disk_monitor.py", "insert_sample"),
+                             ("core/disk_monitor.py", "prune_old_samples")},
+            "data_dir_samples": {("core/disk_monitor.py", "insert_dir_samples"),
+                                 ("core/disk_monitor.py", "prune_old_dir_samples")},
+            "memory_samples": {("core/memory_monitor.py", "insert_sample"),
+                               ("core/memory_monitor.py", "prune_old_samples")},
+        }
+        for table, functions in expected.items():
+            owners = {(s.path, s.owner) for s in writes.writers(table)}
+            assert functions <= owners, (table, owners)
+
+    def test_a_dialect_body_is_read_for_duckdb(self, writes):
+        """Mutation: empty `DIALECT_BODIES`."""
+        for (path, _), renderer in DIALECT_BODIES.items():
+            assert any(s.path == path and s.owner == renderer for s in writes.sites), (
+                path, renderer)
+
+    def test_every_templated_write_is_rendered_or_listed(self):
+        """Mutation: add `"DELETE FROM {t} WHERE x = ?"` to any module
+        without listing it — the walk would not count the write."""
+        found = templated_writes()
+        unlisted = sorted(site for site in found
+                          if site[0] not in HOLE_RENDERERS
+                          and site not in DIALECT_BODIES
+                          and site not in TEMPLATED_ELSEWHERE)
+        assert not unlisted, (
+            f"a write naming its table as a {{hole}} at {unlisted}: list the "
+            f"module's DuckDB renderer, or say in TEMPLATED_ELSEWHERE what "
+            f"fills it")
+        gone = sorted((set(DIALECT_BODIES) | set(TEMPLATED_ELSEWHERE)) - found)
+        assert not gone, f"listed and no longer there: {gone}"
+        for module, renderer in HOLE_RENDERERS.items():
+            assert any(rel == module for rel, _ in found), module
+            assert callable(getattr(importlib.import_module(_module_name(module)),
+                                    renderer)), (module, renderer)
+
+    @pytest.mark.parametrize("source, found", [
+        ('X = "INSERT INTO {t} VALUES (?)"', {("core/_probe.py", "X")}),
+        ('def f(c):\n    c.execute("DELETE FROM {t} WHERE a = ?")',
+         {("core/_probe.py", "f")}),
+        ('X = f"UPDATE {{t}} SET a = {v}"', {("core/_probe.py", "X")}),
+        ('X = f"UPDATE {t} SET a = 1"', set()),        # an f-string's hole
+        ('X = "SELECT * FROM {t}"', set()),            # a read
+        ('async def f(s):\n    await s._sms_run("DELETE FROM {presets}", [])',
+         set()),                                       # the router renders it
+    ])
+    def test_the_template_walk_reads_its_shapes(self, source, found):
+        assert templated_writes([("core/_probe.py", source)]) == found
+
     # ── the guard, shape by shape ──
 
     _W = 'c.execute("DELETE FROM silver_orders")'
@@ -1602,14 +1735,36 @@ class TestDuckdbWritten:
         assert {written[n] for n in moved} == {False}
 
     def test_a_latched_chain_moves_its_tables(self, monkeypatch):
+        """A frozen chain's tables leave DuckDB with its latch. A shadow
+        chain's do not (OD-02 (c)): Postgres writes first and DuckDB is still
+        handed every row (`core/shadow_writes.py`), so the file is written as
+        long as the shadow stands. Mutations: answer `mode == "duckdb"` for
+        every chain (the shadow tables read False), or True for every one."""
         from core import chain_latch
-        from core.write_chains import chain_name
+        from core.write_chains import chain_name, is_shadow
 
+        shapes = set()
         for env, chain in _chain_switches().items():
             chain_latch.latch(chain_name(chain), env)
             written = fates_mod.duckdb_written()
+            shadow = is_shadow(chain)
+            shapes.add(shadow)
             for name in fates_mod.tables_by_switch(env):
-                assert written[name] is False, (env, name)
+                assert written[name] is shadow, (env, name, shadow)
+        assert shapes == {True, False}, "the family: both shapes are registered"
+
+    def test_a_shadow_chains_tables_are_written_by_its_shadow(self, writes):
+        """What makes True the honest answer for a latched shadow chain: the
+        DuckDB statements the shadow runs are the walk's writes of the very
+        tables the chain declares."""
+        from core.write_chains import WRITE_CHAINS, is_shadow
+
+        shadow = [c for c in WRITE_CHAINS if is_shadow(c)]
+        assert shadow
+        by_code = writes.written()
+        for chain in shadow:
+            tables = fates_mod.tables_by_switch(chain.WRITE_ENV)
+            assert tables and set(tables) <= by_code, (chain.WRITE_ENV, tables)
 
     def test_a_chain_flag_nobody_can_read_is_unknown(self, monkeypatch):
         for env in _chain_switches():

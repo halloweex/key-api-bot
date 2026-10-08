@@ -4669,7 +4669,10 @@ each entry is held to the real `phase1_export` (the off-site archive), every
 tier of `snapshot_validation`, every DuckDB→Postgres pairing the shippers and
 comparisons state, the migrated Postgres schema and the registered chains. **A
 chain that registers names its `KS_WRITE_*` on the tables it takes in the same
-change** — chain 4 was the first the guard stopped. OD-11 is pinned there too:
+change** — chain 4 was the first the guard stopped, and chains 3, 5, 6, 7b-3,
+9, 10, 11a and 11b met it at the stage-4 integration. A shadow chain's tables
+(OD-02 (c)) read DuckDB-written in either mode, because the shadow still hands
+DuckDB every row. OD-11 is pinned there too:
 `DERIVED_TABLES` and the set with no DDL are literals, so a DROP says so in
 the diff.
 
@@ -4683,7 +4686,10 @@ tables a store switch moves is read off the writers**, not declared: the
 statements each router runs, rendered by the router itself, plus every
 literal DuckDB write, and a table belongs to `KS_SMS_STORE`, `KS_USER_STORE`
 or `KS_WRITE_WAREHOUSE` only if every writer runs on the branch where that
-reader says DuckDB. `duckdb_written()` is held to the same writers, not to
+reader says DuckDB. A write naming its table as a `{hole}` — one text for two
+engines, chain 10's watchdog statements — is rendered for DuckDB by its
+module's own function, or says what fills the hole (`TEMPLATED_ELSEWHERE`):
+the walk lost all three sample tables before it read them. `duckdb_written()` is held to the same writers, not to
 `kind` — `schema_migrations` is retired at stage 5 and written until then.
 
 `deploy/duckdb_table_fates_check.py` asks the same of a file: the newest

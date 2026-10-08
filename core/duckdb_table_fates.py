@@ -38,7 +38,10 @@ WHAT AN ENTRY SAYS
   writes — or, for a view or a retired table, that nothing writes at all. When
   a chain is registered (`core.write_chains.WRITE_CHAINS`) the test requires
   its tables to carry its variable, so a chain cannot land without saying here
-  which tables it took.
+  which tables it took. A SHADOW chain's tables (OD-02 (c): chains 9, 10, 11a,
+  11b) carry their switch like any other, but moving it does not stop DuckDB
+  writing them — Postgres writes first and DuckDB is still handed every row —
+  so `duckdb_written()` reads them True in either mode.
 - `origin` — what could rebuild the rows if every copy were lost: KeyCRM, a
   computation over other tables, or nothing (IRREPLACEABLE). An irreplaceable
   table must travel off-site; that is chain 12's largest blast radius.
@@ -202,22 +205,24 @@ FATES: Dict[str, TableFate] = {
     "v_restock_alerts": _view("gold.v_restock_alerts", _INVENTORY_VIEW),
     "v_sku_dead_stock_v2": _view("gold.v_sku_dead_stock_v2", _INVENTORY_VIEW),
 
-    # ── chain 3: orders and order-level expenses (no switch yet) ────────────
+    # ── chain 3: orders and order-level expenses (KS_WRITE_ORDERS, registered)
     "orders": TableFate(
         MOVED, KEYCRM, "Order headers; mirrored to bronze.orders from the same "
         "parse, with the version archive captured beside it in Postgres.",
-        successors=("bronze.orders",), chain="3"),
+        successors=("bronze.orders",), chain="3", switch="KS_WRITE_ORDERS"),
     "order_products": TableFate(
         MOVED, KEYCRM, "Line items; moves with the headers as one unit.",
-        successors=("bronze.order_products",), chain="3"),
+        successors=("bronze.order_products",), chain="3",
+        switch="KS_WRITE_ORDERS"),
     "expenses": TableFate(
-        MOVED, KEYCRM, "Order-level expenses from include=expenses; mirrored "
-        "to bronze.expenses.",
-        successors=("bronze.expenses",), chain="3"),
+        MOVED, KEYCRM, "Order-level expenses from include=expenses; written "
+        "with the orders they belong to, in one transaction.",
+        successors=("bronze.expenses",), chain="3", switch="KS_WRITE_ORDERS"),
     "order_backfill_misses": TableFate(
         MOVED, IRREPLACEABLE, "Ids KeyCRM could not supply — the one fact an "
         "API can never be asked for.",
-        successors=("app.order_backfill_misses",), chain="3"),
+        successors=("app.order_backfill_misses",), chain="3",
+        switch="KS_WRITE_ORDERS"),
 
     # ── chain 4: buyers and gender (KS_WRITE_BUYERS, registered) ────────────
     "buyers": TableFate(
@@ -233,47 +238,58 @@ FATES: Dict[str, TableFate] = {
         successors=("app.buyer_gender",), chain="4",
         switch="KS_WRITE_BUYERS"),
 
-    # ── chain 5: manager classification (no switch yet) ─────────────────────
+    # ── chain 5: manager classification (KS_WRITE_MANAGERS, registered) ─────
     "managers": TableFate(
         MOVED, IRREPLACEABLE, "KeyCRM names the managers, but is_retail is "
         "seeded once and then only a human sets it.",
-        successors=("bronze.managers",), chain="5"),
+        successors=("bronze.managers",), chain="5", switch="KS_WRITE_MANAGERS"),
     "manager_classifications": TableFate(
         MOVED, IRREPLACEABLE, "Human-authored retail intervals; sales_type is "
         "decided from them.",
-        successors=("app.manager_classifications",), chain="5"),
+        successors=("app.manager_classifications",), chain="5",
+        switch="KS_WRITE_MANAGERS"),
 
-    # ── chain 6: catalogue (6a registered; products/categories no switch) ───
+    # ── chain 6: catalogue (6 and 6a registered) ───────────────────────────
     "products": TableFate(
         MOVED, KEYCRM, "The product catalogue; mirrored whole each hour. "
         "Product 1055 is DuckDB-only and is carried over (OD-15).",
-        successors=("bronze.products",), chain="6"),
+        successors=("bronze.products",), chain="6",
+        switch="KS_WRITE_CATALOGUE"),
     "categories": TableFate(
         MOVED, KEYCRM, "Categories; shipped by the weekly full sync.",
-        successors=("bronze.categories",), chain="6"),
+        successors=("bronze.categories",), chain="6",
+        switch="KS_WRITE_CATALOGUE"),
     "expense_types": TableFate(
         MOVED, KEYCRM, "The 27-row dictionary /expenses names its costs by; "
         "KeyCRM serves it only to the weekly full sync.",
         successors=("bronze.expense_types",), chain="6a",
         switch="KS_WRITE_EXPENSE_TYPES"),
 
-    # ── chain 7: goals and the forecast (7a registered; 7b no switch) ───────
+    # ── chain 7: goals and the forecast (7a and 7b-3 registered) ────────────
     "revenue_goals": TableFate(
         MOVED, IRREPLACEABLE, "The three goal amounts a human types on /goals.",
         successors=("app.revenue_goals",), chain="7a", switch="KS_WRITE_GOALS"),
     "seasonal_indices": TableFate(
-        DERIVED, COMPUTED, "Computed from Silver by the goal calculators; "
-        "chain 7b ports them onto Postgres Silver (OD-14).",
-        successors=("app.seasonal_indices",), chain="7b"),
+        DERIVED, COMPUTED, "Computed from Silver by the goal calculators "
+        "(chain 7b ported them onto Postgres Silver, OD-14); chain 7b-3 moves "
+        "their writer, the three goal tables in one transaction.",
+        successors=("app.seasonal_indices",), chain="7b-3",
+        switch="KS_WRITE_FORECAST"),
     "weekly_patterns": TableFate(
-        DERIVED, COMPUTED, "Computed by the goal calculators; chain 7b.",
-        successors=("app.weekly_patterns",), chain="7b"),
+        DERIVED, COMPUTED, "Computed by the goal calculators; written with "
+        "the seasonal indices, chain 7b-3.",
+        successors=("app.weekly_patterns",), chain="7b-3",
+        switch="KS_WRITE_FORECAST"),
     "growth_metrics": TableFate(
-        DERIVED, COMPUTED, "Computed by the goal calculators; chain 7b.",
-        successors=("app.growth_metrics",), chain="7b"),
+        DERIVED, COMPUTED, "Computed by the goal calculators; written with "
+        "the seasonal indices, chain 7b-3.",
+        successors=("app.growth_metrics",), chain="7b-3",
+        switch="KS_WRITE_FORECAST"),
     "revenue_predictions": TableFate(
-        DERIVED, COMPUTED, "The model's forecast, retrained daily; chain 7b.",
-        successors=("app.revenue_predictions",), chain="7b"),
+        DERIVED, COMPUTED, "The model's forecast, written after each "
+        "training; chain 7b-3, one owner set with the goal tables.",
+        successors=("app.revenue_predictions",), chain="7b-3",
+        switch="KS_WRITE_FORECAST"),
 
     # ── chain 8: manual expenses (KS_WRITE_EXPENSES, registered) ────────────
     "manual_expenses": TableFate(
@@ -282,16 +298,22 @@ FATES: Dict[str, TableFate] = {
         switch="KS_WRITE_EXPENSES"),
 
     # ── chain 9: the quality journal and the forensic trail ─────────────────
+    # The journal is a SHADOW chain (OD-02 (c)): under KS_WRITE_DQ_JOURNAL
+    # Postgres writes first and DuckDB is still handed every row, so
+    # `duckdb_written()` reads these True in either mode.
     "data_quality_runs": TableFate(
         MOVED, IRREPLACEABLE, "The journal every check verdict, layer age and "
         "digest delta is read from.",
-        successors=("app.data_quality_runs",), chain="9"),
+        successors=("app.data_quality_runs",), chain="9",
+        switch="KS_WRITE_DQ_JOURNAL"),
     "data_quality_issues": TableFate(
         MOVED, IRREPLACEABLE, "Findings of a run; one id space with the runs.",
-        successors=("app.data_quality_issues",), chain="9"),
+        successors=("app.data_quality_issues",), chain="9",
+        switch="KS_WRITE_DQ_JOURNAL"),
     "data_quality_diffs": TableFate(
         MOVED, IRREPLACEABLE, "Diffs of a run; one id space with the runs.",
-        successors=("app.data_quality_diffs",), chain="9"),
+        successors=("app.data_quality_diffs",), chain="9",
+        switch="KS_WRITE_DQ_JOURNAL"),
     "warehouse_refreshes": TableFate(
         ARCHIVE_ONLY, IRREPLACEABLE, "The forensic trail of DuckDB's own "
         "rebuilds; frozen rather than ported (OD-13), and it stops growing "
@@ -302,29 +324,34 @@ FATES: Dict[str, TableFate] = {
         "writer was retired by OD-10 on 2026-09-30, so it is history.",
         successors=("app.reconciliation_log",), chain="9"),
 
-    # ── chain 10: watchdog samples (no switch yet) ──────────────────────────
+    # ── chain 10: watchdog samples (KS_WRITE_WATCHDOGS, registered, shadow) ─
     "disk_samples": TableFate(
         MOVED, IRREPLACEABLE, "Bounded samples the disk watchdog differences "
-        "against; chain 10 moves the writer (where to is OD-16's), and the "
-        "hourly copy in app holds the history.",
-        successors=("app.disk_samples",), chain="10"),
+        "against; chain 10 moves the writer to app with the reads beside it, "
+        "and shadows each insert and prune into DuckDB (OD-02 (c)).",
+        successors=("app.disk_samples",), chain="10",
+        switch="KS_WRITE_WATCHDOGS"),
     "data_dir_samples": TableFate(
         MOVED, IRREPLACEABLE, "Per-group samples behind the 168 h data-dir "
         "baseline; chain 10, as disk_samples.",
-        successors=("app.data_dir_samples",), chain="10"),
+        successors=("app.data_dir_samples",), chain="10",
+        switch="KS_WRITE_WATCHDOGS"),
     "memory_samples": TableFate(
         MOVED, IRREPLACEABLE, "Memory samples; the only memory of an OOM kill "
         "across a container recreate. Chain 10, as disk_samples.",
-        successors=("app.memory_samples",), chain="10"),
+        successors=("app.memory_samples",), chain="10",
+        switch="KS_WRITE_WATCHDOGS"),
 
-    # ── chain 11: the two send ledgers (no switch yet) ──────────────────────
+    # ── chain 11: the two send ledgers (11a and 11b registered, shadow) ─────
     "weekly_report_sends": TableFate(
         MOVED, IRREPLACEABLE, "Which weeks the sales report delivered; a lost "
         "row sends the same week again.",
-        successors=("app.weekly_report_sends",), chain="11"),
+        successors=("app.weekly_report_sends",), chain="11a",
+        switch="KS_WRITE_WEEKLY_LEDGER"),
     "traffic_report_sends": TableFate(
         MOVED, IRREPLACEABLE, "The traffic report's own ledger.",
-        successors=("app.traffic_report_sends",), chain="11"),
+        successors=("app.traffic_report_sends",), chain="11b",
+        switch="KS_WRITE_TRAFFIC_LEDGER"),
 
     # ── one table, three key families ───────────────────────────────────────
     "sync_metadata": TableFate(
@@ -438,7 +465,10 @@ def duckdb_written() -> Dict[str, Optional[bool]]:
     A registered chain answers through `core.write_chains.chain_modes()`, so a
     latch counts exactly as it does for the writers (OD-19 (a)), and a flag
     nobody can read is None: its writers raise rather than pick a store. A
-    store switch asks its own reader; `KS_WRITE_WAREHOUSE` is the mode this
+    shadow chain (`write_chains.is_shadow`, OD-02 (c)) is True whichever store
+    its mode names: under postgres DuckDB is still handed each row after the
+    Postgres commit (`core/shadow_writes.py`), so the file is written until
+    the shadow itself is retired. A store switch asks its own reader; `KS_WRITE_WAREHOUSE` is the mode this
     process configured, and None in a process where `configure_modes()` never
     ran — every process but web's. With no switch, DuckDB writes every table
     in its schema except a frozen archive; nothing writes a view, a table
@@ -455,7 +485,12 @@ def duckdb_written() -> Dict[str, Optional[bool]]:
     chain_mode = {}
     for chain in write_chains.WRITE_CHAINS:
         mode = modes[write_chains.chain_name(chain)]["mode"]
-        chain_mode[chain.WRITE_ENV] = None if mode is None else mode == "duckdb"
+        if mode is None:
+            chain_mode[chain.WRITE_ENV] = None
+        elif write_chains.is_shadow(chain):
+            chain_mode[chain.WRITE_ENV] = True
+        else:
+            chain_mode[chain.WRITE_ENV] = mode == "duckdb"
 
     out: Dict[str, Optional[bool]] = {}
     for name, fate in FATES.items():
