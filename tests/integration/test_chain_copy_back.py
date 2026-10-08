@@ -1108,11 +1108,75 @@ class TestHandoverCheck:
         assert "POST /api/jobs/replicate_operational/trigger" in issues[0].description
         assert await _script(store, env, "expenses", "--handover") == 1
 
-        # The lever, as the runbook says it: web up with the flag unchanged,
-        # the hourly copy ships, stop, ask again.
+        # The lever, as the runbook says it: web up with the chain writing
+        # DuckDB (here the flag never left duckdb), the hourly copy ships,
+        # stop, ask again.
         assert "error" not in await pg_operational.replicate_operational(store)
         assert await handover_check(store, pg_expenses_write) == []
         assert await _script(store, env, "expenses", "--handover") == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("marker", [False, True],
+                             ids=["flag-on-unlatched", "marker-only"])
+    async def test_the_lever_clears_it_when_the_chain_already_routes_to_postgres(
+        self, stores, marker,
+    ):
+        """The review of F6. The pre-flip rule also applies with the flag
+        already at postgres and nothing latched — chain 8's own state since
+        2026-09-17 — and with a marker whose first write failed, which
+        `_marker_steps` sends through `--handover` first. In both the hourly
+        copy stands down, so the lever F6 shipped, "with the flag unchanged",
+        cleared nothing: the review followed it, the ghost stayed, the next
+        typed expense latched the chain, and `--handover` then read the
+        withdrawn 2 500 as the chain's own row — INFO, exit 0 — and /expenses
+        listed it again. The lever now names the state the copy needs, and
+        followed as written it clears the ghost, after which a flip latches
+        over nothing. Mutation killed: the lever's "flag unchanged"."""
+        from core import pg_operational
+
+        store, pool, env = stores
+        kept = await store.add_expense(date(2026, 9, 1), "marketing",
+                                       "Facebook Ads", 1000, platform="facebook")
+        withdrawn = await store.add_expense(date(2026, 9, 2), "marketing",
+                                            "Facebook Ads", 2500, platform="facebook")
+
+        async def blip(*_args, **_kwargs):
+            raise ConnectionError("a Postgres blip")
+
+        with patch.object(pg_operational, "replicate_operational", new=blip):
+            assert await store.delete_expense(withdrawn["id"]) is True
+
+        env.setenv("KS_WRITE_EXPENSES", "postgres")
+        if marker:
+            chain_latch.latch("pg_expenses_write", "KS_WRITE_EXPENSES")
+
+        (issue,) = await handover_check(store, pg_expenses_write)
+        assert (issue.check_name, issue.severity.value, issue.sample_ids) == (
+            "handover_rows_ahead", "CRITICAL", (withdrawn["id"],))
+        assert "its flag at duckdb and no marker" in issue.description
+        assert "flag unchanged" not in issue.description
+
+        # As it stands the copy is down, which is why the lever must say so.
+        result = await pg_operational.replicate_operational(store)
+        assert EXPENSES not in (result.get("replaced") or {})
+
+        # The lever as written: the flag at duckdb, no marker, the copy ships.
+        env.setenv("KS_WRITE_EXPENSES", "duckdb")
+        if marker:
+            assert chain_latch.release("pg_expenses_write")
+        result = await pg_operational.replicate_operational(store)
+        assert EXPENSES in (result.get("replaced") or {}), result
+        assert await handover_check(store, pg_expenses_write) == []
+
+        # Then the flip, and its first write latches over nothing.
+        env.setenv("KS_WRITE_EXPENSES", "postgres")
+        typed = await store.add_expense(date(2026, 9, 3), "marketing",
+                                        "Google Ads", 700, platform="google")
+        pg_ids = [r["id"] for r in await _pg(pool, f"SELECT id FROM {EXPENSES} ORDER BY id")]
+        assert pg_ids == [kept["id"], typed["id"]]
+        after = await handover_check(store, pg_expenses_write)
+        assert [(i.check_name, i.severity.value, i.sample_ids) for i in after] == [
+            ("handover_rows_ahead", "INFO", (typed["id"],))]
 
     @pytest.mark.asyncio
     async def test_once_latched_a_difference_is_the_size_of_the_copy_back(

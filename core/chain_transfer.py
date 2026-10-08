@@ -309,6 +309,28 @@ _REWRITE_STAMP = {"bronze.buyers": ("bronze.buyers", "id"),
 # rightly, proves nothing. An expense carries no such stamp.
 _SOURCE_CLOCK = {"bronze.buyers": ("updated_at",), "bronze.orders": ("updated_at",)}
 
+# What every pre-flip lever below needs before it can clear anything: a
+# shipper of DuckDB's rows — the hourly copy, a landing mirror and its
+# backfill, `replicate_managers`, the sync that feeds both stores — and every
+# one of them runs only while the chain writes DuckDB. The pre-flip rule
+# applies wherever no owner rows exist, which is also two states in which the
+# chain already routes to Postgres: its flag at postgres and nothing written
+# yet (chain 8 from 2026-09-17), and a marker whose first write failed, which
+# `_marker_steps` sends through `--handover` first. The levers said "with the
+# flag unchanged", which is right only with the flag at duckdb and no marker.
+# In those two states the shippers stay down, and the chain's next write
+# latches it over the very rows the finding names — which the next
+# `--handover`, now after the latch, reads as the chain's own: INFO, exit 0
+# (the review of F6 reproduced it in both states). So the levers name the
+# state the shippers need, which is the state before any flip, whatever state
+# they are read in.
+_WEB_ON_DUCKDB = (
+    "Bring web back with the chain writing DuckDB: its flag at duckdb and no "
+    "marker under data/write-chain-owners. Routed to Postgres (the flag at "
+    "postgres, or a marker) it stands down every shipper of DuckDB's rows, "
+    "and its next write latches it over these rows."
+)
+
 
 @dataclass(frozen=True)
 class _MirrorWords:
@@ -353,11 +375,11 @@ _BUYER_WORDS = _MirrorWords(
     missing_before=(
         "The buyers mirror and its hourly ids-diff both stand down the "
         "moment this chain routes to Postgres, so a flip now strands "
-        "them. Bring web back with the flag unchanged, run "
+        "them. " + _WEB_ON_DUCKDB + " Then run "
         "POST /api/mirror/backfill/buyers — it re-ships every buyer "
         "DuckDB holds, with its contacts — and check again."),
     differ_before=(
-        " Bring web back with the flag unchanged, run "
+        " " + _WEB_ON_DUCKDB + " Then run "
         "POST /api/mirror/backfill/buyers — it re-ships every buyer "
         "DuckDB holds, with its contacts — and check again."),
     newer=(
@@ -385,10 +407,10 @@ _BUYER_WORDS = _MirrorWords(
         "also fills city and region, decision 3), which rewrites them "
         "in Postgres after the latch. Then ask again."),
     ahead_lever_child=(
-        "POST /api/mirror/backfill/buyers re-ships every buyer DuckDB "
-        "holds with its contacts, which removes a contact of theirs that "
-        "only Postgres has; a contact of a buyer DuckDB does not hold is "
-        "a buyer of its own to decide."),
+        _WEB_ON_DUCKDB + " Then POST /api/mirror/backfill/buyers re-ships "
+        "every buyer DuckDB holds with its contacts, which removes a contact "
+        "of theirs that only Postgres has; a contact of a buyer DuckDB does "
+        "not hold is a buyer of its own to decide."),
     ahead_lever_owner=(
         "Re-shipping never deletes a buyer, so decide per id: delete it "
         "from Postgres (with its contacts and verdict) if nothing should "
@@ -439,12 +461,12 @@ _ORDER_WORDS = _MirrorWords(
     missing_before=(
         "The order and expense mirrors and their hourly ids-diffs all stand "
         "down the moment this chain routes to Postgres, so a flip now "
-        "strands them. Bring web back with the flag unchanged, run "
+        "strands them. " + _WEB_ON_DUCKDB + " Then run "
         "POST /api/mirror/backfill/orders and POST /api/mirror/backfill/expenses "
         "— each ships what Postgres lacks — and check again."),
     differ_before=(
-        " Bring web back with the flag unchanged and re-fetch those orders — "
-        + _RESYNC + " in DuckDB, and the sync's mirrors ship each one — then "
+        " " + _WEB_ON_DUCKDB + " Then re-fetch those orders — "
+        + _RESYNC + " in DuckDB, and the sync's mirrors ship each one — and "
         "check again."),
     newer=(
         "{n} row(s) differ and DuckDB's version is the later one by KeyCRM's "
@@ -469,9 +491,9 @@ _ORDER_WORDS = _MirrorWords(
         "the chain (" + _RESYNC + "), which rewrites them in Postgres after "
         "the latch. Then ask again."),
     ahead_lever_child=(
-        _RESYNC + " in both stores, which removes a line item of theirs that "
-        "only Postgres has; a line item of an order DuckDB does not hold is "
-        "an order of its own to decide."),
+        _WEB_ON_DUCKDB + " Then " + _RESYNC + " in both stores, which removes "
+        "a line item of theirs that only Postgres has; a line item of an "
+        "order DuckDB does not hold is an order of its own to decide."),
     ahead_lever_owner=(
         "Nothing re-ships a deletion, so decide per id: delete it from "
         "Postgres if nothing should hold it, or find the writer that put it "
@@ -557,19 +579,19 @@ def _catalogue_texts(rows: str, sync: str) -> MirroredTexts:
         missing_preflip=(
             "The mirror stands down the moment this chain routes to Postgres, "
             "and nothing ships a row KeyCRM no longer serves, so a flip now "
-            "strands them. Bring web back with the flag unchanged and run "
+            "strands them. " + _WEB_ON_DUCKDB + " Then run "
             "POST /api/mirror/backfill/catalogue?dry_run=false — it carries "
             "every row the daily comparison calls retired (product 1055) — "
             f"while a row DuckDB wrote after the mirror's last shipment is "
             f"shipped by {sync}. Then check again."),
         differ_preflip=(
-            f" Bring web back with the flag unchanged: {sync} re-ships "
-            "KeyCRM's payload to both stores. A retired row that differs is "
-            "re-shipped by nothing — decide it per id. Then check again."),
+            " " + _WEB_ON_DUCKDB + f" Then {sync} re-ships KeyCRM's payload "
+            "to both stores. A retired row that differs is re-shipped by "
+            "nothing — decide it per id. Then check again."),
         ahead_preflip=(
-            f"If KeyCRM still serves them, {sync} writes them to DuckDB too; "
-            "otherwise decide per id — delete them from Postgres, or find the "
-            "writer that put them there."),
+            "If KeyCRM still serves them: " + _WEB_ON_DUCKDB + f" Then {sync} "
+            "writes them to DuckDB too. Otherwise decide per id — delete them "
+            "from Postgres, or find the writer that put them there."),
         missing_after=(
             f"The chain's writer never deletes {rows}, so DuckDB holds "
             "something Postgres never had — stranded at the flip (the carry "
@@ -968,10 +990,17 @@ def classify_handover(
       copy's full replace would remove it, but it stands down the moment the
       chain routes to Postgres, so after the flip nothing does and the row
       stays in the new source of truth. The lever is the copy itself — web
-      up with the flag unchanged, `replicate_operational` ships, ask again.
-      One exception, on a table both stores sweep by age (`prune_clock`): a
-      row older than anything DuckDB still holds is its sweep having run
-      since the copy, which Postgres's own writer repeats after a flip — INFO.
+      up with the chain writing DuckDB, `replicate_operational` ships, ask
+      again. Not "with the flag unchanged": this half of the rule also
+      applies with the flag already at postgres and nothing latched, and
+      with a marker whose first write failed, and in both the copy stays
+      down and the chain's next write latches it over the row
+      (`_WEB_ON_DUCKDB`). One exception, on a table both stores sweep by age
+      (`prune_clock`) and only there: a row older than anything DuckDB still
+      holds is its sweep having run since the copy, which Postgres's own
+      writer repeats after a flip — INFO. A row's own clock is not a sweep:
+      a withdrawn expense typed before every expense DuckDB still holds is
+      as much a ghost as a newer one.
     - **Mutable tables after the latch**: Postgres is the writer, so a
       difference is its later write — INFO, the work the copy-back carries —
       unless the row's own clock, carried by both stores, says DuckDB's version
@@ -1130,8 +1159,10 @@ def classify_handover(
             why = (
                 "The shipper stands down the moment this chain routes to "
                 "Postgres and these tables have no backfill, so a flip now "
-                "strands them. Bring web back with the flag unchanged, let "
-                "replicate_operational run, and check again."
+                "strands them. " + _WEB_ON_DUCKDB + " Then let "
+                "replicate_operational ship "
+                "(POST /api/jobs/replicate_operational/trigger), stop it, and "
+                "check again."
             )
         critical("handover_rows_missing", missing, (
             f"{len(missing)} row(s) in DuckDB's {dk_table} have no "
@@ -1354,8 +1385,8 @@ def classify_handover(
                 "copy's full replace would remove them, but it stands down "
                 "the moment this chain routes to Postgres: after a flip "
                 "nothing removes them, and they stay in the store the flip "
-                "makes the source of truth. Bring web back up with the flag "
-                "unchanged, let replicate_operational ship "
+                "makes the source of truth. " + _WEB_ON_DUCKDB + " Then let "
+                "replicate_operational ship "
                 "(POST /api/jobs/replicate_operational/trigger), stop it, and "
                 "ask again."
             ))
@@ -2556,10 +2587,9 @@ def _replicated_tables(chain: ModuleType) -> Tuple[str, ...]:
 # What brings Postgres back level with DuckDB before a flip: the copy runs at
 # web's start, and the manager_stats job runs it again on demand.
 _REPLICATED_LEVER = (
-    "Bring web back with the flag unchanged — its startup copy "
-    "(replicate_managers) runs at once, and "
-    "POST /api/jobs/manager_stats/trigger runs it again now — stop it, and "
-    "ask again."
+    _WEB_ON_DUCKDB + " Its startup copy (replicate_managers) then runs at "
+    "once, and POST /api/jobs/manager_stats/trigger runs it again now — stop "
+    "it, and ask again."
 )
 
 

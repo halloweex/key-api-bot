@@ -266,7 +266,7 @@ class TestAKeyOnlyPostgresHolds:
             "handover_rows_ahead", "CRITICAL")
         assert issue.sample_ids == (2,)
         assert "POST /api/jobs/replicate_operational/trigger" in issue.description
-        assert "flag unchanged" in issue.description
+        assert "flag at duckdb" in issue.description
         assert "next full replace removes" not in issue.description
 
     def test_after_the_latch_it_is_the_writer_s_row(self):
@@ -316,6 +316,49 @@ class TestAKeyOnlyPostgresHolds:
         (info,) = [i for i in issues if i.severity.value == "INFO"]
         assert "sweep" in info.description and "sampled_at" in info.description
 
+    @pytest.mark.parametrize(
+        "spec",
+        [s for s in _operational_full_replace_specs() if not s.prune_clock],
+        ids=lambda s: s.pg_table)
+    def test_an_older_ghost_is_still_a_ghost_where_nothing_sweeps(self, spec):
+        """The age exception is the SWEEP's, and only a table both stores
+        sweep by age has one. Every other table is judged with DuckDB holding
+        a row, and the key only Postgres holds older than it in EVERY column —
+        so an exception widened to any clock (`spec.clock`, or any other
+        column read as an age) finds it "older than anything DuckDB still
+        holds" and waves it through. The review's case: a withdrawn expense
+        typed three days before the one DuckDB kept. Mutation killed: the
+        exception read off `spec.clock` as well as `spec.prune_clock` — the
+        parametrised test above passes DuckDB no row, so it has no floor and
+        could not see it."""
+        kept, ghost = ("kept",), ("ghost",)
+        newer = tuple(T0 for _ in spec.compare.columns)
+        older = tuple(T0 - timedelta(days=3) for _ in spec.compare.columns)
+        issues = classify_handover(spec, {kept: newer},
+                                   {kept: newer, ghost: older}, moved_on=False)
+        assert [(i.check_name, i.severity.value, i.count)
+                for i in issues] == [
+            ("handover_rows_ahead", "CRITICAL", 1)], spec.pg_table
+
+    def test_the_review_s_older_withdrawn_expense_is_refused(self):
+        """The same, in chain 8's own columns: expense 1 typed on T0 - 3 d and
+        withdrawn in DuckDB after the last copy, expense 2 kept."""
+        spec = _spec(pg_expenses_write, "app.manual_expenses")
+        assert spec.prune_clock is None and spec.clock
+
+        def expense(id, created_at):
+            return _row(spec, id=id, expense_date=date(2026, 9, 15),
+                        category="marketing", expense_type="Facebook Ads",
+                        amount=Decimal("1000.00"), currency="UAH",
+                        created_at=created_at, updated_at=None)
+
+        (issue,) = classify_handover(
+            spec, {2: expense(2, T0)},
+            {1: expense(1, T0 - timedelta(days=3)), 2: expense(2, T0)},
+            moved_on=False)
+        assert (issue.check_name, issue.severity.value, issue.sample_ids) == (
+            "handover_rows_ahead", "CRITICAL", (1,))
+
     def test_an_append_table_keeps_its_own_rule(self):
         """Out of F6's scope and unchanged: the copy never deletes from an
         append table, so its lever would not clear one. Pinned so the new
@@ -330,6 +373,69 @@ class TestAKeyOnlyPostgresHolds:
         assert (issue.check_name, issue.severity.value) == (
             "handover_rows_ahead", "INFO")
         assert "next full replace" not in issue.description
+
+
+def _preflip_criticals():
+    """Every CRITICAL the pre-flip rule can file, on every table of every
+    registered chain: a key only DuckDB holds, a key both hold differently,
+    a key only Postgres holds — each on its own, so each branch speaks."""
+    from core.write_chains import WRITE_CHAINS
+
+    found = []
+    for chain in WRITE_CHAINS:
+        for spec in chain_transfer.chain_specs(chain):
+            width = len(spec.compare.columns)
+            one = tuple(object() for _ in range(width))
+            other = tuple(object() for _ in range(width))
+            key = ("k",)
+            for dk, pg in (({key: one}, {}), ({key: one}, {key: other}),
+                           ({}, {key: one})):
+                found += [(spec.pg_table, i) for i in classify_handover(
+                    spec, dk, pg, moved_on=False)
+                    if i.severity.value == "CRITICAL"]
+    return found
+
+
+class TestThePreFlipLeversNameTheStateTheShippersNeed:
+    """The review of F6 (#265). The pre-flip rule applies wherever no owner
+    rows exist — which includes the flag already at postgres with nothing
+    latched (chain 8 since 2026-09-17), and a marker whose first write
+    failed, which `_marker_steps` sends through `--handover` first. In both
+    every shipper of DuckDB's rows stands down, so a lever saying "bring web
+    back with the flag unchanged" clears nothing there: the review followed
+    it, the ghost stayed, the next write latched the chain, and the next
+    `--handover` read the same ghost as INFO and exited 0. A lever has to
+    name the state the shippers need — the flag at duckdb and no marker —
+    whatever state it is read in."""
+
+    def test_no_pre_flip_lever_says_the_flag_unchanged(self):
+        """Mutation killed: any lever put back to "with the flag unchanged"."""
+        stale = sorted({table for table, issue in _preflip_criticals()
+                        if "flag unchanged" in issue.description})
+        assert stale == []
+
+    def test_every_lever_that_brings_web_back_names_the_flag_and_the_marker(self):
+        found = [(table, issue) for table, issue in _preflip_criticals()
+                 if "web back" in issue.description]
+        # Not vacuous: the hourly copy's tables, the replicated pair, chain
+        # 4's and chain 3's landings and chain 6's catalogue all say it.
+        tables = {table for table, _ in found}
+        assert {"app.manual_expenses", "bronze.offers", "bronze.managers",
+                "bronze.buyers", "bronze.buyer_contacts", "bronze.orders",
+                "bronze.products"} <= tables, sorted(tables)
+        wrong = sorted({table for table, issue in found
+                        if not ("flag at duckdb" in issue.description
+                                and "no marker" in issue.description)})
+        assert wrong == []
+
+    def test_the_review_s_ghost_says_it(self):
+        """Chain 8's withdrawn expense, the review's case, in full."""
+        spec = _spec(pg_expenses_write, "app.manual_expenses")
+        row = tuple(object() for _ in spec.compare.columns)
+        (issue,) = classify_handover(spec, {}, {2: row}, moved_on=False)
+        assert issue.severity.value == "CRITICAL"
+        assert "its flag at duckdb and no marker" in issue.description
+        assert "POST /api/jobs/replicate_operational/trigger" in issue.description
 
 
 def _spec_of(table):

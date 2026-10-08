@@ -3420,8 +3420,13 @@ docker compose run --rm --no-deps -T web \
 #   write_chains.pg_inventory_write.preflight.ok = true (DN-24). Then this:
 #   exit 0, or do not flip. A CRITICAL is a row the flip would
 #   strand, or one DuckDB deleted that the flip would keep: up -d web with the
-#   flag unchanged, let replicate_operational ship
-#   (POST /api/jobs/replicate_operational/trigger), stop, ask again.
+#   chain writing DuckDB — KS_WRITE_INVENTORY=duckdb and no marker under
+#   data/write-chain-owners — let replicate_operational ship
+#   (POST /api/jobs/replicate_operational/trigger), stop, ask again. Not
+#   "the flag unchanged": the handover asks the same pre-flip question with
+#   the flag already at postgres and nothing latched, or with a marker whose
+#   first write failed, and there the copy stays down and the next write
+#   latches the chain over the row.
 # TO ROLL BACK: the same command with --dry-run (also the default), then with
 #   --execute. Exit 0 released. 1 not committed (a difference rolled back, or
 #   a traceback before COMMIT): DuckDB as it was, latch kept. 2 refused before
