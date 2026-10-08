@@ -301,7 +301,11 @@ run_push() {
     # marker written before verification would be the check swearing to a copy
     # nobody has read back.
     mkdir -p "$(dirname "$MARKER")"
-    date -u +%Y-%m-%dT%H:%M:%SZ >"$MARKER"
+    # Through a temporary file and a rename, so a reader never sees half a
+    # line: offsite_check reads the file's age, and since chain 3 the web
+    # container reads its text (`core/backup_evidence.py`).
+    date -u +%Y-%m-%dT%H:%M:%SZ >"$MARKER.tmp"
+    mv -f "$MARKER.tmp" "$MARKER"
 
     step "prune off-site"
     # Count, never age. Deleting by age removes the copy you most want on the

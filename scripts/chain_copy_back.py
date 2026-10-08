@@ -12,9 +12,11 @@
 comes first in both. **Before flipping a chain** it is the gate: exit 0 says
 everything DuckDB holds has reached Postgres, and anything CRITICAL is a row the
 flip would strand, because the shipper stands down the moment the chain routes
-to Postgres and a replicated table has no backfill (a mirrored one — chain 4's
-buyers — has the reship, `POST /api/mirror/backfill/buyers`, which the finding
-names). **Before rolling one back** it is
+to Postgres and a replicated table has no backfill (a mirrored one has a lever
+the finding names: chain 4's buyers the reship, `POST /api/mirror/backfill/buyers`;
+chain 3's orders and expenses `POST /api/mirror/backfill/orders` and
+`/expenses`, or the resync for a row both hold differently). **Before rolling
+one back** it is
 the preview: its CRITICALs are exactly what `--execute` refuses on, and its INFO
 lines are the size of the copy. `--execute` asks the same question again itself
 and refuses before writing anything, so skipping step 1 cannot destroy a row —
@@ -33,6 +35,15 @@ docstring used `--env-file` and a hand-picked network; at chain 1's flip
 (2026-09-30) the handover died on `KS_PG_DSN is not set`, before writing
 anything. The compose form hands the one-off web's own environment, `./data`
 and networks, so none of them is a second copy that can drift.
+
+EVERY RELEASE IS RECORDED (OD-17 (a))
+
+A release writes one `lever_used` row to `app.alert_events` inside its own
+transaction (`core/lever_journal.py`), and exit 3 writes one when the owner
+rows still stand: a copy-back is a rollback lever, and the 30-day parallel
+period and the week of silence both restart on one. Before this nothing
+durable recorded it — the release deletes rows and unlinks a file, and this
+script's report dies with its `--rm` container.
 
 WHY A DRY RUN IS THE DEFAULT
 
@@ -55,7 +66,12 @@ copies of the latch.
        above where it was), the latch is where it was, and `up -d` returns
        to the state before the run. For --handover: a CRITICAL.
     2  refused before anything was written: a precondition, the handover's
-       CRITICALs, the DuckDB lock, or two flags that ask opposite things.
+       CRITICALs, the DuckDB lock, KS_DUCKDB=off in the container's
+       environment, or two flags that ask opposite things.
+       One refusal comes after a write to Postgres alone: a report ledger's
+       spool (chains 11a/11b) is landed there before the copy reads, and a
+       week still spooled afterwards refuses — the weeks that did land are
+       the delivery records the job's next tick would have written.
     3  COMMITTED, then the checkpoint or the release failed. DuckDB HAS the
        copy, so `up -d` does not return to the state before the run. The
        message names which copies of the latch survived and the next step for
@@ -148,6 +164,7 @@ async def _run(args: argparse.Namespace) -> int:
         resolve_chain,
     )
     from core.duckdb_store import DuckDBStore
+    from core.duckdb_switch import DuckDBOpenedWhileOff
     from core.runtime_modes import configure_modes
 
     # Two different asks, and honouring one of them silently is how somebody
@@ -177,6 +194,21 @@ async def _run(args: argparse.Namespace) -> int:
     store = DuckDBStore()
     try:
         await store.connect()
+    except DuckDBOpenedWhileOff:
+        # The week of silence (OD-17 (a)): this container inherited
+        # KS_DUCKDB=off from web's environment. A copy-back writes DuckDB and
+        # is a rollback lever, so it restarts the parallel period and the
+        # week; doing it anyway is a decision, made by saying so.
+        print(
+            "REFUSED: KS_DUCKDB=off in this container's environment, and a "
+            "copy-back writes the DuckDB file. Nothing was read and nothing "
+            "was written.\n"
+            "  A copy-back is a rollback lever: it restarts the 30-day "
+            "parallel period and the week of silence. If that is the "
+            "decision, run the same command with -e KS_DUCKDB=on.",
+            file=sys.stderr,
+        )
+        return 2
     except duckdb.IOException as exc:
         # The driver says "Could not set lock on file ... held by PID n". True,
         # and it does not say what to do about it.
@@ -202,6 +234,7 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
     except CommittedNotReleased as exc:
+        await _record_committed(chain, exc)
         if args.json:
             print(json.dumps({**exc.plan, "error": str(exc).splitlines()[0]},
                              indent=2, default=str))
@@ -229,6 +262,38 @@ async def _run(args: argparse.Namespace) -> int:
     if not result.get("executed"):
         return 0
     return 0 if result.get("released") else 1
+
+
+async def _record_committed(chain, exc) -> None:
+    """Record a copy that committed and was not released (OD-17 (a)).
+
+    DuckDB has the copy, so the lever was used whatever the latch says now.
+    When the release's own transaction committed — the owner rows are gone —
+    it wrote the record already (`release_chain`), so this writes one only
+    while the owner rows still stand or could not be read. Best effort, and
+    loud when it fails: the exit code and the message above are what the
+    operator acts on, and the Postgres this needs may be what failed."""
+    from core import lever_journal
+    from core.write_chains import chain_name
+
+    latch = exc.latch or {}
+    if latch.get("owned_since") is None and not latch.get("owners_error"):
+        return
+    try:
+        from core.pg import get_pool
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await lever_journal.record(
+                conn, lever_journal.CHAIN_COPY_BACK, subject=chain_name(chain),
+                outcome=lever_journal.COMMITTED_NOT_RELEASED,
+                detail={"tables": list(chain.CHAIN_TABLES)})
+    except Exception as record_exc:
+        logger.error(
+            "The copy committed and its use as a rollback lever could NOT be "
+            "recorded in app.alert_events (%s: %s). The parallel period and "
+            "the week of silence restart from now regardless; note the time.",
+            type(record_exc).__name__, record_exc)
 
 
 def _handover(issues, args: argparse.Namespace) -> int:
@@ -265,6 +330,11 @@ def _report(result: dict) -> None:
     print(f"\nchain: {result['chain']}   marker {result['latched_at']}"
           f"   owner rows {result.get('owned_since')}")
     print(f"executed: {result.get('executed')}")
+    if result.get("landed_from_spool"):
+        # Chains 11a/11b: delivered weeks whose record waited in the spool,
+        # written to Postgres before the read below so the copy carries them.
+        print(f"\nlanded from the spool into Postgres first: "
+              f"{result['landed_from_spool']} delivered week(s)")
     print("\nrows read from Postgres:")
     for table, count in sorted(result["rows"].items()):
         print(f"  {table:<32} {count:>9,}")
@@ -298,6 +368,9 @@ def _report(result: dict) -> None:
             print(f"      {found['description']}")
     elif result.get("executed"):
         print("\nevery table compares equal at zero.")
+        if result.get("full_rebuild_owed"):
+            # Chain 5: sales_type is materialised at rebuild time.
+            print("warehouse marked dirty in full: DuckDB owes a full rebuild.")
     print("\nnext:")
     for line in result.get("runbook", ()):
         print(f"  {line}")

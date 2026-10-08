@@ -22,7 +22,8 @@ from core.duckdb_store import DuckDBStore
 
 @pytest.fixture
 def flags(monkeypatch):
-    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS"):
+    for env in ("KS_WRITE_INVENTORY", "KS_WRITE_EXPENSES", "KS_WRITE_GOALS",
+                "KS_WRITE_CATALOGUE"):
         monkeypatch.delenv(env, raising=False)
     return monkeypatch
 
@@ -59,7 +60,10 @@ class TestTheRegistryNeverRaises:
         assert modes["pg_expenses_write"] == {
             "env": "KS_WRITE_EXPENSES", "mode": "postgres", "error": None,
             "latched": False, "latched_at": None, "mismatch": False,
-            "unmet_precondition": None}
+            "unmet_precondition": None,
+            # The chain's shape, not its state: chain 8 freezes DuckDB
+            # (OD-02 (c) shadows only chains 9, 10 and 11).
+            "shadow": False}
         assert modes["pg_inventory_write"]["mode"] is None and "yes" in modes["pg_inventory_write"]["error"]
 
     def test_valid_flags_are_unchanged(self, flags):
@@ -69,7 +73,8 @@ class TestTheRegistryNeverRaises:
 
 class TestOrdersSurviveAnUnrelatedTypo:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("env", ["KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY"])
+    @pytest.mark.parametrize("env", ["KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY",
+                                     "KS_WRITE_CATALOGUE"])
     async def test_the_orders_watermark_still_reads_and_writes(self, flags, store, env):
         flags.setenv(env, "postgrse")
         stamp = datetime(2026, 9, 17, 10, 0, tzinfo=timezone.utc)

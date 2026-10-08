@@ -146,6 +146,22 @@ def _write_chains() -> dict:
     return chain_modes()
 
 
+def _mark_stood_down(data_quality):
+    """The `data_quality` block with every layer chain 3 stood down marked
+    `stood_down: true` — written by nothing by design, so the canary does not
+    page its age (`pg_orders_write.stood_down_layers`). Applied per response,
+    not in the 60-second stats cache, because a first write can move the
+    chain between two reads. None stays None: its absence is meaningful."""
+    if not isinstance(data_quality, dict):
+        return data_quality
+    from core.pg_orders_write import stood_down_layers
+
+    stood = stood_down_layers()
+    return {layer: ({**entry, "stood_down": True}
+                    if layer in stood and isinstance(entry, dict) else entry)
+            for layer, entry in data_quality.items()}
+
+
 def _read_fallbacks() -> dict:
     """`{surface: {count, last_at}}` — every read this process answered from
     DuckDB because the engine it was sent to failed (DN-20a). Local state, no
@@ -154,6 +170,18 @@ def _read_fallbacks() -> dict:
     from core import read_fallback
 
     return read_fallback.counts()
+
+
+def _duckdb_switch() -> dict:
+    """KS_DUCKDB as this process understood it, the error when it was not
+    understood (ran as `on`), and every open of the DuckDB file refused under
+    `off` — `{site: {count, last_at}}`, a site being the `module:function`
+    that asked. Local state, no I/O, no exception text: this endpoint is
+    public. The canary pages a non-empty `opened_while_off` CRITICAL and
+    writes the week of silence's watch from it (`core/duckdb_switch.py`)."""
+    from core import duckdb_switch
+
+    return duckdb_switch.health_block()
 
 
 def _read_fallback_mode() -> dict:
@@ -168,9 +196,10 @@ def _read_fallback_mode() -> dict:
     (OD-07).
 
     Under `off`, also `refused` — `{surface: {count, last_at}}`, the reads
-    answered 503 rather than from DuckDB (DN-20b). Only under `off`: nothing
-    can be refused under `duckdb`, and the block keeps the shape it has
-    always had there."""
+    answered 503 rather than from DuckDB (DN-20b). Under `duckdb` only once
+    something was refused: the one refusal that mode knows is a read of a
+    table a write chain owns (`read_fallback.chain_refusal`), and without it
+    the block keeps the shape it has always had there."""
     from core import read_fallback
 
     block = {
@@ -179,9 +208,45 @@ def _read_fallback_mode() -> dict:
         "misconfigured": read_fallback.misconfigured(),
         "no_engine": read_fallback.no_engine_routes(),
     }
-    if read_fallback.refusing():
+    if read_fallback.refusing() or read_fallback.refusals():
         block["refused"] = read_fallback.refusals()
     return block
+
+
+# The layer ages, out of Postgres while chain 9 writes the journal there
+# (OD-02 (c)). DuckDB's ages ride in the cached stats; these replace them, on
+# the same TTL, and only a successful read is cached — an error is answered
+# again on the next probe rather than remembered for a minute.
+_journal_ages_cache: dict = {"data": None, "expires_at": 0}
+_journal_ages_lock = asyncio.Lock()
+_JOURNAL_AGES_TIMEOUT_S = 5
+
+
+async def _journal_ages(from_duckdb):
+    """`data_quality` for the canary, from the store that writes the journal.
+
+    Under `KS_WRITE_DQ_JOURNAL=duckdb` (or unset) it is DuckDB's answer,
+    untouched. Under `postgres` it is Postgres's, or None when Postgres
+    cannot answer — never DuckDB's: a fallback would read "journal fine" to
+    the canary at the moment the journal's writer is what failed, and a
+    missing block is what the canary pages (`dq_block_missing`)."""
+    from core import dq_journal
+
+    if not dq_journal.reads_postgres():
+        return from_duckdb
+    now = time.time()
+    async with _journal_ages_lock:
+        if _journal_ages_cache["data"] is not None and now < _journal_ages_cache["expires_at"]:
+            return _journal_ages_cache["data"]
+        try:
+            data = await asyncio.wait_for(
+                dq_journal.last_success_ages_pg(), _JOURNAL_AGES_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001 — public endpoint: class only
+            logger.warning(f"data-quality freshness from Postgres failed: {type(e).__name__}")
+            return None
+        _journal_ages_cache["data"] = data
+        _journal_ages_cache["expires_at"] = now + _STATS_CACHE_TTL
+        return data
 
 
 # Chain 1's answer to "may it be switched to Postgres now?" (DN-24), on the same
@@ -196,6 +261,34 @@ _preflight_cache_lock = asyncio.Lock()
 _PREFLIGHT_TIMEOUT_S = 5
 
 
+def _retrieved(task: "asyncio.Future") -> None:
+    """Read a left-behind preflight's outcome, so an error it unwinds into is
+    not logged as never retrieved."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _bounded_preflight(preflight) -> dict:
+    """`preflight()` within `_PREFLIGHT_TIMEOUT_S`, behind a shield — the DN-05a
+    form the sync tick uses. A bare `wait_for` waits for the cancelled read to
+    unwind, and a Postgres read cut inside a query unwinds into asyncpg's
+    cancel request to a server that may not answer: with Postgres paused,
+    chain 3's preflight returned its "5 s" answer after 60 s, and chain 1's
+    after 30, holding its cache lock — and every later /api/health — the
+    whole time (batch-E review). Shielded, this returns at the bound, and the
+    read is cancelled and left to unwind on its own. Never raises for the
+    bound; a preflight that raises (each promises not to) still does."""
+    task = asyncio.ensure_future(preflight())
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), _PREFLIGHT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        return {"ok": False, "reasons": [
+            f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
+    finally:
+        task.cancel()
+        task.add_done_callback(_retrieved)
+
+
 async def _inventory_preflight() -> dict:
     """`pg_inventory_write.preflight()`, cached. Never raises: a Postgres that
     does not answer in time is an answer of its own, `ok: false`."""
@@ -205,12 +298,7 @@ async def _inventory_preflight() -> dict:
     async with _preflight_cache_lock:
         if _preflight_cache["data"] is not None and now < _preflight_cache["expires_at"]:
             return _preflight_cache["data"]
-        try:
-            data = await asyncio.wait_for(
-                pg_inventory_write.preflight(), _PREFLIGHT_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            data = {"ok": False, "reasons": [
-                f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
+        data = await _bounded_preflight(pg_inventory_write.preflight)
         _preflight_cache["data"] = data
         _preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
         return data
@@ -230,6 +318,73 @@ async def _inventory_sync_step() -> "dict | None":
         return None
 
 
+async def _orders_sync_step() -> "dict | None":
+    """What chain 3's order step last did (`OrdersStepState`): failures in a
+    row, ages, the error's class and how many orders Postgres would refuse.
+    Local state, no I/O; null when the sync service cannot be had. The canary
+    judges it as `orders_sync_failing` once the chain writes Postgres."""
+    try:
+        from core.sync_service import get_sync_service
+
+        return (await get_sync_service()).orders_step_health()
+    except Exception as e:
+        logger.debug(f"Orders sync step unavailable: {e}")
+        return None
+
+
+# Chain 3's pre-flip answer, on the same cache shape as chain 1's.
+_orders_preflight_cache: dict = {"data": None, "expires_at": 0}
+_orders_preflight_cache_lock = asyncio.Lock()
+
+
+async def _orders_preflight() -> dict:
+    """`pg_orders_write.preflight()`, cached and bounded. Never raises."""
+    from core import pg_orders_write
+
+    now = time.time()
+    async with _orders_preflight_cache_lock:
+        if (_orders_preflight_cache["data"] is not None
+                and now < _orders_preflight_cache["expires_at"]):
+            return _orders_preflight_cache["data"]
+        data = await _bounded_preflight(pg_orders_write.preflight)
+        _orders_preflight_cache["data"] = data
+        _orders_preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
+        return data
+
+
+# Chain 5's pre-flip answer, on the same cache shape as chain 1's.
+_managers_preflight_cache: dict = {"data": None, "expires_at": 0}
+_managers_preflight_cache_lock = asyncio.Lock()
+
+
+async def _managers_preflight() -> dict:
+    """`pg_managers_write.preflight()`, cached and bounded. Never raises."""
+    from core import pg_managers_write
+
+    now = time.time()
+    async with _managers_preflight_cache_lock:
+        if (_managers_preflight_cache["data"] is not None
+                and now < _managers_preflight_cache["expires_at"]):
+            return _managers_preflight_cache["data"]
+        data = await _bounded_preflight(pg_managers_write.preflight)
+        _managers_preflight_cache["data"] = data
+        _managers_preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
+        return data
+
+
+async def _managers_sync_step() -> "dict | None":
+    """What chain 5's managers step last did under the chain (failures in a
+    row, the error's class, the retry window). Local state, no I/O; null when
+    the sync service cannot be had."""
+    try:
+        from core.sync_service import get_sync_service
+
+        return (await get_sync_service()).managers_step_health()
+    except Exception as e:
+        logger.debug(f"Managers sync step unavailable: {e}")
+        return None
+
+
 async def _write_chains_block() -> dict:
     """The `write_chains` block: every chain's local state, and under chain 1's
     entry its `preflight` — the three questions asked before
@@ -238,15 +393,92 @@ async def _write_chains_block() -> dict:
     offers or stocks step is recorded instead of ending the tick. Neither is
     judged by the canary: the preflight is read by the person about to flip
     the chain, and a stock step that keeps failing stops `last_sync_stocks`,
-    which the integrity job's chain invariants already watch."""
-    from core import pg_inventory_write
+    which the integrity job's chain invariants already watch.
+
+    Chain 3's and chain 5's entries carry the same two
+    (`pg_orders_write.preflight` and the order step's state, which the canary
+    does judge; `pg_managers_write.preflight` and the managers step's). The
+    preflights are asked at once, never one after the other: each is bounded
+    at `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row would cost
+    the canary's whole `HEALTH_TIMEOUT_S`."""
+    from core import pg_inventory_write, pg_managers_write, pg_orders_write
 
     block = _write_chains()
-    entry = block.get(pg_inventory_write.CHAIN)
+    inventory = block.get(pg_inventory_write.CHAIN)
+    # Chain 3: its preflight — every precondition by name while the flag is
+    # still off — and the order step the canary judges.
+    orders = block.get(pg_orders_write.CHAIN)
+    # Chain 5: the same two, its preflight and its managers step.
+    managers = block.get(pg_managers_write.CHAIN)
+    # The preflights at once, never one after the other: each is bounded at
+    # `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row cost twice
+    # that — 10 s, the canary's whole `HEALTH_TIMEOUT_S` (the chain-3 review).
+    # Concurrently they cost one bound, however many chains ask — a bound
+    # that holds because each is shielded (`_bounded_preflight`): unshielded,
+    # a hung Postgres held them for asyncpg's cancel round trip instead.
+    preflights = await asyncio.gather(
+        _inventory_preflight() if isinstance(inventory, dict) else _nothing(),
+        _orders_preflight() if isinstance(orders, dict) else _nothing(),
+        _managers_preflight() if isinstance(managers, dict) else _nothing())
+    if isinstance(inventory, dict):
+        inventory["preflight"] = preflights[0]
+        inventory["sync_step"] = await _inventory_sync_step()
+    if isinstance(orders, dict):
+        orders["preflight"] = preflights[1]
+        orders["sync_step"] = await _orders_sync_step()
+    if isinstance(managers, dict):
+        managers["preflight"] = preflights[2]
+        managers["sync_step"] = await _managers_sync_step()
+    # Chain 6's hourly products step off DuckDB, in chain 1's shape: recorded
+    # instead of ending the tick. Not judged by the canary — the freshness
+    # check watches `last_sync_products` at 48 h.
+    from core import pg_catalogue_write
+
+    entry = block.get(pg_catalogue_write.CHAIN)
     if isinstance(entry, dict):
-        entry["preflight"] = await _inventory_preflight()
-        entry["sync_step"] = await _inventory_sync_step()
+        entry["sync_step"] = await _catalogue_sync_step()
+    _shadow_entries(block)
     return block
+
+
+async def _nothing() -> None:
+    return None
+
+
+def _shadow_entries(block: dict) -> None:
+    """Under every shadow chain's entry (OD-02 (c)), `shadow_failures`: the
+    DuckDB halves of its writes that failed since this process started —
+    count, when, and the error class, never the text (this endpoint is
+    public). Postgres held each of those rows; the daily comparison finds
+    them as `shadow_missing_in_duckdb`, and this says when to look in the
+    log. A chain that declares `pending()` — the report ledgers' spool —
+    also publishes what is waiting to be recorded. Local state, no I/O."""
+    from core import shadow_writes
+    from core.write_chains import WRITE_CHAINS, chain_name, is_shadow
+
+    for chain in WRITE_CHAINS:
+        entry = block.get(chain_name(chain))
+        if not isinstance(entry, dict) or not is_shadow(chain):
+            continue
+        entry["shadow_failures"] = shadow_writes.failures_of(chain_name(chain))
+        pending = getattr(chain, "pending", None)
+        if callable(pending):
+            try:
+                entry["pending"] = pending()
+            except Exception as exc:  # noqa: BLE001 — published by class
+                entry["pending"] = {"error_class": type(exc).__name__}
+
+
+async def _catalogue_sync_step() -> "dict | None":
+    """What chain 6's hourly products step last did off DuckDB. Local state,
+    no I/O; null when the sync service cannot be had."""
+    try:
+        from core.sync_service import get_sync_service
+
+        return (await get_sync_service()).catalogue_step_health()
+    except Exception as e:
+        logger.debug(f"Catalogue sync step unavailable: {e}")
+        return None
 
 
 def _warehouse_writer_mode() -> dict:
@@ -261,7 +493,9 @@ def _warehouse_writer_mode() -> dict:
     that finishes after it, and `held_for_s` how long that has stood (None
     when not held) — the canary warns on a hold that outlives what a way back
     takes. `reclassify_needed` says DuckDB's UTM verdicts were found empty on
-    it. Local state, no I/O. Judged by the canary."""
+    it. `way_back_refused` names the latched write chains for which a start
+    that would have run as duckdb stayed postgres instead (chain names, no
+    detail). Local state, no I/O. Judged by the canary."""
     from core import warehouse_cutover
 
     return {"mode": warehouse_cutover.mode(), "value": warehouse_cutover.value(),
@@ -269,7 +503,8 @@ def _warehouse_writer_mode() -> dict:
             "preconditions_unmet": [u.key for u in warehouse_cutover.preconditions_unmet()],
             "held": warehouse_cutover.held(),
             "held_for_s": warehouse_cutover.held_for_s(),
-            "reclassify_needed": warehouse_cutover.reclassify_needed()}
+            "reclassify_needed": warehouse_cutover.reclassify_needed(),
+            "way_back_refused": list(warehouse_cutover.way_back_refused())}
 
 
 def _derivation_mode() -> dict:
@@ -296,6 +531,21 @@ def _utm_parse_mode() -> dict:
     from core import pg_utm_parse
 
     return {"mode": pg_utm_parse.mode(), "error": pg_utm_parse.mode_error()}
+
+
+def _backups() -> "dict | None":
+    """The ages of what the host's backup scripts last proved — chain 3's
+    flip evidence (`core.backup_evidence`): the PITR drill, the off-site
+    restore drill and the Postgres off-site shipment, in hours, null where no
+    marker exists. Ages only: the endpoint is public. Local files, no
+    database, so it answers with Postgres down; null if even that fails."""
+    try:
+        from core import backup_evidence
+
+        return backup_evidence.published()
+    except Exception as e:  # noqa: BLE001 — a block that cannot be read is null
+        logger.debug(f"Backup evidence unavailable: {e}")
+        return None
 
 
 # Marks dropped and not yet covered by a validated rebuild, on the same TTL as
@@ -450,6 +700,15 @@ async def health_check(request: Request):
     # failure), so never substitute an empty dict for "we could not tell".
     stats = dict(duckdb_stats or {})
     data_quality = stats.pop("data_quality", None)
+    # Chain 9: from the store that writes the journal (`_journal_ages`).
+    data_quality = await _journal_ages(data_quality)
+    # Chain 3: the layers it stood down marked, on whichever store answered —
+    # per response, after the journal's own cache. Never before
+    # `_journal_ages`: under chain 9 it answers Postgres's block and drops the
+    # one it was handed, mark included, and the canary then pages the
+    # stood-down layer's age every day (`test_orders_chain_reconciliation.py`,
+    # `test_the_endpoint_marks_the_block_chain_9_answers`).
+    data_quality = _mark_stood_down(data_quality)
 
     # The schema ledger. A migration that fails is retried on the next boot and
     # never recorded as applied, so it cannot be skipped past — but somebody has
@@ -469,6 +728,18 @@ async def health_check(request: Request):
     ledger_error = migrations.pop("error", None)
     if ledger_error:
         logger.warning(f"Health check schema ledger error: {ledger_error}")
+
+    # A DuckDB FatalException this process has seen. Read live, not from the
+    # 60 s stats cache: the store drops the invalidated instance and the next
+    # read reconnects and answers, so without this the page a dead DuckDB
+    # raises would resolve over a write that still fails. Counts and a kind,
+    # never the exception text — this endpoint is public.
+    try:
+        store = await get_store()
+        duckdb_fatal = store.fatal_status()
+    except Exception as e:
+        logger.warning(f"Health check DuckDB fatal status error: {e}")
+        duckdb_fatal = None
 
     # The copy that carries the money. Its own watchdog lives in bot/canary.py,
     # out of this container — a mirror that stopped shipping used to wait for
@@ -491,18 +762,25 @@ async def health_check(request: Request):
 
     alerting = transport_health()
 
+    # What made it degraded, one word per cause, so the canary can name it:
+    # a FATAL the reconnect answered past is not a web that is down, and its
+    # lever is not a migration's (batch-E review).
+    degraded_by = [cause for cause, degraded in (
+        ("duckdb", not duckdb_stats),
+        ("migrations", migrations.get("status") == "failed"),
+        ("duckdb_fatal", bool(duckdb_fatal)),
+    ) if degraded]
     return {
-        "status": (
-            "degraded" if not duckdb_stats or migrations.get("status") == "failed"
-            else "healthy"
-        ),
+        "status": "degraded" if degraded_by else "healthy",
+        "degraded_by": degraded_by,
         "version": VERSION,
         "uptime_seconds": uptime_seconds,
         "correlation_id": get_correlation_id(),
         "duckdb": {
             "status": duckdb_status,
             "latency_ms": db_latency_ms,
-            **stats
+            **stats,
+            "fatal": duckdb_fatal,
         },
         "migrations": migrations,
         "sync": sync_status,
@@ -513,10 +791,12 @@ async def health_check(request: Request):
         "write_chains": await _write_chains_block(),
         "read_fallbacks": _read_fallbacks(),
         "read_fallback_mode": _read_fallback_mode(),
+        "duckdb_switch": _duckdb_switch(),
         "warehouse_writer_mode": _warehouse_writer_mode(),
         "utm_parse": _utm_parse_mode(),
         "goals_history": _goals_history(),
         "buyer_sync": await _buyer_sync_block(),
+        "backups": _backups(),
     }
 
 
@@ -640,64 +920,14 @@ async def get_data_quality_health(request: Request):
       - last_run: when the watchdog last produced a verdict
       - counts: how many issues / discrepancies were found
     """
-    from core.data_quality import fetch_latest_run, fetch_run_diffs, fetch_run_issues
+    from core import dq_journal
 
     try:
         store = await get_store()
-        async with store.connection() as conn:
-            integrity = fetch_latest_run(conn, layer="integrity")
-            reconciliation = fetch_latest_run(conn, layer="reconciliation")
-
-            # Include top-N drilldown for the recon run so admins can see
-            # WHICH (month, source) drifted without making a second call.
-            reconciliation_diffs = []
-            if reconciliation:
-                reconciliation_diffs = fetch_run_diffs(
-                    conn, reconciliation["run_id"], limit=20,
-                )
-            integrity_issues = []
-            if integrity:
-                integrity_issues = fetch_run_issues(
-                    conn, integrity["run_id"], limit=20,
-                )
-
-            # The two layers that arrived after this endpoint was written.
-            # Found by an audit standing exactly where on-call would stand: a
-            # WARN verdict in the mirror-landing log line, and no way to see
-            # WHICH findings without opening the database — which the
-            # single-writer rule forbids from outside the process. The layer
-            # holding the most comparisons must not be the one invisible here.
-            mirror_landing = fetch_latest_run(conn, layer="mirror_landing")
-            mirror_issues = []
-            if mirror_landing:
-                mirror_issues = fetch_run_issues(
-                    conn, mirror_landing["run_id"], limit=20,
-                )
-            reconciliation_pg = fetch_latest_run(conn, layer="reconciliation_pg")
-            reconciliation_pg_diffs = []
-            if reconciliation_pg:
-                reconciliation_pg_diffs = fetch_run_diffs(
-                    conn, reconciliation_pg["run_id"], limit=20,
-                )
-
-        return {
-            "integrity": {
-                "last_run": integrity,
-                "issues": integrity_issues,
-            },
-            "reconciliation": {
-                "last_run": reconciliation,
-                "diffs": reconciliation_diffs,
-            },
-            "mirror_landing": {
-                "last_run": mirror_landing,
-                "issues": mirror_issues,
-            },
-            "reconciliation_pg": {
-                "last_run": reconciliation_pg,
-                "diffs": reconciliation_pg_diffs,
-            },
-        }
+        # The block that stood here, moved to `core.dq_journal` so it reads
+        # whichever store writes the journal (chain 9) — DuckDB's one
+        # connection by default, Postgres with no fallback once it moves.
+        return await dq_journal.health_runs(store)
     except Exception as e:
         return {"status": "error", "error": f"{type(e).__name__}: {e}"}
 

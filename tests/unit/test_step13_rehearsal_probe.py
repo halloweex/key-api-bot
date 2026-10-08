@@ -730,7 +730,8 @@ def d1_ev(**over):
           "post": {**DUCK1, "max_dq_run_id": WIN, "indexes": SWEEP, "window": window_read()},
           "f7_stop": stop_state("graceful"), "p0_stop": stop_state("graceful"),
           "window_ids": {"run_id": WIN, "order_id": FIX, "order_status": V4},
-          "delete": deletes()}
+          "delete": deletes(),
+          "b_pre_stop": stop_state("graceful"), "b_stop": stop_state("graceful")}
     ev.update(over)
     return ev
 
@@ -871,6 +872,38 @@ def test_d1_fails_on_a_delete_an_index_could_not_follow():
     assert "idx_orders_status_date" in detail
     # An index holding none of the rows gave none up, so it is no suspect.
     assert "idx_orders_buyer_date" not in detail
+
+
+@pytest.mark.parametrize("which, what", [
+    ("b_pre_stop", "the stop the way back started from"),
+    ("b_stop", "the way back's own stop"),
+])
+@pytest.mark.parametrize("state, why", [
+    (stop_state("grace_expired"), "Docker killed it 11 s into a 10 s grace (exit 137)"),
+    (stop_state("oom"), "the kernel's OOM killer stopped it"),
+    (None, "the container's state after it was not read"),
+])
+def test_d1_names_a_way_back_stop_that_was_no_deploys_beside_a_delete_loss(which, what,
+                                                                            state, why):
+    """The end's DELETE runs after the way back, so the copy reaches it
+    through two more stops of reh-web than F7's. One that outran the grace
+    was a SIGKILL of its own: a loss the DELETE finds is still DuckDB's
+    defect and still FAIL, but it may be that kill's and not P3's, and the
+    verdict says so instead of laying it at P3's door. A clean DELETE does
+    not lean on those stops — F7's checkpoint already wrote down what P3's
+    kill cost — so it still passes.
+    Kills: "D1 never reads the stops between F7 and the end's DELETE"."""
+    fatal = "FATAL Error: Invalid Input Error: Failed to delete all rows from index. Only deleted 0 out of 1 rows."
+    loss = deletes(orders={"fatal": fatal, "scanned": None, "deleted": None, "left": None})
+    short = deletes(data_quality_issues={"scanned": 2, "deleted": 0, "left": 2})
+    for delete in (loss, short):
+        verdict, detail = probe.judge_d1(d1_ev(delete=delete, **{which: state}))
+        assert verdict == FAIL and detail.startswith(probe.KNOWN_DEFECT), detail
+        assert f"the copy reached the DELETE through {what} ({why}" in detail, detail
+        assert "a kill after P3's may have cost it" in detail
+        verdict, detail = probe.judge_d1(d1_ev(delete=delete))
+        assert verdict == FAIL and "reached the DELETE" not in detail, detail
+    assert probe.judge_d1(d1_ev(**{which: state}))[0] == PASS
 
 
 def test_d1_fails_on_a_delete_that_said_ok_and_left_the_rows():
@@ -1132,11 +1165,43 @@ def test_a_delete_through_a_lost_index_finds_nothing_duckdb_1_5_5(tmp_path):
 
     for col, value in (("s", "late3"), ("k", "1")):
         proc = subprocess.run([sys.executable, "-c", probe._DELETE_ONE, db, "t",
-                               probe._WINDOW_WHERE.format(col=col), value],
+                               probe._WINDOW_WHERE.format(col=col), value, str(REPO)],
                               capture_output=True, text=True)
         result = json.loads(proc.stdout.strip().splitlines()[-1])
         assert result.get("fatal", "").startswith(
             "FATAL Error: Invalid Input Error: Failed to delete all rows from index"), result
+
+
+def test_the_ends_delete_costs_no_index_of_its_own_duckdb_1_5_5(tmp_path, monkeypatch):
+    """`window_delete` behind a stop that left a WAL — a grace that ran out
+    after P3's kill — asks one table per process, and each opens the copy
+    through the product's guard (`open_file`), as the product's next
+    start would. So the first process's close is not DuckDB's lossy
+    checkpoint of the next table's index: every DELETE comes clean, and a
+    loss D1 reports is one the product left. A bare read-write connect there
+    replayed the WAL and closed lossily in the first process, the second
+    table's DELETE was the FATAL, and D1 reported its own loss as the kill's.
+    Kills: "_DELETE_ONE opens the copy with a bare duckdb.connect"."""
+    duckdb = pytest.importorskip("duckdb")
+    import subprocess
+    import sys
+
+    monkeypatch.setattr(probe, "APP_DIR", str(REPO))
+    db = str(tmp_path / "wal.duckdb")
+    con = duckdb.connect(db)
+    for table, index in (("c", "CREATE INDEX i_cab ON c(a, b)"), ("s", "CREATE INDEX i_sa ON s(a)")):
+        con.execute(f"CREATE TABLE {table} (id BIGINT PRIMARY KEY, a BIGINT, b VARCHAR)")
+        con.execute(index)
+        con.execute(f"INSERT INTO {table} SELECT r, r % 5, 'early' || r FROM range(1, 3001) x(r)")
+    con.close()
+    assert subprocess.run([sys.executable, "-c", _KILLED_TWO, db]).returncode == -9
+    assert (tmp_path / "wal.duckdb.wal").exists()
+    monkeypatch.setattr(probe, "_window_targets",
+                        lambda run_id, order_id: [("c", "id", 100001), ("s", "id", 100001)])
+    done = probe.window_delete(db, None, 100001)
+    assert [(d["table"], d.get("scanned"), d.get("deleted"), d.get("left"))
+            for d in done["deletes"]] == [("c", 1, 1, 0), ("s", 1, 1, 0)], done
+    assert not any("fatal" in d or "error" in d for d in done["deletes"]), done
 
 
 _WINDOW_WRITER = """
@@ -1311,7 +1376,7 @@ def test_an_index_holds_no_row_with_a_null_key_duckdb_1_5_5(tmp_path, cols):
         held = window["tables"]["orders"]["indexes"][0]["held"]
         assert held == (1 if all(row[c] is not None for c in cols) else 0), (oid, window)
         proc = subprocess.run([sys.executable, "-c", probe._DELETE_ONE, db, "orders",
-                               probe._WINDOW_WHERE.format(col="id"), str(oid)],
+                               probe._WINDOW_WHERE.format(col="id"), str(oid), str(REPO)],
                               capture_output=True, text=True)
         result = json.loads(proc.stdout.strip().splitlines()[-1])
         assert ("fatal" in result) is (held == 1), (oid, cols, result)
@@ -1595,6 +1660,9 @@ def test_assemble_hands_d1_the_kill_the_window_and_the_stops(tmp_path):
     p8 = probe.assemble(tmp_path)["P8"]
     assert probe.stop_kind(p8["pre_stop"]) == "grace_expired"
     assert probe.stop_kind(p8["stop"]) == "graceful"
+    # And D1 reads the same two: they stand between F7's read and its DELETE.
+    d1 = probe.assemble(tmp_path)["D1"]
+    assert (d1["b_pre_stop"], d1["b_stop"]) == (p8["pre_stop"], p8["stop"])
     assert probe.judge_d1({**ev, "flipped": True}) == (
         UNKNOWN, "no kill landed inside the derivation (see P3)")
 

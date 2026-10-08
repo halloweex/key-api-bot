@@ -50,6 +50,11 @@ case "$1" in
                 case "$5" in
                     */pg_inventory_write) [ -n "${FAKE_INVENTORY_LATCHED:-}" ] && exit 0 ;;
                     */pg_buyers_write) [ -n "${FAKE_BUYERS_LATCHED:-}" ] && exit 0 ;;
+                    */pg_managers_write) [ -n "${FAKE_MANAGERS_LATCHED:-}" ] && exit 0 ;;
+                    */pg_dq_journal_write) [ -n "${FAKE_DQ_JOURNAL_LATCHED:-}" ] && exit 0 ;;
+                    */pg_watchdog_write) [ -n "${FAKE_WATCHDOGS_LATCHED:-}" ] && exit 0 ;;
+                    */pg_weekly_ledger_write) [ -n "${FAKE_WEEKLY_LEDGER_LATCHED:-}" ] && exit 0 ;;
+                    */pg_traffic_ledger_write) [ -n "${FAKE_TRAFFIC_LEDGER_LATCHED:-}" ] && exit 0 ;;
                 esac
                 exit 1
             fi
@@ -60,6 +65,12 @@ case "$1" in
                 KS_SMS_STORE) v="${FAKE_KS_SMS_STORE-__unset__}" ;;
                 KS_READ_SEARCH_INDEX) v="${FAKE_KS_READ_SEARCH_INDEX-__unset__}" ;;
                 KS_READ_DASHBOARD) v="${FAKE_KS_READ_DASHBOARD-__unset__}" ;;
+                KS_WRITE_MANAGERS) v="${FAKE_KS_WRITE_MANAGERS-__unset__}" ;;
+                KS_WRITE_DQ_JOURNAL) v="${FAKE_KS_WRITE_DQ_JOURNAL-__unset__}" ;;
+                KS_WRITE_WATCHDOGS) v="${FAKE_KS_WRITE_WATCHDOGS-__unset__}" ;;
+                KS_WRITE_WEEKLY_LEDGER) v="${FAKE_KS_WRITE_WEEKLY_LEDGER-__unset__}" ;;
+                KS_WRITE_TRAFFIC_LEDGER) v="${FAKE_KS_WRITE_TRAFFIC_LEDGER-__unset__}" ;;
+                KS_DUCKDB) v="${FAKE_KS_DUCKDB-__unset__}" ;;
                 *) v="__unset__" ;;
             esac
             [ "$v" = "__unset__" ] && exit 1
@@ -119,7 +130,13 @@ def _run(workdir: Path, **fake: str) -> Run:
     calls.write_text("")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("FAKE_", "SOAK_"))}
     env.update({"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-                "FAKE_DOCKER_CALLS": str(calls), **fake})
+                "FAKE_DOCKER_CALLS": str(calls),
+                # The file-hash record P1 and P4 read: none, unless a test
+                # makes one. Never the host's /root/duckdb-silence.
+                "DUCKDB_SILENCE_STATE_DIR": str(workdir / "silence"),
+                # The `.env` the host-cron sidecars read (P4): none, unless a
+                # test writes one. Never the checkout's.
+                "SOAK_ENV_FILE": str(workdir / "dot-env"), **fake})
     done = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True,
                           text=True, timeout=120)
     return Run(done, calls.read_text().splitlines())
@@ -325,3 +342,253 @@ class TestChain4:
                    SOAK_BUYERS_OVERRIDE_FLOOR="3")
         assert all("buyers_flip_at=2026-10-01 10:30+03 " in c
                    and "buyers_override_floor=3" in c for c in run.psql), run.psql
+
+
+class TestChain5:
+    """`managers_on`: 0, 1, pending, invalid, unknown — the latch outranks the
+    flag, and a flag the chain has not latched under is pending, because its
+    preconditions are only readable in web."""
+
+    def test_unset_is_zero(self, healthy):
+        assert all("managers_on=0 " in c and re.search(r"managers_flip_at=(\s|$)", c)
+                   for c in healthy.psql), healthy.psql
+
+    def test_the_flag_without_the_latch_is_pending(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_MANAGERS=" Postgres ")
+        assert all("managers_on=pending " in c for c in run.psql), run.psql
+
+    def test_the_latch_is_one_whatever_the_flag_says(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_MANAGERS="duckdb", FAKE_MANAGERS_LATCHED="1")
+        assert all("managers_on=1 " in c for c in run.psql), run.psql
+        assert "latched: chain 5 owns its tables" in run.out
+
+    def test_the_flag_and_the_latch_agree_on_one(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_MANAGERS="postgres", FAKE_MANAGERS_LATCHED="1")
+        assert all("managers_on=1 " in c for c in run.psql), run.psql
+
+    def test_a_value_nobody_understands_is_invalid(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_MANAGERS="postgress")
+        assert all("managers_on=invalid " in c for c in run.psql)
+
+    def test_the_flip_time_is_passed(self, tmp_path):
+        run = _run(tmp_path, SOAK_MANAGERS_FLIP_AT="2026-10-08 10:30+03")
+        assert all(re.search(r"managers_flip_at=2026-10-08 10:30\+03(\s|$)", c)
+                   for c in run.psql), run.psql
+
+
+class TestChain9:
+    """Where the quality journal is written decides whether D8, 20, 21 and 22
+    gate on the hourly copy (OD-02 (c)). Mutation: drop the latch from
+    `DQ_JOURNAL_DIRECT`, or stop passing it — a latched chain with its flag
+    put back would then read UNKNOWN on a copy that stood down."""
+
+    def test_unset_is_zero(self, healthy):
+        assert all("dq_journal_direct=0" in c for c in healthy.psql), healthy.psql
+
+    def test_the_flag_is_one(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_DQ_JOURNAL=" Postgres ")
+        assert all("dq_journal_direct=1" in c for c in run.psql), run.psql
+
+    def test_the_latch_outranks_the_flag(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_DQ_JOURNAL="duckdb",
+                   FAKE_DQ_JOURNAL_LATCHED="1")
+        assert all("dq_journal_direct=1" in c for c in run.psql), run.psql
+
+    def test_a_value_nobody_understands_is_not_direct(self, tmp_path):
+        """Unlatched, a typo writes the journal nowhere (OD-18 (a)); the copy
+        is what stands, and the checks keep gating on it."""
+        run = _run(tmp_path, FAKE_KS_WRITE_DQ_JOURNAL="postgress")
+        assert all("dq_journal_direct=invalid" in c for c in run.psql), run.psql
+
+
+class TestTheOtherShadowChains:
+    """Chains 10, 11a and 11b (OD-02 (c)) reach H1 and H2 the way chain 9
+    reaches D8: the flag, outranked by the latch. Mutation: stop passing one
+    of the three, or drop the latch from `shadow_state` — a latched chain with
+    its flag put back would read "not applicable" in the one state the stand-
+    down exists for."""
+
+    NAMES = (("watchdogs_on", "KS_WRITE_WATCHDOGS", "WATCHDOGS"),
+             ("weekly_ledger_on", "KS_WRITE_WEEKLY_LEDGER", "WEEKLY_LEDGER"),
+             ("traffic_ledger_on", "KS_WRITE_TRAFFIC_LEDGER", "TRAFFIC_LEDGER"))
+
+    def test_unset_is_zero(self, healthy):
+        for var, _, _ in self.NAMES:
+            assert all(f"{var}=0" in c for c in healthy.psql), (var, healthy.psql)
+
+    @pytest.mark.parametrize("var,env,latch", NAMES)
+    def test_the_flag_is_one_and_a_typo_invalid(self, tmp_path, var, env, latch):
+        run = _run(tmp_path / "on", **{f"FAKE_{env}": " Postgres "})
+        assert all(f"{var}=1" in c for c in run.psql), run.psql
+        run = _run(tmp_path / "typo", **{f"FAKE_{env}": "postgress"})
+        assert all(f"{var}=invalid" in c for c in run.psql), run.psql
+
+    @pytest.mark.parametrize("var,env,latch", NAMES)
+    def test_the_latch_outranks_the_flag(self, tmp_path, var, env, latch):
+        run = _run(tmp_path, **{f"FAKE_{env}": "duckdb", f"FAKE_{latch}_LATCHED": "1"})
+        assert all(f"{var}=1" in c for c in run.psql), run.psql
+        assert f"{var}=1 ({env})" in run.out
+
+
+class TestStage5:
+    """The parallel period and the week of silence (OD-17 (a)): KS_DUCKDB read
+    by name, the declared start passed through, and the file's hash record
+    read with `--status` — which hashes nothing and writes nothing."""
+
+    def test_nothing_set_is_on_undeclared_and_no_record(self, healthy):
+        assert all("duckdb_off=0 " in c and "parallel_from= " in c
+                   and "duckdb_file_last=none " in c and "duckdb_file_since= " in c
+                   for c in healthy.psql), healthy.psql
+        assert "duckdb_off=0 (KS_DUCKDB), in .env: unknown, file record: none" in healthy.out
+
+    @pytest.mark.parametrize("value, expected", [
+        ("off", "1"), (" OFF ", "1"), ("on", "0"), ("", "0"), ("of", "invalid")])
+    def test_ks_duckdb_reads_the_way_web_reads_it(self, tmp_path, value, expected):
+        run = _run(tmp_path, FAKE_KS_DUCKDB=value)
+        assert all(f"duckdb_off={expected} " in c for c in run.psql), run.psql
+
+    def test_a_stopped_web_is_unknown(self, tmp_path):
+        run = _run(tmp_path, FAKE_WEB="exited")
+        assert all("duckdb_off=unknown " in c for c in run.psql)
+
+    def test_the_declared_start_is_passed(self, tmp_path):
+        run = _run(tmp_path, SOAK_PARALLEL_FROM="2026-11-02 10:00+02")
+        assert all("parallel_from=2026-11-02 10:00+02 " in c for c in run.psql)
+        assert "parallel period from 2026-11-02 10:00+02" in run.out
+
+    def test_the_record_is_read_and_left_as_it_was(self, tmp_path):
+        """The hourly cron's record, made by the real script, then read by the
+        report: every field passed through, and the record byte for byte as
+        it was. Mutation: call the check without `--status` in the report —
+        it would hash the file and write the record."""
+        db = tmp_path / "analytics.duckdb"
+        db.write_bytes(b"duck")
+        state = tmp_path / "silence"
+        base = {k: v for k, v in os.environ.items() if not k.startswith("DUCKDB_")}
+        made = subprocess.run(
+            ["bash", str(REPO / "deploy" / "duckdb_silence_check.sh")],
+            env={**base, "DUCKDB_FILE": str(db), "DUCKDB_SILENCE_STATE_DIR": str(state),
+                 "DUCKDB_SILENCE_NOW": "1900000000"},
+            capture_output=True, text=True, timeout=60)
+        assert made.returncode == 2, made.stdout + made.stderr
+        before = {p.name: p.read_bytes() for p in state.iterdir()}
+        db.write_bytes(b"changed")  # a record-mode run would now say CHANGED
+
+        run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state), DUCKDB_FILE=str(db))
+        assert all("duckdb_file_last=BASELINE " in c
+                   and "duckdb_file_since=2030-03-17T17:46:40Z " in c
+                   and "duckdb_file_since_reason=baseline " in c
+                   and "duckdb_file_checked_at=2030-03-17T17:46:40Z" in c
+                   for c in run.psql), run.psql
+        assert {p.name: p.read_bytes() for p in state.iterdir()} == before
+
+    def test_a_missing_episode_reaches_the_checks(self, tmp_path):
+        """The review of 02.10's sequence, by the real script: baseline, the
+        file moved away for a check, moved back. The record reads UNCHANGED
+        since the baseline; `missing_at` is what tells P1 and P4. Mutation:
+        drop the `missing_at=*` case from `silence_record`."""
+        db = tmp_path / "analytics.duckdb"
+        db.write_bytes(b"duck")
+        state = tmp_path / "silence"
+        base = {k: v for k, v in os.environ.items() if not k.startswith("DUCKDB_")}
+        env = {**base, "DUCKDB_FILE": str(db), "DUCKDB_SILENCE_STATE_DIR": str(state)}
+        check = ["bash", str(REPO / "deploy" / "duckdb_silence_check.sh")]
+        for now, move in ((1900000000, None), (1900003600, "away"), (1900007200, "back")):
+            if move == "away":
+                db.rename(tmp_path / "away")
+            elif move == "back":
+                (tmp_path / "away").rename(db)
+            subprocess.run(check, env={**env, "DUCKDB_SILENCE_NOW": str(now)},
+                           capture_output=True, text=True, timeout=60)
+        run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state), DUCKDB_FILE=str(db))
+        assert all("duckdb_file_last=UNCHANGED " in c
+                   and "duckdb_file_since_reason=baseline " in c
+                   and "duckdb_file_missing_at=2030-03-17T18:46:40Z" in c
+                   for c in run.psql), run.psql
+        assert "last missing 2030-03-17T18:46:40Z" in run.out
+
+    def test_an_unreadable_record_is_an_error_not_a_pass(self, tmp_path):
+        state = tmp_path / "silence"
+        state.mkdir()
+        (state / "state").write_text("nonsense=1\n")
+        run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state))
+        assert all("duckdb_file_last=error " in c for c in run.psql)
+
+    @pytest.mark.parametrize("lines, expected", [
+        ("KS_DUCKDB=off\n", "1"),
+        ("KS_DUCKDB= OFF \r\n", "1"),
+        ("KS_DUCKDB=on\nKS_DUCKDB=off\n", "1"),
+        ("KS_DUCKDB=off\nKS_DUCKDB=on\n", "0"),
+        ("KS_DUCKDB=on\n", "0"),
+        ("BOT_TOKEN=x\n", "0"),
+        ("# KS_DUCKDB=off\n", "0"),
+        ('KS_DUCKDB="off"\n', "invalid"),
+        ("KS_DUCKDB=of\n", "invalid"),
+    ])
+    def test_env_is_read_the_way_the_sidecars_read_it(self, tmp_path, lines, expected):
+        """The weekly compaction and the nightly off-site start their sidecars
+        with `docker run --env-file .env`, so what refuses them is `.env`, not
+        web's environment: the last line naming the key, quotes kept.
+        Mutation: strip the quotes, or take the first line."""
+        env_file = tmp_path / "dot-env"
+        env_file.write_text(lines)
+        os.utime(env_file, (1900000000, 1900000000))
+        run = _run(tmp_path, SOAK_ENV_FILE=str(env_file))
+        assert all(f"duckdb_off_env={expected} " in c
+                   and "duckdb_env_changed_at=2030-03-17T17:46:40Z" in c
+                   for c in run.psql), run.psql
+
+    def test_no_env_is_unknown_and_nothing_else_is_read_from_it(self, tmp_path):
+        run = _run(tmp_path)
+        assert all("duckdb_off_env=unknown " in c and "duckdb_env_changed_at= " in c
+                   for c in run.psql), run.psql
+        env_file = tmp_path / "dot-env"
+        env_file.write_text("BOT_TOKEN=123456:never-printed\nKS_DUCKDB=off\n")
+        run = _run(tmp_path, SOAK_ENV_FILE=str(env_file))
+        assert "never-printed" not in run.out and not any("never-printed" in c
+                                                           for c in run.calls)
+        assert "in .env: 1 (edited 20" in run.out, run.out
+
+    def test_the_check_is_only_ever_asked_for_its_status(self):
+        calls = re.findall(r'"\$SILENCE_CHECK"[^\n]*', SCRIPT.read_text())
+        assert calls == ['"$SILENCE_CHECK" --status 2>&1 || true)"'], calls
+
+
+def test_every_variable_a_check_reads_is_passed():
+    """Walked over the checks, not listed: a `:'name'` a file reads that the
+    script does not pass reaches the server as psql's literal text, and the
+    check judges that. Mutation: drop `-v duckdb_off_env=...` from the
+    script."""
+    passed = set(re.findall(r"-v (\w+)=", SCRIPT.read_text())) - {"ON_ERROR_STOP"}
+    read = set()
+    for path in FILES:
+        read |= set(re.findall(r":'(\w+)'",
+                               re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8"))))
+    assert read <= passed, sorted(read - passed)
+
+
+# A soak file is named in prose far from where it lives — a module docstring
+# telling the reader which check reads its rows, a canary comment naming the
+# check that judges its page — and a renumbering leaves those pointing at
+# nothing. Found once: three such names survived a renumbering in the change
+# that added P1–P4. Walked, not listed: every tree a reader would look in.
+_SOAK_NAME = re.compile(r"\b\d{2}_[a-z0-9]+_[a-z0-9_]+\.sql\b")
+_PROSE_TREES = ("core", "bot", "web", "scripts", "deploy", "tests")
+
+
+def test_every_soak_file_named_anywhere_exists():
+    """Mutation: put P4's old number back in the canary's comment (52 for 53,
+    `p3` for `p4`), a file that does not exist, and this fails naming the
+    file and the name."""
+    sources = [REPO / ".claude" / "CLAUDE.md"]
+    for tree in _PROSE_TREES:
+        sources += [p for p in (REPO / tree).rglob("*")
+                    if p.is_file() and p.suffix in {".py", ".sh", ".sql", ".md", ".yml"}
+                    and "__pycache__" not in p.parts]
+    existing = {p.name for p in FILES}
+    dangling = sorted(
+        f"{path.relative_to(REPO)}: {name}"
+        for path in sources if path.exists()
+        for name in set(_SOAK_NAME.findall(path.read_text(errors="replace")))
+        if name not in existing)
+    assert not dangling, dangling

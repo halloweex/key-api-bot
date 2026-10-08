@@ -114,6 +114,10 @@ _DESTINATION = {
     # journal's own table and has no DuckDB copy either.
     ("core/alert_archive.py", "_write_watch"): (
         "the alert journal lives in Postgres alone; there is no copy", None),
+    # A rollback lever's use (OD-17 (a)), in the same journal and written
+    # inside the release's own transaction.
+    ("core/lever_journal.py", "record"): (
+        "the alert journal lives in Postgres alone; there is no copy", None),
     ("core/ch_history.py", "ship_history"): (
         "writes ClickHouse's history.*, not Postgres", None),
     ("core/pg_silver.py", "rebuild_silver"): (
@@ -629,8 +633,8 @@ class TestEveryPostgresWriterAsksTheRegistry:
         was written."""
         writers = walk.writers()
         assert {
-            ("core/pg_landing.py", "_write"),
-            ("core/pg_landing.py", "write_orders"),
+            ("core/pg_landing.py", "_write_rows"),
+            ("core/pg_landing.py", "_write_order_rows"),
             ("core/pg_buyer_rows.py", "_write_buyer_rows"),
             ("core/pg_replication.py", "write_managers"),
             ("core/pg_expense_backfill.py", "backfill_expenses"),
@@ -852,7 +856,10 @@ _SPEC_TYPES = {"MirroredTable", "BucketedTable"}
 # Reading a spec's Postgres copy, or comparing the two: what makes a function
 # a comparison rather than a reader of DuckDB's side.
 _PG_COMPARE = {"fetch_pg_rows", "pg_fingerprints", "_read_pg_bucket",
-               "compare_table", "compare_bucket"}
+               "compare_table", "compare_bucket",
+               # The shadow chains' comparison, facing Postgres→DuckDB
+               # (OD-02 (c)) — a comparison of the same copies all the same.
+               "fetch_pg_rows_with_clock", "compare_shadow"}
 
 
 def _spec_tables(modules) -> dict:
@@ -2008,14 +2015,19 @@ class TestTheOrderWatchesOutliveTheStandDown:
         return {key for key, targets in walk.writers().items()
                 if targets & set(tables)}
 
+    # Since chain 3's PR-1 the statements live in `_write_order_rows`, on the
+    # caller's transaction: `write_orders` runs them for every path that
+    # ships DuckDB's orders, and chain 3's writer for its own. Still one
+    # writer — the chain module spells no statement against these tables.
+    CORE = ("core/pg_landing.py", "_write_order_rows")
+
     def test_the_order_tables_have_one_writer(self, walk):
-        assert self._writers_of(walk, self.ORDER_TABLES) == {
-            ("core/pg_landing.py", "write_orders")}
+        assert self._writers_of(walk, self.ORDER_TABLES) == {self.CORE}
 
     def test_the_archive_is_written_only_inside_it(self, walk):
         capture = ("core/pg_order_versions.py", "capture_versions")
         assert self._writers_of(walk, {self.ARCHIVE}) == {capture}
-        assert walk.callers.get(capture) == {("core/pg_landing.py", "write_orders")}
+        assert walk.callers.get(capture) == {self.CORE}
 
     @pytest.mark.asyncio
     async def test_it_moves_the_watched_watermark_and_writes_the_archive(self, pool):
@@ -2164,8 +2176,13 @@ def landing_chain(flags):
         fake.WRITE_ENV = "KS_WRITE_LANDING"
         fake.CHAIN_TABLES = tuple(tables)
         fake.env_writes_postgres = env
-        flags.setattr(write_chains, "WRITE_CHAINS",
-                      write_chains.WRITE_CHAINS + (fake,))
+        # The fake is the only chain declaring its tables, as a table belongs
+        # to one chain in any build: a real chain declaring one of them too
+        # (chain 6, the catalogue) would widen an owner row of the fake's to
+        # that chain's other tables, which is not what these tests model.
+        flags.setattr(write_chains, "WRITE_CHAINS", tuple(
+            c for c in write_chains.WRITE_CHAINS
+            if not set(tables) & set(c.CHAIN_TABLES)) + (fake,))
         return fake
 
     return register

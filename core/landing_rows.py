@@ -769,3 +769,54 @@ def parse_buyers(buyers: Iterable[Any]) -> ParsedBuyers:
         if birthday_is_unreadable(buyer.birthday):
             unreadable.append(buyer.id)
     return ParsedBuyers(rows, contacts, unreadable)
+
+
+# ─── Managers (chain 5) ──────────────────────────────────────────────────────
+#
+# A KeyCRM user as both writers of `managers` hand it over. Until chain 5 only
+# DuckDB's `upsert_managers` read the payload, and it spelled the row inline;
+# under `KS_WRITE_MANAGERS=postgres` `core.pg_managers_write.upsert_managers`
+# writes the same row to Postgres, so the reading is one function here rather
+# than two copies that could come to disagree about a manager's NAME or about
+# which managers start out retail.
+#
+# `is_retail` is a SEED, and only that: both writers insert it for a manager
+# they have never seen and never touch it on a conflict. Recomputing it on
+# every sync is what made the column unfixable — whatever a human set was
+# overwritten within the minute (`DuckDBStore.upsert_managers`).
+
+
+class ManagerRow(NamedTuple):
+    """A manager as KeyCRM describes it, plus the retail seed for a manager
+    neither store has seen. Column order is the write order."""
+    id: Any
+    name: Any
+    email: Any
+    status: Any
+    is_retail: bool
+
+
+MANAGER_ROW_COLUMNS = ManagerRow._fields
+
+
+def manager_row(payload: Dict[str, Any]) -> ManagerRow:
+    """One KeyCRM user. The expressions are DuckDB's, verbatim, from before
+    they moved here: `name`, else `full_name`, else 'Unknown' — and a
+    `full_name` key that is present and null stays null, as it always did, so
+    the writers refuse such a row the way they always would have (DuckDB's
+    column is NOT NULL; Postgres's too)."""
+    from core.duckdb_constants import RETAIL_MANAGER_IDS
+
+    return ManagerRow(
+        payload.get("id"),
+        payload.get("name") or payload.get("full_name", "Unknown"),
+        payload.get("email"),
+        payload.get("status"),  # 'active', 'blocked', 'pending'
+        payload.get("id") in RETAIL_MANAGER_IDS,  # seed for new rows only
+    )
+
+
+def manager_rows(payloads: List[Dict[str, Any]]) -> List[ManagerRow]:
+    """The batch, in the order KeyCRM served it — DuckDB writes them one
+    statement at a time, so a manager served twice keeps the last version."""
+    return [manager_row(p) for p in payloads]

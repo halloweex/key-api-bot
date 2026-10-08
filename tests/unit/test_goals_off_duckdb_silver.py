@@ -678,8 +678,15 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
 # The bridge reads three DuckDB tables. Once any of them changes hands, DuckDB's
 # copy freezes, and retail goals silently diverge from Postgres Silver at the
 # first reclassification (critique 8). Chain 5 (managers, classifications) and
-# chain 3 (orders) must therefore wait for the chain 7b port — or for this
-# predicate to be re-pointed at Postgres — and this is what enforces it.
+# chain 3 (orders) must therefore not MOVE before the chain 7b port — or before
+# this predicate is re-pointed at Postgres — and this is what enforces it.
+#
+# Moving, not registering. Chain 3 registered on 2026-10-01 with its flag off:
+# its writes still go to DuckDB, so the bridge reads what it always read. What
+# must hold is that no such chain can move while this file renders the DuckDB
+# case, so every chain declaring a bridge table must name the bridge in its own
+# `unmet_precondition` — an unmet precondition holds an unlatched chain on
+# DuckDB whatever its flag says (`core.write_chains._chain_state`).
 
 PREDICATE_TABLES = frozenset(
     {"bronze.orders", "bronze.managers", "app.manager_classifications"})
@@ -730,19 +737,66 @@ def _tripped(chains: dict[str, frozenset], goals_source: str) -> dict[str, list[
             for name, tables in chains.items() if tables & PREDICATE_TABLES}
 
 
+def _holds_itself_back(module_name: str) -> bool:
+    """Whether a chain declaring a bridge table names the bridge among its own
+    reasons not to move. Asked of the registered module, with no flag set —
+    the reason must be there whatever else is or is not met."""
+    from core.write_chains import WRITE_CHAINS, chain_name
+
+    chain = next((c for c in WRITE_CHAINS if chain_name(c) == module_name), None)
+    if chain is None:
+        return False
+    check = getattr(chain, "unmet_precondition", None)
+    return bool(check) and "goals_bridge" in (check() or "")
+
+
 class TestTheTripwire:
-    def test_no_chain_owns_what_the_bridge_reads(self):
+    def test_no_chain_owning_what_the_bridge_reads_can_move(self):
+        """Mutation: drop `_goals_bridge_unmet` from chain 3's preconditions —
+        its flag would then move the orders while the calculators read them
+        out of a DuckDB that stopped receiving them."""
         chains = _declared_chain_tables()
         assert chains, "no write chain found — the walk is not looking"
         tripped = _tripped(chains, GOALS.read_text(encoding="utf-8"))
-        assert not tripped, (
-            f"write chain(s) {tripped} own tables the goal calculators still "
+        free = sorted(name for name in tripped if not _holds_itself_back(name))
+        assert not free, (
+            f"write chain(s) {free} own tables the goal calculators still "
             f"read from DuckDB (core/repositories/goals.py renders "
             f"silver_sales_type_case(DUCKDB) at lines "
-            f"{_renders_duckdb_case(GOALS.read_text(encoding='utf-8'))}). Once "
-            f"they move, DuckDB's copy freezes and retail goals diverge from "
-            f"Postgres Silver at the first reclassification. Port chain 7b, or "
-            f"re-point the predicate at Postgres, before moving these chains.")
+            f"{_renders_duckdb_case(GOALS.read_text(encoding='utf-8'))}) and do "
+            f"not hold themselves on DuckDB while it does. Once they move, "
+            f"DuckDB's copy freezes and retail goals diverge from Postgres "
+            f"Silver at the first reclassification. Port chain 7b, re-point "
+            f"the predicate at Postgres, or name `goals_bridge` in the chain's "
+            f"unmet_precondition.")
+
+    def test_today_the_owners_are_chains_3_and_5_and_both_hold_themselves_back(self):
+        """Not vacuous: the walk sees both declarations and both holds, and
+        nothing else. Chain 3 owns the orders the bridge counts and chain 5
+        the classification it decides retail by; a third owner — or either
+        one losing a table from its declaration — fails here first."""
+        tripped = _tripped(_declared_chain_tables(), GOALS.read_text(encoding="utf-8"))
+        assert tripped == {
+            "pg_orders_write": ["bronze.orders"],
+            "pg_managers_write": ["app.manager_classifications", "bronze.managers"],
+        }
+        assert _holds_itself_back("pg_orders_write")
+        assert _holds_itself_back("pg_managers_write")
+
+    def test_chain_5_holds_itself_back(self):
+        """Not vacuous: the walk sees chain 5's declaration and its hold.
+        Mutation: drop `goals_bridge` from `pg_managers_write`'s preconditions
+        — its flag would then move the classification while the calculators
+        read it out of a DuckDB that stopped receiving it."""
+        tripped = _tripped(_declared_chain_tables(), GOALS.read_text(encoding="utf-8"))
+        assert tripped["pg_managers_write"] == [
+            "app.manager_classifications", "bronze.managers"]
+        assert _holds_itself_back("pg_managers_write")
+
+    def test_an_unregistered_declaration_cannot_hold_itself_back(self):
+        """A module that declares a bridge table and never registered has no
+        registry to hold it — the walk parses `core/`, and this is why."""
+        assert not _holds_itself_back("pg_nobody_write")
 
     def test_the_bridge_is_what_it_watches_today(self):
         """Not vacuous: the detector sees today's rendering. When chain 7b

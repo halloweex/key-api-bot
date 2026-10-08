@@ -387,7 +387,8 @@ class TestTheWalk:
             for path in (REPO / top).rglob("*.py"):
                 for n in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                     if (isinstance(n, ast.Call) and _call_name(n) in (
-                            "fall_back", "no_address", "no_engine")
+                            "fall_back", "no_address", "no_engine",
+                            "chain_refusal")
                             and n.args):
                         arg = n.args[0]
                         if isinstance(arg, ast.Constant):

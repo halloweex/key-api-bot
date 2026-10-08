@@ -156,6 +156,22 @@ def _no_write_chain_flag_from_outside(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _duckdb_switch_on_and_forgotten(monkeypatch):
+    """Every test starts with KS_DUCKDB unset and the switch's cache and counts
+    empty (core/duckdb_switch.py), and leaves them so.
+
+    A developer's shell or `.env` carrying `KS_DUCKDB=off` would refuse every
+    store the suite opens, and a test that switched it off must not hand the
+    refusal to the next one. Tests that mean `off` set it after this ran."""
+    from core import duckdb_switch
+
+    monkeypatch.delenv(duckdb_switch.ENV, raising=False)
+    duckdb_switch.reset()
+    yield
+    duckdb_switch.reset()
+
+
+@pytest.fixture(autouse=True)
 def _never_the_real_chain_latch(monkeypatch, tmp_path):
     """No test may latch a write chain in the real data directory.
 
@@ -174,6 +190,25 @@ def _never_the_real_chain_latch(monkeypatch, tmp_path):
 
     monkeypatch.setattr(chain_latch, "MARKER_DIR", tmp_path / "write-chain-owners")
     monkeypatch.setattr(chain_latch, "_latched", None, raising=False)
+    # The report ledgers' spool (chains 11a/11b) is a decision of the same
+    # kind — a spooled week reads as sent — so it is redirected the same way.
+    from core import report_ledger
+
+    monkeypatch.setattr(report_ledger, "SPOOL_DIR", tmp_path / "report-ledger-pending")
+
+
+@pytest.fixture(autouse=True)
+def _a_fresh_orders_chain_hold(monkeypatch):
+    """Every test starts as a process that has not held chain 3 on DuckDB.
+
+    `core/pg_orders_write.py` remembers, for the life of the process, the first
+    time it found a precondition unmet under `KS_WRITE_ORDERS=postgres`, and
+    holds the chain until the process ends (the chain-3 review: the flip must
+    happen at a start, never mid-day). One test that met an unmet precondition
+    under the flag would otherwise hold the chain for every later test."""
+    from core import pg_orders_write
+
+    monkeypatch.setattr(pg_orders_write, "_held", None)
 
 
 @pytest.fixture(autouse=True)
@@ -197,3 +232,5 @@ def _a_fresh_warehouse_writer(monkeypatch):
                         ("_reclassify_needed", False),
                         ("_writer_record", None), ("_settle_lock", None)):
         monkeypatch.setattr(wc, name, value)
+    # Chain 5: the way back a start refused while a chain was latched.
+    monkeypatch.setattr(wc, "_way_back_refused", ())

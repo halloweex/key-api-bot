@@ -432,8 +432,9 @@ result.plot()
 ## Commands
 
 ```bash
-# Connect to DuckDB
-python -c "import duckdb; conn = duckdb.connect('data/analytics.duckdb'); print(conn.execute('SELECT COUNT(*) FROM silver_orders').fetchone())"
+# Connect to DuckDB — read-only: a read-write open of a file a killed writer
+# left a WAL on shortens its indexes (see core.duckdb_switch.open_file)
+python -c "import duckdb; conn = duckdb.connect('data/analytics.duckdb', read_only=True); print(conn.execute('SELECT COUNT(*) FROM silver_orders').fetchone())"
 
 # Train model manually
 PYTHONPATH=. python -c "from core.prediction_service import PredictionService; import asyncio; asyncio.run(PredictionService().train())"

@@ -74,6 +74,52 @@ class TestTheClockIsDerived:
             "bronze.buyers": ("updated_at",),
             "bronze.buyer_contacts": (),
             "app.buyer_gender": ("decided_at",),
+            # Chain 3. An order by KeyCRM's own `updated_at`, as a buyer is
+            # (and an equal stamp, common because KeyCRM does not bump it on a
+            # status change, proves nothing); line items follow their order
+            # and an expense has no KeyCRM stamp. The misses' `checked_at` is
+            # the daily spec's clock and a compared value, stamped from the
+            # web process's clock by both writers (`pg_orders_write`).
+            "bronze.orders": ("updated_at",),
+            "bronze.order_products": (),
+            "bronze.expenses": (),
+            "app.order_backfill_misses": ("checked_at",),
+            # Chain 5. `set_at` is when a human decided, carried by both
+            # stores as a value and stamped by both writers from the web
+            # container's clock; the managers carry no shared per-row clock.
+            "bronze.managers": (),
+            "app.manager_classifications": ("set_at",),
+            # Chain 6. KeyCRM serves no `updated_at` for a product or a
+            # category, and DuckDB's `synced_at` against Postgres's
+            # `mirrored_at` is each store's own bookkeeping: nothing orders
+            # two versions, and the rewrite clock dates the chain's writes.
+            "bronze.products": (),
+            "bronze.categories": (),
+            # Chain 7b-3. Each table's stamp is the daily spec's
+            # `synced_column` and also in its `ignore_columns` — one stamp per
+            # writer run, compared by nothing — so it orders nothing across
+            # the two stores. After the latch every difference is taken as
+            # Postgres newer, which `--handover` before the flip makes true.
+            "app.revenue_predictions": (),
+            "app.seasonal_indices": (),
+            "app.weekly_patterns": (),
+            "app.growth_metrics": (),
+            # Chain 9 (OD-02 (c)). A run is dated by its own `started_at`,
+            # which both stores are handed as one value; its findings carry no
+            # clock of their own (the daily comparison borrows the run's
+            # through a subquery, which the copy-back does not ship).
+            "app.data_quality_runs": ("started_at",),
+            "app.data_quality_issues": (),
+            "app.data_quality_diffs": (),
+            # Chain 10. A sample is dated by its own `sampled_at`, the one
+            # value the router hands both stores — it is also the key.
+            "app.disk_samples": ("sampled_at",),
+            "app.data_dir_samples": ("sampled_at",),
+            "app.memory_samples": ("sampled_at",),
+            # Chains 11a/11b. A delivery is dated by `sent_at`, the moment
+            # the message went out, which the router hands both stores.
+            "app.weekly_report_sends": ("sent_at",),
+            "app.traffic_report_sends": ("sent_at",),
         }
 
 
@@ -134,7 +180,36 @@ class TestEveryWrittenColumnIsCompared:
                     assert spec.compare.ignore_columns == \
                         daily[spec.pg_table].ignore_columns, spec.pg_table
         assert forgiven == {("bronze.offers", "synced_at"),
-                            ("app.sku_inventory_status", "updated_at")}
+                            ("app.sku_inventory_status", "updated_at"),
+                            # Chain 7b-3, four more, each forgiven by its daily
+                            # spec for the race that spec describes. A writer
+                            # run stamps ONE value — the goal tables in one
+                            # transaction with one `now`, a training's forecast
+                            # with one `created_at` (measured, DuckDB 1.5.5: 61
+                            # rows, 1 value) — and nothing in DuckDB reads any
+                            # of them: the only reader is the chain's standing
+                            # watch, which reads Postgres and stands down with
+                            # the release. But the next run does NOT restamp
+                            # every row, and that is the honest limit of
+                            # forgiving them here. `seasonal_indices`: every
+                            # month the Monday job computes. `growth_metrics`:
+                            # only a measured rate (the placeholder never
+                            # overwrites one). `weekly_patterns`: only POST
+                            # /api/goals/recalculate — the Monday job never
+                            # stores weekly rows, and production's have not
+                            # moved since 2026-03-14. `revenue_predictions`:
+                            # only the range a training predicts, today to
+                            # +60; a past day keeps its stamp for good. A
+                            # mis-copy of those two is seen by no comparison
+                            # and corrected by no run, so what the copy carries
+                            # is pinned by the suite instead, on stamps that
+                            # differ row by row (`test_forecast_writer.py::
+                            # TestTheCopyBack::test_the_stamps_no_run_
+                            # restamps_arrive_exactly`).
+                            ("app.seasonal_indices", "updated_at"),
+                            ("app.growth_metrics", "updated_at"),
+                            ("app.weekly_patterns", "updated_at"),
+                            ("app.revenue_predictions", "created_at")}
 
 
 class TestAKeyOnlyDuckdbHolds:
@@ -507,3 +582,51 @@ class TestChain7aIsCarriedLikeTheOthers:
         assert "run deploy/stage4_soak.sh and read E1 (expenses copy stood down) and E2" in exp
         assert ("run deploy/stage4_soak.sh and read I1 (inventory copy stood "
                 "down), I2 and I3") in inv
+
+
+class TestNothingHereIsDeadInProduction:
+    """The chain-6 merge into chain 3 left `_clock_table` defined, asserted by
+    one test and called by nothing: `_handover_issues` keys on `rewrite_stamp`
+    now, and its docstring ("the orders or the expenses for chain 3's") read
+    as a live path of the copy-back. A test pinning a helper production never
+    calls proves nothing about the way back. Walked rather than listed, so the
+    next helper a merge orphans is found by the same test. Mutation: put
+    `_clock_table` back, or any function here production stops calling."""
+
+    PRODUCTION = ("core", "scripts", "web", "bot", "deploy")
+
+    @staticmethod
+    def _names(node, *, skip=None):
+        """Every name `node` refers to — loads, attributes, imports — except
+        `skip`, so a function calling itself does not count as reached."""
+        import ast
+
+        out = set()
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name):
+                out.add(n.id)
+            elif isinstance(n, ast.Attribute):
+                out.add(n.attr)
+            elif isinstance(n, ast.alias):
+                out.add(n.name.rsplit(".", 1)[-1])
+        out.discard(skip)
+        return out
+
+    def test_every_function_it_defines_is_reached_from_production(self):
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[2]
+        module = root / "core" / "chain_transfer.py"
+        defined = [n for n in ast.parse(module.read_text()).body
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        reached = set()
+        for top in self.PRODUCTION:
+            for path in (root / top).rglob("*.py"):
+                tree = ast.parse(path.read_text())
+                for node in tree.body:
+                    skip = (node.name if path == module and isinstance(
+                        node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None)
+                    reached |= self._names(node, skip=skip)
+        assert defined, "the walk read nothing"
+        assert [f.name for f in defined if f.name not in reached] == []

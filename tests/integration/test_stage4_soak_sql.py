@@ -44,7 +44,17 @@ FILES = sorted(SQL_DIR.glob("*.sql"))
 VERDICTS = {"PASS", "FAIL", "UNKNOWN"}
 VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on": "0",
              "buyers_on": "0", "buyers_flip_at": "", "buyers_held_by": "",
-             "buyers_override_floor": ""}
+             "buyers_override_floor": "", "dq_journal_direct": "0",
+             "watchdogs_on": "0", "weekly_ledger_on": "0", "traffic_ledger_on": "0",
+             # Stage 5's clocks (OD-17 (a)); tests/integration/test_stage5_soak_sql.py.
+             "duckdb_off": "0", "parallel_from": "", "duckdb_file_last": "none",
+             "duckdb_file_since": "", "duckdb_file_since_reason": "",
+             "duckdb_file_checked_at": "", "duckdb_file_missing_at": "",
+             # What `.env` tells the host-cron sidecars (P4): off, so a test
+             # that turns web off is not also testing `.env`.
+             "duckdb_off_env": "1", "duckdb_env_changed_at": ""}
+# Chain 5's two (30_m1, 31_m2).
+VARIABLES.update({"managers_on": "0", "managers_flip_at": ""})
 RUN_AS_OWNER = "-- soak:run-as ks_app"
 # The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
 HISTORY_CHECKS = (
@@ -359,6 +369,11 @@ class TestEveryCheckRuns:
         {"inventory_on": "unknown", "dq_pg_warehouse_on": "unknown", "buyers_on": "unknown"},
         {"inventory_on": "0", "dq_pg_warehouse_on": "0", "buyers_on": "held",
          "buyers_held_by": "KS_SMS_STORE"},
+        # The shadow chains (OD-02 (c)): every state the script can pass.
+        {"dq_journal_direct": "1", "watchdogs_on": "1", "weekly_ledger_on": "1",
+         "traffic_ledger_on": "1"},
+        {"dq_journal_direct": "invalid", "watchdogs_on": "invalid",
+         "weekly_ledger_on": "unknown", "traffic_ledger_on": "unknown"},
     )
 
     @pytest.mark.asyncio
@@ -720,6 +735,97 @@ class TestStaleEvidenceIsUnknown:
                                ok_at=datetime(2030, 6, 5, 7, 40, tzinfo=KYIV))
             v, detail = await verdict(conn, "09_d8_mirror_landing.sql", now=at_0800)
         assert v == "UNKNOWN", detail
+
+
+@needs_pg
+class TestADirectJournalIsNotGatedOnTheCopy:
+    """Chain 9 (OD-02 (c)): once the journal is written in Postgres, these
+    rows are the journal and not a copy of it. The copy stands down with the
+    chain, its `last_ok_at` freezes, and without this D8, 20, 21 and 22 read
+    UNKNOWN for as long as the chain is on. Direct is the script's flag or the
+    latch's owner row, which outranks it. Mutation: drop the `journal` CTE's
+    effect from one file — its case below stays UNKNOWN."""
+
+    TODAY_0730 = datetime(2030, 6, 5, 7, 30, tzinfo=KYIV)
+    FROZEN = dict(ok_at=datetime(2030, 6, 1, 3, 0, tzinfo=KYIV))
+
+    @staticmethod
+    async def owner_row(conn):
+        await conn.execute(
+            "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+            "VALUES ('owner:app.data_quality_runs', '2030-06-01T00:00:00+00:00', now()) "
+            "ON CONFLICT (key) DO NOTHING")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("how", ["flag", "owner_row"])
+    async def test_d8_judges_the_run(self, pool, how):
+        async with scenario(pool) as conn:
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
+                         started_at=self.TODAY_0730)
+            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
+            if how == "owner_row":
+                await self.owner_row(conn)
+            v, detail = await verdict(
+                conn, "09_d8_mirror_landing.sql",
+                dq_journal_direct="1" if how == "flag" else "0")
+        assert v == "PASS", detail
+
+    @pytest.mark.asyncio
+    async def test_d8_still_fails_a_finding(self, pool):
+        async with scenario(pool) as conn:
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
+                         started_at=self.TODAY_0730)
+            await dq_issue(conn, DQ_RUN_IDS[0], "gold_cell_values", table="gold.daily_revenue")
+            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql",
+                                      dq_journal_direct="1")
+        assert v == "FAIL" and "gold_cell_values" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_without_either_the_frozen_copy_is_still_unknown(self, pool):
+        async with scenario(pool) as conn:
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing",
+                         started_at=self.TODAY_0730)
+            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
+            v, detail = await verdict(conn, "09_d8_mirror_landing.sql")
+        assert v == "UNKNOWN", detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
+    async def test_the_histories_judge_the_runs(self, pool, name, layer):
+        history = TestReconciliationPgHistory()
+        history.LAYER = layer
+        async with scenario(pool) as conn:
+            await history.seed(conn, history.every_morning(), copied=self.FROZEN["ok_at"])
+            stale_v, _ = await verdict(conn, name)
+            v, detail = await verdict(conn, name, dq_journal_direct="1")
+        assert stale_v == "UNKNOWN"
+        assert v == "PASS", detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name,layer", HISTORY_CHECKS)
+    async def test_a_silence_now_is_a_fail_not_an_unknown(self, pool, name, layer):
+        """With the journal direct there is no copy to wait for: a silence past
+        the limit at the read is one that happened."""
+        history = TestReconciliationPgHistory()
+        history.LAYER = layer
+        async with scenario(pool) as conn:
+            await history.seed(conn, history.every_morning(last=2),
+                               copied=self.FROZEN["ok_at"])
+            v, detail = await verdict(conn, name, dq_journal_direct="1")
+        assert v == "FAIL", detail
+
+    @pytest.mark.asyncio
+    async def test_pairing_judges_the_run(self, pool):
+        async with scenario(pool) as conn:
+            await mirror_state(conn, "app.data_quality_runs", **self.FROZEN)
+            await dq_run(conn, DQ_RUN_IDS[1], layer="integrity", started_at=ago(hours=5))
+            await dq_issue(conn, DQ_RUN_IDS[1], "pg_line_items_disagree")
+            stale_v, _ = await verdict(conn, "21_pairing.sql", dq_pg_warehouse_on="1")
+            v, detail = await verdict(conn, "21_pairing.sql", dq_pg_warehouse_on="1",
+                                      dq_journal_direct="1")
+        assert stale_v == "UNKNOWN"
+        assert v == "FAIL" and "pg_line_items_disagree" in detail, detail
 
 
 @needs_pg
@@ -1705,3 +1811,365 @@ class TestF1ReadFallbacks:
             v, detail = await verdict(conn, self.FILE, now=None)
         assert v == "PASS", detail
         assert "(681 probes)" in detail and "are covered" in detail, detail
+
+
+# ── chain 5: M1 and M2 ────────────────────────────────────────────────────────
+
+from datetime import date  # noqa: E402 — chain 5's seeds carry interval dates
+
+
+async def clean_managers(conn):
+    """M1 and M2 read whole tables; a scenario starts from none of their rows."""
+    await conn.execute("DELETE FROM app.manager_classifications")
+    await conn.execute("DELETE FROM bronze.managers")
+    await conn.execute("DELETE FROM meta.chain_watermarks "
+                       "WHERE key LIKE 'owner:%' OR key = 'last_sync_managers'")
+    await conn.execute("DELETE FROM meta.mirror_state WHERE table_name IN "
+                       "('bronze.managers', 'app.manager_classifications')")
+
+
+async def manager_owners(conn, at):
+    for table in ("bronze.managers", "app.manager_classifications"):
+        await conn.execute(
+            "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, $3)",
+            f"owner:{table}", at.isoformat(), at)
+
+
+async def manager(conn, mid, *, retail=False, intervals=((date(1970, 1, 1), None, None),),
+                  set_at=NOW):
+    """A manager and its intervals: (valid_from, valid_to, is_retail or None
+    for the manager's own)."""
+    await conn.execute("INSERT INTO bronze.managers (id, name, is_retail) VALUES ($1, 'M', $2)",
+                       mid, retail)
+    for valid_from, valid_to, is_retail in intervals:
+        await conn.execute(
+            "INSERT INTO app.manager_classifications "
+            "(manager_id, is_retail, valid_from, valid_to, set_at) VALUES ($1, $2, $3, $4, $5)",
+            mid, retail if is_retail is None else is_retail, valid_from, valid_to, set_at)
+
+
+async def managers_synced(conn, at):
+    await conn.execute(
+        "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+        "VALUES ('last_sync_managers', $1, $2)", at.isoformat(), NOW)
+
+
+@needs_pg
+class TestM1ManagersCopyStoodDown:
+    FILE = "30_m1_managers_copy_stood_down.sql"
+
+    @pytest.mark.asyncio
+    async def test_a_copy_after_the_handover_fails(self, pool):
+        """Mutation: judge the tables the replica does not write."""
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager_owners(conn, ago(days=2))
+            await mirror_state(conn, "app.manager_classifications", ok_at=ago(hours=5))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "FAIL" and "app.manager_classifications written by a copy" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_copy_before_the_handover_passes(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager_owners(conn, ago(days=2))
+            await mirror_state(conn, "bronze.managers", ok_at=ago(days=2, minutes=5))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "PASS" and "since the handover" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_failure_after_the_handover_fails(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager_owners(conn, ago(days=2))
+            await mirror_state(conn, "bronze.managers", ok_at=ago(days=3),
+                               attempted_at=ago(hours=1), failures=2, error="boom")
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "FAIL" and "failing (2)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_without_owner_rows_the_flip_time_decides_and_without_it_unknown(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await mirror_state(conn, "bronze.managers", ok_at=ago(minutes=30))
+            v, _ = await verdict(conn, self.FILE, managers_on="1",
+                                 managers_flip_at=ago(hours=1).isoformat())
+            assert v == "FAIL"
+            v, detail = await verdict(conn, self.FILE, managers_on="1",
+                                      managers_flip_at=ago(minutes=10).isoformat())
+            assert v == "PASS" and "since the flip" in detail, detail
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "UNKNOWN" and "SOAK_MANAGERS_FLIP_AT" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_the_states_that_judge_nothing(self, pool):
+        async with scenario(pool) as conn:
+            v, detail = await verdict(conn, self.FILE, managers_on="0")
+            assert (v, detail.startswith("not applicable")) == ("PASS", True)
+            v, detail = await verdict(conn, self.FILE, managers_on="pending")
+            assert v == "UNKNOWN" and "unmet_precondition" in detail, detail
+            v, detail = await verdict(conn, self.FILE, managers_on="invalid")
+        assert v == "FAIL" and "no chain understands" in detail, detail
+
+
+@needs_pg
+class TestM2ClassificationShape:
+    FILE = "31_m2_classification_shape.sql"
+
+    @pytest.mark.asyncio
+    async def test_a_clean_shape_and_a_fresh_stamp_pass(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager(conn, 1)
+            await manager(conn, 2, retail=True, intervals=(
+                (date(1970, 1, 1), date(2030, 3, 1), False), (date(2030, 3, 1), None, True)))
+            await managers_synced(conn, ago(hours=5))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "PASS" and "2 manager(s)" in detail and "5 h old" in detail, detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("seed,expected", [
+        ("no_open", "not exactly one open interval: {3}"),
+        ("two_open", "not exactly one open interval: {3}"),
+        ("none", "no interval at all: {3}"),
+        ("overlap", "history overlaps or gaps: {3}"),
+        ("gap", "history overlaps or gaps: {3}"),
+        ("disagree", "is_retail disagrees with the open interval: {3}"),
+        ("set_at", "1 interval(s) with no set_at"),
+    ])
+    async def test_each_shape_fails_by_name(self, pool, seed, expected):
+        """Mutation: remove or invert any predicate."""
+        d = date
+        shapes = {
+            "no_open": dict(intervals=((d(1970, 1, 1), d(2030, 1, 1), None),)),
+            "two_open": dict(intervals=((d(1970, 1, 1), None, None), (d(2030, 1, 1), None, None))),
+            "none": dict(intervals=()),
+            "overlap": dict(intervals=((d(1970, 1, 1), d(2030, 3, 1), None),
+                                       (d(2030, 1, 1), None, None))),
+            "gap": dict(intervals=((d(1970, 1, 1), d(2030, 1, 1), None),
+                                   (d(2030, 2, 1), None, None))),
+            "disagree": dict(retail=True, intervals=((d(1970, 1, 1), None, False),)),
+            "set_at": dict(set_at=None),
+        }
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager(conn, 1)
+            await manager(conn, 3, **shapes[seed])
+            await managers_synced(conn, ago(hours=1))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "FAIL" and expected in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_the_stamp_is_judged_by_its_value(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager(conn, 1)
+            await managers_synced(conn, ago(hours=27))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "FAIL" and "moved 27 h ago" in detail, detail
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager(conn, 1)
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+            assert v == "FAIL" and "no manager sync has completed" in detail, detail
+            v, detail = await verdict(conn, self.FILE, managers_on="1",
+                                      managers_flip_at=ago(minutes=10).isoformat())
+        assert v == "PASS" and "not written yet" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_an_empty_table_fails(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await managers_synced(conn, ago(hours=1))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "FAIL" and "bronze.managers is empty" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_off_and_pending_judge_nothing(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager(conn, 3, intervals=())
+            for state in ("0", "pending"):
+                v, detail = await verdict(conn, self.FILE, managers_on=state)
+                assert v == "PASS" and detail.startswith("not applicable"), detail
+
+
+# ── H1/H2: the shadow chains (OD-02 (c)) ──────────────────────────────────────
+
+SHADOW_TABLES = ("app.data_quality_runs", "app.data_quality_issues",
+                 "app.data_quality_diffs", "app.disk_samples", "app.data_dir_samples",
+                 "app.memory_samples", "app.weekly_report_sends",
+                 "app.traffic_report_sends")
+SHADOW_OFF = {"dq_journal_direct": "0", "watchdogs_on": "0", "weekly_ledger_on": "0",
+              "traffic_ledger_on": "0"}
+
+
+async def clean_shadow(conn):
+    """No owner row and no copy stamp for any shadow chain's table — inside the
+    scenario's transaction, so whatever another test left is only hidden."""
+    await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
+    await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                       list(SHADOW_TABLES))
+
+
+async def shadow_owner(conn, table, at):
+    await conn.execute(
+        "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, $3) "
+        "ON CONFLICT (key) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+        f"owner:{table}", at.isoformat(), at)
+
+
+@needs_pg
+class TestH1ShadowCopiesStoodDown:
+    """The hourly copy must stay off a shadow chain's tables: its full replace
+    out of DuckDB would delete every row whose shadow write failed — for a
+    ledger, a delivered week, which the next tick then sends again."""
+
+    FILE = "28_h1_shadow_copies_stood_down.sql"
+
+    @pytest.mark.asyncio
+    async def test_all_off_is_not_applicable(self, pool):
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await mirror_state(conn, "app.memory_samples", ok_at=ago(minutes=10))
+            v, detail = await verdict(conn, self.FILE, **SHADOW_OFF)
+        assert v == "PASS" and detail.startswith("not applicable"), detail
+
+    @pytest.mark.asyncio
+    async def test_a_copy_after_the_handover_fails_naming_the_table(self, pool):
+        """Mutation: judge the copy against the flip window alone, ignoring the
+        owner row — a stamp an hour after a handover two days ago would read
+        UNKNOWN for a copy that is plainly still running."""
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await shadow_owner(conn, "app.memory_samples", ago(days=2))
+            await mirror_state(conn, "app.memory_samples", ok_at=ago(hours=1))
+            v, detail = await verdict(conn, self.FILE, **{**SHADOW_OFF, "watchdogs_on": "1"})
+        assert v == "FAIL" and "app.memory_samples written by the copy" in detail, detail
+        assert "chain 10" in detail
+
+    @pytest.mark.asyncio
+    async def test_a_copy_before_the_handover_passes(self, pool):
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await shadow_owner(conn, "app.weekly_report_sends", ago(days=2))
+            await mirror_state(conn, "app.weekly_report_sends", ok_at=ago(days=3))
+            v, detail = await verdict(conn, self.FILE,
+                                      **{**SHADOW_OFF, "weekly_ledger_on": "1"})
+        assert v == "PASS" and "no copy since the handover" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_an_owner_row_outranks_a_flag_put_back(self, pool):
+        """A lost marker with the flag at duckdb: the copy stands down on the
+        owner row, so this judges it. Mutation: read the passed state alone."""
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await shadow_owner(conn, "app.traffic_report_sends", ago(days=1))
+            await mirror_state(conn, "app.traffic_report_sends", ok_at=ago(minutes=20))
+            v, detail = await verdict(conn, self.FILE, **SHADOW_OFF)
+        assert v == "FAIL" and "chain 11b" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_failure_after_the_handover_fails(self, pool):
+        """`owned by Postgres since` is the latch with its flag put back —
+        reported, and the way back named in the file's header."""
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await shadow_owner(conn, "app.data_quality_runs", ago(days=2))
+            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(days=3),
+                               attempted_at=ago(hours=1), failures=2,
+                               error="not shipped: owned by Postgres since 2030-06-03")
+            v, detail = await verdict(conn, self.FILE,
+                                      **{**SHADOW_OFF, "dq_journal_direct": "1"})
+        assert v == "FAIL" and "failing (2)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_without_an_owner_row_a_recent_stamp_is_unknown(self, pool):
+        """The copy stamps the table every hour until the flip, so a healthy
+        flip reads one inside the window until the chain's first write."""
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await mirror_state(conn, "app.disk_samples", ok_at=ago(minutes=30))
+            v, detail = await verdict(conn, self.FILE, **{**SHADOW_OFF, "watchdogs_on": "1"})
+        assert v == "UNKNOWN" and "no owner row yet" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_invalid_fails_and_unknown_is_unknown(self, pool):
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            v, detail = await verdict(conn, self.FILE,
+                                      **{**SHADOW_OFF, "traffic_ledger_on": "invalid"})
+            assert v == "FAIL" and "KS_WRITE_TRAFFIC_LEDGER" in detail, detail
+            v, detail = await verdict(conn, self.FILE,
+                                      **{**SHADOW_OFF, "weekly_ledger_on": "unknown"})
+        assert v == "UNKNOWN" and "could not read KS_WRITE_WEEKLY_LEDGER" in detail, detail
+
+
+async def shadow_issue(conn, run_id, check_name, table, severity):
+    await conn.execute(
+        "INSERT INTO app.data_quality_issues (run_id, check_name, table_name, severity, count) "
+        "VALUES ($1, $2, $3, $4, 1)", run_id, check_name, table, severity)
+
+
+@needs_pg
+class TestH2ShadowComparison:
+    """The runbook's soak criterion for the shadow chains: zero `shadow_*`
+    findings from the 07:30 comparison, read the way D8 reads its own."""
+
+    FILE = "29_h2_shadow_comparison.sql"
+    TODAY_0730 = datetime(2030, 6, 5, 7, 30, tzinfo=KYIV)
+    ON = {**SHADOW_OFF, "dq_journal_direct": "1", "watchdogs_on": "1"}
+
+    @pytest.mark.asyncio
+    async def test_no_shadow_chain_on_is_not_applicable(self, pool):
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            v, detail = await verdict(conn, self.FILE, **SHADOW_OFF)
+        assert v == "PASS" and detail.startswith("not applicable"), detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("check", ["shadow_missing_in_duckdb", "shadow_duckdb_only_rows",
+                                       "shadow_row_values"])
+    async def test_a_shadow_finding_fails_naming_it(self, pool, check):
+        """Mutation: drop a severity from the filter, or the LIKE — each of
+        the three counted findings must fail the soak."""
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
+            severity = "WARN" if check == "shadow_missing_in_duckdb" else "CRITICAL"
+            await shadow_issue(conn, DQ_RUN_IDS[0], check, "app.memory_samples", severity)
+            v, detail = await verdict(conn, self.FILE, **self.ON)
+        assert v == "FAIL" and check in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_lagging_prune_and_other_findings_are_not_this_checks(self, pool):
+        """INFO `shadow_pruned_rows` is DuckDB's prune behind Postgres's by a
+        tick, and a non-shadow finding is D8's or the digest's. Mutation:
+        count INFO — every edge sample would fail the soak."""
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
+            await shadow_issue(conn, DQ_RUN_IDS[0], "shadow_pruned_rows", "app.disk_samples", "INFO")
+            await shadow_issue(conn, DQ_RUN_IDS[0], "mirror_row_values", "bronze.products", "CRITICAL")
+            v, detail = await verdict(conn, self.FILE, **self.ON)
+        assert v == "PASS" and "zero shadow findings for chain 10, chain 9" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_no_run_is_d8s_fail_and_unknown_here(self, pool):
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await conn.execute("DELETE FROM app.data_quality_runs WHERE layer = 'mirror_landing'")
+            v, detail = await verdict(conn, self.FILE, **self.ON)
+        assert v == "UNKNOWN" and "D8 says why" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_frozen_copy_of_the_journal_is_unknown(self, pool):
+        """Chain 9 still at duckdb: the journal is a copy, and a copy that
+        stopped shows yesterday's clean run. Mutation: drop the gate."""
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
+            await mirror_state(conn, "app.data_quality_runs", ok_at=ago(hours=3))
+            v, detail = await verdict(conn, self.FILE,
+                                      **{**SHADOW_OFF, "weekly_ledger_on": "1"})
+        assert v == "UNKNOWN" and "min old" in detail, detail

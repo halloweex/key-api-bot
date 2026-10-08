@@ -153,6 +153,11 @@ class _Recorder:
             return {"missing": 0, "sample": []}
         if "WITH orphans" in sql:
             return {"contacts": 0, "verdicts": 0, "sample": []}
+        # Chain 3's two reads (`_read_orders`).
+        if "checked_at IS NULL" in sql:
+            return {"checked_at": 0}
+        if "AS orphans" in sql:
+            return {"orphans": 0, "sample": []}
         raise AssertionError(f"unexpected fetchrow: {sql}")
 
     async def fetch(self, sql, *_a):
@@ -285,16 +290,20 @@ class TestAChainWithNoInvariants:
 
         from core import write_chains
 
-        fake = types.ModuleType("core.pg_orders_write")
-        fake.WRITE_ENV = "KS_WRITE_ORDERS"
-        fake.CHAIN_TABLES = ("bronze.orders",)
+        # A chain no reader knows. Chain 3 was the example until it got one,
+        # and chain 5 after it, each lane borrowing the other's name — so the
+        # example is a name no chain will ever take.
+        fake = types.ModuleType("core.pg_unread_write")
+        fake.WRITE_ENV = "KS_WRITE_UNREAD"
+        fake.CHAIN_TABLES = ("app.unread_example",)
         fake.env_writes_postgres = lambda: True
         monkeypatch.setattr(write_chains, "WRITE_CHAINS",
                             write_chains.WRITE_CHAINS + (fake,))
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS"):
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS",
+                    "KS_WRITE_ORDERS", "KS_WRITE_MANAGERS"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-        return "pg_orders_write"
+        return "pg_unread_write"
 
     @pytest.mark.asyncio
     async def test_it_is_unwatched_not_clean(self, third_chain):
@@ -316,7 +325,12 @@ class TestAChainWithNoInvariants:
                    if chain_name(c) not in readers]
         assert not missing, f"no chain invariants for {missing}"
         assert set(readers.values()) <= {"expenses", "inventory", "goals",
-                                         "expense_types", "buyers"}
+                                         "expense_types", "buyers", "orders",
+                                         "managers",
+                                         "catalogue", "forecast",
+                                         # The shadow chains (OD-02 (c)).
+                                         "journal", "watchdogs",
+                                         "weekly_ledger", "traffic_ledger"}
         # And each names a field `Facts` actually carries — a reader whose
         # group the verdict never looks at is read and then judged by nothing.
         import dataclasses
@@ -559,6 +573,89 @@ class TestChain4Buyers:
         assert "pg_buyers_write" in issues[0].description
 
 
+class TestChain3Orders:
+    """Chain 3. What is true of its tables on their own: no expense without
+    its order once the chain has written, and no NULL `checked_at` in the
+    backfill-miss ledger (Postgres has no default there, and the half-written
+    repair's 30-day `NOT EXISTS` cannot compare a NULL)."""
+
+    @pytest.fixture
+    def flagged(self, monkeypatch):
+        from core import pg_orders_write
+
+        monkeypatch.setenv("KS_WRITE_ORDERS", "postgres")
+        # Its own preconditions are pinned in tests/unit/test_pg_orders_write.py;
+        # here the chain is simply one that moved.
+        monkeypatch.setattr(pg_orders_write, "unmet_precondition", lambda: None)
+        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS",
+                    "KS_WRITE_EXPENSE_TYPES", "KS_WRITE_BUYERS"):
+            monkeypatch.delenv(env, raising=False)
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
+
+    def test_the_flag_makes_it_watched(self, flagged):
+        assert inv.watched_chains() == {"pg_orders_write": None}
+
+    @pytest.mark.asyncio
+    async def test_before_the_first_write_it_reads_no_orphans(self, flagged):
+        conn = _Recorder()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(conn))
+        assert facts.watched == ("pg_orders_write",) and facts.whole is None
+        assert isinstance(facts.orders, inv.Orders) and facts.orders.latched_at is None
+        read = "\n".join(conn.sql)
+        assert "app.order_backfill_misses" in read
+        assert "AS orphans" not in read
+        assert inv.check_chain_invariants(facts) == []
+
+    @pytest.mark.asyncio
+    async def test_after_the_first_write_it_reads_them_with_the_stamp(self, flagged):
+        _latch("pg_orders_write")
+        conn = _Recorder()
+        with patch("core.pg.require_revision", new=AsyncMock()):
+            facts = await inv.read_facts(pool=_Pool(conn))
+        assert facts.orders.latched_at == UTC_NOW
+        assert "AS orphans" in "\n".join(conn.sql)
+
+    @staticmethod
+    def _facts(latched_at=None, null_checked=0, **kw):
+        nulls = inv.Nulls("app.order_backfill_misses", {"checked_at": null_checked})
+        return inv.Facts(watched=("pg_orders_write",), now=UTC_NOW,
+                         orders=inv.Orders(nulls=nulls, latched_at=latched_at, **kw))
+
+    def test_an_orphaned_expense_after_the_handover_is_a_warn(self):
+        """Mutation: judge it before the handover too — the per-tick mirrors
+        land an expense and its order in different transactions then."""
+        from core.data_quality import Severity
+
+        facts = self._facts(UTC_NOW, expense_orphans=2, expense_orphan_sample=(11, 12))
+        (issue,) = inv.check_chain_invariants(facts)
+        assert issue.check_name == inv.EXPENSE_ORPHANS == "chain_expense_orphans"
+        assert issue.severity is Severity.WARN and issue.count == 2
+        assert issue.sample_ids == (11, 12) and issue.table_name == "bronze.expenses"
+        assert inv.check_chain_invariants(
+            self._facts(None, expense_orphans=2, expense_orphan_sample=(11,))) == []
+
+    def test_a_null_checked_at_is_critical(self):
+        from core.data_quality import Severity
+
+        (issue,) = inv.check_chain_invariants(self._facts(UTC_NOW, null_checked=3))
+        assert issue.check_name == inv.COLUMN_NULL
+        assert issue.severity is Severity.CRITICAL and issue.count == 3
+        assert issue.table_name == "app.order_backfill_misses"
+
+    def test_the_orphan_window_is_a_day(self):
+        """Mutation: judge at 0 days — an order refused this tick and
+        re-offered by the next is not a defect yet."""
+        assert "interval '1 day'" in inv._EXPENSE_ORPHANS_SQL
+
+    def test_an_unreadable_orders_group_is_blindness_not_silence(self):
+        facts = inv.Facts(watched=("pg_orders_write",), now=UTC_NOW,
+                          orders=inv.Unwatched("relation does not exist"))
+        issues = inv.check_chain_invariants(facts)
+        assert [i.check_name for i in issues] == [inv.UNWATCHED]
+        assert "pg_orders_write" in issues[0].description
+
+
 class TestWhoIsWatched:
     def test_a_flagged_chain_is_watched(self, monkeypatch):
         monkeypatch.setenv("KS_WRITE_EXPENSES", "postgres")
@@ -636,7 +733,7 @@ class TestBlindnessIsReported:
         assert facts.watermarks_unread is None
         issues = inv.check_chain_invariants(facts)
         assert [(i.check_name, i.table_name) for i in issues] == [
-            (inv.UNWATCHED, "(write chains)"),
+            (inv.UNWATCHED, "(pg_expenses_write)"),
             (inv.SEQUENCE_BEHIND, "app.stock_movements")]
 
     def test_a_blind_run_holds_every_condition(self):

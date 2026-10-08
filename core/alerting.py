@@ -133,6 +133,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # runs as duckdb (DN-29, OD-09 (b)) — never a raise, web is the only syncer.
     "warehouse_preconditions_unmet": _c(
         "web restarts with every precondition met, or with KS_WRITE_WAREHOUSE unset"),
+    # A start that would have run as duckdb after a flip — the way back —
+    # stayed postgres, because a latched write chain owns a table DuckDB
+    # derives from (`warehouse_cutover`, THE WAY BACK, REFUSED).
+    "warehouse_way_back_refused": _c(
+        "web restarts with the named write chains copied back to DuckDB, or "
+        "with KS_WRITE_WAREHOUSE=postgres and every precondition met"),
     # The way back from KS_WRITE_WAREHOUSE=postgres holding the DuckDB checks
     # down past the canary's limit: a UTM parse that keeps raising, or no tick
     # after a full one whose parse raised (DN-29).
@@ -141,6 +147,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # without KS_PG_DERIVE=own; ran as duckdb, the ship as before (DN-19).
     "utm_parse_mode_invalid": _c(
         "web restarts with a valid KS_UTM_PARSE, postgres only beside KS_PG_DERIVE=own"),
+    # A path in web opened, or tried to open, the DuckDB file under
+    # KS_DUCKDB=off — the week of silence's tripwire (OD-17 (a)). The counters
+    # are per process, so only a restart empties them.
+    "duckdb_opened_while_off": _c(
+        "web restarts and opens no DuckDB file under KS_DUCKDB=off, or runs on"),
+    # KS_DUCKDB set to a value web did not understand: ran as `on` (OD-09).
+    "duckdb_mode_invalid": _c("web restarts with a valid KS_DUCKDB"),
     # KS_GOALS_HISTORY set to a value web does not understand: every goal
     # history read raises — the goal widget, /goals/*, the Monday job (7b).
     "goals_history_mode_invalid": _c("web runs with a valid KS_GOALS_HISTORY"),
@@ -160,11 +173,16 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_*, or latched while its readers read DuckDB (DN-26).
     "write_chain_precondition_unmet": _c(
         "the read flag the chain names is set to postgres and web restarts"),
+    # A report delivered and its ledger row still spooled (chains 11a/11b,
+    # OD-16 (a)): the next tick of that report drains it into Postgres.
+    "report_ledger_pending": _c("the report's next daily tick lands the spooled row"),
     # The buyers step stopped succeeding: no success for 90 min, or three
     # failures in a row that are neither KeyCRM nor data errors (chain 4 PR-1).
     "buyer_sync_stalled": _c("a buyers step that completes"),
     # Chain 4: the same step as the only writer of buyers, paged.
     "buyer_sync_stalled_chain": _c("a buyers step that completes"),
+    # Chain 3: the order step under the chain, judged by the canary.
+    "orders_sync_failing": _c("an order step that completes"),
     "mirror_missing:bronze.orders": _c("the table reports freshness again"),
     "mirror_never:bronze.orders": _c("the table's first successful shipment"),
     "mirror_stale:bronze.orders": _c("a shipment inside the age limit"),
@@ -234,6 +252,17 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # what matters — a sweep that suddenly takes far more than usual is the
     # one thing this cannot tell apart from a loss.
     "mirror_pruned_rows": _c("the next full replace removes them"),
+    # The shadow chains' comparison (OD-02 (c)): Postgres writes, DuckDB is
+    # handed each row after the commit. Nothing re-ships these tables, so
+    # none clears by a job running again — each clears when the rows on the
+    # two sides agree, which for a failed shadow is the copy-back.
+    "shadow_duckdb_only_rows": _c(
+        "the writer that went round the chain is found and its rows decided "
+        "— a human, not a job"),
+    "shadow_missing_in_duckdb": _c(
+        "scripts/chain_copy_back.py carries the rows, or they age out"),
+    "shadow_row_values": _c("the two stores agree on the row again"),
+    "shadow_pruned_rows": _c("the next shadow prune removes them"),
     # Not a data defect: the writer moved and its watchdog did not. It
     # clears when the check is ported or the flag goes back to duckdb.
     "inventory_continuity_unwatched": _c(
@@ -316,6 +345,53 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "the orphaned rows are corrected or their buyers land — a human, not a job"),
     "chain_buyer_contact_missing": _c(
         "the next write of each buyer rewrites its contacts"),
+    # Chain 3's orders. An unjoined cost stays until its order lands or a
+    # human corrects the row.
+    "chain_expense_orphans": _c(
+        "the orders land, or a human corrects the rows — not a job"),
+    # Chain 5's classification. The sync lands managers again; an interval a
+    # human decided is corrected by a human, never re-derived.
+    "chain_managers_empty": _c("the next manager sync lands the managers again"),
+    "chain_manager_open_interval": _c(
+        "each manager has exactly one open interval again — a human, not a job"),
+    "chain_manager_unclassified": _c(
+        "the next manager sync seeds a baseline for each"),
+    "chain_manager_intervals_broken": _c(
+        "a human decides each history and corrects the intervals"),
+    "chain_manager_retail_disagrees": _c(
+        "a classification through the retail-status route sets both again"),
+    # Chain 6's catalogue (OD-15 (a)). Retired is a fact about KeyCRM, not a
+    # defect; the rest are writes that went round the chain, or a short page.
+    "chain_catalogue_empty": _c(
+        "a products sync or a full sync lands the catalogue again"),
+    "chain_catalogue_written_around": _c(
+        "the next full write re-stamps a row KeyCRM serves; one it does not "
+        "stays named until a human deletes or restores it — after finding "
+        "the writer that went round the chain"),
+    "chain_catalogue_rows_lost": _c(
+        "the next full write restores what KeyCRM still serves; a human finds "
+        "the statement that deleted them"),
+    "chain_catalogue_retired": _c(
+        "KeyCRM serves the rows again — or never; it is not a defect"),
+    "chain_catalogue_short_write": _c(
+        "the next full write carries the whole catalogue"),
+    # Chain 7b-3's goal and forecast tables. Every value can be computed
+    # again, so each clears on the writer storing a full set.
+    "chain_goal_tables_incomplete": _c(
+        "a recalculation stores twelve months, every YoY and a measured overall"),
+    "chain_goal_tables_stale": _c(
+        "a seasonality_calc run (the Monday job or its trigger) stores"),
+    "chain_forecast_stale": _c("a training stores a retail forecast"),
+    # The shadow chains' standing watch (OD-02 (c)). Chain 9: a finding whose
+    # run is gone stays until a human finds the writer and the rows.
+    "chain_orphan_children": _c(
+        "the orphaned findings are corrected or their run restored — a human, not a job"),
+    # Chain 10: the next stored sample clears the first; the next prune the
+    # second.
+    "chain_samples_stale": _c("the watchdog stores a sample again"),
+    "chain_retention_unbounded": _c("the prune in the watchdog's tick runs again"),
+    # Chains 11a/11b: the week's row lands — a delivery, or a drained spool.
+    "chain_report_week_missing": _c("the week's row lands in the ledger"),
     "chain_invariants_unwatched": _c(
         "the integrity job reads the chain's facts again"),
 

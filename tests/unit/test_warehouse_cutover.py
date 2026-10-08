@@ -663,18 +663,55 @@ class TestTheBridgeTripwire:
                   if isinstance(n, ast.Constant) and isinstance(n.value, str)}
         assert tables == set(SALES_TYPE_BRIDGE_TABLES)
 
-    @pytest.mark.parametrize("table", ["bronze.orders", "bronze.managers",
-                                       "app.manager_classifications"])
-    def test_a_chain_owning_one_trips_it_and_is_named(self, monkeypatch, table):
+    @staticmethod
+    def _chain(monkeypatch, table, env):
         import types
 
         from core import write_chains
-        from core.repositories.goals import sales_type_bridge_owners
 
         chain = types.ModuleType("core.pg_chain_x_write")
+        chain.WRITE_ENV = "KS_WRITE_CHAIN_X"
         chain.CHAIN_TABLES = ("app.other", table)
+        chain.env_writes_postgres = env
         monkeypatch.setattr(write_chains, "WRITE_CHAINS",
                             write_chains.WRITE_CHAINS + (chain,))
+        return chain
+
+    @pytest.mark.parametrize("table", ["bronze.orders", "bronze.managers",
+                                       "app.manager_classifications"])
+    def test_a_chain_declaring_one_with_its_flag_off_moves_nothing(self, monkeypatch, table):
+        """Registered is not moved (chain 3, 2026-10-01): its writes still go
+        to DuckDB, so the bridge reads what it always read. Mutation: count
+        the declaration — a flag-off registration would then fail step 13's
+        `goals_bridge` at the next start, a full DuckDB rebuild for nothing."""
+        from core.repositories.goals import sales_type_bridge_owners
+
+        self._chain(monkeypatch, table, lambda: False)
+        assert sales_type_bridge_owners() == {}
+
+    @pytest.mark.parametrize("state", ["flag", "latched", "typo"])
+    def test_a_chain_that_moved_trips_it(self, monkeypatch, state):
+        """Its writes left DuckDB — by its flag, by a latch whatever the flag
+        says, or by a flag nobody can read (stood down, so written nowhere)."""
+        from core import chain_latch
+        from core.repositories.goals import sales_type_bridge_owners
+
+        def typo():
+            raise RuntimeError("KS_WRITE_CHAIN_X='postgrse' is not understood")
+
+        self._chain(monkeypatch, "bronze.orders",
+                    {"flag": lambda: True, "latched": lambda: False,
+                     "typo": typo}[state])
+        if state == "latched":
+            chain_latch.latch("pg_chain_x_write")
+        assert sales_type_bridge_owners() == {"pg_chain_x_write": ("bronze.orders",)}
+
+    @pytest.mark.parametrize("table", ["bronze.orders", "bronze.managers",
+                                       "app.manager_classifications"])
+    def test_a_chain_owning_one_trips_it_and_is_named(self, monkeypatch, table):
+        from core.repositories.goals import sales_type_bridge_owners
+
+        self._chain(monkeypatch, table, lambda: True)
         assert sales_type_bridge_owners() == {"pg_chain_x_write": (table,)}
 
         facts = asyncio.run(wc.gather_facts({}))
@@ -883,3 +920,29 @@ class TestReadiness:
                    AsyncMock(return_value=REQUIRED_REVISION)):
             body = asyncio.run(wc.readiness(MET_ENV))
         assert "ks_app:x" not in repr(body) and "http://ch:8123" not in repr(body)
+
+
+class TestTheReadersNotOnPostgresAreOneReading:
+    """`readers_not_on_postgres` is what the switch files as `reader:*` and
+    what chain 6 holds its catalogue writes on (`pg_catalogue_write`). One
+    reading, so the two cannot disagree about which readers still read DuckDB."""
+
+    @pytest.mark.parametrize("off", [(), ("KS_READ_GOLD",),
+                                     ("KS_SMS_STORE", "KS_READ_CHAT"),
+                                     tuple(wc.WAREHOUSE_READERS)])
+    def test_it_is_exactly_the_reader_keys_the_switch_files(self, off):
+        env = {**MET_ENV, **{name: "duckdb" for name in off}}
+        filed = {u.key for u in wc.evaluate_preconditions(env, MET_FACTS)
+                 if u.key.startswith("reader:")}
+        assert filed == {f"reader:{n}" for n in wc.readers_not_on_postgres(env)}
+        assert set(wc.readers_not_on_postgres(env)) == set(off)
+
+    def test_unset_and_a_typo_are_not_postgres_and_case_is(self):
+        env = dict(MET_ENV)
+        env.pop("KS_READ_GOLD")
+        env["KS_READ_SILVER"] = "postgress"
+        env["KS_READ_DASHBOARD"] = " PostgreS "
+        assert wc.readers_not_on_postgres(env) == ("KS_READ_GOLD", "KS_READ_SILVER")
+
+    def test_in_the_lists_order(self):
+        assert wc.readers_not_on_postgres({}) == tuple(wc.WAREHOUSE_READERS)

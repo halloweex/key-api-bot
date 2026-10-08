@@ -128,8 +128,12 @@ class TestAdjacentMarks:
         of the tick, leaving the orders just written out of Silver/Gold."""
         from core.sync_service import SyncService
 
-        src = inspect.getsource(SyncService.incremental_sync)
+        # The order step is its own method since chain 3 (so the tick can
+        # contain a Postgres failure in it); the tick calls it first.
+        src = inspect.getsource(SyncService._orders_step)
         assert src.index("mark_warehouse_dirty(changed_ids)") < src.index("_get_max_updated_at(")
+        tick = inspect.getsource(SyncService.incremental_sync)
+        assert tick.index("self._orders_step(") < tick.index('get_last_sync_time("products")')
 
     def test_the_manual_silver_rebuild_asks_for_validation(self):
         from web.routes.api import admin

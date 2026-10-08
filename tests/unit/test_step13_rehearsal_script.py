@@ -1520,7 +1520,8 @@ def _fed_stop(events, at: int) -> Optional[str]:
 def test_each_stop_state_feeds_the_record_and_the_judge_it_belongs_to(tmp_path):
     """Each restart record carries the state of the stop just before its
     start, P3 the state of the kill, and each judge reads the stop its phase
-    made: D1 F7's and phase 0's, P8 the two around the way back. Checked by
+    made: D1 F7's and phase 0's, P8 the two around the way back — and D1
+    those two as well, since its DELETE comes after them. Checked by
     the script's order of statements and then by `assemble` itself, over
     files that name themselves.
     Kills: "p3.json is fed another stop than the kill", "a restart record is
@@ -1548,6 +1549,9 @@ def test_each_stop_state_feeds_the_record_and_the_judge_it_belongs_to(tmp_path):
         ("D1", "f7_stop"): dict((f[0], f[1]) for _n, f in records)["p6_restart3.json"],
         ("P8", "pre_stop"): [s for n, s in stops if n < way_back][-1],
         ("P8", "stop"): [s for n, s in stops if n > way_back][0],
+        # The end's DELETE comes after the way back: D1 reads the same two.
+        ("D1", "b_pre_stop"): [s for n, s in stops if n < way_back][-1],
+        ("D1", "b_stop"): [s for n, s in stops if n > way_back][0],
     }
     assert expect[("D1", "p0_stop")] == "p0_stop_state.json"
     for _n, name in stops:

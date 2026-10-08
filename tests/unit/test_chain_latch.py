@@ -29,7 +29,11 @@ import pytest_asyncio
 from bot import canary as canary_module
 from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-    pg_goals_write, pg_inventory_write, write_chains,
+    pg_goals_write, pg_inventory_write, pg_orders_write, write_chains,
+)
+from core import (  # noqa: E402 — the shadow chains' block
+    pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
+    pg_weekly_ledger_write,
 )
 
 CORE = pathlib.Path(__file__).resolve().parents[2] / "core"
@@ -203,8 +207,13 @@ class TestTheOneAnswerEveryConsumerReads:
         published = set().union(*(set(state) for state in
                                   write_chains.chain_modes().values()))
         assert published >= {"latched", "latched_at", "mismatch"}
+        import re
+
+        # A whole word, not a substring: `shadow` was "described" by
+        # `shadow_failures` alone, and a mutation renaming it survived.
         for field in sorted(published - {"env", "mode", "error"}):
-            assert field in described, f"{field} is published and undescribed"
+            assert re.search(rf"\b{re.escape(field)}\b", described), \
+                f"{field} is published and undescribed"
         assert "chain_copy_back" in described, "the way back is not named"
 
     def test_the_health_block_answers_without_postgres(self, flags):
@@ -439,6 +448,14 @@ _CONNECTION = {"get_pool", "_pool", "acquire"}
 # nothing, so a write added to one fails there instead of hiding here.
 _READERS = {
     "pg_inventory_write": {"read_snapshot_calendar", "preflight"},
+    "pg_orders_write": {"preflight"},
+    "pg_managers_write": {"preflight"},
+    # Chain 9 (OD-02 (c)): the connection the journal's readers are handed —
+    # the digest, the layer ages, the data-quality endpoint, the catch-up.
+    "pg_dq_journal_write": {"reading"},
+    # Chains 11a/11b: the gate's question, asked of the writer's store.
+    "pg_weekly_ledger_write": {"find_sent"},
+    "pg_traffic_ledger_write": {"find_sent"},
 }
 
 # A statement that writes, by how it starts. Upper-cased first; `setval` is a
@@ -651,6 +668,34 @@ class TestEveryWriterLatchesFirst:
         # Chain 4: the buyers' writer, and the derivation that reads what is
         # pending before it latches.
         assert set(_writers(pg_buyers_write)) == {"upsert_buyers", "derive_gender_pg"}
+        # Chain 3: the orders with their expenses, the backfill-miss ledger,
+        # and the comment restore. Each spells its claim in its own body.
+        assert set(_writers(pg_orders_write)) == {
+            "upsert_orders_with_expenses", "record_backfill_misses",
+            "restore_manager_comments"}
+        # Chain 5: the sync's managers, their stats, and an admin's
+        # classification — three writers, one advisory lock.
+        from core import pg_managers_write
+
+        assert set(_writers(pg_managers_write)) == {
+            "upsert_managers", "update_manager_stats", "set_manager_retail_status"}
+        # Chain 6: the two full-catalogue writers, each spelling its own
+        # acquire, latch, transaction and claim.
+        from core import pg_catalogue_write
+
+        assert set(_writers(pg_catalogue_write)) == {"upsert_products", "upsert_categories"}
+        # Chain 7b-3: the three goal tables in one transaction, and the forecast.
+        from core import pg_forecast_write
+
+        assert set(_writers(pg_forecast_write)) == {
+            "persist_goal_tables", "store_predictions"}
+        # Chain 9: a run with its findings, and the digest's beat.
+        assert set(_writers(pg_dq_journal_write)) == {"persist_run", "set_digest_marker"}
+        # Chain 10: each watchdog's whole tick — reads, insert, prune.
+        assert set(_writers(pg_watchdog_write)) == {"disk_tick", "memory_tick"}
+        # Chains 11a/11b: one record of one delivery each.
+        assert set(_writers(pg_weekly_ledger_write)) == {"mark_sent"}
+        assert set(_writers(pg_traffic_ledger_write)) == {"mark_sent"}
 
     def test_every_registered_chain_has_a_writer_the_walk_can_see(self):
         """The guards below are parametrised over `WRITE_CHAINS`; a chain whose

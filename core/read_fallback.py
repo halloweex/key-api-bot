@@ -153,7 +153,9 @@ class ReadUnavailable(Exception):
     """A read that would have been answered by DuckDB, refused instead.
 
     Raised by `fall_back`, `no_address` and `no_engine` under
-    `KS_READ_FALLBACK=off`, and by nothing else. `web/main.py` maps it to a 503 carrying `surface`, so a
+    `KS_READ_FALLBACK=off`, and — under either mode — by the read of a table a
+    write chain owns, through `chain_refusal`; by nothing else. `web/main.py`
+    maps it to a 503 carrying `surface`, so a
     handler between a route and a router must let it through — the walk in
     `tests/unit/test_read_fallback_sites.py` requires every handler around a
     router to say so, and `GoalsMixin._get_ml_forecast_total` is the one
@@ -394,3 +396,34 @@ def reset_counts() -> None:
     with _lock:
         _counts.clear()
         _refused.clear()
+
+
+def chain_refusal(surface: str, exc: BaseException) -> ReadUnavailable:
+    """A read of a table a write chain owns failed in Postgres: count it as a
+    refusal and hand back the `ReadUnavailable` the caller raises — under
+    EITHER mode.
+
+    While a chain writes Postgres, every read of its tables goes there with
+    no fallback: DuckDB's copy is frozen, not older. Before the flip the same
+    failure went through `fall_back`, and chain 7b-3's precondition is `off`,
+    so it was a counted refusal and a 503 naming the surface. Let through raw
+    after the flip, it reached handlers built to let `ReadUnavailable` through
+    and contain everything else: `/api/revenue/forecast` answered 200
+    "Forecast not available yet" and the smart goal dropped its ML signal,
+    with nothing counted for the canary to page. Under `duckdb` — a latched
+    chain whose precondition has since lapsed — it is refused all the same:
+    DuckDB has nothing to answer with but the pre-flip copy.
+
+    Returned, not raised, so the handler that calls it says `raise` itself,
+    which is what DN-20a's walk reads as a decision. Counted with the
+    refusals, so `/api/health` publishes it beside the mode in either mode,
+    and logged with "read refused", the phrase `read_refused`'s lever greps.
+    """
+    count = _tally(_refused, surface)
+    logger.error(
+        "read refused: %s — its engine failed, and a write chain owns the "
+        "table, so DuckDB's copy is frozen and may not answer (%d refused "
+        "since start): %s", surface, count, exc,
+        exc_info=exc if isinstance(exc, BaseException) else None,
+    )
+    return ReadUnavailable(surface)

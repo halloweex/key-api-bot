@@ -39,8 +39,8 @@ def configure_modes() -> Dict[str, str]:
     to know whether the other already has. The latch is re-read rather than
     assumed unchanged, because a copy-back between two calls releases it.
     """
-    from core import (chain_latch, pg_derivation, pg_utm_parse, read_fallback,
-                      warehouse_cutover)
+    from core import (chain_latch, duckdb_switch, pg_derivation, pg_utm_parse,
+                      read_fallback, warehouse_cutover)
 
     # Not in the returned mapping: that maps an environment variable to the
     # value read from it, and the latch is read from disk and answers over the
@@ -65,9 +65,24 @@ def configure_modes() -> Dict[str, str]:
     # Last, because the switch's preconditions name the modes above it. Never
     # raises, for `KS_READ_FALLBACK`'s reason — an unmet precondition runs as
     # `duckdb` and is published; see `core/warehouse_cutover.py`.
-    return {
+    #
+    # `KS_DUCKDB` (stage 5's week of silence) first: whether this process may
+    # open the DuckDB file at all, and the boot sync's first act is to open
+    # it. Never raises; `off` refuses every open, loudly — see
+    # `core/duckdb_switch.py`.
+    modes = {
+        duckdb_switch.ENV: duckdb_switch.configure_mode(),
         pg_derivation.ENV: pg_derivation.configure_mode(),
         read_fallback.ENV: read_fallback.configure_mode(),
         pg_utm_parse.ENV: pg_utm_parse.configure_mode(),
         warehouse_cutover.ENV: warehouse_cutover.configure_mode(),
     }
+    # Chain 3's start verdict (the chain-3 review): a precondition unmet when
+    # the process starts holds `KS_WRITE_ORDERS=postgres` on DuckDB until it
+    # ends, so the flip happens at a start and never mid-day on its own. After
+    # the warehouse switch, whose cached verdict is one of its facts. Not in
+    # the mapping, for the latch's reason. Never raises.
+    from core import pg_orders_write
+
+    pg_orders_write.settle_hold()
+    return modes

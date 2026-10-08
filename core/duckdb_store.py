@@ -23,7 +23,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -34,8 +34,10 @@ if TYPE_CHECKING:  # pragma: no cover — the annotation's name, no import cost
 import duckdb
 import pandas as pd
 
+from core import duckdb_switch
 from core.models import LOST_STATUS_GROUP_ID, Order, OrderStatus
 from core.exceptions import QueryTimeoutError
+from core.observability import cut_row_dumps, without_row_dump
 from core.duckdb_constants import (
     DB_DIR, DB_PATH, DEFAULT_TZ, DEFAULT_QUERY_TIMEOUT, LONG_QUERY_TIMEOUT,
     B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE,
@@ -49,6 +51,30 @@ from core.repositories import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _orders_in_postgres() -> bool:
+    """Whether chain 3 writes the orders to Postgres — the one answer every
+    order writer and selection routes on. Raises on a `KS_WRITE_ORDERS`
+    nobody can read while unlatched (`pg_orders_write.writes_postgres`): a
+    repair job then fails loudly rather than choosing a store."""
+    from core import pg_orders_write
+
+    return pg_orders_write.writes_postgres()
+
+
+def _refuse_if_orders_in_postgres(writer: str) -> None:
+    """Raise `ChainOwnsOrders` when a DuckDB writer of chain 3's tables is
+    reached while the chain does not write DuckDB — by its flag, its latch, or
+    a flag nobody can read (`mode()`, which never raises)."""
+    from core import pg_orders_write
+
+    mode = pg_orders_write.mode()
+    if mode != "duckdb":
+        raise pg_orders_write.ChainOwnsOrders(
+            f"DuckDBStore.{writer} was called while chain 3 writes the orders "
+            f"to {mode or 'nowhere (KS_WRITE_ORDERS is not understood)'}; "
+            "the orders go through SyncService._upsert_orders_with_expenses")
 
 
 @dataclass(frozen=True)
@@ -116,6 +142,55 @@ def _memory_limit() -> str:
         raw, DEFAULT_DUCKDB_MEMORY_LIMIT,
     )
     return DEFAULT_DUCKDB_MEMORY_LIMIT
+
+
+def _invalidated(conn) -> "Optional[duckdb.FatalException]":
+    """The FatalException a statement on `conn` raises once DuckDB has
+    invalidated its instance, or None while it answers.
+
+    A FatalException invalidates the whole instance, and from then on every
+    statement on it raises FatalException "database has been invalidated
+    because of a previous fatal error", whose text carries the original error
+    (measured on 1.5.5). Asked of the instance rather than read off the
+    exception in hand, because the exception in hand can mislead both ways: a
+    caller may have swallowed the FATAL and raised something else, or wrapped
+    it with no chain left to read; and a FatalException in the chain may have
+    come from some other instance the caller opened.
+    """
+    try:
+        conn.execute("SELECT 1").fetchall()
+    except duckdb.FatalException as exc:
+        return exc
+    except Exception:  # noqa: BLE001 — e.g. an aborted transaction: still valid
+        return None
+    return None
+
+
+# An index FATAL is damage in the FILE, and a restart forgets `_fatal`: so the
+# first one is also written down beside the file, as the file's (device, inode)
+# — which a compaction's swap replaces and a restart does not — and read back
+# by `fatal_status()` while it still describes the file that is there. A
+# restore that copies over the file in place keeps the inode: delete it then.
+INDEX_SHORT_MARKER = ".duckdb_index_short.json"
+
+
+def _fatal_kind(echo: BaseException) -> str:
+    """`index` — an index short in the file, the damage a killed writer's WAL
+    left before the open guard (`duckdb_switch.open_file`; the lever is
+    rebuilding every CREATE INDEX index); `other` — anything else. Read off
+    the "invalidated" echo, which quotes the original error."""
+    if "delete all rows from index" in str(echo).lower():
+        return "index"
+    return "other"
+
+
+class StoreClosedError(RuntimeError):
+    """A use of a `DuckDBStore` that `close()` has closed.
+
+    Shutdown closes the store while handlers past their 504 and jobs past
+    their cancellation may still be queued on its lock; reopening it for them
+    would run the schema and the migrations again during shutdown, write, and
+    leave an instance nothing closes. `connect()` reopens one deliberately."""
 
 
 # The one definition of what a Gold revenue cell contains. Both the rebuild and
@@ -502,6 +577,14 @@ class DuckDBStore(
     # __init__ still read cleanly.
     _last_stuck_rebuild: "float | None" = None
 
+    # FatalExceptions this store has seen, for /api/health; None until one.
+    # Class-level for the same reason.
+    _fatal: "Optional[Dict[str, Any]]" = None
+
+    # Set by close(), cleared by an explicit connect(): what tells a store
+    # shut down from one a FATAL dropped (see `connection()`).
+    _closed: bool = False
+
     def __init__(self, db_path: Optional[Path] = None):
         # Resolved here rather than bound as a default argument. A default is
         # evaluated once, when this function is defined, so `db_path=DB_PATH`
@@ -526,37 +609,59 @@ class DuckDBStore(
         self._failed_migrations: List[Dict[str, Any]] = []
         self._schema_status: Dict[str, Any] = {"status": "unknown", "reason": "not connected"}
 
-    async def connect(self) -> None:
+    async def connect(self, *, reopen: bool = True) -> None:
         """Initialize database connection, schema, and thread pool.
 
         All or nothing: if anything here raises, the store is left with no
         connection, so the next use of it connects again from the start.
+
+        `reopen=False` is `connection()`'s lazy open, and it refuses a store
+        `close()` has closed (`StoreClosedError`) — decided under the lock,
+        so a caller that was queued behind `close()` cannot slip in after it.
+        A call with the default reopens a closed store on purpose.
         """
         DB_DIR.mkdir(parents=True, exist_ok=True)
 
         async with self._lock:
+            if self._closed and not reopen:
+                raise StoreClosedError(
+                    f"the DuckDB store is closed (shutdown): {self.db_path}")
+            self._closed = False
             if self._connection is None:
-                self._connection = duckdb.connect(str(self.db_path))
+                # Enable disk spilling: DuckDB writes to disk instead of OOM crash.
+                tmp_dir = Path(self.db_path).parent / "duckdb_tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                # Through the one opener: it refuses under KS_DUCKDB=off
+                # before the driver can open — or create — the file, and
+                # otherwise CHECKPOINTs whatever WAL a killed writer left,
+                # before the SETs below (core/duckdb_switch.py `open_file`).
+                #
+                # The memory limit and the spill directory are the instance's
+                # from its first moment, not SETs after it. The open replays
+                # that WAL and the opener checkpoints it before any SET could
+                # run, so as SETs they bound neither: both ran under DuckDB's
+                # default — 80% of the memory it detects, ~5.6 GB in web's 7 GB
+                # container — after exactly the kill (an OOM kill, likeliest)
+                # that leaves a large WAL (batch-E review).
+                #
+                # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
+                # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
+                # (also exercises full export). 2GB OOMs WAL flush — keep 3GB as floor.
+                #
+                # 3GB was too tight: on 2026-08-02 seven consecutive warehouse refreshes died
+                # at 2.7/2.7 GiB while the container sat at ~950 MiB of its 7g budget, and the
+                # first refresh to complete afterwards left Gold truncated by 763 revenue rows.
+                # The ceiling is now configurable so it can be raised without a code deploy.
+                self._connection = duckdb_switch.open_file(
+                    self.db_path, config={"memory_limit": _memory_limit(),
+                                          "temp_directory": str(tmp_dir)})
                 try:
-                    # Prevent OOM in memory-limited containers (DuckDB defaults to 80% of system RAM).
-                    # 3GB verified safe for checkpoint on 19GB DB via compact_duckdb.py spike runs
-                    # (also exercises full export). 2GB OOMs WAL flush — keep 3GB as floor.
-                    #
-                    # 3GB was too tight: on 2026-08-02 seven consecutive warehouse refreshes died
-                    # at 2.7/2.7 GiB while the container sat at ~950 MiB of its 7g budget, and the
-                    # first refresh to complete afterwards left Gold truncated by 763 revenue rows.
-                    # The ceiling is now configurable so it can be raised without a code deploy.
-                    self._connection.execute(f"SET memory_limit='{_memory_limit()}'")
                     # Reduce memory usage for bulk operations
                     self._connection.execute("SET preserve_insertion_order=false")
                     # Large WAL threshold; rely on the explicit 6h CHECKPOINT job.
                     # 2MB caused checkpoint-during-write races on DuckDB 1.5.x
                     # (corrupted in-memory column: row group rows mismatched column rows).
                     self._connection.execute("SET wal_autocheckpoint='1GB'")
-                    # Enable disk spilling: DuckDB writes to disk instead of OOM crash
-                    tmp_dir = Path(self.db_path).parent / "duckdb_tmp"
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    self._connection.execute(f"SET temp_directory='{tmp_dir}'")
 
                     await self._init_schema()
 
@@ -565,7 +670,7 @@ class DuckDBStore(
                         max_workers=1,  # Single worker - DuckDB requires serialized access
                         thread_name_prefix="duckdb"
                     )
-                except BaseException:
+                except BaseException as exc:
                     # The schema and the migrations run on `self._connection`,
                     # so it is set before they start — and a failure used to
                     # leave it set. `connection()` reconnects only when it is
@@ -587,13 +692,19 @@ class DuckDBStore(
                     connection, self._connection = self._connection, None
                     with contextlib.suppress(Exception):
                         connection.close()
+                    cut_row_dumps(exc)
                     raise
 
                 logger.info(f"DuckDB connected: {self.db_path}")
 
     async def close(self) -> None:
-        """Close database connection and thread pool."""
+        """Close database connection and thread pool.
+
+        Final until an explicit `connect()`: a later `connection()` — the
+        caller queued on the lock behind this one included — raises
+        `StoreClosedError` instead of opening the file again."""
         async with self._lock:
+            self._closed = True
             # Shutdown thread pool (waits for in-flight queries to finish)
             if self._executor:
                 self._executor.shutdown(wait=True)
@@ -614,8 +725,14 @@ class DuckDBStore(
         changes to the main database file and resets the WAL.
         """
         async with self._lock:
-            if self._connection:
-                self._connection.execute("CHECKPOINT")
+            conn = self._connection
+            if conn:
+                try:
+                    conn.execute("CHECKPOINT")
+                except Exception as exc:
+                    self._drop_if_invalidated()
+                    cut_row_dumps(exc)
+                    raise
                 logger.info("DuckDB checkpoint completed")
 
     @asynccontextmanager
@@ -625,11 +742,189 @@ class DuckDBStore(
         Acquires lock to ensure single-threaded DuckDB access.
         DuckDB connections are NOT thread-safe - only one thread can use
         a connection at a time.
+
+        A FatalException invalidates the DuckDB instance: every later
+        statement on it raises "database has been invalidated". It used to
+        stay in place — reconnection happened only when there was no
+        connection — so one FATAL left web's DuckDB dead until a restart,
+        the caller queued on the lock included. Now, whenever the block
+        raises, the instance is asked whether it still answers
+        (`_invalidated`), and one that does not is dropped, so the next use
+        opens the file again. A FATAL a caller swallowed is dropped by the
+        next use that raises, which is every use of an invalidated instance.
+
+        What that does not do is heal: a FATAL from a short index (see
+        `duckdb_switch.open_file`) comes back on the same write every time,
+        because the index is short in the file. `fatal_status()` keeps
+        /api/health degraded, and the page standing, until a restart.
+
+        A store `close()` has closed is not reopened here: the open is
+        `connect(reopen=False)`, which raises `StoreClosedError`. Otherwise a
+        caller queued behind `close()` would take the missing connection for
+        one a FATAL dropped and open the file again: the schema and the
+        migrations during shutdown, a write after `close()`'s checkpoint, and
+        an instance nothing would ever close.
+
+        Whatever leaves the block leaves without DuckDB's dump of the rows a
+        FATAL could not remove (`core.observability.cut_row_dumps`): every
+        column of each, a buyer's name, phone and email among them, which a
+        caller logging the exception with its traceback — the buyers step
+        does — used to print into web's log on every retry.
         """
-        if self._connection is None:
-            await self.connect()
-        async with self._lock:
-            yield self._connection
+        while True:
+            if self._connection is None:
+                await self.connect(reopen=False)
+            async with self._lock:
+                conn = self._connection
+                if conn is None:
+                    # A FATAL dropped it, or close() closed it, while this
+                    # caller waited for the lock: connect(reopen=False) opens
+                    # the file again for the first and refuses the second.
+                    continue
+                try:
+                    yield conn
+                except Exception as exc:
+                    # Not on a cancellation, which says nothing about the
+                    # instance. (Nor would the probe be safe there if anything
+                    # ever left a thread on `conn` past a cancellation: it
+                    # runs on the event loop and would wait for that query.
+                    # `_offload` does not, so today nothing does.)
+                    self._drop_if_invalidated()
+                    cut_row_dumps(exc)
+                    raise
+                return
+
+    def _drop_if_invalidated(self) -> None:
+        """Forget the store's connection if DuckDB invalidated its instance,
+        so the next use opens the file again.
+
+        Called with the lock held — by `connection()` and `checkpoint()`,
+        after the statement that raised has come off the executor thread — so
+        the connection asked is the one the failing block used: nothing else
+        can replace it while the lock is held.
+
+        The executor goes with it. `connect()` builds a new one, and the old
+        one, left running, is a worker thread per FATAL waiting forever for
+        work nothing will send it. Closing an invalidated instance writes
+        nothing — the WAL stays, and the next open replays and checkpoints it
+        through `duckdb_switch.open_file` — and a fresh `duckdb.connect` of
+        the same file in the same process gets a new instance, even while a
+        cursor of the old one is alive (both measured on 1.5.5).
+        """
+        conn = self._connection
+        if conn is None:
+            return
+        echo = _invalidated(conn)
+        if echo is None:
+            return
+        self._connection = None
+        executor, self._executor = self._executor, None
+        if executor:
+            executor.shutdown(wait=False)
+        with contextlib.suppress(Exception):
+            conn.close()
+        kind = _fatal_kind(echo)
+        seen = self._fatal or {"count": 0, "kinds": {}}
+        count = seen["count"] + 1
+        kinds = {**seen["kinds"], kind: seen["kinds"].get(kind, 0) + 1}
+        self._fatal = {
+            "count": count,
+            "kinds": kinds,
+            "last_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        if kind == "index":
+            self._record_index_short(self._fatal["last_at"])
+        lever = (
+            " An index is short in the file, and the write that met it fails "
+            "again until every CREATE INDEX index is rebuilt: the Sunday "
+            "compaction, or scripts/weekly_compact.sh by hand. A restart does "
+            "not heal it." if kind == "index" else ""
+        )
+        # Up to the chunk dump: an index FATAL prints the rows it could not
+        # remove, and buyers' phone and email columns are indexed.
+        error = " ".join(without_row_dump(str(echo)).split())[:400]
+        logger.error(
+            "DuckDB FATAL #%d (%s): the instance is dropped and the next use "
+            "opens the file again.%s %s", count, kind, lever, error,
+        )
+
+    def fatal_status(self) -> "Optional[Dict[str, Any]]":
+        """The invalidations this store has seen: how many, of which kind
+        (`_fatal_kind`), and when the last one was — and `index_short`, the
+        index damage an index FATAL found in the file that is there now
+        (`since`, `last_at`, `count`), which outlives the process that saw it.
+
+        None until one, or while neither. Published on /api/health, which
+        reads degraded while it is set — without that, the reconnect above
+        would let a dead write look healthy as soon as the next read
+        answered, and a restart would announce a short index healed: it is
+        not, until a compaction replaces the file (`INDEX_SHORT_MARKER`).
+        Never raises."""
+        index = self._read_index_short()
+        if not self._fatal and not index:
+            return None
+        seen = self._fatal or {"count": 0, "kinds": {}, "last_at": None}
+        return {**seen, "kinds": dict(seen["kinds"]), "index_short": index}
+
+    def _index_marker(self) -> "Optional[Path]":
+        # `getattr`: a store built without __init__ has no path (see `_fatal`).
+        db_path = getattr(self, "db_path", None)
+        return None if db_path is None else Path(db_path).parent / INDEX_SHORT_MARKER
+
+    def _file_identity(self) -> "Optional[Tuple[int, int]]":
+        db_path = getattr(self, "db_path", None)
+        try:
+            st = Path(db_path).stat() if db_path is not None else None
+        except OSError:
+            return None
+        return None if st is None else (st.st_dev, st.st_ino)
+
+    def _read_index_short(self) -> "Optional[Dict[str, Any]]":
+        """The written-down index damage, if it describes the file that is
+        there now; None otherwise. Never raises: a marker that cannot be read
+        is logged and read as none, since inventing damage would hold the
+        status degraded with nothing to clear it."""
+        path = self._index_marker()
+        if path is None:
+            return None
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            logger.warning("DuckDB index marker %s unreadable: %s", path, type(exc).__name__)
+            return None
+        if not isinstance(record, dict):
+            return None
+        identity = self._file_identity()
+        if identity is None or [record.get("dev"), record.get("ino")] != list(identity):
+            # Another file now — the compaction swapped one in, which rebuilt
+            # every index — so it describes nothing that is there.
+            return None
+        return {"since": record.get("since"), "last_at": record.get("last_at"),
+                "count": record.get("count")}
+
+    def _record_index_short(self, at: str) -> None:
+        """Write the index damage down beside the file. Never raises: the
+        FATAL is already logged and counted in this process."""
+        identity = self._file_identity()
+        if identity is None:
+            return
+        prior = self._read_index_short() or {}
+        record = {"file": Path(self.db_path).name, "dev": identity[0], "ino": identity[1],
+                  "since": prior.get("since") or at, "last_at": at,
+                  "count": int(prior.get("count") or 0) + 1}
+        path = self._index_marker()
+        if path is None:
+            return
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps(record), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            logger.error("DuckDB index marker %s could not be written: %s: %s; the "
+                         "damage is published until this process restarts only",
+                         path, type(exc).__name__, exc)
 
     # ─── Query Execution with Timeout ────────────────────────────────────────
 
@@ -658,25 +953,8 @@ class DuckDBStore(
         async with self.connection() as conn:
             self._total_queries += 1
             try:
-                loop = asyncio.get_running_loop()
-
-                def _run():
-                    return conn.execute(query, params or []).fetchone()
-
-                future = loop.run_in_executor(self._executor, _run)
-                try:
-                    return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
-                except asyncio.TimeoutError:
-                    # The executor thread is still inside conn.execute(). The
-                    # lock this block holds exists so that no two threads
-                    # touch the one connection; leaving now would release it
-                    # while the thread is on it. Interrupt the query and wait
-                    # for the thread to come off before raising.
-                    with contextlib.suppress(Exception):
-                        conn.interrupt()
-                    with contextlib.suppress(BaseException):
-                        await future
-                    raise
+                return await self._offload(
+                    conn, lambda: conn.execute(query, params or []).fetchone(), timeout)
             except asyncio.TimeoutError:
                 raise QueryTimeoutError(query, timeout, "Fetch one failed")
 
@@ -705,27 +983,46 @@ class DuckDBStore(
         async with self.connection() as conn:
             self._total_queries += 1
             try:
-                loop = asyncio.get_running_loop()
-
-                def _run():
-                    return conn.execute(query, params or []).fetchall()
-
-                future = loop.run_in_executor(self._executor, _run)
-                try:
-                    return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
-                except asyncio.TimeoutError:
-                    # The executor thread is still inside conn.execute(). The
-                    # lock this block holds exists so that no two threads
-                    # touch the one connection; leaving now would release it
-                    # while the thread is on it. Interrupt the query and wait
-                    # for the thread to come off before raising.
-                    with contextlib.suppress(Exception):
-                        conn.interrupt()
-                    with contextlib.suppress(BaseException):
-                        await future
-                    raise
+                return await self._offload(
+                    conn, lambda: conn.execute(query, params or []).fetchall(), timeout)
             except asyncio.TimeoutError:
                 raise QueryTimeoutError(query, timeout, "Fetch all failed")
+
+    async def _offload(self, conn, run, timeout: float):
+        """`run()` on the executor thread, under the lock the caller holds,
+        and the thread off `conn` before this returns or raises — whatever
+        ends the wait.
+
+        The lock exists so that no two threads touch the one connection, and
+        leaving the block releases it. After a timeout the thread is still
+        inside `conn.execute()`, and after a **cancellation** too — the
+        scheduler cancelling a job at shutdown, a caller giving up on a read.
+        A timeout interrupted the query and waited; a cancellation used to
+        leave at once, so the next holder of the lock shared `conn` with the
+        leftover query, and the next block that raised made `connection()`
+        probe the instance on the event loop — which waits for that query:
+        every request stalled for seconds, measured. Both interrupt and wait
+        now. A second cancellation during the wait is held until the thread
+        is off, then raised: the interrupt is already sent, so what it costs
+        is the rest of one statement.
+        """
+        future = asyncio.get_running_loop().run_in_executor(self._executor, run)
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            with contextlib.suppress(Exception):
+                conn.interrupt()
+            cancelled_again = False
+            while not future.done():
+                try:
+                    await asyncio.wait([future])
+                except asyncio.CancelledError:
+                    cancelled_again = True
+            if not future.cancelled():
+                future.exception()   # retrieved: asyncio would log it otherwise
+            if cancelled_again:
+                raise asyncio.CancelledError()
+            raise
 
     async def _init_schema(self) -> None:
         """Create database schema if not exists."""
@@ -1503,6 +1800,9 @@ class DuckDBStore(
             else:
                 self._connection.execute(build)
         except Exception as e:
+            # Its text is published on /api/health, which is public: never
+            # DuckDB's dump of row values (see `connection()`).
+            cut_row_dumps(e)
             logger.error(
                 "View %s could not be built; it keeps whatever definition the "
                 "file last held, if any: %s", name, e, exc_info=True,
@@ -1551,6 +1851,10 @@ class DuckDBStore(
             try:
                 migration.run(self)
             except Exception as e:
+                # The text goes to /api/health, which is public: a migration
+                # that met a short index — or ran on the instance a previous
+                # one invalidated — would publish DuckDB's dump of the rows.
+                cut_row_dumps(e)
                 elapsed = (time.perf_counter() - started) * 1000
                 logger.error(
                     "Migration %s FAILED after %.0f ms: %s",
@@ -1627,7 +1931,7 @@ class DuckDBStore(
                 "SELECT id, outcome FROM schema_migrations"
             ).fetchall()
         except Exception as e:
-            return {"status": "unknown", "error": str(e)}
+            return {"status": "unknown", "error": without_row_dump(str(e))}
         applied = {r[0] for r in rows if r[1] == "applied"}
         once = [m.id for m in MIGRATIONS if m.mode == ONCE]
         return {
@@ -2294,6 +2598,17 @@ class DuckDBStore(
         that never moves again runs every tick (revision 0032). A key absent
         from Postgres is None, which the sync reads as due: the first tick
         after a switch syncs, and its stamp is the first one there.
+
+        Unless its chain declares `CHAIN_WATERMARK_INHERITS_DUCKDB`: then an
+        absent key is DuckDB's own value, which stopped moving at the switch —
+        the same stand-in `_freshness_check` judges. Chain 3 needs it, because
+        `last_sync_orders` is where the order step's window STARTS (the
+        chain-3 review): read as None it became "an hour ago", the window
+        began 25 h back, and every order KeyCRM updated between DuckDB's last
+        stamp and then — a flip after a maintenance window, or after a day of
+        KeyCRM failing — was never fetched by the incremental sync at all.
+        Present, Postgres's value wins: the copy-back deletes it on release,
+        and a stale one left behind only widens the window.
         """
         full_key = f"last_sync_{key}"
         # Only the chain that owns this key is asked — never every chain, or a
@@ -2303,7 +2618,11 @@ class DuckDBStore(
         chain = chain_for_sync_key(full_key)
         if chain is not None and chain.writes_postgres():
             from core.pg_chain_watermarks import get_value
-            return await get_value(full_key)
+            value = await get_value(full_key)
+            if value is not None or not getattr(
+                    chain, "CHAIN_WATERMARK_INHERITS_DUCKDB", False):
+                return value
+            # Inherited: DuckDB's frozen stamp, read below.
         async with self.connection() as conn:
             result = conn.execute(
                 "SELECT value FROM sync_metadata WHERE key = ?",
@@ -2464,7 +2783,15 @@ class DuckDBStore(
 
         Ids already known to be absent upstream are skipped, so the list drains
         to empty instead of cycling forever.
+
+        Asked of Postgres once chain 3 writes the orders there — the ids it
+        repairs and the misses it records land there, and a scan of DuckDB
+        would never see either and re-fetch the same 200 ids every hour.
         """
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.order_id_gaps(limit)
         async with self.connection() as conn:
             rows = conn.execute("""
                 WITH bounds AS (SELECT MIN(id) lo, MAX(id) hi FROM orders)
@@ -2496,7 +2823,14 @@ class DuckDBStore(
         fetch already returned to cover an hour at the edge. Measured on the
         2026-08-31 copy with a 30-day window: 156 ids over 183 daily runs
         (0.85 a day, at most 5), each one API call.
+
+        Asked of Postgres once chain 3 writes the orders there, for
+        `find_order_id_gaps`' reason.
         """
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.backdated_order_ids(since, limit)
         date_ordered = _date_in_kyiv("ordered_at")
         date_created = _date_in_kyiv("created_at")
         async with self.connection() as conn:
@@ -2511,9 +2845,16 @@ class DuckDBStore(
         return [int(r[0]) for r in rows]
 
     async def record_backfill_misses(self, misses: "Dict[int, str]") -> int:
-        """Remember ids KeyCRM could not supply, so they are not retried."""
+        """Remember ids KeyCRM could not supply, so they are not retried.
+
+        Written by chain 3 once it writes the orders to Postgres: the ledger
+        moves with the scans that read it (`core.pg_orders_write`)."""
         if not misses:
             return 0
+        if _orders_in_postgres():
+            from core import pg_orders_write
+
+            return await pg_orders_write.record_backfill_misses(misses)
         async with self.connection() as conn:
             conn.executemany(
                 "INSERT OR REPLACE INTO order_backfill_misses "
@@ -2521,6 +2862,49 @@ class DuckDBStore(
                 [(int(oid), str(reason)[:200]) for oid, reason in misses.items()],
             )
         return len(misses)
+
+    # Orders with revenue and no line items — the half-written repair's
+    # selection, moved here from `scheduler._run_halfwritten_repair` so it can
+    # be asked of Postgres once chain 3 writes the orders there.
+    _EMPTY_LINE_ITEMS_SQL = """
+        SELECT o.id FROM orders o
+        LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
+               ON li.order_id = o.id
+        WHERE li.order_id IS NULL AND o.grand_total > 0
+    """
+
+    async def find_halfwritten_orders(self, limit: int) -> List[int]:
+        """Orders with revenue and no line items, not recorded as a miss in
+        the last 30 days, largest first."""
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.halfwritten_candidates(limit)
+        async with self.connection() as conn:
+            return [int(r[0]) for r in conn.execute(f"""
+                {self._EMPTY_LINE_ITEMS_SQL}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM order_backfill_misses m
+                      WHERE m.order_id = o.id
+                        AND m.checked_at > CURRENT_TIMESTAMP - INTERVAL '30 days'
+                  )
+                ORDER BY o.grand_total DESC
+                LIMIT ?
+            """, [int(limit)]).fetchall()]
+
+    async def halfwritten_among(self, ids: List[int]) -> List[int]:
+        """Which of `ids` still carry revenue and no line items."""
+        if not ids:
+            return []
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.halfwritten_among(ids)
+        ph = ",".join("?" * len(ids))
+        async with self.connection() as conn:
+            return [int(r[0]) for r in conn.execute(
+                f"{self._EMPTY_LINE_ITEMS_SQL} AND o.id IN ({ph})", list(ids),
+            ).fetchall()]
 
     def _claim_stuck_rebuild_slot(self) -> bool:
         """Take the one full-rebuild attempt allowed per cooldown, if it is free.
@@ -2657,7 +3041,7 @@ class DuckDBStore(
 
             # Validate the copy read-only (outside the lock).
             def _validate() -> int:
-                con = duckdb.connect(str(tmp_path), read_only=True)
+                con = duckdb_switch.open_file(tmp_path, read_only=True)
                 try:
                     return con.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
                 finally:
@@ -2734,6 +3118,12 @@ class DuckDBStore(
             moved; `.count` includes rows that were already correct, so
             driving a rebuild from it rebuilds the world every cycle.
         """
+        # Chain 3 (`core/pg_orders_write.py`): once the orders are written to
+        # Postgres this writer must not run — the sync routes round it in
+        # `SyncService._upsert_orders_with_expenses`, and anything that comes
+        # here directly would write the store nobody reads. First, before the
+        # empty-batch return, so the refusal does not depend on the payload.
+        _refuse_if_orders_in_postgres("upsert_orders")
         if not orders:
             return UpsertResult(count=0, changed_ids=[], skipped_unchanged=0, failed=0)
 
@@ -3019,6 +3409,16 @@ class DuckDBStore(
 
         rows = product_rows(products)
 
+        # Chain 6: under KS_WRITE_CATALOGUE=postgres the parsed rows are the
+        # Postgres write and DuckDB's copy stops (`core/pg_catalogue_write.py`).
+        # After the parse, so both stores read a product the same way.
+        from core import pg_catalogue_write
+
+        if pg_catalogue_write.writes_postgres():
+            count = await pg_catalogue_write.upsert_products(rows)
+            logger.info(f"Upserted {count} products to Postgres (chain 6)")
+            return count
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
@@ -3058,6 +3458,13 @@ class DuckDBStore(
         from core.landing_rows import category_rows
 
         rows = category_rows(categories)
+
+        from core import pg_catalogue_write
+
+        if pg_catalogue_write.writes_postgres():
+            count = await pg_catalogue_write.upsert_categories(rows)
+            logger.info(f"Upserted {count} categories to Postgres (chain 6)")
+            return count
 
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
@@ -3103,11 +3510,29 @@ class DuckDBStore(
         if not managers:
             return 0
 
+        # One reading of the payload for both stores (`core.landing_rows`):
+        # the name's fallbacks and the retail seed are spelled there once.
+        from core.landing_rows import manager_rows
+
+        rows = manager_rows(managers)
+
+        # Chain 5: under `KS_WRITE_MANAGERS=postgres` the managers land in
+        # Postgres with their baselines, and DuckDB's copy stops. Asked before
+        # the DuckDB connection is taken; a flag nobody can read raises here
+        # and stops this chain alone (DN-01) — the sync step contains it.
+        from core import pg_managers_write
+
+        if pg_managers_write.writes_postgres():
+            from datetime import timezone
+
+            return await pg_managers_write.upsert_managers(
+                rows, set_at=datetime.now(timezone.utc))
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
                 count = 0
-                for mgr in managers:
+                for row in rows:
                     conn.execute("""
                         INSERT INTO managers
                         (id, name, email, status, is_retail, synced_at)
@@ -3119,13 +3544,7 @@ class DuckDBStore(
                             -- EXCLUDED, not CURRENT_TIMESTAMP: DuckDB binds a
                             -- bare name on this side as a column reference.
                             synced_at = EXCLUDED.synced_at
-                    """, [
-                        mgr.get("id"),
-                        mgr.get("name") or mgr.get("full_name", "Unknown"),
-                        mgr.get("email"),
-                        mgr.get("status"),  # 'active', 'blocked', 'pending'
-                        mgr.get("id") in RETAIL_MANAGER_IDS,  # seed for new rows only
-                    ])
+                    """, list(row))
                     count += 1
 
                 conn.execute("COMMIT")
@@ -3364,26 +3783,37 @@ class DuckDBStore(
         Returns:
             Number of managers updated
         """
+        from core.sql_dialect import DUCKDB, manager_stats_sql
+
+        # Chain 5: the same body, against `bronze.orders`, and no replica
+        # after it — the replica stands down while the chain writes.
+        from core import pg_managers_write
+
+        if pg_managers_write.writes_postgres():
+            return await pg_managers_write.update_manager_stats()
+
+        # On DuckDB while a write chain owns the orders — between chain 5's
+        # copy-back and chain 3's, which the order of ways back makes a state
+        # every rollback passes through, and between chain 3's flip and chain
+        # 5's. DuckDB's `orders` stopped at chain 3's latch, so stats counted
+        # from them would carry `last_order_date` and `order_count` backwards,
+        # and the replica below would ship them over Postgres's. They stay as
+        # they stand — after a copy-back, the chain's own last stats — until
+        # the orders come back, and nothing is shipped for a recompute that
+        # did not happen (`pg_managers_write.duckdb_orders_frozen`).
+        frozen = pg_managers_write.duckdb_orders_frozen()
+        if frozen:
+            logger.warning(
+                "Manager statistics not recomputed: a write chain owns %s, so "
+                "DuckDB's orders are frozen and would move them backwards",
+                ", ".join(sorted(frozen)))
+            return 0
+
         async with self.connection() as conn:
-            # Update stats for managers who have orders
-            result = conn.execute("""
-                UPDATE managers m
-                SET
-                    first_order_date = stats.first_order,
-                    last_order_date = stats.last_order,
-                    order_count = stats.order_cnt
-                FROM (
-                    SELECT
-                        manager_id,
-                        MIN(DATE(ordered_at)) as first_order,
-                        MAX(DATE(ordered_at)) as last_order,
-                        COUNT(*) as order_cnt
-                    FROM orders
-                    WHERE manager_id IS NOT NULL
-                    GROUP BY manager_id
-                ) stats
-                WHERE m.id = stats.manager_id
-            """)
+            # Update stats for managers who have orders. The one body both
+            # engines run, with the order's date spelled in Kyiv rather than
+            # taken from the process's timezone (`core.sql_dialect`).
+            result = conn.execute(manager_stats_sql(DUCKDB))
             count = result.fetchone()
             logger.info(f"Updated manager statistics")
             updated = count[0] if count else 0
@@ -3445,6 +3875,23 @@ class DuckDBStore(
         if effective_from is None:
             effective_from = datetime.now(ZoneInfo(DISPLAY_TIMEZONE)).date()
 
+        # Chain 5: the decision is written where it is derived, in one
+        # Postgres transaction that also raises the derivation signal — and
+        # then the DuckDB mark below, which is a no-op unless DuckDB derives:
+        # the warehouse is marked dirty on whichever engine derives it. A
+        # backdate behind the manager's latest change is refused there
+        # (`BackdateBehindLatest`, OD-C5-1 (a)); DuckDB's own path is as it was.
+        from core import pg_managers_write
+
+        if pg_managers_write.writes_postgres():
+            from datetime import timezone
+
+            await pg_managers_write.set_manager_retail_status(
+                manager_id, is_retail, effective_from, set_by, note,
+                set_at=datetime.now(timezone.utc))
+            await self.mark_warehouse_dirty(None)
+            return
+
         async with self.connection() as conn:
             # One transaction. As four autocommit statements, a failure between
             # closing the open interval and opening the new one left the
@@ -3500,6 +3947,13 @@ class DuckDBStore(
         Returns:
             List of manager dicts with id, name, status, is_retail, order_count, etc.
         """
+        # Chain 5: from Postgres once the chain owns the tables, with no
+        # fallback — DuckDB's copy is frozen then (`core/pg_managers_read.py`).
+        from core import pg_managers_read, pg_managers_write
+
+        if pg_managers_write.reads_postgres():
+            return await pg_managers_read.fetch_all_managers()
+
         async with self.connection() as conn:
             result = conn.execute("""
                 SELECT
@@ -3524,10 +3978,31 @@ class DuckDBStore(
             ]
 
     async def get_latest_order_time(self) -> Optional[datetime]:
-        """Get the latest order updated_at timestamp for sync checkpoint."""
+        """Get the latest order updated_at timestamp for sync checkpoint.
+
+        From Postgres once chain 3 writes the orders there: the full sync
+        stamps `last_sync_orders` from this, and DuckDB's MAX would be the
+        moment of the flip, for ever (`core/pg_orders_read.py`)."""
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.latest_order_time()
         async with self.connection() as conn:
             result = conn.execute("SELECT MAX(updated_at) FROM orders").fetchone()
             return result[0] if result and result[0] else None
+
+    async def orders_held(self) -> int:
+        """How many orders the store they are written to holds — the boot's
+        "is there any history at all?". DuckDB's count, until chain 3 writes
+        the orders to Postgres: from then DuckDB's never grows, and a fresh
+        DuckDB on a latched host would read as empty on every boot and pull
+        730 days from KeyCRM each time. Raises what the read raises."""
+        if _orders_in_postgres():
+            from core import pg_orders_read
+
+            return await pg_orders_read.order_count()
+        async with self.connection() as conn:
+            return int(conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0])
 
     async def get_stats(self) -> Dict[str, Any]:
         """Get database statistics.

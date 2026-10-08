@@ -38,6 +38,7 @@ import logging
 from typing import Callable, List, NamedTuple
 
 from core.duckdb_sequences import advance_to
+from core.observability import cut_row_dumps
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,17 @@ def _m0006_seed_manager_classifications(self) -> None:
     # 1970-01-01 rather than the manager's first order: the floor has to
     # precede every order the warehouse will ever hold, and the earliest is
     # 2023-12-02.
+    #
+    # Not once chain 5 has written Postgres (`core/pg_managers_write.py`): its
+    # writer seeds the baselines there, in the transaction that lands each
+    # manager, and a baseline seeded here after the latch is a key only DuckDB
+    # holds — which `scripts/chain_copy_back.py managers` refuses on, because
+    # its copy would delete it. The marker is a local file, read with no
+    # Postgres, which is all a boot can ask. The table is still created: the
+    # DuckDB schema does not depend on who writes it.
+    from core import chain_latch
+
+    seed = not chain_latch.latched("pg_managers_write")
     self._connection.execute("""
         CREATE TABLE IF NOT EXISTS manager_classifications (
             manager_id INTEGER NOT NULL,
@@ -153,6 +165,8 @@ def _m0006_seed_manager_classifications(self) -> None:
             PRIMARY KEY (manager_id, valid_from)
         )
     """)
+    if not seed:
+        return
     seeded = self._connection.execute("""
         INSERT INTO manager_classifications
             (manager_id, is_retail, valid_from, valid_to, set_by, note)
@@ -742,6 +756,9 @@ def _m0027_reset_sequences_after_compaction(self) -> None:
                     seq_name, burned, table_name, col, floor,
                 )
         except Exception as e:
+            # Published on /api/health: never DuckDB's dump of row values,
+            # which an instance a FATAL invalidated echoes on every statement.
+            cut_row_dumps(e)
             logger.warning(
                 "Migration 0027: could not move %s above MAX(%s.%s); the next "
                 "default insert there may collide with an existing id: %s",

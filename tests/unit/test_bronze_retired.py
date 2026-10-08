@@ -60,6 +60,13 @@ RETIRED = (
 # whole identifiers out of the parse tree rather than the word "bronze".
 SOURCE_DIRS = ("core", "web", "bot", "scripts", "deploy")
 
+# The second module that must still name the table, by its bare name and
+# nothing else: stage 5's fate manifest declares every name the production
+# file holds, and this one is still there until a compaction removes it.
+# `TestTheCompactionStillKnowsAboutIt` holds the entry to saying "retired".
+# Its symbols are still walked; only the one string is excused.
+FATE_MANIFEST = REPO / "core" / "duckdb_table_fates.py"
+
 
 def _python_files():
     for d in SOURCE_DIRS:
@@ -122,6 +129,8 @@ class TestTheSubsystemIsGone:
                     sql = re.search(
                         r"\b(FROM|INTO|UPDATE|TABLE|JOIN)\s+\"?bronze_order_events",
                         node.value, re.I)
+                    if bare and path == FATE_MANIFEST:
+                        continue
                     if bare or sql:
                         offenders.append(
                             f"{path.relative_to(REPO)}:{node.lineno} "
@@ -165,6 +174,16 @@ class TestTheCompactionStillKnowsAboutIt:
             "to import it into a schema that no longer defines it — aborting "
             "the compact and the off-site export behind it"
         )
+
+    def test_the_fate_manifest_says_it_is_retired(self):
+        """What earns the manifest its one excused string: the entry says
+        retired, with no DDL and skipped by the compaction — never a fate that
+        would have something write or restore it."""
+        from core.duckdb_table_fates import FATES, NONE, RETIRED, SKIPPED
+
+        fate = FATES["bronze_order_events"]
+        assert (fate.kind, fate.ddl, fate.compaction, fate.successors,
+                fate.switch) == (RETIRED, NONE, SKIPPED, (), None)
 
     def test_its_sequence_is_not_restored(self):
         """`seq_table_map` names a table for each sequence it repairs. Leaving

@@ -285,6 +285,78 @@ async def backfill_mirror_expenses(
         raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
 
 
+@router.post("/mirror/backfill/catalogue")
+@limiter.limit("5/minute")
+async def backfill_mirror_catalogue(
+    request: Request,
+    dry_run: bool = Query(True, description="Say what would be carried; write nothing"),
+    admin: dict = Depends(require_admin),
+):
+    """Carry the catalogue rows only DuckDB holds into Postgres — the ones the
+    daily comparison calls retired (`mirror_retired_rows`; product 1055).
+    A dry run by default. Chain 6's pre-flip lever (OD-15 (a)).
+
+    Foreground: production carries about one row. The carried rows keep a
+    `mirrored_at` before the mirror's last whole-catalogue success, so they
+    still read as retired, and `meta.mirror_state` is not touched
+    (`core.pg_landing.carry_retired_catalogue`).
+
+    The expenses route's order, for its reasons: 409 with the mirror off,
+    before Postgres is asked anything; 409 once a write chain owns either
+    table, on the local answer and then on the owner rows after
+    `require_revision()`; 503 when the owner rows cannot be read.
+    """
+    from core.pg_landing import (
+        CatalogueCarryRefused, carry_retired_catalogue, enabled,
+        tables_stood_down, tables_stood_down_or_owned,
+    )
+
+    if not enabled():
+        raise HTTPException(
+            status_code=409, detail="KS_MIRROR_LANDING is off; nothing was carried")
+
+    catalogue = ("bronze.products", "bronze.categories")
+    moved = frozenset().union(*(tables_stood_down((t,)) for t in catalogue))
+    if not moved:
+        from core.pg import get_pool, require_revision
+
+        try:
+            pool = await get_pool()
+            await require_revision()
+            for table in catalogue:
+                moved |= await tables_stood_down_or_owned(pool, (table,))
+        except Exception as e:  # noqa: BLE001 — any failure is "cannot tell"
+            logger.error("Catalogue carry: cannot read who owns the catalogue: "
+                         "%s: %s", type(e).__name__, e)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Cannot tell whether a write chain owns the catalogue, so "
+                    f"nothing was carried: {type(e).__name__}: {e}"
+                ),
+            ) from e
+    if moved:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{', '.join(sorted(moved))} is written by a write chain, not "
+                "shipped by the mirror; a row only DuckDB holds is the copy-back "
+                "handover's to decide now (scripts/chain_copy_back.py catalogue "
+                "--handover)."
+            ),
+        )
+
+    store = await get_store()
+    try:
+        stats = await carry_retired_catalogue(store, dry_run=dry_run)
+    except CatalogueCarryRefused as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except Exception as e:
+        logger.error(f"Catalogue carry failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Carry failed: {e}")
+    return {"status": "dry_run" if dry_run else "success", "stats": stats}
+
+
 @router.post("/mirror/backfill/buyers")
 @limiter.limit("2/hour")
 async def backfill_mirror_buyers(
@@ -922,19 +994,55 @@ async def set_manager_retail_status(
     year's reports on the next refresh. Backdating is still available, but it
     is now something you ask for.
     """
-    store = await get_store()
-    managers = {m["id"] for m in await store.get_all_managers()}
-    if manager_id not in managers:
-        raise HTTPException(status_code=404, detail=f"Manager {manager_id} not found")
+    # Chain 5 (`core/pg_managers_write.py`). A `KS_WRITE_MANAGERS` nobody can
+    # read writes neither store — the writer refuses and the replica stands
+    # down — so it is refused here before anything is read: 409, the variable
+    # is the thing to fix. Off DuckDB, a Postgres failure is a 503 rather than
+    # a 500: the decision was not stored, and nothing fell back to DuckDB.
+    from core import pg_managers_write
 
-    # set_manager_retail_status marks the warehouse dirty itself now, so every
-    # caller gets the rebuild, not only this one.
-    await store.set_manager_retail_status(
-        manager_id, is_retail,
-        effective_from=effective_from,
-        set_by=admin.get("user_id"),
-        note=note,
-    )
+    chain_mode = pg_managers_write.mode()
+    if chain_mode is None:
+        raise HTTPException(status_code=409, detail=(
+            f"{pg_managers_write.WRITE_ENV} is not understood, so the "
+            "classification cannot be stored in either store; fix the variable"))
+
+    store = await get_store()
+    try:
+        managers = {m["id"] for m in await store.get_all_managers()}
+        if manager_id not in managers:
+            raise HTTPException(status_code=404, detail=f"Manager {manager_id} not found")
+
+        # set_manager_retail_status marks the warehouse dirty itself now, so every
+        # caller gets the rebuild, not only this one.
+        await store.set_manager_retail_status(
+            manager_id, is_retail,
+            effective_from=effective_from,
+            set_by=admin.get("user_id"),
+            note=note,
+        )
+    except HTTPException:
+        raise
+    except pg_managers_write.ManagerNotFound:
+        raise HTTPException(status_code=404, detail=f"Manager {manager_id} not found")
+    except pg_managers_write.BackdateBehindLatest as exc:
+        # OD-C5-1 (a): DuckDB would have written two open intervals.
+        raise HTTPException(status_code=409, detail=str(exc))
+    except pg_managers_write.ClassificationRefused as exc:
+        # A value Postgres would refuse, refused before Postgres was asked: a
+        # bad request, not an outage — a 503 here would send the operator to
+        # look at a Postgres that was never involved. The message names the
+        # field and the kind of value, never the value.
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        if chain_mode == "duckdb":
+            raise
+        logger.error("Manager %s not classified: Postgres failed under %s: %s",
+                     manager_id, pg_managers_write.WRITE_ENV, type(exc).__name__,
+                     exc_info=True)
+        raise HTTPException(status_code=503, detail=(
+            "The classification is written to Postgres, which did not answer; "
+            f"nothing was stored ({type(exc).__name__})"))
     # Step 05. This endpoint is the whole reason the classification cannot be
     # re-derived on the other side, so Postgres is updated here rather than
     # waiting for the daily manager sync — otherwise Silver computed in

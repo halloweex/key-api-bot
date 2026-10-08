@@ -59,7 +59,10 @@ jobs:
   tests:
     name: pytest
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The suite on main already took 18-19 of 20 minutes in October 2026, and
+    # stage 4 batch E adds ~1 700 tests: the run was cancelled at 20:00 with
+    # nothing failing. 40 leaves room without hiding a hang for long.
+    timeout-minutes: 40
 
     steps:
       - uses: actions/checkout@v4

@@ -200,3 +200,30 @@ def test_the_plaintext_the_shipper_makes_to_check_is_removed_where_it_is_made():
     assert decrypt < removed < marker, (
         "the decrypted dump outlives the check it was made for"
     )
+
+
+def test_the_pitr_drill_vouches_only_after_every_check():
+    """Chain 3's flip reads `data/.pg_pitr_drill_last_ok`
+    (`core/backup_evidence.py`). Written anywhere but at the end — after the
+    last `fail` the drill can reach — it would vouch for a recovery that had
+    not been proved. Mutation: move the marker block above the row counts."""
+    text = (REPO / "deploy" / "pg_pitr_drill.sh").read_text()
+    lines = [(i, line) for i, line in enumerate(text.splitlines())
+             if not line.lstrip().startswith("#")]
+    write = max(i for i, line in lines if "pg_pitr_drill_last_ok" in line)
+    last_fail = max(i for i, line in lines if re.search(r"\bfail \"", line))
+    assert last_fail < write
+    assert text.index("PITR is real") < text.index("pg_pitr_drill_last_ok")
+    # Through a rename, so the web container never reads half a line.
+    assert 'mv -f "$MARKER.tmp" "$MARKER"' in text
+
+
+def test_the_remote_drill_vouches_only_after_pass():
+    """Mutation: write the marker before the row comparison's last `fail`."""
+    text = (REPO / "deploy" / "pg_restore_drill.sh").read_text()
+    body = text[text.index("drill_from_remote() {"):]
+    body = body[:body.index("\n}\n")]
+    assert body.index("PASS — the copy off this machine") < body.index(
+        "pg_restore_drill_remote_last_ok")
+    assert body.rindex('fail "') < body.index("pg_restore_drill_remote_last_ok")
+    assert 'mv -f "$marker.tmp" "$marker"' in body

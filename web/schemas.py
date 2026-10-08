@@ -31,6 +31,23 @@ class DuckDBStats(BaseModel):
     categories: Optional[int] = None
     managers: Optional[int] = None
     db_size_mb: Optional[float] = None
+    fatal: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "DuckDB instances a FatalException invalidated in this process: "
+            "`count`, `kinds` (count per kind) and `last_at` (UTC). `index` is "
+            "an index short in the file — the write that met it fails again "
+            "until every CREATE INDEX index is rebuilt (the Sunday compaction, "
+            "or weekly_compact.sh by hand); `other` is any other FATAL. Each "
+            "invalidated instance is dropped and the next use opens the file "
+            "again, so DuckDB keeps answering. `index_short` (`since`, "
+            "`last_at`, `count`) is that index damage as written down beside "
+            "the file, and outlives a restart until a compaction replaces the "
+            "file. `status` reads degraded while either is set: a FATAL of "
+            "this process until web restarts, `index_short` until the "
+            "compaction. Null until one. Never the exception text."
+        ),
+    )
 
 
 class DataQualityFreshness(BaseModel):
@@ -42,6 +59,11 @@ class DataQualityFreshness(BaseModel):
     """
     last_success_at: Optional[str] = Field(None, description="ISO timestamp of the last successful run")
     age_seconds: Optional[int] = Field(None, description="Seconds since that run; null means never succeeded")
+    stood_down: bool = Field(
+        False, description=(
+            "The layer is not written by design — `reconciliation`, DuckDB's arm "
+            "of the 05:30 job, once chain 3 writes the orders to Postgres — so "
+            "its age is not judged"))
 
 
 class MirrorFreshness(BaseModel):
@@ -78,6 +100,14 @@ class SyncStatus(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str = Field(description="Service status: healthy or degraded")
+    degraded_by: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Why `status` is degraded, one word per cause: `duckdb` (the store "
+            "did not answer), `migrations` (a step failed), `duckdb_fatal` "
+            "(`duckdb.fatal` is set). Empty when healthy."
+        ),
+    )
     version: str = Field(description="Application version")
     uptime_seconds: int = Field(description="Uptime in seconds")
     correlation_id: Optional[str] = Field(None, description="Request correlation ID")
@@ -136,13 +166,40 @@ class HealthResponse(BaseModel):
             "a chain's own condition for moving that does not hold (chain 6a: "
             "KS_READ_EXPENSES=postgres) — an unlatched chain then writes duckdb "
             "whatever its variable says, and a latched one writes Postgres "
-            "while its readers read DuckDB. Chain 1's entry also "
+            "while its readers read DuckDB. `shadow` says the chain keeps "
+            "feeding DuckDB after it moves (OD-02 (c): chains 9, 10 and 11 — "
+            "Postgres writes first and DuckDB is handed the same row after the "
+            "commit, so the hourly copy stands down while the daily comparison "
+            "keeps comparing); such an entry carries `shadow_failures`, the "
+            "DuckDB halves that failed since start (count, last_at, error "
+            "class), and a report ledger's carries `pending`, the delivered "
+            "weeks whose ledger row is still spooled (`unreadable`: the files "
+            "no drain will land, whose row a human writes). Chain 1's entry also "
             "carries `preflight` (DN-24): `ok` and the `reasons` it may not "
             "be switched to Postgres yet, null once it already is, with "
             "`notes` that do not block it; and "
             "`sync_step`: consecutive Postgres failures of its offers or "
             "stocks step, the last one's step and error class, and when the "
-            "next attempt is allowed."
+            "next attempt is allowed. Chain 3's entry (`pg_orders_write`) "
+            "carries the same two: `preflight` names every unmet "
+            "precondition while its flag is still off, and `sync_step` is "
+            "the order step — failures in a row, ages, the last error's "
+            "class and how many orders Postgres would refuse — judged by the "
+            "canary as `orders_sync_failing` once the chain writes Postgres. "
+            "Chain 6's entry (the catalogue) carries the same `sync_step` for "
+            "its hourly products step."
+        ),
+    )
+    backups: Optional[Dict[str, Optional[float]]] = Field(
+        None,
+        description=(
+            "Hours since the host's backup scripts last proved themselves, "
+            "read from the markers they write on success only: "
+            "`pitr_drill_age_h` (the weekly PITR drill), "
+            "`remote_restore_age_h` (the off-site copy restored) and "
+            "`pg_offsite_age_h` (a Postgres dump shipped off the host). Null "
+            "where no marker exists. Chain 3's flip waits on all three "
+            "(`unmet_precondition`). Ages only — no path, host or account."
         ),
     )
     derivation: Optional[Dict[str, Any]] = Field(
@@ -190,6 +247,18 @@ class HealthResponse(BaseModel):
             "with no address missing. Under off only, `refused` "
             "is `{surface: {count, last_at}}` for the reads refused since the "
             "process started."
+        ),
+    )
+    duckdb_switch: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "KS_DUCKDB, the week of silence's switch: `mode` as run (on, the "
+            "default, or off — this process must not open the DuckDB file), "
+            "`value` as read, `error` naming a value that was not understood "
+            "and ran as on. `opened_while_off` is `{site: {count, last_at}}` "
+            "for every open refused under off since the process started, a "
+            "site being the `module:function` that asked; never an "
+            "exception's text. Paged CRITICAL by the canary when non-empty."
         ),
     )
     warehouse_writer_mode: Optional[Dict[str, Any]] = Field(

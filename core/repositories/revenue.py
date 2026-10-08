@@ -434,9 +434,17 @@ class RevenueMixin:
         """
         from core.sql_dialect import DUCKDB, POSTGRES
 
-        from core import pg_dashboard_read
+        from core import pg_dashboard_read, pg_managers_write
 
         params = list(params or [])
+        # A statement reading `{managers}` goes where chain 5 writes, and
+        # without a fallback — `_marketing_run`'s rule for the goals, for
+        # `core/pg_managers_read.py`'s reason: after the flip DuckDB's
+        # managers are frozen, not an older answer.
+        if pg_managers_write.reads_the_chain(sql):
+            return await pg_dashboard_read.fetch(
+                self._render_report(sql, POSTGRES), params,
+            )
         read_fallback.no_address("dashboard", pg_dashboard_read)
         if pg_dashboard_read.enabled() and pg_dashboard_read.available():
             try:

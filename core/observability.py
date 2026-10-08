@@ -16,6 +16,7 @@ Usage:
 """
 import logging
 import json
+import re
 import time
 import uuid
 import functools
@@ -154,6 +155,71 @@ class HumanReadableFormatter(logging.Formatter):
         return base_msg
 
 
+# Where DuckDB starts printing the rows a FATAL could not take out of an index:
+# every column of each — a buyer's name, phone and email among them. Measured
+# on 1.5.5 as "...from index. Only deleted 0 out of 1 rows.\nChunk: Chunk -
+# [4 Columns]\n- FLAT VARCHAR: 1 = [ +380…]", and every "database has been
+# invalidated" echo quotes the original error, dump included. Matched on the
+# dump's own header too (DataChunk::ToString's "Chunk - [N Columns]"), so a
+# message that prints a chunk without the "\nChunk:" prefix is cut as well —
+# and on nothing looser: the sync logs "Chunk 3: Fetching orders...".
+ROW_DUMP = re.compile(r"\nChunk:|Chunk - \[\d+ Columns?\]")
+
+
+def without_row_dump(text: str) -> str:
+    """`text` up to DuckDB's row dump, if it carries one."""
+    found = ROW_DUMP.search(text)
+    return text[:found.start()] if found else text
+
+
+def cut_row_dumps(exc: Optional[BaseException]) -> None:
+    """Cut DuckDB's row dump out of `exc` and of every exception chained to
+    it (`__cause__`, `__context__`, a group's members), in place.
+
+    In place because the exception is what travels: a caller that logs it
+    with its traceback, stores `str(e)` or answers it in an HTTP body reads
+    `args`, and so does every traceback printer."""
+    seen, todo = set(), [exc]
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        args = getattr(e, "args", ())
+        if any(isinstance(a, str) and ROW_DUMP.search(a) for a in args):
+            try:
+                e.args = tuple(without_row_dump(a) if isinstance(a, str) else a
+                               for a in args)
+            except Exception:  # noqa: BLE001 — an exception that refuses new args
+                pass
+        todo += [e.__cause__, e.__context__, *getattr(e, "exceptions", ())]
+
+
+class RowDumpFilter(logging.Filter):
+    """Cuts DuckDB's row dump out of every record a handler emits: the
+    message, and the exception it carries.
+
+    The store cuts what leaves it (`DuckDBStore.connection()`); this is the
+    rest of web's log — a handler that logged a DuckDB error inside its own
+    block, before the exception reached the store's exit, and a migration
+    logged with its traceback during `connect()`. Never drops a record and
+    never raises: a filter that raised would take the caller's log call, and
+    the caller, with it."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if record.exc_info and record.exc_info[1] is not None:
+                cut_row_dumps(record.exc_info[1])
+                if record.exc_text and ROW_DUMP.search(record.exc_text):
+                    record.exc_text = None
+            message = record.getMessage()
+            if ROW_DUMP.search(message):
+                record.msg, record.args = without_row_dump(message), None
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
+
 def setup_logging(
     level: str = "INFO",
     json_format: bool = False,
@@ -176,6 +242,9 @@ def setup_logging(
     # Configure root handler
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
+    # A DuckDB FATAL prints the rows it could not remove — names, phones,
+    # emails — and web's log is read by people and by the diagnostic agent.
+    handler.addFilter(RowDumpFilter())
 
     # Set up root logger
     root_logger = logging.getLogger()

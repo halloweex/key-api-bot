@@ -125,6 +125,73 @@ The buyers (chain 4):
   90 minutes, and a second limit on the stamp the same step writes would say
   one stall twice (`pg_buyers_write.CHAIN_WATERMARK_MAX_AGE_MIN`).
 
+The orders (chain 3):
+
+* **No expense without its order, once the chain has written.** The order
+  and its costs land in one transaction from one payload, so an expense whose
+  `order_id` `bronze.orders` does not hold — older than a day, past anything
+  in flight — is a write that went round the chain, or an order dropped
+  for want of `ordered_at` while its costs were kept, as DuckDB always kept
+  them. WARN: the cost is real, it is only unjoined. No check in either
+  engine looked at expenses against orders before this one; the integrity
+  scan's foreign-key check and DN-23's twin are order lines only.
+* **`app.order_backfill_misses.checked_at`.** Postgres has no default there
+  (revision 0008), and a NULL is an id the half-written repair re-asks KeyCRM
+  about every run, because its 30-day `NOT EXISTS` cannot compare it.
+* **Not its watermark.** `last_sync_orders` holds KeyCRM's newest
+  `updated_at`, not a sync time, and stands still overnight by design
+  (`pg_orders_write.CHAIN_WATERMARK_MAX_AGE_MIN`); `freshness_orders` and the
+  order step's own health judge the sync.
+
+The manager classification (chain 5):
+
+* **Not empty.** The writer upserts and never deletes a manager, so a table
+  found empty is somebody else's statement — and every retail-status call
+  answers 404, the screen lists nobody, and the baseline seed has nothing to
+  seed. CRITICAL.
+* **Exactly one open interval per classified manager.** With none open every
+  order from the last `valid_to` on resolves `internal`, which is admin-only;
+  with two open the answer is whichever is retail. CRITICAL.
+* **Every manager classified, from the latch on.** The chain's writer seeds a
+  baseline in the transaction that lands a manager, so after the handover a
+  manager with no interval is a write that went round it. Before the latch the
+  replica legitimately carries such managers until DuckDB's next boot (the
+  design's M2). WARN: its orders still resolve by `is_retail`.
+* **An unbroken history.** One manager's intervals must end where the next
+  begins — an overlap answers a date twice, a gap not at all. WARN, because a
+  backdate DuckDB accepted before the chain (M1) leaves exactly this, and only
+  a human can decide which answer the past should have.
+* **`is_retail` agrees with the latest open interval.** The screen shows one
+  and Silver uses the other. WARN.
+* **`set_at`** — the copy-back's handover clock, which the Postgres column has
+  no default for (`chain_required_column_null`).
+* **Not its watermark.** The sync is daily; `_freshness_check` judges
+  `last_sync_managers` at 192 h from `meta.chain_watermarks`.
+
+The goal and forecast tables (chain 7b-3):
+
+* **Complete.** Twelve months of `seasonal_indices`, none without a
+  `yoy_growth`, and a measured `yoy_overall` in `growth_metrics`.
+  `generate_smart_goals` falls back per month (index 1.0, YoY at the cap,
+  confidence `low`) and per overall rate without an error, so a short table is
+  a different goal on every page and nothing else says so. The overall rate
+  also counts as missing when it is the 0.10 placeholder (`sample_size = 0`)
+  while its own `period_start` says the history already holds two full years —
+  the state the 2026-08-31 backup was in, written before chain 7b-1.
+* **Stored on time.** Each writer runs on a schedule — the Monday
+  `seasonality_calc` and the Mon/Thu 03:30 training — and a run that did not
+  store (refused under `KS_READ_FALLBACK=off`, raised, a training rejected by
+  its gate, a store `predict_month` swallowed, a restart over the slot) leaves
+  the stamps older than the slot. Judged against the last slot the scheduler's
+  own constants name, `FORECAST_SLOT_GRACE` after it, so a missed Monday or
+  Thursday is in that morning's 07:00 run and the 09:00 digest. A flat age
+  would have to exceed the Thu→Mon gap and say so on Saturday.
+* **All WARN.** Every value in the four tables can be computed again —
+  `POST /api/goals/recalculate` and a training — so nothing here is worth a
+  page at 01:00. An unstamped row is reported inside the staleness it blinds,
+  not as `chain_required_column_null`: these stamps order nothing in the
+  copy-back, which forgives them.
+
 WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
 
 A chain is watched when `core.write_chains.chain_modes()` says its writes go to
@@ -262,6 +329,12 @@ INITIAL_BURST_PCT = 5.0
 # genuinely halved inside the window is worth the look this would cost.
 SNAPSHOT_MIN_RATIO = 0.5
 
+# How long after a scheduled slot of chain 7b-3's two writers their stamps
+# must have moved. Puts the Mon/Thu 03:30 training and the Monday 04:00 job
+# before the 07:00 integrity run (06:00 and 06:30), and leaves the wait for the
+# heavy-job lock and the training itself — seconds — far inside it.
+FORECAST_SLOT_GRACE = timedelta(hours=2, minutes=30)
+
 
 # ─── Facts ────────────────────────────────────────────────────────────────────
 
@@ -355,7 +428,131 @@ class Buyers:
     contact_missing_sample: Tuple[int, ...] = ()
 
 
-Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Unwatched, None]
+@dataclass(frozen=True)
+class Orders:
+    """What is true of chain 3's tables on their own. The expense orphans are
+    read only once the chain has written here (`latched_at`)."""
+    nulls: Nulls
+    latched_at: Optional[datetime] = None
+    expense_orphans: int = 0
+    expense_orphan_sample: Tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class Managers:
+    """The shape of the classification, from one read of both tables
+    (`pg_managers_write.SHAPE_SQL`). Ids, sorted, at most what the read
+    returned. `unclassified` is judged only once the chain has written here
+    (`latched_at`)."""
+    nulls: Nulls
+    latched_at: Optional[datetime] = None
+    managers: int = 0
+    intervals: int = 0
+    unclassified: Tuple[int, ...] = ()
+    open_wrong: Tuple[int, ...] = ()
+    broken: Tuple[int, ...] = ()
+    disagree: Tuple[int, ...] = ()
+    orphans: Tuple[int, ...] = ()
+
+
+
+@dataclass(frozen=True)
+class CatalogueTable:
+    """One catalogue table against the last full write's instant (OD-15 (a)).
+
+    `last_ok_at` is `meta.mirror_state.last_ok_at` — the instant the last full
+    write (the chain's, or the mirror's before it) stamped on every row it
+    carried — and `last_rows` how many distinct rows it carried. `current`,
+    `retired` and `around` split the table by `mirrored_at` against it: equal,
+    earlier (KeyCRM stopped serving the row) and written round the chain —
+    later than it, or, once the chain has written (`recorded`), at or after
+    the latch at an instant that is none of the chain's recorded writes
+    (`pg_catalogue_write`, "THE CHAIN KEEPS A RECORD OF ITS OWN INSTANTS"). A
+    later full write never turns that second kind into retired. None for
+    `last_ok_at` is a table no full write has ever stamped."""
+    table: str
+    rows: int = 0
+    last_ok_at: Optional[datetime] = None
+    last_rows: Optional[int] = None
+    current: int = 0
+    retired: int = 0
+    around: int = 0
+    retired_sample: Tuple[int, ...] = ()
+    around_sample: Tuple[int, ...] = ()
+    recorded: bool = False
+    # Rows the full write before the last one carried and the last one did
+    # not: still at that write's instant (the record's `previous`). What a
+    # truncated catalogue leaves; 0 until the chain has written.
+    dropped: int = 0
+    dropped_sample: Tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class Catalogue:
+    """Chain 6's two tables. `latched_at` None is a chain flagged that has not
+    written here yet: "lost" is not judged then, because the last full write
+    was the mirror's, whose `last_rows` counts a repeated payload id twice.
+    Read off Postgres's clock (`_read_catalogue`), since it is compared with
+    `meta.mirror_state.last_ok_at`."""
+    tables: Tuple[CatalogueTable, ...] = ()
+    latched_at: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
+class Forecast:
+    """What is true of chain 7b-3's four tables on their own (`_read_forecast`).
+
+    Counts and stamps only, read in one statement: the three goal tables are
+    written in one transaction, so one snapshot sees one set of them."""
+    latched_at: Optional[datetime] = None
+    months: int = 0
+    yoy_null: int = 0
+    seasonal_at: Optional[datetime] = None
+    seasonal_unstamped: int = 0
+    yoy_rows: int = 0
+    yoy_overall: Optional[float] = None
+    yoy_sample: Optional[int] = None
+    yoy_from: Optional[date] = None
+    forecast_at: Optional[datetime] = None
+    horizon: Optional[date] = None
+    forecast_unstamped: int = 0
+
+
+
+@dataclass(frozen=True)
+class Journal:
+    """Chain 9 (OD-02 (c)): findings whose run Postgres does not hold. The
+    daily comparison still compares the journal — DuckDB is its shadow — so
+    this is only what a comparison of two copies cannot see: the property a
+    run and its findings land in one transaction, checked where it now
+    lives."""
+    orphan_issues: int = 0
+    orphan_diffs: int = 0
+    orphan_sample: Tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class Watchdogs:
+    """Chain 10 (OD-02 (c)): per sample table, its newest and oldest
+    `sampled_at` — `(table, newest, oldest)`, None for an empty table."""
+    spans: Tuple[Tuple[str, Optional[datetime], Optional[datetime]], ...] = ()
+
+
+@dataclass(frozen=True)
+class Ledger:
+    """Chains 11a/11b (OD-02 (c)): one report's send ledger. `due` is whether
+    the last complete week should have gone out by now — after Wednesday
+    00:00 Kyiv, and not before the report's first week."""
+    nulls: Nulls
+    latched_at: Optional[datetime] = None
+    week_start: Optional[date] = None
+    due: bool = False
+    has_week: bool = True
+
+
+Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Orders,
+              Managers, Catalogue, Forecast, Journal, Watchdogs, Ledger,
+              Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -375,6 +572,17 @@ class Facts:
     goals: Group = None
     expense_types: Group = None
     buyers: Group = None
+    orders: Group = None
+    # Chain 5's two tables.
+    managers: Group = None
+    catalogue: Group = None
+    # Chain 7b-3's four tables.
+    forecast: Group = None
+    # The shadow chains (OD-02 (c)), appended last.
+    journal: Group = None
+    watchdogs: Group = None
+    weekly_ledger: Group = None
+    traffic_ledger: Group = None
     watermarks: Tuple[WatermarkAge, ...] = ()
     watermarks_unread: Optional[Unwatched] = None
     # Watched chains with no reader in `_reader_groups` — moved, and nothing
@@ -399,7 +607,29 @@ DICTIONARY_EMPTY = "chain_dictionary_empty"
 NAME_UNRESOLVED = "chain_name_unresolved"
 BUYER_ORPHANS = "chain_buyer_orphan_rows"
 CONTACT_MISSING = "chain_buyer_contact_missing"
+# Chain 3, the orders.
+EXPENSE_ORPHANS = "chain_expense_orphans"
+# Chain 5, the manager classification.
+MANAGERS_EMPTY = "chain_managers_empty"
+MANAGER_OPEN_INTERVAL = "chain_manager_open_interval"
+MANAGER_UNCLASSIFIED = "chain_manager_unclassified"
+MANAGER_INTERVALS_BROKEN = "chain_manager_intervals_broken"
+MANAGER_RETAIL_DISAGREES = "chain_manager_retail_disagrees"
+# Chain 6, the catalogue (OD-15 (a)): `CatalogueTable`'s three counts judged.
+CATALOGUE_EMPTY = "chain_catalogue_empty"
+CATALOGUE_WRITTEN_AROUND = "chain_catalogue_written_around"
+CATALOGUE_ROWS_LOST = "chain_catalogue_rows_lost"
+CATALOGUE_RETIRED = "chain_catalogue_retired"
+CATALOGUE_SHORT_WRITE = "chain_catalogue_short_write"
+# The shadow chains (OD-02 (c)).
+JOURNAL_ORPHANS = "chain_orphan_children"
+SAMPLES_STALE = "chain_samples_stale"
+RETENTION_UNBOUNDED = "chain_retention_unbounded"
+REPORT_WEEK_MISSING = "chain_report_week_missing"
 UNWATCHED = "chain_invariants_unwatched"
+GOAL_TABLES_INCOMPLETE = "chain_goal_tables_incomplete"
+GOAL_TABLES_STALE = "chain_goal_tables_stale"
+FORECAST_STALE = "chain_forecast_stale"
 
 # What a blind run holds rather than resolves — `data_quality`'s
 # GUARDED_CHECK_CONDITIONS shape, and `unverified_conditions` below reads it.
@@ -407,7 +637,17 @@ CONDITIONS: Tuple[str, ...] = (
     SEQUENCE_BEHIND, COLUMN_NULL, INITIAL_BURST, FIRST_SEEN_RESET,
     ROLLUP_MISSING, SNAPSHOT_SHORT, WATERMARK_STALE,
     DICTIONARY_EMPTY, NAME_UNRESOLVED, BUYER_ORPHANS, CONTACT_MISSING,
+    EXPENSE_ORPHANS,
+    GOAL_TABLES_INCOMPLETE, GOAL_TABLES_STALE, FORECAST_STALE,
+    JOURNAL_ORPHANS, SAMPLES_STALE, RETENTION_UNBOUNDED, REPORT_WEEK_MISSING,
 )
+# Chain 5's, held and resolved with the rest.
+CONDITIONS += (
+    MANAGERS_EMPTY, MANAGER_OPEN_INTERVAL, MANAGER_UNCLASSIFIED,
+    MANAGER_INTERVALS_BROKEN, MANAGER_RETAIL_DISAGREES,
+)
+CONDITIONS += (CATALOGUE_EMPTY, CATALOGUE_WRITTEN_AROUND, CATALOGUE_ROWS_LOST,
+               CATALOGUE_RETIRED, CATALOGUE_SHORT_WRITE)
 
 # The family name every condition above carries, and the key the integrity
 # job resolves them by when its DuckDB half failed (`resolve_group(...,
@@ -461,14 +701,30 @@ def _reader_groups() -> Dict[str, str]:
     """
     from core import (
         pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-        pg_goals_write, pg_inventory_write,
+        pg_goals_write, pg_inventory_write, pg_managers_write, pg_orders_write,
     )
+    from core import pg_catalogue_write
+    from core import (
+        pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
+        pg_weekly_ledger_write,
+    )
+
+    from core import pg_forecast_write
 
     return {pg_expenses_write.CHAIN: "expenses",
             pg_inventory_write.CHAIN: "inventory",
             pg_goals_write.CHAIN: "goals",
             pg_expense_types_write.CHAIN: "expense_types",
-            pg_buyers_write.CHAIN: "buyers"}
+            pg_buyers_write.CHAIN: "buyers",
+            pg_orders_write.CHAIN: "orders",
+            pg_managers_write.CHAIN: "managers",
+            pg_catalogue_write.CHAIN: "catalogue",
+            pg_forecast_write.CHAIN: "forecast",
+            # The shadow chains (OD-02 (c)).
+            pg_dq_journal_write.CHAIN: "journal",
+            pg_watchdog_write.CHAIN: "watchdogs",
+            pg_weekly_ledger_write.CHAIN: "weekly_ledger",
+            pg_traffic_ledger_write.CHAIN: "traffic_ledger"}
 
 
 # ─── Reading ──────────────────────────────────────────────────────────────────
@@ -645,6 +901,59 @@ SELECT count(*) FILTER (WHERE kind = 'contact') AS contacts,
 FROM orphans
 """
 
+# Chain 3. `checked_at` has no default in Postgres (revision 0008).
+_MISS_NULLS_SQL = """
+SELECT count(*) FILTER (WHERE checked_at IS NULL) AS checked_at
+FROM app.order_backfill_misses
+"""
+
+# An expense whose order `bronze.orders` does not hold, past a day — the order
+# and its costs are written in one transaction from one payload, so nothing
+# legitimate is in flight that long.
+_EXPENSE_ORPHANS_SQL = """
+SELECT count(*) AS orphans,
+       COALESCE((array_agg(e.id ORDER BY e.id))[1:10], '{}'::int[]) AS sample
+FROM bronze.expenses e
+WHERE e.mirrored_at < now() - interval '1 day'
+  AND NOT EXISTS (SELECT 1 FROM bronze.orders o WHERE o.id = e.order_id)
+"""
+
+# One catalogue table split by `mirrored_at` against the last full write's
+# instant ($1) and, once the chain has written, against its record: $2 the
+# latch (the owner row's `updated_at`, Postgres's clock), $3 the recorded
+# stamps, $4 the full write before the last one. With $2 NULL the record is
+# not consulted. The table name is the
+# chain's own constant, never input; `{stamp}` is `STAMP_SQL`.
+_CATALOGUE_STATE_SQL = (
+    "SELECT last_ok_at, last_rows FROM meta.mirror_state WHERE table_name = $1")
+# The handover on Postgres's clock: `chain_latch.claim` inserts every owner
+# row in the latching transaction with `now()`, and never moves one after.
+_CATALOGUE_HANDOVER_SQL = (
+    "SELECT min(updated_at) FROM meta.chain_watermarks WHERE key = ANY($1::text[])")
+_CATALOGUE_RECORD_SQL = (
+    "SELECT (SELECT updated_at FROM meta.chain_watermarks WHERE key = $1) AS latched, "
+    "(SELECT value FROM meta.chain_watermarks WHERE key = $2) AS record")
+_CATALOGUE_SPLIT_SQL = """
+WITH r AS (
+    SELECT id, mirrored_at, {stamp} AS stamp,
+           COALESCE(mirrored_at > $1
+                    OR ($2::timestamptz IS NOT NULL AND mirrored_at >= $2
+                        AND NOT {stamp} = ANY($3::bigint[])), false) AS around
+    FROM {table}
+)
+SELECT count(*)                                                    AS rows,
+       count(*) FILTER (WHERE mirrored_at = $1 AND NOT around)     AS current,
+       count(*) FILTER (WHERE mirrored_at < $1 AND NOT around)     AS retired,
+       count(*) FILTER (WHERE around)                              AS around,
+       (array_agg(id ORDER BY id) FILTER (WHERE mirrored_at < $1 AND NOT around))[1:10]
+                                                                   AS retired_sample,
+       (array_agg(id ORDER BY id) FILTER (WHERE around))[1:10]     AS around_sample,
+       count(*) FILTER (WHERE stamp = $4 AND NOT around)           AS dropped,
+       (array_agg(id ORDER BY id) FILTER (WHERE stamp = $4 AND NOT around))[1:10]
+                                                                   AS dropped_sample
+FROM r
+"""
+
 _KYIV_DAY_SQL = "SELECT ($1::timestamptz AT TIME ZONE 'Europe/Kyiv')::date"
 
 _ROLLUP_SQL = """
@@ -661,6 +970,97 @@ FROM app.inventory_sku_history
 WHERE date BETWEEN $1 AND $2
 GROUP BY date ORDER BY date
 """
+
+# Chain 7b-3's four tables, in one statement (one snapshot). `$1` is today in
+# Kyiv: a forecast row dated before it is read by nothing (`get_forecast` and
+# the smart goal's ML signal both start from today), so only the rows still
+# ahead are worth counting unstamped. Retail only, because only retail is
+# trained (`_run_revenue_prediction`).
+_FORECAST_SQL = """
+SELECT (SELECT count(*) FROM app.seasonal_indices
+         WHERE month BETWEEN 1 AND 12) AS months,
+       (SELECT count(*) FROM app.seasonal_indices
+         WHERE yoy_growth IS NULL) AS yoy_null,
+       (SELECT max(updated_at) FROM app.seasonal_indices) AS seasonal_at,
+       (SELECT count(*) FROM app.seasonal_indices
+         WHERE updated_at IS NULL) AS seasonal_unstamped,
+       (SELECT count(*) FROM app.growth_metrics
+         WHERE metric_type = 'yoy_overall') AS yoy_rows,
+       (SELECT value FROM app.growth_metrics
+         WHERE metric_type = 'yoy_overall') AS yoy_overall,
+       (SELECT sample_size FROM app.growth_metrics
+         WHERE metric_type = 'yoy_overall') AS yoy_sample,
+       (SELECT period_start FROM app.growth_metrics
+         WHERE metric_type = 'yoy_overall') AS yoy_from,
+       (SELECT max(created_at) FROM app.revenue_predictions
+         WHERE sales_type = 'retail') AS forecast_at,
+       (SELECT max(prediction_date) FROM app.revenue_predictions
+         WHERE sales_type = 'retail') AS horizon,
+       (SELECT count(*) FROM app.revenue_predictions
+         WHERE sales_type = 'retail' AND prediction_date >= $1::date
+           AND created_at IS NULL) AS forecast_unstamped
+"""
+
+
+_JOURNAL_ORPHANS_SQL = """
+    WITH orphans AS (
+        SELECT 'issues' AS child, i.run_id FROM app.data_quality_issues i
+        WHERE NOT EXISTS (SELECT 1 FROM app.data_quality_runs r
+                          WHERE r.run_id = i.run_id)
+        UNION ALL
+        SELECT 'diffs', d.run_id FROM app.data_quality_diffs d
+        WHERE NOT EXISTS (SELECT 1 FROM app.data_quality_runs r
+                          WHERE r.run_id = d.run_id)
+    )
+    SELECT count(*) FILTER (WHERE child = 'issues') AS issues,
+           count(*) FILTER (WHERE child = 'diffs') AS diffs,
+           (SELECT array_agg(run_id ORDER BY run_id)
+              FROM (SELECT DISTINCT run_id FROM orphans
+                    ORDER BY run_id LIMIT 10) s) AS sample
+    FROM orphans
+"""
+
+
+async def _read_journal(conn) -> Journal:
+    row = await conn.fetchrow(_JOURNAL_ORPHANS_SQL)
+    return Journal(orphan_issues=int(row["issues"] or 0),
+                   orphan_diffs=int(row["diffs"] or 0),
+                   orphan_sample=tuple(int(x) for x in (row["sample"] or ())))
+
+
+def ledger_week_due(today: date, floor: Optional[date]) -> Tuple[date, bool]:
+    """The last complete Monday–Sunday week as of `today` (Kyiv), and whether
+    its report should have gone out: from Wednesday on — Monday's tick and
+    Tuesday's retry have both had their turn — and not before `floor`."""
+    from datetime import timedelta
+
+    week_start = today - timedelta(days=today.weekday() + 7)
+    due = today.weekday() >= 2 and (floor is None or week_start >= floor)
+    return week_start, due
+
+
+async def _read_ledger(conn, chain, today: date,
+                       latched_at: Optional[datetime] = None) -> Ledger:
+    table = chain.TABLE
+    week_start, due = ledger_week_due(today, chain.first_week())
+    row = await conn.fetchrow(
+        f"SELECT count(*) FILTER (WHERE sent_at IS NULL) AS sent_at, "
+        f"bool_or(week_start = $1 AND sales_type = $2) AS has_week FROM {table}",
+        week_start, chain.report_sales_type())
+    return Ledger(nulls=Nulls(table=table, counts={"sent_at": int(row["sent_at"])}),
+                  latched_at=latched_at, week_start=week_start, due=due,
+                  has_week=bool(row["has_week"]))
+
+
+async def _read_watchdogs(conn) -> Watchdogs:
+    from core.pg_watchdog_write import CHAIN_TABLES
+
+    spans = []
+    for table in CHAIN_TABLES:
+        row = await conn.fetchrow(
+            f"SELECT max(sampled_at) AS newest, min(sampled_at) AS oldest FROM {table}")
+        spans.append((table, row["newest"], row["oldest"]))
+    return Watchdogs(spans=tuple(spans))
 
 
 async def _read_allocator(conn, table: str, sequence: str) -> Allocator:
@@ -725,6 +1125,112 @@ async def _read_buyers(conn, latched_at: Optional[datetime] = None) -> Buyers:
                   orphan_contacts=int(orphans["contacts"]),
                   orphan_verdicts=int(orphans["verdicts"]),
                   orphan_sample=tuple(int(i) for i in orphans["sample"]))
+
+
+async def _read_orders(conn, latched_at: Optional[datetime] = None) -> Orders:
+    nulls_row = await conn.fetchrow(_MISS_NULLS_SQL)
+    nulls = Nulls(table="app.order_backfill_misses",
+                  counts={"checked_at": int(nulls_row["checked_at"])})
+    if latched_at is None:
+        return Orders(nulls=nulls)
+    orphans = await conn.fetchrow(_EXPENSE_ORPHANS_SQL)
+    return Orders(nulls=nulls, latched_at=latched_at,
+                  expense_orphans=int(orphans["orphans"]),
+                  expense_orphan_sample=tuple(int(i) for i in orphans["sample"]))
+
+
+async def _read_managers(conn, latched_at: Optional[datetime] = None) -> Managers:
+    """One read of both tables — `pg_managers_write.SHAPE_SQL`, which the
+    preflight asks too, so the question before the flip and the watch after it
+    cannot come to judge different shapes."""
+    from core.pg_managers_write import SHAPE_SQL
+
+    row = await conn.fetchrow(SHAPE_SQL)
+
+    def ids(column: str) -> Tuple[int, ...]:
+        return tuple(int(i) for i in (row[column] or ()))
+
+    return Managers(
+        nulls=Nulls(table="app.manager_classifications",
+                    counts={"set_at": int(row["set_at_null"])}),
+        latched_at=latched_at, managers=int(row["managers"]),
+        intervals=int(row["intervals"]), unclassified=ids("unclassified"),
+        open_wrong=ids("open_wrong"), broken=ids("broken"),
+        disagree=ids("disagree"), orphans=ids("orphans"))
+
+
+async def _read_catalogue(conn, latched_at: Optional[datetime] = None) -> Catalogue:
+    """Both catalogue tables against their last full write. A table with no
+    stamp is read for its size alone — the verdict says why it is unjudged.
+
+    The chain's record of its own writes is consulted from the latch on — the
+    owner row of the table, whose `updated_at` is the latching transaction's
+    `now()`. No record yet (the chain has latched through the other table) is
+    an empty one: nothing at or after the latch is then the chain's. A record
+    nobody can parse raises, and the group reads as unwatched."""
+    from core import chain_latch
+    from core.pg_catalogue_write import (
+        CHAIN_TABLES, STAMP_SQL, WriteRecord, parse_record, record_key,
+    )
+
+    tables: List[CatalogueTable] = []
+    for table in CHAIN_TABLES:
+        state = await conn.fetchrow(_CATALOGUE_STATE_SQL, table)
+        last_ok_at = state["last_ok_at"] if state else None
+        last_rows = state["last_rows"] if state else None
+        if last_ok_at is None:
+            rows = await conn.fetchval(f"SELECT count(*) FROM {table}")
+            tables.append(CatalogueTable(table=table, rows=int(rows),
+                                         last_rows=last_rows))
+            continue
+        mark = await conn.fetchrow(_CATALOGUE_RECORD_SQL,
+                                   chain_latch.owner_key(table), record_key(table))
+        latched = mark["latched"]
+        record = WriteRecord()
+        if latched is not None and mark["record"] is not None:
+            record = parse_record(mark["record"])
+        row = await conn.fetchrow(
+            _CATALOGUE_SPLIT_SQL.format(table=table, stamp=STAMP_SQL),
+            last_ok_at, latched, sorted(record.stamps), record.previous)
+        tables.append(CatalogueTable(
+            table=table, rows=int(row["rows"]), last_ok_at=last_ok_at,
+            last_rows=None if last_rows is None else int(last_rows),
+            current=int(row["current"]), retired=int(row["retired"]),
+            around=int(row["around"]),
+            retired_sample=tuple(int(i) for i in (row["retired_sample"] or ())),
+            around_sample=tuple(int(i) for i in (row["around_sample"] or ())),
+            recorded=latched is not None, dropped=int(row["dropped"]),
+            dropped_sample=tuple(int(i) for i in (row["dropped_sample"] or ()))))
+    # "Lost" asks whether the last full write is the chain's own — at or after
+    # the handover — so both sides of it are Postgres's clock: the owner rows'
+    # `updated_at` is the latching transaction's `now()`, the instant that
+    # write stamps on `meta.mirror_state.last_ok_at`. Never the local marker's
+    # stamp, which is the web host's clock and is taken just before that
+    # transaction begins: a Postgres clock a millisecond behind the host's read
+    # the latching write as older than the handover, and a deleted row went
+    # unjudged until the next full write (a laptop's Docker VM did). No owner
+    # row is a chain that has not written here, whatever the marker says.
+    if latched_at is not None:
+        latched_at = await conn.fetchval(
+            _CATALOGUE_HANDOVER_SQL,
+            [chain_latch.owner_key(t) for t in CHAIN_TABLES])
+    return Catalogue(tables=tuple(tables), latched_at=latched_at)
+
+
+async def _read_forecast(conn, latched_at: Optional[datetime],
+                         today: date) -> Forecast:
+    row = await conn.fetchrow(_FORECAST_SQL, today)
+    value = row["yoy_overall"]
+    return Forecast(
+        latched_at=latched_at,
+        months=int(row["months"]), yoy_null=int(row["yoy_null"]),
+        seasonal_at=row["seasonal_at"],
+        seasonal_unstamped=int(row["seasonal_unstamped"]),
+        yoy_rows=int(row["yoy_rows"]),
+        yoy_overall=None if value is None else float(value),
+        yoy_sample=row["yoy_sample"], yoy_from=row["yoy_from"],
+        forecast_at=row["forecast_at"], horizon=row["horizon"],
+        forecast_unstamped=int(row["forecast_unstamped"]))
 
 
 async def _read_inventory(conn, latched_at: Optional[datetime],
@@ -865,7 +1371,10 @@ async def read_facts(*, pool=None) -> Facts:
 
     from core import (
         pg_buyers_write, pg_expenses_write, pg_goals_write, pg_inventory_write,
+        pg_managers_write, pg_orders_write,
     )
+    from core import pg_catalogue_write, pg_forecast_write
+    from core import pg_traffic_ledger_write, pg_weekly_ledger_write
 
     groups: Dict[str, Group] = {}
     watermarks_unread: Optional[Unwatched] = None
@@ -887,6 +1396,22 @@ async def read_facts(*, pool=None) -> Facts:
                     "expense_types": _read_expense_types,
                     "buyers": lambda c: _read_buyers(
                         c, _stamp(watched.get(pg_buyers_write.CHAIN))),
+                    "orders": lambda c: _read_orders(
+                        c, _stamp(watched.get(pg_orders_write.CHAIN))),
+                    "managers": lambda c: _read_managers(
+                        c, _stamp(watched.get(pg_managers_write.CHAIN))),
+                    "catalogue": lambda c: _read_catalogue(
+                        c, _stamp(watched.get(pg_catalogue_write.CHAIN))),
+                    "forecast": lambda c: _read_forecast(
+                        c, _stamp(watched.get(pg_forecast_write.CHAIN)), today),
+                    "journal": _read_journal,
+                    "watchdogs": _read_watchdogs,
+                    "weekly_ledger": lambda c: _read_ledger(
+                        c, pg_weekly_ledger_write, today,
+                        _stamp(watched.get(pg_weekly_ledger_write.CHAIN))),
+                    "traffic_ledger": lambda c: _read_ledger(
+                        c, pg_traffic_ledger_write, today,
+                        _stamp(watched.get(pg_traffic_ledger_write.CHAIN))),
                 }
                 for group in sorted({groups_for[n] for n in names
                                      if n in groups_for}):
@@ -924,8 +1449,15 @@ async def read_facts(*, pool=None) -> Facts:
                  goals=groups.get("goals"),
                  expense_types=groups.get("expense_types"),
                  buyers=groups.get("buyers"),
+                 orders=groups.get("orders"),
+                 catalogue=groups.get("catalogue"),
+                 journal=groups.get("journal"),
+                 watchdogs=groups.get("watchdogs"),
+                 weekly_ledger=groups.get("weekly_ledger"),
+                 traffic_ledger=groups.get("traffic_ledger"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
-                 unread=unread)
+                 unread=unread, managers=groups.get("managers"),
+                 forecast=groups.get("forecast"))
 
 
 def _stamp(value: Optional[str]) -> Optional[datetime]:
@@ -961,11 +1493,33 @@ def _issue(**kw):
     return IntegrityIssue(**kw)
 
 
-def unwatched_issue(reason: str, watched: Tuple[str, ...]):
+# What a blindness of everything is filed under — the whole read, a verdict
+# that raised, a forgotten pre-read. Each of those is the run's only finding.
+WHOLE_PART = "(write chains)"
+# The watermarks' blindness, beside any group's in the same run.
+WATERMARKS_PART = "meta.chain_watermarks"
+
+
+def unwatched_issue(reason: str, watched: Tuple[str, ...],
+                    part: Optional[str] = None):
+    """`part` names what could not be read, and it is the finding's
+    `table_name`: one chain's group is `(<chain>)`, the watermarks are
+    `meta.chain_watermarks`, everything at once is `(write chains)`.
+
+    It has to differ per part. `app.data_quality_issues` is keyed on
+    `(run_id, check_name, table_name)`, and one constant here gave a run with
+    two blind groups two findings under one key: Postgres refused the whole
+    run under `KS_WRITE_DQ_JOURNAL=postgres`, and under `duckdb` DuckDB took it
+    and the hourly copy of the journal — never pruned — failed every hour from
+    then on. Left out, it is derived from `watched`, so a group that names its
+    one chain is distinct by construction (`tests/unit/test_chain_invariants_unwatched.py`).
+    """
     from core.data_quality import Severity
 
+    if part is None:
+        part = f"({watched[0]})" if len(watched) == 1 else WHOLE_PART
     return _issue(
-        check_name=UNWATCHED, table_name="(write chains)",
+        check_name=UNWATCHED, table_name=part,
         severity=Severity.WARN, count=len(watched) or 1,
         description=(
             f"The invariants of {', '.join(watched) or 'the write chains'} "
@@ -1210,6 +1764,390 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
     return issues
 
 
+def _order_issues(o: Orders, chain: str) -> List:
+    from core.data_quality import Severity
+
+    if o.latched_at is None or not o.expense_orphans:
+        return []
+    shown = ", ".join(str(i) for i in o.expense_orphan_sample)
+    return [_issue(
+        check_name=EXPENSE_ORPHANS, table_name="bronze.expenses",
+        severity=Severity.WARN, count=o.expense_orphans,
+        sample_ids=o.expense_orphan_sample,
+        description=(
+            f"{o.expense_orphans} expense(s) older than a day name an order "
+            f"bronze.orders does not hold (e.g. expense {shown}). {chain} "
+            "writes an order and its costs in one transaction from one "
+            "payload, so these were written round it, or their order was "
+            "refused (no ordered_at, or a value Postgres would not take) while "
+            "its costs were kept — the rule DuckDB always followed. The cost "
+            "is real and unjoined: /expenses' profit analysis cannot place it "
+            "on a day."))]
+
+
+def _shown(ids: Tuple[int, ...]) -> str:
+    return ", ".join(str(i) for i in ids[:10]) + (
+        f" (+{len(ids) - 10} more)" if len(ids) > 10 else "")
+
+
+def _manager_issues(m: Managers, chain: str) -> List:
+    from core.data_quality import Severity
+
+    issues: List = []
+    if not m.managers:
+        issues.append(_issue(
+            check_name=MANAGERS_EMPTY, table_name="bronze.managers",
+            severity=Severity.CRITICAL, count=1,
+            description=(
+                f"bronze.managers holds no rows, and {chain} writes it: the "
+                "managers screen lists nobody, every retail-status call answers "
+                "404, and the baseline seed has nothing to seed. The writer "
+                "upserts and never deletes a manager, so something else emptied "
+                "it. The daily manager sync lands them again; the "
+                "classification intervals are what cannot be re-fetched.")))
+    if m.open_wrong:
+        issues.append(_issue(
+            check_name=MANAGER_OPEN_INTERVAL, table_name="app.manager_classifications",
+            severity=Severity.CRITICAL, count=len(m.open_wrong),
+            sample_ids=m.open_wrong[:10],
+            description=(
+                f"{len(m.open_wrong)} manager(s) have intervals and not exactly "
+                f"one open (e.g. {_shown(m.open_wrong)}). With none open every "
+                "order from the last valid_to on resolves to internal, which is "
+                "admin-only; with two the answer is whichever one is retail. "
+                f"{chain}'s writer closes the open interval in the transaction "
+                "that opens the next, under one lock, so this is a write that "
+                "went round it — or a backdate DuckDB accepted before the chain.")))
+    if m.latched_at is not None and m.unclassified:
+        issues.append(_issue(
+            check_name=MANAGER_UNCLASSIFIED, table_name="app.manager_classifications",
+            severity=Severity.WARN, count=len(m.unclassified),
+            sample_ids=m.unclassified[:10],
+            description=(
+                f"{len(m.unclassified)} manager(s) have no classification "
+                f"interval at all (e.g. {_shown(m.unclassified)}). {chain}'s "
+                "writer seeds a baseline in the transaction that lands each "
+                "manager, so since the handover this is a write that went "
+                "round it. Their orders still resolve by is_retail, so no "
+                "number is wrong yet; the next manager sync seeds them.")))
+    if m.broken:
+        issues.append(_issue(
+            check_name=MANAGER_INTERVALS_BROKEN, table_name="app.manager_classifications",
+            severity=Severity.WARN, count=len(m.broken),
+            sample_ids=m.broken[:10],
+            description=(
+                f"{len(m.broken)} manager(s) have a history whose intervals "
+                f"overlap or leave a gap (e.g. {_shown(m.broken)}): a date is "
+                "answered twice, or not at all. A backdate DuckDB accepted "
+                "before chain 5 leaves exactly this, and which answer the past "
+                "should have is a human's decision, per id.")))
+    if m.disagree:
+        issues.append(_issue(
+            check_name=MANAGER_RETAIL_DISAGREES, table_name="bronze.managers",
+            severity=Severity.WARN, count=len(m.disagree),
+            sample_ids=m.disagree[:10],
+            description=(
+                f"{len(m.disagree)} manager(s) carry an is_retail that disagrees "
+                f"with their latest open interval (e.g. {_shown(m.disagree)}): "
+                "the managers screen shows one answer and Silver decides by the "
+                f"other. {chain}'s writer sets both in one transaction.")))
+    return issues
+
+
+def _catalogue_issues(cat: Catalogue, chain: str) -> List:
+    """OD-15 (a), judged on what Postgres holds. Pure.
+
+    Every rule but "lost" and the short write holds whoever made the last
+    full write — the mirror stamps `last_ok_at` in its rows' transaction
+    exactly as the chain does — so they are judged from the flag. "Lost" reads
+    `last_rows`, which only the chain's own write counts exactly, so it waits
+    for that write; the short write reads the record's `previous`, which only
+    the chain keeps."""
+    from core.data_quality import Severity
+    from core.pg_catalogue_write import RETIRED_WARN_MIN_ROWS, RETIRED_WARN_PCT
+
+    issues: List = []
+    for t in cat.tables:
+        if not t.rows:
+            issues.append(_issue(
+                check_name=CATALOGUE_EMPTY, table_name=t.table,
+                severity=Severity.CRITICAL, count=1,
+                description=(
+                    f"{t.table} holds no rows, and {chain} writes it: every "
+                    "order line Postgres serves joins it for a name, a brand "
+                    "and a category, so the dashboard's goods read Unknown. "
+                    "The writer upserts and never deletes, so something else "
+                    "emptied it — or the chain was flipped onto a Postgres the "
+                    "mirror never reached.")))
+            continue
+        if t.last_ok_at is None:
+            # Named by the table, not derived from `(chain,)`: both tables
+            # can lack a record in one run (a fresh Postgres), and two
+            # findings under `(pg_catalogue_write)` are one key in
+            # `app.data_quality_issues` — the run Postgres refuses whole.
+            issues.append(unwatched_issue(
+                f"meta.mirror_state records no full write of {t.table}, so a "
+                "retired row cannot be told from a lost one", (chain,),
+                part=t.table))
+            continue
+        if t.around:
+            shown = ", ".join(str(i) for i in t.around_sample)
+            issues.append(_issue(
+                check_name=CATALOGUE_WRITTEN_AROUND, table_name=t.table,
+                severity=Severity.CRITICAL, count=t.around,
+                sample_ids=t.around_sample,
+                description=(
+                    f"{t.around} row(s) of {t.table} carry a mirrored_at "
+                    + ("that is none of the chain's recorded writes "
+                       if t.recorded else
+                       "later than the last full write of the catalogue ")
+                    + f"(e.g. id {shown}). {chain} writes the whole catalogue "
+                    "and stamps meta.mirror_state in the same transaction, so "
+                    "every row it writes carries that instant exactly"
+                    + (", and it records every instant it writes at"
+                       if t.recorded else "")
+                    + "; any other is a writer going round it, and nothing "
+                    "compares this table with DuckDB any more. The finding "
+                    "stands until KeyCRM serves the row again or a human "
+                    "deletes or restores it.")))
+        if (cat.latched_at is not None and t.last_rows is not None
+                and t.last_ok_at >= cat.latched_at):
+            lost = t.last_rows - t.current - t.around
+            if lost > 0:
+                issues.append(_issue(
+                    check_name=CATALOGUE_ROWS_LOST, table_name=t.table,
+                    severity=Severity.CRITICAL, count=lost,
+                    description=(
+                        f"The last full write of {t.table} carried "
+                        f"{t.last_rows} row(s) and {t.current + t.around} of "
+                        f"them are still there: at least {lost} were deleted "
+                        f"since. {chain} never deletes, so a statement that is "
+                        "not the chain's removed them. The next full write "
+                        "restores any KeyCRM still serves.")))
+        if t.retired:
+            shown = ", ".join(str(i) for i in t.retired_sample)
+            issues.append(_issue(
+                check_name=CATALOGUE_RETIRED, table_name=t.table,
+                severity=Severity.INFO, count=t.retired,
+                sample_ids=t.retired_sample,
+                description=(
+                    f"{t.retired} row(s) of {t.table} were not in the last "
+                    f"full write (e.g. id {shown}): KeyCRM no longer serves "
+                    "them. The writer never deletes, so old orders on them "
+                    "keep their names. Not a defect.")))
+        # What the LAST write left out of what the one before it carried — not
+        # `retired / rows`, which counts every product KeyCRM ever retired:
+        # the writer never deletes, so that share only ever rose and, past 5%,
+        # warned after every complete write (the chain-6 review's ratchet).
+        carried_before = (t.last_rows or 0) + t.dropped
+        if t.dropped and carried_before:
+            share = t.dropped * 100.0 / carried_before
+            if share > RETIRED_WARN_PCT and t.dropped >= RETIRED_WARN_MIN_ROWS:
+                issues.append(_issue(
+                    check_name=CATALOGUE_SHORT_WRITE, table_name=t.table,
+                    severity=Severity.WARN, count=t.dropped,
+                    sample_ids=t.dropped_sample,
+                    description=(
+                        f"The last full write of {t.table} left out {t.dropped} "
+                        f"row(s) the write before it carried — {share:.1f}% of "
+                        f"{carried_before}, over the {RETIRED_WARN_PCT:g}% KeyCRM "
+                        "retires between two writes in the ordinary way. The "
+                        "sync's pagination stops on the first short page, so "
+                        "this is most likely a truncated catalogue; the next "
+                        "complete write carries the rest and clears this.")))
+    return issues
+
+
+def last_slot(schedule: Mapping[str, object], at: datetime) -> Optional[datetime]:
+    """The last instant at or before `at` a job registered with `schedule` (a
+    `core.scheduler` trigger constant) was due. The scheduler's own trigger,
+    in its own zone, so a daylight-saving change is the trigger's, not this
+    module's arithmetic. Pure."""
+    from apscheduler.triggers.cron import CronTrigger
+
+    from core.scheduler import SCHEDULER_TIMEZONE
+
+    trigger = CronTrigger(**schedule, timezone=SCHEDULER_TIMEZONE)
+    fire = trigger.get_next_fire_time(None, at - timedelta(days=8))
+    last = None
+    while fire is not None and fire <= at:
+        last = fire
+        fire = trigger.get_next_fire_time(fire, fire)
+    return last
+
+
+def _two_full_years_held(since: Optional[date], now: datetime) -> bool:
+    """Whether a history starting on `since` already holds two full calendar
+    years before the current Kyiv one — the pair `_yoy_growth` measures. A
+    year counts once it has orders in eleven months, so a history from 1
+    February of the year before last has its pair; later than that, the
+    placeholder may be honest. Conservative by a month on purpose: a WARN that
+    is wrong costs a reader's trust in the next one."""
+    from core.scheduler import SCHEDULER_TIMEZONE
+
+    if since is None:
+        return False
+    year = now.astimezone(SCHEDULER_TIMEZONE).year
+    return since <= date(year - 2, 2, 1)
+
+
+def _forecast_issues(f: Forecast, chain: str, now: Optional[datetime]) -> List:
+    from core.data_quality import Severity
+    from core.scheduler import REVENUE_TRAIN_SCHEDULE, SEASONALITY_SCHEDULE
+
+    whose = (
+        f"{chain} writes these tables" if f.latched_at is not None else
+        f"{chain} has not written these tables yet — they hold what the hourly "
+        "copy last shipped from DuckDB, so this is DuckDB's writer's state, "
+        "carried across")
+    issues: List = []
+
+    gaps: List[str] = []
+    if f.months < 12:
+        gaps.append(f"app.seasonal_indices holds {f.months} of 12 months")
+    if f.yoy_null:
+        gaps.append(f"{f.yoy_null} month(s) carry no yoy_growth")
+    if not f.yoy_rows:
+        gaps.append("app.growth_metrics holds no yoy_overall")
+    elif f.yoy_overall is None:
+        gaps.append("yoy_overall has no value")
+    elif (f.yoy_sample == 0 and now is not None
+          and _two_full_years_held(f.yoy_from, now)):
+        gaps.append(
+            f"yoy_overall is the {f.yoy_overall:.2f} placeholder (sample_size 0) "
+            f"although the history starts {f.yoy_from} and so already holds two "
+            "full years")
+    if gaps:
+        issues.append(_issue(
+            check_name=GOAL_TABLES_INCOMPLETE, table_name="app.seasonal_indices",
+            severity=Severity.WARN, count=len(gaps),
+            description=(
+                "; ".join(gaps) + ". generate_smart_goals falls back without an "
+                "error — index 1.0, the YoY at the dynamic cap and confidence "
+                "'low' for a month it cannot read, the cap for a missing overall "
+                f"rate — so every smart goal is quietly a different number. {whose}.")))
+
+    if now is None:
+        return issues
+    cutoff = now - FORECAST_SLOT_GRACE
+
+    slot = last_slot(SEASONALITY_SCHEDULE, cutoff)
+    if f.months and slot is not None and (
+            f.seasonal_at is None or f.seasonal_at < slot):
+        stamp = (f"was last stored {f.seasonal_at.isoformat()}"
+                 if f.seasonal_at is not None else "carries no updated_at at all")
+        unstamped = (f", and {f.seasonal_unstamped} row(s) carry no updated_at"
+                     if f.seasonal_unstamped and f.seasonal_at is not None else "")
+        issues.append(_issue(
+            check_name=GOAL_TABLES_STALE, table_name="app.seasonal_indices",
+            severity=Severity.WARN, count=1,
+            description=(
+                f"app.seasonal_indices {stamp}{unstamped}, before the "
+                f"seasonality_calc run due {slot.isoformat()}. That job stores "
+                "the indices and the YoY in one transaction, so it did not store "
+                "at all: refused under KS_READ_FALLBACK=off, raised, or missed by "
+                f"a restart over its slot, which has no catch-up. {whose}.")))
+
+    slot = last_slot(REVENUE_TRAIN_SCHEDULE, cutoff)
+    if slot is not None and (f.forecast_at is None or f.forecast_at < slot):
+        stamp = (f"was last stored {f.forecast_at.isoformat()}"
+                 if f.forecast_at is not None else "holds no retail row")
+        tail = []
+        if f.horizon is not None:
+            tail.append(f"its horizon ends {f.horizon}")
+        if f.forecast_unstamped:
+            tail.append(f"{f.forecast_unstamped} row(s) from today on carry no "
+                        "created_at")
+        issues.append(_issue(
+            check_name=FORECAST_STALE, table_name="app.revenue_predictions",
+            severity=Severity.WARN, count=1,
+            description=(
+                f"The retail forecast in app.revenue_predictions {stamp}"
+                + (f" ({'; '.join(tail)})" if tail else "")
+                + f", before the training due {slot.isoformat()}. The training "
+                "did not store: its model was rejected by the WAPE or sanity "
+                "gate (prediction:retrain_rejected says so), the input was "
+                "refused, or the store failed — predict_month swallows that, and "
+                "/api/jobs then shows predictions_stored false. The previous "
+                f"forecast is still served. {whose}.")))
+    return issues
+
+
+def _journal_issues(j: Journal, chain: str) -> List:
+    from core.data_quality import Severity
+
+    orphans = j.orphan_issues + j.orphan_diffs
+    if not orphans:
+        return []
+    shown = ", ".join(str(i) for i in j.orphan_sample)
+    return [_issue(
+        check_name=JOURNAL_ORPHANS, table_name="app.data_quality_runs",
+        severity=Severity.CRITICAL, count=orphans, sample_ids=j.orphan_sample,
+        description=(
+            f"{j.orphan_issues} finding(s) and {j.orphan_diffs} discrepancy "
+            f"row(s) name a run app.data_quality_runs does not hold (run "
+            f"{shown}). {chain} writes a run and its findings in one "
+            "transaction and nothing deletes a run, so these were written "
+            "round it, or a run was deleted by hand. The digest and "
+            "/api/health/data-quality reach findings through their run, so "
+            "these are findings nobody is shown."))]
+
+
+def _watchdog_issues(w: Watchdogs, chain: str, now: Optional[datetime]) -> List:
+    from datetime import timedelta
+
+    from core.data_quality import Severity
+    from core.pg_watchdog_write import STALE_AFTER, retention_days
+
+    if now is None:
+        return []
+    issues: List = []
+    keep = retention_days()
+    for table, newest, oldest in w.spans:
+        limit = STALE_AFTER[table]
+        if newest is None or now - newest > limit:
+            age = ("holds no sample" if newest is None
+                   else f"took its last sample {(now - newest).total_seconds() / 3600:.1f} h ago")
+            issues.append(_issue(
+                check_name=SAMPLES_STALE, table_name=table, severity=Severity.WARN,
+                count=1, description=(
+                    f"{table} {age}, past its {limit.total_seconds() / 3600:g} h "
+                    f"limit. {chain} writes it in Postgres now, so the watchdog "
+                    "differences against nothing newer: a growth or an OOM kill "
+                    "behind this gap cannot be seen. The job logs \"sample not "
+                    "persisted\" for every tick it could not store.")))
+        bound = timedelta(days=keep[table] + 1)
+        if oldest is not None and now - oldest > bound:
+            issues.append(_issue(
+                check_name=RETENTION_UNBOUNDED, table_name=table,
+                severity=Severity.WARN, count=1, description=(
+                    f"{table}'s oldest sample is {(now - oldest).days} days old, "
+                    f"past its {keep[table]}-day retention and a day of slack. "
+                    f"The prune runs in the same transaction as {chain}'s "
+                    "insert, so it has stopped running or was handed the wrong "
+                    "cutoff — and a table that keeps everything is the next "
+                    "page about the disk.")))
+    return issues
+
+
+def _ledger_issues(led: Ledger, chain: str) -> List:
+    from core.data_quality import Severity
+
+    issues = _null_issues(led.nulls, chain, led.latched_at)
+    if led.due and not led.has_week:
+        issues.append(_issue(
+            check_name=REPORT_WEEK_MISSING, table_name=led.nulls.table,
+            severity=Severity.WARN, count=1, description=(
+                f"The week starting {led.week_start} has no row in "
+                f"{led.nulls.table}, and it is Wednesday or later: either the "
+                "report never went out (the job's result in /api/jobs says "
+                "why — warehouse_behind, not_delivered, a refusal) or it went "
+                "out and the record did not land. A spooled record shows in "
+                f"/api/health under write_chains.{chain}.pending; the next "
+                "tick lands it.")))
+    return issues
+
+
 def _watermark_issues(marks: Tuple[WatermarkAge, ...]) -> List:
     from core.data_quality import Severity
 
@@ -1256,7 +2194,7 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
     """
     from core import (
         pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-        pg_goals_write, pg_inventory_write,
+        pg_goals_write, pg_inventory_write, pg_managers_write, pg_orders_write,
     )
 
     if facts is None:
@@ -1267,9 +2205,9 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
             "the integrity job judged these invariants without a pre-read; it "
             "must hand this check what core.pg_chain_invariants.read_facts "
             "returned",
-            watched)]
+            watched, WHOLE_PART)]
     if facts.whole is not None:
-        return [unwatched_issue(facts.whole.reason, facts.watched)]
+        return [unwatched_issue(facts.whole.reason, facts.watched, WHOLE_PART)]
     if not facts.watched:
         return []
 
@@ -1317,10 +2255,69 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
                                facts.buyers.latched_at)
         issues += _buyer_issues(facts.buyers, pg_buyers_write.CHAIN)
 
+    if isinstance(facts.orders, Unwatched):
+        issues.append(unwatched_issue(facts.orders.reason,
+                                      (pg_orders_write.CHAIN,)))
+    elif isinstance(facts.orders, Orders):
+        issues += _null_issues(facts.orders.nulls, pg_orders_write.CHAIN,
+                               facts.orders.latched_at)
+        issues += _order_issues(facts.orders, pg_orders_write.CHAIN)
+
+    if isinstance(facts.managers, Unwatched):
+        issues.append(unwatched_issue(facts.managers.reason,
+                                      (pg_managers_write.CHAIN,)))
+    elif isinstance(facts.managers, Managers):
+        issues += _null_issues(facts.managers.nulls, pg_managers_write.CHAIN,
+                               facts.managers.latched_at)
+        issues += _manager_issues(facts.managers, pg_managers_write.CHAIN)
+
+    from core import pg_catalogue_write
+
+    if isinstance(facts.catalogue, Unwatched):
+        issues.append(unwatched_issue(facts.catalogue.reason,
+                                      (pg_catalogue_write.CHAIN,)))
+    elif isinstance(facts.catalogue, Catalogue):
+        issues += _catalogue_issues(facts.catalogue, pg_catalogue_write.CHAIN)
+
+    from core import pg_forecast_write
+
+    if isinstance(facts.forecast, Unwatched):
+        issues.append(unwatched_issue(facts.forecast.reason,
+                                      (pg_forecast_write.CHAIN,)))
+    elif isinstance(facts.forecast, Forecast):
+        issues += _forecast_issues(facts.forecast, pg_forecast_write.CHAIN,
+                                   facts.now)
+
+    # The shadow chains (OD-02 (c)).
+    from core import pg_dq_journal_write
+
+    if isinstance(facts.journal, Unwatched):
+        issues.append(unwatched_issue(facts.journal.reason,
+                                      (pg_dq_journal_write.CHAIN,)))
+    elif isinstance(facts.journal, Journal):
+        issues += _journal_issues(facts.journal, pg_dq_journal_write.CHAIN)
+
+    from core import pg_watchdog_write
+
+    if isinstance(facts.watchdogs, Unwatched):
+        issues.append(unwatched_issue(facts.watchdogs.reason,
+                                      (pg_watchdog_write.CHAIN,)))
+    elif isinstance(facts.watchdogs, Watchdogs):
+        issues += _watchdog_issues(facts.watchdogs, pg_watchdog_write.CHAIN, facts.now)
+
+    from core import pg_traffic_ledger_write, pg_weekly_ledger_write
+
+    for chain_mod, group in ((pg_weekly_ledger_write, facts.weekly_ledger),
+                             (pg_traffic_ledger_write, facts.traffic_ledger)):
+        if isinstance(group, Unwatched):
+            issues.append(unwatched_issue(group.reason, (chain_mod.CHAIN,)))
+        elif isinstance(group, Ledger):
+            issues += _ledger_issues(group, chain_mod.CHAIN)
+
     if facts.watermarks_unread is not None:
         issues.append(unwatched_issue(
             f"meta.chain_watermarks unreadable: {facts.watermarks_unread.reason}",
-            facts.watched))
+            facts.watched, WATERMARKS_PART))
     issues += _watermark_issues(facts.watermarks)
 
     for chain in facts.unread:
@@ -1353,7 +2350,7 @@ def judge(facts: Optional[Facts]) -> List:
         # could raise the very thing the verdict just did.
         return [unwatched_issue(
             f"judging the facts raised {type(e).__name__}: {e}",
-            facts.watched if facts is not None else ())]
+            facts.watched if facts is not None else (), WHOLE_PART)]
 
 
 def unverified_conditions(issues) -> List[str]:

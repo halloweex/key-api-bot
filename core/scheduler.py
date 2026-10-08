@@ -39,6 +39,9 @@ from apscheduler.events import (
 )
 
 from core.observability import get_logger, correlation_context
+# The data-quality journal's one door (chain 9, OD-02 (c)): every check
+# job journals its run through it, and the digest reads through it.
+from core import dq_journal
 
 logger = get_logger(__name__)
 
@@ -64,6 +67,16 @@ DEFAULT_MISFIRE_GRACE_SECONDS = 3600
 # wall clock and is immune. Hours avoid the 03:00-04:00 DST window; do not move
 # these to hour 3 or 4.
 INVARIANT_CHECK_HOURS = "1,7,13,19"
+
+# When the two goal/forecast writers are due, as `CronTrigger` keyword
+# arguments in `SCHEDULER_TIMEZONE`. Constants rather than literals at the
+# `_add_job` call because a second reader needs them: chain 7b-3's standing
+# watch (`core/pg_chain_invariants.py`) judges the four forecast tables stale
+# against the last slot these name, so the slot it judges by is the one the
+# scheduler fires on — a copy of "Mon and Thu 03:30" there would drift the day
+# either moved. Training is twice weekly, not daily.
+REVENUE_TRAIN_SCHEDULE = {"day_of_week": "mon,thu", "hour": 3, "minute": 30}
+SEASONALITY_SCHEDULE = {"day_of_week": "mon", "hour": 4, "minute": 0}
 
 # Checks whose scheduled instant we may simply not have been alive for, and how
 # stale their last *successful* verdict may be at process start before we run a
@@ -129,7 +142,9 @@ def _writes_layer(layer: str) -> bool:
 # Where the digest remembers its last delivery. In `sync_metadata` and not on
 # the scheduler object, because the weekly restatement beat has to outlive a
 # deploy — otherwise every release re-announces the same standing WARN.
-DQ_DIGEST_LAST_SENT_KEY = "dq_digest_last_sent"
+# Chain 9 moves it to `meta.chain_watermarks` with the journal; the spelling
+# lives in `core.dq_journal`, beside both of its readers.
+DQ_DIGEST_LAST_SENT_KEY = dq_journal.DIGEST_MARKER_KEY
 
 # The inventory snapshot gets its own catch-up rather than a row above, because
 # its liveness signal is not a data_quality layer age — it is whether
@@ -229,6 +244,7 @@ async def _inventory_snapshot_taken_today_pg():
     except Exception as exc:                       # pragma: no cover
         logger.debug("inventory catch-up probe (postgres) skipped: %s", exc)
         return ()
+
 
 
 class BackgroundScheduler:
@@ -402,6 +418,11 @@ class BackgroundScheduler:
             # table that is being written correctly somewhere else.
             if writes_postgres():
                 inventory_today = await _inventory_snapshot_taken_today_pg()
+            # The same rule for the quality journal (chain 9): the ages come
+            # from the store that writes it. DuckDB's, read above inside the
+            # connection the probe needed anyway, are replaced — never merged.
+            if dq_journal.reads_postgres():
+                ages = await dq_journal.last_success_ages_pg()
         except Exception as e:
             logger.warning(f"Catch-up check skipped: {e}")
             return
@@ -441,18 +462,26 @@ class BackgroundScheduler:
                     )
                 except Exception as e:
                     logger.warning(f"Could not queue inventory catch-up: {e}")
+        from core.pg_orders_write import stood_down_layers
+
+        stood_down = stood_down_layers()
         for job_id, (layer, max_age_s, delay_s) in CATCHUP_CHECKS.items():
-            entry = ages.get(layer) or {}
-            age = entry.get("age_seconds")
-            # The oldest arm the job writes decides, when it is older than its
-            # own layer (`CATCHUP_SIBLING_LAYERS`). Null is overdue there too.
+            # The layers this process writes for the job, and their ages: its
+            # own — absent counts as never succeeded — unless chain 3 stood it
+            # down, and each sibling arm this process writes
+            # (`CATCHUP_SIBLING_LAYERS`), where absence is no evidence.
+            candidates = []
+            if layer not in stood_down:
+                candidates.append((layer, (ages.get(layer) or {}).get("age_seconds")))
             for sibling in CATCHUP_SIBLING_LAYERS.get(job_id, ()):
                 sibling_entry = ages.get(sibling)
                 if not isinstance(sibling_entry, dict) or not _writes_layer(sibling):
                     continue
-                sibling_age = sibling_entry.get("age_seconds")
-                if age is not None and (sibling_age is None or sibling_age > age):
-                    layer, age = sibling, sibling_age
+                candidates.append((sibling, sibling_entry.get("age_seconds")))
+            if not candidates:
+                continue
+            # The oldest decides; null — never succeeded — is the oldest of all.
+            layer, age = max(candidates, key=lambda c: float("inf") if c[1] is None else c[1])
             # A layer that has never succeeded is exactly the case worth
             # catching up, so a null age counts as overdue, not as unknown.
             if age is not None and age <= max_age_s:
@@ -554,7 +583,7 @@ class BackgroundScheduler:
             name="Seasonality Calculation",
             description="Calculate seasonality indices and goals",
             func=self._run_seasonality_calc,
-            trigger=CronTrigger(day_of_week="mon", hour=4, minute=0),
+            trigger=CronTrigger(**SEASONALITY_SCHEDULE),
             max_instances=1,
             coalesce=True,
         )
@@ -567,7 +596,7 @@ class BackgroundScheduler:
             name="Revenue Prediction",
             description="Train LightGBM model and generate revenue forecasts",
             func=self._run_revenue_prediction,
-            trigger=CronTrigger(day_of_week="mon,thu", hour=3, minute=30),
+            trigger=CronTrigger(**REVENUE_TRAIN_SCHEDULE),
             max_instances=1,
             coalesce=True,
         )
@@ -1039,20 +1068,32 @@ class BackgroundScheduler:
     # ═══════════════════════════════════════════════════════════════════════════
 
     async def _run_incremental_sync(self) -> Dict[str, Any]:
-        """Run incremental sync job."""
-        async with self._heavy_job_lock:
-            with correlation_context() as corr_id:
-                logger.debug("Starting incremental sync job")
+        """Run incremental sync job.
 
-                from core.sync_service import get_sync_service
-                sync_service = await get_sync_service()
-                stats = await sync_service.incremental_sync()
+        The wait for `_heavy_job_lock` is recorded on the order step's state
+        (`OrdersStepState.waiting`): the Sunday full sync, training, the
+        backup and the 05:15 refresh hold the lock, and under chain 3 the
+        canary judges the order step by its ages — a tick queued behind them
+        is not a tick that stopped (the chain-3 review)."""
+        from core.sync_service import get_sync_service
 
-                logger.debug(
-                    "Incremental sync job complete",
-                    extra={"stats": stats}
-                )
-                return stats
+        sync_service = await get_sync_service()
+        sync_service.orders_step.waiting()
+        try:
+            async with self._heavy_job_lock:
+                sync_service.orders_step.done_waiting()
+                with correlation_context() as corr_id:
+                    logger.debug("Starting incremental sync job")
+
+                    stats = await sync_service.incremental_sync()
+
+                    logger.debug(
+                        "Incremental sync job complete",
+                        extra={"stats": stats}
+                    )
+                    return stats
+        finally:
+            sync_service.orders_step.done_waiting()
 
     async def _run_full_sync(self) -> Dict[str, Any]:
         """Run full sync job (90 days)."""
@@ -2010,7 +2051,6 @@ class BackgroundScheduler:
             format_alert_message,
             machine_attempts_note,
             overall_severity,
-            persist_run,
         )
         from core.duckdb_store import get_store
 
@@ -2156,16 +2196,15 @@ class BackgroundScheduler:
             # Persist in a separate transaction (uses store wrapper).
             run_id = None
             try:
-                async with store.connection() as conn:
-                    run_id = persist_run(
-                        conn,
-                        started_at=started_at, ended_at=ended_at,
-                        as_of=ended_at,
-                        window_start=window_day, window_end=window_day,
-                        layer="integrity",
-                        issues=issues, discrepancies=[],
-                        error_message=error_message,
-                    )
+                run_id = await dq_journal.journal_run(
+                    store,
+                    started_at=started_at, ended_at=ended_at,
+                    as_of=ended_at,
+                    window_start=window_day, window_end=window_day,
+                    layer="integrity",
+                    issues=issues, discrepancies=[],
+                    error_message=error_message,
+                )
             except Exception as e:
                 logger.exception(f"DQ integrity persist failed: {e}")
 
@@ -2265,7 +2304,6 @@ class BackgroundScheduler:
             format_alert_message,
             machine_attempts_note,
             overall_severity,
-            persist_run,
         )
         from core.duckdb_store import get_store
         from core.mirror_reconciliation import (
@@ -2510,16 +2548,15 @@ class BackgroundScheduler:
 
             run_id = None
             try:
-                async with store.connection() as conn:
-                    run_id = persist_run(
-                        conn,
-                        started_at=started_at, ended_at=ended_at,
-                        as_of=ended_at,
-                        window_start=window_day, window_end=window_day,
-                        layer=MIRROR_LAYER,
-                        issues=issues, discrepancies=[],
-                        error_message=error_message,
-                    )
+                run_id = await dq_journal.journal_run(
+                    store,
+                    started_at=started_at, ended_at=ended_at,
+                    as_of=ended_at,
+                    window_start=window_day, window_end=window_day,
+                    layer=MIRROR_LAYER,
+                    issues=issues, discrepancies=[],
+                    error_message=error_message,
+                )
             except Exception as e:
                 logger.exception(f"Mirror reconciliation persist failed: {e}")
 
@@ -2690,16 +2727,10 @@ class BackgroundScheduler:
             evaluate_disk_capacity,
             evaluate_growth,
             evidence_for_growth,
-            fetch_dir_sample_at_age,
-            fetch_remainder_series,
-            fetch_sample_at_age,
-            insert_dir_samples,
-            insert_sample,
-            prune_old_dir_samples,
-            prune_old_samples,
             sample_data_dir,
             sample_disk_state,
         )
+        from core import watchdog_samples
         from core.duckdb_store import get_store
 
         with correlation_context() as corr_id:
@@ -2723,22 +2754,17 @@ class BackgroundScheduler:
                 disk_used_bytes=sample.get("disk_used_bytes"),
             )
 
-            async with store.connection() as conn:
-                history = fetch_sample_at_age(conn, hours=24, slack_hours=2)
-                insert_sample(conn, sample)
-                # Keep the table tiny: ~56 rows max (14 days x 4 samples/day).
-                deleted = prune_old_samples(conn, retention_days=14)
-
-                dir_week_ago = fetch_dir_sample_at_age(conn, hours=168, slack_hours=12)
-                dir_six_ago = fetch_dir_sample_at_age(conn, hours=6, slack_hours=2)
-                if dir_now:
-                    insert_dir_samples(conn, dir_now)
-                    prune_old_dir_samples(conn, retention_days=21)
-                # After the insert, deliberately: the recent window is
-                # supposed to contain this very sample. The two lookups above
-                # are read first for the opposite reason — a "168h ago" search
-                # must not be able to find today.
-                remainder = fetch_remainder_series(conn, hours=180)
+            # The insert, its prune and the differencing reads beside them,
+            # from whichever store writes the samples (chain 10, OD-02 (c)):
+            # DuckDB's one connection as it always was, or one Postgres
+            # transaction shadowed into DuckDB. Under Postgres a store that
+            # refuses hands back no history, and capacity is judged anyway.
+            reads = await watchdog_samples.disk_tick(store, sample, dir_now)
+            history = reads["history"]
+            deleted = reads["deleted"]
+            dir_week_ago = reads["dir_week_ago"]
+            dir_six_ago = reads["dir_six_ago"]
+            remainder = reads["remainder"]
 
             growth = evaluate_growth(
                 current=dir_now, baseline=dir_week_ago,
@@ -3031,7 +3057,6 @@ class BackgroundScheduler:
             format_alert_message,
             machine_attempts_note,
             overall_severity,
-            persist_run,
         )
         from core.duckdb_store import get_store
 
@@ -3047,20 +3072,19 @@ class BackgroundScheduler:
         # out, and the rest of the reconciliation job with it.
         run_id = None
         try:
-            async with store.connection() as conn:
-                run_id = persist_run(
-                    conn,
-                    started_at=started_at,
-                    ended_at=datetime.now(timezone.utc),
-                    as_of=as_of,
-                    window_start=window_start, window_end=window_end,
-                    layer=layer,
-                    issues=issues, discrepancies=discrepancies,
-                    # Zero, and that is the point: this comparison rides on the
-                    # fetch the DuckDB one already paid for.
-                    api_calls_used=0,
-                    error_message=error_message,
-                )
+            run_id = await dq_journal.journal_run(
+                store,
+                started_at=started_at,
+                ended_at=datetime.now(timezone.utc),
+                as_of=as_of,
+                window_start=window_start, window_end=window_end,
+                layer=layer,
+                issues=issues, discrepancies=discrepancies,
+                # Zero, and that is the point: this comparison rides on the
+                # fetch the DuckDB one already paid for.
+                api_calls_used=0,
+                error_message=error_message,
+            )
         except Exception as e:
             logger.exception(f"DQ Postgres reconciliation persist failed: {e}")
 
@@ -3225,7 +3249,6 @@ class BackgroundScheduler:
             format_alert_message,
             machine_attempts_note,
             overall_severity,
-            persist_run,
         )
         from core.duckdb_store import get_store
 
@@ -3241,18 +3264,17 @@ class BackgroundScheduler:
         # out, and the rest of the reconciliation job with it.
         run_id = None
         try:
-            async with store.connection() as conn:
-                run_id = persist_run(
-                    conn,
-                    started_at=started_at,
-                    ended_at=datetime.now(timezone.utc),
-                    as_of=as_of,
-                    window_start=window_start, window_end=window_end,
-                    layer=layer,
-                    issues=issues, discrepancies=discrepancies,
-                    api_calls_used=0,
-                    error_message=error_message,
-                )
+            run_id = await dq_journal.journal_run(
+                store,
+                started_at=started_at,
+                ended_at=datetime.now(timezone.utc),
+                as_of=as_of,
+                window_start=window_start, window_end=window_end,
+                layer=layer,
+                issues=issues, discrepancies=discrepancies,
+                api_calls_used=0,
+                error_message=error_message,
+            )
         except Exception as e:
             logger.exception(f"DQ ClickHouse reconciliation persist failed: {e}")
 
@@ -3290,7 +3312,6 @@ class BackgroundScheduler:
             format_alert_message,
             machine_attempts_note,
             overall_severity,
-            persist_run,
         )
         from core.duckdb_store import get_store
         from core.reconciliation_io import (
@@ -3325,6 +3346,14 @@ class BackgroundScheduler:
             api_calls = 0
             pg_result = None
             ch_result = None
+            # Chain 3: once the orders are written to Postgres, DuckDB's arm
+            # compares a store that stopped receiving them — every new order
+            # MISSING, every status change STATUS_DRIFT. It stands down: not
+            # extracted, not persisted, not paged, not resolved; the Postgres
+            # arm is the comparison against the source, and drives the repair.
+            from core import pg_orders_write
+
+            duckdb_arm = "reconciliation" not in pg_orders_write.stood_down_layers()
 
             try:
                 # 1. KeyCRM orders (counts API calls). Runs first because it
@@ -3335,25 +3364,27 @@ class BackgroundScheduler:
                     window_start, window_end, watermark=as_of,
                 )
 
-                # 2. The same facts from the warehouse, minus the same orders
-                async with store.connection() as conn:
-                    dk_orders = duckdb_orders_in_window(
-                        conn, window_start, window_end, watermark=as_of,
-                        exclude_ids=inflight_ids,
-                    )
-
-                # 3. Classify (pure). Both rollups come from one function, so
-                #    the two sides cannot aggregate differently. The per-order
-                #    pass costs no extra API calls and catches what totals hide:
-                #    offsetting errors net to zero in a monthly sum.
-                dk_rollup = rollup_from_orders(dk_orders)
                 kc_rollup = rollup_from_orders(kc_orders)
-                discrepancies = classify_discrepancies(dk_rollup, kc_rollup)
-                discrepancies += classify_order_discrepancies(dk_orders, kc_orders)
-                logger.info(
-                    f"DQ reconciliation: dk_cells={len(dk_rollup)} "
-                    f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
-                )
+                if duckdb_arm:
+                    # 2. The same facts from the warehouse, minus the same orders
+                    async with store.connection() as conn:
+                        dk_orders = duckdb_orders_in_window(
+                            conn, window_start, window_end, watermark=as_of,
+                            exclude_ids=inflight_ids,
+                        )
+
+                    # 3. Classify (pure). Both rollups come from one function,
+                    #    so the two sides cannot aggregate differently. The
+                    #    per-order pass costs no extra API calls and catches
+                    #    what totals hide: offsetting errors net to zero in a
+                    #    monthly sum.
+                    dk_rollup = rollup_from_orders(dk_orders)
+                    discrepancies = classify_discrepancies(dk_rollup, kc_rollup)
+                    discrepancies += classify_order_discrepancies(dk_orders, kc_orders)
+                    logger.info(
+                        f"DQ reconciliation: dk_cells={len(dk_rollup)} "
+                        f"kc_cells={len(kc_rollup)} discrepancies={len(discrepancies)}"
+                    )
                 # The same KeyCRM snapshot, compared a second time — against
                 # Postgres. Free: the API calls are the expensive part and they
                 # have already been made, and comparing both stores to the
@@ -3377,12 +3408,12 @@ class BackgroundScheduler:
 
             ended_at = datetime.now(timezone.utc)
 
-            # 4. Persist
+            # 4. Persist — DuckDB's arm only while it compares (chain 3).
             run_id = None
             try:
-                async with store.connection() as conn:
-                    run_id = persist_run(
-                        conn,
+                if duckdb_arm:
+                    run_id = await dq_journal.journal_run(
+                        store,
                         started_at=started_at, ended_at=ended_at,
                         as_of=as_of,
                         window_start=window_start, window_end=window_end,
@@ -3432,9 +3463,15 @@ class BackgroundScheduler:
             #    now: `halfwritten_repair`.
             repair = None
             if not error_message:
+                # Under chain 3 the orders we do not hold are the ones
+                # Postgres lacks: its arm classified the same snapshot with
+                # Postgres on the store's side, so MISSING_IN_DK there means
+                # missing from the store the chain writes.
+                source = (discrepancies if duckdb_arm else
+                          (pg_result or {}).get("discrepancies") or [])
                 repairable = sorted({
                     oid
-                    for d in discrepancies
+                    for d in source
                     if d.diff_class == DiscrepancyClass.MISSING_IN_DK
                     for oid in d.order_ids
                 })
@@ -3450,7 +3487,7 @@ class BackgroundScheduler:
 
             # 6. Alert on CRITICAL severity
             sev = overall_severity(issues, discrepancies)
-            if sev == Severity.CRITICAL and not error_message:
+            if sev == Severity.CRITICAL and not error_message and duckdb_arm:
                 msg = format_alert_message(
                     "reconciliation", sev, issues, discrepancies,
                     window=(window_start, window_end),
@@ -3471,9 +3508,13 @@ class BackgroundScheduler:
                     evidence=evidence_for_agent("reconciliation", issues,
                                                 discrepancies, run_id=run_id),
                 )
-            await self._resolve_dq_layer("reconciliation", issues, error_message)
+            # A stood-down arm resolves nothing: it looked at nothing, and the
+            # flip waited for its pages to clear (`landing_pages_clear`).
+            if duckdb_arm:
+                await self._resolve_dq_layer("reconciliation", issues, error_message)
 
             result = {
+                **({} if duckdb_arm else {"stood_down": ["reconciliation"]}),
                 "run_id": run_id,
                 "discrepancies_count": len(discrepancies),
                 "severity": sev.value,
@@ -3502,27 +3543,15 @@ class BackgroundScheduler:
         from core.duckdb_store import get_store
         from core.sync_service import SyncService, get_sync_service
 
-        _EMPTY_LINE_ITEMS = """
-            SELECT o.id FROM orders o
-            LEFT JOIN (SELECT DISTINCT order_id FROM order_products) li
-                   ON li.order_id = o.id
-            WHERE li.order_id IS NULL AND o.grand_total > 0
-        """
-
         with correlation_context():
             store = await get_store()
 
-            async with store.connection() as conn:
-                candidates = [int(r[0]) for r in conn.execute(f"""
-                    {_EMPTY_LINE_ITEMS}
-                      AND NOT EXISTS (
-                          SELECT 1 FROM order_backfill_misses m
-                          WHERE m.order_id = o.id
-                            AND m.checked_at > CURRENT_TIMESTAMP - INTERVAL '30 days'
-                      )
-                    ORDER BY o.grand_total DESC
-                    LIMIT ?
-                """, [SyncService.REPAIR_BATCH_LIMIT]).fetchall()]
+            # The store's own selection, so that under chain 3 it is asked of
+            # Postgres, where the repair lands and the misses are recorded —
+            # a scan of a frozen DuckDB would re-fetch the same orders every
+            # two hours for ever.
+            candidates = await store.find_halfwritten_orders(
+                SyncService.REPAIR_BATCH_LIMIT)
 
             if not candidates:
                 logger.debug("Half-written repair: nothing to fetch")
@@ -3534,11 +3563,7 @@ class BackgroundScheduler:
             )
 
             # Which ones KeyCRM served without line items anyway.
-            ph = ",".join("?" * len(candidates))
-            async with store.connection() as conn:
-                still_empty = [int(r[0]) for r in conn.execute(
-                    f"{_EMPTY_LINE_ITEMS} AND o.id IN ({ph})", candidates,
-                ).fetchall()]
+            still_empty = await store.halfwritten_among(candidates)
             recorded = await store.record_backfill_misses({
                 oid: "re-fetched by id; KeyCRM served no line items"
                 for oid in still_empty
@@ -3575,13 +3600,7 @@ class BackgroundScheduler:
         """
         from datetime import datetime, timezone
         from core.data_quality import (
-            DigestSection,
             build_digest,
-            fetch_latest_run,
-            fetch_baseline_run,
-            fetch_previous_run,
-            fetch_run_diffs,
-            fetch_run_issues,
             WATCHED_LAYERS,
         )
         from core.duckdb_store import get_store
@@ -3589,54 +3608,21 @@ class BackgroundScheduler:
         with correlation_context():
             store = await get_store()
             now = datetime.now(timezone.utc)
-            sections: List[DigestSection] = []
-            last_sent_at: Optional[datetime] = None
+            from core.pg_orders_write import stood_down_layers
 
-            async with store.connection() as conn:
-                row = conn.execute(
-                    "SELECT value FROM sync_metadata WHERE key = ?",
-                    [DQ_DIGEST_LAST_SENT_KEY],
-                ).fetchone()
-                if row and row[0]:
-                    try:
-                        last_sent_at = datetime.fromisoformat(row[0])
-                    except ValueError:
-                        # An unreadable marker must not mute the digest; the
-                        # next send overwrites it with something parseable.
-                        logger.warning("Unparseable DQ digest marker: %r", row[0])
-
-                for layer in WATCHED_LAYERS:
-                    run = fetch_latest_run(conn, layer=layer)
-                    if run is None:
-                        sections.append(DigestSection(layer=layer, run=None))
-                        continue
-
-                    age_hours = None
-                    if run.get("started_at"):
-                        started = datetime.fromisoformat(run["started_at"])
-                        age_hours = (now - started).total_seconds() / 3600
-
-                    # "=" must mean "since you last read this", not
-                    # "since a run six hours ago".
-                    previous = fetch_baseline_run(
-                        conn, layer,
-                        sent_at=last_sent_at, before_run_id=run["run_id"],
-                    )
-                    sections.append(DigestSection(
-                        layer=layer,
-                        run=run,
-                        issues=fetch_run_issues(conn, run["run_id"], limit=20),
-                        diffs=fetch_run_diffs(conn, run["run_id"], limit=20),
-                        previous_issues=(
-                            fetch_run_issues(conn, previous["run_id"], limit=20)
-                            if previous else []
-                        ),
-                        previous_diffs=(
-                            fetch_run_diffs(conn, previous["run_id"], limit=20)
-                            if previous else []
-                        ),
-                        age_hours=age_hours,
-                    ))
+            stood_down = stood_down_layers()
+            layers = []
+            for layer in WATCHED_LAYERS:
+                # A layer chain 3 stood down is written by nothing; its last
+                # run would read stale here every morning.
+                if layer in stood_down:
+                    continue
+                layers.append(layer)
+            # The beat and every layer's runs, from whichever store writes the
+            # journal (chain 9): one DuckDB connection, as it always was, or
+            # Postgres with the beat inherited from DuckDB until it moves.
+            last_sent_at, sections = await dq_journal.digest_inputs(
+                store, layers, now)
 
             message = build_digest(sections, last_sent_at=last_sent_at, now=now)
             if message:
@@ -3665,11 +3651,7 @@ class BackgroundScheduler:
                 # Only a delivered digest moves the beat. Marking a failed
                 # send as delivered would mute the next seven days on the
                 # strength of a message nobody received.
-                async with store.connection() as conn:
-                    conn.execute("""
-                        INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
-                        VALUES (?, ?, CURRENT_TIMESTAMP)
-                    """, [DQ_DIGEST_LAST_SENT_KEY, now.isoformat()])
+                await dq_journal.mark_digest_sent(store, now.isoformat())
 
             result = {
                 "layers": len(sections),
@@ -3697,12 +3679,11 @@ class BackgroundScheduler:
         from core import read_fallback
         from core.config import ADMIN_USER_IDS, DASHBOARD_URL
         from core.duckdb_store import get_store
+        from core import report_ledger
         from core.weekly_report import (
-            already_sent,
             build_report,
             format_report,
             last_complete_week,
-            mark_sent,
             warehouse_max_date,
         )
 
@@ -3714,16 +3695,18 @@ class BackgroundScheduler:
             week_start, week_end = last_complete_week(today)
             week = week_start.isoformat()
 
-            # The ledger is still DuckDB's, so it keeps its connection block.
-            # `warehouse_max_date` and `build_report` must stay OUTSIDE it:
-            # both are routed by KS_READ_WEEKLY now, and the DuckDB side of
+            # The ledger, from whichever store writes it (chain 11a, OD-02
+            # (c)): DuckDB's one connection as always, or Postgres — counting
+            # a spooled week as sent and adopting a row only DuckDB holds.
+            # `warehouse_max_date` and `build_report` stay outside any store
+            # block: both are routed by KS_READ_WEEKLY, and the DuckDB side of
             # that router takes `store.connection()` itself. The store lock is
             # not reentrant — a nested acquisition hangs rather than raises,
             # which on a weekly job means a scheduler thread parked forever.
-            async with store.connection() as conn:
-                if already_sent(conn, week_start, sales_type):
-                    logger.debug("Weekly report for %s already sent", week)
-                    return {"sent": False, "week": week, "reason": "already_sent"}
+            if await report_ledger.already_sent(
+                    store, report_ledger.WEEKLY, week_start, sales_type):
+                logger.debug("Weekly report for %s already sent", week)
+                return {"sent": False, "week": week, "reason": "already_sent"}
 
             # Under KS_READ_FALLBACK=off a read DuckDB would have answered is
             # refused instead (DN-20c). Both reads come before the ledger
@@ -3856,15 +3839,18 @@ class BackgroundScheduler:
                 logger.warning("Weekly report for %s reached no admin", week)
                 return {"sent": False, "week": week, "reason": "not_delivered"}
 
-            async with store.connection() as conn:
-                mark_sent(
-                    conn, week_start, sales_type,
-                    report.current.revenue, report.current.orders,
-                )
+            # At least once, never twice (OD-16 (a)): under Postgres a record
+            # that fails is retried and then spooled, and the gate counts a
+            # spooled week as sent.
+            ledger = await report_ledger.mark_sent(
+                store, report_ledger.WEEKLY, week_start, sales_type,
+                report.current.revenue, report.current.orders,
+            )
 
             result = {
                 "sent": True,
                 "week": week,
+                "ledger": ledger,
                 "sales_type": sales_type,
                 "revenue": round(report.current.revenue, 2),
                 "orders": report.current.orders,
@@ -3896,14 +3882,13 @@ class BackgroundScheduler:
         from core import read_fallback
         from core.config import DASHBOARD_URL
         from core.duckdb_store import get_store
+        from core import report_ledger
         from core.traffic_report import (
             TRAFFIC_SALES_TYPE,
-            already_sent,
             build_report,
             first_week,
             format_report,
             format_report_rich,
-            mark_sent,
         )
         from core.weekly_report import last_complete_week, warehouse_max_date
 
@@ -3926,10 +3911,11 @@ class BackgroundScheduler:
                 )
                 return {"sent": False, "week": week, "reason": "before_first_week"}
 
-            async with store.connection() as conn:
-                if already_sent(conn, week_start, sales_type):
-                    logger.debug("Traffic report for %s already sent", week)
-                    return {"sent": False, "week": week, "reason": "already_sent"}
+            # The ledger, from whichever store writes it (chain 11b).
+            if await report_ledger.already_sent(
+                    store, report_ledger.TRAFFIC, week_start, sales_type):
+                logger.debug("Traffic report for %s already sent", week)
+                return {"sent": False, "week": week, "reason": "already_sent"}
 
             # Outside the block, for the weekly job's reason: the gate is
             # routed now and its DuckDB path takes the same non-reentrant lock.
@@ -4015,12 +4001,14 @@ class BackgroundScheduler:
                 logger.warning("Traffic report for %s reached no admin", week)
                 return {"sent": False, "week": week, "reason": "not_delivered"}
 
-            async with store.connection() as conn:
-                mark_sent(conn, week_start, sales_type, report.revenue, report.orders)
+            ledger = await report_ledger.mark_sent(
+                store, report_ledger.TRAFFIC, week_start, sales_type,
+                report.revenue, report.orders)
 
             result = {
                 "sent": True,
                 "week": week,
+                "ledger": ledger,
                 "sales_type": sales_type,
                 "revenue": round(report.revenue, 2),
                 "orders": report.orders,
@@ -4094,12 +4082,9 @@ class BackgroundScheduler:
         """
         from core.memory_monitor import (
             evaluate_memory,
-            fetch_last_sample,
-            fetch_peak_working_set_mb,
-            insert_sample,
-            prune_old_samples,
             read_cgroup_memory,
         )
+        from core import watchdog_samples
 
         mem = read_cgroup_memory()
         if not mem:
@@ -4110,12 +4095,11 @@ class BackgroundScheduler:
         try:
             from core.duckdb_store import get_store
             store = await get_store()
-            async with store.connection() as conn:
-                last = fetch_last_sample(conn)
-                previous_oom = last["oom_kills"] if last else None
-                insert_sample(conn, mem)
-                peak_24h = fetch_peak_working_set_mb(conn, hours=24)
-                prune_old_samples(conn, retention_days=14)
+            # From whichever store writes the samples (chain 10, OD-02 (c)).
+            reads = await watchdog_samples.memory_tick(store, mem)
+            last = reads["last"]
+            previous_oom = last["oom_kills"] if last else None
+            peak_24h = reads["peak_24h"]
         except Exception as e:
             # A memory check that cannot reach the database must still report
             # memory. Losing the OOM-across-restart comparison is the only cost.

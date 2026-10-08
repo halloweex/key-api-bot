@@ -65,6 +65,14 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
     # it owed a rebuild over the comments just restored.
     configure_modes()
 
+    # Under chain 3 the orders are written to Postgres alone (the latch is
+    # loaded by `configure_modes` above): a comment restored in DuckDB would
+    # be one nobody reads, and `ship_orders_by_id` stands down.
+    from core.duckdb_store import _orders_in_postgres
+
+    if _orders_in_postgres():
+        return await _backfill_utm_postgres(days_back, force_ship=force_ship)
+
     store = await get_store()
     client = await get_async_client()
 
@@ -189,6 +197,13 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
             "Ids: %s", len(pg_failed_ids), pg_failed_ids,
         )
 
+    await _reparse(store, force_ship=force_ship)
+
+
+async def _reparse(store, *, force_ship: bool) -> None:
+    """The re-parse both paths end on, and the one place this script hands
+    `--force-ship` on (`tests/unit/test_order_utm_shipping.py` holds it to
+    exactly one)."""
     # Now refresh UTM layers — in DuckDB only while it derives. Under
     # KS_WRITE_WAREHOUSE=postgres (DN-29) the parse below is Postgres' alone,
     # and the recorded writer notes it, so the way back re-parses DuckDB's
@@ -250,6 +265,66 @@ async def backfill_utm(days_back: int = 730, force_ship: bool = False):
         logger.info("UTM distribution:")
         for traffic_type, platform, count in row:
             logger.info(f"  {traffic_type:20} {platform:15} {count}")
+
+
+async def _backfill_utm_postgres(days_back: int, *, force_ship: bool = False):
+    """`backfill_utm` under chain 3 (`core/pg_orders_write.py`): the same walk
+    over KeyCRM, each chunk's comments written by
+    `pg_orders_write.restore_manager_comments` — only where Postgres holds the
+    comment as NULL, archived as `kind='backfill'` (OD-20 (b)) — and nothing
+    written to DuckDB, whose orders the chain froze. Step 13 is in force under
+    the chain, so Postgres alone re-parses (`reparse_router`, full). Web must
+    be stopped, as for the DuckDB path (`WEB_MUST_BE_STOPPED`, logged above)."""
+    from core import pg_orders_read, pg_orders_write
+    from core.duckdb_store import get_store
+    from core.keycrm import get_async_client
+    from core.runtime_modes import configure_modes
+
+    # Idempotent, and asked again here because this function is the one that
+    # writes: the latch and KS_PG_DERIVE must be loaded before the chain's
+    # writer runs, whoever called it.
+    configure_modes()
+    null_count = await pg_orders_read.null_comment_count()
+    logger.info(f"Orders with NULL manager_comment in Postgres: {null_count}")
+    if null_count == 0:
+        logger.info("All orders already have manager_comment, nothing to backfill")
+        return
+
+    client = await get_async_client()
+    final_end = datetime.now(DEFAULT_TZ) + timedelta(days=1)
+    current_start = datetime.now(DEFAULT_TZ) - timedelta(days=days_back)
+    restored_total = 0
+    failed_chunks: list[str] = []
+    while current_start < final_end:
+        current_end = min(current_start + timedelta(days=90), final_end)
+        start_str, end_str = current_start.strftime('%Y-%m-%d'), current_end.strftime('%Y-%m-%d')
+        logger.info(f"Fetching orders {start_str} to {end_str}...")
+        comments = {}
+        params = {"filter[created_between]": f"{start_str}, {end_str}", "limit": 50}
+        try:
+            async for batch in client.paginate("order", params=params, page_size=50):
+                for order in batch:
+                    if order.get("manager_comment"):
+                        comments[order["id"]] = order["manager_comment"]
+        except Exception as e:
+            logger.warning(f"Error fetching chunk {start_str}-{end_str}: {e}")
+            current_start = current_end
+            continue
+        if comments:
+            try:
+                restored = await pg_orders_write.restore_manager_comments(comments)
+                restored_total += len(restored)
+                logger.info(f"  Restored {len(restored)} comment(s) in Postgres")
+            except Exception as write_error:
+                failed_chunks.append(f"{start_str}..{end_str}")
+                logger.error("  Chunk %s..%s not written: %s", start_str, end_str,
+                             type(write_error).__name__)
+        current_start = current_end
+
+    logger.info(f"Backfill complete: restored {restored_total} comment(s) in Postgres")
+    if failed_chunks:
+        logger.error("Chunks not written, offered again by a re-run: %s", failed_chunks)
+    await _reparse(await get_store(), force_ship=force_ship)
 
 
 if __name__ == "__main__":

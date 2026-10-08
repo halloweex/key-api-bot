@@ -83,7 +83,10 @@ DQ_MAX_AGE_S = {
     # DuckDB stops being fed. It is not independent of DuckDB yet: the job
     # runs it only after the DuckDB extraction succeeded, inside the same try,
     # and journals it in DuckDB's data_quality_runs, which is where the age
-    # /api/health publishes comes from. So a DuckDB failure silences it too,
+    # /api/health publishes comes from — until chain 9 (KS_WRITE_DQ_JOURNAL,
+    # OD-02 (c)) moves the journal to Postgres, when the age comes from there;
+    # the job's dependence on the DuckDB extraction stays. So a DuckDB failure
+    # silences it too,
     # and since DN-21 that pages under this key as well as `reconciliation`.
     # Decoupling it belongs with step 13.
     # DN-21's opt-in rested on what the stage-4 soak checked on 18.09: a
@@ -197,9 +200,17 @@ class CanaryResult:
     # `uptime_seconds`; None when no payload said. The watch uses it to tell
     # the process it read last time from a new one (see record_watch).
     web_uptime_s: Optional[float] = None
+    # What this probe read for the week of silence's watch (OD-17 (a)): True
+    # web runs KS_DUCKDB=off and opened nothing, False it opened something,
+    # None no block read or web not under off. See duckdb_silent.
+    duckdb_silent: Optional[bool] = None
     # Keys this probe could not judge, because it read no block to judge them
     # by: the resolve keeps them firing (see unjudged_keys).
     unjudged_keys: list[str] = field(default_factory=list)
+    # When `health_status` failed for a DuckDB FATAL and nothing else
+    # (`duckdb_fatal_only`): "index" or "other", which set the page's
+    # severity, title and lever. None otherwise.
+    duckdb_fatal: Optional[str] = None
 
 
 # ─── Health probe ───────────────────────────────────────────────────────────
@@ -322,6 +333,12 @@ def check_dq_freshness(
             continue
 
         age = entry.get("age_seconds")
+        if entry.get("stood_down") is True:
+            # Not written by design (chain 3 stands DuckDB's reconciliation
+            # arm down): its age grows by construction, and `reconciliation_pg`
+            # is the page that remains.
+            ages[layer] = age
+            continue
         ages[layer] = age
         if age is None:
             failures.append(
@@ -508,6 +525,30 @@ def check_write_chain_precondition(payload: Optional[dict]) -> "list[tuple[str, 
     return [("write_chain_precondition_unmet", "write chains: " + "; ".join(parts))]
 
 
+def check_report_ledger_pending(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """A report that went out and whose ledger row is still spooled (chains
+    11a/11b, OD-16 (a)): `write_chains.<chain>.pending.count` above zero.
+
+    Warn: nothing is lost and nothing will be sent twice — the gate counts a
+    spooled week as sent, and the report's next daily tick drains the spool
+    into Postgres. What it says is that Postgres refused three times after a
+    delivery, and that the local disk is now the only record of the week until
+    the drain. Judged from the published block alone.
+    """
+    block = (payload or {}).get("write_chains")
+    if not isinstance(block, dict):
+        return []
+    parts = []
+    for name, state in sorted(block.items()):
+        pending = state.get("pending") if isinstance(state, dict) else None
+        if isinstance(pending, dict) and pending.get("count"):
+            weeks = ", ".join(pending.get("weeks") or ()) or f"{pending['count']} row(s)"
+            parts.append(f"{name}: {weeks}")
+    if not parts:
+        return []
+    return [("report_ledger_pending", "report ledgers spooled: " + "; ".join(parts))]
+
+
 # The buyers step, published by web as `buyer_sync` (chain 4, PR-1). The step
 # runs at most hourly by its watermark, so a success older than an hour and a
 # half means one hourly run has already been missed; three consecutive
@@ -604,6 +645,74 @@ def check_buyer_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
     return [("buyer_sync_stalled_chain",
              f"buyer sync: no success for {age // 60} min, and chain 4 makes it "
              f"the only writer of buyers ({block.get('last_error_class') or 'no error recorded'})")]
+
+
+# Chain 3 writes the orders in Postgres alone (`core/pg_orders_write.py`,
+# OD-13 (a)): an order step that fails is orders landing nowhere, with no
+# DuckDB copy behind it. Web publishes the step's own state under the chain's
+# `write_chains` entry as `sync_step`; judged only when the same payload says
+# the chain writes Postgres. Three failures in a row, no success for 15
+# minutes, or no attempt for 20 (the tick never reached the step) page: the
+# incremental tick runs at most five minutes apart, so each bound is past
+# anything the adaptive backoff can produce. Spelled rather than imported —
+# nothing under `bot/` may import `core.pg*`, and a test pins the name.
+ORDERS_CHAIN = "pg_orders_write"
+ORDERS_SYNC_FAILURES = 3
+ORDERS_SYNC_STALE_S = 15 * 60
+ORDERS_SYNC_UNREACHED_S = 20 * 60
+# Except while the tick waits for the scheduler's heavy-job lock
+# (`lock_wait_s`): the Sunday full sync, training, the backup and the 05:15
+# refresh hold it, and the tick queues behind them before it can reach the
+# step. Nobody has measured how long they hold it, so the wait is not given a
+# number of its own to fit inside: the clocks are judged as they stood when the
+# wait began — a step already stale before it still pages — and the wait
+# itself pages past chain 4's bound for its own step, the point past which
+# whatever holds the lock is stuck (the chain-3 review).
+ORDERS_SYNC_LOCK_WAIT_MAX_S = 90 * 60
+
+
+def check_orders_sync_chain(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the order step as the only writer of orders: CRITICAL.
+
+    The class of the last error, never its text — the block is public. A web
+    still on DuckDB, or one publishing no step for the chain, is not judged:
+    its orders land in DuckDB and the mirror's own watch covers them."""
+    chain = ((payload or {}).get("write_chains") or {}).get(ORDERS_CHAIN)
+    if not isinstance(chain, dict) or chain.get("mode") != "postgres":
+        return []
+    step = chain.get("sync_step")
+    if not isinstance(step, dict):
+        return []
+    failures = _number(step.get("consecutive_failures")) or 0
+    ok_age = _number(step.get("last_ok_age_s"))
+    attempt = _number(step.get("last_attempt_age_s"))
+    error = step.get("last_error_class") or "no error recorded"
+    if failures >= ORDERS_SYNC_FAILURES:
+        return [("orders_sync_failing",
+                 f"order sync: {failures} failures in a row ({error}) — chain 3 "
+                 "makes it the only writer of orders")]
+    wait = _number(step.get("lock_wait_s"))
+    if wait is not None:
+        if wait > ORDERS_SYNC_LOCK_WAIT_MAX_S:
+            return [("orders_sync_failing",
+                     f"order sync: waiting {wait // 60} min for the heavy-job "
+                     "lock — whatever holds it is stuck — and chain 3 makes it "
+                     "the only writer of orders")]
+        # The wait excuses its own length and nothing before it.
+        ok_age = None if ok_age is None else max(0, ok_age - wait)
+        attempt = None if attempt is None else max(0, attempt - wait)
+    if attempt is None or attempt > ORDERS_SYNC_UNREACHED_S:
+        if ok_age is not None and ok_age > ORDERS_SYNC_UNREACHED_S:
+            return [("orders_sync_failing",
+                     f"order sync: step not reached for {ok_age // 60} min — the "
+                     "incremental tick is not running — and chain 3 makes it the "
+                     "only writer of orders")]
+        return []
+    if ok_age is not None and ok_age > ORDERS_SYNC_STALE_S:
+        return [("orders_sync_failing",
+                 f"order sync: no success for {ok_age // 60} min ({error}), and "
+                 "chain 3 makes it the only writer of orders")]
+    return []
 
 
 # How long a dropped derivation mark may stand before it says the heal is not
@@ -837,6 +946,36 @@ def read_fallbacks_clean(payload: Optional[dict]) -> Optional[bool]:
     return not block and not _routed_to_duckdb(payload)
 
 
+def duckdb_fatal_only(payload: Optional[dict]) -> "Optional[tuple[str, str]]":
+    """`(kind, message)` when web says it is degraded for a DuckDB FATAL and
+    for nothing else (`degraded_by == ["duckdb_fatal"]`); None otherwise, and
+    for a web that does not say why.
+
+    `index` — an index is short in the file (`duckdb.fatal.index_short`, or an
+    index FATAL in this process): the write that meets it fails until the
+    indexes are rebuilt, which a compaction does and a restart does not.
+    `other` — every other FATAL: the store dropped the instance and opened the
+    file again, so reads answer; the status stays degraded until web
+    restarts. Counts and dates only — the block never carries the text."""
+    payload = payload or {}
+    if payload.get("degraded_by") != ["duckdb_fatal"]:
+        return None
+    fatal = (payload.get("duckdb") or {}).get("fatal")
+    if not isinstance(fatal, dict):
+        return None
+    kinds = fatal.get("kinds") if isinstance(fatal.get("kinds"), dict) else {}
+    index = fatal.get("index_short") if isinstance(fatal.get("index_short"), dict) else None
+    count = _number(fatal.get("count")) or 0
+    if index or _number(kinds.get("index")):
+        since = (index or {}).get("since") or fatal.get("last_at") or "?"
+        seen = (f"{count} FATAL in this process" if count
+                else "found before web last restarted")
+        return ("index", f"DuckDB: an index is short in the file since {since} — "
+                         f"the write that meets it fails ({seen})")
+    return ("other", f"DuckDB FATAL ×{count} in this process, last {fatal.get('last_at') or '?'}"
+                     " — the instance was dropped and the file reopened; reads answer")
+
+
 def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     """The OD-07 keys this probe could not judge, because it read no block to
     judge them by — web did not answer, or answered without the block.
@@ -847,8 +986,10 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     design, until web restarts, so a first-time blip the canary holds back
     (`defer_flaky` — the 05:15 freeze, an nginx reload, a 10 s timeout)
     would announce it resolved and the next probe page it again as a new
-    incident, agent and all. Only these keys, and the buyers step's: every
-    other payload-derived key keeps today's behaviour.
+    incident, agent and all. Only these keys, the buyers step's and the week
+    of silence's tripwire (`duckdb_opened_while_off`, which stands until web
+    restarts for the same reason): every other payload-derived key keeps
+    today's behaviour.
 
     The buyers step's two keys are held the same way: both when the probe read
     no `buyer_sync` block, and chain 4's CRITICAL when it read no entry for the
@@ -856,7 +997,12 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     stall outlives the 05:15 freeze and every deploy recreate. Read blind, the
     page was announced resolved and paged again as a new incident each time —
     through the WARN beside it as much as through the CRITICAL, since both
-    fire for one stall (review of chain 4's merge with OD-07)."""
+    fire for one stall (review of chain 4's merge with OD-07).
+
+    Chain 3's `orders_sync_failing` the same way, when the probe read no
+    entry for the chain, or read it on Postgres with no step to judge: under
+    chain 3 the order step is the only writer of orders, and the Postgres
+    hang that fails it hangs this endpoint too (batch-E review)."""
     payload = payload or {}
     keys = []
     if not isinstance(payload.get("read_fallbacks"), dict):
@@ -868,6 +1014,21 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
         keys += ["buyer_sync_stalled", "buyer_sync_stalled_chain"]
     elif not (isinstance(chains, dict) and isinstance(chains.get(BUYER_CHAIN), dict)):
         keys.append("buyer_sync_stalled_chain")
+    # The week of silence's page stands, like `read_fallback_used`, until web
+    # restarts; a probe that read no switch block cannot say it cleared.
+    if not isinstance(payload.get("duckdb_switch"), dict):
+        keys.append("duckdb_opened_while_off")
+    # Chain 3's CRITICAL, held the way chain 4's is: under chain 3 the order
+    # step is the only writer of orders, and a hung Postgres — the likeliest
+    # cause of the page — hangs /api/health too, which is exactly a blind
+    # probe. Held when the probe read no entry for the chain, or read the
+    # chain on Postgres with no step to judge; an entry that says duckdb is
+    # judged, and clears it (batch-E review).
+    orders = chains.get(ORDERS_CHAIN) if isinstance(chains, dict) else None
+    if not isinstance(orders, dict) or (
+            orders.get("mode") == "postgres"
+            and not isinstance(orders.get("sync_step"), dict)):
+        keys.append("orders_sync_failing")
     return keys
 
 
@@ -905,7 +1066,8 @@ def check_read_refusals(
     (`READ_REFUSED_RECENT_S`), so the page stands only while reads are being
     refused — unlike a fallback, a refusal left no wrong number behind to
     explain. A timestamp that cannot be read counts as recent. Published under
-    `off` alone; today, under `duckdb`, there is nothing to judge.
+    `off`, and under `duckdb` only for a read of a table a write chain owns,
+    which has no fallback in either mode (`read_fallback.chain_refusal`).
     """
     block = (payload or {}).get("read_fallback_mode")
     refused = block.get("refused") if isinstance(block, dict) else None
@@ -962,11 +1124,61 @@ def check_warehouse_preconditions(payload: Optional[dict]) -> "list[tuple[str, s
     unmet = block.get("preconditions_unmet")
     if not isinstance(unmet, list) or not unmet:
         return []
+    if _way_back_refused(block):
+        # Web did not run as duckdb: `check_warehouse_way_back_refused` says
+        # what it did instead, and names these keys in its message.
+        return []
     value = block.get("value")
     value = value if isinstance(value, str) and value else "postgres"
     return [("warehouse_preconditions_unmet",
              f"KS_WRITE_WAREHOUSE={value} ran as duckdb, unmet: "
              + ", ".join(str(key) for key in unmet))]
+
+
+def _way_back_refused(block: dict) -> "list[str]":
+    chains = block.get("way_back_refused")
+    if not isinstance(chains, list):
+        return []
+    return [str(chain) for chain in chains if chain]
+
+
+def check_warehouse_way_back_refused(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `warehouse_writer_mode` block: a start that would have run as
+    duckdb after a flip — the way back — stayed postgres, because a latched
+    write chain owns a table DuckDB derives from (chain 5's classification,
+    chain 3's orders).
+
+    Pages: either somebody asked for the way back and did not get it, or a
+    start with a precondition unmet took it on its own; both need a person,
+    and the lever is not the way back's — the chains are copied back first.
+    Web serves. Postgres derives only on its own signal: under any other
+    KS_PG_DERIVE its rebuild rides the DuckDB tick, which a `postgres` start
+    does not run, so then NOTHING derives and the message says so — read
+    from the `derivation` block, since a way back taken by unsetting the
+    variable evaluates no precondition. An absent block or field is not a
+    failure; an older web publishes none."""
+    block = (payload or {}).get("warehouse_writer_mode")
+    if not isinstance(block, dict):
+        return []
+    chains = _way_back_refused(block)
+    if not chains:
+        return []
+    value = block.get("value")
+    value = value if isinstance(value, str) and value else "duckdb"
+    unmet = block.get("preconditions_unmet")
+    unmet = ("; unmet: " + ", ".join(str(key) for key in unmet)
+             if isinstance(unmet, list) and unmet else "")
+    derivation = (payload or {}).get("derivation")
+    derive = derivation.get("mode") if isinstance(derivation, dict) else None
+    if derive == "own":
+        who = "; Postgres derives"
+    elif isinstance(derive, str) and derive:
+        who = f"; NOTHING derives (KS_PG_DERIVE={derive}, not own)"
+    else:
+        who = ""
+    return [("warehouse_way_back_refused",
+             f"KS_WRITE_WAREHOUSE={value} stayed postgres: write chain(s) "
+             + ", ".join(chains) + " own what DuckDB derives from" + who + unmet)]
 
 
 # How long the way back from KS_WRITE_WAREHOUSE=postgres may hold the DuckDB
@@ -1015,6 +1227,72 @@ def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
         return [("utm_parse_mode_invalid",
                  f"UTM parse: {block['error']}")]
     return []
+
+
+# ─── The week of silence (OD-17 (a)) ────────────────────────────────────────
+#
+# Stage 5 waits for seven days in which nothing opened the DuckDB file, and
+# "nothing" has to be shown by running web with `KS_DUCKDB=off`, not by reading
+# the code. Web refuses every open under `off`, counts it at the raise and
+# publishes the sites as `duckdb_switch.opened_while_off`
+# (core/duckdb_switch.py). The canary pages that block and keeps the watch that
+# says since when web has run `off` and opened nothing — written only under
+# `off`, so a web running `on`, today, writes no row at all.
+
+# The first words of the page's line: what a reader greps the journal by. The
+# week-of-silence soak check (deploy/stage4_soak/53_p4_week_of_silence.sql)
+# judges the page by its key and the watch below, never by these words.
+DUCKDB_OPENED_LINE = "DuckDB opened while KS_DUCKDB=off: "
+
+# The watch row in `app.alert_series` (`core.alert_archive.record_watch`), and
+# its gap: the read-fallback watch's, for the same reason — the counters cover a
+# web process from its start, and only a process replaced while nobody read it
+# can lose what it counted. A test holds the soak check's gap to this one.
+DUCKDB_SWITCH_WATCH_KEY = "watch:duckdb_switch"
+DUCKDB_SWITCH_WATCH_GAP_S = READ_FALLBACK_WATCH_GAP_S
+
+
+def check_duckdb_switch(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge `duckdb_switch.opened_while_off`: a path in web that opened, or
+    tried to open, the DuckDB file under KS_DUCKDB=off.
+
+    CRITICAL: under `off` the claim being made is that nothing needs DuckDB
+    any more, and this is the proof that something does — the week of silence
+    starts again. On the block being non-empty, not on a count moving: the
+    counters are per process, so the page stands until web restarts. Never
+    fires under `on`, where nothing is refused. An absent block is not a
+    failure; an older web publishes none."""
+    block = (payload or {}).get("duckdb_switch")
+    if not isinstance(block, dict):
+        return []
+    opened = block.get("opened_while_off")
+    if not isinstance(opened, dict) or not opened:
+        return []
+    return [("duckdb_opened_while_off", DUCKDB_OPENED_LINE + _surfaces(opened))]
+
+
+def check_duckdb_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge `duckdb_switch.error`: a KS_DUCKDB web did not understand.
+
+    Warn, the read-fallback mode's reason: web runs `on`, today's behaviour,
+    so nothing is failing — but whoever set it believes the week of silence is
+    running, and it is not. It must not stop web instead: web is the only
+    process that syncs orders. An absent block is not a failure."""
+    block = (payload or {}).get("duckdb_switch")
+    if isinstance(block, dict) and block.get("error"):
+        return [("duckdb_mode_invalid", f"DuckDB switch: {block['error']}")]
+    return []
+
+
+def duckdb_silent(payload: Optional[dict]) -> Optional[bool]:
+    """What this probe can say for the week of silence's watch: True when web
+    runs `off` and has opened nothing, False when it runs `off` and has, None
+    when it is not under `off` or published no block — which says nothing
+    about the week and is not written, so a web running `on` writes no row."""
+    block = (payload or {}).get("duckdb_switch")
+    if not isinstance(block, dict) or block.get("mode") != "off":
+        return None
+    return not block.get("opened_while_off")
 
 
 def check_goals_history_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
@@ -1086,13 +1364,27 @@ async def run_canary(
     mirror_ages: dict[str, Optional[int]] = {}
     read_fallbacks_seen: Optional[bool] = None
     uptime_seen: Optional[float] = None
+    duckdb_silent_seen: Optional[bool] = None
+    duckdb_fatal: Optional[str] = None
     if payload:
         health_status = payload.get("status")
         sync_block = payload.get("sync") or {}
         sync_seconds = sync_block.get("seconds_since_sync")
         if health_status and health_status != "healthy":
-            fail("health_status", f"status={health_status}")
-            severity = "critical"
+            fatal = duckdb_fatal_only(payload)
+            if fatal is None:
+                fail("health_status", f"status={health_status}")
+                severity = "critical"
+            else:
+                # The same key — the page the kill guard chose — named for
+                # what it is: web answers, so it is not "DOWN", and neither
+                # lever is a migration's or a restart's (batch-E review).
+                duckdb_fatal, message = fatal
+                fail("health_status", message)
+                if duckdb_fatal == "index":
+                    severity = "critical"
+                elif severity == "ok":
+                    severity = "warn"
 
         # Only judge freshness when the endpoint answered at all — an
         # unreachable dashboard is already reported above, and piling a
@@ -1185,6 +1477,14 @@ async def run_canary(
         if warehouse_unmet:
             severity = "critical"
 
+        # The way back refused while a latched write chain owns a table
+        # DuckDB derives from: web stayed postgres. Pages.
+        refused_way_back = check_warehouse_way_back_refused(payload)
+        for key, message in refused_way_back:
+            fail(key, message)
+        if refused_way_back:
+            severity = "critical"
+
         # The way back holding the DuckDB checks down for hours. Warn: web
         # serves and DuckDB derives, and the checks are what is missing.
         hold_failures = check_warehouse_hold(payload)
@@ -1200,6 +1500,23 @@ async def run_canary(
             fail(key, message)
         if utm_mode_failures and severity == "ok":
             severity = "warn"
+
+        # Web opened the DuckDB file under KS_DUCKDB=off. Pages: the week of
+        # silence's claim is that nothing needs it, and this disproves it.
+        opened_failures = check_duckdb_switch(payload)
+        for key, message in opened_failures:
+            fail(key, message)
+        if opened_failures:
+            severity = "critical"
+
+        # A KS_DUCKDB web could not read. Warn: `on` is running, and somebody
+        # believes the week of silence is.
+        duckdb_mode_failures = check_duckdb_mode(payload)
+        for key, message in duckdb_mode_failures:
+            fail(key, message)
+        if duckdb_mode_failures and severity == "ok":
+            severity = "warn"
+        duckdb_silent_seen = duckdb_silent(payload)
 
         # A KS_GOALS_HISTORY web does not understand: every goal history read
         # raises, so this pages rather than warns.
@@ -1241,6 +1558,12 @@ async def run_canary(
             fail(key, message)
         if precondition_failures and severity == "ok":
             severity = "warn"
+        # A delivered report whose ledger row is spooled: warn.
+        ledger_failures = check_report_ledger_pending(payload)
+        for key, message in ledger_failures:
+            fail(key, message)
+        if ledger_failures and severity == "ok":
+            severity = "warn"
         # The buyers step: warn. Its own reasons are in check_buyer_sync.
         buyer_failures = check_buyer_sync(payload)
         for key, message in buyer_failures:
@@ -1252,6 +1575,12 @@ async def run_canary(
         for key, message in chain_buyer_failures:
             fail(key, message)
         if chain_buyer_failures:
+            severity = "critical"
+        # Chain 3's order step, the only writer of orders under it: page.
+        orders_failures = check_orders_sync_chain(payload)
+        for key, message in orders_failures:
+            fail(key, message)
+        if orders_failures:
             severity = "critical"
 
     if cert_err:
@@ -1270,6 +1599,7 @@ async def run_canary(
         failures=failures,
         failure_keys=failure_keys,
         health_status=health_status,
+        duckdb_fatal=duckdb_fatal,
         http_code=http_code,
         cert_days_remaining=cert_days,
         sync_seconds_since=sync_seconds,
@@ -1277,6 +1607,7 @@ async def run_canary(
         mirror_ages=mirror_ages,
         read_fallbacks_clean=read_fallbacks_seen,
         web_uptime_s=uptime_seen,
+        duckdb_silent=duckdb_silent_seen,
         unjudged_keys=unjudged_keys(payload),
     )
 
@@ -1289,6 +1620,11 @@ async def run_canary(
 # because "the dashboard is unreachable" outranks "a layer is stale" when both
 # are true.
 _ACTIONS: tuple[tuple[str, str], ...] = (
+    # First: under KS_DUCKDB=off web cannot work yet, so the health keys beside
+    # it are its symptom and this is the cause.
+    ("duckdb_opened_while_off",
+     "KS_DUCKDB=off and web opened DuckDB at the sites named: decouple them, or "
+     "KS_DUCKDB=on and up -d web. The week of silence starts again"),
     ("health_unreachable",
      "curl /api/health from the VPS — app vs nginx/TLS. Restart is the last lever"),
     ("health_http", "Read web's log for the failing request — not a network issue"),
@@ -1297,11 +1633,15 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("cert_unreachable", "TLS handshake fails: nginx or the network, not the app"),
     ("warehouse_preconditions_unmet",
      "After a flip this IS the way back (full DuckDB rebuild). Meet each cutover.unmet on /api/warehouse/status or unset KS_WRITE_WAREHOUSE; recreate web"),
+    ("warehouse_way_back_refused",
+     "Copy the named chains back first (scripts/chain_copy_back.py, chain 5 before chain 3), then recreate web for the way back; nothing derives meanwhile unless KS_PG_DERIVE=own"),
     ("mirror_", "Check meta.mirror_state and web's log; the mirror re-ships itself"),
     ("dq_", "Check /api/jobs — nothing is verifying the warehouse meanwhile"),
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),
     ("derivation_marks_",
      "Read meta.derivation_signal's last_error in meta.mirror_state, then meta.derivation_runs"),
+    ("orders_sync_failing",
+     "Chain 3: nothing else writes orders. write_chains.pg_orders_write.sync_step names the error class (a long lock_wait_s: /api/jobs shows the heavy job); Postgres back, the 24 h window refills"),
     ("buyer_sync_stalled_chain",
      "Chain 4: nothing else writes buyers. 'step not reached' means the tick stops first: grep 'Incremental sync'; else buyer_sync names the error class, grep 'Buyer'"),
     ("buyer_sync_",
@@ -1316,8 +1656,12 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "grep web's log for 'UTM layer refresh failed'; then POST /api/warehouse/refresh — a full tick whose parse finishes ends it"),
     ("write_chain_precondition_unmet",
      "Set the read flag the message names to postgres, then docker compose up -d web"),
+    ("report_ledger_pending",
+     "Nothing to resend: the next daily tick drains data/report-ledger-pending into the ledger, under either flag; grep -i 'report ledger' in web's log"),
     ("utm_parse_mode_invalid",
      "Set KS_UTM_PARSE to duckdb, or to postgres with KS_PG_DERIVE=own, in .env; then recreate web"),
+    ("duckdb_mode_invalid",
+     "Set KS_DUCKDB to on or off in .env, then recreate web"),
     ("goals_history_mode_invalid",
      "Set KS_GOALS_HISTORY to bridge or silver (or remove it) in .env, then recreate web; every goal read fails until then"),
     # Last: when an engine is down its own key names the cause, and a fallback
@@ -1334,10 +1678,22 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "names; clears 30 min after the last"),
 )
 
+# `health_status` when web is degraded for a DuckDB FATAL alone
+# (`duckdb_fatal_only`), by kind: what to do is the FATAL's, not a migration's.
+_FATAL_ACTIONS: dict[str, str] = {
+    "index": "Rebuild the indexes: scripts/weekly_compact.sh by hand, or Sunday's "
+             "compaction. A restart does not heal it",
+    "other": "grep web's log for 'DuckDB FATAL': one that repeats on a write is a "
+             "write that keeps failing. The status clears when web restarts",
+}
+
+
 def _what_to_do(result: CanaryResult) -> Optional[str]:
     """The single most useful lever for this result, or None."""
     for prefix, action in _ACTIONS:
         if any(k.startswith(prefix) for k in result.failure_keys):
+            if prefix == "health_status" and result.duckdb_fatal in _FATAL_ACTIONS:
+                return _FATAL_ACTIONS[result.duckdb_fatal]
             return action
     return None
 
@@ -1353,6 +1709,8 @@ _OUTAGE_KEYS: tuple[str, ...] = ("health_unreachable", "health_http", "health_st
 # A CRITICAL that is not an outage, named for what it is. First match wins.
 _CRITICAL_TITLES: tuple[tuple[str, str], ...] = (
     ("warehouse_preconditions_unmet", "Warehouse switch held back"),
+    ("warehouse_way_back_refused", "Warehouse way back refused"),
+    ("duckdb_opened_while_off", "DuckDB opened while off"),
 )
 
 
@@ -1360,8 +1718,14 @@ def _title(result: CanaryResult) -> str:
     if result.severity != "critical":
         return "Dashboard warning"
     keys = result.failure_keys
-    if not keys or any(key in _OUTAGE_KEYS for key in keys):
+    # `health_status` for a DuckDB FATAL alone is web answering that its store
+    # is damaged, not web down (`duckdb_fatal_only`).
+    outage = [key for key in keys if key in _OUTAGE_KEYS
+              and not (key == "health_status" and result.duckdb_fatal)]
+    if not keys or outage:
         return "Dashboard DOWN"
+    if result.duckdb_fatal == "index":
+        return "DuckDB index short"
     for prefix, title in _CRITICAL_TITLES:
         if any(key.startswith(prefix) for key in keys):
             return title

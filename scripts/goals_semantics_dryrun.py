@@ -44,7 +44,11 @@ tolerance of zero. It is read out of Postgres' copy of the quality journal,
 as `ks_readonly`, and the run is clean only when:
 
 - the journal copy is fresh — under 75 min old and not failing — or a copy
-  that stopped would keep showing an older clean run;
+  that stopped would keep showing an older clean run. Unless chain 9 writes
+  the journal in Postgres (`pg_dq_journal_write.reads_postgres()`, read in
+  this process as chain 1's preflight reads it): the run is then read from
+  the writer itself, the hourly copy has stood down with the chain, and its
+  frozen `last_ok_at` would refuse every flip after it;
 - the latest `mirror_landing` run is under the canary's 30 h;
 - that run did not fail in `reconcile_silver`, between its checks (`setup`),
   or with an error that does not say which check raised; a run that failed
@@ -91,9 +95,14 @@ and it is `scripts/utm_reclassify_dryrun.py`'s door: `KS_PG_READONLY_DSN`
 anything is refused before a row is read, the session is read-only by
 default, the transaction is declared READ ONLY, and before it ends the server
 is asked whether it assigned a transaction id. Nothing it computes reads
-`revenue_goals`, the one table a write chain could route regardless of the
-flag. It needs the database file to itself only if it is the live one, which
-web holds; a backup is not.
+`revenue_goals`, chain 7a's table. Chain 7b-3's four tables it does read and
+write — the Monday job's store and the smart goal — and that chain routes
+them to Postgres once it is flagged or latched, through `KS_PG_DSN`, and
+latches itself in web's `./data` on the first write. So `measure` pins both
+of the chain's answers to DuckDB and replaces its pool with one that raises:
+whatever the flag or the latch says, the store goes to the in-memory copy.
+It needs the database file to itself only if it is the live one, which web
+holds; a backup is not.
 """
 from __future__ import annotations
 
@@ -102,7 +111,7 @@ import asyncio
 import json
 import os
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -448,11 +457,14 @@ async def read_postgres_state(conn) -> Dict[str, Any]:
 
 
 def judge_postgres(state: Mapping[str, Any], *, landing_on: bool,
-                   warehouse_value: Optional[str] = None) -> PostgresVerdict:
+                   warehouse_value: Optional[str] = None,
+                   journal_direct: bool = False) -> PostgresVerdict:
     """Whether the state read proves Postgres Silver holds what DuckDB's
     holds. Pure: `now` is the server's own `taken_at`, and the two switches
     that stand `reconcile_silver` down are handed in — `landing_on`, and
-    `warehouse_value`, `KS_WRITE_WAREHOUSE` as the environment holds it."""
+    `warehouse_value`, `KS_WRITE_WAREHOUSE` as the environment holds it — as
+    is `journal_direct`, whether chain 9 writes the journal in Postgres, when
+    the copy's age is no reason (chain 1's preflight drops it the same way)."""
     from core import warehouse_cutover as cutover
     from core.pg_inventory_write import _raised_checks
 
@@ -477,10 +489,19 @@ def judge_postgres(state: Mapping[str, Any], *, landing_on: bool,
             "while a way back is owed its first validated full DuckDB tick, "
             f"so silence about {SILVER_TABLE} is not a verdict")
 
+    # The journal copy the run is read from — unless chain 9 writes the
+    # journal in Postgres: the run is then read from the writer itself, the
+    # hourly copy has stood down, and its frozen `last_ok_at` would refuse for
+    # ever. The run's age and its findings below are still asked.
     ok_at = state.get("journal_ok_at")
     if ok_at is not None:
         verdict.journal_copy_age_s = int((now - ok_at).total_seconds())
-    if ok_at is None:
+    if journal_direct:
+        verdict.journal_copy_age_s = None
+        notes.append(
+            "chain 9 writes the quality journal in Postgres: the run is read "
+            "from the writer, not from its stood-down copy")
+    elif ok_at is None:
         reasons.append(
             f"the quality journal has never been copied into Postgres "
             f"({journal_copy}), so no verdict can be read")
@@ -594,10 +615,12 @@ async def postgres_half(dsn: Optional[str] = None) -> PostgresVerdict:
                           f"{type(exc).__name__}: {exc}")
     finally:
         await conn.close()
+    from core import pg_dq_journal_write
     from core import warehouse_cutover as cutover
 
     return judge_postgres(state, landing_on=pg_landing.enabled(),
-                          warehouse_value=os.environ.get(cutover.ENV))
+                          warehouse_value=os.environ.get(cutover.ENV),
+                          journal_direct=pg_dq_journal_write.reads_postgres())
 
 
 # ─── the report ──────────────────────────────────────────────────────────────
@@ -640,6 +663,29 @@ def _leaves(value) -> int:
     return 1
 
 
+NOT_THE_COPY = ("the dry run reached chain 7b-3's Postgres writer; it stores "
+                "into the in-memory copy only")
+
+
+@contextmanager
+def held_off_chain_7b3():
+    """Chain 7b-3's two answers pinned to DuckDB, and its writer's pool made
+    to raise, for as long as the block runs (module docstring).
+
+    The pins are the first wall: the Monday job's store and the smart goal's
+    read ask them and stay on the copy. The pool is the second, for a route
+    to either writer that does not ask `writes_postgres`: it raises before the
+    writer acquires a connection, so before the latch is taken.
+    """
+    async def _no_forecast_pool():
+        raise RuntimeError(NOT_THE_COPY)
+
+    with patch("core.pg_forecast_write.writes_postgres", lambda: False), \
+            patch("core.pg_forecast_write.reads_postgres", lambda: False), \
+            patch("core.pg_forecast_write._pool", _no_forecast_pool):
+        yield
+
+
 async def measure(backup: Path, today: date) -> Report:
     from core.duckdb_constants import KNOWN_SALES_TYPES
     from core import pg_goals_read
@@ -650,8 +696,12 @@ async def measure(backup: Path, today: date) -> Report:
 
     report = Report(backup=str(backup), today=today.isoformat())
     results: Dict[str, Any] = {}
+    # Chain 7b-3 routes the Monday job's store and the smart goal's read to
+    # Postgres once flagged or latched; here both stay on the copy, and the
+    # writer's pool raises as a second wall (module docstring).
     with patch.dict(os.environ, {"KS_READ_GOALS": "duckdb"}), \
             patch("core.pg_goals_read.fetch", _no_postgres), \
+            held_off_chain_7b3(), \
             patch("core.repositories.goals.datetime", frozen_clock(today)):
         for side in SIDES:
             conn = copy_backup(backup)
