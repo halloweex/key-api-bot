@@ -2849,6 +2849,42 @@ class TestTheAdminBuyerReship:
                 assert go is False
 
     @pytest.mark.asyncio
+    async def test_the_guard_waits_as_long_as_the_full_sync_does(self, flags, pool, reship):
+        """The review of F1. The test above proves the guard takes the heavy
+        lock and can give up; it did not prove how long it waits. A reship is
+        detached, outside any request budget, and a full sync or a resync
+        holds the lock for minutes — so it waits `SYNC_ALL_LOCK_WAIT_S` (300 s)
+        as the full buyer sync does, not the 20 s a request can afford
+        (`HEAVY_LOCK_WAIT_S`), after which every reship that met a sync would
+        stop. The two waits are moved apart here — the request budget huge,
+        the reship's tiny — so the wrong one cannot pass by being slow: it
+        times out. Mutations killed: `_heavy_lock(HEAVY_LOCK_WAIT_S)`, or any
+        constant, in the guard."""
+        import asyncio
+
+        from core.scheduler import get_scheduler
+        from web.routes.api import admin
+
+        assert admin.SYNC_ALL_LOCK_WAIT_S == 300
+        assert admin.SYNC_ALL_LOCK_WAIT_S > admin.HEAVY_LOCK_WAIT_S
+
+        lock = asyncio.Lock()
+        flags.setattr(get_scheduler(), "_heavy_job_lock", lock)
+        assert await self._post_and_finish(
+            flags, "/api/mirror/backfill/buyers") == [(200, False)]
+        guard = reship.await_args.kwargs["portion_guard"]
+
+        flags.setattr(admin, "HEAVY_LOCK_WAIT_S", 3600)
+        flags.setattr(admin, "SYNC_ALL_LOCK_WAIT_S", 0.05)
+
+        async def gives_up() -> bool:
+            async with guard() as go:
+                return go
+
+        async with lock:
+            assert await asyncio.wait_for(gives_up(), 5) is False
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("outcome", [
         {"return_value": {"status": "done"}},
         {"side_effect": RuntimeError("the lock stayed busy")},
