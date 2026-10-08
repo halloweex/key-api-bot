@@ -1244,7 +1244,12 @@ in-memory, the opener, or `compact_duckdb.py::phase3_validate` (the file
 phase 2 just built and closed — no WAL — in a do-not-touch script),
 including one written out in a string a module runs elsewhere (`python -c`,
 a subprocess), which the AST never sees inside — the step-13 rehearsal's D1
-DELETE hid there, merged in after the walk was written; the
+DELETE hid there, merged in after the walk was written. Such a program is
+read the way a module is when it parses, so `import duckdb as d;
+d.connect(p)` does not pass where the literal `duckdb.connect(` did, and
+the week of silence's walk reads it too: it runs in another process, past
+the in-process count, and a read-only open changes no byte the hash sees
+(batch-E review); the
 `duckdb` module is never handed on as a value; and every ATTACH of a database
 file carries the READ_ONLY *option* — parsed, because `AS read_only_copy`,
 `(READ_ONLY false)` and a comment saying READ_ONLY all attach read-write, and

@@ -26,6 +26,7 @@ import ast
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -277,6 +278,15 @@ def driver_references(source: str) -> list:
     `getattr` (`x = duckdb`, `f(duckdb)`), the driver counts too: no later
     line can be traced through.
 
+    A program held as text — a string, an f-string or a `+` concatenation
+    that is itself Python mentioning the driver, run elsewhere by `python -c`
+    or a subprocess — is read the same way, and every reach inside it counts
+    where the string stands: it runs in another process, past the switch's
+    in-process count, and a read-only open of it changes no byte the file's
+    hash could see (batch-E review; the step-13 rehearsal's D1 DELETE is
+    such a program, and opens through `open_file`). Text that does not parse
+    counts once if it imports the driver.
+
     What it cannot read, and does not pretend to: a module named by a value
     (`import_module(name)`), the driver reached through an object's
     attribute set at run time, and anything that is not Python (`ATTACH` in a
@@ -365,7 +375,8 @@ def driver_references(source: str) -> list:
         return False
 
     found = []
-    for node in [*starred, *(n for n in ast.walk(tree) if reaches(n))]:
+    for node in [*starred, *(n for n in ast.walk(tree) if reaches(n)),
+                 *_reaches_in_programs(tree)]:
         scope, names = node, []
         while scope in parents:
             scope = parents[scope]
@@ -373,6 +384,47 @@ def driver_references(source: str) -> list:
                 names.append(scope.name)
         found.append(".".join(reversed(names)) or "<module>")
     return found
+
+
+def _string_text(node) -> str | None:
+    """The text a string expression holds, every hole as `{}`: a literal, an
+    f-string, or a `+` concatenation with a literal in it. None otherwise."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(v.value if isinstance(v, ast.Constant) else "{}"
+                       for v in node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _string_text(node.left), _string_text(node.right)
+        if left is None and right is None:
+            return None
+        return (left if left is not None else "{}") + (right if right is not None else "{}")
+    return None
+
+
+_DRIVER_IMPORT_IN_TEXT = re.compile(
+    r"(?m)(?:^|;)\s*(?:import\s+(?:[\w.]+\s*,\s*)*duckdb\b|from\s+duckdb\s+import\b)")
+
+
+def _reaches_in_programs(tree: ast.AST) -> list:
+    """One string node per reach for the driver inside a program it holds."""
+    out, inside = [], set()
+    for node in ast.walk(tree):
+        if node in inside:
+            continue
+        text = _string_text(node)
+        if text is None:
+            continue
+        # Breadth-first, so the whole expression is read before its parts.
+        inside.update(d for d in ast.walk(node) if d is not node)
+        if "duckdb" not in text:
+            continue
+        try:
+            reaches = driver_references(text)
+        except (SyntaxError, ValueError):
+            reaches = ["<text>"] if _DRIVER_IMPORT_IN_TEXT.search(text) else []
+        out += [node] * len(reaches)
+    return out
 
 
 def _walk(*trees: str) -> dict:
@@ -504,6 +556,27 @@ class TestOneOpener:
          "if args.duckdb:\n    use = args.duckdb", []),
         ("from core.duckdb_store import duckdb\ntry:\n    pass\n"
          "except duckdb.IOException:\n    pass", []),
+        # A program held as text, run in another process (batch-E review):
+        # past the in-process count, and a read-only open changes no byte the
+        # hash could see — so the static walk is the only one that can.
+        ("_PROG = \"import duckdb as d, sys; print(d.connect(sys.argv[1]))\"",
+         ["<module>"]),
+        ("_PEEK = \"import duckdb, sys; "
+         "print(duckdb.connect(sys.argv[1], read_only=True).execute('x').fetchone())\"",
+         ["<module>"]),
+        ("import subprocess\ndef f(q):\n"
+         "    subprocess.run(['python', '-c', f'import duckdb; duckdb.sql({q!r})'])",
+         ["f"]),
+        ("_DELETE_ONE = r'''\nimport sys\nimport duckdb as ddb\n"
+         "con = ddb.connect(sys.argv[1])\n'''", ["<module>"]),
+        ("X = 'import duckdb\\n  con = duckdb.connect(p'", ["<module>"]),   # does not parse
+        # D1 as it is: the driver for its exception class, the file through
+        # the opener — no reach.
+        ("_DELETE_ONE = r'''\nimport sys\nimport duckdb\n"
+         "from core.duckdb_switch import open_file\ncon = open_file(sys.argv[1])\n"
+         "try:\n    con.execute('DELETE FROM t')\nexcept duckdb.FatalException:\n"
+         "    pass\n'''", []),
+        ("doc = 'every `duckdb.connect` in core goes through open_file'", []),
     ])
     def test_the_walk_reads_every_spelling(self, source, expected):
         """Mutation: drop any one rule from `driver_references` — the module

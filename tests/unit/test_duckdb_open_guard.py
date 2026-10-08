@@ -136,6 +136,38 @@ def _sql_text(node: ast.AST) -> "str | None":
     return None
 
 
+def _driver_imports(tree: ast.AST):
+    """(names bound to the `duckdb` module, names bound to its `connect`)."""
+    modules, functions = set(), set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            modules |= {a.asname or a.name for a in n.names if a.name == "duckdb"}
+        elif isinstance(n, ast.ImportFrom) and n.module == "duckdb":
+            functions |= {a.asname or a.name for a in n.names if a.name == "connect"}
+    return modules, functions
+
+
+def program_violations(text: str) -> list:
+    """`why` for every read-write open in a program held as text.
+
+    Read the way a module is read when the text is a Python program that
+    imports the driver — `import duckdb as d; d.connect(p)` included, which
+    the literal `duckdb.connect(` the first form searched for never matched
+    (batch-E review) — and by that literal call otherwise: a fragment that
+    does not parse, or a snippet run where `duckdb` is already bound. An
+    ATTACH is not read here; the caller reads the whole text for it."""
+    if "duckdb" in text:
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            tree = None
+        if tree is not None and any(_driver_imports(tree)):
+            _calls, inner = scan(text, "<text>")
+            return [why for *_where, why in inner
+                    if not why.startswith("ATTACH without READ_ONLY")]
+    return [why for _pos, why in connect_violations(text)]
+
+
 def scan(source: str, rel: str):
     """(calls, violations) for one module.
 
@@ -143,12 +175,7 @@ def scan(source: str, rel: str):
     violations: (rel, function, line, why).
     """
     tree = ast.parse(source)
-    modules, functions = set(), set()
-    for n in ast.walk(tree):
-        if isinstance(n, ast.Import):
-            modules |= {a.asname or a.name for a in n.names if a.name == "duckdb"}
-        elif isinstance(n, ast.ImportFrom) and n.module == "duckdb":
-            functions |= {a.asname or a.name for a in n.names if a.name == "connect"}
+    modules, functions = _driver_imports(tree)
 
     parents = {}
     for n in ast.walk(tree):
@@ -204,8 +231,9 @@ def scan(source: str, rel: str):
         # subprocess — opens the file as surely as a call here does, and the
         # AST above never sees inside a string. The step-13 rehearsal's D1
         # DELETE was one: a bare read-write connect, in a string, run once per
-        # table, whose lossy close cost the next table's index.
-        for _pos, why in connect_violations(text):
+        # table, whose lossy close cost the next table's index. Read as a
+        # module is, so an alias does not pass (`program_violations`).
+        for why in program_violations(text):
             violations.append((rel, function_of(n), n.lineno,
                                f"{why} in a program held as text"))
     return calls, violations
@@ -433,6 +461,19 @@ def test_the_switch_refuses_before_the_checkpoint_opens_anything():
     ("PROG = '''\nimport duckdb\ncon = duckdb.connect(db, read_only=True)\n'''", None),
     ("PROG = '''\nfrom core.duckdb_switch import open_file\ncon = open_file(db)\n'''",
      None),
+    # The batch-E review's: the driver aliased inside the program, which the
+    # literal `duckdb.connect(` never matched — in core/, and as D1's DELETE
+    # with the bare connect 2df7ed80 removed put back under an alias.
+    ("_PROG = \"import duckdb as d, sys; "
+     "print(d.connect(sys.argv[1]).execute('SELECT count(*) FROM orders').fetchone())\"",
+     "program held as text"),
+    ("_DELETE_ONE = r'''\nimport json, sys\nimport duckdb as ddb\n"
+     "db, table = sys.argv[1:3]\ncon = ddb.connect(db)\n"
+     "con.execute(f\"DELETE FROM {table}\")\n'''", "program held as text"),
+    ("PROG = 'from duckdb import connect as c\\nc(db)'", "program held as text"),
+    ("PROG = 'import duckdb as d\\nd.connect(db, read_only=True)'", None),
+    # Prose naming the driver is not a program.
+    ("doc = 'the one read-write `duckdb.connect` of the analytics file'", None),
 ])
 def test_the_walk_sees_what_it_must(source, verdict):
     _, violations = scan(source, "core/x.py")
