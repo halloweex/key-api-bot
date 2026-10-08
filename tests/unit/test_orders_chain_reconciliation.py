@@ -98,6 +98,42 @@ class TestTheJob:
         sched._resolve_dq_layer.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("latched", [True, False])
+    async def test_a_stood_down_arm_journals_no_run(self, off, monkeypatch, latched):
+        """A stood-down arm compared nothing, so a run on its layer would be a
+        fresh, clean `reconciliation` verdict — through chain 9's door, into
+        Postgres while chain 9 writes there. Recorded at the door every route
+        goes through (`dq_journal.journal_run`), with `persist_run` recording
+        too rather than raising: the test above raises from `persist`, and the
+        job's own `except Exception` swallows it. Mutation: drop
+        `if duckdb_arm:` in front of the journal write. The unlatched case
+        proves the recorder sees the door."""
+        from core import dq_journal
+
+        journalled = []
+
+        async def journal_run(store, **kwargs):
+            journalled.append(kwargs["layer"])
+            return 7
+
+        monkeypatch.setattr(dq_journal, "journal_run", journal_run)
+        if latched:
+            chain_latch.latch(pg_orders_write.CHAIN)
+        persist = MagicMock(return_value=7)
+        sched, _sync, result = await _run(
+            duckdb_orders=MagicMock(return_value={}), persist=persist,
+            pg_result={"issues": [], "discrepancies": [], "error": None})
+        assert result["error"] is None
+        if latched:
+            assert journalled == []
+            persist.assert_not_called()
+            assert result["run_id"] is None
+        else:
+            assert journalled == ["reconciliation"]
+            assert result["run_id"] == 7
+        sched._persist_postgres_reconciliation.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_off_the_duckdb_arm_runs_as_it_always_has(self, off):
         extract = MagicMock(return_value={})
         persist = MagicMock(return_value=7)
@@ -159,6 +195,57 @@ class TestTheLayerIsNotWatched:
         assert DataQualityFreshness(**marked["reconciliation"]).stood_down is True
         assert DataQualityFreshness.model_fields["stood_down"].description
 
+    @pytest.mark.parametrize("journal_chain", [True, False])
+    def test_the_endpoint_marks_the_block_chain_9_answers(self, off, journal_chain):
+        """Through `/api/health` and the canary, with chain 3 latched. Under
+        chain 9 `_journal_ages` answers Postgres's block and ignores the one
+        it is handed, so the mark has to go on after it. Mutation: chain 3's
+        original order — `_mark_stood_down(stats.pop(...))`, then
+        `_journal_ages` — loses `stood_down`, and the canary pages
+        `dq_stale:reconciliation` every day once both chains are on. Without
+        chain 9 the block is DuckDB's either way, and marked either way."""
+        import time
+
+        from fastapi.testclient import TestClient
+
+        from bot.canary import check_dq_freshness
+        from core import dq_journal, pg_dq_journal_write
+        from web.main import app
+        from web.ratelimit import limiter
+        from web.routes.api import health
+
+        fresh = {"last_success_at": "2026-10-01T05:30:00+03:00", "age_seconds": 3600}
+        stale = {"last_success_at": "2026-09-29T13:30:00+03:00", "age_seconds": 40 * 3600}
+        layers = ("integrity", "reconciliation", "mirror_landing",
+                  "reconciliation_pg", "reconciliation_ch")
+        block = {layer: dict(stale if layer == "reconciliation" else fresh)
+                 for layer in layers}
+
+        async def from_postgres(layers=None):
+            return {layer: dict(entry) for layer, entry in block.items()}
+
+        if journal_chain:
+            chain_latch.latch(pg_dq_journal_write.CHAIN)
+            off.setattr(dq_journal, "last_success_ages_pg", from_postgres)
+            from_duckdb = {layer: dict(fresh) for layer in layers}   # frozen copy
+        else:
+            from_duckdb = block
+        chain_latch.latch(pg_orders_write.CHAIN)
+        off.setitem(health._stats_cache, "data", {"data_quality": from_duckdb})
+        off.setitem(health._stats_cache, "expires_at", time.time() + 600)
+        off.setitem(health._journal_ages_cache, "data", None)
+        off.setitem(health._journal_ages_cache, "expires_at", 0)
+
+        limiter.reset()
+        try:
+            body = TestClient(app).get("/api/health").json()
+        finally:
+            limiter.reset()
+        assert body["data_quality"]["reconciliation"]["age_seconds"] == 40 * 3600
+        assert body["data_quality"]["reconciliation"]["stood_down"] is True
+        failures, _ = check_dq_freshness(body)
+        assert not [k for k, _ in failures if k.endswith(":reconciliation")], failures
+
     @pytest.mark.asyncio
     async def test_the_catch_up_does_not_run_the_job_for_a_layer_stood_down(self, moved):
         """Mutation: keep judging the job's own layer — every start of a web
@@ -189,10 +276,41 @@ class TestTheLayerIsNotWatched:
             await scheduler._schedule_catchup_runs()
         assert "dq_reconciliation_catchup" in scheduler._scheduler.added
 
-    def test_the_digest_skips_it(self):
-        """Mutation: digest the stood-down layer — a stale section every
-        morning, in the one message WARN findings reach anyone by."""
-        import inspect
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("latched", [True, False])
+    async def test_the_digest_skips_it(self, off, tmp_path, latched):
+        """Run against a real journal, every watched layer fresh and clean but
+        `reconciliation`, which nothing has written. Mutation: digest the
+        stood-down layer — a "no successful run" section every morning, in
+        the one message WARN findings reach anyone by. Since the merge with
+        chain 9 that is one word, `digest_inputs(store, WATCHED_LAYERS, now)`,
+        and the source-text check this replaced passed it. The unlatched case
+        proves the layer's absence is news, so the quiet is the skip's."""
+        from datetime import date, timedelta
 
-        src = inspect.getsource(BackgroundScheduler._run_dq_digest)
-        assert "stood_down_layers()" in src and "if layer in stood_down" in src
+        from core.data_quality import WATCHED_LAYERS, persist_run
+        from tests.unit.test_dq_digest_beat import _install_outbox, _make_store
+
+        store = await _make_store(tmp_path, off)
+        outbox = _install_outbox(off)
+        at = datetime.now(timezone.utc) - timedelta(minutes=30)
+        async with store.connection() as conn:
+            for layer in WATCHED_LAYERS:
+                if layer != "reconciliation":
+                    persist_run(conn, started_at=at, ended_at=at, as_of=at,
+                                window_start=date(2026, 1, 1),
+                                window_end=date(2026, 9, 30),
+                                layer=layer, issues=[], discrepancies=[])
+        if latched:
+            chain_latch.latch(pg_orders_write.CHAIN)
+        try:
+            result = await BackgroundScheduler()._run_dq_digest()
+        finally:
+            await store.close()
+        if latched:
+            assert result["quiet"] is True and result["sent"] is False
+            assert outbox.messages == []
+            assert result["layers"] == len(WATCHED_LAYERS) - 1
+        else:
+            assert result["sent"] is True
+            assert "<b>reconciliation</b> — no successful run" in outbox.messages[0]

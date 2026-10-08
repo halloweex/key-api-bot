@@ -217,11 +217,6 @@ class TableTransfer:
     # writer's — and not as a stranded row. Derived from the daily spec's
     # `prunes_by_age` and its clock; None everywhere else.
     prune_clock: Optional[str] = None
-    # A mirrored table only, and only chain 6's: the table whose recorded
-    # write instants (`_RECORDED_CLOCKS`) say a row is the chain's — each
-    # catalogue table its own. None for every table `_REWRITE_STAMP` dates by
-    # `mirrored_at` alone (chains 4 and 3; `rewrite_clock` is their landing).
-    clock_table: Optional[str] = None
     # A mirrored table only: what the handover tells an operator to do, where
     # it is not chain 4's buyer texts (`MirroredTexts`). None for the buyers.
     texts: Optional["MirroredTexts"] = None
@@ -786,7 +781,6 @@ def chain_specs(chain: ModuleType) -> Tuple[TableTransfer, ...]:
                 rewrite_stamp=stamp,
                 dk_select=buyer_contacts_select("duckdb") if joined else None,
                 pg_select=buyer_contacts_select("postgres") if joined else None,
-                clock_table=_REWRITE_CLOCK_OF.get(table),
                 texts=_MIRRORED_TEXTS.get(table),
             ))
             continue
@@ -1280,13 +1274,6 @@ async def _handover_issues(
                 if owner == spec.pg_table and later:
                     rewritten[stamp] = rewritten[stamp] - later
     return issues
-
-
-def _clock_table(spec: TableTransfer) -> str:
-    """The table whose owner row dates the latch for `spec`'s rows — the
-    landing it belongs to (`rewrite_clock`): the buyers for chain 4's, the
-    orders or the expenses for chain 3's, each catalogue table its own."""
-    return spec.rewrite_clock or spec.clock_table or _REWRITE_CLOCK_TABLE
 
 
 def _fetch_dk(conn, spec: TableTransfer) -> Dict[Any, Tuple[Any, ...]]:

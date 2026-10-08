@@ -148,25 +148,42 @@ CHAIN_TABLES: Tuple[str, ...] = (
     "bronze.orders", "bronze.order_products", "bronze.expenses",
     "app.order_backfill_misses")
 
-# The one `sync_metadata` key that moves with it — what the incremental sync
-# stamps after a batch lands and the full sync stamps from `MAX(updated_at)`.
-# The store's getter and setter route it through
-# `core.write_chains.chain_for_sync_key` to `meta.chain_watermarks`, so the
-# monotonicity guard reads the row it writes.
-CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_orders",)
+# The `sync_metadata` keys that move with it. The store's getter and setter
+# route both through `core.write_chains.chain_for_sync_key` to
+# `meta.chain_watermarks`, so the monotonicity guard reads the row it writes;
+# the copy-back carries both into DuckDB and the release deletes both.
+#
+# `last_sync_orders` — what the incremental sync stamps after a batch lands
+# and the full sync stamps from `MAX(updated_at)`.
+#
+# `last_sync_meilisearch_pg` — the cursor of the search index built from
+# Postgres (`core.pg_search_index_read.WATERMARK_KEY`), owner decision OD-15:
+# its value is `MAX(mirrored_at)` over orders, buyers and products, a Postgres
+# clock, and it moves with whichever of chains 3 and 6 lands last, which by
+# the sequencing is this one. Absent from Postgres at the flip, DuckDB's
+# frozen cursor stands in (`CHAIN_WATERMARK_INHERITS_DUCKDB` below), so the
+# first index tick after the flip goes on from where the last one stopped
+# instead of re-indexing everything. Neither `_freshness_check` nor the
+# standing watch judges it: it is in no `FRESHNESS_THRESHOLDS` entry, and
+# `CHAIN_WATERMARK_MAX_AGE_MIN` is None. `last_sync_meilisearch`, the cursor
+# of the index built from DuckDB, is a DuckDB clock and stays DuckDB's.
+CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_orders", "last_sync_meilisearch_pg")
 
-# Not judged by `core.pg_chain_invariants`: the key holds KeyCRM's newest
-# `updated_at`, not a sync time, and stands still overnight by design.
+# Not judged by `core.pg_chain_invariants`: `last_sync_orders` holds KeyCRM's
+# newest `updated_at`, not a sync time, and stands still overnight by design,
+# and the search cursor stands still whenever nothing is mirrored.
 # Freshness stays with `freshness_orders` and the order step's own health.
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
-# Absent from Postgres until the first tick after the flip writes it, and the
-# key is where the order step's window STARTS. Read as absent it was "an hour
-# ago", so the first tick fetched from 25 h back and every order KeyCRM
-# updated between DuckDB's last stamp and then was never fetched by the
-# incremental sync (the chain-3 review: a three-day-old DuckDB stamp skipped
-# two days). Declared, the store's getter answers DuckDB's frozen stamp for
-# the absent key (`DuckDBStore.get_last_sync_time`), and `_freshness_check`
-# judges the same value — one stand-in for both.
+# Absent from Postgres until the first tick after the flip writes it, and
+# `last_sync_orders` is where the order step's window STARTS. Read as absent
+# it was "an hour ago", so the first tick fetched from 25 h back and every
+# order KeyCRM updated between DuckDB's last stamp and then was never fetched
+# by the incremental sync (the chain-3 review: a three-day-old DuckDB stamp
+# skipped two days). Declared, the store's getter answers DuckDB's frozen
+# stamp for the absent key (`DuckDBStore.get_last_sync_time`), and
+# `_freshness_check` judges the same value — one stand-in for both. For the
+# search cursor the same stand-in is what keeps the first index tick after
+# the flip incremental.
 CHAIN_WATERMARK_INHERITS_DUCKDB = True
 
 # Per statement, inside every transaction here (DN-05a: the server is asked to

@@ -524,6 +524,10 @@ def _freshness_check(
     for name in chain_errors:
         chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
         blind.update(k[len("last_sync_"):] for k in getattr(chain, "CHAIN_SYNC_KEYS", ()))
+    # Only what this check judges. A moved key with no threshold — the search
+    # index's cursor, chain 3's since OD-15 — is watched in no mode, so naming
+    # it here would say that a stall of it went unwatched this run.
+    blind &= set(FRESHNESS_THRESHOLDS)
     if blind:
         why = ("; ".join(f"{n}: {e}" for n, e in sorted(chain_errors.items()))
                if chain_errors else "")
@@ -1716,8 +1720,11 @@ def unverified_conditions(raised: Sequence[str], issues: List[IntegrityIssue]) -
     if "sync_watermarks_unwatched" in found:
         from core.write_chains import stood_down_sync_keys
 
+        # The judged entities only (`_freshness_check`'s `blind`): a moved key
+        # with no threshold has no condition to hold.
         names.update(f"freshness_{key[len('last_sync_'):]}"
-                     for key in stood_down_sync_keys())
+                     for key in stood_down_sync_keys()
+                     if key[len("last_sync_"):] in FRESHNESS_THRESHOLDS)
     return sorted(names)
 
 

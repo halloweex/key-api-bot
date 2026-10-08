@@ -165,11 +165,11 @@ CHAIN_TABLES: Tuple[str, ...] = (PRODUCTS, CATEGORIES)
 # NOT `last_sync_meilisearch_pg` (OD-15): its value is `MAX(mirrored_at)` over
 # orders, buyers and products, which this chain stamps exactly as the mirror
 # did, so its meaning does not move here; it moves with whichever of chains 3
-# and 6 lands last, and by the sequencing that is chain 3. Declared here, a
-# catalogue rollback would carry and release a search-index cursor, and the
-# flip would read it as absent and re-index everything.
+# and 6 lands last, and by the sequencing that is chain 3, which declares it
+# (`core.pg_orders_write.CHAIN_SYNC_KEYS`). Declared here too, a catalogue
+# rollback would carry and release a search-index cursor chain 3 still writes.
 # `tests/unit/test_catalogue_chain.py` keeps it off every chain that does not
-# also own an order table.
+# also own an order table, and on chain 3.
 CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_products", "last_sync_categories")
 
 # Not judged by `core.pg_chain_invariants`' 90 minutes. A stalled catalogue

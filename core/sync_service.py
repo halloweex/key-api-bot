@@ -1128,7 +1128,9 @@ class SyncService:
 
             # The engine is chosen once: the watermark belongs to it. Only what
             # the index READS moves — the watermark is still `sync_metadata`
-            # bookkeeping, written by DuckDB until that table's stage-4 chain.
+            # bookkeeping, written by DuckDB until chain 3 writes Postgres,
+            # which takes the Postgres one with it (OD-15; the store's getter
+            # and setter route it, `pg_orders_write.CHAIN_SYNC_KEYS`).
             # Under KS_READ_FALLBACK=off a switch with no address is refused
             # rather than read from DuckDB, before anything is indexed or the
             # watermark is touched; the handlers below say who answers it.

@@ -174,6 +174,12 @@ class TestTheWayBack:
         await store.set_last_sync_time("orders", stamp)
         assert await _pg(pool, "SELECT value FROM meta.chain_watermarks "
                                "WHERE key = 'last_sync_orders'")
+        # The search index's Postgres cursor moves with the chain (OD-15):
+        # written to Postgres under it, carried back and released with it.
+        cursor = T0 + timedelta(hours=3)
+        await store.set_last_sync_time("meilisearch_pg", cursor)
+        assert await _pg(pool, "SELECT value FROM meta.chain_watermarks "
+                               "WHERE key = 'last_sync_meilisearch_pg'")
         assert chain_latch.latched(chain.CHAIN)
 
         preview = await handover_check(store, chain)
@@ -196,8 +202,12 @@ class TestTheWayBack:
         stored = (await _duck(store, "SELECT value FROM sync_metadata "
                                      "WHERE key = 'last_sync_orders'"))[0][0]
         assert datetime.fromisoformat(stored) == stamp
+        carried = (await _duck(store, "SELECT value FROM sync_metadata "
+                                      "WHERE key = 'last_sync_meilisearch_pg'"))[0][0]
+        assert datetime.fromisoformat(carried) == cursor
+        assert plan["sync_keys"].keys() == {"last_sync_orders", "last_sync_meilisearch_pg"}
         assert await _pg(pool, "SELECT key FROM meta.chain_watermarks "
-                               "WHERE key LIKE 'owner:%'") == []
+                               "WHERE key LIKE 'owner:%' OR key LIKE 'last_sync_%'") == []
         assert chain_latch.latched_at(chain.CHAIN) is None
         # The release hands the writes back to the flag; put it back as the
         # runbook does and DuckDB writes again.

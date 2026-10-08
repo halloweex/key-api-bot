@@ -164,15 +164,16 @@ class TestTheFlag:
 
 
 class TestTheDeclaration:
-    def test_the_four_tables_and_the_one_key(self):
+    def test_the_four_tables_and_the_two_keys(self):
         """Mutation: drop `app.order_backfill_misses` — `replicate_operational`
         would go on replacing it out of a frozen DuckDB every hour, rolling
-        back every miss the chain recorded."""
+        back every miss the chain recorded. And the search index's Postgres
+        cursor (OD-15, `TestTheSearchCursorMovesWithTheChain`)."""
         assert pow_.CHAIN == "pg_orders_write"
         assert pow_.WRITE_ENV == "KS_WRITE_ORDERS"
         assert pow_.CHAIN_TABLES == ("bronze.orders", "bronze.order_products",
                                      "bronze.expenses", "app.order_backfill_misses")
-        assert pow_.CHAIN_SYNC_KEYS == ("last_sync_orders",)
+        assert pow_.CHAIN_SYNC_KEYS == ("last_sync_orders", "last_sync_meilisearch_pg")
         assert pow_.CHAIN_WATERMARK_MAX_AGE_MIN is None
         # The order step's window starts at this key (the chain-3 review;
         # `TestTheFirstTickAfterTheFlip`).
@@ -703,6 +704,75 @@ class TestTheFirstTickAfterTheFlip:
         assert pg_inventory_write.writes_postgres()
         monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
         assert await duck.get_last_sync_time("offers") is None
+
+
+class TestTheSearchCursorMovesWithTheChain:
+    """OD-15: `last_sync_meilisearch_pg`, the cursor of the search index built
+    from Postgres, moves with chain 3. Its value is a Postgres clock
+    (`MAX(mirrored_at)`), and once the chain writes Postgres it lives in
+    `meta.chain_watermarks` with `last_sync_orders` — carried into DuckDB and
+    released by the copy-back with it."""
+
+    @pytest.mark.asyncio
+    async def test_under_the_chain_it_is_postgres_s_and_inherited_until_written(
+            self, met, duck, monkeypatch):
+        """The first index tick after the flip finds no cursor in Postgres;
+        DuckDB's frozen one stands in, so it goes on incrementally rather
+        than re-indexing everything, and its stamp lands in Postgres.
+        Mutation: drop the key from `CHAIN_SYNC_KEYS` — the setter writes
+        DuckDB, and nothing set below reaches `set_value`."""
+        from core import pg_chain_watermarks
+        from core.pg_search_index_read import WATERMARK_KEY
+
+        frozen = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=2)
+        await duck.set_last_sync_time(WATERMARK_KEY, frozen)    # flag off: DuckDB's
+        met.setenv("KS_WRITE_ORDERS", "postgres")
+        written = {}
+
+        async def set_value(key, value):
+            written[key] = value
+
+        monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
+        monkeypatch.setattr(pg_chain_watermarks, "set_value", set_value)
+        assert await duck.get_last_sync_time(WATERMARK_KEY) == frozen
+
+        later = frozen + timedelta(hours=1)
+        await duck.set_last_sync_time(WATERMARK_KEY, later)
+        assert written == {"last_sync_meilisearch_pg": later.isoformat()}
+        async with duck.connection() as conn:              # DuckDB's stays frozen
+            assert conn.execute(
+                "SELECT value FROM sync_metadata WHERE key = 'last_sync_meilisearch_pg'"
+            ).fetchone()[0] == frozen.isoformat()
+
+    def test_the_copy_back_carries_it_and_the_release_deletes_it(self):
+        from core.chain_transfer import _carried_keys
+
+        assert "last_sync_meilisearch_pg" in _carried_keys(pow_)
+
+    @pytest.mark.asyncio
+    async def test_the_freshness_check_does_not_call_it_unwatched(self, flags, duck):
+        """It has no threshold, so it is watched in no mode; a run that could
+        not read the moved watermarks names only what it would have judged.
+        Mutation: drop `blind &= set(FRESHNESS_THRESHOLDS)` (or the matching
+        filter in `unverified_conditions`) — every such run would say a stall
+        of the search cursor went unwatched, and hold a condition no check
+        fires."""
+        from core import data_quality as dq
+
+        chain_latch.latch(pow_.CHAIN)
+        now = datetime.now(UTC)
+        async with duck.connection() as conn:
+            for key in ("orders", "meilisearch_pg"):
+                conn.execute(
+                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
+                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
+                    [f"last_sync_{key}", (now - timedelta(minutes=5)).isoformat()])
+            issues = dq._freshness_check(conn, now)            # no chain_watermarks
+        (unwatched,) = [i for i in issues if i.check_name == "sync_watermarks_unwatched"]
+        assert unwatched.count == 1
+        assert "orders" in unwatched.description
+        assert "meilisearch" not in unwatched.description
+        assert dq.unverified_conditions([], [unwatched]) == ["freshness_orders"]
 
 
 class TestTheTickSaysWhenItWaitsForTheHeavyLock:

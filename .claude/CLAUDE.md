@@ -1593,11 +1593,27 @@ The wait excuses its own length, never what was stale before it, and pages
 on its own past 90 minutes, chain 4's bound. How long those jobs hold the
 lock has not been measured.
 
+**The search index's Postgres cursor moves with it** (OD-15).
+`last_sync_meilisearch_pg` is `MAX(mirrored_at)` over orders, buyers and
+products, a Postgres clock, and it is the chain's second sync key: under the
+chain the store's getter and setter keep it in `meta.chain_watermarks`,
+DuckDB's frozen cursor stands in until the first index tick writes it there
+(the same `CHAIN_WATERMARK_INHERITS_DUCKDB`, so that tick goes on
+incrementally rather than re-indexing everything), and the copy-back carries
+it into DuckDB and the release deletes it. Nothing judges its age: it is in no
+`FRESHNESS_THRESHOLDS` entry, so a run that cannot read the moved watermarks
+does not name it in `sync_watermarks_unwatched`. `last_sync_meilisearch`, the
+DuckDB-built index's cursor, is a DuckDB clock and stays DuckDB's. Declared on
+no chain until a review found it, while this file said chain 3 carried it.
+
 **What stands down with it.** DuckDB's arm of `dq_reconciliation` (layer
 `reconciliation`): against a DuckDB that no longer receives orders it would
 page every morning and re-fetch every new order. The Postgres arm, from the
-same KeyCRM snapshot, drives the repair; `/api/health` marks the layer
-`stood_down`, and the canary, the catch-up and the digest skip it. The ten
+same KeyCRM snapshot, drives the repair; the stood-down arm journals no run.
+`/api/health` marks the layer `stood_down` — after chain 9's `_journal_ages`,
+which answers Postgres's block and ignores the one it is handed, so marking
+first loses the mark — and the canary, the catch-up and the digest skip it.
+Each of those is pinned by running it, not by reading its source. The ten
 DuckDB integrity checks over the order tables (`ORDER_LANDING_CHECKS`) join
 `stood_down_duckdb_checks()`, so DN-23's Postgres twins stand in alone;
 `tests/unit/test_order_landing_stand_down.py` derives the list from the scan.
@@ -3653,8 +3669,9 @@ does, and the daily `mirror_retired_rows` INFO goes to zero.
 
 **`last_sync_meilisearch_pg` is not this chain's.** Its value is a Postgres
 clock this chain stamps exactly as the mirror did; by OD-15 it moves with
-whichever of chains 3 and 6 lands last, which is chain 3. A test keeps it off
-every chain that does not own an order table.
+whichever of chains 3 and 6 lands last, which is chain 3, and chain 3 declares
+it (see "Chain 3"). A test keeps it off every chain that does not own an order
+table, and requires it on chain 3.
 
 **The way back** is `scripts/chain_copy_back.py catalogue`. Both tables are
 mirrored landing tables there, each its own rewrite clock (`mirrored_at` one

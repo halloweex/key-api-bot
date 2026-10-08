@@ -623,7 +623,11 @@ async def health_check(request: Request):
     # Chain 9: from the store that writes the journal (`_journal_ages`).
     data_quality = await _journal_ages(data_quality)
     # Chain 3: the layers it stood down marked, on whichever store answered —
-    # per response, after the journal's own cache.
+    # per response, after the journal's own cache. Never before
+    # `_journal_ages`: under chain 9 it answers Postgres's block and drops the
+    # one it was handed, mark included, and the canary then pages the
+    # stood-down layer's age every day (`test_orders_chain_reconciliation.py`,
+    # `test_the_endpoint_marks_the_block_chain_9_answers`).
     data_quality = _mark_stood_down(data_quality)
 
     # The schema ledger. A migration that fails is retried on the next boot and

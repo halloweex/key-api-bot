@@ -539,3 +539,51 @@ class TestChain7aIsCarriedLikeTheOthers:
         assert "run deploy/stage4_soak.sh and read E1 (expenses copy stood down) and E2" in exp
         assert ("run deploy/stage4_soak.sh and read I1 (inventory copy stood "
                 "down), I2 and I3") in inv
+
+
+class TestNothingHereIsDeadInProduction:
+    """The chain-6 merge into chain 3 left `_clock_table` defined, asserted by
+    one test and called by nothing: `_handover_issues` keys on `rewrite_stamp`
+    now, and its docstring ("the orders or the expenses for chain 3's") read
+    as a live path of the copy-back. A test pinning a helper production never
+    calls proves nothing about the way back. Walked rather than listed, so the
+    next helper a merge orphans is found by the same test. Mutation: put
+    `_clock_table` back, or any function here production stops calling."""
+
+    PRODUCTION = ("core", "scripts", "web", "bot", "deploy")
+
+    @staticmethod
+    def _names(node, *, skip=None):
+        """Every name `node` refers to — loads, attributes, imports — except
+        `skip`, so a function calling itself does not count as reached."""
+        import ast
+
+        out = set()
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name):
+                out.add(n.id)
+            elif isinstance(n, ast.Attribute):
+                out.add(n.attr)
+            elif isinstance(n, ast.alias):
+                out.add(n.name.rsplit(".", 1)[-1])
+        out.discard(skip)
+        return out
+
+    def test_every_function_it_defines_is_reached_from_production(self):
+        import ast
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[2]
+        module = root / "core" / "chain_transfer.py"
+        defined = [n for n in ast.parse(module.read_text()).body
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        reached = set()
+        for top in self.PRODUCTION:
+            for path in (root / top).rglob("*.py"):
+                tree = ast.parse(path.read_text())
+                for node in tree.body:
+                    skip = (node.name if path == module and isinstance(
+                        node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None)
+                    reached |= self._names(node, skip=skip)
+        assert defined, "the walk read nothing"
+        assert [f.name for f in defined if f.name not in reached] == []

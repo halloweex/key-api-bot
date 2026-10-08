@@ -345,8 +345,19 @@ class TestTheRegistrySeesIt:
 class TestTheSearchCursorIsNotTheCatalogues:
     """OD-15: `last_sync_meilisearch_pg` moves with whichever of chains 3 and
     6 lands last, and that is chain 3. Declared here, a catalogue rollback
-    would carry and release a search-index cursor, and the flip would read it
-    as absent and re-index everything."""
+    would carry and release a search-index cursor chain 3 still writes."""
+
+    def test_chain_3_carries_it(self):
+        """The half the two tests below cannot see: they forbid the key on
+        the wrong chains and never required it on the right one, so the
+        merged tree carried it on none while CLAUDE.md and this module said
+        chain 3 did — a chain-3 copy-back neither carried nor released it.
+        Mutation: drop it from `pg_orders_write.CHAIN_SYNC_KEYS`."""
+        from core import pg_orders_write
+
+        assert write_chains.chain_for_sync_key("last_sync_meilisearch_pg") is pg_orders_write
+        # The DuckDB-built index's cursor is a DuckDB clock and stays DuckDB's.
+        assert write_chains.chain_for_sync_key("last_sync_meilisearch") is None
 
     SEARCH_KEYS = {"last_sync_meilisearch_pg", "last_sync_meilisearch"}
 
@@ -1011,7 +1022,10 @@ class TestTheCopyBackKnowsIt:
         for spec in specs:
             assert spec.is_mirrored and not spec.is_append
             assert spec.clock == ()
-            assert spec.clock_table == spec.pg_table
+            # Each table its own clock and its own stamp: what
+            # `_handover_issues` reads the chain's recorded instants by.
+            assert spec.rewrite_clock == spec.pg_table
+            assert spec.rewrite_stamp == (spec.pg_table, "id")
             assert spec.rewritten_by == "id"
             assert spec.texts is not None
             # A key on one side only is a failed copy in this direction,
@@ -1025,8 +1039,9 @@ class TestTheCopyBackKnowsIt:
 
         for spec in chain_transfer.chain_specs(pg_buyers_write):
             if spec.is_mirrored:
-                assert spec.clock_table is None and spec.texts is None
-                assert chain_transfer._clock_table(spec) == "bronze.buyers"
+                assert spec.texts is None
+                assert spec.rewrite_clock == "bronze.buyers"
+                assert spec.rewrite_stamp == ("bronze.buyers", "id")
 
     def test_the_operator_types_its_short_name(self):
         from core.chain_transfer import resolve_chain
