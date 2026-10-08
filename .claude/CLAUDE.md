@@ -1218,8 +1218,14 @@ Every OOM kill and every stop that outlives its grace is such a kill.
 the analytics file, and its first statement is `CHECKPOINT`, which keeps every
 replayed entry. First, not after the SETs: a SET that fails leaves a valid
 instance, and closing a valid instance is the lossy checkpoint. A guard
-checkpoint that fails is itself FATAL, so nothing is written on close and the
-WAL waits for the next open. Free on a clean start; behind a kill, 1.5 / 3.6 /
+checkpoint that fails inside DuckDB is FATAL, so nothing is written on close
+and the WAL waits for the next open. One that is **interrupted** is not —
+`InterruptException`, or Ctrl-C in a CLI opening through the store, leaves a
+valid instance and the WAL unapplied (measured on a 58 MB WAL), and closing
+that is the lossy checkpoint again. `PRAGMA disable_checkpoint_on_shutdown`
+on every failed exit is what stops it, and every failed exit closes: an
+instance left to the exception's traceback holds the file's lock against
+every other process. Free on a clean start; behind a kill, 1.5 / 3.6 /
 8.9 s at 30 / 300 / 900 MB of WAL — the checkpoint the restart would have
 taken anyway, moved to the open. A WAL found at open is logged as a WARNING,
 so every kill is named. Read-only opens replay into memory and answer
@@ -1228,8 +1234,17 @@ correctly; they neither lose entries nor take the guard.
 `tests/unit/test_duckdb_open_guard.py` walks `core/ web/ bot/ scripts/
 deploy/`, not a list of callers: every `duckdb.connect` is read-only,
 in-memory, the opener, or `compact_duckdb.py::phase3_validate` (the file
-phase 2 just built and closed — no WAL — in a do-not-touch script), and every
-ATTACH of a database file says READ_ONLY. `test_duckdb_kill_guard.py` SIGKILLs
+phase 2 just built and closed — no WAL — in a do-not-touch script); the
+`duckdb` module is never handed on as a value; and every ATTACH of a database
+file carries the READ_ONLY *option* — parsed, because `AS read_only_copy`,
+`(READ_ONLY false)` and a comment saying READ_ONLY all attach read-write, and
+read through `%` and `+` as well as f-strings. It also reads every document
+in the repository (Markdown, shell, YAML, SQL, Dockerfiles; not `.planning/`
+or other worktrees) for a `duckdb.connect` call, an ATTACH and the `duckdb`
+CLI, under the same rules: the analytics agent's instructions told it to open
+`data/analytics.duckdb` with a bare read-write connect, which on a killed
+writer's file is the lossy restart itself. (So this file, too, never writes
+such a call out.) `test_duckdb_kill_guard.py` SIGKILLs
 a child that wrote through `DuckDBStore`, and also pins **the defect without
 the guard**: if that half fails after a DuckDB upgrade, re-measure before
 deleting the guard — never just the test.
@@ -1237,8 +1252,25 @@ deleting the guard — never just the test.
 **web gets 120 s to stop** (`stop_grace_period`; Docker's default is 10 s):
 uvicorn's drain (30 s, handlers run on past their 504), DuckDB work a
 cancelled job left in flight (~30 s, a whole warehouse refresh), `close()`'s
-checkpoint (~7 s at 900 MB) — ~67 s at worst, inside the deploy's 10-minute
-ssh timeout. `weekly_compact.sh` keeps its `--timeout 30`; harmless now.
+checkpoint (~7 s at 900 MB) — ~67 s for an ordinary request. **Not for a slow
+one**: the eight `SLOW_ENDPOINTS` (`web/middleware.py`) get 300 s, uvicorn
+drains them too, and three write DuckDB (`/api/duckdb/resync`,
+`/api/duckdb/refresh-statuses`, `/api/traffic/reclassify`). One in flight at a
+stop is killed. Covering them (~340 s) would leave a deploy — pull, stop,
+migrate, the 180 s health gate — no margin inside its 10-minute ssh timeout,
+so the grace makes kills rarer and `open_read_write` is what makes them
+harmless. `test_web_stop_grace.py` pins both halves, the endpoints by name.
+`weekly_compact.sh` keeps its `--timeout 30`; harmless now.
+
+**`close()` is final.** Shutdown closes the store while a handler past its
+504 or a job past its cancellation may still be queued on its lock. Such a
+caller used to find no connection, take it for one a FATAL had dropped, and
+open the file again — the schema and the migrations during shutdown, a write
+after `close()`'s checkpoint, and an instance nothing would ever close. It
+gets `StoreClosedError` now; only an explicit `connect()` reopens a store.
+`get_store()` after `close_store()` still builds a new one — a new lifespan
+and the tests rely on it — so a caller that asks the singleton afresh during
+shutdown is not stopped; one holding the store is.
 
 **A FATAL drops the instance instead of leaving web's DuckDB dead.**
 `connection()` reconnected only when there was no connection, so one FATAL
@@ -1253,9 +1285,32 @@ write after every reconnect — in the sync, an order batch every tick. So
 `/api/health` publishes `duckdb.fatal` (`count`, `kinds` — `index` or `other`
 — `last_at`; never the text) and `status: degraded` until web restarts;
 otherwise the next read answering would resolve the `health_status` page over
-a write that still fails. The existing page, not a new canary key. The log
-line stops before DuckDB's dump of the rows it could not remove: buyers'
-phone and email are indexed.
+a write that still fails. The existing page, not a new canary key.
+
+**DuckDB prints the rows it could not remove** — every column, so a buyer's
+name, phone and email — after `\nChunk:` in the FATAL, and again in every
+"invalidated" echo that quotes it. The store's own line was cut from the start,
+but the exception went to the caller whole, and the buyers step logs a failed
+write with its traceback, on every retry while the index stays short. Now
+`connection()`, `checkpoint()` and `connect()` cut the dump out of what leaves
+them, the whole exception chain included
+(`core.observability.cut_row_dumps`); web's log handler (`RowDumpFilter`,
+installed by `setup_logging`) cuts it from any record, for a handler that logs
+inside its own block before the exception reaches the store's exit; and a
+migration's or a view's error text — published on `/api/health`, which is
+public — is cut where it is recorded. Not covered: text an in-block handler
+writes anywhere but a log, and a script that logs through its own handler
+(scripts still get the cut exception).
+
+**A cancelled read waits for its thread.** `_fetch_one`/`_fetch_all` run the
+query on the executor thread under the store lock. A timeout interrupted the
+query and waited for the thread; a cancellation — the scheduler at shutdown,
+a caller giving up — released the lock with the thread still inside
+`conn.execute()`, and the next block that raised made the probe above wait
+for that query on the event loop (2.2–2.9 s of every request stalled,
+measured). Both now interrupt and wait (`_offload`); the probe never runs on
+a cancellation. An aborted transaction is not a FATAL: the probe's
+`TransactionException` keeps the instance.
 
 The lever for `index` is rebuilding every index, which the compaction does —
 Sunday's, or `weekly_compact.sh` by hand; a restart clears the status, not the
@@ -1264,18 +1319,23 @@ damage. Rebuilding automatically was measured and **not** built (3–3.5 s,
 owner's call. Whether production holds damage from before the guard is
 unknown; the first compaction after it ships clears whatever there is.
 
-**Not fixed: a WAL that cannot be replayed at all.** On 1.5.5 a WAL holding an
-`ALTER TABLE` — add, drop or rename a column — on a table whose column DEFAULT
-calls a function (`nextval(...)`, `CURRENT_TIMESTAMP`: nearly every table
-here) fails every open, read-only included, guard or not: `INTERNAL Error:
-Failure while replaying WAL file … GetDefaultDatabase with no default
+**Not fixed: a WAL that cannot be replayed at all.** On 1.5.5 a WAL holding a
+column-level `ALTER TABLE` — add, drop or rename a column, change its type,
+set or drop a DEFAULT or a NOT NULL — on a table that, after it, has a column
+DEFAULT calling a function (`nextval(...)`, `CURRENT_TIMESTAMP`, `now()`,
+`uuid()`: nearly every table here, and an `ADD COLUMN ... DEFAULT nextval(...)`
+makes one) fails every open, read-only included, guard or not: `INTERNAL
+Error: Failure while replaying WAL file … GetDefaultDatabase with no default
 database set`. Neither web nor the compaction opens the file until the WAL is
 removed, and its contents with it. First seen as "a brand-new file killed
 before its first checkpoint" (the first start creates `warehouse_refreshes`,
 then ALTERs it), but production is exposed too: the first start after a
-deploy that adds such a column, until the hourly checkpoint. An `ADD COLUMN
-IF NOT EXISTS` on a column that exists writes nothing. Candidate fix, as a
-separate change: a second CHECKPOINT at the end of `connect()`.
+deploy that alters such a table, until the hourly checkpoint. What replays:
+renaming the table, dropping the function DEFAULT itself, `CREATE INDEX`,
+DML, and an `ADD COLUMN IF NOT EXISTS` of a column that exists (it writes
+nothing). `test_duckdb_kill_guard.py::test_which_wal_cannot_be_replayed`
+pins each case. Candidate fix, as a separate change: a second CHECKPOINT at
+the end of `connect()`.
 
 ### How a failure reaches a human
 - **`KS_ALERTS_DISABLED=1` глушит весь исходящий Telegram** (алерты, дайджест,
@@ -3815,4 +3875,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-10-07*
+*Last updated: 2026-10-08*
