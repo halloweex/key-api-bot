@@ -136,6 +136,45 @@ class TestMonotone:
         assert not v.ok
         assert any("buyers" in e for e in v.errors)
 
+    # ── The contacts' two tiers, pinned by value (F8, review of #265) ──
+    #
+    # `TestMustBeNonEmpty` parametrises over the set itself, so it shrinks
+    # with the set: removing `buyer_contacts` from it passed with one test
+    # fewer. And the falls above bracket the bound only between 0.13% and
+    # 2.3%, so 2% — or `1 - 2*bound` — passed too. The rule is CLAUDE.md's,
+    # "an export that falls by more than 1% (~330 rows at 32 700), or to
+    # zero, is rejected", and these say it in numbers.
+
+    def test_the_contacts_tiers_are_exactly_these(self):
+        """Mutations killed: `buyer_contacts` dropped from MUST_BE_NONEMPTY,
+        or its bound moved off 1%."""
+        from core.snapshot_validation import BOUNDED_SHRINK
+
+        assert "buyer_contacts" in MUST_BE_NONEMPTY
+        assert BOUNDED_SHRINK == {"buyer_contacts": 0.01}
+
+    def test_no_contacts_and_no_baseline_is_rejected(self):
+        """The baseline moves only on an accepted snapshot, so a first run, or
+        a `.last_snapshot.json` deleted to resume after a rejection, has none —
+        and then only MUST_BE_NONEMPTY stands between an export of zero
+        contacts and the copy that survives. Mutation killed: the entry
+        removed (the review saw ok=True, with a warning)."""
+        v = validate_snapshot(_healthy(buyer_contacts=0), previous_counts=None)
+        assert not v.ok
+        assert any("buyer_contacts" in e for e in v.errors), v.errors
+
+    @pytest.mark.parametrize("now, ok", [
+        (32_416, True),     # 32 743 × 0.99 = 32 415.57: inside the 1%
+        (32_415, False),    # and the first row past it
+    ])
+    def test_the_bound_is_one_percent_to_the_row(self, now, ok):
+        """Mutations killed: a bound of 2%, `1 - 2*bound`, or any bound a row
+        either side of 1% of 32 743."""
+        v = validate_snapshot(_healthy(buyer_contacts=now), previous_counts=_healthy())
+        assert v.ok is ok, v.errors
+        if not ok:
+            assert any("buyer_contacts" in e and "1%" in e for e in v.errors), v.errors
+
 
 class TestEmptyMustBeDeclared:
     def test_the_historical_case_passes_but_is_named(self):
