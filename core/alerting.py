@@ -133,6 +133,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # runs as duckdb (DN-29, OD-09 (b)) — never a raise, web is the only syncer.
     "warehouse_preconditions_unmet": _c(
         "web restarts with every precondition met, or with KS_WRITE_WAREHOUSE unset"),
+    # A start that would have run as duckdb after a flip — the way back —
+    # stayed postgres, because a latched write chain owns a table DuckDB
+    # derives from (`warehouse_cutover`, THE WAY BACK, REFUSED).
+    "warehouse_way_back_refused": _c(
+        "web restarts with the named write chains copied back to DuckDB, or "
+        "with KS_WRITE_WAREHOUSE=postgres and every precondition met"),
     # The way back from KS_WRITE_WAREHOUSE=postgres holding the DuckDB checks
     # down past the canary's limit: a UTM parse that keeps raising, or no tick
     # after a full one whose parse raised (DN-29).
@@ -336,6 +342,17 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # human corrects the row.
     "chain_expense_orphans": _c(
         "the orders land, or a human corrects the rows — not a job"),
+    # Chain 5's classification. The sync lands managers again; an interval a
+    # human decided is corrected by a human, never re-derived.
+    "chain_managers_empty": _c("the next manager sync lands the managers again"),
+    "chain_manager_open_interval": _c(
+        "each manager has exactly one open interval again — a human, not a job"),
+    "chain_manager_unclassified": _c(
+        "the next manager sync seeds a baseline for each"),
+    "chain_manager_intervals_broken": _c(
+        "a human decides each history and corrects the intervals"),
+    "chain_manager_retail_disagrees": _c(
+        "a classification through the retail-status route sets both again"),
     # Chain 6's catalogue (OD-15 (a)). Retired is a fact about KeyCRM, not a
     # defect; the rest are writes that went round the chain, or a short page.
     "chain_catalogue_empty": _c(

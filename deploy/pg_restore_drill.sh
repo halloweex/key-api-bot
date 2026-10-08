@@ -115,6 +115,19 @@ DRILL_TABLES=(
     "bronze.buyer_contacts:either"
     "app.buyer_gender:grows"
 )
+# Chain 5's two (KS_WRITE_MANAGERS). Nothing deletes a manager, and the chain's
+# writer replaces a same-day classification only by deleting it and inserting
+# its replacement in one transaction, so neither table's key set shrinks under
+# it. Once the chain writes them this dump is the only backup of a
+# classification an admin made after the flip. Counted only from then — an
+# owner row in live meta.chain_watermarks (CHAIN5_OWNER_SQL): before it they
+# are a replica DuckDB full-replaces, a correction there may remove
+# an interval, and with the chain off the drill reads what it always read.
+CHAIN5_DRILL_TABLES=(
+    "bronze.managers:grows"
+    "app.manager_classifications:grows"
+)
+CHAIN5_OWNER_SQL="SELECT count(*) FROM meta.chain_watermarks WHERE key IN ('owner:bronze.managers', 'owner:app.manager_classifications')"
 # Absolute floor first, because two of these tables are small and a percentage
 # of a small number is not a margin. app.order_versions gains ~100 rows a day
 # and app.stock_movements a few hundred, so a day of lag is well inside both.
@@ -224,8 +237,17 @@ drill_from_remote() {
 
     echo "── restored against live ────────────────────────────────"
     echo "  rule: restored <= live within max(${DRILL_MARGIN_ROWS} rows, ${DRILL_MARGIN_PCT}% of live)"
-    local entry table direction live restored gap allow verdict bad=0
-    for entry in "${DRILL_TABLES[@]}"; do
+    local entry table direction live restored gap allow verdict bad=0 owned
+    local tables=("${DRILL_TABLES[@]}")
+    # Chain 5's two once it owns them. A read that fails counts them: the
+    # direction is the stricter one, and the counts below then say whether
+    # live can be read at all.
+    owned="$(docker exec -i ks-postgres psql -U ks_readonly -d ks -tAc \
+        "$CHAIN5_OWNER_SQL" 2>/dev/null || echo ERR)"
+    if [ "$owned" != 0 ]; then
+        tables+=("${CHAIN5_DRILL_TABLES[@]}")
+    fi
+    for entry in "${tables[@]}"; do
         table="${entry%%:*}"; direction="${entry##*:}"
         restored="$(docker exec "$container" psql -U postgres -d ks -tAc \
             "SELECT count(*) FROM $table" 2>/dev/null || echo ERR)"

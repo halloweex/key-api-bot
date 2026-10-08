@@ -290,18 +290,20 @@ class TestAChainWithNoInvariants:
 
         from core import write_chains
 
-        # A chain no reader knows — chain 3 was the example until it got one.
-        fake = types.ModuleType("core.pg_managers_write")
-        fake.WRITE_ENV = "KS_WRITE_MANAGERS"
-        fake.CHAIN_TABLES = ("bronze.managers",)
+        # A chain no reader knows. Chain 3 was the example until it got one,
+        # and chain 5 after it, each lane borrowing the other's name — so the
+        # example is a name no chain will ever take.
+        fake = types.ModuleType("core.pg_unread_write")
+        fake.WRITE_ENV = "KS_WRITE_UNREAD"
+        fake.CHAIN_TABLES = ("app.unread_example",)
         fake.env_writes_postgres = lambda: True
         monkeypatch.setattr(write_chains, "WRITE_CHAINS",
                             write_chains.WRITE_CHAINS + (fake,))
         for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS",
-                    "KS_WRITE_ORDERS"):
+                    "KS_WRITE_ORDERS", "KS_WRITE_MANAGERS"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-        return "pg_managers_write"
+        return "pg_unread_write"
 
     @pytest.mark.asyncio
     async def test_it_is_unwatched_not_clean(self, third_chain):
@@ -324,6 +326,7 @@ class TestAChainWithNoInvariants:
         assert not missing, f"no chain invariants for {missing}"
         assert set(readers.values()) <= {"expenses", "inventory", "goals",
                                          "expense_types", "buyers", "orders",
+                                         "managers",
                                          "catalogue",
                                          # The shadow chains (OD-02 (c)).
                                          "journal", "watchdogs",

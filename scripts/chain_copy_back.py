@@ -309,6 +309,9 @@ def _report(result: dict) -> None:
             print(f"      {found['description']}")
     elif result.get("executed"):
         print("\nevery table compares equal at zero.")
+        if result.get("full_rebuild_owed"):
+            # Chain 5: sales_type is materialised at rebuild time.
+            print("warehouse marked dirty in full: DuckDB owes a full rebuild.")
     print("\nnext:")
     for line in result.get("runbook", ()):
         print(f"  {line}")

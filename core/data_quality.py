@@ -2208,6 +2208,18 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # orphaned cost is an order refused or a write that went round the chain.
     ("chain_expense_orphans",
      "Read the web log for the order ids the chain refused; a refused order is re-offered for 24 h, then re-fetch it by id"),
+    # Chain 5's classification. Only the sync can re-land managers; only a
+    # human can decide an interval, and nothing here may re-derive one.
+    ("chain_managers_empty",
+     "Find what deleted bronze.managers; the next manager sync lands them, but the intervals are not re-fetchable — restore those from the nightly dump"),
+    ("chain_manager_open_interval",
+     "Per id: a forward classification through POST /api/managers/{id}/retail-status closes the extra open interval; none open needs one"),
+    ("chain_manager_unclassified",
+     "Find the write that skipped core.pg_managers_write.upsert_managers; its next run seeds the baseline"),
+    ("chain_manager_intervals_broken",
+     "A human decides each overlap or gap per id — it changes past sales_type; never let a job rewrite history"),
+    ("chain_manager_retail_disagrees",
+     "Reclassify the manager through POST /api/managers/{id}/retail-status, which sets both in one transaction"),
     # Chain 6's catalogue (OD-15 (a)). Never re-ship it out of DuckDB: DuckDB's
     # copy froze at the flip, and the chain's writer is the only one.
     ("chain_catalogue_empty",
@@ -2397,6 +2409,11 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "ch_reconcile_pending": "ClickHouse copy lagging",
     "gold_values_unwatched": "Gold not re-checked by a second engine",
     "freshness_orders": "orders not arriving",
+    "chain_managers_empty": "no managers in Postgres",
+    "chain_manager_open_interval": "a manager without exactly one classification in force",
+    "chain_manager_unclassified": "managers with no classification",
+    "chain_manager_intervals_broken": "a manager's classification history overlaps or gaps",
+    "chain_manager_retail_disagrees": "a manager's retail flag ≠ its classification",
 }
 
 

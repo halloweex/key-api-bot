@@ -46,6 +46,8 @@ VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on":
              "buyers_on": "0", "buyers_flip_at": "", "buyers_held_by": "",
              "buyers_override_floor": "", "dq_journal_direct": "0",
              "watchdogs_on": "0", "weekly_ledger_on": "0", "traffic_ledger_on": "0"}
+# Chain 5's two (30_m1, 31_m2).
+VARIABLES.update({"managers_on": "0", "managers_flip_at": ""})
 RUN_AS_OWNER = "-- soak:run-as ks_app"
 # The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
 HISTORY_CHECKS = (
@@ -1802,6 +1804,187 @@ class TestF1ReadFallbacks:
             v, detail = await verdict(conn, self.FILE, now=None)
         assert v == "PASS", detail
         assert "(681 probes)" in detail and "are covered" in detail, detail
+
+
+# ── chain 5: M1 and M2 ────────────────────────────────────────────────────────
+
+from datetime import date  # noqa: E402 — chain 5's seeds carry interval dates
+
+
+async def clean_managers(conn):
+    """M1 and M2 read whole tables; a scenario starts from none of their rows."""
+    await conn.execute("DELETE FROM app.manager_classifications")
+    await conn.execute("DELETE FROM bronze.managers")
+    await conn.execute("DELETE FROM meta.chain_watermarks "
+                       "WHERE key LIKE 'owner:%' OR key = 'last_sync_managers'")
+    await conn.execute("DELETE FROM meta.mirror_state WHERE table_name IN "
+                       "('bronze.managers', 'app.manager_classifications')")
+
+
+async def manager_owners(conn, at):
+    for table in ("bronze.managers", "app.manager_classifications"):
+        await conn.execute(
+            "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, $3)",
+            f"owner:{table}", at.isoformat(), at)
+
+
+async def manager(conn, mid, *, retail=False, intervals=((date(1970, 1, 1), None, None),),
+                  set_at=NOW):
+    """A manager and its intervals: (valid_from, valid_to, is_retail or None
+    for the manager's own)."""
+    await conn.execute("INSERT INTO bronze.managers (id, name, is_retail) VALUES ($1, 'M', $2)",
+                       mid, retail)
+    for valid_from, valid_to, is_retail in intervals:
+        await conn.execute(
+            "INSERT INTO app.manager_classifications "
+            "(manager_id, is_retail, valid_from, valid_to, set_at) VALUES ($1, $2, $3, $4, $5)",
+            mid, retail if is_retail is None else is_retail, valid_from, valid_to, set_at)
+
+
+async def managers_synced(conn, at):
+    await conn.execute(
+        "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+        "VALUES ('last_sync_managers', $1, $2)", at.isoformat(), NOW)
+
+
+@needs_pg
+class TestM1ManagersCopyStoodDown:
+    FILE = "30_m1_managers_copy_stood_down.sql"
+
+    @pytest.mark.asyncio
+    async def test_a_copy_after_the_handover_fails(self, pool):
+        """Mutation: judge the tables the replica does not write."""
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager_owners(conn, ago(days=2))
+            await mirror_state(conn, "app.manager_classifications", ok_at=ago(hours=5))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "FAIL" and "app.manager_classifications written by a copy" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_copy_before_the_handover_passes(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager_owners(conn, ago(days=2))
+            await mirror_state(conn, "bronze.managers", ok_at=ago(days=2, minutes=5))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "PASS" and "since the handover" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_failure_after_the_handover_fails(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager_owners(conn, ago(days=2))
+            await mirror_state(conn, "bronze.managers", ok_at=ago(days=3),
+                               attempted_at=ago(hours=1), failures=2, error="boom")
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "FAIL" and "failing (2)" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_without_owner_rows_the_flip_time_decides_and_without_it_unknown(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await mirror_state(conn, "bronze.managers", ok_at=ago(minutes=30))
+            v, _ = await verdict(conn, self.FILE, managers_on="1",
+                                 managers_flip_at=ago(hours=1).isoformat())
+            assert v == "FAIL"
+            v, detail = await verdict(conn, self.FILE, managers_on="1",
+                                      managers_flip_at=ago(minutes=10).isoformat())
+            assert v == "PASS" and "since the flip" in detail, detail
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "UNKNOWN" and "SOAK_MANAGERS_FLIP_AT" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_the_states_that_judge_nothing(self, pool):
+        async with scenario(pool) as conn:
+            v, detail = await verdict(conn, self.FILE, managers_on="0")
+            assert (v, detail.startswith("not applicable")) == ("PASS", True)
+            v, detail = await verdict(conn, self.FILE, managers_on="pending")
+            assert v == "UNKNOWN" and "unmet_precondition" in detail, detail
+            v, detail = await verdict(conn, self.FILE, managers_on="invalid")
+        assert v == "FAIL" and "no chain understands" in detail, detail
+
+
+@needs_pg
+class TestM2ClassificationShape:
+    FILE = "31_m2_classification_shape.sql"
+
+    @pytest.mark.asyncio
+    async def test_a_clean_shape_and_a_fresh_stamp_pass(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager(conn, 1)
+            await manager(conn, 2, retail=True, intervals=(
+                (date(1970, 1, 1), date(2030, 3, 1), False), (date(2030, 3, 1), None, True)))
+            await managers_synced(conn, ago(hours=5))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "PASS" and "2 manager(s)" in detail and "5 h old" in detail, detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("seed,expected", [
+        ("no_open", "not exactly one open interval: {3}"),
+        ("two_open", "not exactly one open interval: {3}"),
+        ("none", "no interval at all: {3}"),
+        ("overlap", "history overlaps or gaps: {3}"),
+        ("gap", "history overlaps or gaps: {3}"),
+        ("disagree", "is_retail disagrees with the open interval: {3}"),
+        ("set_at", "1 interval(s) with no set_at"),
+    ])
+    async def test_each_shape_fails_by_name(self, pool, seed, expected):
+        """Mutation: remove or invert any predicate."""
+        d = date
+        shapes = {
+            "no_open": dict(intervals=((d(1970, 1, 1), d(2030, 1, 1), None),)),
+            "two_open": dict(intervals=((d(1970, 1, 1), None, None), (d(2030, 1, 1), None, None))),
+            "none": dict(intervals=()),
+            "overlap": dict(intervals=((d(1970, 1, 1), d(2030, 3, 1), None),
+                                       (d(2030, 1, 1), None, None))),
+            "gap": dict(intervals=((d(1970, 1, 1), d(2030, 1, 1), None),
+                                   (d(2030, 2, 1), None, None))),
+            "disagree": dict(retail=True, intervals=((d(1970, 1, 1), None, False),)),
+            "set_at": dict(set_at=None),
+        }
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager(conn, 1)
+            await manager(conn, 3, **shapes[seed])
+            await managers_synced(conn, ago(hours=1))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "FAIL" and expected in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_the_stamp_is_judged_by_its_value(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager(conn, 1)
+            await managers_synced(conn, ago(hours=27))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "FAIL" and "moved 27 h ago" in detail, detail
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager(conn, 1)
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+            assert v == "FAIL" and "no manager sync has completed" in detail, detail
+            v, detail = await verdict(conn, self.FILE, managers_on="1",
+                                      managers_flip_at=ago(minutes=10).isoformat())
+        assert v == "PASS" and "not written yet" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_an_empty_table_fails(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await managers_synced(conn, ago(hours=1))
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == "FAIL" and "bronze.managers is empty" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_off_and_pending_judge_nothing(self, pool):
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager(conn, 3, intervals=())
+            for state in ("0", "pending"):
+                v, detail = await verdict(conn, self.FILE, managers_on=state)
+                assert v == "PASS" and detail.startswith("not applicable"), detail
 
 
 # ── H1/H2: the shadow chains (OD-02 (c)) ──────────────────────────────────────

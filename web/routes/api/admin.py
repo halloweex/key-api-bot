@@ -994,19 +994,55 @@ async def set_manager_retail_status(
     year's reports on the next refresh. Backdating is still available, but it
     is now something you ask for.
     """
-    store = await get_store()
-    managers = {m["id"] for m in await store.get_all_managers()}
-    if manager_id not in managers:
-        raise HTTPException(status_code=404, detail=f"Manager {manager_id} not found")
+    # Chain 5 (`core/pg_managers_write.py`). A `KS_WRITE_MANAGERS` nobody can
+    # read writes neither store — the writer refuses and the replica stands
+    # down — so it is refused here before anything is read: 409, the variable
+    # is the thing to fix. Off DuckDB, a Postgres failure is a 503 rather than
+    # a 500: the decision was not stored, and nothing fell back to DuckDB.
+    from core import pg_managers_write
 
-    # set_manager_retail_status marks the warehouse dirty itself now, so every
-    # caller gets the rebuild, not only this one.
-    await store.set_manager_retail_status(
-        manager_id, is_retail,
-        effective_from=effective_from,
-        set_by=admin.get("user_id"),
-        note=note,
-    )
+    chain_mode = pg_managers_write.mode()
+    if chain_mode is None:
+        raise HTTPException(status_code=409, detail=(
+            f"{pg_managers_write.WRITE_ENV} is not understood, so the "
+            "classification cannot be stored in either store; fix the variable"))
+
+    store = await get_store()
+    try:
+        managers = {m["id"] for m in await store.get_all_managers()}
+        if manager_id not in managers:
+            raise HTTPException(status_code=404, detail=f"Manager {manager_id} not found")
+
+        # set_manager_retail_status marks the warehouse dirty itself now, so every
+        # caller gets the rebuild, not only this one.
+        await store.set_manager_retail_status(
+            manager_id, is_retail,
+            effective_from=effective_from,
+            set_by=admin.get("user_id"),
+            note=note,
+        )
+    except HTTPException:
+        raise
+    except pg_managers_write.ManagerNotFound:
+        raise HTTPException(status_code=404, detail=f"Manager {manager_id} not found")
+    except pg_managers_write.BackdateBehindLatest as exc:
+        # OD-C5-1 (a): DuckDB would have written two open intervals.
+        raise HTTPException(status_code=409, detail=str(exc))
+    except pg_managers_write.ClassificationRefused as exc:
+        # A value Postgres would refuse, refused before Postgres was asked: a
+        # bad request, not an outage — a 503 here would send the operator to
+        # look at a Postgres that was never involved. The message names the
+        # field and the kind of value, never the value.
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        if chain_mode == "duckdb":
+            raise
+        logger.error("Manager %s not classified: Postgres failed under %s: %s",
+                     manager_id, pg_managers_write.WRITE_ENV, type(exc).__name__,
+                     exc_info=True)
+        raise HTTPException(status_code=503, detail=(
+            "The classification is written to Postgres, which did not answer; "
+            f"nothing was stored ({type(exc).__name__})"))
     # Step 05. This endpoint is the whole reason the classification cannot be
     # re-derived on the other side, so Postgres is updated here rather than
     # waiting for the daily manager sync — otherwise Silver computed in

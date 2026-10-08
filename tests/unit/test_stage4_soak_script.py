@@ -50,6 +50,7 @@ case "$1" in
                 case "$5" in
                     */pg_inventory_write) [ -n "${FAKE_INVENTORY_LATCHED:-}" ] && exit 0 ;;
                     */pg_buyers_write) [ -n "${FAKE_BUYERS_LATCHED:-}" ] && exit 0 ;;
+                    */pg_managers_write) [ -n "${FAKE_MANAGERS_LATCHED:-}" ] && exit 0 ;;
                     */pg_dq_journal_write) [ -n "${FAKE_DQ_JOURNAL_LATCHED:-}" ] && exit 0 ;;
                     */pg_watchdog_write) [ -n "${FAKE_WATCHDOGS_LATCHED:-}" ] && exit 0 ;;
                     */pg_weekly_ledger_write) [ -n "${FAKE_WEEKLY_LEDGER_LATCHED:-}" ] && exit 0 ;;
@@ -64,6 +65,7 @@ case "$1" in
                 KS_SMS_STORE) v="${FAKE_KS_SMS_STORE-__unset__}" ;;
                 KS_READ_SEARCH_INDEX) v="${FAKE_KS_READ_SEARCH_INDEX-__unset__}" ;;
                 KS_READ_DASHBOARD) v="${FAKE_KS_READ_DASHBOARD-__unset__}" ;;
+                KS_WRITE_MANAGERS) v="${FAKE_KS_WRITE_MANAGERS-__unset__}" ;;
                 KS_WRITE_DQ_JOURNAL) v="${FAKE_KS_WRITE_DQ_JOURNAL-__unset__}" ;;
                 KS_WRITE_WATCHDOGS) v="${FAKE_KS_WRITE_WATCHDOGS-__unset__}" ;;
                 KS_WRITE_WEEKLY_LEDGER) v="${FAKE_KS_WRITE_WEEKLY_LEDGER-__unset__}" ;;
@@ -333,6 +335,38 @@ class TestChain4:
                    SOAK_BUYERS_OVERRIDE_FLOOR="3")
         assert all("buyers_flip_at=2026-10-01 10:30+03 " in c
                    and "buyers_override_floor=3" in c for c in run.psql), run.psql
+
+
+class TestChain5:
+    """`managers_on`: 0, 1, pending, invalid, unknown — the latch outranks the
+    flag, and a flag the chain has not latched under is pending, because its
+    preconditions are only readable in web."""
+
+    def test_unset_is_zero(self, healthy):
+        assert all("managers_on=0 " in c and re.search(r"managers_flip_at=(\s|$)", c)
+                   for c in healthy.psql), healthy.psql
+
+    def test_the_flag_without_the_latch_is_pending(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_MANAGERS=" Postgres ")
+        assert all("managers_on=pending " in c for c in run.psql), run.psql
+
+    def test_the_latch_is_one_whatever_the_flag_says(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_MANAGERS="duckdb", FAKE_MANAGERS_LATCHED="1")
+        assert all("managers_on=1 " in c for c in run.psql), run.psql
+        assert "latched: chain 5 owns its tables" in run.out
+
+    def test_the_flag_and_the_latch_agree_on_one(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_MANAGERS="postgres", FAKE_MANAGERS_LATCHED="1")
+        assert all("managers_on=1 " in c for c in run.psql), run.psql
+
+    def test_a_value_nobody_understands_is_invalid(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_MANAGERS="postgress")
+        assert all("managers_on=invalid " in c for c in run.psql)
+
+    def test_the_flip_time_is_passed(self, tmp_path):
+        run = _run(tmp_path, SOAK_MANAGERS_FLIP_AT="2026-10-08 10:30+03")
+        assert all(re.search(r"managers_flip_at=2026-10-08 10:30\+03(\s|$)", c)
+                   for c in run.psql), run.psql
 
 
 class TestChain9:

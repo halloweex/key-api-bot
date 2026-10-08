@@ -216,6 +216,26 @@ class OrdersStepState:
         }
 
 
+# Chain 5's managers step, under `KS_WRITE_MANAGERS=postgres` (or a flag nobody
+# can read): a failure is recorded (`ManagersStepState`, on /api/health as
+# `write_chains.pg_managers_write.sync_step`), `last_sync_managers` is not
+# moved, and the next attempt waits this long — chain 4's interval. On the
+# DuckDB path a raise in the managers step used to skip the buyers, offers and
+# stocks steps for the tick; under the chain it is contained (DN-01's rule: a
+# chain's fault stops that chain and nothing else). The DuckDB path is
+# untouched.
+MANAGERS_RETRY_AFTER_S = 600
+
+# The managers' sync cadence, as the DuckDB path spells it.
+MANAGERS_STEP_EVERY_S = 86400
+
+
+class ManagersStepState(InventoryStepState):
+    """What chain 5's managers step last did, under the chain. Published on
+    /api/health as `write_chains.pg_managers_write.sync_step` — the error's
+    class, never its text: the endpoint is public."""
+
+
 def _get_max_updated_at(orders: list) -> Optional[datetime]:
     """
     Extract max updated_at from a list of orders.
@@ -422,6 +442,9 @@ class SyncService:
         # may try again after a failure (a `time.monotonic()` instant).
         self.inventory_step = InventoryStepState()
         self._inventory_retry_at = 0.0
+        # Chain 5's managers step, under the chain (`MANAGERS_RETRY_AFTER_S`).
+        self.managers_step = ManagersStepState()
+        self._managers_retry_at = 0.0
         # The buyers step, contained — see BuyerSyncState.
         self.buyer_sync_state = BuyerSyncState()
         self._buyers_retry_after: Optional[float] = None
@@ -618,6 +641,13 @@ class SyncService:
             Number of managers synced
         """
         logger.info("Syncing managers...")
+        # Chain 5: off DuckDB — or a flag nobody can read — every failure is
+        # recorded, the watermark held and the step retried after
+        # `MANAGERS_RETRY_AFTER_S`, and nothing escapes into the tick or the
+        # full sync. On DuckDB this method is what it always was.
+        from core import pg_managers_write
+
+        moved = pg_managers_write.mode() != "duckdb"
         try:
             client = await get_async_client()
             managers = []
@@ -632,15 +662,67 @@ class SyncService:
             await self.store.set_last_sync_time("managers")
 
             logger.info(f"Synced {count} managers from KeyCRM")
+            if moved:
+                self.managers_step.succeeded()
             return count
         except KeyCRMConnectionError as e:
             logger.warning(f"Manager sync connection error (will retry): {e}")
+            if moved:
+                self._managers_step_failed(e)
             return 0
         except KeyCRMAPIError as e:
             logger.error(f"Manager sync API error: {e}")
+            if moved:
+                self._managers_step_failed(e)
             return 0
         except KeyCRMError as e:
             logger.error(f"Manager sync error: {e}")
+            if moved:
+                self._managers_step_failed(e)
+            return 0
+        except Exception as e:  # noqa: BLE001 — contained under chain 5 only
+            if not moved:
+                raise
+            logger.error(
+                "Manager sync failed under %s; last_sync_managers not moved, "
+                "next attempt in %ss: %s: %s", pg_managers_write.WRITE_ENV,
+                MANAGERS_RETRY_AFTER_S, type(e).__name__, e, exc_info=True)
+            self._managers_step_failed(e)
+            return 0
+
+    def _managers_step_failed(self, exc: BaseException) -> None:
+        self.managers_step.failed("managers", exc)
+        self._managers_retry_at = time.monotonic() + MANAGERS_RETRY_AFTER_S
+
+    def _managers_retry_in(self) -> Optional[int]:
+        remaining = self._managers_retry_at - time.monotonic()
+        return int(remaining) + 1 if remaining > 0 else None
+
+    def managers_step_health(self) -> Dict[str, Any]:
+        """The `sync_step` entry of chain 5 on /api/health."""
+        return self.managers_step.published(self._managers_retry_in())
+
+    async def _managers_step_postgres(self) -> int:
+        """The incremental tick's managers step while chain 5 is off DuckDB.
+        Never raises.
+
+        The watermark getter is inside the step: under the chain it reads
+        `meta.chain_watermarks`, and on a flag nobody can read it raises —
+        either way a failure here used to skip the buyers, offers and stocks
+        steps for the tick. Inside the retry window nothing is asked of any
+        store or of KeyCRM.
+        """
+        if self._managers_retry_in() is not None:
+            return 0
+        try:
+            last = await self.store.get_last_sync_time("managers")
+            if not last or (datetime.now(DEFAULT_TZ) - last).total_seconds() > MANAGERS_STEP_EVERY_S:
+                return await self.sync_managers()
+            return 0
+        except Exception as e:  # noqa: BLE001 — recorded, published, retried
+            logger.error("Manager step failed before it started: %s",
+                         type(e).__name__, exc_info=True)
+            self._managers_step_failed(e)
             return 0
 
     async def sync_missing_buyers(self, limit: int = 500) -> int:
@@ -1593,9 +1675,16 @@ class SyncService:
                 await events.emit(SyncEvent.PRODUCTS_SYNCED, {"count": stats["products"]})
 
             # Sync managers daily (86400 seconds = 24 hours)
-            last_managers_sync = await self.store.get_last_sync_time("managers")
-            if not last_managers_sync or (datetime.now(DEFAULT_TZ) - last_managers_sync).total_seconds() > 86400:
-                stats["managers"] = await self.sync_managers()
+            from core import pg_managers_write
+
+            if pg_managers_write.mode() == "duckdb":
+                last_managers_sync = await self.store.get_last_sync_time("managers")
+                if not last_managers_sync or (datetime.now(DEFAULT_TZ) - last_managers_sync).total_seconds() > 86400:
+                    stats["managers"] = await self.sync_managers()
+            else:
+                # Chain 5 off DuckDB, or its flag unreadable: contained, so the
+                # buyers, offers and stocks below run whatever happens here.
+                stats["managers"] = await self._managers_step_postgres()
 
             # Sync missing buyers (fetch buyer details for orders that don't have them)
             #

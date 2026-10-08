@@ -321,6 +321,44 @@ async def _orders_preflight() -> dict:
         return data
 
 
+# Chain 5's pre-flip answer, on the same cache shape as chain 1's.
+_managers_preflight_cache: dict = {"data": None, "expires_at": 0}
+_managers_preflight_cache_lock = asyncio.Lock()
+
+
+async def _managers_preflight() -> dict:
+    """`pg_managers_write.preflight()`, cached and bounded. Never raises."""
+    from core import pg_managers_write
+
+    now = time.time()
+    async with _managers_preflight_cache_lock:
+        if (_managers_preflight_cache["data"] is not None
+                and now < _managers_preflight_cache["expires_at"]):
+            return _managers_preflight_cache["data"]
+        try:
+            data = await asyncio.wait_for(pg_managers_write.preflight(),
+                                          _PREFLIGHT_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            data = {"ok": False, "reasons": [
+                f"Postgres did not answer within {_PREFLIGHT_TIMEOUT_S} s"]}
+        _managers_preflight_cache["data"] = data
+        _managers_preflight_cache["expires_at"] = now + _STATS_CACHE_TTL
+        return data
+
+
+async def _managers_sync_step() -> "dict | None":
+    """What chain 5's managers step last did under the chain (failures in a
+    row, the error's class, the retry window). Local state, no I/O; null when
+    the sync service cannot be had."""
+    try:
+        from core.sync_service import get_sync_service
+
+        return (await get_sync_service()).managers_step_health()
+    except Exception as e:
+        logger.debug(f"Managers sync step unavailable: {e}")
+        return None
+
+
 async def _write_chains_block() -> dict:
     """The `write_chains` block: every chain's local state, and under chain 1's
     entry its `preflight` — the three questions asked before
@@ -329,29 +367,40 @@ async def _write_chains_block() -> dict:
     offers or stocks step is recorded instead of ending the tick. Neither is
     judged by the canary: the preflight is read by the person about to flip
     the chain, and a stock step that keeps failing stops `last_sync_stocks`,
-    which the integrity job's chain invariants already watch."""
-    from core import pg_inventory_write
+    which the integrity job's chain invariants already watch.
 
-    from core import pg_orders_write
+    Chain 3's and chain 5's entries carry the same two
+    (`pg_orders_write.preflight` and the order step's state, which the canary
+    does judge; `pg_managers_write.preflight` and the managers step's). The
+    preflights are asked at once, never one after the other: each is bounded
+    at `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row would cost
+    the canary's whole `HEALTH_TIMEOUT_S`."""
+    from core import pg_inventory_write, pg_managers_write, pg_orders_write
 
     block = _write_chains()
     inventory = block.get(pg_inventory_write.CHAIN)
     # Chain 3: its preflight — every precondition by name while the flag is
     # still off — and the order step the canary judges.
     orders = block.get(pg_orders_write.CHAIN)
-    # The two preflights at once, never one after the other: each is bounded
-    # at `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row cost
-    # twice that — 10 s, the canary's whole `HEALTH_TIMEOUT_S` (the chain-3
-    # review). Concurrently they cost one bound.
+    # Chain 5: the same two, its preflight and its managers step.
+    managers = block.get(pg_managers_write.CHAIN)
+    # The preflights at once, never one after the other: each is bounded at
+    # `_PREFLIGHT_TIMEOUT_S`, and with Postgres hung two in a row cost twice
+    # that — 10 s, the canary's whole `HEALTH_TIMEOUT_S` (the chain-3 review).
+    # Concurrently they cost one bound, however many chains ask.
     preflights = await asyncio.gather(
         _inventory_preflight() if isinstance(inventory, dict) else _nothing(),
-        _orders_preflight() if isinstance(orders, dict) else _nothing())
+        _orders_preflight() if isinstance(orders, dict) else _nothing(),
+        _managers_preflight() if isinstance(managers, dict) else _nothing())
     if isinstance(inventory, dict):
         inventory["preflight"] = preflights[0]
         inventory["sync_step"] = await _inventory_sync_step()
     if isinstance(orders, dict):
         orders["preflight"] = preflights[1]
         orders["sync_step"] = await _orders_sync_step()
+    if isinstance(managers, dict):
+        managers["preflight"] = preflights[2]
+        managers["sync_step"] = await _managers_sync_step()
     # Chain 6's hourly products step off DuckDB, in chain 1's shape: recorded
     # instead of ending the tick. Not judged by the canary — the freshness
     # check watches `last_sync_products` at 48 h.
@@ -416,7 +465,9 @@ def _warehouse_writer_mode() -> dict:
     that finishes after it, and `held_for_s` how long that has stood (None
     when not held) — the canary warns on a hold that outlives what a way back
     takes. `reclassify_needed` says DuckDB's UTM verdicts were found empty on
-    it. Local state, no I/O. Judged by the canary."""
+    it. `way_back_refused` names the latched write chains for which a start
+    that would have run as duckdb stayed postgres instead (chain names, no
+    detail). Local state, no I/O. Judged by the canary."""
     from core import warehouse_cutover
 
     return {"mode": warehouse_cutover.mode(), "value": warehouse_cutover.value(),
@@ -424,7 +475,8 @@ def _warehouse_writer_mode() -> dict:
             "preconditions_unmet": [u.key for u in warehouse_cutover.preconditions_unmet()],
             "held": warehouse_cutover.held(),
             "held_for_s": warehouse_cutover.held_for_s(),
-            "reclassify_needed": warehouse_cutover.reclassify_needed()}
+            "reclassify_needed": warehouse_cutover.reclassify_needed(),
+            "way_back_refused": list(warehouse_cutover.way_back_refused())}
 
 
 def _derivation_mode() -> dict:

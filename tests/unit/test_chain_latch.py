@@ -449,6 +449,7 @@ _CONNECTION = {"get_pool", "_pool", "acquire"}
 _READERS = {
     "pg_inventory_write": {"read_snapshot_calendar", "preflight"},
     "pg_orders_write": {"preflight"},
+    "pg_managers_write": {"preflight"},
     # Chain 9 (OD-02 (c)): the connection the journal's readers are handed —
     # the digest, the layer ages, the data-quality endpoint, the catch-up.
     "pg_dq_journal_write": {"reading"},
@@ -672,6 +673,12 @@ class TestEveryWriterLatchesFirst:
         assert set(_writers(pg_orders_write)) == {
             "upsert_orders_with_expenses", "record_backfill_misses",
             "restore_manager_comments"}
+        # Chain 5: the sync's managers, their stats, and an admin's
+        # classification — three writers, one advisory lock.
+        from core import pg_managers_write
+
+        assert set(_writers(pg_managers_write)) == {
+            "upsert_managers", "update_manager_stats", "set_manager_retail_status"}
         # Chain 6: the two full-catalogue writers, each spelling its own
         # acquire, latch, transaction and claim.
         from core import pg_catalogue_write

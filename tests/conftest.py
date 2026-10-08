@@ -216,3 +216,5 @@ def _a_fresh_warehouse_writer(monkeypatch):
                         ("_reclassify_needed", False),
                         ("_writer_record", None), ("_settle_lock", None)):
         monkeypatch.setattr(wc, name, value)
+    # Chain 5: the way back a start refused while a chain was latched.
+    monkeypatch.setattr(wc, "_way_back_refused", ())

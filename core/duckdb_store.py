@@ -3486,11 +3486,29 @@ class DuckDBStore(
         if not managers:
             return 0
 
+        # One reading of the payload for both stores (`core.landing_rows`):
+        # the name's fallbacks and the retail seed are spelled there once.
+        from core.landing_rows import manager_rows
+
+        rows = manager_rows(managers)
+
+        # Chain 5: under `KS_WRITE_MANAGERS=postgres` the managers land in
+        # Postgres with their baselines, and DuckDB's copy stops. Asked before
+        # the DuckDB connection is taken; a flag nobody can read raises here
+        # and stops this chain alone (DN-01) — the sync step contains it.
+        from core import pg_managers_write
+
+        if pg_managers_write.writes_postgres():
+            from datetime import timezone
+
+            return await pg_managers_write.upsert_managers(
+                rows, set_at=datetime.now(timezone.utc))
+
         async with self.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
             try:
                 count = 0
-                for mgr in managers:
+                for row in rows:
                     conn.execute("""
                         INSERT INTO managers
                         (id, name, email, status, is_retail, synced_at)
@@ -3502,13 +3520,7 @@ class DuckDBStore(
                             -- EXCLUDED, not CURRENT_TIMESTAMP: DuckDB binds a
                             -- bare name on this side as a column reference.
                             synced_at = EXCLUDED.synced_at
-                    """, [
-                        mgr.get("id"),
-                        mgr.get("name") or mgr.get("full_name", "Unknown"),
-                        mgr.get("email"),
-                        mgr.get("status"),  # 'active', 'blocked', 'pending'
-                        mgr.get("id") in RETAIL_MANAGER_IDS,  # seed for new rows only
-                    ])
+                    """, list(row))
                     count += 1
 
                 conn.execute("COMMIT")
@@ -3747,26 +3759,37 @@ class DuckDBStore(
         Returns:
             Number of managers updated
         """
+        from core.sql_dialect import DUCKDB, manager_stats_sql
+
+        # Chain 5: the same body, against `bronze.orders`, and no replica
+        # after it — the replica stands down while the chain writes.
+        from core import pg_managers_write
+
+        if pg_managers_write.writes_postgres():
+            return await pg_managers_write.update_manager_stats()
+
+        # On DuckDB while a write chain owns the orders — between chain 5's
+        # copy-back and chain 3's, which the order of ways back makes a state
+        # every rollback passes through, and between chain 3's flip and chain
+        # 5's. DuckDB's `orders` stopped at chain 3's latch, so stats counted
+        # from them would carry `last_order_date` and `order_count` backwards,
+        # and the replica below would ship them over Postgres's. They stay as
+        # they stand — after a copy-back, the chain's own last stats — until
+        # the orders come back, and nothing is shipped for a recompute that
+        # did not happen (`pg_managers_write.duckdb_orders_frozen`).
+        frozen = pg_managers_write.duckdb_orders_frozen()
+        if frozen:
+            logger.warning(
+                "Manager statistics not recomputed: a write chain owns %s, so "
+                "DuckDB's orders are frozen and would move them backwards",
+                ", ".join(sorted(frozen)))
+            return 0
+
         async with self.connection() as conn:
-            # Update stats for managers who have orders
-            result = conn.execute("""
-                UPDATE managers m
-                SET
-                    first_order_date = stats.first_order,
-                    last_order_date = stats.last_order,
-                    order_count = stats.order_cnt
-                FROM (
-                    SELECT
-                        manager_id,
-                        MIN(DATE(ordered_at)) as first_order,
-                        MAX(DATE(ordered_at)) as last_order,
-                        COUNT(*) as order_cnt
-                    FROM orders
-                    WHERE manager_id IS NOT NULL
-                    GROUP BY manager_id
-                ) stats
-                WHERE m.id = stats.manager_id
-            """)
+            # Update stats for managers who have orders. The one body both
+            # engines run, with the order's date spelled in Kyiv rather than
+            # taken from the process's timezone (`core.sql_dialect`).
+            result = conn.execute(manager_stats_sql(DUCKDB))
             count = result.fetchone()
             logger.info(f"Updated manager statistics")
             updated = count[0] if count else 0
@@ -3828,6 +3851,23 @@ class DuckDBStore(
         if effective_from is None:
             effective_from = datetime.now(ZoneInfo(DISPLAY_TIMEZONE)).date()
 
+        # Chain 5: the decision is written where it is derived, in one
+        # Postgres transaction that also raises the derivation signal — and
+        # then the DuckDB mark below, which is a no-op unless DuckDB derives:
+        # the warehouse is marked dirty on whichever engine derives it. A
+        # backdate behind the manager's latest change is refused there
+        # (`BackdateBehindLatest`, OD-C5-1 (a)); DuckDB's own path is as it was.
+        from core import pg_managers_write
+
+        if pg_managers_write.writes_postgres():
+            from datetime import timezone
+
+            await pg_managers_write.set_manager_retail_status(
+                manager_id, is_retail, effective_from, set_by, note,
+                set_at=datetime.now(timezone.utc))
+            await self.mark_warehouse_dirty(None)
+            return
+
         async with self.connection() as conn:
             # One transaction. As four autocommit statements, a failure between
             # closing the open interval and opening the new one left the
@@ -3883,6 +3923,13 @@ class DuckDBStore(
         Returns:
             List of manager dicts with id, name, status, is_retail, order_count, etc.
         """
+        # Chain 5: from Postgres once the chain owns the tables, with no
+        # fallback — DuckDB's copy is frozen then (`core/pg_managers_read.py`).
+        from core import pg_managers_read, pg_managers_write
+
+        if pg_managers_write.reads_postgres():
+            return await pg_managers_read.fetch_all_managers()
+
         async with self.connection() as conn:
             result = conn.execute("""
                 SELECT

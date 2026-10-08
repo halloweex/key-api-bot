@@ -48,6 +48,10 @@ needed in place; DN-29 is the switch.
   is empty (a Sunday compaction ran in between) it also flags a reclassify as
   needed. A way back taken by a value nobody meant as `duckdb` publishes
   `value_understood` among the unmet preconditions.
+- **The way back is refused while a write chain is latched over a table
+  DuckDB derives from** (chain 3's orders, chain 5's classification): the
+  start stays `postgres` instead, publishes the chains as `way_back_refused`
+  and the canary pages — see THE WAY BACK, REFUSED.
 - **The UTM doors** (refresh, reclassify, the `manager_comment` backfill and
   its CLI) parse in Postgres alone under `postgres`. The two that re-parse
   everything note it in the record, and the way back then empties DuckDB's
@@ -106,6 +110,9 @@ _held_since: Optional[datetime] = None
 _full_validated = False
 _reclassify_needed = False
 _writer_record: Optional[Dict[str, Any]] = None
+# The latched write chains that made this start refuse the way back and stay
+# `postgres` — see THE WAY BACK, REFUSED.
+_way_back_refused: Tuple[str, ...] = ()
 
 
 def configure_mode() -> str:
@@ -116,18 +123,23 @@ def configure_mode() -> str:
     Under `postgres` the preconditions are evaluated here, the Postgres
     revision included (`_gather_facts_blocking`), and only the first call of a
     process asks: the verdict is kept."""
-    global _value, _mode, _mode_error, _unmet, _decided_for
+    global _value, _mode, _mode_error, _unmet, _decided_for, _way_back_refused
     value = os.getenv(ENV, DUCKDB).strip().lower() or DUCKDB
+    # Local, and asked whatever the value: a start that would run as duckdb
+    # after a flip is a way back, and a latched chain owning what DuckDB
+    # derives from refuses it (THE WAY BACK, REFUSED, below).
+    holding = _chains_holding_duckdbs_sources()
     if value in _VALID:
         error = None
     else:
-        error = (f"{ENV}={value!r} is not one of {_VALID}; "
-                 f"running as {DUCKDB!r}")
+        error = (f"{ENV}={value!r} is not one of {_VALID}; running as "
+                 f"{(POSTGRES if holding else DUCKDB)!r}")
     if error and error != _mode_error:
         logger.error(error)
     _value, _mode_error = value, error
     if value != POSTGRES:
-        _mode, _unmet, _decided_for = DUCKDB, (), None
+        _unmet, _decided_for = (), None
+        _mode = _the_way_back(holding, f"{ENV}={value!r}")
         return _mode
     if _decided_for == POSTGRES and _mode is not None:
         return _mode
@@ -135,13 +147,16 @@ def configure_mode() -> str:
     unmet = tuple(evaluate_preconditions(env, _gather_facts_blocking(env)))
     _unmet, _decided_for = unmet, POSTGRES
     if unmet:
-        _mode = DUCKDB
-        logger.critical(
-            "%s=postgres, but %d precondition(s) of the switch are unmet — "
-            "running as duckdb, DuckDB goes on deriving: %s", ENV, len(unmet),
-            "; ".join(f"{u.key}: {u.detail}" for u in unmet))
+        _mode = _the_way_back(holding, f"{ENV}=postgres with {len(unmet)} "
+                                       "precondition(s) of the switch unmet ("
+                                       + ", ".join(u.key for u in unmet) + ")")
+        if _mode == DUCKDB:
+            logger.critical(
+                "%s=postgres, but %d precondition(s) of the switch are unmet — "
+                "running as duckdb, DuckDB goes on deriving: %s", ENV, len(unmet),
+                "; ".join(f"{u.key}: {u.detail}" for u in unmet))
     else:
-        _mode = POSTGRES
+        _mode, _way_back_refused = POSTGRES, ()
         logger.warning(
             "%s=postgres and every precondition holds: DuckDB no longer derives "
             "Silver, Gold or the UTM verdicts in this process", ENV)
@@ -1182,6 +1197,7 @@ def status() -> Dict[str, Any]:
         "held_since": _held_since.isoformat() if _held and _held_since else None,
         "reclassify_needed": _reclassify_needed,
         "stood_down_duckdb_checks": sorted(stood_down_duckdb_checks()),
+        "way_back_refused": list(way_back_refused()),
     }
 
 
@@ -1197,3 +1213,109 @@ async def readiness(env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
         "unmet": [{"key": u.key, "detail": u.detail} for u in unmet],
         "preconditions": [key for key, _ in PRECONDITIONS],
     }
+
+
+# ─── THE WAY BACK, REFUSED ───────────────────────────────────────────────────
+#
+# After a flip, a start that runs as `duckdb` IS the way back — whether an
+# operator unset the variable, a typo took it, or a precondition was unmet at
+# the start — and the full DuckDB rebuild it owes derives Silver from DuckDB's
+# own landing. That is right only while DuckDB's landing is current. A write
+# chain that owns a table the DuckDB derivation reads froze DuckDB's copy at
+# its latch: under chain 5 every order of a manager reclassified since the
+# latch would come back with the wrong `sales_type` (the CASE reads
+# `managers.is_retail` and the intervals), under chain 3 every order since the
+# latch would be missing, and the Silver and Gold comparisons the way back
+# brings back would be set against that Silver. The copy-back's
+# `warehouse_dirty='full'` mark covers the order of ways back only when the
+# copy-back has already run, and an automatic way back runs no runbook.
+#
+# So the start refuses it: it stays `postgres` — DuckDB does not derive,
+# Postgres goes on deriving from the tables the chains write — publishes the
+# chains in `/api/health` under `warehouse_writer_mode.way_back_refused`, and
+# the canary pages `warehouse_way_back_refused` (CRITICAL) with the lever:
+# copy the chains back (`scripts/chain_copy_back.py`, chain 5 before chain 3),
+# then take the way back. The latch outranks KS_WRITE_WAREHOUSE as it outranks
+# a chain's own flag (OD-19 (a)).
+#
+# Postgres derives on its own signal only under KS_PG_DERIVE=own; under
+# `piggyback` its rebuild rides the DuckDB tick, which a `postgres` start does
+# not register, so a refused way back with `own` gone leaves NOTHING deriving
+# — screens frozen at the start, and correct up to it. Refused all the same:
+# the alternative is a DuckDB Silver with the wrong `sales_type` that a
+# rollback of the read switches would serve. The log and the canary's message
+# say which it is (the canary reads the `derivation` block, since an unset
+# variable evaluates no precondition). Never on a deployment that has not flipped:
+# both chains hold themselves on DuckDB until step 13 is in force (their
+# `step13` precondition), so a latched one means a flip happened —
+# `tests/unit/test_managers_chain.py` holds every chain declaring one of these
+# tables to that.
+#
+# Asked of the local markers alone, like every routing answer, before the boot
+# sync and with Postgres possibly down. An owner row whose marker was lost is
+# the one copy this cannot see; the daily comparison files it
+# (`chain_latch_disagrees`, CRITICAL).
+
+# The landing tables DuckDB's derivation reads that a write chain can freeze:
+# the orders it derives Silver from (chain 3, which moves both as a unit) and
+# the classification `sales_type` is decided from (chain 5). Not the buyers
+# (chain 4): DuckDB's Silver and Gold read none of `bronze.buyers`' columns,
+# and chain 4 latches without step 13.
+DUCKDB_DERIVATION_SOURCES: Tuple[str, ...] = (
+    "bronze.orders",
+    "bronze.order_products",
+    "bronze.managers",
+    "app.manager_classifications",
+)
+
+
+def _chains_holding_duckdbs_sources() -> Tuple[str, ...]:
+    """Every registered write chain that is latched and owns a table in
+    `DUCKDB_DERIVATION_SOURCES`, by name. Never raises, and reads no database.
+
+    A registry that cannot be read refuses nothing, and says so: refusing on
+    it would stop DuckDB deriving on a deployment that never flipped, and a
+    process that cannot import the registry cannot sync orders either."""
+    try:
+        from core import chain_latch
+        from core.write_chains import WRITE_CHAINS, chain_name
+
+        sources = frozenset(DUCKDB_DERIVATION_SOURCES)
+        return tuple(sorted(
+            chain_name(chain) for chain in WRITE_CHAINS
+            if sources & frozenset(getattr(chain, "CHAIN_TABLES", ()))
+            and chain_latch.latched(chain_name(chain))))
+    except Exception as exc:  # noqa: BLE001 — logged; refuses nothing
+        logger.error("the write-chain registry could not be read, so a way back "
+                     "from %s=postgres is not checked against it: %s: %s",
+                     ENV, type(exc).__name__, exc)
+        return ()
+
+
+def _the_way_back(holding: Tuple[str, ...], why: str) -> str:
+    """The mode a start that would run as `duckdb` runs: `postgres` while a
+    latched chain holds what DuckDB derives from, `duckdb` otherwise. Records
+    the refusal; logs it once per distinct set of chains."""
+    global _way_back_refused
+    if holding and holding != _way_back_refused:
+        from core import pg_derivation
+
+        logger.critical(
+            "%s would run as duckdb, but the way back is refused: write chain(s) "
+            "%s own tables DuckDB derives from (%s) and froze DuckDB's copy at "
+            "their latch, so a DuckDB rebuild would derive from them. Staying "
+            "postgres: DuckDB does not derive, and %s. Copy them back first "
+            "(scripts/chain_copy_back.py, chain 5 before chain 3), then take "
+            "the way back.", why, ", ".join(holding),
+            ", ".join(DUCKDB_DERIVATION_SOURCES),
+            "Postgres derives on its own signal" if pg_derivation.owns() else
+            f"NOTHING derives: {pg_derivation.ENV} is not own, so the Postgres "
+            "rebuild rides a DuckDB tick this process does not run")
+    _way_back_refused = holding
+    return POSTGRES if holding else DUCKDB
+
+
+def way_back_refused() -> Tuple[str, ...]:
+    """The latched write chains for which this start refused the way back
+    and stayed `postgres`; empty when none did. Local state, no I/O."""
+    return _way_back_refused

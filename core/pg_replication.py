@@ -60,6 +60,17 @@ CLASSIFICATION_COLUMNS: Tuple[str, ...] = (
     "note",
 )
 
+# The shipping shape `write_managers` uses, in `core.pg_operational._FULL_REPLACE`'s
+# tuple shape: `(pg_table, dk_table, columns, order_by)`. Declared so the
+# copy-back (`core.chain_transfer.chain_specs`) derives chain 5's two tables
+# from what this module ships rather than from a list of its own — the
+# reasoning `chain_transfer` gives for every source it reads.
+REPLICATED_SHAPES: Tuple[Tuple[str, str, Tuple[str, ...], str], ...] = (
+    (MANAGERS_TABLE, "managers", MANAGER_COLUMNS, "id"),
+    (CLASSIFICATIONS_TABLE, "manager_classifications", CLASSIFICATION_COLUMNS,
+     "manager_id, valid_from"),
+)
+
 
 def read_managers(conn) -> Tuple[List[tuple], List[tuple]]:
     """Both tables out of DuckDB, in the column order Postgres expects."""

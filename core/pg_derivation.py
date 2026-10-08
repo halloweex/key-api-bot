@@ -146,6 +146,9 @@ MARK_SITES: Dict[str, str] = {
     "core.pg_landing": "_write_order_rows",
     "core.pg_replication": "write_managers",
     "core.pg_buyer_rows": "_write_buyer_rows",
+    # Chain 5's classification writer; its `upsert_managers` marks too, pinned
+    # in tests/unit/test_managers_chain.py — one function per module here.
+    "core.pg_managers_write": "set_manager_retail_status",
 }
 SOURCE_TABLES = ("bronze.orders", "bronze.managers",
                  "app.manager_classifications", "bronze.buyers")

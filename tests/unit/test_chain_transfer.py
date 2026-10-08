@@ -84,6 +84,11 @@ class TestTheClockIsDerived:
             "bronze.order_products": (),
             "bronze.expenses": (),
             "app.order_backfill_misses": ("checked_at",),
+            # Chain 5. `set_at` is when a human decided, carried by both
+            # stores as a value and stamped by both writers from the web
+            # container's clock; the managers carry no shared per-row clock.
+            "bronze.managers": (),
+            "app.manager_classifications": ("set_at",),
             # Chain 6. KeyCRM serves no `updated_at` for a product or a
             # category, and DuckDB's `synced_at` against Postgres's
             # `mirrored_at` is each store's own bookkeeping: nothing orders

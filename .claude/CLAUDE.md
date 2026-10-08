@@ -1866,6 +1866,110 @@ Postgres is reported CRITICAL with the manager id as the sample, where the
 catalogue rule would have excused it as retired (seeded baselines carry
 `valid_from = 1970-01-01`, so their `set_at` always predates the watermark).
 
+### Chain 5: the classification, written where it is derived (off)
+
+`core/pg_managers_write.py` is a registered write chain for `bronze.managers`
+and `app.manager_classifications` — `pg_replication.MANAGER_UNIT`, whole —
+under `KS_WRITE_MANAGERS=postgres`. **Off in production, and held even if
+set**: `unmet_precondition()` names `goals_bridge` (the goal calculators read
+DuckDB's classification until 7b-4 deletes the bridge — spelled as chain 3
+spells it, so the tripwire in `test_goals_off_duckdb_silver.py` finds the
+hold), `step13` (DuckDB would derive `sales_type` from a classification the
+chain freezes), `chain3` (`update_manager_stats` reads the orders; a build
+without chain 3 reads as unmet, not as an import error) and
+`read_fallback_off`. Every fact is local, so `/api/health` answers with
+Postgres down. Order of flips: 7b-4, step 13, chain 3, a lock-out revision
+(directly before the flip, as chain 4 did with 0034 — not in this change),
+chain 5. The way back runs in reverse.
+
+**Three writers, one advisory lock** (`CHAIN_LOCK_KEY`, 'ks' + 5), taken
+first in every transaction. Measured before building: two classifications of
+one manager in flight leave **two open intervals** without it, one with it.
+
+- `upsert_managers` — from the shared parse (`landing_rows.manager_row`).
+  `is_retail` is inserted for a new manager and **never in the conflict
+  update**: writing the seed there reverts every human classification. The
+  same transaction seeds a baseline for every manager without one — DuckDB
+  does that only at the next boot (`_m0006`), which stands down once the
+  chain is latched, because a DuckDB baseline after the latch is a key the
+  copy-back refuses on.
+- `update_manager_stats` — one body for both engines
+  (`sql_dialect.manager_stats_sql`) with the date **spelled in Kyiv**.
+  `DATE(ordered_at)` took the process's timezone: right in production only
+  because web runs `TZ=Europe/Kyiv`, a day early under UTC — CI, a laptop, a
+  Postgres session. Production's answer does not move. It raises no
+  derivation signal: Silver reads none of the three columns.
+- `set_manager_retail_status` — close, replace the same day, open, set
+  `is_retail`, raise the signal: one transaction. **A backdate behind the
+  manager's latest change is refused** (`BackdateBehindLatest`, 409) before
+  the latch and again under the lock (OD-C5-1 (a)). DuckDB accepts one and
+  writes two open intervals and an overlap, and the `sales_type` it then
+  gives depends on the direction — that latent defect is left as it is, since
+  changing what DuckDB accepts changes production. `set_at` is the web
+  container's UTC clock, the copy-back's handover clock.
+
+**Around it, with the flag off nothing moves**: the store routes the four
+methods by `writes_postgres()` (or `reads_postgres()`); `get_all_managers`
+and every statement carrying `{managers}` (the dashboard's returns list,
+through `_dashboard_run`) read Postgres once the chain owns the tables, with
+no fallback — a walk in `test_managers_chain.py` finds every such statement;
+the incremental tick's managers step is contained under the chain, retried
+after 10 minutes and published as `write_chains.pg_managers_write.sync_step`
+(on DuckDB a raise there skipped the buyers, offers and stocks steps, and
+still does); the retail-status route answers a `KS_WRITE_MANAGERS` typo with
+409 before anything is read and a Postgres failure with 503;
+`replicate_managers` already stood down on the flag and on an owner row
+alone (DN-22b). `/api/health` asks chain 5's `preflight()` concurrently with
+chain 1's — two in a row could cost the canary's whole timeout — and it
+names every unmet precondition and, once those all hold, a replica failing or
+over 26 h old and the shape the standing watch would file.
+
+**Watched**: `chain_managers_empty` and `chain_manager_open_interval`
+(CRITICAL), `chain_manager_unclassified` (WARN, from the latch on),
+`chain_manager_intervals_broken` and `chain_manager_retail_disagrees` (WARN),
+and a NULL `set_at` as `chain_required_column_null` — one read,
+`pg_managers_write.SHAPE_SQL`, shared with the preflight. Soak checks M1 (the
+replica stayed away) and M2 (the shape and `last_sync_managers` under 26 h);
+`stage4_soak.sh` passes `managers_on=pending` for a flag the chain has not
+latched under, since only web can evaluate the bridge. The restore drill
+counts both tables once the chain owns them (`grows`: nothing deletes a
+manager, and the writer's one DELETE is followed by the INSERT of the same
+key).
+
+**The way back** is `scripts/chain_copy_back.py managers`. `chain_specs`
+derives the pair from a fourth source — `pg_replication.REPLICATED_SHAPES`
+and `mirror_reconciliation.REPLICATED_TABLES` — and the handover differs from
+an operational table's in three places: before a flip a key only Postgres
+holds is **CRITICAL** (there is no next full replace to remove a ghost
+interval), the pre-flip lever is `replicate_managers` and
+`POST /api/jobs/manager_stats/trigger`, and after the latch a key only DuckDB
+holds is a DuckDB write after it. Expect one pre-flip CRITICAL naming a
+`(manager, 1970-01-01)` baseline: the script's own connect runs `_m0006` for
+a manager synced since web's last start; `up -d web` ships it. A chain
+declaring `CHAIN_COPY_BACK_OWES_FULL_REBUILD` gets `warehouse_dirty='full'`
+in the copy's own transaction — `sales_type` is materialised at rebuild time
+and an incremental rebuild never re-derives an order whose classification
+moved. **Step 13's way back is refused while this chain is latched**: a
+start that would run as duckdb stays `postgres` and pages
+`warehouse_way_back_refused` (see "Step 13"); copy chain 5 back first, then
+chain 3, then take the way back.
+
+**What the review moved (2026-10-08).** The ways back leave a state where this
+chain is on DuckDB and chain 3 still owns the orders; DuckDB's
+`update_manager_stats` then leaves the stats as the copy-back carried them
+(`duckdb_orders_frozen`) rather than count frozen orders and ship
+`last_order_date` and `order_count` backwards. A value Postgres would refuse —
+a note with NUL, a `set_by` past INTEGER — is `ClassificationRefused`, which
+the route answers **422**, not "Postgres did not answer". Every precondition's
+reason starts with its key, an unreadable one too (`read_fallback_off`, not
+`read_fallback`). With the flag off nothing is asked on the chain's behalf:
+the preflight asks Postgres only once every local precondition holds — never
+while chain 3 writes DuckDB, its default — and the restore drill counts the two tables only
+once live `meta.chain_watermarks` holds an owner row naming one. And a walk in
+`test_managers_chain.py` finds every statement naming DuckDB's `managers` or
+`manager_classifications` **bare**, not only through the holes, and holds each
+to the router that keeps it off the frozen copy.
+
 ### Postgres against KeyCRM — the other half of the criterion
 Reconciliation A proves the two stores agree with each other. That is not the
 same as being right: two copies can agree perfectly and both disagree with the
@@ -3470,6 +3574,29 @@ there reads as "never migrated", where the default reads any failure so.
 The write-chain registry and the Alert Gate are read on the caller's thread,
 outside that bound, so a start that could not reach Postgres names
 `pg_revision` alone.
+
+**Unless a write chain is latched over what DuckDB derives from** (chain 5's
+review, 2026-10-08). A chain owning `bronze.orders`/`order_products` (chain 3)
+or `bronze.managers`/`app.manager_classifications` (chain 5) froze DuckDB's
+copy at its latch, and the full rebuild the way back owes would derive Silver
+from it — every order of a manager reclassified since on the wrong
+`sales_type`, with the Silver and Gold comparisons back to vouch for it. An
+automatic way back follows no runbook, so `configure_mode` refuses it: a start
+that would run as duckdb — unset, typo or an unmet precondition — stays
+`postgres` while such a chain is latched (`DUCKDB_DERIVATION_SOURCES`, local
+markers only), publishes the chains as `warehouse_writer_mode.way_back_refused`,
+and the canary pages `warehouse_way_back_refused` (CRITICAL, "Warehouse way
+back refused") in place of `warehouse_preconditions_unmet`. The lever: copy the
+chains back first (chain 5, then chain 3), then the way back. Postgres derives
+on its own signal only under `KS_PG_DERIVE=own` — under `piggyback` its
+rebuild rides the DuckDB tick a `postgres` start does not run — so a refusal
+with `own` gone leaves **nothing** deriving, screens frozen and correct up to
+the start; still refused, because the alternative is a wrong `sales_type` that
+rolled-back read switches would serve. The page says which, from the
+`derivation` block. Never on a
+deployment that has not flipped — both chains hold themselves behind `step13`,
+which a test requires of every chain declaring one of those tables — and not
+for chain 4: DuckDB's Silver reads none of the buyers.
 
 **The UTM doors parse Postgres alone under `postgres`.** `POST
 /api/traffic/refresh`, `/traffic/reclassify`, the `manager_comment` backfill

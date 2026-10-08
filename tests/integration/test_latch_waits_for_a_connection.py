@@ -42,7 +42,8 @@ import pytest_asyncio
 
 from core import (
     chain_latch, pg_buyers_write, pg_expense_types_write, pg_expenses_write,
-    pg_goals_write, pg_inventory_write, pg_orders_write, write_chains,
+    pg_goals_write, pg_inventory_write, pg_managers_write, pg_orders_write,
+    write_chains,
 )
 from core import pg_catalogue_write
 from core import (  # noqa: E402 — the shadow chains' block
@@ -72,6 +73,9 @@ _WRITTEN += ("bronze.products", "bronze.categories")
 # is append-only for every writer in the repository, so only this order's are
 # removed, by a test, and never the table.
 ORDER_ID = 990_301
+
+# Chain 5's two, apart from the literal above so a merge stays a union.
+_WRITTEN += ("app.manager_classifications", "bronze.managers")
 
 STOCK = {"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
          "quantity": 40, "reserve": 0}
@@ -245,6 +249,21 @@ def _sync_orders(store):
     return SyncService(store)._upsert_orders_with_expenses([_order_payload()])
 
 
+async def _classify(store):
+    """Chain 5's classification, of a manager Postgres holds — without one it
+    refuses before the latch, which is the point of reading first. Seeded
+    through the pool the test hands out, which serves anybody but the
+    writer's module the live pool."""
+    from core.pg import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO bronze.managers (id, name, is_retail) VALUES (34, 'M', FALSE) "
+            "ON CONFLICT (id) DO NOTHING")
+    return await store.set_manager_retail_status(34, True, date(2026, 10, 7), 1, "x")
+
+
 def _journal_run(_store):
     """Chain 9's writer, with the values the router would hand it."""
     from datetime import datetime, timezone
@@ -324,6 +343,10 @@ WRITERS = {
     # NULL comment to fill it still opens its transaction and claims.
     "restore_manager_comments": (pg_orders_write, lambda _s: (
         pg_orders_write.restore_manager_comments({ORDER_ID: "utm_source=ig"}))),
+    "upsert_managers": (pg_managers_write, lambda s: s.upsert_managers(
+        [{"id": 1, "name": "M1"}])),
+    "update_manager_stats": (pg_managers_write, lambda s: s.update_manager_stats()),
+    "set_manager_retail_status": (pg_managers_write, _classify),
     "upsert_products": (pg_catalogue_write, lambda s: s.upsert_products(
         [{"id": 1, "name": "Toner", "category_id": 10, "sku": "T-1", "price": 250}])),
     "upsert_categories": (pg_catalogue_write, lambda s: s.upsert_categories(
@@ -369,6 +392,10 @@ async def stores(tmp_path, monkeypatch):
     # evidence hold (`pg_orders_write.unmet_precondition`); none of them is
     # what this module is about, and every one is a local read.
     monkeypatch.setattr(pg_orders_write, "unmet_precondition", lambda: None)
+    # Chain 5 is held on DuckDB by facts no environment variable sets (the
+    # goal bridge, step 13, chain 3); this harness proves where its latch is
+    # taken, not whether it may move.
+    monkeypatch.setattr(pg_managers_write, "unmet_precondition", lambda: None)
     # Chain 6's precondition taken as met: setting KS_WRITE_INVENTORY=postgres
     # here would move chain 1's own calls; the precondition itself is proved
     # in tests/unit/test_catalogue_chain.py.
@@ -568,6 +595,7 @@ FIRST_WRITES = {
     "pg_expense_types_write": ("upsert_expense_types", "bronze.expense_types", "id", 1),
     "pg_buyers_write": ("upsert_buyers", "bronze.buyers", "id", 1),
     "pg_orders_write": ("upsert_orders_with_expenses", "bronze.orders", "id", ORDER_ID),
+    "pg_managers_write": ("upsert_managers", "bronze.managers", "id", 1),
     "pg_catalogue_write": ("upsert_products", "bronze.products", "id", 1),
     "pg_dq_journal_write": ("persist_run", "app.data_quality_runs", "run_id", 1),
     "pg_watchdog_write": ("memory_tick", "app.memory_samples", None, None),

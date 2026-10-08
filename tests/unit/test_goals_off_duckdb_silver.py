@@ -770,11 +770,28 @@ class TestTheTripwire:
             f"the predicate at Postgres, or name `goals_bridge` in the chain's "
             f"unmet_precondition.")
 
-    def test_today_the_one_owner_is_chain_3_and_it_holds_itself_back(self):
-        """Not vacuous: the walk sees chain 3's declaration and its hold."""
+    def test_today_the_owners_are_chains_3_and_5_and_both_hold_themselves_back(self):
+        """Not vacuous: the walk sees both declarations and both holds, and
+        nothing else. Chain 3 owns the orders the bridge counts and chain 5
+        the classification it decides retail by; a third owner — or either
+        one losing a table from its declaration — fails here first."""
         tripped = _tripped(_declared_chain_tables(), GOALS.read_text(encoding="utf-8"))
-        assert tripped == {"pg_orders_write": ["bronze.orders"]}
+        assert tripped == {
+            "pg_orders_write": ["bronze.orders"],
+            "pg_managers_write": ["app.manager_classifications", "bronze.managers"],
+        }
         assert _holds_itself_back("pg_orders_write")
+        assert _holds_itself_back("pg_managers_write")
+
+    def test_chain_5_holds_itself_back(self):
+        """Not vacuous: the walk sees chain 5's declaration and its hold.
+        Mutation: drop `goals_bridge` from `pg_managers_write`'s preconditions
+        — its flag would then move the classification while the calculators
+        read it out of a DuckDB that stopped receiving it."""
+        tripped = _tripped(_declared_chain_tables(), GOALS.read_text(encoding="utf-8"))
+        assert tripped["pg_managers_write"] == [
+            "app.manager_classifications", "bronze.managers"]
+        assert _holds_itself_back("pg_managers_write")
 
     def test_an_unregistered_declaration_cannot_hold_itself_back(self):
         """A module that declares a bridge table and never registered has no
