@@ -175,6 +175,22 @@ class TestMonotone:
         if not ok:
             assert any("buyer_contacts" in e and "1%" in e for e in v.errors), v.errors
 
+    @pytest.mark.parametrize("now, ok", [
+        (32_373, True),     # 32 700 × 0.99 = 32 373 exactly: a fall OF 1% ships
+        (32_372, False),    # one row more than 1%
+    ])
+    def test_a_fall_of_exactly_one_percent_ships(self, now, ok):
+        """The review of F8. The count above cannot land on exactly 1%
+        (32 415.57), so the boundary's direction was free: `<=` rejected a
+        fall of exactly 1% and all 35 tests passed. CLAUDE.md's rule is
+        "falls by MORE than 1%", and at 32 700 — the count it names — 1% is
+        a whole row, 32 373.0 exactly in floating point too. Mutation
+        killed: `now <= before * (1 - bound)`."""
+        assert 32_700 * (1 - 0.01) == 32_373          # the boundary is exact
+        before = _healthy(buyer_contacts=32_700)
+        v = validate_snapshot(_healthy(buyer_contacts=now), previous_counts=before)
+        assert v.ok is ok, v.errors
+
 
 class TestEmptyMustBeDeclared:
     def test_the_historical_case_passes_but_is_named(self):
