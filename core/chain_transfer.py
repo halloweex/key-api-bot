@@ -898,6 +898,20 @@ def _later_in_duckdb(spec: TableTransfer, dk_row, pg_row) -> bool:
     return dk is not None and pg is not None and dk > pg
 
 
+def _minus(keys: Sequence[Any], drop: Sequence[Any]) -> List[Any]:
+    """`keys` without `drop`, in `keys`' order, with the set built once.
+
+    The comprehensions this replaces tested `k not in set(drop)`, which builds
+    the set again for every key — quadratic in the rewritten set, and that set
+    is every buyer after a full re-fetch through chain 4: the review of #265
+    (F7) measured one classification at 15 s for 33 000 rewritten buyers and
+    57-67 s for as many contacts, each paid in the stopped window, three times
+    over in the runbook. Hoisted, 0.03 s, and the same answer.
+    """
+    dropped = set(drop)
+    return [k for k in keys if k not in dropped]
+
+
 def classify_handover(
     spec: TableTransfer,
     dk_rows: Mapping[Any, Tuple[Any, ...]],
@@ -1040,7 +1054,7 @@ def classify_handover(
                 "DuckDB's prune has not yet. A copy-back deletes them, as "
                 "retention would."
             ))
-            missing = [k for k in missing if k not in set(aged)]
+            missing = _minus(missing, aged)
     if missing and spec.texts is not None and moved_on:
         # Chain 6: nothing explains one. Its writer never deletes, and a row
         # only DuckDB holds has no Postgres row the chain could have rewritten.
@@ -1058,7 +1072,7 @@ def classify_handover(
         child = spec.pg_table != spec.rewrite_clock
         dropped = [k for k in missing
                    if child and owned_by_rewritten(dk_rows[k])]
-        stranded = [k for k in missing if k not in set(dropped)]
+        stranded = _minus(missing, dropped)
         if dropped:
             info("handover_rows_missing", dropped,
                  say(_words(spec).dropped, dropped))
@@ -1136,7 +1150,7 @@ def classify_handover(
         ))
     elif differing and spec.texts is not None:
         carried = [k for k in differing if owned_by_rewritten(pg_rows[k])]
-        unexplained = [k for k in differing if k not in set(carried)]
+        unexplained = _minus(differing, carried)
         if carried:
             info("handover_rows_differ", carried, (
                 f"{len(carried)} row(s) differ between DuckDB's {dk_table} "
@@ -1156,9 +1170,9 @@ def classify_handover(
         if newer:
             critical("handover_rows_newer_in_duckdb", newer,
                      say(_words(spec).newer, newer))
-        differing = [k for k in differing if k not in set(newer)]
+        differing = _minus(differing, newer)
         carried = [k for k in differing if owned_by_rewritten(pg_rows[k])]
-        unexplained = [k for k in differing if k not in set(carried)]
+        unexplained = _minus(differing, carried)
         if carried:
             info("handover_rows_differ", carried,
                  say(_words(spec).carried, carried))
@@ -1182,8 +1196,7 @@ def classify_handover(
                 "decide they are to be discarded, before running this "
                 "again."
             ))
-        refused = set(newer_in_duckdb)
-        overwritten = [k for k in differing if k not in refused]
+        overwritten = _minus(differing, newer_in_duckdb)
         if overwritten:
             clockless = "" if spec.clock else (
                 f" Neither store keeps a per-row time for {table} that "
@@ -1220,12 +1233,11 @@ def classify_handover(
                     "carries this table only from that MAX upwards, could "
                     "never bring them back."
                 ))
-            unreachable = set(behind)
-            ahead = [key for key in ahead if key not in unreachable]
+            ahead = _minus(ahead, behind)
     if ahead and spec.texts is not None:
         written = ([k for k in ahead if owned_by_rewritten(pg_rows[k])]
                    if moved_on else [])
-        older = [k for k in ahead if k not in set(written)]
+        older = _minus(ahead, written)
         if written:
             info("handover_rows_ahead", written, (
                 f"{len(written)} row(s) in {table} are not in DuckDB's "
@@ -1258,7 +1270,7 @@ def classify_handover(
         # After the latch, decided by data like the other two branches: a row
         # only Postgres holds is the chain's only for a buyer it rewrote.
         written = [k for k in ahead if owned_by_rewritten(pg_rows[k])]
-        older = [k for k in ahead if k not in set(written)]
+        older = _minus(ahead, written)
         if written:
             info("handover_rows_ahead", written,
                  say(_words(spec).ahead_written, written))
@@ -1307,8 +1319,7 @@ def classify_handover(
                 "The next copy removes them before a flip, and Postgres's own "
                 "writer sweeps them by the same rule after one."
             ))
-        swept = set(aged)
-        ghosts = [k for k in ahead if k not in swept]
+        ghosts = _minus(ahead, aged)
         if ghosts:
             critical("handover_rows_ahead", ghosts, (
                 f"{len(ghosts)} row(s) in {table} are not in DuckDB's "
@@ -1504,7 +1515,7 @@ def _spool_issues(chain: ModuleType) -> List[IntegrityIssue]:
         return []
     state = pending()
     unreadable = list(state.get("unreadable") or ())
-    readable = [w for w in state.get("weeks") or () if w not in set(unreadable)]
+    readable = _minus(state.get("weeks") or (), unreadable)
     table = chain.CHAIN_TABLES[0]
     folder = f"data/report-ledger-pending/{chain.CHAIN}/"
     issues: List[IntegrityIssue] = []

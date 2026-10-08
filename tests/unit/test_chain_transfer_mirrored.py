@@ -380,3 +380,67 @@ class TestTheRunbookTellsTheShippersApart:
         assert len(names) == len(WRITE_CHAINS)
         for name, chain in zip(names, WRITE_CHAINS):
             assert chain_transfer.resolve_chain(name) is chain
+
+
+class TestTheClassificationIsLinear:
+    """F7 (review of #265). `classify_handover` tested `k not in set(x)`
+    inside four comprehensions, which builds the set again for every key.
+    After a full re-fetch through chain 4 every buyer is rewritten and every
+    one differs, so one classification cost 15 s at 33 000 buyers — paid in
+    the stopped window, three times over in the runbook. The answer was
+    always right; only the time was quadratic."""
+
+    def test_no_comprehension_in_the_module_builds_a_set_per_element(self):
+        """Structural, so it cannot flake: no comprehension's condition in
+        `core/chain_transfer.py` calls `set()` or `frozenset()`. Mutation
+        killed: any of the four `k not in set(...)` put back."""
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(chain_transfer))
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp,
+                                     ast.GeneratorExp)):
+                continue
+            for gen in node.generators:
+                for cond in gen.ifs:
+                    for call in ast.walk(cond):
+                        if (isinstance(call, ast.Call)
+                                and isinstance(call.func, ast.Name)
+                                and call.func.id in {"set", "frozenset"}):
+                            offenders.append(call.lineno)
+        assert offenders == [], offenders
+
+    def test_forty_thousand_rewritten_buyers_classify_in_well_under_a_second(self, specs):
+        """The review's case at production's size and beyond: every buyer
+        rewritten and differing only in city, and as many contacts only
+        DuckDB holds of rewritten buyers. Quadratic, this was 18 s and 63 s;
+        the bound leaves two orders of magnitude for a slow runner."""
+        import time
+
+        n = 40_000
+        buyers, contacts = specs[BUYERS], specs[CONTACTS]
+        city = buyers.compare.columns.index("city")
+
+        def moved(row):
+            return row[:city] + ("Київ",) + row[city + 1:]
+
+        dk = {i: _buyer(buyers, i) for i in range(1, n + 1)}
+        pg = {i: moved(row) for i, row in dk.items()}
+        dk_contacts = {(i, "phone", f"+3805{i}"): _contact(contacts, i, f"+3805{i}")
+                       for i in range(1, n + 1)}
+        rewritten = frozenset(range(1, n + 1))
+
+        started = time.perf_counter()
+        on_buyers = classify_handover(buyers, dk, pg, moved_on=True,
+                                      rewritten=rewritten)
+        on_contacts = classify_handover(contacts, dk_contacts, {}, moved_on=True,
+                                        rewritten=rewritten)
+        took = time.perf_counter() - started
+
+        assert [(i.check_name, i.severity.value, i.count) for i in on_buyers] == [
+            ("handover_rows_differ", "INFO", n)]
+        assert [(i.check_name, i.severity.value, i.count) for i in on_contacts] == [
+            ("handover_rows_missing", "INFO", n)]
+        assert took < 5, f"{took:.1f} s for {n} rewritten buyers and contacts"
