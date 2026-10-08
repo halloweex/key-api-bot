@@ -36,6 +36,7 @@ import pandas as pd
 
 from core.models import LOST_STATUS_GROUP_ID, Order, OrderStatus
 from core.exceptions import QueryTimeoutError
+from core.observability import cut_row_dumps, without_row_dump
 from core.duckdb_constants import (
     DB_DIR, DB_PATH, DEFAULT_TZ, DEFAULT_QUERY_TIMEOUT, LONG_QUERY_TIMEOUT,
     B2B_MANAGER_ID, RETAIL_MANAGER_IDS, KNOWN_SALES_TYPES, DISPLAY_TIMEZONE,
@@ -135,11 +136,16 @@ def open_read_write(path) -> "duckdb.DuckDBPyConnection":
 
     **First, not after the SETs**: a SET that fails leaves the instance valid,
     and closing a valid instance is the lossy checkpoint. With nothing before
-    it, the only failure left is the CHECKPOINT's own, which 1.5.5 makes a
-    FatalException: the instance writes nothing on close, the WAL stays, and
-    the next open replays it again. The PRAGMA below covers a failure that
-    would not invalidate, so that no exit from here closes through the lossy
-    path.
+    it, the only failure left is the CHECKPOINT's own. One that fails inside
+    DuckDB is a FatalException in 1.5.5: the instance writes nothing on
+    close, the WAL stays, and the next open replays it again. One that is
+    *interrupted* is not — `InterruptException`, or Ctrl-C in a CLI that opens
+    through the store, leaves the instance valid with the WAL unapplied
+    (measured), and closing that is the lossy checkpoint. The PRAGMA below is
+    what keeps that close from writing, so no exit from here takes the lossy
+    path. And every exit closes: an instance left open while its exception's
+    traceback lives holds the file's lock against every other process — the
+    compaction, a CLI — until something drops the traceback.
 
     Free on a clean start — a graceful close leaves no WAL. Behind a kill it
     is the checkpoint the restart would have taken at close, moved to the
@@ -208,6 +214,15 @@ def _fatal_kind(echo: BaseException) -> str:
     if "delete all rows from index" in str(echo).lower():
         return "index"
     return "other"
+
+
+class StoreClosedError(RuntimeError):
+    """A use of a `DuckDBStore` that `close()` has closed.
+
+    Shutdown closes the store while handlers past their 504 and jobs past
+    their cancellation may still be queued on its lock; reopening it for them
+    would run the schema and the migrations again during shutdown, write, and
+    leave an instance nothing closes. `connect()` reopens one deliberately."""
 
 
 # The one definition of what a Gold revenue cell contains. Both the rebuild and
@@ -598,6 +613,10 @@ class DuckDBStore(
     # Class-level for the same reason.
     _fatal: "Optional[Dict[str, Any]]" = None
 
+    # Set by close(), cleared by an explicit connect(): what tells a store
+    # shut down from one a FATAL dropped (see `connection()`).
+    _closed: bool = False
+
     def __init__(self, db_path: Optional[Path] = None):
         # Resolved here rather than bound as a default argument. A default is
         # evaluated once, when this function is defined, so `db_path=DB_PATH`
@@ -622,15 +641,24 @@ class DuckDBStore(
         self._failed_migrations: List[Dict[str, Any]] = []
         self._schema_status: Dict[str, Any] = {"status": "unknown", "reason": "not connected"}
 
-    async def connect(self) -> None:
+    async def connect(self, *, reopen: bool = True) -> None:
         """Initialize database connection, schema, and thread pool.
 
         All or nothing: if anything here raises, the store is left with no
         connection, so the next use of it connects again from the start.
+
+        `reopen=False` is `connection()`'s lazy open, and it refuses a store
+        `close()` has closed (`StoreClosedError`) — decided under the lock,
+        so a caller that was queued behind `close()` cannot slip in after it.
+        A call with the default reopens a closed store on purpose.
         """
         DB_DIR.mkdir(parents=True, exist_ok=True)
 
         async with self._lock:
+            if self._closed and not reopen:
+                raise StoreClosedError(
+                    f"the DuckDB store is closed (shutdown): {self.db_path}")
+            self._closed = False
             if self._connection is None:
                 # CHECKPOINTs whatever WAL a killed writer left, before the
                 # SETs below — see `open_read_write`.
@@ -663,7 +691,7 @@ class DuckDBStore(
                         max_workers=1,  # Single worker - DuckDB requires serialized access
                         thread_name_prefix="duckdb"
                     )
-                except BaseException:
+                except BaseException as exc:
                     # The schema and the migrations run on `self._connection`,
                     # so it is set before they start — and a failure used to
                     # leave it set. `connection()` reconnects only when it is
@@ -685,13 +713,19 @@ class DuckDBStore(
                     connection, self._connection = self._connection, None
                     with contextlib.suppress(Exception):
                         connection.close()
+                    cut_row_dumps(exc)
                     raise
 
                 logger.info(f"DuckDB connected: {self.db_path}")
 
     async def close(self) -> None:
-        """Close database connection and thread pool."""
+        """Close database connection and thread pool.
+
+        Final until an explicit `connect()`: a later `connection()` — the
+        caller queued on the lock behind this one included — raises
+        `StoreClosedError` instead of opening the file again."""
         async with self._lock:
+            self._closed = True
             # Shutdown thread pool (waits for in-flight queries to finish)
             if self._executor:
                 self._executor.shutdown(wait=True)
@@ -716,8 +750,9 @@ class DuckDBStore(
             if conn:
                 try:
                     conn.execute("CHECKPOINT")
-                except Exception:
-                    self._drop_if_invalidated(conn)
+                except Exception as exc:
+                    self._drop_if_invalidated()
+                    cut_row_dumps(exc)
                     raise
                 logger.info("DuckDB checkpoint completed")
 
@@ -743,43 +778,70 @@ class DuckDBStore(
         `open_read_write`) comes back on the same write every time, because
         the index is short in the file. `fatal_status()` keeps /api/health
         degraded, and the page standing, until a restart.
+
+        A store `close()` has closed is not reopened here: the open is
+        `connect(reopen=False)`, which raises `StoreClosedError`. Otherwise a
+        caller queued behind `close()` would take the missing connection for
+        one a FATAL dropped and open the file again: the schema and the
+        migrations during shutdown, a write after `close()`'s checkpoint, and
+        an instance nothing would ever close.
+
+        Whatever leaves the block leaves without DuckDB's dump of the rows a
+        FATAL could not remove (`core.observability.cut_row_dumps`): every
+        column of each, a buyer's name, phone and email among them, which a
+        caller logging the exception with its traceback — the buyers step
+        does — used to print into web's log on every retry.
         """
         while True:
             if self._connection is None:
-                await self.connect()
+                await self.connect(reopen=False)
             async with self._lock:
                 conn = self._connection
                 if conn is None:
-                    # A FATAL dropped it while this caller waited for the lock.
+                    # A FATAL dropped it, or close() closed it, while this
+                    # caller waited for the lock: connect(reopen=False) opens
+                    # the file again for the first and refuses the second.
                     continue
                 try:
                     yield conn
-                except Exception:
-                    # Not BaseException: a cancellation can leave the executor
-                    # thread on `conn`, and the probe must not join it there.
-                    self._drop_if_invalidated(conn)
+                except Exception as exc:
+                    # Not on a cancellation, which says nothing about the
+                    # instance. (Nor would the probe be safe there if anything
+                    # ever left a thread on `conn` past a cancellation: it
+                    # runs on the event loop and would wait for that query.
+                    # `_offload` does not, so today nothing does.)
+                    self._drop_if_invalidated()
+                    cut_row_dumps(exc)
                     raise
                 return
 
-    def _drop_if_invalidated(self, conn) -> None:
-        """Forget `conn` if DuckDB invalidated its instance, so the next use
-        opens the file again.
+    def _drop_if_invalidated(self) -> None:
+        """Forget the store's connection if DuckDB invalidated its instance,
+        so the next use opens the file again.
 
-        Called with the lock held, after the statement that raised has come
-        off the executor thread. Closing an invalidated instance writes
+        Called with the lock held — by `connection()` and `checkpoint()`,
+        after the statement that raised has come off the executor thread — so
+        the connection asked is the one the failing block used: nothing else
+        can replace it while the lock is held.
+
+        The executor goes with it. `connect()` builds a new one, and the old
+        one, left running, is a worker thread per FATAL waiting forever for
+        work nothing will send it. Closing an invalidated instance writes
         nothing — the WAL stays, and the next open replays and checkpoints it
         through `open_read_write` — and a fresh `duckdb.connect` of the same
         file in the same process gets a new instance, even while a cursor of
         the old one is alive (both measured on 1.5.5).
         """
+        conn = self._connection
+        if conn is None:
+            return
         echo = _invalidated(conn)
         if echo is None:
             return
-        if self._connection is conn:
-            self._connection = None
-            executor, self._executor = self._executor, None
-            if executor:
-                executor.shutdown(wait=False)
+        self._connection = None
+        executor, self._executor = self._executor, None
+        if executor:
+            executor.shutdown(wait=False)
         with contextlib.suppress(Exception):
             conn.close()
         kind = _fatal_kind(echo)
@@ -799,7 +861,7 @@ class DuckDBStore(
         )
         # Up to the chunk dump: an index FATAL prints the rows it could not
         # remove, and buyers' phone and email columns are indexed.
-        error = " ".join(str(echo).split("\nChunk:")[0].split())[:400]
+        error = " ".join(without_row_dump(str(echo)).split())[:400]
         logger.error(
             "DuckDB FATAL #%d (%s): the instance is dropped and the next use "
             "opens the file again.%s %s", count, kind, lever, error,
@@ -843,25 +905,8 @@ class DuckDBStore(
         async with self.connection() as conn:
             self._total_queries += 1
             try:
-                loop = asyncio.get_running_loop()
-
-                def _run():
-                    return conn.execute(query, params or []).fetchone()
-
-                future = loop.run_in_executor(self._executor, _run)
-                try:
-                    return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
-                except asyncio.TimeoutError:
-                    # The executor thread is still inside conn.execute(). The
-                    # lock this block holds exists so that no two threads
-                    # touch the one connection; leaving now would release it
-                    # while the thread is on it. Interrupt the query and wait
-                    # for the thread to come off before raising.
-                    with contextlib.suppress(Exception):
-                        conn.interrupt()
-                    with contextlib.suppress(BaseException):
-                        await future
-                    raise
+                return await self._offload(
+                    conn, lambda: conn.execute(query, params or []).fetchone(), timeout)
             except asyncio.TimeoutError:
                 raise QueryTimeoutError(query, timeout, "Fetch one failed")
 
@@ -890,27 +935,46 @@ class DuckDBStore(
         async with self.connection() as conn:
             self._total_queries += 1
             try:
-                loop = asyncio.get_running_loop()
-
-                def _run():
-                    return conn.execute(query, params or []).fetchall()
-
-                future = loop.run_in_executor(self._executor, _run)
-                try:
-                    return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
-                except asyncio.TimeoutError:
-                    # The executor thread is still inside conn.execute(). The
-                    # lock this block holds exists so that no two threads
-                    # touch the one connection; leaving now would release it
-                    # while the thread is on it. Interrupt the query and wait
-                    # for the thread to come off before raising.
-                    with contextlib.suppress(Exception):
-                        conn.interrupt()
-                    with contextlib.suppress(BaseException):
-                        await future
-                    raise
+                return await self._offload(
+                    conn, lambda: conn.execute(query, params or []).fetchall(), timeout)
             except asyncio.TimeoutError:
                 raise QueryTimeoutError(query, timeout, "Fetch all failed")
+
+    async def _offload(self, conn, run, timeout: float):
+        """`run()` on the executor thread, under the lock the caller holds,
+        and the thread off `conn` before this returns or raises — whatever
+        ends the wait.
+
+        The lock exists so that no two threads touch the one connection, and
+        leaving the block releases it. After a timeout the thread is still
+        inside `conn.execute()`, and after a **cancellation** too — the
+        scheduler cancelling a job at shutdown, a caller giving up on a read.
+        A timeout interrupted the query and waited; a cancellation used to
+        leave at once, so the next holder of the lock shared `conn` with the
+        leftover query, and the next block that raised made `connection()`
+        probe the instance on the event loop — which waits for that query:
+        every request stalled for seconds, measured. Both interrupt and wait
+        now. A second cancellation during the wait is held until the thread
+        is off, then raised: the interrupt is already sent, so what it costs
+        is the rest of one statement.
+        """
+        future = asyncio.get_running_loop().run_in_executor(self._executor, run)
+        try:
+            return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            with contextlib.suppress(Exception):
+                conn.interrupt()
+            cancelled_again = False
+            while not future.done():
+                try:
+                    await asyncio.wait([future])
+                except asyncio.CancelledError:
+                    cancelled_again = True
+            if not future.cancelled():
+                future.exception()   # retrieved: asyncio would log it otherwise
+            if cancelled_again:
+                raise asyncio.CancelledError()
+            raise
 
     async def _init_schema(self) -> None:
         """Create database schema if not exists."""
@@ -1688,6 +1752,9 @@ class DuckDBStore(
             else:
                 self._connection.execute(build)
         except Exception as e:
+            # Its text is published on /api/health, which is public: never
+            # DuckDB's dump of row values (see `connection()`).
+            cut_row_dumps(e)
             logger.error(
                 "View %s could not be built; it keeps whatever definition the "
                 "file last held, if any: %s", name, e, exc_info=True,
@@ -1736,6 +1803,10 @@ class DuckDBStore(
             try:
                 migration.run(self)
             except Exception as e:
+                # The text goes to /api/health, which is public: a migration
+                # that met a short index — or ran on the instance a previous
+                # one invalidated — would publish DuckDB's dump of the rows.
+                cut_row_dumps(e)
                 elapsed = (time.perf_counter() - started) * 1000
                 logger.error(
                     "Migration %s FAILED after %.0f ms: %s",
@@ -1812,7 +1883,7 @@ class DuckDBStore(
                 "SELECT id, outcome FROM schema_migrations"
             ).fetchall()
         except Exception as e:
-            return {"status": "unknown", "error": str(e)}
+            return {"status": "unknown", "error": without_row_dump(str(e))}
         applied = {r[0] for r in rows if r[1] == "applied"}
         once = [m.id for m in MIGRATIONS if m.mode == ONCE]
         return {

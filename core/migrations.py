@@ -38,6 +38,7 @@ import logging
 from typing import Callable, List, NamedTuple
 
 from core.duckdb_sequences import advance_to
+from core.observability import cut_row_dumps
 
 logger = logging.getLogger(__name__)
 
@@ -742,6 +743,9 @@ def _m0027_reset_sequences_after_compaction(self) -> None:
                     seq_name, burned, table_name, col, floor,
                 )
         except Exception as e:
+            # Published on /api/health: never DuckDB's dump of row values,
+            # which an instance a FATAL invalidated echoes on every statement.
+            cut_row_dumps(e)
             logger.warning(
                 "Migration 0027: could not move %s above MAX(%s.%s); the next "
                 "default insert there may collide with an existing id: %s",

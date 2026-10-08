@@ -204,6 +204,36 @@ def _judge(path: Path, killed: dict, scratch: Path):
     return _fatal_tables(path, killed["tables"], scratch), _run_issues_seen(path, killed["runs"])
 
 
+def _another_process_opens(path: Path) -> str:
+    """'opened', or why another process could not open `path` read-only —
+    the compaction or a CLI, while this one still holds an instance."""
+    code = ("import duckdb, sys\n"
+            "duckdb.connect(sys.argv[1], read_only=True).close()\n"
+            "print('opened')\n")
+    out = subprocess.run([sys.executable, "-c", code, str(path)],
+                         capture_output=True, text=True, timeout=120)
+    return out.stdout.strip() or (out.stderr.strip().splitlines() or ["?"])[-1]
+
+
+class _InterruptedCheckpoint:
+    """A connection whose CHECKPOINT is interrupted before it applies
+    anything — `con.interrupt()` landing on the guard, or Ctrl-C in a CLI
+    that opens through the store. Measured on 1.5.5 with a 58 MB WAL and a
+    real interrupt: InterruptException, the instance still valid, the WAL
+    whole — and closing that instance as it is was the lossy checkpoint."""
+
+    def __init__(self, con, interrupt):
+        self._con, self._interrupt = con, interrupt
+
+    def execute(self, sql, *args, **kwargs):
+        if sql.strip().upper() == "CHECKPOINT":
+            raise self._interrupt()
+        return self._con.execute(sql, *args, **kwargs)
+
+    def close(self):
+        return self._con.close()
+
+
 # ─── the tests ──────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -265,10 +295,43 @@ def test_a_guard_checkpoint_that_fails_leaves_the_wal_for_the_next_open(
         return real_connect(database, *args, **kwargs)
 
     monkeypatch.setattr(duckdb, "connect", aborting)
-    with pytest.raises(duckdb.Error):
+    with pytest.raises(duckdb.Error) as failed:
         open_read_write(path)
     monkeypatch.undo()
     assert Path(f"{path}.wal").stat().st_size > 0, "the failed guard lost the WAL"
+    # Closed, not left to the traceback: while `failed` lives, an instance
+    # still open would hold the file's lock against every other process.
+    assert _another_process_opens(path) == "opened"
+    del failed
+
+    con = open_read_write(path)
+    con.close()
+    fatal, seen = _judge(path, killed_file, tmp_path)
+    assert fatal == [] and seen == list(_ISSUES_PER_RUN)
+
+
+@pytest.mark.parametrize("interrupt", [
+    pytest.param(lambda: duckdb.InterruptException("INTERRUPT Error: Interrupted!"),
+                 id="InterruptException"),
+    pytest.param(KeyboardInterrupt, id="KeyboardInterrupt"),
+])
+def test_an_interrupted_guard_checkpoint_leaves_the_wal_for_the_next_open(
+        killed_file, tmp_path, monkeypatch, interrupt):
+    """Not every failed guard is FATAL. An interrupt leaves the instance
+    valid with the WAL unapplied, and closing a valid instance is DuckDB's
+    own, lossy checkpoint — the defect itself. `disable_checkpoint_on_shutdown`
+    is what keeps that close from writing; without it every CREATE INDEX
+    index comes back short."""
+    path = _copy(killed_file, tmp_path / "db")
+    real_connect = duckdb.connect
+    monkeypatch.setattr(duckdb, "connect", lambda database, *a, **k: _InterruptedCheckpoint(
+        real_connect(database, *a, **k), interrupt))
+    with pytest.raises((duckdb.InterruptException, KeyboardInterrupt)) as failed:
+        open_read_write(path)
+    monkeypatch.undo()
+    assert Path(f"{path}.wal").stat().st_size > 0, "the interrupted guard's close checkpointed"
+    assert _another_process_opens(path) == "opened"
+    del failed
 
     con = open_read_write(path)
     con.close()
@@ -285,6 +348,58 @@ async def test_a_clean_start_says_nothing(tmp_path, caplog):
         store = await _connect(path)
         await store.close()
     assert not [r for r in caplog.records if "replayed" in r.getMessage()]
+
+
+# ─── the WAL nothing replays (not fixed; CLAUDE.md names these cases) ───────
+
+_TS = "CREATE TABLE a (id INTEGER, ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP, v INTEGER)"
+
+
+@pytest.mark.parametrize("ddl, alter, replays", [
+    # A column-level ALTER of a table that, after it, has a DEFAULT calling a
+    # function: the replay cannot bind it ("GetDefaultDatabase with no
+    # default database set"), read-only included, guard or not.
+    (_TS, "ALTER TABLE a ADD COLUMN x INTEGER", False),
+    (_TS, "ALTER TABLE a ADD COLUMN IF NOT EXISTS x INTEGER", False),
+    (_TS, "ALTER TABLE a DROP COLUMN v", False),
+    (_TS, "ALTER TABLE a RENAME COLUMN v TO w", False),
+    (_TS, "ALTER TABLE a ALTER COLUMN v TYPE BIGINT", False),
+    (_TS, "ALTER TABLE a ALTER COLUMN v SET DEFAULT 3", False),
+    (_TS, "ALTER TABLE a ALTER COLUMN v DROP DEFAULT", False),
+    (_TS, "ALTER TABLE a ALTER COLUMN v SET NOT NULL", False),
+    (_TS, "ALTER TABLE a ALTER COLUMN v DROP NOT NULL", False),
+    ("CREATE SEQUENCE s; CREATE TABLE a (id INTEGER DEFAULT nextval('s'), v INTEGER)",
+     "ALTER TABLE a ADD COLUMN x INTEGER", False),
+    ("CREATE SEQUENCE s; CREATE TABLE a (id INTEGER, v INTEGER)",
+     "ALTER TABLE a ADD COLUMN x INTEGER DEFAULT nextval('s')", False),
+    # ...and what does replay.
+    (_TS, "ALTER TABLE a RENAME TO b", True),
+    (_TS, "ALTER TABLE a ALTER COLUMN ts DROP DEFAULT", True),
+    (_TS, "ALTER TABLE a ADD COLUMN IF NOT EXISTS v INTEGER", True),   # writes nothing
+    (_TS, "CREATE INDEX i ON a(v)", True),
+    (_TS, "INSERT INTO a (id) VALUES (1)", True),
+    ("CREATE TABLE a (id INTEGER DEFAULT 5, v INTEGER)", "ALTER TABLE a ADD COLUMN x INTEGER", True),
+])
+def test_which_wal_cannot_be_replayed(tmp_path, ddl, alter, replays):
+    """Pinned on the DuckDB this repository pins: the cases CLAUDE.md lists
+    under "Not fixed: a WAL that cannot be replayed at all"."""
+    path = tmp_path / "a.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute(ddl)
+    con.execute("CHECKPOINT")
+    con.close()
+    code = ("import duckdb, os, signal, sys\n"
+            "c = duckdb.connect(sys.argv[1])\n"
+            "c.execute(sys.argv[2])\n"
+            "os.kill(os.getpid(), signal.SIGKILL)\n")
+    rc = subprocess.run([sys.executable, "-c", code, str(path), alter], timeout=60).returncode
+    assert rc == -signal.SIGKILL, rc
+    for read_only in (True, False):
+        if replays:
+            duckdb.connect(str(path), read_only=read_only).close()
+        else:
+            with pytest.raises(duckdb.InternalException, match="GetDefaultDatabase"):
+                duckdb.connect(str(path), read_only=read_only)
 
 
 if __name__ == "__main__" and sys.argv[1:2] == ["--child"]:
