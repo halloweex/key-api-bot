@@ -83,8 +83,9 @@ async def query_timeout_handler(request: Request, exc: QueryTimeoutError):
 
 @app.exception_handler(ReadUnavailable)
 async def read_unavailable_handler(request: Request, exc: ReadUnavailable):
-    """A read refused under `KS_READ_FALLBACK=off` (DN-20b): its engine
-    failed, and DuckDB may not answer in its place.
+    """A read refused under `KS_READ_FALLBACK=off` (DN-20b), or of a table a
+    write chain owns under either mode (`read_fallback.chain_refusal`): its
+    engine failed, and DuckDB may not answer in its place.
 
     One handler for every route, so no router has to know it is behind HTTP:
     `core.read_fallback` raises, this answers. 503, not 500 — nothing here

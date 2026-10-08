@@ -1205,6 +1205,12 @@ class PredictionService:
         self._last_trained: Optional[str] = None
         self._training = False
         self._training_lock = asyncio.Lock()
+        # Whether the last `predict_month` stored its forecast: True, False, or
+        # None before any. `predict_month` swallows a failed store (the model
+        # and the forecast it just made stay usable), so without this a store
+        # refused by Postgres under chain 7b-3 — or by DuckDB — showed nowhere
+        # but the log. `_train_impl` publishes it as `predictions_stored`.
+        self._last_store_ok: Optional[bool] = None
 
     @property
     def is_ready(self) -> bool:
@@ -1392,6 +1398,9 @@ class PredictionService:
                 "metrics": metrics,
                 "training_rows": len(df),
                 "predictions_generated": len(predictions),
+                # Whether they landed — the flip runbook of chain 7b-3 reads
+                # this in /api/jobs to see the first Postgres write.
+                "predictions_stored": bool(self._last_store_ok),
             }
 
         except read_fallback.ReadUnavailable:
@@ -1432,6 +1441,7 @@ class PredictionService:
         sales_type: str = "retail",
     ) -> List[Dict[str, Any]]:
         """Predict revenue for the next 60 days."""
+        self._last_store_ok = False
         if not self.is_ready:
             return []
 
@@ -1484,9 +1494,12 @@ class PredictionService:
             await self._alert_model_rejected(sales_type, reason, self._metrics or {})
             return predictions
 
-        # Store predictions in DuckDB
+        # Store predictions where chain 7b-3 says they are written (DuckDB, or
+        # Postgres under KS_WRITE_FORECAST). A failure is swallowed, as it
+        # always was, and recorded.
         try:
             await store.store_predictions(predictions, sales_type, self._metrics)
+            self._last_store_ok = True
         except Exception as e:
             logger.error(f"Failed to store predictions: {e}")
 

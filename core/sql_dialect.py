@@ -112,6 +112,13 @@ class Dialect:
     # Postgres carries an hourly copy. Not derivable there — re-running the
     # model tomorrow answers a different question.
     revenue_predictions: str
+    # The three shared goal tables a smart goal is built from (revision 0025).
+    # DuckDB writes them and Postgres carries an hourly copy until chain 7b-3
+    # (`core/pg_forecast_write.py`) moves their writer; while it does, every
+    # statement carrying one of these holes reads Postgres.
+    seasonal_indices: str
+    growth_metrics: str
+    weekly_patterns: str
     # `/traffic`. `order_utm` is shipped rather than derived — its body is a
     # Python parser, not SQL (revision 0018) — and it is 1:1 with the order,
     # which is what lets the traffic reads fold it against `silver_orders`
@@ -167,6 +174,9 @@ DUCKDB = Dialect(
     gold_revenue_rollup="TRUE",
     revenue_goals="revenue_goals",
     revenue_predictions="revenue_predictions",
+    seasonal_indices="seasonal_indices",
+    growth_metrics="growth_metrics",
+    weekly_patterns="weekly_patterns",
     order_utm="silver_order_utm",
     manual_expenses="manual_expenses",
     expenses="expenses",
@@ -211,6 +221,9 @@ POSTGRES = Dialect(
     gold_revenue_rollup="source_id IS NULL",
     revenue_goals="app.revenue_goals",
     revenue_predictions="app.revenue_predictions",
+    seasonal_indices="app.seasonal_indices",
+    growth_metrics="app.growth_metrics",
+    weekly_patterns="app.weekly_patterns",
     order_utm="silver.order_utm",
     manual_expenses="app.manual_expenses",
     expenses="bronze.expenses",
@@ -408,6 +421,9 @@ def render_tables(sql: str, dialect: Dialect, **extra: Any) -> str:
         gold_revenue_rollup=dialect.gold_revenue_rollup,
         revenue_goals=dialect.revenue_goals,
         revenue_predictions=dialect.revenue_predictions,
+        seasonal_indices=dialect.seasonal_indices,
+        growth_metrics=dialect.growth_metrics,
+        weekly_patterns=dialect.weekly_patterns,
         order_utm=dialect.order_utm,
         manual_expenses=dialect.manual_expenses,
         expenses=dialect.expenses,

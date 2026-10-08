@@ -684,6 +684,11 @@ class TestEveryWriterLatchesFirst:
         from core import pg_catalogue_write
 
         assert set(_writers(pg_catalogue_write)) == {"upsert_products", "upsert_categories"}
+        # Chain 7b-3: the three goal tables in one transaction, and the forecast.
+        from core import pg_forecast_write
+
+        assert set(_writers(pg_forecast_write)) == {
+            "persist_goal_tables", "store_predictions"}
         # Chain 9: a run with its findings, and the digest's beat.
         assert set(_writers(pg_dq_journal_write)) == {"persist_run", "set_digest_marker"}
         # Chain 10: each watchdog's whole tick — reads, insert, prune.

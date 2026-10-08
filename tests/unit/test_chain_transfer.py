@@ -95,6 +95,15 @@ class TestTheClockIsDerived:
             # two versions, and the rewrite clock dates the chain's writes.
             "bronze.products": (),
             "bronze.categories": (),
+            # Chain 7b-3. Each table's stamp is the daily spec's
+            # `synced_column` and also in its `ignore_columns` — one stamp per
+            # writer run, compared by nothing — so it orders nothing across
+            # the two stores. After the latch every difference is taken as
+            # Postgres newer, which `--handover` before the flip makes true.
+            "app.revenue_predictions": (),
+            "app.seasonal_indices": (),
+            "app.weekly_patterns": (),
+            "app.growth_metrics": (),
             # Chain 9 (OD-02 (c)). A run is dated by its own `started_at`,
             # which both stores are handed as one value; its findings carry no
             # clock of their own (the daily comparison borrows the run's
@@ -171,7 +180,36 @@ class TestEveryWrittenColumnIsCompared:
                     assert spec.compare.ignore_columns == \
                         daily[spec.pg_table].ignore_columns, spec.pg_table
         assert forgiven == {("bronze.offers", "synced_at"),
-                            ("app.sku_inventory_status", "updated_at")}
+                            ("app.sku_inventory_status", "updated_at"),
+                            # Chain 7b-3, four more, each forgiven by its daily
+                            # spec for the race that spec describes. A writer
+                            # run stamps ONE value — the goal tables in one
+                            # transaction with one `now`, a training's forecast
+                            # with one `created_at` (measured, DuckDB 1.5.5: 61
+                            # rows, 1 value) — and nothing in DuckDB reads any
+                            # of them: the only reader is the chain's standing
+                            # watch, which reads Postgres and stands down with
+                            # the release. But the next run does NOT restamp
+                            # every row, and that is the honest limit of
+                            # forgiving them here. `seasonal_indices`: every
+                            # month the Monday job computes. `growth_metrics`:
+                            # only a measured rate (the placeholder never
+                            # overwrites one). `weekly_patterns`: only POST
+                            # /api/goals/recalculate — the Monday job never
+                            # stores weekly rows, and production's have not
+                            # moved since 2026-03-14. `revenue_predictions`:
+                            # only the range a training predicts, today to
+                            # +60; a past day keeps its stamp for good. A
+                            # mis-copy of those two is seen by no comparison
+                            # and corrected by no run, so what the copy carries
+                            # is pinned by the suite instead, on stamps that
+                            # differ row by row (`test_forecast_writer.py::
+                            # TestTheCopyBack::test_the_stamps_no_run_
+                            # restamps_arrive_exactly`).
+                            ("app.seasonal_indices", "updated_at"),
+                            ("app.growth_metrics", "updated_at"),
+                            ("app.weekly_patterns", "updated_at"),
+                            ("app.revenue_predictions", "created_at")}
 
 
 class TestAKeyOnlyDuckdbHolds:

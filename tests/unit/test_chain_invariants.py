@@ -327,7 +327,7 @@ class TestAChainWithNoInvariants:
         assert set(readers.values()) <= {"expenses", "inventory", "goals",
                                          "expense_types", "buyers", "orders",
                                          "managers",
-                                         "catalogue",
+                                         "catalogue", "forecast",
                                          # The shadow chains (OD-02 (c)).
                                          "journal", "watchdogs",
                                          "weekly_ledger", "traffic_ledger"}

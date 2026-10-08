@@ -368,6 +368,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "KeyCRM serves the rows again — or never; it is not a defect"),
     "chain_catalogue_short_write": _c(
         "the next full write carries the whole catalogue"),
+    # Chain 7b-3's goal and forecast tables. Every value can be computed
+    # again, so each clears on the writer storing a full set.
+    "chain_goal_tables_incomplete": _c(
+        "a recalculation stores twelve months, every YoY and a measured overall"),
+    "chain_goal_tables_stale": _c(
+        "a seasonality_calc run (the Monday job or its trigger) stores"),
+    "chain_forecast_stale": _c("a training stores a retail forecast"),
     # The shadow chains' standing watch (OD-02 (c)). Chain 9: a finding whose
     # run is gone stays until a human finds the writer and the rows.
     "chain_orphan_children": _c(

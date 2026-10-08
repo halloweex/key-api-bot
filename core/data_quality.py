@@ -2232,6 +2232,14 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Not a defect: KeyCRM retired them, and the dashboard keeps their names"),
     ("chain_catalogue_short_write",
      "Read the last products sync in the web log (pages fetched vs the catalogue); the next hourly write heals it"),
+    # Chain 7b-3's four tables. Recomputable, so the lever is the writer; what
+    # to read first is the job's own result in /api/jobs.
+    ("chain_goal_tables_incomplete",
+     "POST /api/goals/recalculate stores all three tables at once; if it recurs, read seasonality_calc in /api/jobs"),
+    ("chain_goal_tables_stale",
+     "Read seasonality_calc in /api/jobs (skipped? error?), then POST /api/jobs/seasonality_calc/trigger"),
+    ("chain_forecast_stale",
+     "Read revenue_prediction_train in /api/jobs (rejected? predictions_stored false?), then trigger it again"),
     # The shadow chains (OD-02 (c)). Chain 9 writes a run and its findings
     # in one transaction, so an orphan is a write that went round it.
     ("chain_orphan_children",

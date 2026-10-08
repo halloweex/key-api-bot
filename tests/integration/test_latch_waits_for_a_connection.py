@@ -50,6 +50,7 @@ from core import (  # noqa: E402 — the shadow chains' block
     pg_dq_journal_write, pg_traffic_ledger_write, pg_watchdog_write,
     pg_weekly_ledger_write,
 )
+from core import pg_forecast_write, read_fallback
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -76,6 +77,10 @@ ORDER_ID = 990_301
 
 # Chain 5's two, apart from the literal above so a merge stays a union.
 _WRITTEN += ("app.manager_classifications", "bronze.managers")
+
+# Chain 7b-3's four, apart for the same reason.
+_WRITTEN += ("app.seasonal_indices", "app.growth_metrics", "app.weekly_patterns",
+             "app.revenue_predictions")
 
 STOCK = {"id": 1, "sku": "S-1", "price": 500, "purchased_price": 250,
          "quantity": 40, "reserve": 0}
@@ -351,6 +356,14 @@ WRITERS = {
         [{"id": 1, "name": "Toner", "category_id": 10, "sku": "T-1", "price": 250}])),
     "upsert_categories": (pg_catalogue_write, lambda s: s.upsert_categories(
         [{"id": 10, "name": "Care", "parent_id": None}])),
+    # Chain 7b-3. The recalculation reads its history first, through
+    # `core.pg_goals_read` — which is served the live pool — so only the
+    # writer's own acquire is interfered with.
+    "persist_goal_tables": (pg_forecast_write, lambda s: s.recalculate_goal_tables(
+        include_weekly=True)),
+    "store_predictions": (pg_forecast_write, lambda s: s.store_predictions(
+        [{"date": "2026-10-07", "predicted_revenue": 1.0}], "retail",
+        {"mae": 1, "mape": 1, "wape": 1})),
     # Chain 9 (OD-02 (c)): driven at the chain module rather than through
     # `dq_journal.journal_run`, which would also hand DuckDB the shadow — the
     # latch is the writer's alone.
@@ -400,6 +413,14 @@ async def stores(tmp_path, monkeypatch):
     # here would move chain 1's own calls; the precondition itself is proved
     # in tests/unit/test_catalogue_chain.py.
     monkeypatch.setattr(pg_catalogue_write, "unmet_precondition", lambda: None)
+    # Chain 7b-3's four preconditions: its inputs on Postgres, and the
+    # fallback off as configured. The goal history then reads an empty
+    # `silver.orders`, which still writes a placeholder growth row.
+    monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
+    monkeypatch.setenv("KS_READ_GOALS", "postgres")
+    monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
+    monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
+    monkeypatch.setattr(read_fallback, "_mode_error", None)
     store = DuckDBStore(db_path=tmp_path / "latch-acquire.duckdb")
     await store.connect()
     live = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
@@ -597,6 +618,8 @@ FIRST_WRITES = {
     "pg_orders_write": ("upsert_orders_with_expenses", "bronze.orders", "id", ORDER_ID),
     "pg_managers_write": ("upsert_managers", "bronze.managers", "id", 1),
     "pg_catalogue_write": ("upsert_products", "bronze.products", "id", 1),
+    "pg_forecast_write": ("store_predictions", "app.revenue_predictions",
+                          "sales_type", "retail"),
     "pg_dq_journal_write": ("persist_run", "app.data_quality_runs", "run_id", 1),
     "pg_watchdog_write": ("memory_tick", "app.memory_samples", None, None),
     "pg_weekly_ledger_write": ("mark_sent:weekly", "app.weekly_report_sends", None, None),

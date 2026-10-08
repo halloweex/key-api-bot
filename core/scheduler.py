@@ -68,6 +68,16 @@ DEFAULT_MISFIRE_GRACE_SECONDS = 3600
 # these to hour 3 or 4.
 INVARIANT_CHECK_HOURS = "1,7,13,19"
 
+# When the two goal/forecast writers are due, as `CronTrigger` keyword
+# arguments in `SCHEDULER_TIMEZONE`. Constants rather than literals at the
+# `_add_job` call because a second reader needs them: chain 7b-3's standing
+# watch (`core/pg_chain_invariants.py`) judges the four forecast tables stale
+# against the last slot these name, so the slot it judges by is the one the
+# scheduler fires on — a copy of "Mon and Thu 03:30" there would drift the day
+# either moved. Training is twice weekly, not daily.
+REVENUE_TRAIN_SCHEDULE = {"day_of_week": "mon,thu", "hour": 3, "minute": 30}
+SEASONALITY_SCHEDULE = {"day_of_week": "mon", "hour": 4, "minute": 0}
+
 # Checks whose scheduled instant we may simply not have been alive for, and how
 # stale their last *successful* verdict may be at process start before we run a
 # one-off catch-up. Shape: job_id -> (data_quality layer, max age s, delay s).
@@ -573,7 +583,7 @@ class BackgroundScheduler:
             name="Seasonality Calculation",
             description="Calculate seasonality indices and goals",
             func=self._run_seasonality_calc,
-            trigger=CronTrigger(day_of_week="mon", hour=4, minute=0),
+            trigger=CronTrigger(**SEASONALITY_SCHEDULE),
             max_instances=1,
             coalesce=True,
         )
@@ -586,7 +596,7 @@ class BackgroundScheduler:
             name="Revenue Prediction",
             description="Train LightGBM model and generate revenue forecasts",
             func=self._run_revenue_prediction,
-            trigger=CronTrigger(day_of_week="mon,thu", hour=3, minute=30),
+            trigger=CronTrigger(**REVENUE_TRAIN_SCHEDULE),
             max_instances=1,
             coalesce=True,
         )

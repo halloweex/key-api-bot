@@ -168,6 +168,30 @@ The manager classification (chain 5):
 * **Not its watermark.** The sync is daily; `_freshness_check` judges
   `last_sync_managers` at 192 h from `meta.chain_watermarks`.
 
+The goal and forecast tables (chain 7b-3):
+
+* **Complete.** Twelve months of `seasonal_indices`, none without a
+  `yoy_growth`, and a measured `yoy_overall` in `growth_metrics`.
+  `generate_smart_goals` falls back per month (index 1.0, YoY at the cap,
+  confidence `low`) and per overall rate without an error, so a short table is
+  a different goal on every page and nothing else says so. The overall rate
+  also counts as missing when it is the 0.10 placeholder (`sample_size = 0`)
+  while its own `period_start` says the history already holds two full years —
+  the state the 2026-08-31 backup was in, written before chain 7b-1.
+* **Stored on time.** Each writer runs on a schedule — the Monday
+  `seasonality_calc` and the Mon/Thu 03:30 training — and a run that did not
+  store (refused under `KS_READ_FALLBACK=off`, raised, a training rejected by
+  its gate, a store `predict_month` swallowed, a restart over the slot) leaves
+  the stamps older than the slot. Judged against the last slot the scheduler's
+  own constants name, `FORECAST_SLOT_GRACE` after it, so a missed Monday or
+  Thursday is in that morning's 07:00 run and the 09:00 digest. A flat age
+  would have to exceed the Thu→Mon gap and say so on Saturday.
+* **All WARN.** Every value in the four tables can be computed again —
+  `POST /api/goals/recalculate` and a training — so nothing here is worth a
+  page at 01:00. An unstamped row is reported inside the staleness it blinds,
+  not as `chain_required_column_null`: these stamps order nothing in the
+  copy-back, which forgives them.
+
 WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
 
 A chain is watched when `core.write_chains.chain_modes()` says its writes go to
@@ -304,6 +328,12 @@ INITIAL_BURST_PCT = 5.0
 # status table was empty when the photograph was taken" — a catalogue that
 # genuinely halved inside the window is worth the look this would cost.
 SNAPSHOT_MIN_RATIO = 0.5
+
+# How long after a scheduled slot of chain 7b-3's two writers their stamps
+# must have moved. Puts the Mon/Thu 03:30 training and the Monday 04:00 job
+# before the 07:00 integrity run (06:00 and 06:30), and leaves the wait for the
+# heavy-job lock and the training itself — seconds — far inside it.
+FORECAST_SLOT_GRACE = timedelta(hours=2, minutes=30)
 
 
 # ─── Facts ────────────────────────────────────────────────────────────────────
@@ -469,6 +499,27 @@ class Catalogue:
 
 
 @dataclass(frozen=True)
+class Forecast:
+    """What is true of chain 7b-3's four tables on their own (`_read_forecast`).
+
+    Counts and stamps only, read in one statement: the three goal tables are
+    written in one transaction, so one snapshot sees one set of them."""
+    latched_at: Optional[datetime] = None
+    months: int = 0
+    yoy_null: int = 0
+    seasonal_at: Optional[datetime] = None
+    seasonal_unstamped: int = 0
+    yoy_rows: int = 0
+    yoy_overall: Optional[float] = None
+    yoy_sample: Optional[int] = None
+    yoy_from: Optional[date] = None
+    forecast_at: Optional[datetime] = None
+    horizon: Optional[date] = None
+    forecast_unstamped: int = 0
+
+
+
+@dataclass(frozen=True)
 class Journal:
     """Chain 9 (OD-02 (c)): findings whose run Postgres does not hold. The
     daily comparison still compares the journal — DuckDB is its shadow — so
@@ -500,7 +551,8 @@ class Ledger:
 
 
 Group = Union[Expenses, ExpenseTypes, Inventory, Goals, Buyers, Orders,
-              Managers, Catalogue, Journal, Watchdogs, Ledger, Unwatched, None]
+              Managers, Catalogue, Forecast, Journal, Watchdogs, Ledger,
+              Unwatched, None]
 
 
 @dataclass(frozen=True)
@@ -524,6 +576,8 @@ class Facts:
     # Chain 5's two tables.
     managers: Group = None
     catalogue: Group = None
+    # Chain 7b-3's four tables.
+    forecast: Group = None
     # The shadow chains (OD-02 (c)), appended last.
     journal: Group = None
     watchdogs: Group = None
@@ -573,6 +627,9 @@ SAMPLES_STALE = "chain_samples_stale"
 RETENTION_UNBOUNDED = "chain_retention_unbounded"
 REPORT_WEEK_MISSING = "chain_report_week_missing"
 UNWATCHED = "chain_invariants_unwatched"
+GOAL_TABLES_INCOMPLETE = "chain_goal_tables_incomplete"
+GOAL_TABLES_STALE = "chain_goal_tables_stale"
+FORECAST_STALE = "chain_forecast_stale"
 
 # What a blind run holds rather than resolves — `data_quality`'s
 # GUARDED_CHECK_CONDITIONS shape, and `unverified_conditions` below reads it.
@@ -581,6 +638,7 @@ CONDITIONS: Tuple[str, ...] = (
     ROLLUP_MISSING, SNAPSHOT_SHORT, WATERMARK_STALE,
     DICTIONARY_EMPTY, NAME_UNRESOLVED, BUYER_ORPHANS, CONTACT_MISSING,
     EXPENSE_ORPHANS,
+    GOAL_TABLES_INCOMPLETE, GOAL_TABLES_STALE, FORECAST_STALE,
     JOURNAL_ORPHANS, SAMPLES_STALE, RETENTION_UNBOUNDED, REPORT_WEEK_MISSING,
 )
 # Chain 5's, held and resolved with the rest.
@@ -651,6 +709,8 @@ def _reader_groups() -> Dict[str, str]:
         pg_weekly_ledger_write,
     )
 
+    from core import pg_forecast_write
+
     return {pg_expenses_write.CHAIN: "expenses",
             pg_inventory_write.CHAIN: "inventory",
             pg_goals_write.CHAIN: "goals",
@@ -659,6 +719,7 @@ def _reader_groups() -> Dict[str, str]:
             pg_orders_write.CHAIN: "orders",
             pg_managers_write.CHAIN: "managers",
             pg_catalogue_write.CHAIN: "catalogue",
+            pg_forecast_write.CHAIN: "forecast",
             # The shadow chains (OD-02 (c)).
             pg_dq_journal_write.CHAIN: "journal",
             pg_watchdog_write.CHAIN: "watchdogs",
@@ -910,6 +971,36 @@ WHERE date BETWEEN $1 AND $2
 GROUP BY date ORDER BY date
 """
 
+# Chain 7b-3's four tables, in one statement (one snapshot). `$1` is today in
+# Kyiv: a forecast row dated before it is read by nothing (`get_forecast` and
+# the smart goal's ML signal both start from today), so only the rows still
+# ahead are worth counting unstamped. Retail only, because only retail is
+# trained (`_run_revenue_prediction`).
+_FORECAST_SQL = """
+SELECT (SELECT count(*) FROM app.seasonal_indices
+         WHERE month BETWEEN 1 AND 12) AS months,
+       (SELECT count(*) FROM app.seasonal_indices
+         WHERE yoy_growth IS NULL) AS yoy_null,
+       (SELECT max(updated_at) FROM app.seasonal_indices) AS seasonal_at,
+       (SELECT count(*) FROM app.seasonal_indices
+         WHERE updated_at IS NULL) AS seasonal_unstamped,
+       (SELECT count(*) FROM app.growth_metrics
+         WHERE metric_type = 'yoy_overall') AS yoy_rows,
+       (SELECT value FROM app.growth_metrics
+         WHERE metric_type = 'yoy_overall') AS yoy_overall,
+       (SELECT sample_size FROM app.growth_metrics
+         WHERE metric_type = 'yoy_overall') AS yoy_sample,
+       (SELECT period_start FROM app.growth_metrics
+         WHERE metric_type = 'yoy_overall') AS yoy_from,
+       (SELECT max(created_at) FROM app.revenue_predictions
+         WHERE sales_type = 'retail') AS forecast_at,
+       (SELECT max(prediction_date) FROM app.revenue_predictions
+         WHERE sales_type = 'retail') AS horizon,
+       (SELECT count(*) FROM app.revenue_predictions
+         WHERE sales_type = 'retail' AND prediction_date >= $1::date
+           AND created_at IS NULL) AS forecast_unstamped
+"""
+
 
 _JOURNAL_ORPHANS_SQL = """
     WITH orphans AS (
@@ -1126,6 +1217,22 @@ async def _read_catalogue(conn, latched_at: Optional[datetime] = None) -> Catalo
     return Catalogue(tables=tuple(tables), latched_at=latched_at)
 
 
+async def _read_forecast(conn, latched_at: Optional[datetime],
+                         today: date) -> Forecast:
+    row = await conn.fetchrow(_FORECAST_SQL, today)
+    value = row["yoy_overall"]
+    return Forecast(
+        latched_at=latched_at,
+        months=int(row["months"]), yoy_null=int(row["yoy_null"]),
+        seasonal_at=row["seasonal_at"],
+        seasonal_unstamped=int(row["seasonal_unstamped"]),
+        yoy_rows=int(row["yoy_rows"]),
+        yoy_overall=None if value is None else float(value),
+        yoy_sample=row["yoy_sample"], yoy_from=row["yoy_from"],
+        forecast_at=row["forecast_at"], horizon=row["horizon"],
+        forecast_unstamped=int(row["forecast_unstamped"]))
+
+
 async def _read_inventory(conn, latched_at: Optional[datetime],
                           today: date) -> Inventory:
     from core.landing_rows import MOVEMENT_INITIAL
@@ -1266,7 +1373,7 @@ async def read_facts(*, pool=None) -> Facts:
         pg_buyers_write, pg_expenses_write, pg_goals_write, pg_inventory_write,
         pg_managers_write, pg_orders_write,
     )
-    from core import pg_catalogue_write
+    from core import pg_catalogue_write, pg_forecast_write
     from core import pg_traffic_ledger_write, pg_weekly_ledger_write
 
     groups: Dict[str, Group] = {}
@@ -1295,6 +1402,8 @@ async def read_facts(*, pool=None) -> Facts:
                         c, _stamp(watched.get(pg_managers_write.CHAIN))),
                     "catalogue": lambda c: _read_catalogue(
                         c, _stamp(watched.get(pg_catalogue_write.CHAIN))),
+                    "forecast": lambda c: _read_forecast(
+                        c, _stamp(watched.get(pg_forecast_write.CHAIN)), today),
                     "journal": _read_journal,
                     "watchdogs": _read_watchdogs,
                     "weekly_ledger": lambda c: _read_ledger(
@@ -1347,7 +1456,8 @@ async def read_facts(*, pool=None) -> Facts:
                  weekly_ledger=groups.get("weekly_ledger"),
                  traffic_ledger=groups.get("traffic_ledger"),
                  watermarks=watermarks, watermarks_unread=watermarks_unread,
-                 unread=unread, managers=groups.get("managers"))
+                 unread=unread, managers=groups.get("managers"),
+                 forecast=groups.get("forecast"))
 
 
 def _stamp(value: Optional[str]) -> Optional[datetime]:
@@ -1848,6 +1958,121 @@ def _catalogue_issues(cat: Catalogue, chain: str) -> List:
     return issues
 
 
+def last_slot(schedule: Mapping[str, object], at: datetime) -> Optional[datetime]:
+    """The last instant at or before `at` a job registered with `schedule` (a
+    `core.scheduler` trigger constant) was due. The scheduler's own trigger,
+    in its own zone, so a daylight-saving change is the trigger's, not this
+    module's arithmetic. Pure."""
+    from apscheduler.triggers.cron import CronTrigger
+
+    from core.scheduler import SCHEDULER_TIMEZONE
+
+    trigger = CronTrigger(**schedule, timezone=SCHEDULER_TIMEZONE)
+    fire = trigger.get_next_fire_time(None, at - timedelta(days=8))
+    last = None
+    while fire is not None and fire <= at:
+        last = fire
+        fire = trigger.get_next_fire_time(fire, fire)
+    return last
+
+
+def _two_full_years_held(since: Optional[date], now: datetime) -> bool:
+    """Whether a history starting on `since` already holds two full calendar
+    years before the current Kyiv one — the pair `_yoy_growth` measures. A
+    year counts once it has orders in eleven months, so a history from 1
+    February of the year before last has its pair; later than that, the
+    placeholder may be honest. Conservative by a month on purpose: a WARN that
+    is wrong costs a reader's trust in the next one."""
+    from core.scheduler import SCHEDULER_TIMEZONE
+
+    if since is None:
+        return False
+    year = now.astimezone(SCHEDULER_TIMEZONE).year
+    return since <= date(year - 2, 2, 1)
+
+
+def _forecast_issues(f: Forecast, chain: str, now: Optional[datetime]) -> List:
+    from core.data_quality import Severity
+    from core.scheduler import REVENUE_TRAIN_SCHEDULE, SEASONALITY_SCHEDULE
+
+    whose = (
+        f"{chain} writes these tables" if f.latched_at is not None else
+        f"{chain} has not written these tables yet — they hold what the hourly "
+        "copy last shipped from DuckDB, so this is DuckDB's writer's state, "
+        "carried across")
+    issues: List = []
+
+    gaps: List[str] = []
+    if f.months < 12:
+        gaps.append(f"app.seasonal_indices holds {f.months} of 12 months")
+    if f.yoy_null:
+        gaps.append(f"{f.yoy_null} month(s) carry no yoy_growth")
+    if not f.yoy_rows:
+        gaps.append("app.growth_metrics holds no yoy_overall")
+    elif f.yoy_overall is None:
+        gaps.append("yoy_overall has no value")
+    elif (f.yoy_sample == 0 and now is not None
+          and _two_full_years_held(f.yoy_from, now)):
+        gaps.append(
+            f"yoy_overall is the {f.yoy_overall:.2f} placeholder (sample_size 0) "
+            f"although the history starts {f.yoy_from} and so already holds two "
+            "full years")
+    if gaps:
+        issues.append(_issue(
+            check_name=GOAL_TABLES_INCOMPLETE, table_name="app.seasonal_indices",
+            severity=Severity.WARN, count=len(gaps),
+            description=(
+                "; ".join(gaps) + ". generate_smart_goals falls back without an "
+                "error — index 1.0, the YoY at the dynamic cap and confidence "
+                "'low' for a month it cannot read, the cap for a missing overall "
+                f"rate — so every smart goal is quietly a different number. {whose}.")))
+
+    if now is None:
+        return issues
+    cutoff = now - FORECAST_SLOT_GRACE
+
+    slot = last_slot(SEASONALITY_SCHEDULE, cutoff)
+    if f.months and slot is not None and (
+            f.seasonal_at is None or f.seasonal_at < slot):
+        stamp = (f"was last stored {f.seasonal_at.isoformat()}"
+                 if f.seasonal_at is not None else "carries no updated_at at all")
+        unstamped = (f", and {f.seasonal_unstamped} row(s) carry no updated_at"
+                     if f.seasonal_unstamped and f.seasonal_at is not None else "")
+        issues.append(_issue(
+            check_name=GOAL_TABLES_STALE, table_name="app.seasonal_indices",
+            severity=Severity.WARN, count=1,
+            description=(
+                f"app.seasonal_indices {stamp}{unstamped}, before the "
+                f"seasonality_calc run due {slot.isoformat()}. That job stores "
+                "the indices and the YoY in one transaction, so it did not store "
+                "at all: refused under KS_READ_FALLBACK=off, raised, or missed by "
+                f"a restart over its slot, which has no catch-up. {whose}.")))
+
+    slot = last_slot(REVENUE_TRAIN_SCHEDULE, cutoff)
+    if slot is not None and (f.forecast_at is None or f.forecast_at < slot):
+        stamp = (f"was last stored {f.forecast_at.isoformat()}"
+                 if f.forecast_at is not None else "holds no retail row")
+        tail = []
+        if f.horizon is not None:
+            tail.append(f"its horizon ends {f.horizon}")
+        if f.forecast_unstamped:
+            tail.append(f"{f.forecast_unstamped} row(s) from today on carry no "
+                        "created_at")
+        issues.append(_issue(
+            check_name=FORECAST_STALE, table_name="app.revenue_predictions",
+            severity=Severity.WARN, count=1,
+            description=(
+                f"The retail forecast in app.revenue_predictions {stamp}"
+                + (f" ({'; '.join(tail)})" if tail else "")
+                + f", before the training due {slot.isoformat()}. The training "
+                "did not store: its model was rejected by the WAPE or sanity "
+                "gate (prediction:retrain_rejected says so), the input was "
+                "refused, or the store failed — predict_month swallows that, and "
+                "/api/jobs then shows predictions_stored false. The previous "
+                f"forecast is still served. {whose}.")))
+    return issues
+
+
 def _journal_issues(j: Journal, chain: str) -> List:
     from core.data_quality import Severity
 
@@ -2053,6 +2278,15 @@ def check_chain_invariants(facts: Optional[Facts]) -> List:
                                       (pg_catalogue_write.CHAIN,)))
     elif isinstance(facts.catalogue, Catalogue):
         issues += _catalogue_issues(facts.catalogue, pg_catalogue_write.CHAIN)
+
+    from core import pg_forecast_write
+
+    if isinstance(facts.forecast, Unwatched):
+        issues.append(unwatched_issue(facts.forecast.reason,
+                                      (pg_forecast_write.CHAIN,)))
+    elif isinstance(facts.forecast, Forecast):
+        issues += _forecast_issues(facts.forecast, pg_forecast_write.CHAIN,
+                                   facts.now)
 
     # The shadow chains (OD-02 (c)).
     from core import pg_dq_journal_write

@@ -31,6 +31,7 @@ from core import (
     pg_inventory_write, pg_managers_write, pg_orders_write,
 )
 from core import pg_catalogue_write
+from core import pg_forecast_write
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,11 @@ WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
 # `bronze.categories`, off by default, and held on DuckDB until chain 1, the
 # read fallback and every warehouse reader have moved (`unmet_precondition`).
 WRITE_CHAINS += (pg_catalogue_write,)
+# Chain 7b-3 (`pg_forecast_write`) is the ninth: the four goal and forecast
+# tables — `app.seasonal_indices`, `app.growth_metrics`, `app.weekly_patterns`,
+# `app.revenue_predictions` — off by default, and held on DuckDB until the
+# calculators' inputs are Postgres (`unmet_precondition`).
+WRITE_CHAINS += (pg_forecast_write,)
 
 # A KS_WRITE_* value no chain understands must stop that chain and nothing
 # else. The registry used to evaluate every chain's flag for every question, so

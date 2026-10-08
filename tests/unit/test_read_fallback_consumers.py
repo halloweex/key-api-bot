@@ -106,6 +106,9 @@ import pytest
 REPO = pathlib.Path(__file__).resolve().parents[2]
 WALKED = ("core", "web", "scripts")
 REFUSERS = {"fall_back", "no_address", "no_engine"}
+# A read of a table a write chain owns refuses its Postgres failure under
+# either mode (chain 7b-3's reads; `read_fallback.chain_refusal`).
+REFUSERS |= {"chain_refusal"}
 # A receiver the store is reached through: `store`, `self.store`,
 # `self._store`, `get_store()`, `(await get_store())`.
 STORE_RECEIVER = re.compile(r"(^|[._])store$|get_store\(\)")

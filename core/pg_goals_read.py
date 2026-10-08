@@ -14,8 +14,10 @@ WHAT IS HERE AND WHAT IS NOT
     `weekly_patterns` and `growth_metrics`. Revision 0025 created those three
     in Postgres too, but only as an hourly replica of what DuckDB writes, so a
     routed read would answer up to an hour behind `POST /goals/recalculate`.
-    They are read where they are written, until their writer moves (chain
-    7b-3).
+    They are read where they are written, through `_goal_tables_run`, which
+    asks chain 7b-3 (`KS_WRITE_FORECAST`, `core/pg_forecast_write.py`) and
+    never this flag: DuckDB while that chain writes DuckDB, Postgres with no
+    fallback once it writes there. `fetch` below is what answers then.
   * **not here either** — the seven writes. This tab is the only one that
     writes from the interface, and `app.revenue_goals` is an hourly read
     replica: DuckDB is still the writer, so a write routed here would land in

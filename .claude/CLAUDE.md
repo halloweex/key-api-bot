@@ -413,8 +413,8 @@ What does exist:
 - **DOW residual corrections**: computed on last 180 days, clamped [0.70, 1.30], saved to `data/dow_corrections.json`
 - LightGBM with 500 rounds, early stopping (patience=50), time-series validation (last 60 days)
 - **Performance** (6-fold walk-forward CV): WAPE=27.66%, R²=0.066, beats best baseline by 1.53%
-- Retrains daily at 3:30 AM via scheduler + on server startup
-- Predictions stored in `revenue_predictions` DuckDB table
+- Retrains twice weekly, Mon and Thu 03:30 Kyiv (`REVENUE_TRAIN_SCHEDULE` in `core/scheduler.py`), and at a start with no model artefact on disk
+- Predictions stored in `revenue_predictions` — DuckDB, or Postgres `app.revenue_predictions` under chain 7b-3 (`KS_WRITE_FORECAST`, off)
 - Frontend shows forecast bars (lighter opacity) on Revenue Trend chart when period=month
 - "Predicted: ₴X" badge in chart header
 - Graceful degradation: chart works normally if model unavailable
@@ -3076,8 +3076,9 @@ the cause stays in the log. One raise, so it refuses every router an HTTP
 route reaches, the filter bar's lookups included, not only the tabs the plan
 named. A refusal is not a fallback: counted apart, logged without the phrase
 a fallback is grepped by, published as `read_fallback_mode.refused` under `off`
-alone, so `read_fallbacks` stays empty there and the block keeps its shape
-under `duckdb`. `off` refuses a *failure*, never a switch left at `duckdb` —
+— and under `duckdb` only once a write chain's read was refused, below — so
+`read_fallbacks` stays empty there and the block keeps its shape under
+`duckdb`. `off` refuses a *failure*, never a switch left at `duckdb` —
 except the cohorts, which have no Postgres body: under `off` a live
 ClickHouse answers them or nobody does (`no_engine`). A switch naming an
 engine this process has **no address** for (`KS_READ_TRAFFIC=postgres`
@@ -3181,8 +3182,11 @@ hourly copy in Postgres), `KS_WRITE_EXPENSE_TYPES` (chain 6a, off),
 `KS_WRITE_BUYERS` (chain 4, off — the buyers, their contacts and their gender;
 see "Chain 4: the buyers, written where they are read"), `KS_WRITE_ORDERS`
 (chain 3, off — see "Chain 3: the orders, written where they are read"),
-`KS_WRITE_CATALOGUE` (chain 6, off — see "Chain 6: the catalogue"). Putting one
-back to `duckdb` reads like an undo and is not one:
+`KS_WRITE_MANAGERS` (chain 5, off — see "Chain 5: the classification, written
+where it is derived"), `KS_WRITE_CATALOGUE` (chain 6, off — see "Chain 6: the
+catalogue"), `KS_WRITE_FORECAST` (chain 7b-3, off — the three goal tables and
+the forecast; see "Chain 7b-3"). Putting one back to `duckdb` reads like an
+undo and is not one:
 once rows have landed in Postgres, it starts a **second writer beside the
 first** — a typed expense in the store the page does not read, DuckDB's
 `seq_stock_movements_id` reissuing ids the Postgres sequence already handed out
@@ -3226,7 +3230,16 @@ when that writer last ran and nothing about an offer or a SKU, and the writer
 restamps it wholesale on its next hourly run after `up -d` — a bad copy could
 cost a wrong "as of" on /inventory until then. Keeping the daily list is
 also what keeps the specs derived rather than a second opinion, and a unit
-test computes the set so a third cannot join it quietly.
+test computes the set so a third cannot join it quietly. Chain 7b-3 added four
+more on purpose, with the reason in that test: the goal tables' `updated_at`
+and `revenue_predictions.created_at`, each one stamp per writer run and read
+by nothing in DuckDB. Two of them are **not** restamped by the next run —
+`weekly_patterns` is stored only by `POST /api/goals/recalculate`, never by
+the Monday job, and a training replaces only the range it predicts, so a past
+day's `created_at` stands for good — so a mis-copy of either is seen by no
+comparison and corrected by no run. What the copy carries is pinned by the
+suite instead (`test_forecast_writer.py::TestTheCopyBack`, stamps that differ
+by row).
 `stock_movements.recorded_at` is the opposite case and **is** compared: the
 daily check leaves it out only because it is that check's clock, but it dates
 one movement for good, and a review shifted every copied value by an hour and
@@ -3349,7 +3362,7 @@ docker compose run --rm --no-deps -T web \
 #   1. set KS_WRITE_INVENTORY=duckdb in .env   (the flag decides again)
 #   2. docker compose up -d web bot
 #   3. at +2 min: deploy/stage4_soak.sh — E1/E2 for chain 8, I1/I2/I3 for
-#      chain 1; chains 7a and 6a have no soak check yet, so meta.mirror_state
+#      chain 1; chains 7a, 6a and 7b-3 have no soak check yet, so meta.mirror_state
 #      for app.revenue_goals or bronze.expense_types. The hourly copy must be
 #      shipping the chain's tables again. Chain 4's B1-B5 read "not
 #      applicable" once it is released, so read meta.mirror_state for its
@@ -3448,7 +3461,9 @@ allocator above `MAX(id)`; no NULL where Postgres has no default
 `revenue_goals.updated_at` and `.is_custom`);
 chain 1's `last_sync_*` under 90 minutes; and from chain 1's handover on, no
 burst of `initial` movements, no offer first seen after a day it was already
-photographed, and both snapshots every day. Who is watched comes from
+photographed, and both snapshots every day; for chain 7b-3, the four goal and
+forecast tables complete and stored by their last scheduled slot (WARN, see
+"Chain 7b-3"). Who is watched comes from
 `chain_modes()`, a watched chain with no invariants written for it is reported
 unwatched rather than clean, and nothing is repaired. **It is judged in the
 integrity job beside the Postgres twins, not inside the DuckDB scan**: these
@@ -4432,7 +4447,103 @@ detail names any write chain already owning a bridge table, which is when
 retail goals start diverging. The CI tripwire in
 `tests/unit/test_goals_off_duckdb_silver.py` stays until the bridge is
 deleted (7b-4, after the flip's soak); chains 3 and 5 wait for that. The
-three goal tables' writer moving to Postgres is 7b-3's.
+three goal tables' writer moving to Postgres is 7b-3's, below.
+
+### Chain 7b-3: the goal and forecast tables' writer (off)
+
+`KS_WRITE_FORECAST` (`duckdb` default | `postgres`), `core/pg_forecast_write.py`:
+`app.seasonal_indices`, `app.growth_metrics`, `app.weekly_patterns` and
+`app.revenue_predictions` (revision 0025, ~313 rows; no migration). Until it
+writes Postgres, DuckDB writes all four and the hourly full replace carries
+them. Two writers, one chain: `persist_goal_tables` (the three goal tables —
+the Monday `seasonality_calc`, which stores two, and `POST
+/api/goals/recalculate`, which stores all three) and `store_predictions`
+(every training). Routed in the repository, `_persist_goal_tables` and
+`store_predictions`, where every caller arrives. Either writer's first write
+latches the chain and claims all four owner rows: they move as a unit.
+
+**One transaction, and the YoY must land.** The index upsert never touches
+`yoy_growth`; the YoY is one `UPDATE` per month after it. Split or reordered,
+that UPDATE matches nothing and says nothing, and `generate_smart_goals` then
+reads NULL and silently uses the cap. So both run in one transaction, upsert
+first, and every UPDATE must report `UPDATE 1` or the set rolls back
+(`executemany` returns no per-row status, so it is a loop). One advisory lock
+for the chain (`pg_locks` objid 31491) restores the serialisation DuckDB's
+store lock gave: two `store_predictions` over one range otherwise die on the
+primary key.
+
+**Refused before the latch, NaN included.** DuckDB 1.5.5 refuses NaN, ±inf
+and overflow in `DECIMAL(6,2)`; Postgres 17.2 refuses the last two and
+**stores NaN** (measured). MAPE is unbounded (a zero-revenue validation day),
+so every number goes through `core.pg_numeric.refusal` first, which refuses
+NaN on purpose; and the model's ISO-string dates become `date`s there, since
+asyncpg refuses a string where a DATE goes. `predict_month` swallows a failed
+store, as always, so `_train_impl`'s result (the job's, and `POST
+/api/revenue/forecast/train`'s) now carries `predictions_stored`.
+
+**The reads follow the chain, and only the chain.** While it writes Postgres,
+every statement reading one of the four goes there whatever `KS_READ_GOALS`
+says, with no fallback (7a's rule). A failure there is a **counted refusal**
+in either mode (`read_fallback.chain_refusal`): a 503 naming `goals`, and
+`read_fallback_mode.refused` on `/api/health`, which the canary pages as
+`read_refused` — what the same failure was before the flip under the
+precondition's `off`. Raw, as 7a's reads still are, it reached two handlers
+that let `ReadUnavailable` through and contain everything else:
+`/api/revenue/forecast` answered 200 "Forecast not available yet" and the
+smart goal dropped its ML signal, with nothing counted. While it does not,
+each keeps today's engine: the forecast by `KS_READ_GOALS`, the three goal
+tables from DuckDB.
+The smart goal reads the three in **one** `UNION ALL` statement through
+`_goal_tables_run` — one committed set in either engine, and never
+`KS_READ_GOALS`, which in production would read the replica up to an hour
+behind a POST. `CAST(NULL AS INTEGER)`, because Postgres types a UNION column
+from its first branch. Weekly rows are sorted in Python: the residual goes to
+`max(...)`, which breaks ties by insertion order.
+
+**Held until its inputs are Postgres** (`unmet_precondition`, 6a's
+arrangement): `KS_GOALS_HISTORY=silver`, `KS_READ_GOALS=postgres` with a DSN,
+`KS_READ_FALLBACK=off` as configured at start, and `KS_READ_FORECAST_INPUT=
+postgres` (the training frame; on in production since 2026-09-16, so it
+costs nothing and stops a later rollback of that flag training on DuckDB Gold).
+Unmet and unlatched, the chain runs as duckdb for every consumer — writer,
+reads (unlike 7a's `reads_postgres`), shipper, comparison — and the canary
+warns `write_chain_precondition_unmet`.
+
+**Standing watch** (integrity layer, all WARN — every value is recomputable):
+`chain_goal_tables_incomplete` (fewer than 12 months, a NULL `yoy_growth`, no
+measured `yoy_overall`, or the 0.10 placeholder while `period_start` already
+holds two full years — the 2026-08-31 backup's state), `chain_goal_tables_stale`
+and `chain_forecast_stale`, judged against the last slot of the scheduler's
+own constants plus 2 h 30 min, so a missed Monday or Thursday is in that
+morning's 07:00 run. **Training is twice weekly, not daily**; a flat limit
+would have to exceed the Thu→Mon gap.
+
+**The goals dry run** (`scripts/goals_semantics_dryrun.py`) pins the chain's
+two answers to DuckDB and makes its pool raise (`held_off_chain_7b3`): run as
+the web service under a latched chain it would store into production Postgres
+and latch from a one-off. Each wall is tested on its own — the pins under a
+latched chain and under a flagged one whose precondition holds, the pool by
+calling both writers inside the pins.
+
+**The way back.** Flagged and not yet latched: unset, `up -d web`, free.
+Latched: `scripts/chain_copy_back.py forecast` (specs derived, no sequence,
+no sync key; the stamps forgiven as above), then the flag, then
+`replicate_operational`. Recalculating and retraining are the cheaper way to
+fix the *content* — they write wherever the chain writes — but only the
+copy-back releases a latch. The model artefact (`data/revenue_model.joblib`
+and its JSON siblings) is a file and does not move.
+
+**The flip**, after `KS_GOALS_HISTORY=silver` with `KS_READ_FALLBACK=off`
+live, one flag a day, outside Mon/Thu 03:20–04:40 Kyiv and ≥ 65 min after any
+write to these tables, before step 13: `/api/health` shows the chain
+`duckdb`/unlatched and `goals_history.mode` silver; record `/api/goals/smart`
+and `/api/revenue/forecast`; `docker compose stop web bot`; `chain_copy_back.py
+forecast --handover` exits 0 or no flip; set the flag; `up -d web bot`; then
+trigger `seasonality_calc` and `revenue_prediction_train` (admin, `POST
+/api/jobs/<id>/trigger`) so the first writes happen watched — the trigger
+leaves `weekly_patterns` as they are, on purpose. Expect `retail_months: 12`,
+`predictions_stored: true` and `latched: true`; at +65 min the copy lists the
+four under `stood_down`.
 
 ### Every other shipper asks too, and a walk finds them (DN-22b)
 
