@@ -267,8 +267,12 @@ fi
 trap cleanup EXIT
 trap 'exit 143' TERM INT HUP
 
-# What a killed run left behind goes first, whatever --keep says.
+# What a killed run left behind goes first, whatever --keep says, and the
+# evidence an earlier failed judge kept: one kept directory at most.
 remove_all
+for kept in "$REPORT_DIR"/step13-rehearsal-*-evidence; do
+    if [ -d "$kept" ]; then rm -rf -- "$kept"; fi
+done
 if [ "$CLEANUP_ONLY" = 1 ]; then
     KEEP=0
     say "cleanup done"
@@ -1355,13 +1359,43 @@ printf '{"before": %s, "after": %s, "min_mem_available_mib": %s}\n' \
     "$(as_json_list < "$REH_ROOT/others.before")" "$(as_json_list < "$REH_ROOT/others.after")" \
     "$MEM_MIN" > "$EV/z0.json"
 
-ROWS="$(docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 \
+JUDGE_RC=0
+if ROWS="$(docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 \
     --memory 256m --memory-swap 256m --log-opt max-size=10m \
     -v "$EV:/ev:ro" \
     -v "$HELPER_DIR:/reh:ro" \
-    --entrypoint python "$REH_IMAGE" /reh/probe.py judge --evidence /ev --floor "$FLOOR_S" 2>>"$LOG_DIR/probe.err" || true)"
-if [ -z "$ROWS" ]; then
-    ROWS="ALL|UNKNOWN|the judge did not run (see $LOG_DIR/probe.err)"
+    --entrypoint python "$REH_IMAGE" /reh/probe.py judge --evidence /ev --floor "$FLOOR_S" 2>>"$LOG_DIR/probe.err")"; then
+    :
+else
+    JUDGE_RC=$?
+fi
+# A judge that failed must not take its reason with it. The run's directory
+# goes at the end — it holds the copies of production — and its log said "see
+# probe.err" about a file the cleanup then deleted (2026-10-08: a whole hour's
+# rehearsal reduced to one UNKNOWN nobody could explain). The evidence is what
+# the probes wrote, ids, counts, keys and check descriptions, never a row of
+# the copies, so it is kept beside the report, root's alone, and the next run
+# removes it: one kept directory at most. Judge it again with the command the
+# row prints.
+if [ "$JUDGE_RC" -ne 0 ] || [ -z "$ROWS" ]; then
+    KEPT="$REPORT_DIR/step13-rehearsal-$STAMP-evidence"
+    WHY="exit $JUDGE_RC"
+    [ "$JUDGE_RC" = 137 ] && WHY="exit 137: killed, the judge's 256m limit or the kernel"
+    LAST="$(grep -v '^[[:space:]]*$' "$LOG_DIR/probe.err" 2>/dev/null | tail -n 1 | tr '|' '/' | cut -c1-200 || true)"
+    # `cp -a dir/.` carries the source directory's mode onto the target, so
+    # the 700 is set after the copy, not only at creation.
+    if install -d -m 700 "$KEPT" && cp -a "$EV/." "$KEPT/" && chmod 700 "$KEPT" \
+        && { cp "$LOG_DIR/probe.err" "$KEPT/probe.err" 2>/dev/null || true; }; then
+        AGAIN="kept in $KEPT; judge them again as this step does, $KEPT mounted read-only at /ev in $REH_IMAGE, the probe's judge with --evidence /ev and --floor $FLOOR_S"
+    else
+        AGAIN="and the evidence could not be kept"
+    fi
+    if [ -z "$ROWS" ]; then
+        ROWS="ALL|UNKNOWN|the judge did not run ($WHY${LAST:+: $LAST}), $AGAIN"
+    else
+        ROWS="$ROWS
+JUDGE|UNKNOWN|the judge ended with $WHY${LAST:+: $LAST}, so a row may be missing; $AGAIN"
+    fi
 fi
 
 render() {

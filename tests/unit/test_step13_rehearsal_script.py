@@ -319,6 +319,13 @@ def test_the_one_directory_it_deletes_is_guarded():
     assert '"$REPO"/*|/opt/key-api-bot/*' in guard
     rms = [s for _n, s in STATEMENTS if re.search(r"(^|\s)rm\s+-[a-z]*r", s)]
     for stmt in rms:
+        # The one other: the evidence a failed judge kept, by its exact glob
+        # beside the report (test_a_run_removes_the_evidence_an_earlier_judge_kept…).
+        if 'rm -rf -- "$kept"' in stmt:
+            assert ('for kept in "$REPORT_DIR"/step13-rehearsal-*-evidence; do\n'
+                    '    if [ -d "$kept" ]; then rm -rf -- "$kept"; fi\n'
+                    'done\n') in SCRIPT.read_text(encoding="utf-8"), stmt
+            continue
         assert re.search(r'rm -rf "\$(REH_ROOT|DATA_DIR" "\$KEYCRM_DIR)"', stmt), stmt
 
 
@@ -1683,3 +1690,106 @@ probe_offline() {{ echo "$*" >> "$EV/calls"; echo '{{"deletes": []}}'; }}
         assert verdict == "UNKNOWN" and "--keep" in detail, detail
     elif not deletes:
         assert not done.exists()
+
+
+def _judge_section() -> str:
+    """The verdict step's judge call and what it keeps when the judge fails."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index("JUDGE_RC=0\n")
+    end = text.index("\nrender() {", start)
+    return text[start:end]
+
+
+@pytest.mark.parametrize("stdout, stderr, rc, kept, reason", [
+    ("", "Traceback (most recent call last):\nKeyError: 'kill_stop'\n", 1, True,
+     "exit 1: KeyError: 'kill_stop'"),
+    ("", "", 137, True, "exit 137: killed"),
+    ("P1 x|PASS|ok\n", "ValueError: half way\n", 1, True, "ValueError: half way"),
+    ("P1 x|PASS|ok\n", "", 0, False, None),
+])
+def test_a_failed_judge_keeps_its_reason_and_its_evidence(tmp_path, stdout, stderr, rc,
+                                                          kept, reason):
+    """2026-10-08: the judge failed on the host, the row said "see
+    probe.err", and the cleanup deleted that file with the run's directory —
+    an hour of rehearsal with nothing to read. The reason now goes into the
+    row, the evidence and stderr are kept beside the report (root's alone),
+    and the row prints the command that judges them again. A judge that
+    answered keeps nothing. Kills: "drop the cp of the evidence", "the row
+    without the reason", "keep on success"."""
+    import os
+    import stat
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text(
+        "#!/bin/sh\n"
+        f"printf '%s' '{stdout}'\n"
+        f"printf '%s' \"$JUDGE_STDERR\" >&2\n"
+        f"exit {rc}\n")
+    (bin_dir / "docker").chmod(0o755)
+    ev, logs, report_dir = tmp_path / "ev", tmp_path / "logs", tmp_path / "root"
+    for d in (ev, logs, report_dir):
+        d.mkdir()
+    (ev / "p3.json").write_text('{"seen_blocked": true}')
+    body = f"""set -Eeuo pipefail
+REH_PROBE=reh-probe; REH_IMAGE=img:prod; HELPER_DIR=/opt/x/deploy/step13_rehearsal
+FLOOR_S=120; STAMP=20261008-101600
+EV={ev}; LOG_DIR={logs}; REPORT_DIR={report_dir}
+{_judge_section()}
+printf '%s\\n' "$ROWS"
+"""
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "JUDGE_STDERR": stderr}
+    proc = subprocess.run(["bash", "-c", body], env=env, capture_output=True, text=True,
+                          timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    rows = proc.stdout
+    keep_dir = report_dir / "step13-rehearsal-20261008-101600-evidence"
+    assert keep_dir.is_dir() is kept, rows
+    if not kept:
+        assert rows.strip() == "P1 x|PASS|ok"
+        return
+    assert reason in rows, rows
+    assert f"kept in {keep_dir}" in rows and "the probe's judge with --evidence /ev and --floor 120" in rows, rows
+    assert (keep_dir / "p3.json").read_text() == '{"seen_blocked": true}'
+    assert stat.S_IMODE(keep_dir.stat().st_mode) == 0o700
+    if stdout:
+        assert rows.startswith("P1 x|PASS|ok\nJUDGE|UNKNOWN|"), rows
+    else:
+        assert rows.startswith("ALL|UNKNOWN|the judge did not run"), rows
+    for line in rows.splitlines():
+        assert line.count("|") == 2, f"the reason broke the table: {line}"
+
+
+def test_a_run_removes_the_evidence_an_earlier_judge_kept_and_nothing_else(tmp_path):
+    """One kept directory at most: the next run's start removes it, and only
+    it — not the reports, not the run log. Kills: "the sweep removed"."""
+    import os
+    import subprocess
+
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index('for kept in "$REPORT_DIR"/step13-rehearsal-*-evidence; do')
+    loop = text[start:text.index("done\n", start) + len("done\n")]
+    (tmp_path / "step13-rehearsal-20261008-101600-evidence").mkdir()
+    (tmp_path / "step13-rehearsal-20261008-101600-evidence" / "p3.json").write_text("{}")
+    (tmp_path / "step13-rehearsal-20261008-101600.txt").write_text("table")
+    (tmp_path / "step13-rehearsal-run-20261008.log").write_text("log")
+    proc = subprocess.run(["bash", "-c", f"set -Eeuo pipefail\nREPORT_DIR={tmp_path}\n{loop}"],
+                          env=dict(os.environ), capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "step13-rehearsal-20261008-101600.txt", "step13-rehearsal-run-20261008.log"]
+
+
+def test_the_sweep_survives_when_there_is_nothing_to_sweep(tmp_path):
+    """An unmatched glob is the literal pattern; under `set -e` the sweep
+    must not end the run before it began."""
+    import os
+    import subprocess
+
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index('for kept in "$REPORT_DIR"/step13-rehearsal-*-evidence; do')
+    loop = text[start:text.index("done\n", start) + len("done\n")]
+    proc = subprocess.run(["bash", "-c", f"set -Eeuo pipefail\nREPORT_DIR={tmp_path}\n{loop}echo after"],
+                          env=dict(os.environ), capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0 and proc.stdout.strip() == "after", proc.stderr
