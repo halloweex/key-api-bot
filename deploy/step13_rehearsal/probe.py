@@ -1465,7 +1465,15 @@ def _window_deletes(ev: Mapping[str, Any], post: Mapping[str, Any],
     `held`), so one holding none of the window's rows was not asked whatever
     its table — the fixture order, with no buyer and no manager, is in two of
     `orders`' four composite indexes. An index whose holding was not read
-    cannot be counted either way."""
+    cannot be counted either way.
+
+    The DELETE comes after the way back, not straight after F7: the copy
+    reaches it through two more stops of reh-web, the one the way back starts
+    from and the way back's own. One that outran the grace was a SIGKILL of
+    its own, and a loss the DELETE then finds may be that kill's rather than
+    P3's — still DuckDB's defect, so still FAIL, but said beside the loss
+    rather than laid at P3's door. A clean DELETE does not lean on them: what
+    F7's checkpoint wrote down of P3's kill is still what the DELETE asks."""
     asked: Dict[str, Any] = {"tables": 0, "indexes": 0, "composite": 0, "not_held": []}
     done = ev.get("delete")
     if not isinstance(done, Mapping):
@@ -1476,6 +1484,12 @@ def _window_deletes(ev: Mapping[str, Any], post: Mapping[str, Any],
         unknown.append(f"the window's rows were not deleted ({done.get('skipped')}), so no "
                        f"composite index was asked")
         return asked
+    later = [f"{what} ({_describe_stop(state)})" for what, state in
+             (("the stop the way back started from", ev.get("b_pre_stop")),
+              ("the way back's own stop", ev.get("b_stop")))
+             if stop_kind(state) != "graceful"]
+    since = (f"; the copy reached the DELETE through {' and '.join(later)}, so a kill after "
+             f"P3's may have cost it" if later else "")
     indexes = {t: v.get("indexes") or [] for t, v in
                (((post.get("window") or {}).get("tables")) or {}).items() if isinstance(v, Mapping)}
     answered = 0
@@ -1486,13 +1500,13 @@ def _window_deletes(ev: Mapping[str, Any], post: Mapping[str, Any],
         names = _fmt(i.get("index") for i in indexes.get(table, []) if i.get("held") != 0)
         if d.get("fatal"):
             bad.append(f"deleting the window's rows from {table} is DuckDB's FATAL "
-                       f"({d.get('fatal')}): an index on it lost them — one of [{names}]")
+                       f"({d.get('fatal')}): an index on it lost them — one of [{names}]{since}")
         elif d.get("error") or not isinstance(d.get("scanned"), int):
             unknown.append(f"deleting the window's rows from {table} raised {d.get('error') or '?'}")
         elif d.get("deleted") != d["scanned"] or d.get("left"):
             bad.append(f"the DELETE from {table} took {d.get('deleted')} of the {d['scanned']} "
                        f"rows a scan finds, {d.get('left')} left: an index on it answered for "
-                       f"fewer — one of [{names}]")
+                       f"fewer — one of [{names}]{since}")
         else:
             answered += 1
             if d["scanned"] > 0:
@@ -1793,7 +1807,9 @@ def assemble(ev_dir: Path) -> Dict[str, Dict[str, Any]]:
                "kill_stop": p3.get("stop"), "pre": d_pre, "post": d1,
                "f7_stop": L("f7_stop_state.json"), "p0_stop": L("p0_stop_state.json"),
                "window_ids": L("d1_window.json"),
-               "delete": L("d1_delete.json")},
+               "delete": L("d1_delete.json"),
+               # The two stops between F7's read and the end's DELETE.
+               "b_pre_stop": L("b_pre_stop_state.json"), "b_stop": L("b_stop_state.json")},
         "K0": L("k0.json") or {},
         "Z0": L("z0.json") or {},
     }

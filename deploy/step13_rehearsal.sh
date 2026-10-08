@@ -29,8 +29,9 @@
 # else on the host moved).
 # Every stop of reh-web gets production's grace (STOP_GRACE_S), so it is the
 # stop a deploy makes, and records the container's state after it, so one
-# that outruns the grace is recorded as the kill it is: P6 and D1 read F5s's
-# and F7's, P8 the two around the way back.
+# that outruns the grace is recorded as the kill it is: P6 reads F5s's and
+# F7's, D1 phase 0's and F7's, P8 the two around the way back — and D1 those
+# two as well, since its DELETE comes after them.
 #
 # HOW IT STAYS AWAY FROM PRODUCTION
 #   - Its own containers only, every one named reh-*, on its own network

@@ -3404,9 +3404,12 @@ restart after the kill only when its SIGKILL is the one `p3.json` records.
 Every stop of reh-web gets production's grace — compose's 10 s default for
 web (`STOP_GRACE_S`, pinned to `docker-compose.yml`) — and records the
 container's state after it, so one that outruns the grace is recorded as the
-kill a deploy would have made: P6 and D1 read F5s's and F7's, P8 the stop
-the way back starts from and its own last one, and a stop that outran the
-grace is UNKNOWN until somebody has read why web did not stop in time. Three
+kill a deploy would have made: P6 reads F5s's and F7's, D1 phase 0's and
+F7's, P8 the stop the way back starts from and its own last one, and a stop
+that outran the grace is UNKNOWN there until somebody has read why web did
+not stop in time. D1 reads those last two as well, because its DELETE comes
+after them: a loss it finds behind one that was no deploy's stop is still
+FAIL, and says that a kill after P3's may have cost it. Three
 stops recorded nothing until 2026-10-08 — both around the way back, and the
 one after a run that did not flip — while phase 0's had already taken 7 of
 its 10 s on 400 orders. A test walks the script for a stop of reh-web
@@ -3481,12 +3484,13 @@ passed P1–P8, D1 and K0 in 22 minutes, exit 2 for Z0 alone, UNKNOWN for
 other sessions' containers. P4a and P5 judged F4's runs as F5s read them,
 both whole through `fetch_run_issues`; D1 swept 23 indexes at both stops
 and found none short. That PASS said less than it read as. F5s's graceful
-stop had checkpointed F4's runs before F6's kill, so of what the sweep
-asked only the fixture's fourth version — landed by F6 after that
-checkpoint and before the kill — was within the kill's reach, asked of the
-single-column indexes on `orders` and `order_products` (`idx_orders_status`
-among them); it survived because the sync touches `orders` after a
-restart, not because the kill could not reach it. And the sweep asked
+stop had checkpointed F4's runs before F6's kill, so they were out of its
+reach; what the sweep asked within it was whatever reh-web wrote after that
+checkpoint, the fixture's fourth version among it — landed by F6 before the
+kill, and asked of the single-column indexes on `orders` and
+`order_products` (`idx_orders_status` among them). That row survived
+because the sync touches `orders` after a restart, not because the kill
+could not reach it. And the sweep asked
 single-column indexes only: 23 of the 57, the other 34 the 12 composite
 ones and 22 left empty by the seed (counted on the 10-07 run, whose seed is
 the same deterministic one; none was one-valued). Its P6 counted a `kill`
@@ -3610,7 +3614,10 @@ scan. At the end, on the copy about to be removed, the window's rows are
 deleted table by table in a process each, found by a predicate no index
 serves: a `DELETE` must take each row out of every index on its table that
 holds it, so a lost entry is DuckDB's FATAL, and that is the only question
-a composite index answers — on 1.5.5 none serves a read. Every
+a composite index answers — on 1.5.5 none serves a read. The copy reaches
+that DELETE after the way back, through two more stops of reh-web, and a
+loss found behind one that was not graceful (or not recorded) may be that
+stop's kill: still FAIL, and the verdict names the stop. Every
 single-column index is also swept at both
 stops (lookup limits lifted, held to `count_if` over the table). A loss
 after the kill is a FAIL labelled **DuckDB 1.5.5's known defect, not a
