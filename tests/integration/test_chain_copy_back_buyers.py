@@ -23,7 +23,10 @@ What they prove, in the plan's numbering:
 9. the reship's loop keeps its docstring's promises: a guard that says stop
    stops it, it ships in portions of `chunk`, a latch taken between portions
    stops the next one, a mirror switched off refuses, and its writer takes
-   contacts as any iterable (F9, review of #265).
+   contacts as any iterable (F9, review of #265);
+10. the handover's two conservative branches: buyers are judged before their
+   contacts whatever order the chain declares them in, and with no
+   `owner:bronze.buyers` row no buyer counts as the chain's write (F10).
 
 The copy-back reads WHOLE tables, so the three tables are emptied around each
 test — `test_buyer_writes_mirror`'s precedent on this shared database.
@@ -564,6 +567,75 @@ class TestTheReviewsCases:
             await copy_back(store, chain, dry_run=False)
         assert [r[0] for r in await _duck(
             store, "SELECT value FROM buyer_contacts WHERE buyer_id = 5")] == ["+380502"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("order", [(BUYERS, CONTACTS, GENDER),
+                                       (CONTACTS, BUYERS, GENDER)],
+                             ids=["buyers-first", "contacts-first"])
+    async def test_buyers_are_judged_before_their_contacts_whatever_the_order(
+            self, stores, order):
+        """F10 (review of #265). The case above, with the chain's tables
+        declared in either order. A buyer DuckDB holds in a later version is
+        taken out of the rewritten set before its contacts are judged, so its
+        new number is a stranded contact (CRITICAL), not one the chain
+        "dropped" (INFO) that the copy-back would delete. That needs the
+        buyers judged first, which `_handover_issues` sorts for rather than
+        trusting `CHAIN_TABLES`. Mutation killed: `ordered = list(specs)` —
+        with the contacts first, `handover_rows_missing` disappeared."""
+        from core import chain_latch
+        from core.chain_transfer import handover_check
+
+        store, pool, chain, env = stores
+        env.setattr(chain, "CHAIN_TABLES", order)
+        await _mirrored(store, pool, [_buyer(5, phones=["+380501"])])
+        await _latch_and_write(pool, [_buyer(5, phones=["+380501"])])
+        chain_latch.release(NAME)                       # the marker is lost
+        await store.upsert_buyers([Buyer.from_api({
+            "id": 5, "full_name": "Покупець 5", "phone": ["+380502"], "email": [],
+            "created_at": "2026-09-01 10:00:00+00:00",
+            "updated_at": "2026-09-24T09:00:00Z"})])
+
+        assert _critical(await handover_check(store, chain)) == {
+            ("handover_rows_newer_in_duckdb", BUYERS),
+            ("handover_rows_missing", CONTACTS),
+            ("handover_rows_ahead", CONTACTS),
+        }
+
+    @pytest.mark.asyncio
+    async def test_without_the_buyers_owner_row_nothing_is_the_chains(self, stores):
+        """F10 (review of #265). The chain holds an owner row — so Postgres
+        has moved on — but not `owner:bronze.buyers`: a row deleted by hand,
+        or an image older than the chain. Then no buyer can be shown to be
+        the chain's write, and a buyer that differs stays CRITICAL however
+        recently Postgres stamped it; the copy-back refuses and DuckDB keeps
+        its name. Mutation killed: `_rewritten_since_latch` answering every
+        buyer Postgres holds when the owner row is absent — the review saw
+        the difference read INFO, the copy-back release, and DuckDB's name
+        overwritten."""
+        from core import chain_latch
+        from core.chain_transfer import CopyBackRefused, copy_back, handover_check
+
+        store, pool, chain, _env = stores
+        await _mirrored(store, pool, [_buyer(1)])
+        chain_latch.latch(NAME, ENV)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await chain_latch.claim(conn, (GENDER,),
+                                        datetime.now(timezone.utc).isoformat())
+            await conn.execute(
+                "UPDATE bronze.buyers SET full_name = 'Інше ім''я', "
+                "mirrored_at = now() + interval '1 second' WHERE id = 1")
+
+        found = await handover_check(store, chain)
+
+        assert {(i.check_name, i.table_name, i.severity.value) for i in found
+                if i.table_name == BUYERS} == {
+            ("handover_rows_differ", BUYERS, "CRITICAL")}, found
+        with pytest.raises(CopyBackRefused):
+            await copy_back(store, chain, dry_run=False)
+        assert [r[0] for r in await _duck(
+            store, "SELECT full_name FROM buyers WHERE id = 1")] == ["Покупець 1"]
+        assert chain_latch.latched_at(NAME) is not None
 
     @pytest.mark.asyncio
     async def test_an_orphan_contact_in_either_store_blocks_nothing(self, stores):
