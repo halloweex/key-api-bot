@@ -133,6 +133,12 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # runs as duckdb (DN-29, OD-09 (b)) — never a raise, web is the only syncer.
     "warehouse_preconditions_unmet": _c(
         "web restarts with every precondition met, or with KS_WRITE_WAREHOUSE unset"),
+    # A start that would have run as duckdb after a flip — the way back —
+    # stayed postgres, because a latched write chain owns a table DuckDB
+    # derives from (`warehouse_cutover`, THE WAY BACK, REFUSED).
+    "warehouse_way_back_refused": _c(
+        "web restarts with the named write chains copied back to DuckDB, or "
+        "with KS_WRITE_WAREHOUSE=postgres and every precondition met"),
     # The way back from KS_WRITE_WAREHOUSE=postgres holding the DuckDB checks
     # down past the canary's limit: a UTM parse that keeps raising, or no tick
     # after a full one whose parse raised (DN-29).

@@ -959,9 +959,11 @@ class TestAClassificationThatCannotLand:
         (7, True, date(2026, 5, 1), 1, "a\x00b"),
     ])
     async def test_what_postgres_would_refuse_is_refused_first(self, pool, args):
+        """As `ClassificationRefused`, which the route answers 422: a bad
+        request, not a Postgres that did not answer."""
         from core import pg_managers_write
 
-        with pytest.raises(ValueError):
+        with pytest.raises(pg_managers_write.ClassificationRefused):
             await pg_managers_write.set_manager_retail_status(*args, set_at=T0)
         assert pool.acquired == 0
 
@@ -1678,3 +1680,527 @@ class TestHealthPublishesIt:
             health._preflight_cache.update(data=None, expires_at=0)
         assert _time.monotonic() - started < 0.55
         assert "did not answer" in block["pg_managers_write"]["preflight"]["reasons"][0]
+
+
+# ─── The review of chain 5 (2026-10-08) ─────────────────────────────────────
+
+
+class TestStep13sWayBackIsRefusedWhileTheChainIsLatched:
+    """H1. After a flip any start that would run as duckdb is step 13's way
+    back — an operator's unset, a typo, or a precondition unmet at the start —
+    and the full DuckDB rebuild it owes would derive `sales_type` from the
+    classification this chain froze at its latch. Refused: the start stays
+    postgres (`warehouse_cutover`, THE WAY BACK, REFUSED)."""
+
+    @pytest.fixture
+    def cutover(self, flags):
+        from core import warehouse_cutover as wc
+
+        # A start that read nothing of Postgres: `pg_revision` and the rest
+        # unmet whatever the environment says.
+        flags.setattr(wc, "_gather_facts_blocking",
+                      lambda env: wc.Facts(required_revision="x"))
+        flags.delenv(wc.ENV, raising=False)
+        return flags
+
+    def test_a_start_with_a_precondition_unmet_stays_postgres(self, cutover):
+        """The review's reproduction. Mutation: drop the refusal from the
+        unmet branch of `configure_mode` — DuckDB derives again."""
+        from core import chain_latch, pg_managers_write
+        from core import warehouse_cutover as wc
+
+        chain_latch.latch(pg_managers_write.CHAIN)
+        cutover.setenv(wc.ENV, "postgres")
+        cutover.delenv("KS_CH_URL", raising=False)
+        assert wc.configure_mode() == "postgres"
+        assert not wc.duckdb_derives()
+        assert wc.way_back_refused() == ("pg_managers_write",)
+        # What is unmet is still published, beside the refusal.
+        assert "ch_url" in {u.key for u in wc.preconditions_unmet()}
+        assert "step13" not in (pg_managers_write.unmet_precondition() or "")
+
+    @pytest.mark.parametrize("value", [None, "duckdb", "postgrse"])
+    def test_an_operators_way_back_is_refused_too(self, cutover, value):
+        """Unset, `duckdb`, or a value this build does not understand.
+        Mutation: drop the refusal from the `value != postgres` branch."""
+        from core import chain_latch, pg_managers_write
+        from core import warehouse_cutover as wc
+
+        chain_latch.latch(pg_managers_write.CHAIN)
+        if value is not None:
+            cutover.setenv(wc.ENV, value)
+        assert wc.configure_mode() == "postgres"
+        assert not wc.duckdb_derives()
+        assert wc.way_back_refused() == ("pg_managers_write",)
+        if value == "postgrse":
+            assert "running as 'postgres'" in wc.mode_error()
+
+    @pytest.mark.parametrize("value", [None, "duckdb", "postgres", "postgrse"])
+    def test_with_nothing_latched_nothing_moves(self, cutover, value):
+        """Production today: nothing latched, so every value runs as it did —
+        `postgres` with a precondition unmet included."""
+        from core import warehouse_cutover as wc
+
+        if value is not None:
+            cutover.setenv(wc.ENV, value)
+        assert wc.configure_mode() == "duckdb"
+        assert wc.duckdb_derives()
+        assert wc.way_back_refused() == ()
+        if value == "postgrse":
+            assert "running as 'duckdb'" in wc.mode_error()
+
+    def test_only_a_chain_over_what_duckdb_derives_from_refuses_it(self, cutover):
+        """Chain 4 latches without step 13, and DuckDB's Silver reads none of
+        the buyers. Mutation: refuse on any latched chain, or on every
+        `pg_derivation.SOURCE_TABLES` table (`bronze.buyers` is one)."""
+        from core import chain_latch, write_chains
+        from core import warehouse_cutover as wc
+
+        others = [c for c in write_chains.WRITE_CHAINS
+                  if not set(c.CHAIN_TABLES) & set(wc.DUCKDB_DERIVATION_SOURCES)]
+        assert "pg_buyers_write" in {write_chains.chain_name(c) for c in others}
+        for chain in others:
+            chain_latch.latch(write_chains.chain_name(chain))
+        assert wc.configure_mode() == "duckdb"
+        assert wc.way_back_refused() == ()
+
+    def test_every_chain_over_those_tables_holds_itself_behind_step_13(self, flags):
+        """The refusal reads a latch as "step 13 was flipped". That holds only
+        of a chain that cannot latch while DuckDB derives — chain 5 here, and
+        chain 3 when it lands. Mutation: drop `step13` from chain 5's checks."""
+        from core import warehouse_cutover as wc
+        from core import write_chains
+
+        flags.setattr(wc, "_mode", "duckdb")
+        declaring = [c for c in write_chains.WRITE_CHAINS
+                     if set(c.CHAIN_TABLES) & set(wc.DUCKDB_DERIVATION_SOURCES)]
+        assert declaring, "nothing declares a table DuckDB derives from"
+        for chain in declaring:
+            flags.setenv(chain.WRITE_ENV, "postgres")
+            assert "step13" in (chain.unmet_precondition() or ""), chain.__name__
+            name = write_chains.chain_name(chain)
+            assert write_chains.chain_modes()[name]["mode"] == "duckdb", name
+
+    def test_the_full_rebuild_is_not_owed_and_nothing_is_held(self, cutover, tmp_path):
+        """What the refusal is for: no DuckDB rebuild over the frozen
+        classification. Mutation: drop the refusal — the start marks the
+        warehouse dirty in full and holds the checks for it."""
+        import asyncio
+        import json
+
+        from core import chain_latch, pg_managers_write
+        from core import warehouse_cutover as wc
+        from tests.unit.test_warehouse_writer import _metadata, _seed, _store
+
+        store = _store(tmp_path)
+        try:
+            _seed(store, **{wc.WRITER_KEY: {
+                "writer": "postgres", "since": "2026-10-01T00:00:00+00:00",
+                "resolved": True}})
+            chain_latch.latch(pg_managers_write.CHAIN)
+            assert wc.configure_mode() == "postgres"
+            asyncio.run(wc.settle_writer(store))
+            assert not wc.held()
+            assert _metadata(store, "warehouse_dirty") is None
+            assert json.loads(_metadata(store, wc.WRITER_KEY)[0])["writer"] == "postgres"
+        finally:
+            asyncio.run(store.close())
+
+    def test_a_registry_that_cannot_be_read_refuses_nothing(self, cutover, caplog):
+        """`configure_mode` never raises, and an unreadable latch must not
+        stop DuckDB deriving on a deployment that never flipped. Mutation:
+        let the error through."""
+        from core import chain_latch
+        from core import warehouse_cutover as wc
+
+        def boom(chain):
+            raise OSError("marker directory unreadable")
+
+        cutover.setattr(chain_latch, "latched", boom)
+        assert wc.configure_mode() == "duckdb"
+        assert wc.way_back_refused() == ()
+        assert "could not be read" in caplog.text
+
+    def test_health_publishes_it_and_the_canary_judges_it(self, cutover):
+        """Mutation: leave `way_back_refused` out of the health block — the
+        canary would page "ran as duckdb", which it did not."""
+        from bot import canary
+        from core import chain_latch, pg_managers_write
+        from core import warehouse_cutover as wc
+        from core.alerting import Kind, spec_for
+        from web.routes.api import health
+
+        chain_latch.latch(pg_managers_write.CHAIN)
+        cutover.setenv(wc.ENV, "postgres")
+        wc.configure_mode()
+        block = health._warehouse_writer_mode()
+        assert block["mode"] == "postgres"
+        assert block["way_back_refused"] == ["pg_managers_write"]
+        assert wc.status()["way_back_refused"] == ["pg_managers_write"]
+        payload = {"warehouse_writer_mode": block}
+        ((key, message),) = canary.check_warehouse_way_back_refused(payload)
+        assert key == "warehouse_way_back_refused"
+        assert "pg_managers_write" in message and "pg_revision" in message
+        assert canary.check_warehouse_preconditions(payload) == []
+        assert spec_for(key).kind is Kind.CONDITION
+        # An older web, or a start that refused nothing.
+        assert canary.check_warehouse_way_back_refused({}) == []
+        unrefused = dict(block, way_back_refused=[])
+        assert canary.check_warehouse_way_back_refused(
+            {"warehouse_writer_mode": unrefused}) == []
+        assert [k for k, _ in canary.check_warehouse_preconditions(
+            {"warehouse_writer_mode": unrefused})] == ["warehouse_preconditions_unmet"]
+
+    @pytest.mark.parametrize("derive, says", [
+        ("own", "; Postgres derives"),
+        ("piggyback", "; NOTHING derives (KS_PG_DERIVE=piggyback, not own)"),
+        (None, None),
+    ])
+    def test_the_page_says_whether_anything_derives(self, cutover, caplog, derive, says):
+        """Postgres derives on its own signal only under KS_PG_DERIVE=own; under
+        `piggyback` its rebuild rides the DuckDB tick a `postgres` start does
+        not run, so a refusal leaves nothing deriving. The page must not say
+        "Postgres still derives" then — and an unset KS_WRITE_WAREHOUSE
+        evaluates no precondition, so it reads the `derivation` block.
+        Mutation: drop the clause, or the log's half of it."""
+        import logging
+
+        from bot import canary
+        from core import chain_latch, pg_derivation, pg_managers_write
+        from core import warehouse_cutover as wc
+        from web.routes.api import health
+
+        cutover.setattr(pg_derivation, "_mode", derive)
+        chain_latch.latch(pg_managers_write.CHAIN)
+        with caplog.at_level(logging.CRITICAL, logger=wc.__name__):
+            assert wc.configure_mode() == "postgres"      # unset: the operator's way back
+        assert ("NOTHING derives" in caplog.text) is (derive != "own")
+        payload = {"warehouse_writer_mode": health._warehouse_writer_mode()}
+        if derive is not None:
+            payload["derivation"] = health._derivation_mode()
+        ((_key, message),) = canary.check_warehouse_way_back_refused(payload)
+        if says is None:
+            # An older web's payload: no claim either way.
+            assert message.endswith("own what DuckDB derives from"), message
+        else:
+            assert message.endswith(says), message
+        assert "unless KS_PG_DERIVE=own" in dict(canary._ACTIONS)["warehouse_way_back_refused"]
+
+    @pytest.mark.asyncio
+    async def test_the_canary_pages_it_with_its_own_lever_and_title(self):
+        from datetime import timedelta
+        from unittest.mock import patch
+
+        import httpx
+
+        from bot import canary
+        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
+
+        payload = _healthy_payload()
+        payload["warehouse_writer_mode"] = {
+            "mode": "postgres", "value": "duckdb", "error": None,
+            "preconditions_unmet": [], "held": False, "held_for_s": None,
+            "reclassify_needed": False, "way_back_refused": ["pg_managers_write"]}
+
+        def handler(request):
+            return httpx.Response(200, json=payload)
+
+        future = datetime.now(timezone.utc) + timedelta(days=60)
+        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+        async with _mock_transport(handler) as client:
+            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
+                result = await canary.run_canary(DASHBOARD, client=client)
+        assert result.severity == "critical"
+        assert result.failure_keys == ["warehouse_way_back_refused"]
+        assert "chain_copy_back" in canary._what_to_do(result)
+        assert canary._title(result) == "Warehouse way back refused"
+
+
+class TestTheStatsWaitForTheOrders:
+    """The ways back run chain 5's before chain 3's. Between the two DuckDB
+    writes the managers again while chain 3 still owns the orders, and
+    DuckDB's `orders` stopped at chain 3's latch."""
+
+    @staticmethod
+    def _orders_chain():
+        import types
+
+        chain = types.ModuleType("core.pg_chain_orders_write")
+        chain.WRITE_ENV = "KS_WRITE_CHAIN_ORDERS"
+        chain.CHAIN_TABLES = ("bronze.orders", "bronze.order_products")
+        chain.env_writes_postgres = lambda: True
+        return chain
+
+    @pytest.mark.asyncio
+    async def test_they_hold_rather_than_go_backwards_and_nothing_is_shipped(
+            self, flags, tmp_path):
+        """Mutation: drop the guard in `update_manager_stats` — the review's
+        reproduction: Postgres held 2026-10-06 and 500 orders, and after the
+        recompute 2026-09-01 and 1."""
+        from unittest.mock import AsyncMock, patch
+
+        from core import write_chains
+        from core.duckdb_store import DuckDBStore
+
+        store = DuckDBStore(db_path=tmp_path / "stats.duckdb")
+        await store.connect()
+
+        async def stats():
+            async with store.connection() as conn:
+                return conn.execute(
+                    "SELECT first_order_date, last_order_date, order_count "
+                    "FROM managers WHERE id = 34").fetchone()
+        try:
+            async with store.connection() as conn:
+                conn.execute(
+                    "INSERT INTO managers (id, name, first_order_date, last_order_date, "
+                    "order_count) VALUES (34, 'M', DATE '2025-01-01', DATE '2026-10-06', 500)")
+                conn.execute(
+                    "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, "
+                    "created_at, updated_at, manager_id) VALUES (980000001, 1, 1, 100, "
+                    "TIMESTAMPTZ '2026-09-01 10:00:00+00', TIMESTAMPTZ '2026-09-01 10:00:00+00', "
+                    "TIMESTAMPTZ '2026-09-01 10:00:00+00', 34)")
+            registered = write_chains.WRITE_CHAINS
+            replica = AsyncMock()
+            with patch("core.pg_replication.replicate_managers", new=replica):
+                flags.setattr(write_chains, "WRITE_CHAINS",
+                              registered + (self._orders_chain(),))
+                assert await store.update_manager_stats() == 0
+                assert await stats() == (date(2025, 1, 1), date(2026, 10, 6), 500)
+                replica.assert_not_awaited()
+
+                # The control: with nobody owning the orders, they are counted.
+                flags.setattr(write_chains, "WRITE_CHAINS", registered)
+                assert await store.update_manager_stats() == 1
+                assert await stats() == (date(2026, 9, 1), date(2026, 9, 1), 1)
+                replica.assert_awaited_once()
+        finally:
+            await store.close()
+
+
+class TestTheReviewsSmallerGuards:
+    @pytest.mark.parametrize("key", ["goals_bridge", "step13", "chain3",
+                                     "read_fallback_off"])
+    def test_a_check_that_raises_is_keyed_by_its_precondition(
+            self, every_precondition_met, key):
+        """Every reason starts with the precondition's name, an unreadable one
+        too. Mutation: derive the key from the function's name —
+        `_read_fallback_unmet` read as "read_fallback"."""
+        import sys
+
+        from core import pg_managers_write, read_fallback, warehouse_cutover
+        from core.repositories import goals
+
+        def boom(*_a):
+            raise OSError("unreadable")
+
+        class _Unreadable:
+            __contains__ = boom
+
+        env = every_precondition_met
+        if key == "goals_bridge":
+            env.setattr(goals, "SALES_TYPE_BRIDGE_TABLES", _Unreadable())
+        elif key == "step13":
+            env.setattr(warehouse_cutover, "writes_postgres", boom)
+        elif key == "chain3":
+            env.setitem(sys.modules, "core.pg_orders_write", _Chain3(raises=OSError("x")))
+        else:
+            env.setattr(read_fallback, "refusing", boom)
+        assert pg_managers_write.unmet_precondition() == f"{key}: could not be read (OSError)"
+
+    def test_a_chain_whose_state_cannot_be_read_counts_as_moved(self, flags):
+        """`sales_type_bridge_owners`: the louder answer for a chain over a
+        bridge table. Mutation: read an unreadable state as not moved."""
+        from core import write_chains
+        from core.repositories.goals import sales_type_bridge_owners
+
+        real = write_chains._chain_state
+
+        def state(chain):
+            if write_chains.chain_name(chain) == "pg_managers_write":
+                raise RuntimeError("unreadable")
+            return real(chain)
+
+        flags.setattr(write_chains, "_chain_state", state)
+        assert sales_type_bridge_owners() == {
+            "pg_managers_write": ("app.manager_classifications", "bronze.managers")}
+
+    @pytest.mark.asyncio
+    async def test_an_empty_managers_table_is_a_reason_before_the_flip(
+            self, every_precondition_met, monkeypatch):
+        """A flip over an empty `bronze.managers` sends every manager's orders
+        to `internal`. Mutation: drop the reason."""
+        from unittest.mock import AsyncMock
+
+        from core import pg_managers_write
+
+        conn = _PreflightConn([_fresh(t) for t in pg_managers_write.CHAIN_TABLES],
+                              dict(_CLEAN_SHAPE, managers=0, intervals=0))
+        monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=_PgPool(conn)))
+        monkeypatch.setattr("core.pg.require_revision", AsyncMock())
+        assert await pg_managers_write.preflight() == {
+            "ok": False, "reasons": ["shape: bronze.managers is empty"]}
+
+    @pytest.mark.asyncio
+    async def test_while_a_precondition_is_unmet_postgres_is_not_asked(self, flags,
+                                                                       monkeypatch):
+        """The default build: chain 3 absent, so the flag cannot move the
+        writes, and `/api/health` asks Postgres nothing on this chain's behalf
+        once a minute. Mutation: ask anyway (the review: a default-on change
+        not gated by KS_WRITE_MANAGERS)."""
+        from unittest.mock import AsyncMock
+
+        from core import pg_managers_write
+
+        get_pool = AsyncMock(side_effect=AssertionError("Postgres was asked"))
+        monkeypatch.setattr("core.pg.get_pool", get_pool)
+        out = await pg_managers_write.preflight()
+        assert out["ok"] is False
+        assert [r.split(":")[0] for r in out["reasons"]] == [
+            "goals_bridge", "step13", "chain3", "read_fallback_off"]
+        get_pool.assert_not_awaited()
+
+
+class TestTheRouteAnswersWhatHappened:
+    PATH = TestTheRoute.PATH
+
+    def test_a_manager_gone_between_the_list_and_the_write_is_404(self, route, flags):
+        """Mutation: drop the `ManagerNotFound` mapping — a 503 naming
+        Postgres for a manager that is not there."""
+        from core import chain_latch, pg_managers_write
+
+        chain_latch.latch(pg_managers_write.CHAIN)
+        store = _RouteStore(pg_managers_write.ManagerNotFound("manager 34"))
+        res = route(store).post(self.PATH)
+        assert res.status_code == 404 and "34" in res.json()["detail"]
+
+    def test_a_refusal_postgres_never_saw_is_422_not_503(self, route, flags, monkeypatch):
+        """A note carrying NUL, refused by the writer before Postgres is asked
+        (the review's reproduction answered 503 "Postgres did not answer").
+        Mutation: drop the route's `ClassificationRefused` mapping."""
+        from unittest.mock import AsyncMock
+
+        from core import chain_latch, pg_managers_write
+
+        chain_latch.latch(pg_managers_write.CHAIN)
+        get_pool = AsyncMock(side_effect=AssertionError("Postgres was asked"))
+        monkeypatch.setattr("core.pg.get_pool", get_pool)
+
+        class _Writing(_RouteStore):
+            async def set_manager_retail_status(self, manager_id, is_retail, **kw):
+                await pg_managers_write.set_manager_retail_status(
+                    manager_id, is_retail, kw["effective_from"], kw["set_by"],
+                    kw["note"], set_at=T0)
+
+        res = route(_Writing()).post(self.PATH + "&effective_from=2026-10-07&note=a%00b")
+        assert res.status_code == 422, res.text
+        assert "note carries NUL" in res.json()["detail"]
+        assert "a\x00b" not in res.text
+        get_pool.assert_not_awaited()
+
+
+# ─── Nothing reads the frozen DuckDB copies by name ─────────────────────────
+
+# DuckDB's own `managers` and `manager_classifications` spelled bare in a
+# statement — a read or a write — outside the `{managers}`/`{classifications}`
+# holes `_read_walk` follows. Not after a `.`: `bronze.managers` is Postgres's.
+_BARE = r"\b(?:FROM|JOIN|UPDATE|INTO)\s+(?:managers|manager_classifications)(?![.\w])"
+
+# Every function that names them, with the function that routes it and the
+# question that function asks: the DuckDB half of a store method behind the
+# chain's own answer, the boot seed behind the latch, and the replica's read
+# behind the stand-down. A new site fails until it is added here with its
+# router — the review's probe (`FROM managers` in a new module) is one.
+_BARE_SITES = {
+    ("core/duckdb_store.py", "upsert_managers"): ("upsert_managers", "writes_postgres"),
+    ("core/duckdb_store.py", "set_manager_retail_status"):
+        ("set_manager_retail_status", "writes_postgres"),
+    ("core/duckdb_store.py", "get_all_managers"): ("get_all_managers", "reads_postgres"),
+    ("core/migrations.py", "_m0006_seed_manager_classifications"):
+        ("_m0006_seed_manager_classifications", "latched"),
+    ("core/pg_replication.py", "read_managers"): ("replicate_managers", "tables_stood_down"),
+}
+
+
+def _bare_walk():
+    """`({(file, function) naming a bare table}, {(file, function): its
+    calls}, {called name: {(file, function) calling it}})` over `core/`,
+    `web/`, `scripts/`, `bot/` and `deploy/`. A module-level constant counts
+    at every function of its module that loads it."""
+    import pathlib
+    import re
+
+    repo = pathlib.Path(__file__).resolve().parents[2]
+    bare = re.compile(_BARE, re.I)
+    found, calls, callers = set(), {}, {}
+    for top in ("core", "web", "scripts", "bot", "deploy"):
+        for path in sorted((repo / top).rglob("*.py")):
+            rel = str(path.relative_to(repo))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            docs = {id(n.body[0].value) for n in ast.walk(tree)
+                    if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                      ast.AsyncFunctionDef))
+                    and n.body and isinstance(n.body[0], ast.Expr)
+                    and isinstance(n.body[0].value, ast.Constant)}
+            functions = [n for n in ast.walk(tree)
+                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            owner = {}
+            for fn in functions:
+                for node in ast.walk(fn):
+                    owner.setdefault(id(node), fn.name)
+            for fn in functions:
+                names = {getattr(c.func, "attr", getattr(c.func, "id", ""))
+                         for c in ast.walk(fn) if isinstance(c, ast.Call)}
+                calls.setdefault((rel, fn.name), set()).update(names)
+                for name in names:
+                    callers.setdefault(name, set()).add((rel, fn.name))
+            constants = {}
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and id(node) not in docs and bare.search(node.value)):
+                    continue
+                if id(node) in owner:
+                    found.add((rel, owner[id(node)]))
+                    continue
+                for stmt in tree.body:
+                    if isinstance(stmt, ast.Assign) and any(
+                            n is node for n in ast.walk(stmt.value)):
+                        constants.update({t.id: node for t in stmt.targets
+                                          if isinstance(t, ast.Name)})
+                else:
+                    found.add((rel, "<module>"))
+            for fn in functions:
+                if any(isinstance(n, ast.Name) and n.id in constants
+                       for n in ast.walk(fn)):
+                    found.add((rel, fn.name))
+    return found, calls, callers
+
+
+class TestNothingReadsTheFrozenCopiesByName:
+    def test_every_site_is_known(self):
+        """The review's finding: a statement written `FROM managers` instead
+        of `FROM {managers}` passed every walk. Mutation: add one."""
+        found, _calls, _callers = _bare_walk()
+        assert found == set(_BARE_SITES), sorted(found ^ set(_BARE_SITES))
+
+    def test_each_is_routed_by_the_chain(self):
+        """Mutation: drop the routing from any of them — `get_all_managers`'
+        `reads_postgres()`, say."""
+        _found, calls, callers = _bare_walk()
+        for (rel, function), (router, asks) in _BARE_SITES.items():
+            assert asks in calls[(rel, router)], (rel, router, asks)
+            if function != router:
+                assert callers[function] == {(rel, router)}, (function, callers[function])
+
+    def test_it_sees_a_statement_written_bare(self):
+        """Non-vacuity, on the review's own probe."""
+        import re
+
+        bare = re.compile(_BARE, re.I)
+        for sql, seen in (("SELECT id, name, is_retail FROM managers ORDER BY id", True),
+                          ("SELECT manager_id FROM manager_classifications", True),
+                          ("SELECT 1 FROM orders o JOIN managers m ON m.id = o.manager_id", True),
+                          ("SELECT 1 FROM bronze.managers", False),
+                          ("SELECT 1 FROM {managers}", False),
+                          ("'baseline frozen from managers.is_retail'", False)):
+            assert bool(bare.search(sql)) is seen, sql

@@ -956,6 +956,12 @@ async def set_manager_retail_status(
     except pg_managers_write.BackdateBehindLatest as exc:
         # OD-C5-1 (a): DuckDB would have written two open intervals.
         raise HTTPException(status_code=409, detail=str(exc))
+    except pg_managers_write.ClassificationRefused as exc:
+        # A value Postgres would refuse, refused before Postgres was asked: a
+        # bad request, not an outage — a 503 here would send the operator to
+        # look at a Postgres that was never involved. The message names the
+        # field and the kind of value, never the value.
+        raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         if chain_mode == "duckdb":
             raise

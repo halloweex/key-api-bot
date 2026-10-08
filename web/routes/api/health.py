@@ -315,7 +315,9 @@ def _warehouse_writer_mode() -> dict:
     that finishes after it, and `held_for_s` how long that has stood (None
     when not held) — the canary warns on a hold that outlives what a way back
     takes. `reclassify_needed` says DuckDB's UTM verdicts were found empty on
-    it. Local state, no I/O. Judged by the canary."""
+    it. `way_back_refused` names the latched write chains for which a start
+    that would have run as duckdb stayed postgres instead (chain names, no
+    detail). Local state, no I/O. Judged by the canary."""
     from core import warehouse_cutover
 
     return {"mode": warehouse_cutover.mode(), "value": warehouse_cutover.value(),
@@ -323,7 +325,8 @@ def _warehouse_writer_mode() -> dict:
             "preconditions_unmet": [u.key for u in warehouse_cutover.preconditions_unmet()],
             "held": warehouse_cutover.held(),
             "held_for_s": warehouse_cutover.held_for_s(),
-            "reclassify_needed": warehouse_cutover.reclassify_needed()}
+            "reclassify_needed": warehouse_cutover.reclassify_needed(),
+            "way_back_refused": list(warehouse_cutover.way_back_refused())}
 
 
 def _derivation_mode() -> dict:

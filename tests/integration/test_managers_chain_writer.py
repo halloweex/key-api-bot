@@ -599,3 +599,147 @@ class TestTheReadsFollow:
                 "WHERE layer = 'warehouse'") == requested + 1
         assert await _duck_intervals(store) == []
         assert [(m["id"], m["is_retail"]) for m in listed] == [(34, True)]
+
+
+# ─── The review of chain 5 (2026-10-08) ─────────────────────────────────────
+
+
+class TestTheReviewAgainstARealPostgres:
+    @pytest.mark.asyncio
+    async def test_the_in_lock_seed_keeps_an_inherited_retail_history_retail(self, stores):
+        """A manager the replica carried with `is_retail` and no interval, then
+        classified non-retail: its past stays what the seed said. Mutation:
+        `WHERE FALSE AND m.id = $1` in the classification's seed — the March
+        order resolves `internal` (the review's reproduction)."""
+        from core.duckdb_store import silver_sales_type_case
+        from core.sql_dialect import POSTGRES
+
+        store, pool, env = stores
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO bronze.managers (id, name, is_retail) "
+                               "VALUES (17, 'Inherited retail', TRUE)")
+        env.setenv(ENV, "postgres")
+        await store.set_manager_retail_status(17, False, date(2026, 10, 1), 1, "wholesale now")
+        assert await _pg_intervals(pool, 17) == [
+            (17, BASELINE, date(2026, 10, 1), True, None,
+             "baseline frozen from managers.is_retail"),
+            (17, date(2026, 10, 1), None, False, 1, "wholesale now")]
+        case = silver_sales_type_case(POSTGRES)
+        async with pool.acquire() as conn:
+            for at, expected in (("2026-03-01 12:00+00", "retail"),
+                                 ("2026-10-02 12:00+00", "internal")):
+                got = await conn.fetchval(
+                    f"SELECT {case} FROM (SELECT 1 AS source_id, 17 AS manager_id, "
+                    f"TIMESTAMPTZ '{at}' AS ordered_at) o")
+                assert got == expected, (at, got)
+
+    @pytest.mark.asyncio
+    async def test_set_at_is_the_callers_clock_never_postgres_now(self, stores):
+        """Chain 7a's ONE CLOCK rule: `set_at` is the copy-back's handover
+        clock. Mutation: stamp `now()` in the classification's INSERT (or in
+        its seed) — the stored value is then today's, not the caller's."""
+        store, pool, env = stores
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO bronze.managers (id, name) VALUES (34, 'M')")
+        env.setenv(ENV, "postgres")
+        clock = datetime(2001, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
+        await pg_managers_write.set_manager_retail_status(
+            34, True, date(2026, 6, 1), 7, "why", set_at=clock)
+        async with pool.acquire() as conn:
+            stamps = await conn.fetch(
+                "SELECT valid_from, set_at FROM app.manager_classifications "
+                "WHERE manager_id = 34 ORDER BY valid_from")
+        assert [(r["valid_from"], r["set_at"]) for r in stamps] == [
+            (BASELINE, clock), (date(2026, 6, 1), clock)]
+
+    @pytest.mark.asyncio
+    async def test_the_route_answers_422_for_a_refusal_postgres_never_saw(
+            self, stores, monkeypatch):
+        """A note carrying NUL is refused before Postgres is asked; the review
+        reproduced a 503 "Postgres did not answer" for it. Nothing stored.
+        Mutation: drop the route's `ClassificationRefused` mapping."""
+        import time as _time
+
+        import httpx
+
+        from core.permissions import ADMIN_USER_IDS
+        from web.main import app
+        from web.routes.api._deps import limiter
+        from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
+
+        store, pool, env = stores
+        env.setenv(ENV, "postgres")
+        await store.upsert_managers([{"id": 34, "name": "M"}])
+        before = await _pg_intervals(pool)
+
+        async def get():
+            return store
+        monkeypatch.setattr("web.routes.api.admin.get_store", get)
+        limiter.reset()
+        admin = sorted(ADMIN_USER_IDS)[0]
+        cookie = session_serializer.dumps(create_session_data(
+            {"id": str(admin), "first_name": "T", "last_name": "U", "username": "t",
+             "auth_date": str(int(_time.time()))}, role="admin"))
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                         base_url="http://test",
+                                         cookies={SESSION_COOKIE: cookie}) as client:
+                res = await client.post("/api/managers/34/retail-status?is_retail=true"
+                                        "&effective_from=2026-10-07&note=a%00b")
+        finally:
+            limiter.reset()
+        assert res.status_code == 422, res.text
+        assert "note carries NUL" in res.json()["detail"]
+        assert await _pg_intervals(pool) == before
+
+    @pytest.mark.asyncio
+    async def test_the_postgres_list_has_duckdbs_shape(self, stores):
+        """`GET /api/managers` reads either store, so one answer must look like
+        the other — `synced_at` included. Mutation: `mirrored_at AS
+        mirrored_at` in `pg_managers_read`."""
+        from core import pg_managers_read
+
+        store, pool, env = stores
+        with patch("core.pg_replication.replicate_managers", new=AsyncMock()):
+            await store.upsert_managers([{"id": 34, "name": "M"}])
+        duck = await store.get_all_managers()
+        env.setenv(ENV, "postgres")
+        await store.upsert_managers([{"id": 34, "name": "M"}])
+        pg = await pg_managers_read.fetch_all_managers()
+        assert [set(r) for r in pg] == [set(r) for r in duck]
+        assert pg[0]["synced_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_the_stats_never_go_backwards_while_a_chain_owns_the_orders(
+            self, stores, monkeypatch):
+        """The ways back run chain 5's before chain 3's. With chain 5 back on
+        DuckDB and the orders still a chain's, DuckDB's orders are frozen;
+        recounted from them, Postgres went from 2026-10-06 and 500 orders to
+        2026-09-01 and 1 (the review's reproduction). Mutation: drop the guard
+        in `DuckDBStore.update_manager_stats`."""
+        import types
+
+        from core import write_chains
+        from core.pg_replication import replicate_managers
+
+        store, pool, _env = stores
+        async with store.connection() as conn:
+            conn.execute("INSERT INTO managers (id, name) VALUES (34, 'M')")
+            conn.execute(
+                "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, "
+                "created_at, updated_at, manager_id) VALUES (?, 1, 1, 100, "
+                "TIMESTAMPTZ '2026-09-01 10:00:00+00', TIMESTAMPTZ '2026-09-01 10:00:00+00', "
+                "TIMESTAMPTZ '2026-09-01 10:00:00+00', 34)", [ORDER_IDS[0]])
+            conn.execute("UPDATE managers SET last_order_date = DATE '2026-10-06', "
+                         "order_count = 500 WHERE id = 34")
+        assert (await replicate_managers(store))["ok"] is True
+        orders_chain = types.ModuleType("core.pg_chain_orders_write")
+        orders_chain.WRITE_ENV = "KS_WRITE_CHAIN_ORDERS"
+        orders_chain.CHAIN_TABLES = ("bronze.orders", "bronze.order_products")
+        orders_chain.env_writes_postgres = lambda: True
+        monkeypatch.setattr(write_chains, "WRITE_CHAINS",
+                            write_chains.WRITE_CHAINS + (orders_chain,))
+
+        assert await store.update_manager_stats() == 0
+        row = (await _pg_managers(pool))[34]
+        assert (row["last_order_date"], row["order_count"]) == (date(2026, 10, 6), 500)

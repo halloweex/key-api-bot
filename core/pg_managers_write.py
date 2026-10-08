@@ -98,7 +98,7 @@ import os
 import sys
 import time
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from core import chain_latch
 
@@ -166,6 +166,14 @@ class ManagersRefused(ValueError):
 
 class ManagerNotFound(LookupError):
     """No such manager in `bronze.managers`. Nothing written, nothing latched."""
+
+
+class ClassificationRefused(ValueError):
+    """A classification Postgres would refuse — a note carrying NUL, a
+    `set_by` past INTEGER — or one that is not a classification at all. Raised
+    before anything is asked of Postgres and before the latch: a bad request,
+    which the route answers 422, never an outage. The message names the field
+    and the kind of value, never the value."""
 
 
 class BackdateBehindLatest(ValueError):
@@ -263,7 +271,15 @@ def _read_fallback_unmet() -> Optional[str]:
             "of the classification would be answered from DuckDB's frozen copy")
 
 
-_CHECKS = (_goals_bridge_unmet, _step13_unmet, _chain3_unmet, _read_fallback_unmet)
+# `(key, check)`: the key is the precondition's name, the word every reason
+# starts with — spelled here, not derived from the function's name, which
+# would read `_read_fallback_unmet` as "read_fallback".
+_CHECKS = (
+    ("goals_bridge", _goals_bridge_unmet),
+    ("step13", _step13_unmet),
+    ("chain3", _chain3_unmet),
+    ("read_fallback_off", _read_fallback_unmet),
+)
 
 
 def unmet_precondition() -> Optional[str]:
@@ -277,12 +293,11 @@ def unmet_precondition() -> Optional[str]:
     watching; a fact that could would need chain 3's `held_until_restart`.
     """
     reasons: List[str] = []
-    for check in _CHECKS:
+    for key, check in _CHECKS:
         try:
             why = check()
         except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
             # Keyed by the precondition's name, as the answer it stands for.
-            key = check.__name__.strip("_").removesuffix("_unmet")
             why = f"{key}: could not be read ({type(exc).__name__})"
         if why:
             reasons.append(why)
@@ -511,6 +526,29 @@ async def update_manager_stats() -> int:
     return int(status.rsplit(" ", 1)[-1])
 
 
+def duckdb_orders_frozen() -> FrozenSet[str]:
+    """The order tables a write chain has taken, whose DuckDB copies therefore
+    stopped at its latch — asked by `DuckDBStore.update_manager_stats` before
+    it counts DuckDB's orders while this chain is on DuckDB. Never raises.
+
+    The rollback order runs this chain's copy-back before chain 3's, so the
+    managers come back to DuckDB while the orders are still chain 3's; counted
+    from DuckDB's frozen orders, `last_order_date` and `order_count` would go
+    backwards and the replica would ship them over Postgres's (the chain-5
+    review). The stats are left as they stand instead — after a copy-back, the
+    chain's own last ones — until the orders come back.
+
+    The local answer (`pg_landing.order_tables_stood_down`), as the per-tick
+    order mirror takes it: it asks only a chain that declares an order table,
+    and none does in this build, so today it reads no variable and no file.
+    An owner row whose marker was lost is the daily comparison's to page
+    (`order_owner_row_without_marker`, CRITICAL); the stats are display-only.
+    """
+    from core.pg_landing import order_tables_stood_down
+
+    return order_tables_stood_down()
+
+
 def _classification_refusal(manager_id, is_retail, effective_from, set_by,
                             note) -> Optional[str]:
     if effective_from is None or not isinstance(effective_from, date) \
@@ -558,13 +596,14 @@ async def set_manager_retail_status(
     `bronze.managers.is_retail` is set to the new current answer. A date before
     the manager's latest change is refused (`BackdateBehindLatest`, module
     docstring), and so is a manager Postgres does not hold
-    (`ManagerNotFound`) — both before the latch.
+    (`ManagerNotFound`) — both before the latch — and a value Postgres would
+    refuse (`ClassificationRefused`), before Postgres is asked anything.
     """
     from core.pg_derivation import mark_if_owned
 
     why = _classification_refusal(manager_id, is_retail, effective_from, set_by, note)
     if why:
-        raise ValueError(why)
+        raise ClassificationRefused(why)
     if set_at is None:
         raise ValueError("set_at must be supplied — it is the copy-back's clock")
 
@@ -701,7 +740,8 @@ async def preflight() -> Dict[str, Any]:
 
     `ok` is null once the chain writes Postgres — the question is over. Before
     that `reasons` names every unmet precondition (asked whatever the flag
-    says), a replica of either table failing or over a day old, and every
+    says, and alone while any is: Postgres is asked only once they all hold),
+    a replica of either table failing or over a day old, and every
     shape the standing watch would file after the flip — or that
     `chain_copy_back.py managers --handover` refuses on: a manager with no
     interval, not exactly one open, a broken history, a current answer that
@@ -714,7 +754,13 @@ async def preflight() -> Dict[str, Any]:
     reasons: List[str] = []
     unmet = unmet_precondition()
     if unmet:
-        reasons.extend(unmet.split("; "))
+        # Postgres is not asked while a local precondition is unmet: until
+        # they all hold the flag cannot move the writes whatever the replica
+        # or the shape say, and in a build without chain 3 that is for good —
+        # so `/api/health` asks Postgres nothing on this chain's behalf by
+        # default. The shape is then asked the minute after the last one
+        # clears, before anybody sets the flag.
+        return {"ok": False, "reasons": unmet.split("; ")}
     try:
         pool = await _pool()
         async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:

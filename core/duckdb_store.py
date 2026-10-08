@@ -3385,6 +3385,23 @@ class DuckDBStore(
         if pg_managers_write.writes_postgres():
             return await pg_managers_write.update_manager_stats()
 
+        # On DuckDB while a write chain owns the orders — between chain 5's
+        # copy-back and chain 3's, which the order of ways back makes a state
+        # every rollback passes through, and between chain 3's flip and chain
+        # 5's. DuckDB's `orders` stopped at chain 3's latch, so stats counted
+        # from them would carry `last_order_date` and `order_count` backwards,
+        # and the replica below would ship them over Postgres's. They stay as
+        # they stand — after a copy-back, the chain's own last stats — until
+        # the orders come back, and nothing is shipped for a recompute that
+        # did not happen (`pg_managers_write.duckdb_orders_frozen`).
+        frozen = pg_managers_write.duckdb_orders_frozen()
+        if frozen:
+            logger.warning(
+                "Manager statistics not recomputed: a write chain owns %s, so "
+                "DuckDB's orders are frozen and would move them backwards",
+                ", ".join(sorted(frozen)))
+            return 0
+
         async with self.connection() as conn:
             # Update stats for managers who have orders. The one body both
             # engines run, with the order's date spelled in Kyiv rather than

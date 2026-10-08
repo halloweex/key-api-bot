@@ -962,11 +962,61 @@ def check_warehouse_preconditions(payload: Optional[dict]) -> "list[tuple[str, s
     unmet = block.get("preconditions_unmet")
     if not isinstance(unmet, list) or not unmet:
         return []
+    if _way_back_refused(block):
+        # Web did not run as duckdb: `check_warehouse_way_back_refused` says
+        # what it did instead, and names these keys in its message.
+        return []
     value = block.get("value")
     value = value if isinstance(value, str) and value else "postgres"
     return [("warehouse_preconditions_unmet",
              f"KS_WRITE_WAREHOUSE={value} ran as duckdb, unmet: "
              + ", ".join(str(key) for key in unmet))]
+
+
+def _way_back_refused(block: dict) -> "list[str]":
+    chains = block.get("way_back_refused")
+    if not isinstance(chains, list):
+        return []
+    return [str(chain) for chain in chains if chain]
+
+
+def check_warehouse_way_back_refused(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge the `warehouse_writer_mode` block: a start that would have run as
+    duckdb after a flip — the way back — stayed postgres, because a latched
+    write chain owns a table DuckDB derives from (chain 5's classification,
+    chain 3's orders).
+
+    Pages: either somebody asked for the way back and did not get it, or a
+    start with a precondition unmet took it on its own; both need a person,
+    and the lever is not the way back's — the chains are copied back first.
+    Web serves. Postgres derives only on its own signal: under any other
+    KS_PG_DERIVE its rebuild rides the DuckDB tick, which a `postgres` start
+    does not run, so then NOTHING derives and the message says so — read
+    from the `derivation` block, since a way back taken by unsetting the
+    variable evaluates no precondition. An absent block or field is not a
+    failure; an older web publishes none."""
+    block = (payload or {}).get("warehouse_writer_mode")
+    if not isinstance(block, dict):
+        return []
+    chains = _way_back_refused(block)
+    if not chains:
+        return []
+    value = block.get("value")
+    value = value if isinstance(value, str) and value else "duckdb"
+    unmet = block.get("preconditions_unmet")
+    unmet = ("; unmet: " + ", ".join(str(key) for key in unmet)
+             if isinstance(unmet, list) and unmet else "")
+    derivation = (payload or {}).get("derivation")
+    derive = derivation.get("mode") if isinstance(derivation, dict) else None
+    if derive == "own":
+        who = "; Postgres derives"
+    elif isinstance(derive, str) and derive:
+        who = f"; NOTHING derives (KS_PG_DERIVE={derive}, not own)"
+    else:
+        who = ""
+    return [("warehouse_way_back_refused",
+             f"KS_WRITE_WAREHOUSE={value} stayed postgres: write chain(s) "
+             + ", ".join(chains) + " own what DuckDB derives from" + who + unmet)]
 
 
 # How long the way back from KS_WRITE_WAREHOUSE=postgres may hold the DuckDB
@@ -1185,6 +1235,14 @@ async def run_canary(
         if warehouse_unmet:
             severity = "critical"
 
+        # The way back refused while a latched write chain owns a table
+        # DuckDB derives from: web stayed postgres. Pages.
+        refused_way_back = check_warehouse_way_back_refused(payload)
+        for key, message in refused_way_back:
+            fail(key, message)
+        if refused_way_back:
+            severity = "critical"
+
         # The way back holding the DuckDB checks down for hours. Warn: web
         # serves and DuckDB derives, and the checks are what is missing.
         hold_failures = check_warehouse_hold(payload)
@@ -1297,6 +1355,8 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("cert_unreachable", "TLS handshake fails: nginx or the network, not the app"),
     ("warehouse_preconditions_unmet",
      "After a flip this IS the way back (full DuckDB rebuild). Meet each cutover.unmet on /api/warehouse/status or unset KS_WRITE_WAREHOUSE; recreate web"),
+    ("warehouse_way_back_refused",
+     "Copy the named chains back first (scripts/chain_copy_back.py, chain 5 before chain 3), then recreate web for the way back; nothing derives meanwhile unless KS_PG_DERIVE=own"),
     ("mirror_", "Check meta.mirror_state and web's log; the mirror re-ships itself"),
     ("dq_", "Check /api/jobs — nothing is verifying the warehouse meanwhile"),
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),
@@ -1353,6 +1413,7 @@ _OUTAGE_KEYS: tuple[str, ...] = ("health_unreachable", "health_http", "health_st
 # A CRITICAL that is not an outage, named for what it is. First match wins.
 _CRITICAL_TITLES: tuple[tuple[str, str], ...] = (
     ("warehouse_preconditions_unmet", "Warehouse switch held back"),
+    ("warehouse_way_back_refused", "Warehouse way back refused"),
 )
 
 
