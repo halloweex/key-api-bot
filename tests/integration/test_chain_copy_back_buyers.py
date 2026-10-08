@@ -360,6 +360,31 @@ class TestTheReship:
         assert await handover_check(store, chain) == []
 
     @pytest.mark.asyncio
+    async def test_it_clears_a_number_of_a_buyer_duckdb_holds_with_none(self, stores):
+        """F2 (review of #265). DuckDB holds buyer 1 with no contact at all;
+        Postgres still holds a number for it. The reship hands `(1, [])`, and
+        the contacts DELETE must run for an empty list too, or `--handover`
+        stays CRITICAL after the very lever it names. Mutation killed: the
+        DELETE moved under `if buyer_contacts:` in `core.pg_buyer_rows`."""
+        from core.chain_transfer import handover_check
+        from core.pg_buyers import reship_buyers
+
+        store, pool, chain, _env = stores
+        await _mirrored(store, pool, [_buyer(1, phones=[])])
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO bronze.buyer_contacts (buyer_id, "
+                               "contact_type, value, is_primary) "
+                               "VALUES (1, 'phone', '+380597', FALSE)")
+        assert _critical(await handover_check(store, chain)) == {
+            ("handover_rows_ahead", CONTACTS)}
+
+        result = await reship_buyers(store, chunk=1)
+
+        assert (result["status"], result["buyers_shipped"],
+                result["contacts_shipped"]) == ("done", 1, 0), result
+        assert await handover_check(store, chain) == []
+
+    @pytest.mark.asyncio
     async def test_it_refuses_once_the_chain_is_latched(self, stores):
         from core.pg_buyers import reship_buyers
 
