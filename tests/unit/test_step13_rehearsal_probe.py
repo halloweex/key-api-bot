@@ -1165,11 +1165,43 @@ def test_a_delete_through_a_lost_index_finds_nothing_duckdb_1_5_5(tmp_path):
 
     for col, value in (("s", "late3"), ("k", "1")):
         proc = subprocess.run([sys.executable, "-c", probe._DELETE_ONE, db, "t",
-                               probe._WINDOW_WHERE.format(col=col), value],
+                               probe._WINDOW_WHERE.format(col=col), value, str(REPO)],
                               capture_output=True, text=True)
         result = json.loads(proc.stdout.strip().splitlines()[-1])
         assert result.get("fatal", "").startswith(
             "FATAL Error: Invalid Input Error: Failed to delete all rows from index"), result
+
+
+def test_the_ends_delete_costs_no_index_of_its_own_duckdb_1_5_5(tmp_path, monkeypatch):
+    """`window_delete` behind a stop that left a WAL — a grace that ran out
+    after P3's kill — asks one table per process, and each opens the copy
+    through the product's guard (`open_read_write`), as the product's next
+    start would. So the first process's close is not DuckDB's lossy
+    checkpoint of the next table's index: every DELETE comes clean, and a
+    loss D1 reports is one the product left. A bare read-write connect there
+    replayed the WAL and closed lossily in the first process, the second
+    table's DELETE was the FATAL, and D1 reported its own loss as the kill's.
+    Kills: "_DELETE_ONE opens the copy with a bare duckdb.connect"."""
+    duckdb = pytest.importorskip("duckdb")
+    import subprocess
+    import sys
+
+    monkeypatch.setattr(probe, "APP_DIR", str(REPO))
+    db = str(tmp_path / "wal.duckdb")
+    con = duckdb.connect(db)
+    for table, index in (("c", "CREATE INDEX i_cab ON c(a, b)"), ("s", "CREATE INDEX i_sa ON s(a)")):
+        con.execute(f"CREATE TABLE {table} (id BIGINT PRIMARY KEY, a BIGINT, b VARCHAR)")
+        con.execute(index)
+        con.execute(f"INSERT INTO {table} SELECT r, r % 5, 'early' || r FROM range(1, 3001) x(r)")
+    con.close()
+    assert subprocess.run([sys.executable, "-c", _KILLED_TWO, db]).returncode == -9
+    assert (tmp_path / "wal.duckdb.wal").exists()
+    monkeypatch.setattr(probe, "_window_targets",
+                        lambda run_id, order_id: [("c", "id", 100001), ("s", "id", 100001)])
+    done = probe.window_delete(db, None, 100001)
+    assert [(d["table"], d.get("scanned"), d.get("deleted"), d.get("left"))
+            for d in done["deletes"]] == [("c", 1, 1, 0), ("s", 1, 1, 0)], done
+    assert not any("fatal" in d or "error" in d for d in done["deletes"]), done
 
 
 _WINDOW_WRITER = """
@@ -1344,7 +1376,7 @@ def test_an_index_holds_no_row_with_a_null_key_duckdb_1_5_5(tmp_path, cols):
         held = window["tables"]["orders"]["indexes"][0]["held"]
         assert held == (1 if all(row[c] is not None for c in cols) else 0), (oid, window)
         proc = subprocess.run([sys.executable, "-c", probe._DELETE_ONE, db, "orders",
-                               probe._WINDOW_WHERE.format(col="id"), str(oid)],
+                               probe._WINDOW_WHERE.format(col="id"), str(oid), str(REPO)],
                               capture_output=True, text=True)
         result = json.loads(proc.stdout.strip().splitlines()[-1])
         assert ("fatal" in result) is (held == 1), (oid, cols, result)

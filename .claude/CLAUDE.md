@@ -1235,7 +1235,10 @@ correctly; they neither lose entries nor take the guard.
 `tests/unit/test_duckdb_open_guard.py` walks `core/ web/ bot/ scripts/
 deploy/`, not a list of callers: every `duckdb.connect` is read-only,
 in-memory, the opener, or `compact_duckdb.py::phase3_validate` (the file
-phase 2 just built and closed — no WAL — in a do-not-touch script); the
+phase 2 just built and closed — no WAL — in a do-not-touch script),
+including one written out in a string a module runs elsewhere (`python -c`,
+a subprocess), which the AST never sees inside — the step-13 rehearsal's D1
+DELETE hid there, merged in after the walk was written; the
 `duckdb` module is never handed on as a value; and every ATTACH of a database
 file carries the READ_ONLY *option* — parsed, because `AS read_only_copy`,
 `(READ_ONLY false)` and a comment saying READ_ONLY all attach read-write, and
@@ -3752,10 +3755,19 @@ scan. At the end, on the copy about to be removed, the window's rows are
 deleted table by table in a process each, found by a predicate no index
 serves: a `DELETE` must take each row out of every index on its table that
 holds it, so a lost entry is DuckDB's FATAL, and that is the only question
-a composite index answers — on 1.5.5 none serves a read. The copy reaches
-that DELETE after the way back, through two more stops of reh-web, and a
-loss found behind one that was not graceful (or not recorded) may be that
-stop's kill: still FAIL, and the verdict names the stop. Every
+a composite index answers — on 1.5.5 none serves a read. Each process opens
+the copy through the image's own `open_read_write`, as the product's next
+start would. A bare read-write open there, as D1 had it until the kill
+guard was merged beside it, replays a WAL the last stop left and closes
+lossily, so the next table's DELETE was a FATAL of D1's own making
+(measured: a killed writer's rows in two tables, the first DELETE clean,
+the second the FATAL; `test_the_ends_delete_costs_no_index_of_its_own_duckdb_1_5_5`).
+An image without the guard cannot import it, and the DELETE is UNKNOWN.
+The copy reaches that DELETE after the way back, through two more stops of
+reh-web, and a loss found behind one that was not graceful (or not
+recorded) may be that stop's kill: still FAIL, and the verdict names the
+stop — a hedge written for an image whose restarts were lossy; through the
+guard neither a restart nor D1's own open loses what a WAL holds. Every
 single-column index is also swept at both
 stops (lookup limits lifted, held to `count_if` over the table). A loss
 after the kill is a FAIL labelled **DuckDB 1.5.5's known defect, not a
@@ -3764,9 +3776,11 @@ the live web costs the same; a loss already there before the kill is the
 copy's own and is not given that label. Nothing the product runs at start
 touches the DQ journal, so on 1.5.5 as the store opens today D1 fails on
 the window's run — the 2026-10-07 run above did, on the DQ journal alone. A
-`CHECKPOINT` of the replayed WAL before anything else runs — the change on
-the `duckdb-kill-guard` branch, not merged when this was written — should
-turn it PASS, and nothing here depends on it.
+`CHECKPOINT` of the replayed WAL before anything else runs —
+`open_read_write`, the kill guard ("A killed DuckDB writer, and what the
+next start used to lose"), merged after this was written — should turn it
+PASS, and nothing here depends on it; the rehearsal has not yet been run
+against an image that carries it.
 Two earlier notes here called it one odd segment, then a DQ-journal matter,
 and the judges first read P4a and P5 after the kill, which passed what the
 product could not show anyone.

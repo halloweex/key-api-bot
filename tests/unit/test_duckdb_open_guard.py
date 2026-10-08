@@ -193,6 +193,14 @@ def scan(source: str, rel: str):
         for attach in attach_violations(text):
             violations.append((rel, function_of(n), n.lineno,
                                f"ATTACH without READ_ONLY: {attach}"))
+        # A program held as text and run elsewhere — `python -c`, a
+        # subprocess — opens the file as surely as a call here does, and the
+        # AST above never sees inside a string. The step-13 rehearsal's D1
+        # DELETE was one: a bare read-write connect, in a string, run once per
+        # table, whose lossy close cost the next table's index.
+        for _pos, why in connect_violations(text):
+            violations.append((rel, function_of(n), n.lineno,
+                               f"{why} in a program held as text"))
     return calls, violations
 
 
@@ -244,6 +252,25 @@ def _call_text(text: str, start: int, open_paren: int) -> str:
     return text[start:i].replace('\\"', '"').replace("\\'", "'")
 
 
+def connect_violations(text: str) -> list:
+    """(offset, why) for every `duckdb.connect(...)` written out in `text`
+    that is not read-only or in-memory — in a document, or in a program a
+    module holds as a string."""
+    violations = []
+    for found in _CONNECT_IN_TEXT.finditer(text):
+        snippet = _call_text(text, found.start(), found.end())
+        try:
+            call = ast.parse(snippet, mode="eval").body
+        except SyntaxError:
+            violations.append((found.start(),
+                               f"duckdb.connect the walk cannot read: {snippet[:80]}"))
+            continue
+        kind = _classify(call) if isinstance(call, ast.Call) else "read_write"
+        if kind == "read_write":
+            violations.append((found.start(), f"read-write duckdb.connect: {snippet[:80]}"))
+    return violations
+
+
 def scan_document(text: str, rel: str) -> list:
     """(rel, line, why) for every read-write open a document tells somebody
     to run."""
@@ -252,18 +279,8 @@ def scan_document(text: str, rel: str) -> list:
     def line_of(pos):
         return text.count("\n", 0, pos) + 1
 
-    for found in _CONNECT_IN_TEXT.finditer(text):
-        snippet = _call_text(text, found.start(), found.end())
-        try:
-            call = ast.parse(snippet, mode="eval").body
-        except SyntaxError:
-            violations.append((rel, line_of(found.start()),
-                               f"duckdb.connect the walk cannot read: {snippet[:80]}"))
-            continue
-        kind = _classify(call) if isinstance(call, ast.Call) else "read_write"
-        if kind == "read_write":
-            violations.append((rel, line_of(found.start()),
-                               f"read-write duckdb.connect: {snippet[:80]}"))
+    for pos, why in connect_violations(text):
+        violations.append((rel, line_of(pos), why))
     for attach in attach_violations(text):
         violations.append((rel, line_of(text.find(attach)),
                            f"ATTACH without READ_ONLY: {attach}"))
@@ -389,6 +406,14 @@ def test_the_store_opens_through_the_guard():
     # The module itself, handed on.
     ("import duckdb\nddb = duckdb\nddb.connect(p)", "module used as a value"),
     ("import duckdb\ngetattr(duckdb, 'connect')(p)", "module used as a value"),
+    # A program held as text, run by `python -c` or a subprocess: the AST
+    # does not see inside a string, and the rehearsal's D1 DELETE hid there.
+    ("PROG = '''\nimport duckdb\ncon = duckdb.connect(db)\n'''", "program held as text"),
+    ("run([exe, '-c', f'import duckdb; duckdb.connect({p!r}).execute(q)'])",
+     "program held as text"),
+    ("PROG = '''\nimport duckdb\ncon = duckdb.connect(db, read_only=True)\n'''", None),
+    ("PROG = '''\nfrom core.duckdb_store import open_read_write\ncon = open_read_write(db)\n'''",
+     None),
 ])
 def test_the_walk_sees_what_it_must(source, verdict):
     _, violations = scan(source, "core/x.py")
