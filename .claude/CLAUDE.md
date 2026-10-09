@@ -3337,11 +3337,14 @@ written:
   stores sweep by age (chain 10's samples): a row older than anything DuckDB
   still holds is its sweep, which Postgres's own writer repeats after a flip.
   A row's own clock is no sweep — an older withdrawn expense is a ghost too.
-  An append table's key only Postgres holds, above DuckDB's watermark, stays
-  INFO and is **not** refused: a DuckDB file restored from before the last
-  copy and a writer round the copy look the same there, and refusing the
-  first leaves no lever but deleting real history. The finding says the flip
-  keeps them; whether it should refuse is the owner's to decide;
+  An append table's key only Postgres holds, above DuckDB's watermark, is
+  refused too (owner's decision, 2026-10-09; the review of F6 had left it
+  INFO): a DuckDB file restored from before the last copy and a writer round
+  the copy look the same there, and a flip would keep either as the record.
+  So the decision is made per id, with web stopped — a row DuckDB lost is
+  written back into DuckDB (its allocator moved above it), a phantom is
+  deleted from Postgres — and `--handover` is asked again. After the latch
+  the same row is Postgres's later write and stays INFO;
 - in an append-only table, two different rows under one key. There is no
   "newer" there: they are two events, and the usual one is a movement id both
   allocators issued, because Postgres floors its sequence on its own MAX(id);
