@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.276
+
+
+
 ## 3.0.275
 
 - CLAUDE.md: step 13 and KS_READ_FALLBACK=off are on in production
