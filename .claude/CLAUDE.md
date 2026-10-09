@@ -1931,7 +1931,9 @@ deleted the bridge through which the goal calculators read DuckDB's
 classification. Every fact is local, so `/api/health` answers with
 Postgres down. Order of flips: step 13, chain 3, a lock-out revision
 (directly before the flip, as chain 4 did with 0034 — not in this change),
-chain 5 (7b-4, which came first, is done). The way back runs in reverse.
+chain 5. 7b-4 had to come before chain 3, since chains 3 and 5 held on its
+`goals_bridge`, and not before step 13, whose own `goals_bridge`
+`KS_GOALS_HISTORY=silver` met. The way back runs in reverse.
 
 **Three writers, one advisory lock** (`CHAIN_LOCK_KEY`, 'ks' + 5), taken
 first in every transaction. Measured before building: two classifications of
@@ -4621,21 +4623,46 @@ Postgres half read, as `ks_readonly`, the latest `mirror_landing` run's
 the backup half read DuckDB's Silver on both sides. A three-day soak followed
 (to 2026-10-10 08:20 UTC).
 
-**7b-4 — the bridge deleted, the variable retired.** Every history read has
+**7b-4 — the bridge deleted, the variable retired. It merges only after the
+flip's soak has ended (2026-10-10 08:20 UTC)**: a merge deploys itself, and
+until then the way back is the bridge this deletes. On this build, unsetting
+the variable — the rollback the soak was run under — reads Silver with
+nothing to say so (`/api/health` shows `silver`, the canary is quiet), and
+setting `bridge` refuses every calculator read. (Once step 13 is in force,
+that rollback on the build before this one is itself step 13's way back,
+since `goals_bridge` is one of its preconditions there.) Every history read has
 one body, `{silver_orders}` through `_goals_run`; the bridge bodies,
 `_orders_sales_type_predicate`, `_bridge_rows`, `history_from_silver`,
 `SALES_TYPE_BRIDGE_TABLES` and `sales_type_bridge_owners` are gone.
 `KS_GOALS_HISTORY` is read only to refuse: **unset and `silver` both read
-Silver; any other value — `bridge` included — raises at every history read**
-(never at import, so web cannot crash-loop on it), and the goal widget,
-`/goals/*`, the POST and the Monday job fail with nothing written. A value
-naming a history that no longer exists is a configuration nobody can
-satisfy; answering it from Silver in silence would hide that. `/api/health`
-publishes `goals_history {mode: silver | null, error}` and the canary pages
-`goals_history_mode_invalid`, CRITICAL like `write_chain_flag_invalid`; its
-lever is to remove the variable. Production's `.env` line (`silver`) reads
-as before and may go at leisure. There is no switch back: an image from
-before 7b-4 reads Silver under that line too.
+Silver; any other value — `bridge` included — raises at every read of the
+calculators' history** (never at import, so web cannot crash-loop on it):
+the goal widget (`/goals/smart`), `/goals/seasonality`, `/goals/growth`,
+`/goals/weekly-patterns`, `/goals/forecast`, `POST /goals/recalculate` and
+the Monday job fail with nothing written. `GET /goals`, `/goals/history` and
+setting or resetting a goal never read that history — a recent window of
+Silver, `is_active_source` included — and answer as before;
+`test_goals_history_silver.py` reads every goal route off the app and holds
+it to one of the two lists. A value naming a history that no longer exists
+is a configuration nobody can satisfy; answering it from Silver in silence
+would hide that. `/api/health` publishes `goals_history {mode: silver |
+null, error}` and the canary pages `goals_history_mode_invalid`, CRITICAL
+like `write_chain_flag_invalid`; its lever, like the refusal, is to set the
+variable to `silver`.
+
+**Retired is not removable: keep production's `.env` line
+(`KS_GOALS_HISTORY=silver`) for as long as an image from before 7b-4 can be
+a rollback target.** Such an image reads unset as `bridge`. Rolled back to
+without the line, it counts the goals from DuckDB's orders and
+classification — frozen copies once chain 3 or 5 has latched, while the
+latch keeps the writes in Postgres — and, after step 13, its own
+`goals_bridge` is unmet, so the start runs as duckdb: the way back, a full
+DuckDB rebuild, a CRITICAL `warehouse_preconditions_unmet`, and the soak
+clock restarting. (An unlatched chain 3 or 5 is held on such an image
+whatever the line says: the bridge is a code constant there.)
+`deploy/step13_rehearsal.sh` keeps the line for the same reason. With the
+line there is no switch back to make: an image from before 7b-4 reads
+Silver under it too.
 
 What guarded the bridge went with it: step 13's `goals_bridge` precondition
 and its registry walk (so step 13's start asks no write chain its mode any
@@ -4644,7 +4671,14 @@ own `goals_bridge`, the CI tripwire in `test_goals_off_duckdb_silver.py`, and
 the dry run, retired rather than reduced — with no bridge there is nothing to
 compare, and no flip left for it to gate. What guards Silver stays: the
 orders it selects, pinned to written-out ids on every branch of the CASE
-(`test_goals_history_silver.py`); no goal read naming DuckDB's `orders`,
+(`test_goals_history_silver.py`); every calculator — seasonality, YoY yearly
+and per month, the weekly weights and the cap — against numbers computed in
+Python from the fixture's rows, for every sales type
+(`test_goals_off_duckdb_silver.py`), which replaced the comparison with the
+bridge's bodies: that was the bodies' only independent answer, since the
+two-engine test runs one text on both engines (review of 7b-4: three
+mutations to the seasonality and monthly-YoY bodies passed every goal test
+until then); no goal read naming DuckDB's `orders`,
 `managers` or `manager_classifications`; the two engines answering alike to
 1e-6, with DuckDB's history refused at the statement and its Silver emptied
 (`tests/integration/test_goals_history_two_engines.py`); and step 13's
