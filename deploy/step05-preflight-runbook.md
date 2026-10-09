@@ -5,7 +5,10 @@ was closed in code on 2026-08-23 (#123–#128). Two things could not be: one
 reads the production warehouse, the other writes a file to the server's disk.
 
 **Both were done on 2026-08-23.** What follows is how, and how to do them
-again — the second Ark is still owed, in the deploy that removes DuckDB.
+again. The second Ark is not made from B below: `deploy/ark_ship.sh` freezes
+it at the start of the week of silence and ships it encrypted (OD-S5-6),
+fetching it back and verifying the downloaded copy — B4's steps as one
+command, with the gpg B4 never had.
 
 ---
 

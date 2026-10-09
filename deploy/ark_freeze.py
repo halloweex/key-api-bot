@@ -11,8 +11,10 @@ So the Ark is taken **twice in the whole migration** and never rotated:
 
   1. before the first landing write to Postgres — after that moment DuckDB
      stops being the only writer of truth, and "what was in DuckDB" stops
-     being reproducible;
-  2. in the same deploy that removes DuckDB from production.
+     being reproducible (2026-08-23, deploy/step05-preflight-runbook.md);
+  2. at the start of the week of silence, from the file once nothing writes
+     it any more — web stopped, KS_DUCKDB about to go `off`. That one is
+     frozen, shipped, fetched back and verified by deploy/ark_ship.sh.
 
 WHAT GOES IN, AND WHY EACH PART IS NECESSARY
 
@@ -64,9 +66,19 @@ WHAT IS DELIBERATELY NOT HERE
 USAGE
 
     python3 deploy/ark_freeze.py --source data/backups/analytics-YYYYMMDD.duckdb \\
-                                --out    data/ark
+                                --out    /root/ark/key-api-bot
 
-    python3 deploy/ark_freeze.py --verify data/ark/20260822T120000Z
+    python3 deploy/ark_freeze.py --verify /root/ark/key-api-bot/20260822T120000Z
+
+On the host the image is what has `duckdb`, and deploy/ark_ship.sh runs both
+in it, with the file and the Ark mounted — prefer that to calling this by hand.
+
+WHERE AN ARK GOES. `--out` defaults to /root/ark/key-api-bot, outside ./data:
+the disk watchdog books growth under ./data as `other` and pages at +0.75 GB
+a week, and an Ark is a deliberate, permanent step of that size. Inside a
+container that path is the container's own layer and leaves with it, so with
+the default and no mount there the freeze is refused rather than reported
+complete. The first Ark (2026-08-23) lives in data/ark/, from before this.
 
 Only `duckdb` and the standard library. No import from `core/`, by design: this
 script must keep working after the modules it archives have been deleted.
@@ -76,6 +88,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -89,6 +102,13 @@ except ImportError:  # pragma: no cover - environment problem, not logic
     raise SystemExit(2)
 
 CHUNK = 1024 * 1024
+
+# Outside ./data, for the disk watchdog's sake; deploy/ark_ship.sh defaults to
+# the same path and a test holds the two equal.
+DEFAULT_OUT = Path("/root/ark/key-api-bot")
+
+# What a container runtime leaves at the root of every container it starts.
+CONTAINER_MARKERS = (Path("/.dockerenv"), Path("/run/.containerenv"))
 
 
 def log(msg: str, level: str = "INFO") -> None:
@@ -255,6 +275,25 @@ def _order_views(views: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return ordered
 
 
+def leaves_with_the_container(out_root: Path) -> bool:
+    """True when this runs inside a container and `out_root` is on that
+    container's own layer, so an Ark written there is gone at `docker run --rm`.
+
+    A bind mount is a mount point inside the container, so the walk up from
+    `out_root` meets one before it reaches `/` exactly when the Ark would
+    survive. Asked only of the default `--out`: that is the path a host and a
+    container read differently, and an explicit one is somebody's choice."""
+    if not any(marker.exists() for marker in CONTAINER_MARKERS):
+        return False
+    path = out_root.absolute()
+    for candidate in (path, *path.parents):
+        if candidate == Path(candidate.anchor):
+            return True
+        if os.path.ismount(candidate):
+            return False
+    return True
+
+
 def freeze(source: Path, out_root: Path) -> Path:
     if not source.exists():
         log(f"source not found: {source}", "ERROR")
@@ -262,14 +301,24 @@ def freeze(source: Path, out_root: Path) -> Path:
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     ark = out_root / stamp
-    (ark / "tables").mkdir(parents=True, exist_ok=True)
-    (ark / "views").mkdir(parents=True, exist_ok=True)
+    # Written once. An existing directory of this name is an Ark already —
+    # perhaps shipped, perhaps immutable — and a second freeze into it would
+    # leave a manifest describing files from two moments.
+    try:
+        ark.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        log(f"{ark} exists already; an Ark is never written into another", "ERROR")
+        raise SystemExit(1)
+    (ark / "tables").mkdir()
+    (ark / "views").mkdir()
 
     log(f"source  {source}  ({source.stat().st_size / 1024**2:,.0f} MB)")
     log(f"ark     {ark}")
 
-    # Read-only, and from a backup rather than the live file: copying the live
-    # database yields a torn file that looks exactly like corruption.
+    # Read-only, and never from a file somebody is writing: a copy taken under
+    # a writer is torn and looks exactly like corruption. A nightly backup is
+    # static by construction; the live file is static only once web has
+    # stopped, and deploy/ark_ship.sh proves that by hashing it either side.
     conn = duckdb.connect(str(source), read_only=True)
     duckdb_version = conn.execute("PRAGMA version").fetchone()[0]
 
@@ -464,7 +513,10 @@ convenience.
 
 ## Check it is intact
 
-    python3 ark_freeze.py --verify .
+    python3 ../ark_freeze.py --verify .
+
+(An archive made by deploy/ark_ship.sh carries ark_freeze.py beside this
+directory. Otherwise it is deploy/ark_freeze.py in the repository.)
 
 Three levels: file checksums, then the frozen database's own counts, then —
 the one that matters — replaying `schema.sql` into an empty engine and reading
@@ -482,9 +534,12 @@ see the presence checks in `core/data_quality.py`.
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--source", type=Path,
-                    help="database file to freeze; use a nightly backup, never the live file")
-    ap.add_argument("--out", type=Path, default=Path("data/ark"),
-                    help="root directory for Arks (default: data/ark)")
+                    help="database file to freeze: a nightly backup, or the live file "
+                         "once nothing writes it (web stopped) — never one being written")
+    ap.add_argument("--out", type=Path, default=None,
+                    help=f"root directory for Arks (default: {DEFAULT_OUT}, outside "
+                         f"./data, whose growth the disk watchdog pages on; inside a "
+                         f"container it must be a mount, or the Ark leaves with it)")
     ap.add_argument("--verify", type=Path,
                     help="verify an existing Ark directory and exit")
     args = ap.parse_args()
@@ -493,7 +548,15 @@ def main() -> None:
         raise SystemExit(verify(args.verify))
     if not args.source:
         ap.error("--source is required unless --verify is given")
-    freeze(args.source, args.out)
+    out_root = args.out
+    if out_root is None:
+        out_root = DEFAULT_OUT
+        if leaves_with_the_container(out_root):
+            log(f"{out_root} is inside this container and not a mount: the Ark "
+                f"would be gone when it exits. Mount a host directory and pass "
+                f"--out, or run deploy/ark_ship.sh", "ERROR")
+            raise SystemExit(2)
+    freeze(args.source, out_root)
 
 
 if __name__ == "__main__":
