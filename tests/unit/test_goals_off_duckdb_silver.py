@@ -1,4 +1,4 @@
-"""The goal calculators stop reading DuckDB Silver (DN-12, a bridge).
+"""The goal calculators stop reading DuckDB Silver (DN-12), and read Silver.
 
 Seasonality, YoY, weekly patterns, the growth cap and the two history reads of
 `generate_smart_goals` narrowed `orders` through an EXISTS over DuckDB
@@ -7,32 +7,35 @@ every newer order; the next compaction empties it, the EXISTS matches nothing,
 and `calculate_yoy_growth` wrote its 0.10 placeholder over the measured rate —
 which the hourly full replace carried into Postgres.
 
-The replacement renders the one definition, `silver_sales_type_case`, over
-`orders o`. Four things are proved here:
+DN-12 replaced it with a bridge — `silver_sales_type_case` rendered over
+DuckDB `orders` — and chain 7b-2 with `{silver_orders}` through the goal
+router, whose engine is `KS_READ_GOALS`'. Chain 7b-4 deleted the bridge, and
+with it the tests that compared it against the Silver EXISTS, its compaction
+shape and the tripwire that held chains 3 and 5 while it was rendered. What
+stays here proves the Silver history and what never depended on the bridge:
 
-  * **equivalence** — on every branch of that CASE, it selects exactly the order
-    ids the Silver EXISTS selected while Silver was current, and the calculators
-    built on it answer exactly what they answered before;
-  * **compaction shape** — with `silver_orders` emptied, nothing moves;
+  * **the shared fixtures** — the equivalence fixture (one manager per branch
+    of the sales-type CASE) and the three-year history;
   * **empty history** — the placeholder never overwrites a stored rate;
-  * **the tripwire** — the bridge reads DuckDB `orders`, `managers` and
-    `manager_classifications`, so it is right only while those chains have not
-    moved. The test fails the moment one of them is registered as a write
-    chain while `goals.py` still renders the DuckDB case.
+  * **the forecast signal**, **what the smart goal narrows to**, and **every
+    calculator** — seasonality, YoY yearly and per month, the weekly weights
+    and the cap, for every sales type — against numbers written out here, in
+    Python. The last replaces the comparison with the bridge's own bodies,
+    which was the only independent answer the Silver bodies had.
 
-The forecast signal's two-engine test lives with its siblings in
-`tests/integration/test_goals_two_engines.py`.
+`tests/unit/test_goals_history_silver.py` holds the Silver selection and the
+retired switch; the two-engine half is in
+`tests/integration/test_goals_history_two_engines.py`.
 """
 from __future__ import annotations
 
-import ast
 import asyncio
 import logging
+import math
 import statistics
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -48,23 +51,8 @@ from core.duckdb_constants import (
 from core.duckdb_store import DuckDBStore
 from core.models import OrderStatus
 
-REPO = Path(__file__).resolve().parents[2]
-GOALS = REPO / "core" / "repositories" / "goals.py"
 KYIV = ZoneInfo("Europe/Kyiv")
 TIMEOUT_S = 60
-
-# The old filter, verbatim, kept here as the reference the new predicate is
-# measured against. It lived in `DuckDBStore._build_sales_type_filter`.
-def _silver_exists(sales_type: str):
-    if sales_type == "all":
-        return "1=1", []
-    return ("EXISTS (SELECT 1 FROM silver_orders sv "
-            "WHERE sv.id = o.id AND sv.sales_type = ?)", [sales_type])
-
-
-def _new(sales_type: str):
-    from core.repositories.goals import _orders_sales_type_predicate
-    return _orders_sales_type_predicate(sales_type)
 
 
 # ─── The equivalence fixture ────────────────────────────────────────────────
@@ -173,12 +161,6 @@ async def _seed_equivalence(store, scenario: str) -> None:
     await store.refresh_warehouse_layers(trigger="manual")
 
 
-def _ids(conn, predicate):
-    clause, params = predicate
-    return {r[0] for r in conn.execute(
-        f"SELECT o.id FROM orders o WHERE {clause}", params).fetchall()}
-
-
 @pytest_asyncio.fixture
 async def store(tmp_path):
     s = DuckDBStore(db_path=tmp_path / "goals.duckdb")
@@ -187,34 +169,6 @@ async def store(tmp_path):
         yield s
     finally:
         await s.close()
-
-
-class TestTheNewPredicateSelectsWhatSilverSelected:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("scenario", sorted(EXPECTED))
-    async def test_every_sales_type_on_every_branch(self, store, scenario):
-        await _seed_equivalence(store, scenario)
-        async with store.connection() as conn:
-            silver_rows = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
-            assert silver_rows == len(ORDERS), "Silver was not built — nothing compared"
-            for sales_type in (*KNOWN_SALES_TYPES, "all"):
-                old = _ids(conn, _silver_exists(sales_type))
-                new = _ids(conn, _new(sales_type))
-                assert new == old, (scenario, sales_type, sorted(new ^ old))
-                expected = (ALL_IDS if sales_type == "all"
-                            else EXPECTED[scenario][sales_type])
-                assert new == expected, (scenario, sales_type, sorted(new ^ expected))
-
-    @pytest.mark.asyncio
-    async def test_the_partition_is_whole(self, store):
-        """Every order lands in exactly one sales_type, so no branch is empty
-        by accident and the four sets above cannot overlap."""
-        await _seed_equivalence(store, "classified")
-        async with store.connection() as conn:
-            seen = [_ids(conn, _new(t)) for t in KNOWN_SALES_TYPES]
-        assert set().union(*seen) == ALL_IDS
-        assert sum(len(s) for s in seen) == len(ALL_IDS)
-        assert all(seen), "a sales type selected nothing — the fixture lost a branch"
 
 
 class TestTheSummaryFallbackReadsTheRowsOwnSalesType:
@@ -337,59 +291,6 @@ async def _smart(store, sales_type):
         store.recalculate_goal_tables(include_weekly=True), TIMEOUT_S)
     return _without_clock(await asyncio.wait_for(
         store.generate_smart_goals(2026, 10, sales_type), TIMEOUT_S))
-
-
-class TestTheCalculatorsAnswerWhatTheyAnsweredBefore:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("sales_type", ["retail", "b2b"])
-    async def test_through_the_new_predicate_and_through_the_silver_exists(
-        self, store, sales_type,
-    ):
-        """OD-14: the bridge changes where the answer is read, never the answer.
-        The same calculators, once through the old EXISTS and once through the
-        new predicate, over a current Silver."""
-        await _seed_history(store)
-        new = await _calculators(store, sales_type)
-        with patch("core.repositories.goals._orders_sales_type_predicate",
-                   _silver_exists):
-            old = await _calculators(store, sales_type)
-        assert new == old
-        seasonality, yoy, _weekly, _caps = new
-        assert len(seasonality) == 12, "the fixture no longer reaches every month"
-        assert yoy["sample_size"] >= 1, "no pair of full years — YoY compared nothing"
-
-
-class TestCompactionShape:
-    """`silver_orders` emptied — what a compaction leaves after step 13."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
-    async def test_nothing_moves_when_silver_is_empty(self, store, sales_type):
-        await _seed_history(store)
-        before = await _calculators(store, sales_type)
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM silver_orders")
-        after = await _calculators(store, sales_type)
-        assert after == before
-
-        seasonality, yoy, weekly, _caps = after
-        assert len(seasonality) == 12
-        assert yoy["sample_size"] >= 1 and yoy["overall_yoy"] != 0.10
-        assert all(len(weekly[m]) == 5 for m in range(1, 13))
-
-    @pytest.mark.asyncio
-    async def test_the_smart_goal_does_not_move_either(self, store):
-        """`generate_smart_goals` read the same filter at two more sites — the
-        growth cap and last year's month — and persists the three tables it
-        recomputes. Gold is left alone: only Silver is emptied here."""
-        await _seed_history(store)
-        before = await _smart(store, "retail")
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM silver_orders")
-        after = await _smart(store, "retail")
-        assert after == before
-        assert before["monthly"]["lastYearRevenue"] > 0
-        assert before["monthly"]["recent3MonthAvg"] > 0
 
 
 class TestAnEmptyHistoryLeavesTheStoredRateAlone:
@@ -567,12 +468,10 @@ class TestTheForecastSignal:
 
 # ─── What the smart goal narrows to, in written-out numbers ─────────────────
 #
-# `TestTheCalculatorsAnswerWhatTheyAnsweredBefore` compares the old filter with
-# the new one by patching the predicate, and `TestCompactionShape` compares a
-# store with itself before and after — so a site that stops calling the
-# predicate at all loses its filter on both sides and passes both (DN-12
-# review, mutations x1, x2 and cap). These expect numbers computed here, in
-# Python, from the rows as `_history_rows` wrote them.
+# A comparison of one history against another passes when both lose a filter
+# — DN-12's review found three sites that did (mutations x1, x2 and cap). These
+# expect numbers computed here, in Python, from the rows as `_history_rows`
+# wrote them, so a Silver body that stops narrowing fails on its own.
 
 RETURN_STATUSES = frozenset(int(s) for s in OrderStatus.return_statuses())
 
@@ -584,17 +483,25 @@ def _history_sales_type(source_id, manager_id):
     return "b2b" if manager_id == B2B_MANAGER_ID else "retail"
 
 
-def _monthly_history(sales_type):
-    """`{(year, month): (revenue, days with orders)}`, returns left out;
-    `None` is every sales type — what a read that lost its filter sees."""
-    revenue, days = defaultdict(Decimal), defaultdict(set)
+def _history_days(sales_type):
+    """`(Kyiv date, total)` for every order the history counts, returns left
+    out; `None` is every sales type — what a read that lost its filter sees,
+    and what `'all'` asks for."""
     for _oid, src, status, total, when, mgr in _history_rows():
         if status in RETURN_STATUSES:
             continue
         if sales_type is not None and _history_sales_type(src, mgr) != sales_type:
             continue
-        day = when.date()   # `when` is Kyiv-aware, so this is the Kyiv date
-        revenue[(day.year, day.month)] += Decimal(str(total))
+        # `when` is Kyiv-aware, so this is the Kyiv date.
+        yield when.date(), Decimal(str(total))
+
+
+def _monthly_history(sales_type):
+    """`{(year, month): (revenue, days with orders)}`, returns left out;
+    `None` is every sales type — what a read that lost its filter sees."""
+    revenue, days = defaultdict(Decimal), defaultdict(set)
+    for day, total in _history_days(sales_type):
+        revenue[(day.year, day.month)] += total
         days[(day.year, day.month)].add(day)
     return {k: (float(revenue[k]), len(days[k])) for k in revenue}
 
@@ -642,14 +549,12 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
             "a clamped cap cannot show a filter being lost")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("history", ["bridge", "silver"])
     @pytest.mark.parametrize("sales_type", ["retail", "b2b"])
     async def test_last_year_the_recent_months_and_the_cap(
-        self, store, monkeypatch, sales_type, history,
+        self, store, sales_type,
     ):
-        """Under both histories (chain 7b-2): numbers written out here, so a
-        Silver body that lost its filter fails as a bridge one did."""
-        monkeypatch.setenv("KS_GOALS_HISTORY", history)
+        """Numbers written out here, so a Silver body that lost its filter
+        fails as a bridge one did (mutations x1, x2 and cap)."""
         await _seed_history(store)
         monthly = (await _smart(store, sales_type))["monthly"]
         year, month = self.TARGET
@@ -661,11 +566,9 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
             _expected_cap(sales_type, month), abs=1e-4)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("history", ["bridge", "silver"])
-    async def test_the_cap_for_every_month(self, store, monkeypatch, history):
+    async def test_the_cap_for_every_month(self, store):
         """December has three years in the fixture and so two pairs — the one
         month where the standard deviation is not zero."""
-        monkeypatch.setenv("KS_GOALS_HISTORY", history)
         await _seed_history(store)
         caps = [await store._dynamic_growth_cap(m, "retail")
                 for m in range(1, 13)]
@@ -673,156 +576,194 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
             [_expected_cap("retail", m) for m in range(1, 13)], rel=1e-9)
 
 
-# ─── The tripwire ───────────────────────────────────────────────────────────
+# ─── Every calculator, in written-out numbers ───────────────────────────────
 #
-# The bridge reads three DuckDB tables. Once any of them changes hands, DuckDB's
-# copy freezes, and retail goals silently diverge from Postgres Silver at the
-# first reclassification (critique 8). Chain 5 (managers, classifications) and
-# chain 3 (orders) must therefore not MOVE before the chain 7b port — or before
-# this predicate is re-pointed at Postgres — and this is what enforces it.
-#
-# Moving, not registering. Chain 3 registered on 2026-10-01 with its flag off:
-# its writes still go to DuckDB, so the bridge reads what it always read. What
-# must hold is that no such chain can move while this file renders the DuckDB
-# case, so every chain declaring a bridge table must name the bridge in its own
-# `unmet_precondition` — an unmet precondition holds an unlatched chain on
-# DuckDB whatever its flag says (`core.write_chains._chain_state`).
+# Until chain 7b-4 the Silver bodies of seasonality, YoY and the weekly
+# weights were held to the bridge's separately written bodies
+# (`TestTheAnswersAreTheSame`). The bridge is gone, and the two-engine test
+# runs one text on two engines, so a mistake in that text answers alike on
+# both. Here the same arithmetic is done in Python from the rows
+# `_history_rows` wrote — what `_expected_cap` already did for the cap, done
+# for the rest — so a Silver body that computes the wrong thing fails on its
+# own. Review mutations (7b-4): MS2 `MIN(revenue) AS max_revenue`, MS3 the
+# monthly YoY divided by `curr.revenue`, MS5 the index over `max_revenue`,
+# and `LEAST(4, …)` in the weekly body.
 
-PREDICATE_TABLES = frozenset(
-    {"bronze.orders", "bronze.managers", "app.manager_classifications"})
+MONEY = 0.0101     # the answer rounds to the cent
+RATIO = 1.01e-4    # and these to four places
 
-
-def _renders_duckdb_case(source: str) -> list[int]:
-    """Lines calling `silver_sales_type_case` for DuckDB — explicitly, by
-    keyword, or through the default, which is DuckDB."""
-    lines = []
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name != "silver_sales_type_case":
-            continue
-        args = list(node.args) + [k.value for k in node.keywords if k.arg == "dialect"]
-        if not args or (isinstance(args[0], ast.Name) and args[0].id == "DUCKDB") \
-                or (isinstance(args[0], ast.Constant) and args[0].value is None):
-            lines.append(node.lineno)
-    return lines
+# The weights a month or week without orders is filled with, written out
+# rather than imported from the module under test.
+DEFAULT_WEEKLY_WEIGHTS = {1: 0.23, 2: 0.23, 3: 0.23, 4: 0.23, 5: 0.08}
 
 
-def _declared_chain_tables() -> dict[str, frozenset]:
-    """`{module: CHAIN_TABLES}` for every chain — registered, and also any
-    module under `core/` that declares the name, parsed rather than imported,
-    so a chain that forgot to register cannot slip past."""
-    from core.write_chains import WRITE_CHAINS, chain_name
+def _history_filter(sales_type):
+    """A sales type as `_history_days` takes it: `'all'` is every one."""
+    return None if sales_type == "all" else sales_type
 
-    out = {chain_name(c): frozenset(c.CHAIN_TABLES) for c in WRITE_CHAINS}
-    for path in (REPO / "core").rglob("*.py"):
-        for node in ast.parse(path.read_text(encoding="utf-8")).body:
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if any(isinstance(t, ast.Name) and t.id == "CHAIN_TABLES" for t in targets) \
-                        and node.value is not None:
-                    tables = {n.value for n in ast.walk(node.value)
-                              if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-                    out.setdefault(path.stem, frozenset(tables))
+
+def _weighted_by_recency(rates):
+    """The oldest pair weighs 1.0 and the newest 2.0, linear between."""
+    if len(rates) == 1:
+        return rates[0]
+    weights = [1.0 + i / (len(rates) - 1) for i in range(len(rates))]
+    return sum(r * w for r, w in zip(rates, weights)) / sum(weights)
+
+
+def _expected_seasonality(sales_type):
+    """Per calendar month, over the years in which it had 20 days of orders
+    or more: the mean, the least and the greatest year, how many, their
+    sample deviation, and the mean over the mean of every month's mean."""
+    by_month = defaultdict(list)
+    history = _monthly_history(_history_filter(sales_type))
+    for (_year, month), (revenue, days) in sorted(history.items()):
+        if days >= 20:
+            by_month[month].append(revenue)
+    if not by_month:
+        return {}
+    means = {month: statistics.mean(r) for month, r in by_month.items()}
+    grand = statistics.mean(means.values())
+    out = {}
+    for month, revenues in sorted(by_month.items()):
+        n = len(revenues)
+        out[month] = {
+            "month": month,
+            "avg_revenue": means[month],
+            "min_revenue": min(revenues),
+            "max_revenue": max(revenues),
+            "sample_size": n,
+            "std_dev": statistics.stdev(revenues) if n > 1 else 0.0,
+            "seasonality_index": means[month] / grand,
+            "confidence": "high" if n >= 3 else "medium" if n >= 2 else "low",
+        }
     return out
 
 
-def _tripped(chains: dict[str, frozenset], goals_source: str) -> dict[str, list[str]]:
-    rendered = _renders_duckdb_case(goals_source)
-    if not rendered:
-        return {}
-    return {name: sorted(tables & PREDICATE_TABLES)
-            for name, tables in chains.items() if tables & PREDICATE_TABLES}
+def _expected_yoy(sales_type):
+    """Full years — eleven months with orders or more — paired in order, and
+    per calendar month the consecutive years with 25 days of orders each,
+    every rate `(this - last) / last`; both weighted by recency. The fixture
+    ends before the running Kyiv year, so no year is left out for that."""
+    history = _monthly_history(_history_filter(sales_type))
+    revenue, months = defaultdict(Decimal), defaultdict(set)
+    for (year, month), (month_revenue, _days) in history.items():
+        revenue[year] += Decimal(str(month_revenue))
+        months[year].add(month)
+    full = sorted(year for year in revenue if len(months[year]) >= 11)
+    rates = [float((revenue[b] - revenue[a]) / revenue[a])
+             for a, b in zip(full, full[1:]) if revenue[a] > 0]
+    monthly = {}
+    for month in range(1, 13):
+        by_year = {y: r for (y, m), (r, n) in history.items()
+                   if m == month and n >= 25}
+        pairs = [(by_year[y] - by_year[y - 1]) / by_year[y - 1]
+                 for y in sorted(by_year) if by_year.get(y - 1)]
+        if pairs:
+            monthly[month] = _weighted_by_recency(pairs)
+    return {
+        "overall_yoy": _weighted_by_recency(rates) if rates else 0.10,
+        "monthly_yoy": monthly,
+        "yearly_data": [{"year": y, "revenue": float(revenue[y])} for y in full],
+        "sample_size": len(rates),
+    }
 
 
-def _holds_itself_back(module_name: str) -> bool:
-    """Whether a chain declaring a bridge table names the bridge among its own
-    reasons not to move. Asked of the registered module, with no flag set —
-    the reason must be there whatever else is or is not met."""
-    from core.write_chains import WRITE_CHAINS, chain_name
+def _expected_weekly(sales_type):
+    """Week of month 1-5 by day (`ceil(day / 7)`, the 29th to the 31st in the
+    fifth): each week's share of its month, averaged over the months it
+    occurs in; anything unmeasured is the default."""
+    weekly = defaultdict(Decimal)
+    for day, total in _history_days(_history_filter(sales_type)):
+        weekly[(day.year, day.month, min(5, math.ceil(day.day / 7)))] += total
+    totals = defaultdict(Decimal)
+    for (year, month, _week), revenue in weekly.items():
+        totals[(year, month)] += revenue
+    shares = defaultdict(list)
+    for (year, month, week), revenue in weekly.items():
+        shares[(month, week)].append(revenue / totals[(year, month)])
+    out = {month: dict(DEFAULT_WEEKLY_WEIGHTS) for month in range(1, 13)}
+    for (month, week), share in shares.items():
+        out[month][week] = float(sum(share) / len(share))
+    return out
 
-    chain = next((c for c in WRITE_CHAINS if chain_name(c) == module_name), None)
-    if chain is None:
-        return False
-    check = getattr(chain, "unmet_precondition", None)
-    return bool(check) and "goals_bridge" in (check() or "")
 
+class TestEveryCalculatorInWrittenOutNumbers:
+    """Seasonality, YoY (yearly and per month), the weekly weights and the
+    cap, for every sales type, against the numbers above. What the Monday job
+    and the POST store is these answers column by column
+    (`test_goals_read_paths_do_not_write.py::TestWhatIsStored`), so the
+    stored rows are pinned through them."""
 
-class TestTheTripwire:
-    def test_no_chain_owning_what_the_bridge_reads_can_move(self):
-        """Mutation: drop `_goals_bridge_unmet` from chain 3's preconditions —
-        its flag would then move the orders while the calculators read them
-        out of a DuckDB that stopped receiving them."""
-        chains = _declared_chain_tables()
-        assert chains, "no write chain found — the walk is not looking"
-        tripped = _tripped(chains, GOALS.read_text(encoding="utf-8"))
-        free = sorted(name for name in tripped if not _holds_itself_back(name))
-        assert not free, (
-            f"write chain(s) {free} own tables the goal calculators still "
-            f"read from DuckDB (core/repositories/goals.py renders "
-            f"silver_sales_type_case(DUCKDB) at lines "
-            f"{_renders_duckdb_case(GOALS.read_text(encoding='utf-8'))}) and do "
-            f"not hold themselves on DuckDB while it does. Once they move, "
-            f"DuckDB's copy freezes and retail goals diverge from Postgres "
-            f"Silver at the first reclassification. Port chain 7b, re-point "
-            f"the predicate at Postgres, or name `goals_bridge` in the chain's "
-            f"unmet_precondition.")
+    def test_the_fixture_tells_each_mutation_apart(self):
+        """Otherwise the numbers below would agree with a body that made the
+        mistake, and prove nothing."""
+        assert HISTORY_END.year < date.today().year, (
+            "the running Kyiv year would drop a year from the yearly read")
+        for sales_type in ("retail", "b2b", "all"):
+            # Retail grows every year, so every month tells; b2b's amount is
+            # fixed per month, so only the months whose day counts differ do.
+            every = all if sales_type == "retail" else any
+            seasonal = _expected_seasonality(sales_type)
+            assert len(seasonal) == 12, sales_type
+            # MS2 and MS5: a month with two years that differ.
+            assert every(m["sample_size"] >= 2 and m["min_revenue"] < m["max_revenue"]
+                         and m["avg_revenue"] < m["max_revenue"]
+                         for m in seasonal.values()), sales_type
+            # MS3: dividing by this year instead of the last moves the rate.
+            assert every(abs(rate) > 0.01 for rate
+                         in _expected_yoy(sales_type)["monthly_yoy"].values()), sales_type
+            # LEAST(4, …): the 29th to the 31st are a week of their own.
+            assert abs(_expected_weekly(sales_type)[1][5]
+                       - DEFAULT_WEEKLY_WEIGHTS[5]) > 0.01, sales_type
+        retail = _expected_yoy("retail")
+        assert len(retail["monthly_yoy"]) == 12 and retail["sample_size"] == 1
+        # December has three years, so two pairs: the recency weighting shows.
+        assert sorted(y for (y, m), (_r, n) in _monthly_history("retail").items()
+                      if m == 12 and n >= 25) == [2023, 2024, 2025]
+        assert _expected_seasonality("internal") == {}, "no internal orders"
 
-    def test_today_the_owners_are_chains_3_and_5_and_both_hold_themselves_back(self):
-        """Not vacuous: the walk sees both declarations and both holds, and
-        nothing else. Chain 3 owns the orders the bridge counts and chain 5
-        the classification it decides retail by; a third owner — or either
-        one losing a table from its declaration — fails here first."""
-        tripped = _tripped(_declared_chain_tables(), GOALS.read_text(encoding="utf-8"))
-        assert tripped == {
-            "pg_orders_write": ["bronze.orders"],
-            "pg_managers_write": ["app.manager_classifications", "bronze.managers"],
-        }
-        assert _holds_itself_back("pg_orders_write")
-        assert _holds_itself_back("pg_managers_write")
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sales_type", [*KNOWN_SALES_TYPES, "all"])
+    async def test_the_calculators(self, store, sales_type):
+        await _seed_history(store)
+        seasonal = await store.calculate_seasonality_indices(sales_type)
+        yoy = await store.calculate_yoy_growth(sales_type)
+        weekly = await store.calculate_weekly_patterns(sales_type)
+        caps = [await store._dynamic_growth_cap(month, sales_type)
+                for month in range(1, 13)]
 
-    def test_chain_5_holds_itself_back(self):
-        """Not vacuous: the walk sees chain 5's declaration and its hold.
-        Mutation: drop `goals_bridge` from `pg_managers_write`'s preconditions
-        — its flag would then move the classification while the calculators
-        read it out of a DuckDB that stopped receiving it."""
-        tripped = _tripped(_declared_chain_tables(), GOALS.read_text(encoding="utf-8"))
-        assert tripped["pg_managers_write"] == [
-            "app.manager_classifications", "bronze.managers"]
-        assert _holds_itself_back("pg_managers_write")
+        want = _expected_seasonality(sales_type)
+        assert set(seasonal) == set(want), sales_type
+        for month, row in want.items():
+            got = seasonal[month]
+            for key in ("avg_revenue", "min_revenue", "max_revenue", "std_dev"):
+                assert got[key] == pytest.approx(row[key], abs=MONEY), (
+                    sales_type, month, key)
+            assert got["seasonality_index"] == pytest.approx(
+                row["seasonality_index"], abs=RATIO), (sales_type, month)
+            assert (got["month"], got["sample_size"], got["confidence"]) == (
+                month, row["sample_size"], row["confidence"]), (sales_type, month)
 
-    def test_an_unregistered_declaration_cannot_hold_itself_back(self):
-        """A module that declares a bridge table and never registered has no
-        registry to hold it — the walk parses `core/`, and this is why."""
-        assert not _holds_itself_back("pg_nobody_write")
+        want_yoy = _expected_yoy(sales_type)
+        assert yoy["sample_size"] == want_yoy["sample_size"], sales_type
+        assert yoy["overall_yoy"] == pytest.approx(want_yoy["overall_yoy"], abs=RATIO)
+        assert [y["year"] for y in yoy["yearly_data"]] == [
+            y["year"] for y in want_yoy["yearly_data"]], sales_type
+        assert [y["revenue"] for y in yoy["yearly_data"]] == pytest.approx(
+            [y["revenue"] for y in want_yoy["yearly_data"]], abs=MONEY)
+        assert set(yoy["monthly_yoy"]) == set(want_yoy["monthly_yoy"]), sales_type
+        for month, rate in want_yoy["monthly_yoy"].items():
+            assert yoy["monthly_yoy"][month] == pytest.approx(rate, abs=RATIO), (
+                sales_type, month)
 
-    def test_the_bridge_is_what_it_watches_today(self):
-        """Not vacuous: the detector sees today's rendering. When chain 7b
-        lands and this fails, delete the tripwire with the bridge."""
-        assert _renders_duckdb_case(GOALS.read_text(encoding="utf-8"))
+        want_weekly = _expected_weekly(sales_type)
+        assert {m: set(w) for m, w in weekly.items()} == {
+            m: set(w) for m, w in want_weekly.items()}, sales_type
+        for month, weeks in want_weekly.items():
+            for week, weight in weeks.items():
+                assert weekly[month][week] == pytest.approx(weight, abs=RATIO), (
+                    sales_type, month, week)
 
-    @pytest.mark.parametrize("table", sorted(PREDICATE_TABLES))
-    def test_it_trips_on_each_table(self, table):
-        source = "silver_sales_type_case(DUCKDB)"
-        assert _tripped({"chain_x": frozenset({"app.other", table})}, source) \
-            == {"chain_x": [table]}
-
-    @pytest.mark.parametrize("call", [
-        "silver_sales_type_case(DUCKDB)",
-        "silver_sales_type_case()",
-        "silver_sales_type_case(dialect=DUCKDB)",
-        "store.silver_sales_type_case(None)",
-    ])
-    def test_it_sees_every_spelling_of_duckdb(self, call):
-        assert _renders_duckdb_case(call) == [1]
-
-    def test_a_postgres_rendering_does_not_trip(self):
-        chains = {"chain_x": frozenset({"bronze.orders"})}
-        assert _tripped(chains, "silver_sales_type_case(POSTGRES)") == {}
-        assert _tripped(chains, "") == {}
-
-    def test_a_chain_elsewhere_does_not_trip(self):
-        chains = {"chain_x": frozenset({"app.manual_expenses", "bronze.offers"})}
-        assert _tripped(chains, "silver_sales_type_case(DUCKDB)") == {}
+        assert caps == pytest.approx(
+            [_expected_cap(_history_filter(sales_type), month)
+             for month in range(1, 13)], rel=1e-9)

@@ -276,7 +276,8 @@ MARCH = date(2025, 3, 1)
 async def _goals_store(tmp_path):
     """Twenty-five retail days in one month: enough for the seasonality pass
     to write a row, so "nothing written" is a claim about a table that would
-    otherwise have one."""
+    otherwise have one. Silver is built from them: the goal history is
+    Silver's since chain 7b-4 deleted the bridge over DuckDB `orders`."""
     store = await _duck(tmp_path, "goals.duckdb")
     async with store.connection() as conn:
         for n in range(25):
@@ -284,6 +285,7 @@ async def _goals_store(tmp_path):
                 "INSERT INTO orders (id, source_id, status_id, grand_total,"
                 " ordered_at, buyer_id) VALUES (?, 1, 1, 1000, ?, 9)",
                 [n + 1, datetime(2025, 3, 1 + n, 12, tzinfo=timezone.utc)])
+    await store.refresh_warehouse_layers(trigger="manual")
     return store
 
 

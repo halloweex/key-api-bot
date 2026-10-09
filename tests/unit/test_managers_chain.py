@@ -506,14 +506,13 @@ def _stand_in_chain3(mp, value) -> None:
 
 @pytest.fixture
 def every_precondition_met(flags):
-    """The four facts chain 5 waits on, each made true at its source — so a
+    """The three facts chain 5 waits on, each made true at its source — so a
     test that then breaks one exercises the real check, not a stub of it.
     Chain 3's answer is the one stand-in, at the name chain 5 asks
-    (`_stand_in_chain3`); `TestTheRealChain3` asks the real one."""
+    (`_stand_in_chain3`); `TestTheRealChain3` asks the real one. (The goal
+    bridge was a fourth, until chain 7b-4 deleted it.)"""
     from core import read_fallback, warehouse_cutover
-    from core.repositories import goals
 
-    flags.setattr(goals, "SALES_TYPE_BRIDGE_TABLES", frozenset({"bronze.orders"}))
     flags.setattr(warehouse_cutover, "_mode", "postgres")
     _stand_in_chain3(flags, _Chain3())
     flags.setattr(read_fallback, "refusing", lambda: True)
@@ -568,10 +567,27 @@ class TestThePreconditions:
         from core import pg_managers_write
 
         unmet = pg_managers_write.unmet_precondition()
-        for key in ("goals_bridge", "step13", "chain3", "read_fallback_off"):
+        for key in ("step13", "chain3", "read_fallback_off"):
             assert key in unmet, key
+        assert "goals_bridge" not in unmet
 
-    def test_with_all_four_met_the_flag_moves_the_writes(self, every_precondition_met):
+    def test_the_goal_bridge_is_no_precondition_any_more(self, every_precondition_met):
+        """Chain 7b-4 deleted the DN-12 bridge: no goal calculator reads
+        DuckDB's `managers` or `manager_classifications`, so nothing about the
+        goals holds this chain — the goal history is Silver's, and step 13
+        (a precondition here) is what makes it Postgres'. Mutation: put
+        `goals_bridge` back in `_CHECKS`, answering as it did — this chain
+        declares two tables the bridge read."""
+        from core import pg_managers_write
+
+        assert [key for key, _check in pg_managers_write._CHECKS] == [
+            "step13", "chain3", "read_fallback_off"]
+        assert not hasattr(pg_managers_write, "_goals_bridge_unmet")
+        assert pg_managers_write.unmet_precondition() is None
+        every_precondition_met.setenv(pg_managers_write.WRITE_ENV, "postgres")
+        assert pg_managers_write.mode() == "postgres"
+
+    def test_with_all_three_met_the_flag_moves_the_writes(self, every_precondition_met):
         from core import pg_managers_write
 
         assert pg_managers_write.unmet_precondition() is None
@@ -580,18 +596,13 @@ class TestThePreconditions:
         assert pg_managers_write.mode() == "postgres"
         assert pg_managers_write.reads_postgres() is True
 
-    @pytest.mark.parametrize("broken", ["goals_bridge", "step13", "chain3",
-                                        "read_fallback_off"])
+    @pytest.mark.parametrize("broken", ["step13", "chain3", "read_fallback_off"])
     def test_any_one_unmet_holds_the_flag_on_duckdb(self, every_precondition_met, broken):
-        """Mutation: remove any one of the four checks."""
+        """Mutation: remove any one of the three checks."""
         from core import pg_managers_write, read_fallback, warehouse_cutover
-        from core.repositories import goals
 
         env = every_precondition_met
-        if broken == "goals_bridge":
-            env.setattr(goals, "SALES_TYPE_BRIDGE_TABLES",
-                        frozenset({"bronze.orders", "app.manager_classifications"}))
-        elif broken == "step13":
+        if broken == "step13":
             env.setattr(warehouse_cutover, "_mode", "duckdb")
         elif broken == "chain3":
             _stand_in_chain3(env, _Chain3("duckdb"))
@@ -604,18 +615,6 @@ class TestThePreconditions:
         assert pg_managers_write.mode() == "duckdb"
         # And reads stay with the rows: a held flag writes DuckDB.
         assert pg_managers_write.reads_postgres() is False
-
-    def test_the_bridge_is_named_while_it_holds_either_table(self, every_precondition_met):
-        """Spelled `goals_bridge`, as chain 3 spells it, so the tripwire in
-        test_goals_off_duckdb_silver.py finds the hold. Mutation: check the
-        wrong table."""
-        from core import pg_managers_write
-        from core.repositories import goals
-
-        for table in ("bronze.managers", "app.manager_classifications"):
-            every_precondition_met.setattr(goals, "SALES_TYPE_BRIDGE_TABLES",
-                                           frozenset({table}))
-            assert "goals_bridge" in pg_managers_write.unmet_precondition()
 
     def test_a_build_without_chain_3_is_unmet_not_an_import_error(self, every_precondition_met):
         """Mutation: treat a missing chain 3 as met."""
@@ -660,9 +659,7 @@ class TestTheRealChain3:
     @pytest.fixture
     def others_met(self, flags):
         from core import read_fallback, warehouse_cutover
-        from core.repositories import goals
 
-        flags.setattr(goals, "SALES_TYPE_BRIDGE_TABLES", frozenset({"bronze.orders"}))
         flags.setattr(warehouse_cutover, "_mode", "postgres")
         flags.setattr(read_fallback, "refusing", lambda: True)
         flags.delenv("KS_WRITE_ORDERS", raising=False)
@@ -705,14 +702,15 @@ class TestTheRealChain3:
                             AsyncMock(side_effect=AssertionError("Postgres was asked")))
         out = await pg_managers_write.preflight()
         assert [r.split(":")[0] for r in out["reasons"]] == [
-            "goals_bridge", "step13", "chain3", "read_fallback_off"]
+            "step13", "chain3", "read_fallback_off"]
 
     @pytest.mark.asyncio
     async def test_a_reason_with_a_semicolon_is_still_one(self, flags, monkeypatch):
         """Structurally, not by every reason's wording: chain 3's goal-bridge
         reason carried a "; " and its preflight published the lever after it
-        as a precondition of its own (batch-E review). Mutation: split the
-        joined `unmet_precondition()` on "; " again."""
+        as a precondition of its own (batch-E review). That reason went with
+        the bridge (chain 7b-4); the next one with a "; " must not repeat it.
+        Mutation: split the joined `unmet_precondition()` on "; " again."""
         from unittest.mock import AsyncMock
 
         from core import pg_managers_write
@@ -720,11 +718,11 @@ class TestTheRealChain3:
         monkeypatch.setattr("core.pg.get_pool",
                             AsyncMock(side_effect=AssertionError("Postgres was asked")))
         monkeypatch.setattr(pg_managers_write, "_CHECKS", (
-            ("goals_bridge", lambda: "goals_bridge: the bridge reads it; port 7b first"),
-            ("step13", lambda: "step13: not in force")))
+            ("step13", lambda: "step13: not in force; flip step 13 first"),
+            ("chain3", lambda: "chain3: on duckdb")))
         out = await pg_managers_write.preflight()
-        assert out["reasons"] == ["goals_bridge: the bridge reads it; port 7b first",
-                                  "step13: not in force"]
+        assert out["reasons"] == ["step13: not in force; flip step 13 first",
+                                  "chain3: on duckdb"]
 
 
 # ─── The writers, as code ───────────────────────────────────────────────────
@@ -1662,7 +1660,7 @@ class TestThePreflight:
         out = await pg_managers_write.preflight()
         assert out["ok"] is False
         assert [r.split(":")[0] for r in out["reasons"]] == [
-            "goals_bridge", "step13", "chain3", "read_fallback_off"]
+            "step13", "chain3", "read_fallback_off"]
         # It only reads.
         assert not [c for c in conn.calls if c[0] in ("BEGIN", "COMMIT")]
 
@@ -2095,49 +2093,25 @@ class TestTheStatsWaitForTheOrders:
 
 
 class TestTheReviewsSmallerGuards:
-    @pytest.mark.parametrize("key", ["goals_bridge", "step13", "chain3",
-                                     "read_fallback_off"])
+    @pytest.mark.parametrize("key", ["step13", "chain3", "read_fallback_off"])
     def test_a_check_that_raises_is_keyed_by_its_precondition(
             self, every_precondition_met, key):
         """Every reason starts with the precondition's name, an unreadable one
         too. Mutation: derive the key from the function's name —
         `_read_fallback_unmet` read as "read_fallback"."""
         from core import pg_managers_write, read_fallback, warehouse_cutover
-        from core.repositories import goals
 
         def boom(*_a):
             raise OSError("unreadable")
 
-        class _Unreadable:
-            __contains__ = boom
-
         env = every_precondition_met
-        if key == "goals_bridge":
-            env.setattr(goals, "SALES_TYPE_BRIDGE_TABLES", _Unreadable())
-        elif key == "step13":
+        if key == "step13":
             env.setattr(warehouse_cutover, "writes_postgres", boom)
         elif key == "chain3":
             _stand_in_chain3(env, _Chain3(raises=OSError("x")))
         else:
             env.setattr(read_fallback, "refusing", boom)
         assert pg_managers_write.unmet_precondition() == f"{key}: could not be read (OSError)"
-
-    def test_a_chain_whose_state_cannot_be_read_counts_as_moved(self, flags):
-        """`sales_type_bridge_owners`: the louder answer for a chain over a
-        bridge table. Mutation: read an unreadable state as not moved."""
-        from core import write_chains
-        from core.repositories.goals import sales_type_bridge_owners
-
-        real = write_chains._chain_state
-
-        def state(chain):
-            if write_chains.chain_name(chain) == "pg_managers_write":
-                raise RuntimeError("unreadable")
-            return real(chain)
-
-        flags.setattr(write_chains, "_chain_state", state)
-        assert sales_type_bridge_owners() == {
-            "pg_managers_write": ("app.manager_classifications", "bronze.managers")}
 
     @pytest.mark.asyncio
     async def test_an_empty_managers_table_is_a_reason_before_the_flip(
@@ -2171,7 +2145,7 @@ class TestTheReviewsSmallerGuards:
         out = await pg_managers_write.preflight()
         assert out["ok"] is False
         assert [r.split(":")[0] for r in out["reasons"]] == [
-            "goals_bridge", "step13", "chain3", "read_fallback_off"]
+            "step13", "chain3", "read_fallback_off"]
         get_pool.assert_not_awaited()
 
 

@@ -67,10 +67,11 @@ read from a DuckDB that stops moving — and first of all, this build must
 require `LOCKOUT_REVISION` (0035), which refuses every image built before
 the chain (`chain_latch.lockout_unmet`):
 
-1. `KS_GOALS_HISTORY=silver` — the history is Silver, not the DN-12 bridge
-   over DuckDB `orders`;
-2. `KS_READ_GOALS=postgres` with `KS_PG_DSN` — under `silver`, what makes that
-   Silver Postgres's;
+1. `KS_GOALS_HISTORY` understood — unset or `silver`. The history is Silver
+   either way since chain 7b-4 deleted the DN-12 bridge; any other value
+   refuses every history read, so a recalculation could store nothing;
+2. `KS_READ_GOALS=postgres` with `KS_PG_DSN` — what makes that Silver
+   Postgres's;
 3. `KS_READ_FALLBACK=off` as configured at start — under `duckdb` a failed
    Postgres history read is answered by DuckDB, and the recalculation would
    store those numbers;
@@ -183,8 +184,7 @@ def _unmet_clauses() -> List[str]:
 
     unmet: List[str] = []
     try:
-        if pg_goals_read.history_mode() != pg_goals_read.SILVER:
-            unmet.append(f"{pg_goals_read.HISTORY_ENV} is not {pg_goals_read.SILVER}")
+        pg_goals_read.history_mode()    # `silver`, or it raises (chain 7b-4)
     except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
         unmet.append(f"{pg_goals_read.HISTORY_ENV} is not understood ({exc})")
     try:

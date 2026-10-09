@@ -1398,19 +1398,20 @@ def test_the_rehearsal_sets_every_switch_the_cutover_names(monkeypatch):
     read supplies taken as met, so a precondition main adds and the list
     lacks fails here and not an hour into a run: chain 7b's
     `KS_GOALS_HISTORY=silver` did exactly that — `no flip: mode=duckdb
-    unmet=[goals_bridge]`.
+    unmet=[goals_bridge]`. (Chain 7b-4 retired that precondition with the
+    bridge; WEB_ENV keeps the line, which every image understands.)
     Kills: "WEB_ENV drops a switch the cutover requires"."""
     from core import warehouse_cutover as wc
 
     facts = wc.Facts(revision="r", required_revision="r", expenses_backfilled=True,
-                     bridge_owners={}, open_retired={}, od10_doors=())
+                     open_retired={}, od10_doors=())
     starts = _web_starts()
     f1 = _phase_env(starts["-e KS_WRITE_WAREHOUSE=postgres -e KS_READ_FALLBACK=off"], monkeypatch)
     assert [u.key for u in wc.evaluate_preconditions(f1, facts)] == []
     phase0 = _phase_env(starts["-e KS_WRITE_WAREHOUSE=postgres"], monkeypatch)
     assert [u.key for u in wc.evaluate_preconditions(phase0, facts)] == ["read_fallback_off"]
     assert wc.evaluate_preconditions(
-        {**f1, "KS_GOALS_HISTORY": "bridge"}, facts)[0].key == "goals_bridge"
+        {**f1, "KS_UTM_PARSE": "duckdb"}, facts)[0].key == "utm_parse_postgres"
 
 
 def test_the_flip_is_read_the_way_p1_reads_it():

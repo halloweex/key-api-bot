@@ -150,7 +150,9 @@ jobs:
       # `KS_PG_DSN` is the one addition, and it *unskips* rather than changes:
       # every test that reads it creates and drops its own rows in the
       # throwaway database. `KS_PG_READONLY_DSN` is the same database as the
-      # read-only role, and only the two dry runs' tests read it (UTM, goals).
+      # read-only role, and only the UTM reclassify dry run's tests and chain
+      # 1's pre-flip TEMPORARY case read it (the goals dry run was retired
+      # with the bridge, chain 7b-4).
       #
       # `-rs` so the run reports what it skipped, and the next step reads that
       # rather than running the suite a second time to ask.

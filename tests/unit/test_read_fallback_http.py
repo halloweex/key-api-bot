@@ -500,13 +500,9 @@ def _every_switch_on(monkeypatch) -> None:
         module = importlib.import_module(f"core.{name}")
         monkeypatch.setenv(module.ENV,
                            "clickhouse" if name.startswith("ch_") else "postgres")
-    # Not an engine switch, so the walk does not find it: which orders the
-    # goal calculators count (chain 7b-2). Under `silver` their history reads
-    # go through the goal router, and so can be refused; under the default
-    # bridge they read DuckDB `orders` and are never asked.
-    from core import pg_goals_read
-
-    monkeypatch.setenv(pg_goals_read.HISTORY_ENV, pg_goals_read.SILVER)
+    # `KS_GOALS_HISTORY` is not set: since chain 7b-4 the goal calculators'
+    # history is Silver's whatever it says (and refused unless unset or
+    # silver), read through the goal router, so it can be refused here.
 
 
 class TestEveryRoute:
@@ -565,10 +561,11 @@ class TestEveryRoute:
         assert len(routes) >= 90, len(routes)
         assert len(refused_routes) >= 55, refused_routes
         # Every goal route refuses, the three calculator GETs included: their
-        # history goes through the router under KS_GOALS_HISTORY=silver.
-        # Read off the app by prefix, never listed. Mutation M18: drop the
-        # setenv in `_every_switch_on`, and /goals/seasonality, /growth and
-        # /weekly-patterns answer from DuckDB `orders` — named here.
+        # history goes through the router — Silver, the only history since
+        # chain 7b-4. Read off the app by prefix, never listed. Mutation M18:
+        # read a calculator's history on the store's own connection again
+        # (the deleted bridge's way), and its route answers from DuckDB —
+        # named here.
         goal_routes = {e.path for e in routes if e.path.startswith("/api/goals")}
         assert {"/api/goals/seasonality", "/api/goals/growth",
                 "/api/goals/weekly-patterns", "/api/goals/smart",

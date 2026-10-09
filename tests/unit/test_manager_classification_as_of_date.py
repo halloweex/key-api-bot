@@ -11,10 +11,11 @@ The second class of test here covers the other half of the same seam. Silver
 stores the answer; ten of the eleven `_build_sales_type_filter` call sites used
 to re-derive it from `manager_id`, which is a second definition wearing a
 different hat — and the two had already diverged over source 5. That filter
-then read Silver's stored column, and since DN-12 the goal calculators — its
-last consumers — render the one definition, `silver_sales_type_case`, over
-`orders` instead (`core/repositories/goals._orders_sales_type_predicate`), so
-they stop depending on a Silver that step 13 freezes. Either way it is one
+then read Silver's stored column; from DN-12 the goal calculators — its last
+consumers — rendered the one definition, `silver_sales_type_case`, over DuckDB
+`orders` (a bridge), and since chain 7b-4 deleted that bridge they read
+Silver's column again, through the goal router
+(`core/repositories/goals._silver_history_where`). Either way it is one
 definition, never a second copy, and the exhibition case below is the one
 that proves it.
 """
@@ -165,7 +166,7 @@ class TestConsumersUseTheOneDefinition:
         On production that was 176 orders and ₴267,416 counted as exhibition by
         Gold and as retail by every endpoint that went through this filter.
         """
-        from core.repositories.goals import _orders_sales_type_predicate
+        from core.repositories.goals import _silver_history_where
 
         store = await _make_store(tmp_path)
         try:
@@ -180,9 +181,9 @@ class TestConsumersUseTheOneDefinition:
             await store.refresh_warehouse_layers(trigger="manual")
 
             def ids(sales_type):
-                clause, params = _orders_sales_type_predicate(sales_type)
+                clause, params = _silver_history_where(sales_type)
                 return [r[0] for r in conn.execute(
-                    f"SELECT o.id FROM orders o WHERE {clause} ORDER BY o.id",
+                    f"SELECT s.id FROM silver_orders s WHERE {clause} ORDER BY s.id",
                     params).fetchall()]
 
             async with store.connection() as conn:
@@ -196,11 +197,11 @@ class TestConsumersUseTheOneDefinition:
 
     def test_an_unknown_sales_type_is_refused_rather_than_read_as_retail(self):
         """It used to fall through the else and quietly mean 'retail'."""
-        from core.repositories.goals import _orders_sales_type_predicate
+        from core.repositories.goals import _silver_history_where
 
         with pytest.raises(ValueError):
-            _orders_sales_type_predicate("wholsale")
-        assert _orders_sales_type_predicate("all") == ("1=1", [])
+            _silver_history_where("wholsale")
+        assert _silver_history_where("all") == ("NOT s.is_return", [])
 
 
 class TestTheClassificationWriteIsAllOrNothing:

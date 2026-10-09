@@ -153,8 +153,9 @@ elif [ "$BUYERS_ON" = "1" ] && [ "$BUYERS_LATCHED" = "unknown" ]; then
 fi
 
 # Chain 5 (`pg_managers_write`) cannot be judged held from here: its
-# preconditions are the goal bridge, step 13, chain 3 and KS_READ_FALLBACK,
-# and the first is a code constant only web can read. So a flag that says
+# preconditions are step 13, chain 3 and KS_READ_FALLBACK, and the first two
+# are verdicts only web holds (the goal bridge, a code constant, was one until
+# chain 7b-4). So a flag that says
 # postgres on a chain that has not latched is `pending` — the first tick after
 # the flip writes, and latches, within a minute — and M1 names where web
 # publishes why it is held. Latched outranks the flag, as everywhere here.

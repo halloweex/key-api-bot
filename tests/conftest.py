@@ -172,6 +172,20 @@ def _duckdb_switch_on_and_forgotten(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _goals_history_unset(monkeypatch):
+    """Every test starts with KS_GOALS_HISTORY unset — Silver, the only goal
+    history since chain 7b-4 retired the variable.
+
+    A developer's shell or `.env` still carrying `KS_GOALS_HISTORY=bridge`
+    (the default and the rollback before 7b-4) would refuse every goal
+    history read, and a test would fail for a reason CI never sees. Tests
+    that mean a value set it after this ran."""
+    from core import pg_goals_read
+
+    monkeypatch.delenv(pg_goals_read.HISTORY_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _never_the_real_chain_latch(monkeypatch, tmp_path):
     """No test may latch a write chain in the real data directory.
 
