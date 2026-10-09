@@ -1976,7 +1976,12 @@ lost (`order_owner_row_without_marker`'s state), naming
 `data/write-chain-owners/pg_orders_write` and `scripts/chain_copy_back.py
 orders` — and FAILs the same with `orders_on=pending`, where a precondition
 unmet keeps the mirror shipping and the flag is not the lever, rather than
-read it as a flip waiting for its first write.
+read it as a flip waiting for its first write. Unless the owner rows are
+dated after `markers_read_at`, the moment the script took before reading any
+marker: a healthy first write takes the marker before it claims the rows, so
+those are the chain latching while the report ran — flip day's +2 min run,
+some thirty psql sessions after the marker read — and O1 is UNKNOWN, "run the
+report again", never a FAIL naming a rollback tool.
 `stage4_soak.sh` passes `orders_on=pending` for a flag the chain has not
 latched under, chain 5's way. The restore drill counts the four tables once
 an owner row names one: orders, expenses and misses `grows`, line items
@@ -2123,7 +2128,9 @@ and a NULL `set_at` as `chain_required_column_null` — one read,
 replica stayed away; with `managers_on=0` or `pending` and owner rows
 standing, a FAIL as a lost marker naming
 `data/write-chain-owners/pg_managers_write` and
-`scripts/chain_copy_back.py managers`; a failure counts for its day) and M2
+`scripts/chain_copy_back.py managers` — at `pending` only for rows older than
+the script's `markers_read_at`, since newer ones are the first tick latching
+during the report, UNKNOWN; a failure counts for its day) and M2
 (the shape and `last_sync_managers` under 26 h);
 `stage4_soak.sh` passes `managers_on=pending` for a flag the chain has not
 latched under, since only web holds the step-13 and chain-3 verdicts. The restore drill
