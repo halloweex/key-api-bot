@@ -46,6 +46,15 @@ case "$1" in
     exec)
         if [ "$2" = "keycrm-web" ]; then
             if [ "$3" = "test" ]; then
+                # When a test asks, the moment of every marker read, and the
+                # first one waits past a second boundary, so a clock the script
+                # took after it cannot fall in the same second.
+                if [ -n "${FAKE_MARKER_CLOCK:-}" ]; then
+                    first=""
+                    [ -s "$FAKE_MARKER_CLOCK" ] || first=1
+                    date -u +%s >> "$FAKE_MARKER_CLOCK"
+                    [ -z "$first" ] || sleep 1.1
+                fi
                 # `test -f <marker>`: the latch, read the way the script reads it.
                 case "$5" in
                     */pg_inventory_write) [ -n "${FAKE_INVENTORY_LATCHED:-}" ] && exit 0 ;;
@@ -429,6 +438,43 @@ class TestChain3:
         assert labels == ["O1 orders copies stood down", "O2 orders watermark",
                           "O3 order versions", "O4 half-written orders",
                           "O5 orders integrity"], labels
+
+
+class TestTheMarkerClock:
+    """O1 and M1 judge owner rows standing beside a marker the script found
+    missing, and the script reads the markers some thirty psql sessions before
+    those two files run. A healthy first write takes the marker and then
+    claims the owner rows, so the checks need the moment the markers were
+    read: owner rows dated after it are a chain that latched during the
+    report, not a lost marker (chain 3 soak review, 2026-10-10)."""
+
+    @staticmethod
+    def _read_at(run):
+        stamps = {m.group(1) for c in run.psql
+                  for m in [re.search(r"markers_read_at=(\S*)", c)] if m}
+        assert len(stamps) == 1 and len(run.psql) == len(FILES), (stamps, run.psql)
+        return stamps.pop()
+
+    def test_it_is_passed_in_utc_to_the_second(self, healthy):
+        stamp = self._read_at(healthy)
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stamp), stamp
+
+    def test_it_is_taken_before_any_marker_is_read(self, tmp_path):
+        """Truncated to the second it can only err early, which reads a latch
+        in that second as taken during the report: UNKNOWN, never a false
+        FAIL. Mutation: take it after the marker reads, beside the loop that
+        runs the checks — the fake's first read waits past a second boundary,
+        so this fails."""
+        from datetime import datetime, timezone
+
+        clock = tmp_path / "marker-clock"
+        run = _run(tmp_path, FAKE_MARKER_CLOCK=str(clock))
+        read_at = datetime.strptime(self._read_at(run), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+        reads = [int(x) for x in clock.read_text().split()]
+        assert any(c.endswith("/pg_orders_write") for c in run.calls), run.calls
+        assert any(c.endswith("/pg_managers_write") for c in run.calls), run.calls
+        assert reads and read_at <= min(reads), (read_at, reads)
 
 
 class TestChain9:

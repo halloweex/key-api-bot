@@ -57,6 +57,10 @@ VARIABLES = {"inventory_on": "0", "inventory_flip_at": "", "dq_pg_warehouse_on":
 VARIABLES.update({"managers_on": "0", "managers_flip_at": ""})
 # Chain 3's five (32_o1 … 36_o5).
 VARIABLES.update({"orders_on": "0", "orders_flip_at": ""})
+# When the script read the latch markers: O1 and M1 tell a latch taken during
+# the report from a lost marker by it (chain 3 soak review). Empty judges every
+# owner row as older, which is what the scenarios below mean unless they say.
+VARIABLES.update({"markers_read_at": ""})
 RUN_AS_OWNER = "-- soak:run-as ks_app"
 # The two histories the canary's 30 h watch rests on: DN-21's and OD-08's.
 HISTORY_CHECKS = (
@@ -375,6 +379,8 @@ class TestEveryCheckRuns:
          "orders_on": "unknown"},
         {"inventory_on": "0", "dq_pg_warehouse_on": "0", "buyers_on": "held",
          "buyers_held_by": "KS_SMS_STORE", "orders_on": "pending"},
+        {"managers_on": "pending", "orders_on": "pending",
+         "markers_read_at": "2030-06-05T08:59:30Z"},
         # The shadow chains (OD-02 (c)): every state the script can pass.
         {"dq_journal_direct": "1", "watchdogs_on": "1", "weekly_ledger_on": "1",
          "traffic_ledger_on": "1"},
@@ -2232,6 +2238,30 @@ class TestM1ManagersCopyStoodDown:
         assert "since 03.06 12:00 Kyiv" in detail, detail
 
     @pytest.mark.asyncio
+    async def test_a_latch_taken_while_the_report_ran_is_not_a_lost_marker(self, pool):
+        """The script reads the markers first and runs M1 some thirty psql
+        sessions later, and a healthy first write takes the marker before it
+        claims the owner rows (`pg_managers_write`: `_latch()`, then the
+        transaction whose `now()` dates them). So owner rows dated after the
+        script read the marker are a chain that latched during the report —
+        flip day, the first tick — not a marker lost: UNKNOWN, run it again.
+        Rows dated before the read are the lost marker still. Mutation: judge
+        `pending` with owner rows as FAIL whenever they were written (the
+        review reproduced exactly that against a latch 10 seconds old)."""
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager_owners(conn, ago(seconds=10))
+            v, detail = await verdict(conn, self.FILE, managers_on="pending",
+                                      markers_read_at=ago(seconds=40).isoformat())
+            assert v == "UNKNOWN", detail
+            assert "latched while this report ran" in detail, detail
+            assert "run the report again" in detail, detail
+            assert "11:59:50" in detail and "11:59:20" in detail, detail
+            v, detail = await verdict(conn, self.FILE, managers_on="pending",
+                                      markers_read_at=ago(seconds=5).isoformat())
+        assert v == "FAIL" and "the marker is lost" in detail, detail
+
+    @pytest.mark.asyncio
     async def test_the_states_that_judge_nothing(self, pool):
         async with scenario(pool) as conn:
             await clean_managers(conn)
@@ -2477,6 +2507,42 @@ class TestChain3IsJudgedOnlyOnceItMoved:
         assert "since 03.06 12:00 Kyiv" in detail, detail
         assert all(v == "PASS" and d.startswith("not applicable")
                    for v, d in verdicts.values()), verdicts
+
+    @pytest.mark.asyncio
+    async def test_a_latch_taken_while_the_report_ran_is_o1s_unknown_and_nothing_else(
+            self, pool):
+        """Flip day: the checklist runs the report at +2 min, and chain 3
+        latches on the first order KeyCRM changes. The script read the marker
+        before log_check and some thirty psql sessions; the first write took
+        the marker, then claimed the owner rows in its transaction
+        (`pg_orders_write`: `_latch()`, then `chain_latch.claim`). Rows dated
+        after the script read the marker are that latch, not a lost marker,
+        and the lever a FAIL names is a rollback tool: O1 is UNKNOWN and says
+        to run the report again; O2–O5 stay not applicable. Rows dated before
+        the read are the lost marker still. Mutation: judge `pending` with
+        owner rows as FAIL whenever they were written (the review reproduced
+        it against a latch 10 seconds old)."""
+        verdicts = {}
+        for name in O_FILES:
+            async with scenario(pool) as conn:
+                await clean_orders(conn)
+                await order_owners(conn, ago(seconds=10))
+                verdicts[name] = await verdict(conn, name, orders_on="pending",
+                                               markers_read_at=ago(seconds=40).isoformat())
+        v, detail = verdicts.pop(O_FILES[0])
+        assert v == "UNKNOWN", detail
+        assert "latched while this report ran" in detail, detail
+        assert "run the report again" in detail, detail
+        assert "11:59:50" in detail and "11:59:20" in detail, detail
+        assert "chain_copy_back" not in detail, detail
+        assert all(v == "PASS" and d.startswith("not applicable")
+                   for v, d in verdicts.values()), verdicts
+        async with scenario(pool) as conn:
+            await clean_orders(conn)
+            await order_owners(conn, ago(seconds=10))
+            v, detail = await verdict(conn, O_FILES[0], orders_on="pending",
+                                      markers_read_at=ago(seconds=5).isoformat())
+        assert v == "FAIL" and "the marker is lost" in detail, detail
 
     @pytest.mark.asyncio
     async def test_another_chains_owner_rows_are_not_chain_3s(self, pool):

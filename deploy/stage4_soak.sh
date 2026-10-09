@@ -120,6 +120,18 @@ latch_state() {
     fi
 }
 
+# When the markers were read, taken before the first of them. A marker found
+# missing is read here, and the owner rows beside it are read by the SQL some
+# thirty psql sessions later, so a chain that takes its latch in between — the
+# first write on flip day, minutes after the start — would read as a lost
+# marker: a healthy first write takes the marker and only then claims the
+# owner rows, dated by its transaction's `now()`. So O1 and M1 read owner rows
+# dated after this moment as a latch taken during the report, UNKNOWN, and
+# only older ones as the marker lost. The host's clock is Postgres's: a
+# container has no clock of its own. To the second, truncated, so it can only
+# err early, and early reads a latch in that second as UNKNOWN, never FAIL.
+MARKERS_READ_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 INVENTORY_ON="$(flag_state KS_WRITE_INVENTORY postgres duckdb)"
 INVENTORY_LATCHED="$(latch_state pg_inventory_write)"
 DQ_PG_WAREHOUSE_ON="$(flag_state KS_DQ_PG_WAREHOUSE on off)"
@@ -159,7 +171,8 @@ fi
 # chain 7b-4). So a flag that says
 # postgres on a chain that has not latched is `pending` — the first tick after
 # the flip writes, and latches, within a minute — and M1 names where web
-# publishes why it is held. Latched outranks the flag, as everywhere here.
+# publishes why it is held. Latched outranks the flag, as everywhere here. A
+# latch taken while this report runs is M1's UNKNOWN, by MARKERS_READ_AT.
 MANAGERS_ON="$(flag_state KS_WRITE_MANAGERS postgres duckdb)"
 MANAGERS_LATCHED="$(latch_state pg_managers_write)"
 MANAGERS_FLIP_AT="${SOAK_MANAGERS_FLIP_AT:-}"
@@ -179,7 +192,9 @@ fi
 # until it restarts. So a flag that says postgres on a chain that has not
 # latched is `pending`, and O1 names where web publishes why. It latches on
 # its first write, the first order KeyCRM changes after the start: minutes, in
-# the day. The latch outranks the flag, as everywhere here.
+# the day — so on flip day it can latch while this report runs, which O1
+# reads by MARKERS_READ_AT as UNKNOWN. The latch outranks the flag, as
+# everywhere here.
 ORDERS_ON="$(flag_state KS_WRITE_ORDERS postgres duckdb)"
 ORDERS_LATCHED="$(latch_state pg_orders_write)"
 ORDERS_FLIP_AT="${SOAK_ORDERS_FLIP_AT:-}"
@@ -345,6 +360,7 @@ run_check() {
             -v managers_flip_at="$MANAGERS_FLIP_AT" \
             -v orders_on="$ORDERS_ON" \
             -v orders_flip_at="$ORDERS_FLIP_AT" \
+            -v markers_read_at="$MARKERS_READ_AT" \
             -v dq_journal_direct="$DQ_JOURNAL_DIRECT" \
             -v watchdogs_on="$WATCHDOGS_ON" \
             -v weekly_ledger_on="$WEEKLY_LEDGER_ON" \

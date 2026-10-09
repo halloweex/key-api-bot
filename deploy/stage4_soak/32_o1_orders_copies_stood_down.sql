@@ -10,6 +10,8 @@
 --                    unknown
 --   orders_flip_at   when the flag was flipped, if the operator gave it
 --                    (SOAK_ORDERS_FLIP_AT), else empty
+--   markers_read_at  when the script began reading the latch markers, UTC to
+--                    the second (empty: owner rows are judged as if older)
 --
 -- WHY IT EXISTS
 -- Two DuckDB shippers fed these tables every hour before the chain, and both
@@ -63,10 +65,23 @@
 -- takes the marker again. Either way UNKNOWN would send the operator to the
 -- preconditions while the lever is the marker, so it FAILs.
 --
+-- Except owner rows dated after the script read the marker (chain 3's soak
+-- review, 2026-10-10). The script reads the marker, then runs the log check
+-- and some thirty psql sessions before this file, and a healthy first write
+-- takes the marker before it claims the owner rows, which its transaction's
+-- `now()` dates — so on flip day, when the chain latches on the first order
+-- KeyCRM changes and the checklist runs this report at +2 min, those rows are
+-- the latch taken during the report, not a marker lost. UNKNOWN, and run the
+-- report again: the next run reads the marker after them, and a marker still
+-- missing then is lost. A FAIL here names a rollback tool. Not at 0: the web
+-- container whose flag the script read cannot latch, and a recreate during
+-- the report makes every flag it passed stale, this one no more than the rest.
+--
 -- WHAT A FAIL MEANS
 -- - invalid: KS_WRITE_ORDERS is a value no chain understands; the chain is
 --   stood down and no order is written anywhere. Fix the .env line.
--- - owner rows and orders_on=0 or pending: the marker is lost. Restore
+-- - owner rows and orders_on=0, or pending with the rows older than the
+--   script's read of the marker: the marker is lost. Restore
 --   data/write-chain-owners/pg_orders_write (or redeploy the chain's build),
 --   else scripts/chain_copy_back.py orders — DN-22a's lever for the same
 --   state. Not the flag: at duckdb it is the same state.
@@ -84,7 +99,8 @@ WITH clock AS (
 ),
 flag AS (
     SELECT :'orders_on'::text AS state,
-           NULLIF(:'orders_flip_at', '')::timestamptz AS flip_at
+           NULLIF(:'orders_flip_at', '')::timestamptz AS flip_at,
+           NULLIF(:'markers_read_at', '')::timestamptz AS markers_read_at
 ),
 owner AS (
     SELECT min(updated_at) AS at
@@ -140,7 +156,9 @@ SELECT 'O1 orders copies stood down'::text AS "check",
            WHEN '1' THEN CASE WHEN agg.n = 0 THEN 'PASS'
                               WHEN since.guessed THEN 'UNKNOWN'
                               ELSE 'FAIL' END
-           WHEN 'pending' THEN CASE WHEN owner.at IS NULL THEN 'UNKNOWN' ELSE 'FAIL' END
+           WHEN 'pending' THEN CASE WHEN owner.at IS NULL THEN 'UNKNOWN'
+                                    WHEN owner.at >= flag.markers_read_at THEN 'UNKNOWN'
+                                    ELSE 'FAIL' END
            WHEN 'invalid' THEN 'FAIL'
            ELSE 'UNKNOWN'
        END AS verdict,
@@ -164,6 +182,13 @@ SELECT 'O1 orders copies stood down'::text AS "check",
                    'write, the first order KeyCRM changes after the start, so in the day, minutes '
                    'after the flip, this is a chain HELD on DuckDB — read /api/health '
                    'write_chains.pg_orders_write.unmet_precondition'
+               WHEN owner.at >= flag.markers_read_at THEN format(
+                   'chain 3 latched while this report ran: its owner rows are dated %s Kyiv, '
+                   'after it began reading the latch markers at %s Kyiv and found '
+                   'data/write-chain-owners/pg_orders_write missing, and a first write takes the '
+                   'marker before it claims them. Not a lost marker: run the report again',
+                   to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI:SS'),
+                   to_char(flag.markers_read_at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI:SS'))
                ELSE format(
                    'chain 3 owns its tables in Postgres since %s Kyiv (owner rows), and '
                    'data/write-chain-owners/pg_orders_write is gone with KS_WRITE_ORDERS=postgres: '
