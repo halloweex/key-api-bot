@@ -578,10 +578,12 @@ class TestThePreconditions:
         (a precondition here) is what makes it Postgres'. Mutation: put
         `goals_bridge` back in `_CHECKS`, answering as it did — this chain
         declares two tables the bridge read."""
-        from core import pg_managers_write
+        from core import chain_latch, pg_managers_write
 
+        # The lockout (revision 0035) is no condition of the goals: it holds
+        # every batch-E chain alike until no older image can start.
         assert [key for key, _check in pg_managers_write._CHECKS] == [
-            "step13", "chain3", "read_fallback_off"]
+            chain_latch.LOCKOUT_KEY, "step13", "chain3", "read_fallback_off"]
         assert not hasattr(pg_managers_write, "_goals_bridge_unmet")
         assert pg_managers_write.unmet_precondition() is None
         every_precondition_met.setenv(pg_managers_write.WRITE_ENV, "postgres")
