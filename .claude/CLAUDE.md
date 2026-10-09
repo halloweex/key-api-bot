@@ -1765,10 +1765,32 @@ refused the 0034 one. Held by `tests/unit/test_batch_e_chains_revision.py`
 (each test names its mutation) and `tests/integration/test_batch_e_lock_pg.py`
 (the round trip and the lock on a real server, in a transaction rolled back).
 Both read what came before from `tests/migration_replay.py`, which runs every
-revision against a recorder rather than restating its text. **And a chain
-registered after it fails the first of them**: every registered chain must be
-held by 0034 or 0035, so a later one needs a lock-out revision before its
-flip, and the test's set says which.
+revision against a recorder rather than restating its text.
+
+**A flip waits for the lock-out, at runtime, from this build on.** Each of the
+eight names 0035 as its `LOCKOUT_REVISION`, and a chain's flag moves its writes
+only in a build whose `REQUIRED_REVISION` is that revision or a later one
+(`core.chain_latch.lockout_unmet`, compared by the four-digit number, because
+neither image carries the migrations): until then it runs as duckdb,
+`/api/health` names `lockout` under its `unmet_precondition`, and the canary
+warns `write_chain_precondition_unmet`. A latched chain is not held (OD-19
+(a)). Its writers pass `require_revision()` before the latch, so the database
+is at the lock-out too when the chain first writes Postgres. A chain registered
+later names its own lock-out and cannot flip until a build requires it.
+`tests/unit/test_chain_lockout.py` holds all of it for every chain from #280
+on, and that the revision a chain names comments every table it owns naming its
+module. A table added to a chain afterwards fails there, and the answer is a
+new revision, never an edit of 0035. Chains 1, 4, 6a, 7a and 8 predate the
+rule; 0034 holds them.
+
+**What no code here can hold is the images already built.** 3.0.271 and
+3.0.272 carry the eight chains, require 0034 and have no such rule (3.0.272
+runs in production on 2026-10-09). In them nothing refuses a flip: reproduced
+against a 0034 database, `KS_WRITE_WEEKLY_LEDGER=postgres` latched chain 11a at
+its first write — owner row and ledger row written, no revision asked. So
+**set none of the eight flags until the database says `0035_batch_e_chains`**
+(`SELECT version_num FROM meta.alembic_version`). If this revision has not
+deployed by the time the flips are due, the flips wait for it.
 
 ### Chain 3: the orders, written where they are read (off)
 

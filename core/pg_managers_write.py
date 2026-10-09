@@ -63,9 +63,11 @@ by the caller — `datetime.now(timezone.utc)` — never Postgres' `now()`; Duck
 
 HELD ON DUCKDB UNTIL WHAT READS THE TABLES FOLLOWS
 
-`unmet_precondition()` names four things; until all hold an unlatched chain
+`unmet_precondition()` names five things; until all hold an unlatched chain
 runs as duckdb whatever its flag says (DN-26's hook, generic in the registry):
 
+- `lockout` — this build requires `LOCKOUT_REVISION` (0035), which refuses
+  every image built before the chain (`chain_latch.lockout_unmet`).
 - `goals_bridge` — the goal calculators read DuckDB's classification through
   the sales-type bridge until chain 7b deletes it (7b-4). Spelled exactly as
   chain 3 spells it: `tests/unit/test_goals_off_duckdb_silver.py` requires every
@@ -114,6 +116,10 @@ CHAIN = "pg_managers_write"
 # `pg_replication.MANAGER_UNIT`, whole: a classification is read against its
 # managers, never alone, so the two change hands as one (DN-22b).
 CHAIN_TABLES: Tuple[str, ...] = ("bronze.managers", "app.manager_classifications")
+
+# The revision that refuses every image built before this chain; the flag
+# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
+LOCKOUT_REVISION = "0035_batch_e_chains"
 
 # The one `sync_metadata` key that moves with it — what `sync_managers` stamps.
 CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_managers",)
@@ -275,6 +281,7 @@ def _read_fallback_unmet() -> Optional[str]:
 # starts with — spelled here, not derived from the function's name, which
 # would read `_read_fallback_unmet` as "read_fallback".
 _CHECKS = (
+    (chain_latch.LOCKOUT_KEY, lambda: chain_latch.lockout_unmet(LOCKOUT_REVISION)),
     ("goals_bridge", _goals_bridge_unmet),
     ("step13", _step13_unmet),
     ("chain3", _chain3_unmet),

@@ -63,7 +63,9 @@ A PRECONDITION THE FLAG ENFORCES
 
 `unmet_precondition()` — chain 6a's arrangement. The calculators' inputs must
 already be Postgres, or the chain would store, in the only copy left, numbers
-read from a DuckDB that stops moving:
+read from a DuckDB that stops moving — and first of all, this build must
+require `LOCKOUT_REVISION` (0035), which refuses every image built before
+the chain (`chain_latch.lockout_unmet`):
 
 1. `KS_GOALS_HISTORY=silver` — the history is Silver, not the DN-12 bridge
    over DuckDB `orders`;
@@ -116,6 +118,10 @@ CHAIN_TABLES: Tuple[str, ...] = (
     "app.seasonal_indices", "app.growth_metrics",
     "app.weekly_patterns", "app.revenue_predictions",
 )
+
+# The revision that refuses every image built before this chain; the flag
+# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
+LOCKOUT_REVISION = "0035_batch_e_chains"
 
 # The holes every shared statement that reads one of these tables carries —
 # `core.sql_dialect.render_tables` fills them with the bare DuckDB name or the
@@ -210,7 +216,14 @@ def unmet_precondition() -> Optional[str]:
 
     Never raises and never asks Postgres: `/api/health` reads it through the
     registry and must answer with Postgres down. A flag nobody can parse is
-    unmet, because nobody can then say where the inputs come from."""
+    unmet, because nobody can then say where the inputs come from. The
+    lock-out (`chain_latch.lockout_unmet`) comes first."""
+    reasons = [why for why in (chain_latch.lockout_unmet(LOCKOUT_REVISION),
+                               _inputs_unmet()) if why]
+    return "; ".join(reasons) if reasons else None
+
+
+def _inputs_unmet() -> Optional[str]:
     try:
         unmet = _unmet_clauses()
     except Exception as exc:  # noqa: BLE001 — carried out, not swallowed

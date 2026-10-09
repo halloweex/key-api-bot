@@ -76,6 +76,10 @@ CHAIN_TABLES: Tuple[str, ...] = (
 # receives every row after the Postgres commit.
 CHAIN_SHADOW = True
 
+# The revision that refuses every image built before this chain; the flag
+# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
+LOCKOUT_REVISION = "0035_batch_e_chains"
+
 # Not a sync watermark — `_freshness_check` would judge a `last_sync_*` key as
 # a stalled sync — but kept in `meta.chain_watermarks` for the same reason,
 # and carried back by the copy-back with the chain (`_carried_keys`).
@@ -101,11 +105,19 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
+def unmet_precondition() -> Optional[str]:
+    """Why `KS_WRITE_DQ_JOURNAL=postgres` must not move the writes yet, or
+    None: the lock-out alone (`chain_latch.lockout_unmet`). Never raises and
+    never asks Postgres."""
+    return chain_latch.lockout_unmet(LOCKOUT_REVISION)
+
+
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the latch outranks the flag."""
+    """Whether this chain writes Postgres — the latch outranks the flag, and
+    the flag moves the writes only once `unmet_precondition()` holds."""
     if chain_latch.latched(CHAIN):
         return True
-    return env_writes_postgres()
+    return env_writes_postgres() and unmet_precondition() is None
 
 
 def reads_postgres() -> bool:
@@ -118,7 +130,7 @@ def reads_postgres() -> bool:
     if chain_latch.latched(CHAIN):
         return True
     try:
-        return env_writes_postgres()
+        return env_writes_postgres() and unmet_precondition() is None
     except RuntimeError:
         return False
 

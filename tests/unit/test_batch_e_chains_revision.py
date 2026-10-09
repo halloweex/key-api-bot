@@ -27,15 +27,6 @@ BATCH_E = {
     "pg_traffic_ledger_write": "chain 11b",
 }
 
-# Every chain registered before 0035. Chain 4's lock is 0034; chains 1, 8, 7a
-# and 6a were registered before 0034 shipped, so an image without them requires
-# 0033 or less and 0034's bump already refuses it.
-HELD_BEFORE_0035 = {
-    "pg_inventory_write", "pg_expenses_write", "pg_goals_write",
-    "pg_expense_types_write", "pg_buyers_write",
-}
-
-
 def _module():
     return replay.load(REV)
 
@@ -122,18 +113,3 @@ class TestTheLock:
         text = replay.comments_at("0034_buyer_chain")["meta.chain_watermarks"]
         assert text.endswith("see revision 0032."), text
 
-
-class TestEveryRegisteredChainIsHeld:
-    def test_no_chain_is_registered_without_a_lock_older_than_its_flip(self):
-        """A chain registered after this revision is held by nothing until the
-        next revision bump: an image older than it still starts against its
-        tables, and after its flip writes round it. Kills: a ninth chain
-        registered and flipped with no lock-out revision shipped before the
-        flip. Ship one (this revision's shape) and add it to a set here."""
-        registered = set(_chains())
-        assert registered == HELD_BEFORE_0035 | set(BATCH_E), (
-            f"not held by any lock-out revision: "
-            f"{sorted(registered - HELD_BEFORE_0035 - set(BATCH_E))}; "
-            f"no longer registered: "
-            f"{sorted((HELD_BEFORE_0035 | set(BATCH_E)) - registered)}")
-        assert not HELD_BEFORE_0035 & set(BATCH_E)

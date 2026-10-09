@@ -24,6 +24,15 @@ goes out directly before the first of these flips, not earlier: from the day
 it lands, rolling back an image below it for any reason at all takes the
 downgrade below.
 
+From the build that carries it, the order is held at runtime: each of the
+eight names this revision as its `LOCKOUT_REVISION`, and its flag moves
+nothing in a build that requires an earlier one
+(`core.chain_latch.lockout_unmet`); its writers pass `require_revision()`
+before the latch, so the database is here too. The builds before have no such
+rule — 3.0.271 and 3.0.272 carry the eight chains and require 0034, and in
+them a flag latches its chain at the first write — so none of the eight flags
+may be set until the database says `0035_batch_e_chains`.
+
 WHAT IT CHANGES FOR AN IMAGE OLDER THAN THE CHAINS
 
 In 3.0.263 to 3.0.270 every gated path that writes one of these tables already

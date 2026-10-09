@@ -56,6 +56,10 @@ CHAIN_TABLES: Tuple[str, ...] = (
 )
 CHAIN_SHADOW = True
 
+# The revision that refuses every image built before this chain; the flag
+# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
+LOCKOUT_REVISION = "0035_batch_e_chains"
+
 # How far back the disk job's three differencing reads look — the job's own
 # numbers, spelled once for both stores.
 DISK_HISTORY = (24, 2)          # (hours, slack) for the 24 h DB delta
@@ -99,10 +103,19 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
+def unmet_precondition() -> Optional[str]:
+    """Why `KS_WRITE_WATCHDOGS=postgres` must not move the writes yet, or None:
+    the lock-out alone (`chain_latch.lockout_unmet`). Never raises and
+    never asks Postgres."""
+    return chain_latch.lockout_unmet(LOCKOUT_REVISION)
+
+
 def writes_postgres() -> bool:
+    """The latch outranks the flag, and the flag moves the writes only
+    once `unmet_precondition()` holds."""
     if chain_latch.latched(CHAIN):
         return True
-    return env_writes_postgres()
+    return env_writes_postgres() and unmet_precondition() is None
 
 
 def _latch() -> str:

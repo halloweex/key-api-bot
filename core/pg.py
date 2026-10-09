@@ -64,7 +64,9 @@ VERSION_TABLE = "alembic_version"
 # what it does not hold: the per-tick landing mirrors, which never gated, and
 # DuckDB. An image-only rollback below it needs `alembic downgrade
 # 0034_buyer_chain` with the new migrate image first, and none once one of
-# those chains has latched.
+# those chains has latched. Each of the eight names it as its
+# `LOCKOUT_REVISION`, and its flag moves nothing in a build that requires less
+# (`core.chain_latch.lockout_unmet`).
 REQUIRED_REVISION = "0035_batch_e_chains"
 
 _pool: Optional[Any] = None

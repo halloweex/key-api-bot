@@ -33,6 +33,10 @@ WRITE_ENV = "KS_WRITE_TRAFFIC_LEDGER"
 CHAIN = "pg_traffic_ledger_write"
 CHAIN_TABLES: Tuple[str, ...] = ("app.traffic_report_sends",)
 CHAIN_SHADOW = True
+
+# The revision that refuses every image built before this chain; the flag
+# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
+LOCKOUT_REVISION = "0035_batch_e_chains"
 TABLE = CHAIN_TABLES[0]
 
 
@@ -63,10 +67,19 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
+def unmet_precondition() -> Optional[str]:
+    """Why `KS_WRITE_TRAFFIC_LEDGER=postgres` must not move the writes yet, or None:
+    the lock-out alone (`chain_latch.lockout_unmet`). Never raises and
+    never asks Postgres."""
+    return chain_latch.lockout_unmet(LOCKOUT_REVISION)
+
+
 def writes_postgres() -> bool:
+    """The latch outranks the flag, and the flag moves the writes only
+    once `unmet_precondition()` holds."""
     if chain_latch.latched(CHAIN):
         return True
-    return env_writes_postgres()
+    return env_writes_postgres() and unmet_precondition() is None
 
 
 def pending() -> Dict[str, Any]:

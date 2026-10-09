@@ -112,6 +112,8 @@ through `silver_order_lines` — and each can still read DuckDB, whose catalogue
 stops changing the moment this chain writes Postgres. So `unmet_precondition()`
 holds an unlatched chain on DuckDB until:
 
+- this build requires `LOCKOUT_REVISION` (0035), which refuses every image
+  built before the chain (`chain_latch.lockout_unmet`);
 - chain 1 writes Postgres: DuckDB's `refresh_sku_inventory_status` joins
   DuckDB's products, and its result is what the hourly copy ships;
 - `KS_READ_FALLBACK=off`: under `duckdb` a failed Postgres read is answered
@@ -157,6 +159,10 @@ CATEGORIES = "bronze.categories"
 # the carry of retired rows and the copy-back. Each is a unit of its own
 # (`pg_landing.unit_of`): one writer, one table, one transaction.
 CHAIN_TABLES: Tuple[str, ...] = (PRODUCTS, CATEGORIES)
+
+# The revision that refuses every image built before this chain; the flag
+# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
+LOCKOUT_REVISION = "0035_batch_e_chains"
 
 # What the two full-catalogue sync sites stamp after the rows land. The store's
 # getter and setter route them through `core.write_chains.chain_for_sync_key`
@@ -315,11 +321,18 @@ def env_writes_postgres() -> bool:
 
 
 def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_CATALOGUE=postgres` must not move the writes yet, or None.
+    """Why `KS_WRITE_CATALOGUE=postgres` must not move the writes yet, or None:
+    the lock-out (`chain_latch.lockout_unmet`), then the readers.
 
     Never raises and never asks Postgres: `/api/health` reads it through the
     registry, and must still answer with Postgres down. Names flags, never
     their values — that endpoint is public. A flag nobody can parse is unmet."""
+    reasons = [why for why in (chain_latch.lockout_unmet(LOCKOUT_REVISION),
+                               _readers_unmet()) if why]
+    return "; ".join(reasons) if reasons else None
+
+
+def _readers_unmet() -> Optional[str]:
     from core import pg_inventory_write, read_fallback, warehouse_cutover
 
     lagging: List[str] = []
