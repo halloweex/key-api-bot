@@ -37,11 +37,31 @@ def _comments(path: Path, function: str) -> dict:
 REV = VERSIONS / "0034_buyer_chain.py"
 
 
+def _ancestry(head: str) -> list:
+    """Every revision from `head` back to the base, parsed from the files."""
+    parents = {}
+    for path in VERSIONS.glob("*.py"):
+        src = path.read_text(encoding="utf-8")
+        rev = re.search(r'^revision = "([^"]+)"$', src, re.M).group(1)
+        down = re.search(r'^down_revision = (?:"([^"]+)"|None)$', src, re.M)
+        parents[rev] = down.group(1) if down else None
+    out, cursor = [], head
+    while cursor:
+        out.append(cursor)
+        cursor = parents[cursor]
+    return out
+
+
 class TestTheLock:
-    def test_it_is_the_head_the_code_requires(self):
+    def test_it_is_still_in_force_under_the_head_the_code_requires(self):
+        """0034 was the head while it was the lock; since 0035 (the batch-E
+        chains' lock) it is an ancestor, and the lock holds for as long as it
+        stays one: an image older than chain 4 requires 0033 or less, and any
+        mismatch refuses. Kills: a later revision branching round 0034, or the
+        pin moving to a head that does not descend from it."""
         from core import pg
 
-        assert pg.REQUIRED_REVISION == "0034_buyer_chain"
+        assert "0034_buyer_chain" in _ancestry(pg.REQUIRED_REVISION)
         src = REV.read_text(encoding="utf-8")
         assert re.search(r'^revision = "0034_buyer_chain"$', src, re.M)
         assert re.search(r'^down_revision = "0033_derivation_signal"$', src, re.M)

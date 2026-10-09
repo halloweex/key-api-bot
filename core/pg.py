@@ -58,7 +58,14 @@ VERSION_TABLE = "alembic_version"
 # buyers chain refuses a database that does. See the revision's docstring for
 # what the lock does not cover — images below v3.0.249 — and why an image-only
 # rollback after it needs `alembic downgrade` first, and none after the flip.
-REQUIRED_REVISION = "0034_buyer_chain"
+#
+# 0035 is the same lock for the eight chains #280 registered — 3, 5, 6, 7b-3,
+# 9, 10, 11a, 11b — shipped before the first of their flips. Its docstring says
+# what it does not hold: the per-tick landing mirrors, which never gated, and
+# DuckDB. An image-only rollback below it needs `alembic downgrade
+# 0034_buyer_chain` with the new migrate image first, and none once one of
+# those chains has latched.
+REQUIRED_REVISION = "0035_batch_e_chains"
 
 _pool: Optional[Any] = None
 _pool_lock = asyncio.Lock()
