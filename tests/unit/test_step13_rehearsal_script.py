@@ -1765,6 +1765,19 @@ printf '%s\\n' "$ROWS"
         assert line.count("|") == 2, f"the reason broke the table: {line}"
 
 
+def test_the_judge_can_read_root_s_evidence():
+    """2026-10-08 and 09.10: both rehearsals ran every phase and lost the
+    verdict to `PermissionError: '/ev/f1_snapshot.json'` — $EV is root's and
+    700, the image runs as appuser. The judge runs as root, still with no
+    network and the evidence read-only, and the kept run's command says so.
+    Kills: "drop --user 0", "the re-judge line without it"."""
+    (judge,) = [words for _n, words in _runs() if "judge" in words]
+    assert _flag(judge, "--user") == "0"
+    assert _flag(judge, "--network") == "none"
+    assert '"$EV:/ev:ro"' in judge or "$EV:/ev:ro" in judge
+    assert "as --user 0" in _judge_section()
+
+
 def test_a_run_removes_the_evidence_an_earlier_judge_kept_and_nothing_else(tmp_path):
     """One kept directory at most: the next run's start removes it, and only
     it — not the reports, not the run log. Kills: "the sweep removed"."""
