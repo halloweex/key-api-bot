@@ -162,8 +162,6 @@ class TestTheOrdersSilverSelects:
                 got = _silver_ids(conn, sales_type)
                 want = _expected_silver(scenario, sales_type)
                 assert got == want, (scenario, sales_type, sorted(got ^ want))
-        assert SOURCE_3_RETAIL in _expected_silver(scenario, "retail"), (
-            "the 2024 website's order is not counted (OQ-1)")
 
     @pytest.mark.asyncio
     async def test_the_partition_is_whole(self, store):

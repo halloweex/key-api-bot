@@ -68,8 +68,8 @@ read from a DuckDB that stops moving:
 1. `KS_GOALS_HISTORY` understood — unset or `silver`. The history is Silver
    either way since chain 7b-4 deleted the DN-12 bridge; any other value
    refuses every history read, so a recalculation could store nothing;
-2. `KS_READ_GOALS=postgres` with `KS_PG_DSN` — under `silver`, what makes that
-   Silver Postgres's;
+2. `KS_READ_GOALS=postgres` with `KS_PG_DSN` — what makes that Silver
+   Postgres's;
 3. `KS_READ_FALLBACK=off` as configured at start — under `duckdb` a failed
    Postgres history read is answered by DuckDB, and the recalculation would
    store those numbers;
