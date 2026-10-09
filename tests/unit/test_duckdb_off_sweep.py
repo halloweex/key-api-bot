@@ -41,22 +41,37 @@ TWO FLAVOURS OF POSTGRES
   skipped.
 
 Each row of `KNOWN_RESIDUAL` names the flavours it shows in. The GET routes
-are swept in `down` only: a route either refuses before its engine
-(`KS_READ_FALLBACK=off`) or answers from it, and neither depends on Postgres
-answering — the four routes left are the ones that ask DuckDB itself.
+are swept in `down` only, so what a route reaches only once Postgres has
+answered is not here: that is PR-9's integration variant, on a seeded
+Postgres. Each is called with its required parameters, and again per value of
+every optional parameter that can pick a branch and with the header's filters
+together (`optional_variants`): `/api/summary?source_id=3` reaches the file
+where `/api/summary` does not.
+
+WHAT A STEP IS RUN AS
+
+Every job runs as the tick production runs once the first minutes have
+passed: the boot's sync tick arms the sync service's backoff and retry
+windows, and a job run seconds later read nothing behind them — so each job
+gets a fresh sync service. A refusal under `get_last_sync_time` carries the
+key it was asked for (`name_the_key`): the order step and the catalogue step
+are the same site otherwise, and one row would stand for two reaches.
 
 The sweep runs in a fresh interpreter (`tests/unit/duckdb_off_sweep_run.py`
 says why) and judges nothing there; the judging is here.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import subprocess
 import sys
+import types
+import typing
 from pathlib import Path
-from typing import Dict, FrozenSet, Tuple
+from typing import Dict, FrozenSet, Optional, Tuple
 from unittest.mock import AsyncMock
 
 import pytest
@@ -80,19 +95,29 @@ DSN = os.getenv("KS_PG_DSN")
 # (step, site) → the flavours it shows in. A step is `boot` (web's
 # `startup_event` outside the two below), `boot:init_and_sync`,
 # `boot:scheduler_start` (`BackgroundScheduler.start`), `job:<id>` for every
-# job `_register_jobs()` registers, or `GET <path>`. A site is
-# `duckdb_switch._site()`'s name for who reached for the file. The PR that
-# takes each row out is the plan's (section 3); it is a note, not a rule.
+# job `_register_jobs()` registers, or `GET <path>` — `GET <path>?<query>`
+# for a request with optional values (`variant_key`). A site is
+# `duckdb_switch._site()`'s name for who reached for the file, with
+# `[last_sync_<key>]` after it under `get_last_sync_time`. The PR that takes
+# each row out is the plan's (section 3); it is a note, not a rule.
 
 KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     # ── web's boot ──
     # The warehouse writer's record is DuckDB's `sync_metadata` row (PR-6).
     ("boot:init_and_sync", "core.warehouse_cutover:read_writer"): BOTH,
     ("boot:scheduler_start", "core.warehouse_cutover:read_writer"): BOTH,
-    # `last_sync_orders` absent from Postgres is inherited from DuckDB, read
-    # in a task the order step starts (PR-5). Live only: refused Postgres
-    # stops the step first.
-    ("boot:init_and_sync", "core.duckdb_store:get_last_sync_time (task)"): LIVES,
+    # A watermark absent from Postgres is inherited from DuckDB, read in a
+    # task of its own by the order step and by the catalogue step (PR-5) —
+    # in the boot's sync tick, and in every tick after it. Live only: refused
+    # Postgres stops each step first. One row per key (`name_the_key`).
+    ("boot:init_and_sync",
+     "core.duckdb_store:get_last_sync_time (task) [last_sync_orders]"): LIVES,
+    ("boot:init_and_sync",
+     "core.duckdb_store:get_last_sync_time (task) [last_sync_products]"): LIVES,
+    ("job:incremental_sync",
+     "core.duckdb_store:get_last_sync_time (task) [last_sync_orders]"): LIVES,
+    ("job:incremental_sync",
+     "core.duckdb_store:get_last_sync_time (task) [last_sync_products]"): LIVES,
     # The catch-up reads DuckDB's ages before Postgres replaces them (PR-7).
     ("boot:scheduler_start", "core.scheduler:_schedule_catchup_runs"): BOTH,
     # ── the jobs ──
@@ -117,6 +142,9 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     ("GET /api/health", "web.routes.api.health:health_check"): DOWNS,                 # PR-3
     ("GET /api/health/detailed", "web.routes.api.health:detailed_health_check"): DOWNS,  # PR-3
     ("GET /api/warehouse/status", "web.routes.api.admin:get_warehouse_status"): DOWNS,   # PR-8
+    # Opencart has no column in Gold: Postgres is not asked, DuckDB answers
+    # the zeros (design 2.7). An optional parameter's branch (`optional_variants`).
+    ("GET /api/summary?source_id=3", "core.repositories.revenue:get_summary_stats"): DOWNS,  # PR-8
 }
 
 
@@ -211,7 +239,12 @@ class FrozenFile:
     def _state(self) -> dict:
         """The file's bytes and time, and every name DuckDB would leave beside
         it: the WAL, the spill directory, a backup's copy. Other files in the
-        directory are web's own — the disk watchdog's heartbeat — and move."""
+        directory are web's own — the disk watchdog's heartbeat — and move.
+
+        `backups/` is its listing when it exists and None when it does not:
+        a directory the backup made and left empty is a change beside the
+        file too, and an empty listing could not tell it from no directory
+        (review of PR-1 — `db_backup` made it before it was refused)."""
         directory = self.path.parent
         backups = directory / "backups"
         return {"sha256": hashlib.sha256(self.path.read_bytes()).hexdigest(),
@@ -220,12 +253,130 @@ class FrozenFile:
                     p.name for p in directory.iterdir()
                     if p.name != self.path.name
                     and (p.name.startswith(self.path.name) or p.name == "duckdb_tmp")),
-                "backups": sorted(p.name for p in backups.iterdir()) if backups.is_dir() else []}
+                "backups": (sorted(p.name for p in backups.iterdir())
+                            if backups.is_dir() else None)}
 
     def unchanged(self) -> dict:
         """Empty when nothing moved; otherwise what did."""
         after = self._state()
         return {k: [self._before[k], after[k]] for k in after if after[k] != self._before[k]}
+
+
+# ─── Which watermark ─────────────────────────────────────────────────────────
+#
+# `get_last_sync_time` inherits from DuckDB for more than one key, and its
+# refusal is one site whichever key it was asked: the order step and the
+# catalogue step each read theirs in a task of its own, and both are
+# `core.duckdb_store:get_last_sync_time (task)`. A row naming that site would
+# stay matched with one of the two inheritances fixed and the other not. So,
+# in the sweep, a refusal under that method carries the key it was asked for.
+
+def _watermark_key(frame) -> Optional[str]:
+    """The `last_sync_*` key of the `get_last_sync_time` call on the stack
+    from `frame` outwards, or None when there is none."""
+    from core.duckdb_store import DuckDBStore
+
+    code = DuckDBStore.get_last_sync_time.__code__
+    while frame is not None:
+        if frame.f_code is code:
+            return f"last_sync_{frame.f_locals.get('key')}"
+        frame = frame.f_back
+    return None
+
+
+def name_the_key(monkeypatch) -> None:
+    """Count every refusal under `get_last_sync_time` as its site plus
+    `[last_sync_<key>]`. The site itself is still `_site()`'s: the count is
+    taken after it is named, by `_tally`, which is what this wraps."""
+    real_tally = duckdb_switch._tally
+
+    def _tally(site: str) -> int:
+        key = _watermark_key(sys._getframe(1))
+        return real_tally(f"{site} [{key}]" if key else site)
+
+    monkeypatch.setattr(duckdb_switch, "_tally", _tally)
+
+
+# ─── The optional parameters ─────────────────────────────────────────────────
+#
+# A route's base request carries its required parameters only
+# (`test_read_fallback_http._request_for`), so a branch an optional one picks
+# is never taken there — and `/api/summary?source_id=3` reaches the file where
+# `/api/summary` does not: Opencart has no column in Gold, so Postgres is not
+# asked and DuckDB answers (design 2.7). Every route is called again, once per
+# value of each optional parameter that can pick a branch — the domains below,
+# read from the validators, and every boolean turned from its default — and
+# once with the header's filters together.
+
+# The header's filters, each at a value its validator takes. `source_id` and
+# `sales_type` are here too, so the filters are also tried together.
+FILTERS_TOGETHER = {"period": "month", "source_id": 1, "category_id": 1,
+                    "brand": "ab1", "promocode": "ab1", "sales_type": "all"}
+
+
+def _variant_domains() -> Dict[str, list]:
+    from core.duckdb_constants import KNOWN_SALES_TYPES
+    from core.validators import VALID_SOURCE_IDS
+
+    return {"source_id": sorted(VALID_SOURCE_IDS),
+            "sales_type": [*KNOWN_SALES_TYPES, "all"]}
+
+
+def _is_bool(param) -> bool:
+    annotation = param.field_info.annotation
+    return annotation is bool or (
+        typing.get_origin(annotation) in (typing.Union, types.UnionType)
+        and bool in typing.get_args(annotation))
+
+
+def _optional_query_params(dependant) -> list:
+    """The optional query parameters of a route, its dependencies' included,
+    each once."""
+    from tests.routes_helper import is_required
+
+    found, seen = [], set()
+
+    def walk(node) -> None:
+        for param in getattr(node, "query_params", ()) or ():
+            if param.name not in seen and not is_required(param):
+                seen.add(param.name)
+                found.append(param)
+        for sub in getattr(node, "dependencies", ()) or ():
+            walk(sub)
+
+    walk(dependant)
+    return found
+
+
+def optional_variants(endpoint) -> list:
+    """The optional parameters to add to a route's base request, one dict per
+    request: each value of each branching parameter alone, then the header's
+    filters together with every boolean turned."""
+    domains = _variant_domains()
+    variants, together = [], {}
+    for param in _optional_query_params(endpoint.route.dependant):
+        default = param.field_info.default
+        if param.name in domains:
+            values = domains[param.name]
+        elif _is_bool(param):
+            values = [not bool(default)]
+            together[param.name] = values[0]
+        else:
+            values = []
+        variants.extend({param.name: v} for v in values if v != default)
+        if param.name in FILTERS_TOGETHER:
+            together[param.name] = FILTERS_TOGETHER[param.name]
+    if len(together) > 1:
+        variants.append(together)
+    return variants
+
+
+def variant_key(path: str, variant: dict) -> str:
+    """`/api/summary?source_id=3` — the step a variant is recorded under."""
+    def text(value) -> str:
+        return str(value).lower() if isinstance(value, bool) else str(value)
+
+    return path + "?" + "&".join(f"{k}={text(v)}" for k, v in sorted(variant.items()))
 
 
 # ─── The fixture holds ───────────────────────────────────────────────────────
@@ -264,6 +415,8 @@ PROCESS, ROUTES = "process", "routes"
 # Non-vacuity, so a sweep that silently reached nothing cannot pass: when this
 # was written the scheduler registered 24 jobs and the app 91 GET routes.
 MIN_JOBS, MIN_ROUTES = 20, 90
+# And ~320 requests again with optional values (`optional_variants`).
+MIN_VARIANTS = 250
 # Steps that are not themselves swept: the moment before the first, and the
 # control at the end, whose one refusal is the tripwire proving it stands.
 NOT_SWEPT = {"before", "control"}
@@ -318,6 +471,36 @@ def _judge(flavor: str, sweep: str, result: dict) -> None:
         f"change that fixed it): {paid}")
 
 
+# What the runner records for a job `_register_jobs()` registered and the
+# scheduler no longer holds: a step whose body never ran.
+NOT_SCHEDULED = "not scheduled"
+
+
+def _judge_the_jobs(result: dict) -> None:
+    """Every job `_register_jobs()` registered was run. A step exists for
+    each, and none of them is a body that never ran: a job taken off the
+    scheduler would otherwise be swept by name only, and its reaches for
+    the file would leave the list without anybody fixing them."""
+    assert len(result["jobs"]) >= MIN_JOBS, result["jobs"]
+    steps = result["steps"]
+    missing = sorted(j for j in result["jobs"] if f"job:{j}" not in steps)
+    unrun = sorted(j for j in result["jobs"]
+                   if steps.get(f"job:{j}", {}).get("status") == NOT_SCHEDULED)
+    assert not missing and not unrun, (
+        f"registered and not run — no step: {missing}; taken off the "
+        f"scheduler ({NOT_SCHEDULED}): {unrun}")
+
+
+def _judge_the_order_tick(result: dict) -> None:
+    """The sync tick ran rather than waited out a window the boot armed. Its
+    skips are its adaptive backoff and nothing else, so any skip here is the
+    sweep reading less than production's every tick reads. Other jobs' skips
+    are the state's own answers — no ClickHouse address, a derivation not
+    owned — and are recorded, not judged."""
+    step = result["steps"]["job:incremental_sync"]
+    assert step["status"] == "ok" and not step.get("skipped"), step
+
+
 def _judge_the_run(result: dict) -> None:
     """What every run must have done, whatever it found."""
     assert result["file"] == {}, (
@@ -345,9 +528,11 @@ class TestTheSweepUnderARefusingPostgres:
 
     def test_every_job_was_run(self, down):
         result = down[PROCESS]
-        assert len(result["jobs"]) >= MIN_JOBS, result["jobs"]
-        assert {f"job:{j}" for j in result["jobs"]} <= set(result["steps"])
+        _judge_the_jobs(result)
         _judge_the_run(result)
+
+    def test_the_order_tick_ran_rather_than_waited(self, down):
+        _judge_the_order_tick(down[PROCESS])
 
     def test_every_route_was_called(self, down):
         result = down[ROUTES]
@@ -355,16 +540,28 @@ class TestTheSweepUnderARefusingPostgres:
         assert {f"GET {p}" for p in result["routes"]} <= set(result["steps"])
         assert result["file"] == {}
 
+    def test_every_route_was_called_again_with_its_optional_values(self, down):
+        """And the variants were requests the routes took: a 422 is FastAPI
+        refusing the parameters, a variant that swept nothing."""
+        result = down[ROUTES]
+        variants = result["variants"]
+        assert len(variants) >= MIN_VARIANTS, len(variants)
+        assert {f"GET {key}" for key in variants} <= set(result["steps"])
+        assert not [key for key, status in variants.items() if status == 422]
+
     def test_the_routes_left_answer_as_they_do_today(self, down):
         """Of the routes left, the one whose refusal reaches web's handler
         answers 503 naming `duckdb` (PR-1) rather than the 500 it fell through
         to; the three that swallow it answer 200, degraded, until PR-3."""
-        routes, surfaces = down[ROUTES]["routes"], down[ROUTES]["surfaces"]
-        assert (routes["/api/warehouse/status"], surfaces["/api/warehouse/status"]) == (
-            503, "duckdb")
+        result = down[ROUTES]
+        answered = {**result["routes"], **result["variants"]}
+        surfaces = result["surfaces"]
+        for key in ("/api/warehouse/status", "/api/summary?source_id=3"):
+            assert (answered[key], surfaces[key]) == (503, "duckdb"), key
         for path in ("/api/health", "/api/health/detailed", "/api/duckdb/stats"):
-            assert routes[path] == 200, path
-        assert [p for p, s in surfaces.items() if s == "duckdb"] == ["/api/warehouse/status"]
+            assert answered[path] == 200, path
+        assert sorted(k for k, s in surfaces.items() if s == "duckdb") == [
+            "/api/summary?source_id=3", "/api/warehouse/status"]
 
 
 class TestTheSweepUnderALivePostgres:
@@ -380,9 +577,14 @@ class TestTheSweepUnderALivePostgres:
 
     def test_every_job_was_run(self, live):
         result = live[PROCESS]
-        assert len(result["jobs"]) >= MIN_JOBS, result["jobs"]
-        assert {f"job:{j}" for j in result["jobs"]} <= set(result["steps"])
+        _judge_the_jobs(result)
         _judge_the_run(result)
+
+    def test_the_order_tick_ran_rather_than_waited(self, live):
+        """The review's case: the boot's tick armed the backoff, and the job
+        a few seconds later skipped and read nothing (review of PR-1).
+        Mutation: drop the fresh sync service in the runner's job loop."""
+        _judge_the_order_tick(live[PROCESS])
 
 
 class TestTheList:
@@ -403,3 +605,83 @@ class TestTheList:
         ran = set(down[PROCESS]["steps"]) | set(down[ROUTES]["steps"])
         stale = sorted({step for step, _site in KNOWN_RESIDUAL} - ran)
         assert not stale, f"rows naming a step nothing runs any more: {stale}"
+
+
+class TestTheInstruments:
+    """The sweep's own instruments, held in-process: each is what makes a
+    finding visible, so each is checked against the case it exists for."""
+
+    def test_the_frozen_file_sees_a_directory_made_beside_it_and_left_empty(
+        self, tmp_path,
+    ):
+        """`db_backup` made `backups/` before it was refused, and an empty
+        listing read the same as no directory (review of PR-1). Mutation:
+        read a missing `backups/` as `[]`."""
+        frozen = FrozenFile(tmp_path / "data" / "analytics.duckdb")
+        assert frozen.unchanged() == {}
+        (tmp_path / "data" / "backups").mkdir()
+        assert frozen.unchanged() == {"backups": [None, []]}
+
+    def test_the_frozen_file_still_lets_web_s_own_files_move(self, tmp_path):
+        frozen = FrozenFile(tmp_path / "data" / "analytics.duckdb")
+        (tmp_path / "data" / "disk_watchdog_heartbeat").write_text("now")
+        assert frozen.unchanged() == {}
+
+    def test_a_job_taken_off_the_scheduler_fails_the_sweep(self):
+        """A registered job the scheduler no longer holds is a step whose
+        body never ran; recorded as such by the runner, and judged here as
+        the debt it is rather than as a job that was swept (review of
+        PR-1). Mutation: judge only that every job has a step."""
+        jobs = [f"j{i}" for i in range(MIN_JOBS)]
+        ran = {f"job:{j}": {"status": "ok", "sites": []} for j in jobs}
+        _judge_the_jobs({"jobs": jobs, "steps": ran})
+        ran["job:j3"] = {"status": NOT_SCHEDULED, "sites": []}
+        with pytest.raises(AssertionError, match="j3"):
+            _judge_the_jobs({"jobs": jobs, "steps": ran})
+
+    def test_a_watermark_inherited_from_duckdb_is_named_with_its_key(
+        self, monkeypatch, duckdb_off,
+    ):
+        """The order step and the catalogue step each read their watermark in
+        a task of its own, and both refusals are the same site — one row
+        stood for two reaches, and fixing one key's inheritance would have
+        left it matched (review of PR-1). Mutation: drop the key from
+        `name_the_key`'s site."""
+        from core.duckdb_store import DuckDBStore
+
+        name_the_key(monkeypatch)
+        store = DuckDBStore()
+
+        async def tick():
+            for key in ("orders", "products"):
+                with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+                    await asyncio.ensure_future(store.get_last_sync_time(key))
+            async with store.connection():  # no watermark in hand: unnamed
+                pass
+
+        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+            asyncio.run(tick())
+        assert sorted(duckdb_switch.opened()) == [
+            "core.duckdb_store:get_last_sync_time (task) [last_sync_orders]",
+            "core.duckdb_store:get_last_sync_time (task) [last_sync_products]",
+            f"{__name__}:tick",
+        ]
+        assert not duckdb_off.exists()
+
+    def test_a_route_is_also_called_with_the_optional_values_that_pick_a_branch(self):
+        """`_request_for` sends the required parameters only, and
+        `/api/summary?source_id=3` reaches the file where `/api/summary` does
+        not (review of PR-1, design 2.7). Mutation: return no variants."""
+        from web.main import app
+        from tests.unit.test_read_fallback_http import swept_routes
+
+        by_path = {e.path: e for e in swept_routes(app)}
+        summary = optional_variants(by_path["/api/summary"])
+        for source_id in (1, 2, 3, 4):
+            assert {"source_id": source_id} in summary
+        assert {"sales_type": "all"} in summary and {"sales_type": "retail"} not in summary
+        assert any({"category_id", "brand", "period"} <= set(v) for v in summary)
+        trend = optional_variants(by_path["/api/revenue/trend"])
+        assert {"include_forecast": True} in trend
+        assert optional_variants(by_path["/api/me"]) == []
+

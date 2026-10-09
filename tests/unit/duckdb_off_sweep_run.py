@@ -30,7 +30,8 @@ import pytest
 
 from core import duckdb_switch
 from tests.unit.test_duckdb_off_sweep import (
-    FLAVOR_ENV, LIVE, OUT_ENV, STEP_TIMEOUT_S, FrozenFile, apply_target_state,
+    FLAVOR_ENV, LIVE, NOT_SCHEDULED, OUT_ENV, STEP_TIMEOUT_S, FrozenFile,
+    apply_target_state, name_the_key, optional_variants, variant_key,
 )
 from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
     admin_client, fresh_read_fallback,
@@ -54,12 +55,15 @@ class Recorder:
         self.sweep = sweep
         self.steps: Dict[str, Dict[str, object]] = {}
 
-    def collect(self, step: str, status: Optional[str] = None) -> None:
+    def collect(self, step: str, status: Optional[str] = None,
+                skipped: Optional[str] = None) -> None:
         entry = self.steps.setdefault(step, {"status": None, "sites": []})
         sites = set(entry["sites"]) | set(duckdb_switch.opened())
         entry["sites"] = sorted(sites)
         if status is not None:
             entry["status"] = status
+        if skipped is not None:
+            entry["skipped"] = skipped
         duckdb_switch.reset_counts()
 
     def write(self, **extra) -> None:
@@ -67,6 +71,16 @@ class Recorder:
         with open(path, "w", encoding="utf-8") as handle:
             json.dump({"flavor": FLAVOR, "steps": self.steps, **extra}, handle,
                       indent=1, sort_keys=True)
+
+
+def skipped_by(result) -> Optional[str]:
+    """Why a job's run said it skipped, when its result says so — the sync's
+    `{"skipped": True, "reason": ...}`, a shipper's `{"skipped": "..."}` —
+    and None when it ran or returned nothing of the kind."""
+    if isinstance(result, dict) and result.get("skipped"):
+        reason = result.get("reason") or result["skipped"]
+        return str(reason)
+    return None
 
 
 async def run_step(coro, timeout: float = STEP_TIMEOUT_S, *, reraise: bool = False) -> str:
@@ -98,6 +112,17 @@ async def run_step(coro, timeout: float = STEP_TIMEOUT_S, *, reraise: bool = Fal
 
 
 # ─── The world outside the process ───────────────────────────────────────────
+
+def refused(message: str):
+    """A side effect raising a new exception on every call. One instance
+    raised again and again grows its traceback by the frames of every raise,
+    and every log line that formats it grows with it: the routes sweep spent
+    ~0.2 s a request on that by its four hundredth."""
+    def _raise(*_args, **_kwargs):
+        raise OSError(message)
+
+    return _raise
+
 
 @pytest.fixture
 def sweep_network(monkeypatch):
@@ -143,7 +168,7 @@ def sweep_network(monkeypatch):
     if FLAVOR != LIVE:
         # The pool refuses at once rather than through a DSN nothing answers.
         monkeypatch.setattr("core.pg.get_pool",
-                            AsyncMock(side_effect=OSError("connection refused")))
+                            AsyncMock(side_effect=refused("connection refused")))
 
 
 @pytest.fixture
@@ -323,6 +348,8 @@ def state(canonical_postgres, monkeypatch, tmp_path, fresh_read_fallback):  # no
             chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
         asyncio.run(_seed_live_facts(os.environ["KS_PG_DSN"]))
     apply_target_state(monkeypatch, tmp_path, live=FLAVOR == LIVE)
+    # A refusal under `get_last_sync_time` is recorded with its key.
+    name_the_key(monkeypatch)
     import core.duckdb_store as store_module
 
     return FrozenFile(store_module.DB_PATH)
@@ -336,6 +363,7 @@ def test_process(state, sweep_network, production_host, monkeypatch):
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
     import core.scheduler as scheduler_module
+    import core.sync_service as sync_module
     import web.main as main
     from core.duckdb_store import get_store
 
@@ -383,10 +411,26 @@ def test_process(state, sweep_network, production_host, monkeypatch):
         for job_id in jobs:
             job = scheduler._scheduler.get_job(job_id)
             if job is None:  # registered, then taken off the scheduler
-                record.collect(f"job:{job_id}", "not scheduled")
+                record.collect(f"job:{job_id}", NOT_SCHEDULED)
                 continue
-            status = await run_step(job.func(*job.args, **job.kwargs))
-            record.collect(f"job:{job_id}", status)
+            # Each job runs as the tick that comes once every window an
+            # earlier step armed has passed — what production runs from a few
+            # minutes after the boot on. The boot's own sync tick arms the
+            # sync service's adaptive backoff (120 s at least, 300 s off-hours)
+            # and its steps' retry windows, and a job run seconds later was
+            # skipped by them: `job:incremental_sync` read nothing at all, and
+            # what every later tick reaches was missing from the list (review
+            # of PR-1). So the sync service is built fresh for each job, with
+            # no window armed. What else it holds is the last tick's step
+            # states, which /api/health reads, and a cached KeyCRM capability.
+            sync_module._sync_service = None
+            ran = {}
+
+            async def run(job=job):
+                ran["result"] = await job.func(*job.args, **job.kwargs)
+
+            status = await run_step(run())
+            record.collect(f"job:{job_id}", status, skipped_by(ran.get("result")))
         # The control: the tripwire still stands in this state.
         async def control():
             async with (await get_store()).connection():
@@ -414,24 +458,34 @@ def test_routes(state, sweep_network, production_host, admin_client,  # noqa: F8
     from web.routes.api import health as health_routes
 
     assert FLAVOR != LIVE, "the routes are swept with Postgres refusing"
-    monkeypatch.setattr(ch_cohorts, "fetch", AsyncMock(side_effect=OSError("down")))
+    monkeypatch.setattr(ch_cohorts, "fetch", AsyncMock(side_effect=refused("down")))
     client = TestClient(app, raise_server_exceptions=False)
     client.cookies.update(admin_client.cookies)
 
     record = Recorder("routes")
     record.collect("before")
-    statuses, surfaces = {}, {}
-    for endpoint in swept_routes(app):
+    statuses, variants, surfaces = {}, {}, {}
+
+    def call(key: str, path: str, params: dict) -> int:
         limiter.reset()
         read_fallback.reset_counts()
         # A count cached by an earlier request is not a reach for the file.
         health_routes._stats_cache.update(data=None, expires_at=0)
-        path, params = _request_for(endpoint)
         response = client.get(path, params=params)
-        statuses[endpoint.path] = response.status_code
         try:
-            surfaces[endpoint.path] = response.json().get("surface")
+            surfaces[key] = response.json().get("surface")
         except Exception:  # noqa: BLE001 — a CSV, an HTML page, a list
-            surfaces[endpoint.path] = None
-        record.collect(f"GET {endpoint.path}", str(response.status_code))
-    record.write(routes=statuses, surfaces=surfaces, file=state.unchanged())
+            surfaces[key] = None
+        record.collect(f"GET {key}", str(response.status_code))
+        return response.status_code
+
+    for endpoint in swept_routes(app):
+        path, params = _request_for(endpoint)
+        statuses[endpoint.path] = call(endpoint.path, path, params)
+        # Again with the optional values that can pick a branch the base
+        # request never takes (`optional_variants`).
+        for variant in optional_variants(endpoint):
+            key = variant_key(endpoint.path, variant)
+            variants[key] = call(key, path, {**params, **variant})
+    record.write(routes=statuses, variants=variants, surfaces=surfaces,
+                 file=state.unchanged())
