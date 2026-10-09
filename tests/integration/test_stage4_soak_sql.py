@@ -3221,3 +3221,105 @@ class TestH2ShadowComparison:
             v, detail = await verdict(conn, self.FILE,
                                       **{**SHADOW_OFF, "weekly_ledger_on": "1"})
         assert v == "UNKNOWN" and "min old" in detail, detail
+
+
+# ── the owner rows date the handover before the flip time does ───────────────
+# Every check that dates a chain's handover by its owner rows and only then by
+# the operator's flip time, each with the one thing it counts after the
+# handover. Both given, the owner rows win: they are the chain's first write,
+# on the clock the shippers stamp with, and a flip time is what somebody typed.
+# The review of the chain 3 soak checks found I1's order survived every I1
+# test — swap `owner.at` and `flag.flip_at` and nothing failed — and the same
+# swap then survived B1's, M1's, O1's and O4's (2026-10-10). Walked, not
+# listed: a new file on that clock with no arrangement here fails
+# `test_every_handover_clock_is_pinned`.
+
+
+async def _i1_between(conn, latch, problem_at):
+    await clean_inventory(conn)
+    await inventory_owners(conn, latch)
+    await mirror_state(conn, "app.stock_movements", ok_at=problem_at)
+
+
+async def _b1_between(conn, latch, problem_at):
+    await clean_buyers(conn)
+    await owners(conn, latch)
+    await mirror_state(conn, "app.buyer_gender", ok_at=problem_at)
+
+
+async def _m1_between(conn, latch, problem_at):
+    await clean_managers(conn)
+    await manager_owners(conn, latch)
+    await mirror_state(conn, "app.manager_classifications", ok_at=problem_at)
+
+
+async def _o1_between(conn, latch, problem_at):
+    await clean_orders(conn)
+    await order_owners(conn, latch)
+    await mirror_state(conn, "app.order_backfill_misses", ok_at=problem_at)
+
+
+async def _o4_between(conn, latch, problem_at):
+    await clean_orders(conn)
+    await order_owners(conn, latch)
+    await chain_order(conn, CHAIN3_IDS[0], lines=0, mirrored_at=problem_at,
+                      created_at=problem_at - timedelta(hours=2))
+
+
+# file -> (the flag that says the chain writes Postgres, its flip-time
+# variable, the arrangement: owner rows at `latch`, one problem at `problem_at`)
+HANDOVER_CLOCKS = {
+    "15_i1_inventory_copy_stood_down.sql": ("inventory_on", "inventory_flip_at", _i1_between),
+    "23_b1_buyers_copies_stood_down.sql": ("buyers_on", "buyers_flip_at", _b1_between),
+    "30_m1_managers_copy_stood_down.sql": ("managers_on", "managers_flip_at", _m1_between),
+    "32_o1_orders_copies_stood_down.sql": ("orders_on", "orders_flip_at", _o1_between),
+    "35_o4_halfwritten_orders.sql": ("orders_on", "orders_flip_at", _o4_between),
+}
+# O2 asks whether a missing watermark is forgiven by a recent handover — a
+# different shape, pinned by its own test, which has to go on existing.
+HANDOVER_CLOCKS_ELSEWHERE = {
+    "33_o2_orders_watermark.sql": ("TestO2OrdersWatermark",
+                                   "test_missing_fails_unless_the_handover_is_recent"),
+}
+
+
+def test_every_handover_clock_is_pinned():
+    """Mutation: add `COALESCE(owner.at, flag.flip_at)` to a check and leave
+    it out of both maps."""
+    dating = {p.name for p in FILES
+              if re.search(r"COALESCE\(\s*owner\.at\s*,\s*flag\.flip_at\b",
+                           _code(p.read_text(encoding="utf-8")))}
+    assert dating == set(HANDOVER_CLOCKS) | set(HANDOVER_CLOCKS_ELSEWHERE), dating
+    for cls, test in HANDOVER_CLOCKS_ELSEWHERE.values():
+        assert callable(getattr(globals()[cls], test, None)), (cls, test)
+
+
+@needs_pg
+class TestTheOwnerRowsDateTheHandoverFirst:
+    LATCH = ago(days=2)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(HANDOVER_CLOCKS))
+    async def test_a_flip_time_after_the_latch_excuses_nothing(self, pool, name):
+        """Owner rows two days old, a flip time an hour old: a problem five
+        hours ago is after the handover. Mutation: date the handover by the
+        flip time first — the problem falls before it and passes."""
+        state, flip_var, arrange = HANDOVER_CLOCKS[name]
+        async with scenario(pool) as conn:
+            await arrange(conn, self.LATCH, ago(hours=5))
+            v, detail = await verdict(conn, name, **{
+                state: "1", flip_var: ago(hours=1).isoformat()})
+        assert v == "FAIL" and "since the handover" in detail, detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(HANDOVER_CLOCKS))
+    async def test_a_flip_time_before_the_latch_blames_nothing(self, pool, name):
+        """Owner rows two days old, a flip time three days old: a problem
+        stamped between the two is before the chain's first write, history.
+        Mutation: date the handover by the flip time first — it fails."""
+        state, flip_var, arrange = HANDOVER_CLOCKS[name]
+        async with scenario(pool) as conn:
+            await arrange(conn, self.LATCH, ago(days=2, hours=12))
+            v, detail = await verdict(conn, name, **{
+                state: "1", flip_var: ago(days=3).isoformat()})
+        assert v == "PASS" and "since the handover" in detail, detail
