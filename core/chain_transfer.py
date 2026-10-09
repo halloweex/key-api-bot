@@ -1340,25 +1340,28 @@ def classify_handover(
             "the copy-back."
         ))
     elif ahead and spec.is_append:
-        # Before a flip, and left INFO on purpose (the review of F6 asked; it
-        # is the owner's decision to change). Two causes read the same here:
-        # DuckDB lost rows the copy had already shipped — a file restored from
+        # Before a flip, and refused (owner's decision, 2026-10-09, after the
+        # review of F6 left it INFO). Two causes read the same here: DuckDB
+        # lost rows the copy had already shipped — a file restored from
         # before the last copy, with nothing written since (a later write
-        # would reuse an id and differ, CRITICAL above) — and then keeping
-        # them is right, Postgres floors its sequence on its own MAX after the
-        # flip; or a writer round the copy put them there, a phantom event.
-        # Refusing would refuse the first with no lever but deleting real
-        # history, so the finding says what a flip does with them instead.
-        info("handover_rows_ahead", ahead, (
+        # would reuse an id and differ, CRITICAL above) — or a writer round
+        # the copy put them there, a phantom event. A flip keeps them as the
+        # record either way, and only a person looking at each id can tell
+        # which it is, so the flip waits for that look and the finding names
+        # the lever for each answer.
+        critical("handover_rows_ahead", ahead, (
             f"{len(ahead)} row(s) in {table} are not in DuckDB's "
             f"{dk_table}, above its MAX({spec.append.watermark}). Nothing "
             "writes Postgres here but the hourly copy of DuckDB, and nothing "
             "deletes from an append-only table, so either DuckDB lost rows "
             "the copy had already shipped (a DuckDB file restored from "
             "before the last copy) or a writer that is not the copy put them "
-            "there. A flip keeps them as the record: right for the first, a "
-            "phantom event for the second, and nothing here can tell which, "
-            "so this does not refuse. Look at them by id before flipping."
+            "there — a phantom event. A flip would keep them as the record, "
+            "and nothing here can tell which they are, so it waits for a "
+            "decision per id, with web stopped: a row DuckDB lost is written "
+            f"back into {dk_table} as Postgres holds it (and DuckDB's id "
+            f"allocator moved above it, where it has one); a phantom is "
+            f"deleted from {table}. Then ask again."
         ))
     elif ahead:
         # Before a flip, a table the hourly copy replaces whole. Postgres is

@@ -360,9 +360,10 @@ class TestAKeyOnlyPostgresHolds:
             "handover_rows_ahead", "CRITICAL", (1,))
 
     def test_an_append_table_keeps_its_own_rule(self):
-        """Out of F6's scope and unchanged: the copy never deletes from an
-        append table, so its lever would not clear one. Pinned so the new
-        branch cannot swallow it."""
+        """Its own rule, not the full-replace one: the copy never deletes
+        from an append table, so that branch's lever would not clear one.
+        Pinned so neither branch swallows the other. Refused since the
+        owner's decision of 2026-10-09, with levers of its own."""
         spec = _spec(pg_inventory_write, "app.stock_movements")
         row = lambda i: _row(spec, id=i, offer_id=1, product_id=101,  # noqa: E731
                              movement_type="stock_out", quantity_before=40,
@@ -371,25 +372,48 @@ class TestAKeyOnlyPostgresHolds:
         (issue,) = classify_handover(spec, {1: row(1)}, {1: row(1), 9: row(9)},
                                      moved_on=False)
         assert (issue.check_name, issue.severity.value) == (
-            "handover_rows_ahead", "INFO")
+            "handover_rows_ahead", "CRITICAL")
         assert "next full replace" not in issue.description
+        assert "replicate_operational" not in issue.description
 
-    def test_an_append_table_says_what_a_flip_does_with_them(self):
-        """The review of F6: still INFO before a flip, so `--handover` exits
-        0 over them, and the finding read as if they were harmless — "a
-        writer that is not the copy put them there". A flip keeps them as the
-        record, which is right if DuckDB lost them (a restore older than the
-        last copy) and a phantom movement if something wrote round the copy.
-        The severity is the owner's to change; the sentence says both causes
-        and what the flip does. Mutation killed: the old sentence."""
+    @pytest.mark.parametrize("table", ["app.stock_movements",
+                                       "app.inventory_sku_history"])
+    def test_an_append_table_refuses_until_each_id_is_decided(self, table):
+        """The review of F6 left this INFO, so `--handover` exited 0 and a
+        flip kept the rows as the record — right if DuckDB lost them (a
+        restore older than the last copy), a phantom movement if something
+        wrote round the copy, and nothing here tells which. The owner chose
+        refusal (2026-10-09): CRITICAL, naming the lever for each answer.
+        Mutation killed: the INFO put back."""
+        spec = _spec(pg_inventory_write, table)
+        if table == "app.stock_movements":
+            row = lambda i: _row(spec, id=i, offer_id=1, recorded_at=T0)  # noqa: E731
+            dk, pg = {1: row(1)}, {1: row(1), 9: row(9)}
+        else:
+            day = date(2026, 9, 17)
+            row = lambda d: _row(spec, date=d, offer_id=1, quantity=5,  # noqa: E731
+                                 reserve=0, price=Decimal("90.00"))
+            later = day + timedelta(days=1)
+            dk, pg = {(day, 1): row(day)}, {(day, 1): row(day),
+                                            (later, 1): row(later)}
+        (issue,) = classify_handover(spec, dk, pg, moved_on=False)
+        assert (issue.check_name, issue.severity.value) == (
+            "handover_rows_ahead", "CRITICAL")
+        assert len(issue.sample_ids) == 1
+        assert "restored" in issue.description
+        assert "decision per id" in issue.description
+        assert "written back into" in issue.description
+        assert f"deleted from {table}" in issue.description
+
+    def test_after_the_latch_an_append_row_ahead_is_still_the_copy_back(self):
+        """The refusal is the pre-flip rule only: after the latch a row above
+        DuckDB's MAX is Postgres's later write, which the copy-back carries."""
         spec = _spec(pg_inventory_write, "app.stock_movements")
         row = lambda i: _row(spec, id=i, offer_id=1, recorded_at=T0)  # noqa: E731
         (issue,) = classify_handover(spec, {1: row(1)}, {1: row(1), 9: row(9)},
-                                     moved_on=False)
-        assert issue.severity.value == "INFO"
-        assert "A flip keeps them as the record" in issue.description
-        assert "restored" in issue.description
-        assert "by id before flipping" in issue.description
+                                     moved_on=True)
+        assert (issue.check_name, issue.severity.value) == (
+            "handover_rows_ahead", "INFO")
 
 
 def _preflip_criticals():

@@ -3234,7 +3234,9 @@ its OvercommitTracker stopped our query with code 241. Our own hourly ship had
 finished 18 minutes earlier. `ch_cohorts.fetch` now asks again after 1 s and
 3 s on code 241 alone, and only the last refusal reaches the fallback.
 
-`KS_READ_FALLBACK` (`duckdb` default | `off`) is read in `configure_modes()`,
+`KS_READ_FALLBACK` (`duckdb` default | `off`; production `off` since
+2026-10-09 08:01 UTC, ahead of step 13 — the owner shortened the clean week
+to the rehearsal) is read in `configure_modes()`,
 before the boot sync. **Under `off`, `fall_back` raises `ReadUnavailable`**
 (DN-20b) instead of letting its caller read DuckDB, and one exception handler
 in `web/main.py` answers it, from any route, with a 503 carrying `surface` —
@@ -3450,11 +3452,14 @@ written:
   stores sweep by age (chain 10's samples): a row older than anything DuckDB
   still holds is its sweep, which Postgres's own writer repeats after a flip.
   A row's own clock is no sweep — an older withdrawn expense is a ghost too.
-  An append table's key only Postgres holds, above DuckDB's watermark, stays
-  INFO and is **not** refused: a DuckDB file restored from before the last
-  copy and a writer round the copy look the same there, and refusing the
-  first leaves no lever but deleting real history. The finding says the flip
-  keeps them; whether it should refuse is the owner's to decide;
+  An append table's key only Postgres holds, above DuckDB's watermark, is
+  refused too (owner's decision, 2026-10-09; the review of F6 had left it
+  INFO): a DuckDB file restored from before the last copy and a writer round
+  the copy look the same there, and a flip would keep either as the record.
+  So the decision is made per id, with web stopped — a row DuckDB lost is
+  written back into DuckDB (its allocator moved above it), a phantom is
+  deleted from Postgres — and `--handover` is asked again. After the latch
+  the same row is Postgres's later write and stays INFO;
 - in an append-only table, two different rows under one key. There is no
   "newer" there: they are two events, and the usual one is a movement id both
   allocators issued, because Postgres floors its sequence on its own MAX(id);
@@ -3711,11 +3716,14 @@ bounded at 5 s, and publishes the answer.
   KeyCRM once a minute. The DuckDB path is unchanged, a failure escaping it
   included.
 
-### Step 13: the switch is built, and not switched (DN-28, DN-29)
+### Step 13: the switch, thrown on 2026-10-09 (DN-28, DN-29)
 
 `KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts:
 `duckdb` (default) or `postgres`. It is read in `configure_modes()`, before
-the boot sync, and **production does not set it**. An unknown value runs as
+the boot sync. **Production set it to `postgres` on 2026-10-09 at 08:18 UTC**,
+after a rehearsal on the production backups passed 11 checks of 11 and
+seventeen minutes after `KS_READ_FALLBACK=off`; the first Postgres derivation
+after it validated at 08:24. An unknown value runs as
 `duckdb` and publishes the error on `/api/health` (`warehouse_writer_mode`),
 where the canary warns `warehouse_mode_invalid`; it never raises, since web is
 the only syncer. After a flip the same typo is the way back, so it pages as

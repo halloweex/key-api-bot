@@ -1364,8 +1364,11 @@ printf '{"before": %s, "after": %s, "min_mem_available_mib": %s}\n' \
     "$MEM_MIN" > "$EV/z0.json"
 
 JUDGE_RC=0
+# As root: $EV is root's and 700, and the image runs as appuser, which could
+# not enter it — both rehearsals of 08 and 09.10 lost their verdict to that
+# PermissionError. Nothing else changes: no network, the evidence read-only.
 if ROWS="$(docker run --rm --name "$REH_PROBE" --network none --pull never --oom-score-adj 1000 \
-    --memory 256m --memory-swap 256m --log-opt max-size=10m \
+    --memory 256m --memory-swap 256m --log-opt max-size=10m --user 0 \
     -v "$EV:/ev:ro" \
     -v "$HELPER_DIR:/reh:ro" \
     --entrypoint python "$REH_IMAGE" /reh/probe.py judge --evidence /ev --floor "$FLOOR_S" 2>>"$LOG_DIR/probe.err")"; then
@@ -1390,7 +1393,7 @@ if [ "$JUDGE_RC" -ne 0 ] || [ -z "$ROWS" ]; then
     # the 700 is set after the copy, not only at creation.
     if install -d -m 700 "$KEPT" && cp -a "$EV/." "$KEPT/" && chmod 700 "$KEPT" \
         && { cp "$LOG_DIR/probe.err" "$KEPT/probe.err" 2>/dev/null || true; }; then
-        AGAIN="kept in $KEPT; judge them again as this step does, $KEPT mounted read-only at /ev in $REH_IMAGE, the probe's judge with --evidence /ev and --floor $FLOOR_S"
+        AGAIN="kept in $KEPT; judge them again as this step does, $KEPT mounted read-only at /ev in $REH_IMAGE as --user 0, the probe's judge with --evidence /ev and --floor $FLOOR_S"
     else
         AGAIN="and the evidence could not be kept"
     fi
