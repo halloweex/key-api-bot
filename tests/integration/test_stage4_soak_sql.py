@@ -413,6 +413,7 @@ class TestEveryCheckRuns:
             if not path.name[3:].startswith("b"):
                 continue
             async with scenario(pool) as conn:
+                await clean_buyers(conn)
                 v, detail = await verdict(conn, path.name, buyers_on="0")
             assert (v, detail.startswith("not applicable")) == ("PASS", True), (path.name, detail)
 
@@ -425,9 +426,11 @@ class TestEveryCheckRuns:
             if not path.name[3:].startswith("b"):
                 continue
             async with scenario(pool) as conn:
+                await clean_buyers(conn)
                 verdicts[path.name[:2]] = await verdict(
                     conn, path.name, buyers_on="held", buyers_held_by="KS_READ_DASHBOARD")
-        assert verdicts.pop("23")[0] == "FAIL"
+        v, detail = verdicts.pop("23")
+        assert v == "FAIL" and "so nothing moved" in detail, detail
         assert all(v == "PASS" and "held on DuckDB" in d for v, d in verdicts.values()), verdicts
 
     @pytest.mark.asyncio
@@ -436,6 +439,7 @@ class TestEveryCheckRuns:
             if not path.name[3:].startswith("i"):
                 continue
             async with scenario(pool) as conn:
+                await clean_inventory(conn)
                 v, detail = await verdict(conn, path.name, inventory_on="0")
             assert (v, detail.startswith("not applicable")) == ("PASS", True), (path.name, detail)
 
@@ -1223,6 +1227,209 @@ class TestE1ExpensesStoodDown:
             v, detail = await verdict(conn, self.FILE)
         assert v == "PASS", detail
 
+    @staticmethod
+    async def clean(conn):
+        await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
+        await conn.execute(
+            "DELETE FROM meta.mirror_state WHERE table_name = 'app.manual_expenses'")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("attempted,expected", [(timedelta(hours=23), "FAIL"),
+                                                    (timedelta(hours=25), "PASS")])
+    async def test_a_failure_is_judged_a_day_at_a_time(self, pool, attempted, expected):
+        """Only a successful copy resets `failures_since_ok`, and under chain 8
+        the copy never succeeds: it stamps the table failing while the cause
+        lasts, then stands down silently — so one episode failed E1 for ever.
+        O1's rule (chain 3 review). Mutation: drop the 24 hours."""
+        async with scenario(pool) as conn:
+            await self.clean(conn)
+            await mirror_state(conn, "app.manual_expenses", ok_at=ago(days=20),
+                               attempted_at=NOW - attempted, failures=4,
+                               error="not shipped: KS_WRITE_EXPENSES='postgress' is not understood")
+            v, detail = await verdict(conn, self.FILE)
+        assert v == expected, detail
+        if expected == "PASS":
+            assert "are history" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_failure_before_the_handover_is_history(self, pool):
+        """Chain 8's owner row is its handover: a failure stamped before it is
+        not a copy at work over rows the chain wrote. Mutation: drop the
+        owner row's bound."""
+        for attempted, failures, expected in ((ago(hours=5), 1, "PASS"),
+                                              (ago(hours=1), 2, "FAIL")):
+            async with scenario(pool) as conn:
+                await self.clean(conn)
+                await conn.execute(
+                    "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                    "VALUES ('owner:app.manual_expenses', 'x', $1)", ago(hours=2))
+                await mirror_state(conn, "app.manual_expenses", ok_at=ago(days=20),
+                                   attempted_at=attempted, failures=failures,
+                                   error="owner rows in Postgres since 2030-06-05 "
+                                         "and no local marker")
+                v, detail = await verdict(conn, self.FILE)
+            assert v == expected, (attempted, detail)
+        assert "no local marker" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_another_chains_owner_row_is_not_chain_8s_handover(self, pool):
+        """Mutation: read every `owner:` row rather than chain 8's."""
+        async with scenario(pool) as conn:
+            await self.clean(conn)
+            await conn.execute(
+                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                "VALUES ('owner:app.buyer_gender', 'x', $1)", ago(hours=2))
+            await mirror_state(conn, "app.manual_expenses", ok_at=ago(days=20),
+                               attempted_at=ago(hours=5), failures=1, error="boom")
+            v, detail = await verdict(conn, self.FILE)
+        assert v == "FAIL", detail
+
+
+# ── chain 1: I1 ───────────────────────────────────────────────────────────────
+
+INVENTORY_TABLES = ("bronze.offers", "bronze.offer_stocks", "app.stock_movements",
+                    "app.sku_inventory_status", "app.inventory_sku_history",
+                    "app.inventory_history")
+
+
+async def clean_inventory(conn):
+    """No owner row anywhere and no copy stamp on chain 1's six tables."""
+    await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
+    await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
+                       list(INVENTORY_TABLES))
+
+
+async def inventory_owners(conn, at):
+    for table in INVENTORY_TABLES:
+        await conn.execute(
+            "INSERT INTO meta.chain_watermarks (key, value, updated_at) VALUES ($1, $2, $3)",
+            f"owner:{table}", at.isoformat(), at)
+
+
+@needs_pg
+class TestI1InventoryCopyStoodDown:
+    """Chain 1 is latched in production since 2026-09-30, so its owner rows
+    stand: they date the handover, as O1's do (chain 3 review)."""
+
+    FILE = "15_i1_inventory_copy_stood_down.sql"
+
+    @pytest.mark.asyncio
+    async def test_a_copy_after_the_handover_fails(self, pool):
+        """Mutation: date the handover by the flip time or the window alone —
+        a copy five hours after a handover two days ago passes."""
+        async with scenario(pool) as conn:
+            await clean_inventory(conn)
+            await inventory_owners(conn, ago(days=2))
+            await mirror_state(conn, "app.stock_movements", ok_at=ago(hours=5))
+            v, detail = await verdict(conn, self.FILE, inventory_on="1")
+        assert v == "FAIL" and "app.stock_movements written by the copy" in detail, detail
+        assert "since the handover" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_copy_before_the_handover_passes(self, pool):
+        """The last copy before the chain's first write is history.
+        Mutation: count any `last_ok_at`, not one after the handover."""
+        async with scenario(pool) as conn:
+            await clean_inventory(conn)
+            await inventory_owners(conn, ago(days=2))
+            await mirror_state(conn, "bronze.offers", ok_at=ago(days=2, minutes=5))
+            v, detail = await verdict(conn, self.FILE, inventory_on="1")
+        assert v == "PASS" and "since the handover" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_failure_before_the_handover_is_not_the_copys_now(self, pool):
+        """Every failure ever stamped used to count, the ones from before the
+        flip included. Mutation: drop `last_attempted_at > since.at`."""
+        for attempted, expected in ((ago(hours=5), "PASS"), (ago(hours=1), "FAIL")):
+            async with scenario(pool) as conn:
+                await clean_inventory(conn)
+                await inventory_owners(conn, ago(hours=2))
+                await mirror_state(conn, "app.inventory_history", ok_at=ago(days=3),
+                                   attempted_at=attempted, failures=3,
+                                   error="owned by Postgres since 2030-06-05")
+                v, detail = await verdict(conn, self.FILE, inventory_on="1")
+            assert v == expected, (attempted, detail)
+        assert "failing (3): owned by Postgres since" in detail, detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("attempted,expected", [(timedelta(hours=23), "FAIL"),
+                                                    (timedelta(hours=25), "PASS")])
+    async def test_a_failure_is_judged_a_day_at_a_time(self, pool, attempted, expected):
+        """The copy stamps the six tables failing while the flag and the latch
+        disagree, then stands down silently once they agree, and only a
+        successful copy would reset the count — the sticky FAIL the file's old
+        'KNOWN AND LEFT' note described. Mutation: drop the 24 hours."""
+        async with scenario(pool) as conn:
+            await clean_inventory(conn)
+            await inventory_owners(conn, ago(days=4))
+            await mirror_state(conn, "bronze.offer_stocks", ok_at=ago(days=5),
+                               attempted_at=NOW - attempted, failures=3,
+                               error="owned by Postgres since 2030-06-01")
+            v, detail = await verdict(conn, self.FILE, inventory_on="1")
+        assert v == expected, detail
+
+    @pytest.mark.asyncio
+    async def test_without_owner_rows_the_flip_time_decides_and_without_it_unknown(self, pool):
+        """The copy stamps all six tables every hour until the flip, so with
+        neither an owner row nor a flip time a healthy flip reads a stamp
+        inside the window until the chain's first write. Mutation: FAIL a
+        guessed window."""
+        async with scenario(pool) as conn:
+            await clean_inventory(conn)
+            await mirror_state(conn, "bronze.offers", ok_at=ago(minutes=30))
+            v, _ = await verdict(conn, self.FILE, inventory_on="1",
+                                 inventory_flip_at=ago(hours=1).isoformat())
+            assert v == "FAIL"
+            v, detail = await verdict(conn, self.FILE, inventory_on="1",
+                                      inventory_flip_at=ago(minutes=10).isoformat())
+            assert v == "PASS" and "since the flip" in detail, detail
+            v, detail = await verdict(conn, self.FILE, inventory_on="1")
+        assert v == "UNKNOWN" and "SOAK_INVENTORY_FLIP_AT" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_a_lost_marker_fails_i1_once_and_nothing_else(self, pool):
+        """Owner rows in Postgres, no marker, the flag at duckdb: the script
+        passes 0, the stock step writes DuckDB again, and the hourly copy
+        stands down on the owner rows, so the inventory in Postgres stops
+        moving. I1 says so, naming the marker and the copy-back; I2–I5 have no
+        chain writing Postgres to judge. Mutation: judge 0 as not applicable
+        without reading the owner rows."""
+        verdicts = {}
+        for path in FILES:
+            if not path.name[3:].startswith("i"):
+                continue
+            async with scenario(pool) as conn:
+                await clean_inventory(conn)
+                await inventory_owners(conn, ago(days=2))
+                verdicts[path.name[:2]] = await verdict(conn, path.name, inventory_on="0")
+        v, detail = verdicts.pop("15")
+        assert v == "FAIL", detail
+        assert "data/write-chain-owners/pg_inventory_write" in detail, detail
+        assert "scripts/chain_copy_back.py inventory" in detail, detail
+        assert "since 03.06 12:00 Kyiv" in detail, detail
+        assert verdicts and all(v == "PASS" and d.startswith("not applicable")
+                                for v, d in verdicts.values()), verdicts
+
+    @pytest.mark.asyncio
+    async def test_another_chains_owner_rows_are_not_chain_1s(self, pool):
+        """Mutation: read every `owner:` row rather than chain 1's six."""
+        async with scenario(pool) as conn:
+            await clean_inventory(conn)
+            await manager_owners(conn, ago(days=2))
+            v, detail = await verdict(conn, self.FILE, inventory_on="0")
+        assert v == "PASS" and detail.startswith("not applicable"), detail
+
+    @pytest.mark.asyncio
+    async def test_invalid_fails_and_unknown_is_unknown(self, pool):
+        """A flag no chain understands writes nowhere (DN-01); a flag nobody
+        could read says nothing. Mutation: answer `invalid` as UNKNOWN."""
+        async with scenario(pool) as conn:
+            await clean_inventory(conn)
+            v, detail = await verdict(conn, self.FILE, inventory_on="invalid")
+            assert v == "FAIL" and "no chain understands" in detail, detail
+            v, detail = await verdict(conn, self.FILE, inventory_on="unknown")
+        assert v == "UNKNOWN" and "could not read KS_WRITE_INVENTORY" in detail, detail
+
 
 # ── chain 4 ───────────────────────────────────────────────────────────────────
 
@@ -1378,8 +1585,34 @@ class TestB1BuyersCopiesStoodDown:
                    for v, d in verdicts.values()), verdicts
 
     @pytest.mark.asyncio
+    async def test_held_with_owner_rows_is_the_marker_lost(self, pool):
+        """Owner rows, no marker, the flag at postgres and a reader on duckdb:
+        the script passes `held`, but this is no flip that did not move — the
+        unmet reader keeps the buyers step on DuckDB with nothing shipping it,
+        and taking the flag back would only make it state 0. B1 names the
+        marker and the copy-back; B2–B5 stay as held. Mutation: answer `held`
+        without reading the owner rows."""
+        verdicts = {}
+        for path in FILES:
+            if not path.name[3:].startswith("b"):
+                continue
+            async with scenario(pool) as conn:
+                await clean_buyers(conn)
+                await owners(conn, ago(days=2))
+                verdicts[path.name[:2]] = await verdict(
+                    conn, path.name, buyers_on="held", buyers_held_by="KS_SMS_STORE")
+        v, detail = verdicts.pop("23")
+        assert v == "FAIL", detail
+        assert "data/write-chain-owners/pg_buyers_write" in detail, detail
+        assert "scripts/chain_copy_back.py buyers" in detail, detail
+        assert "KS_SMS_STORE" in detail and "since 03.06 12:00 Kyiv" in detail, detail
+        assert "so nothing moved" not in detail, detail
+        assert all(v == "PASS" and "held on DuckDB" in d for v, d in verdicts.values()), verdicts
+
+    @pytest.mark.asyncio
     async def test_held_and_invalid_fail_with_their_reason(self, pool):
         async with scenario(pool) as conn:
+            await clean_buyers(conn)
             v, detail = await verdict(conn, self.FILE, buyers_on="held",
                                       buyers_held_by="KS_SMS_STORE")
             assert v == "FAIL" and "KS_SMS_STORE is not postgres" in detail, detail
@@ -1982,8 +2215,26 @@ class TestM1ManagersCopyStoodDown:
         assert v2 == "PASS" and detail2.startswith("not applicable"), detail2
 
     @pytest.mark.asyncio
+    async def test_pending_with_owner_rows_is_the_marker_lost(self, pool):
+        """Owner rows, no marker, the flag at postgres: the script passes
+        `pending`, but this is no flip waiting for its first tick — while a
+        precondition is unmet a classification goes to DuckDB and the replica
+        stands down on the owner rows. M1 FAILs naming the marker and the
+        copy-back, not UNKNOWN pointing at the preconditions. Mutation: answer
+        `pending` without reading the owner rows."""
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager_owners(conn, ago(days=2))
+            v, detail = await verdict(conn, self.FILE, managers_on="pending")
+        assert v == "FAIL", detail
+        assert "data/write-chain-owners/pg_managers_write" in detail, detail
+        assert "scripts/chain_copy_back.py managers" in detail, detail
+        assert "since 03.06 12:00 Kyiv" in detail, detail
+
+    @pytest.mark.asyncio
     async def test_the_states_that_judge_nothing(self, pool):
         async with scenario(pool) as conn:
+            await clean_managers(conn)
             v, detail = await verdict(conn, self.FILE, managers_on="0")
             assert (v, detail.startswith("not applicable")) == ("PASS", True)
             v, detail = await verdict(conn, self.FILE, managers_on="pending")
@@ -2196,6 +2447,29 @@ class TestChain3IsJudgedOnlyOnceItMoved:
                 await clean_orders(conn)
                 await order_owners(conn, ago(days=2))
                 verdicts[name] = await verdict(conn, name, orders_on="0")
+        v, detail = verdicts.pop(O_FILES[0])
+        assert v == "FAIL", detail
+        assert "data/write-chain-owners/pg_orders_write" in detail, detail
+        assert "scripts/chain_copy_back.py orders" in detail, detail
+        assert "since 03.06 12:00 Kyiv" in detail, detail
+        assert all(v == "PASS" and d.startswith("not applicable")
+                   for v, d in verdicts.values()), verdicts
+
+    @pytest.mark.asyncio
+    async def test_pending_with_owner_rows_fails_o1_once_and_nothing_else(self, pool):
+        """Owner rows and no marker with the flag at postgres: the script
+        passes `pending`, but this is no flip waiting for its first write.
+        While a precondition is unmet the writes stay on DuckDB and the sync's
+        mirror ships DuckDB's orders over the chain's every tick, as at 0. O1
+        FAILs naming the marker and the copy-back rather than UNKNOWN pointing
+        at the preconditions; O2–O5 stay not applicable. Mutation: answer
+        `pending` without reading the owner rows."""
+        verdicts = {}
+        for name in O_FILES:
+            async with scenario(pool) as conn:
+                await clean_orders(conn)
+                await order_owners(conn, ago(days=2))
+                verdicts[name] = await verdict(conn, name, orders_on="pending")
         v, detail = verdicts.pop(O_FILES[0])
         assert v == "FAIL", detail
         assert "data/write-chain-owners/pg_orders_write" in detail, detail
@@ -2772,6 +3046,24 @@ class TestH1ShadowCopiesStoodDown:
             v, detail = await verdict(conn, self.FILE,
                                       **{**SHADOW_OFF, "dq_journal_direct": "1"})
         assert v == "FAIL" and "failing (2)" in detail, detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("attempted,expected", [(timedelta(hours=23), "FAIL"),
+                                                    (timedelta(hours=25), "PASS")])
+    async def test_a_failure_is_judged_a_day_at_a_time(self, pool, attempted, expected):
+        """Only a successful copy resets `failures_since_ok`, and under the
+        chain the copy stamps failing while the flag and the latch disagree,
+        then stands down silently — so one episode after the handover failed
+        H1 for ever. O1's rule (chain 3 review). Mutation: drop the 24 hours."""
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await shadow_owner(conn, "app.weekly_report_sends", ago(days=4))
+            await mirror_state(conn, "app.weekly_report_sends", ok_at=ago(days=5),
+                               attempted_at=NOW - attempted, failures=3,
+                               error="not shipped: owned by Postgres since 2030-06-01")
+            v, detail = await verdict(conn, self.FILE,
+                                      **{**SHADOW_OFF, "weekly_ledger_on": "1"})
+        assert v == expected, detail
 
     @pytest.mark.asyncio
     async def test_without_an_owner_row_a_recent_stamp_is_unknown(self, pool):

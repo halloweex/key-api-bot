@@ -39,12 +39,20 @@
 -- `chain_latch_disagrees` the only page. M2 stays "not applicable"; this one
 -- FAILs.
 --
+-- And with managers_on=pending: the flag at postgres and no marker is the
+-- marker lost too once owner rows stand, not a flip waiting for its first
+-- tick. A precondition web holds unmet keeps the classification on DuckDB and
+-- out of Postgres, exactly as above; with every one met, the chain's next
+-- write takes the marker again. Either way the lever is the marker, so it
+-- FAILs rather than send the operator to the preconditions as UNKNOWN.
+--
 -- WHAT A FAIL MEANS
 -- - invalid: KS_WRITE_MANAGERS is a value no chain understands; the chain is
 --   stood down and nothing is written anywhere. Fix the .env line.
--- - owner rows and managers_on=0: the marker is lost. Restore
+-- - owner rows and managers_on=0 or pending: the marker is lost. Restore
 --   data/write-chain-owners/pg_managers_write, else
---   scripts/chain_copy_back.py managers.
+--   scripts/chain_copy_back.py managers. Not the flag: at duckdb it is the
+--   same state.
 -- - a table written or failing after the handover: something is writing
 --   DuckDB's copy over the chain's. Read M2, then the web log for 'replicate:'.
 WITH clock AS (
@@ -99,7 +107,7 @@ SELECT 'M1 managers copy stood down'::text AS "check",
            WHEN '1' THEN CASE WHEN agg.n = 0 THEN 'PASS'
                               WHEN since.guessed THEN 'UNKNOWN'
                               ELSE 'FAIL' END
-           WHEN 'pending' THEN 'UNKNOWN'
+           WHEN 'pending' THEN CASE WHEN owner.at IS NULL THEN 'UNKNOWN' ELSE 'FAIL' END
            WHEN 'invalid' THEN 'FAIL'
            ELSE 'UNKNOWN'
        END AS verdict,
@@ -117,10 +125,20 @@ SELECT 'M1 managers copy stood down'::text AS "check",
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed || ' ' || since.said, 500)
                               ELSE 'neither table written by a copy ' || since.said END
-           WHEN 'pending' THEN
-               'KS_WRITE_MANAGERS=postgres and the chain has not latched: its first write '
-               'comes on the first tick, so minutes after the flip this is a chain HELD on '
-               'DuckDB — read /api/health write_chains.pg_managers_write.unmet_precondition'
+           WHEN 'pending' THEN CASE
+               WHEN owner.at IS NULL THEN
+                   'KS_WRITE_MANAGERS=postgres and the chain has not latched: its first write '
+                   'comes on the first tick, so minutes after the flip this is a chain HELD on '
+                   'DuckDB — read /api/health write_chains.pg_managers_write.unmet_precondition'
+               ELSE format(
+                   'chain 5 owns its tables in Postgres since %s Kyiv (owner rows), and '
+                   'data/write-chain-owners/pg_managers_write is gone with KS_WRITE_MANAGERS=postgres: '
+                   'the marker is lost. While a precondition is unmet (/api/health '
+                   'write_chains.pg_managers_write.unmet_precondition) a classification goes to '
+                   'DuckDB, and the replica stands down on the owner rows, so it never reaches '
+                   'Postgres (chain_latch_disagrees). Restore the marker, else '
+                   'scripts/chain_copy_back.py managers; taking the flag back changes nothing',
+                   to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN 'invalid' THEN
                'KS_WRITE_MANAGERS is set to a value no chain understands: chain 5 is stood down'
            WHEN 'unknown' THEN 'could not read KS_WRITE_MANAGERS from the web container'

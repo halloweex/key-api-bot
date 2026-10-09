@@ -56,13 +56,20 @@
 -- "not applicable" (no chain writes Postgres for them to judge); this one
 -- FAILs.
 --
+-- And with orders_on=pending: the flag at postgres and no marker is the marker
+-- lost too once owner rows stand, not a flip waiting for its first write. A
+-- precondition web holds unmet keeps the writes on DuckDB and the mirror
+-- shipping, exactly as above; with every one met, the chain's next write
+-- takes the marker again. Either way UNKNOWN would send the operator to the
+-- preconditions while the lever is the marker, so it FAILs.
+--
 -- WHAT A FAIL MEANS
 -- - invalid: KS_WRITE_ORDERS is a value no chain understands; the chain is
 --   stood down and no order is written anywhere. Fix the .env line.
--- - owner rows and orders_on=0: the marker is lost. Restore
+-- - owner rows and orders_on=0 or pending: the marker is lost. Restore
 --   data/write-chain-owners/pg_orders_write (or redeploy the chain's build),
 --   else scripts/chain_copy_back.py orders — DN-22a's lever for the same
---   state.
+--   state. Not the flag: at duckdb it is the same state.
 -- - the misses written after the handover: the hourly copy put DuckDB's ledger
 --   over the chain's. Failing after it: read the error — `owned by Postgres
 --   since` is the latch with its flag put back, `no local marker` a lost
@@ -133,7 +140,7 @@ SELECT 'O1 orders copies stood down'::text AS "check",
            WHEN '1' THEN CASE WHEN agg.n = 0 THEN 'PASS'
                               WHEN since.guessed THEN 'UNKNOWN'
                               ELSE 'FAIL' END
-           WHEN 'pending' THEN 'UNKNOWN'
+           WHEN 'pending' THEN CASE WHEN owner.at IS NULL THEN 'UNKNOWN' ELSE 'FAIL' END
            WHEN 'invalid' THEN 'FAIL'
            ELSE 'UNKNOWN'
        END AS verdict,
@@ -151,11 +158,21 @@ SELECT 'O1 orders copies stood down'::text AS "check",
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed || ' ' || since.said, 500)
                               ELSE 'none of the four tables written by a DuckDB copy ' || since.said END
-           WHEN 'pending' THEN
-               'KS_WRITE_ORDERS=postgres and the chain has not latched: it latches on its first '
-               'write, the first order KeyCRM changes after the start, so in the day, minutes '
-               'after the flip, this is a chain HELD on DuckDB — read /api/health '
-               'write_chains.pg_orders_write.unmet_precondition'
+           WHEN 'pending' THEN CASE
+               WHEN owner.at IS NULL THEN
+                   'KS_WRITE_ORDERS=postgres and the chain has not latched: it latches on its first '
+                   'write, the first order KeyCRM changes after the start, so in the day, minutes '
+                   'after the flip, this is a chain HELD on DuckDB — read /api/health '
+                   'write_chains.pg_orders_write.unmet_precondition'
+               ELSE format(
+                   'chain 3 owns its tables in Postgres since %s Kyiv (owner rows), and '
+                   'data/write-chain-owners/pg_orders_write is gone with KS_WRITE_ORDERS=postgres: '
+                   'the marker is lost. While a precondition is unmet (/api/health '
+                   'write_chains.pg_orders_write.unmet_precondition) the writes stay on DuckDB '
+                   'and the sync''s mirror ships DuckDB''s orders over the chain''s every tick '
+                   '(order_owner_row_without_marker). Restore the marker, else '
+                   'scripts/chain_copy_back.py orders; taking the flag back changes nothing',
+                   to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN 'invalid' THEN
                'KS_WRITE_ORDERS is set to a value no chain understands: chain 3 is stood down'
            WHEN 'unknown' THEN 'could not read KS_WRITE_ORDERS from the web container'
