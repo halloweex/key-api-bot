@@ -550,9 +550,11 @@ class TestTheSweepUnderARefusingPostgres:
         assert not [key for key, status in variants.items() if status == 422]
 
     def test_the_routes_left_answer_as_they_do_today(self, down):
-        """Of the routes left, the one whose refusal reaches web's handler
-        answers 503 naming `duckdb` (PR-1) rather than the 500 it fell through
-        to; the three that swallow it answer 200, degraded, until PR-3."""
+        """Of the routes left, the two whose refusal reaches web's handler —
+        the warehouse status, and the summary for a source with no column in
+        Gold — answer 503 naming `duckdb` (PR-1) rather than the 500 they fell
+        through to; the three that swallow it answer 200, degraded, until
+        PR-3."""
         result = down[ROUTES]
         answered = {**result["routes"], **result["variants"]}
         surfaces = result["surfaces"]
