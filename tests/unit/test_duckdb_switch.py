@@ -7,8 +7,11 @@ reading the code (core/duckdb_switch.py). What is held here:
 - the mode: unset is `on`, today; a value nobody understands runs `on` and
   says so; a process that never configured reads it on its first open;
 - the opener: under `off` it refuses before the driver runs — the file is not
-  created — counts at the raise, names the site, bounds the sites, and
-  publishes no exception text;
+  created, and the store's `connect()` and `backup_database()` refuse before
+  they touch the disk beside the file —
+  counts at the raise, names the site (a task's coroutine when the walk would
+  otherwise name whatever turns the loop), bounds the sites, and publishes no
+  exception text;
 - the walk: `open_file` is the only reach for a driver function in `core/`,
   `web/` and `bot/` — `connect`, and every function that runs on the default
   connection — and the host-side tools that reach it directly are exactly the
@@ -166,6 +169,123 @@ class TestTheOpener:
         assert not target.exists()
         assert list(duckdb_switch.opened()) == [f"{__name__}:asks_for_the_store"]
 
+    def test_a_refused_connect_creates_no_directory(self, monkeypatch, tmp_path):
+        """The switch is `connect()`'s first act: before it, a refused connect
+        had already made `data/` and `duckdb_tmp/` (stage 5, PR-0).
+        Mutation: move `duckdb_switch.guard()` below `DB_DIR.mkdir` in
+        `DuckDBStore.connect`."""
+        from core.duckdb_store import DuckDBStore
+
+        data = tmp_path / "data"
+        monkeypatch.setattr("core.duckdb_store.DB_DIR", data)
+        _off(monkeypatch)
+        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+            asyncio.run(DuckDBStore(db_path=data / "analytics.duckdb").connect())
+        assert list(tmp_path.iterdir()) == []
+        # `asyncio.run` made `connect()` itself the task, so the site is it.
+        assert duckdb_switch.opened()["core.duckdb_store:connect (task)"]["count"] == 1, (
+            "counted once: connect's refusal, not open_file's as well")
+
+    def test_a_refused_backup_touches_nothing_beside_the_file(self, monkeypatch, tmp_path):
+        """The backup is the other reach for the file that went to the disk
+        before the switch: `backups/` made, stale temp copies deleted, the
+        file stat'ed and the disk measured — and an alert sent if that came
+        out short — all before `connection()` refused. Under off the switch
+        is its first act too, so a frozen file's neighbours stay exactly as
+        they were (review of stage 5's PR-0). Mutation: move
+        `duckdb_switch.guard()` below `dest.mkdir` in `backup_database`."""
+        from core.duckdb_store import DuckDBStore
+
+        data = tmp_path / "data"
+        data.mkdir()
+        frozen = data / "analytics.duckdb"
+        frozen.write_bytes(b"frozen")
+        left_by_a_kill = data / "elsewhere" / ".analytics-20261009-020000.duckdb.tmp"
+        left_by_a_kill.parent.mkdir()
+        left_by_a_kill.write_bytes(b"half a copy")
+        _off(monkeypatch)
+        store = DuckDBStore(db_path=frozen)
+        alert = AsyncMock()
+        monkeypatch.setattr(store, "_send_warehouse_alert", alert)
+
+        # Beside the file, as the daily job asks; and into a directory that
+        # holds a temp copy a kill left, which the backup would clear first.
+        for dest_dir in (None, left_by_a_kill.parent):
+            with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+                asyncio.run(store.backup_database(dest_dir=dest_dir))
+        assert sorted(p.name for p in data.iterdir()) == ["analytics.duckdb", "elsewhere"]
+        assert left_by_a_kill.read_bytes() == b"half a copy"
+        alert.assert_not_awaited()
+        assert sum(e["count"] for e in duckdb_switch.opened().values()) == 2
+
+    def test_on_still_makes_both_directories(self, monkeypatch, tmp_path):
+        from core.duckdb_store import DuckDBStore
+
+        data = tmp_path / "data"
+        monkeypatch.setattr("core.duckdb_store.DB_DIR", data)
+
+        async def opens():
+            store = DuckDBStore(db_path=data / "analytics.duckdb")
+            await store.connect()
+            await store.close()
+
+        asyncio.run(opens())
+        assert (data / "analytics.duckdb").exists() and (data / "duckdb_tmp").is_dir()
+        assert duckdb_switch.opened() == {}
+
+    def test_a_refusal_inside_a_task_names_the_task_not_the_loop(self, monkeypatch, tmp_path):
+        """The sync hands the store's own methods to `asyncio.ensure_future`,
+        so the task's coroutine is plumbing and the walk went past it to
+        whatever turns the loop: this test function here, uvicorn in
+        production — never the read that was refused (stage 5, PR-0).
+        Mutation: drop the `left_the_task` branch in `_site`."""
+        from core.duckdb_store import DuckDBStore
+
+        _off(monkeypatch)
+        store = DuckDBStore(db_path=tmp_path / "a.duckdb")
+
+        async def sync():
+            with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+                await asyncio.ensure_future(store.get_last_sync_time("orders"))
+
+        asyncio.run(sync())
+        assert list(duckdb_switch.opened()) == [
+            "core.duckdb_store:get_last_sync_time (task)"]
+
+    def test_an_application_frame_that_turns_the_loop_is_still_the_site(
+        self, monkeypatch, tmp_path,
+    ):
+        """A tool of ours that runs the loop on the store's coroutine says
+        more than the coroutine does, and is named as it always was."""
+        from core.duckdb_store import DuckDBStore
+
+        _off(monkeypatch)
+        scope = {"__name__": "scripts.some_tool", "asyncio": asyncio,
+                 "store": DuckDBStore(db_path=tmp_path / "a.duckdb")}
+        exec("def main():\n    asyncio.run(store.connect())\n", scope)
+        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+            scope["main"]()
+        assert list(duckdb_switch.opened()) == ["scripts.some_tool:main"]
+
+    def test_a_task_of_our_own_is_named_plainly(self, monkeypatch, tmp_path):
+        """A task whose coroutine is a caller, not the store, is found by the
+        walk before it leaves the task: no `(task)`."""
+        from core.duckdb_store import DuckDBStore
+
+        _off(monkeypatch)
+        store = DuckDBStore(db_path=tmp_path / "a.duckdb")
+
+        async def reads():
+            async with store.connection():
+                pass
+
+        async def boot():
+            with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+                await asyncio.ensure_future(reads())
+
+        asyncio.run(boot())
+        assert list(duckdb_switch.opened()) == [f"{__name__}:reads"]
+
     def test_the_singleton_is_not_left_half_built(self, monkeypatch):
         import core.duckdb_store as store_module
 
@@ -209,6 +329,21 @@ class TestTheOpener:
         duckdb_switch.reset()
         monkeypatch.delenv(duckdb_switch.ENV)
         assert duckdb_switch.opened() == {} and duckdb_switch.mode() == "on"
+
+    def test_reset_counts_forgets_the_counts_and_keeps_the_mode(self, monkeypatch, tmp_path):
+        """What a sweep calls between its steps. Mutation: make it `reset()`
+        — the mode is read again, from an environment that no longer says
+        `off`, and the next open is let through."""
+        _off(monkeypatch)
+        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+            duckdb_switch.open_file(tmp_path / "a.duckdb")
+        duckdb_switch.reset_counts()
+        monkeypatch.delenv(duckdb_switch.ENV)
+        assert duckdb_switch.opened() == {}
+        assert duckdb_switch.mode() == "off" and duckdb_switch.value() == "off"
+        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+            duckdb_switch.open_file(tmp_path / "a.duckdb")
+        assert not (tmp_path / "a.duckdb").exists()
 
 
 # ─── The walk: one opener ────────────────────────────────────────────────────
