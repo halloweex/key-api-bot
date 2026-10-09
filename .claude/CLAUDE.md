@@ -1696,6 +1696,111 @@ it does not do, both written down in the revision:
   DuckDB before the mirror refuses — and after the flip `--handover` then
   refuses on those ids. After the flip, no image rollback at all.
 
+### Revision 0035: the same lock for the eight chains #280 registered
+
+#280 registered chains 3, 5, 6, 7b-3, 9, 10, 11a and 11b, all off, and shipped
+no revision, so a database at 0034 still admitted images 3.0.263 to 3.0.270 —
+built between chain 4's lock and #280, and knowing none of these chains.
+Image numbers here are what `/app/VERSION` and the Docker Hub tag say, each
+read from `git show <merge>:VERSION`. The git tag of the same code is usually
+one higher — `deploy.yml` tags the image with the VERSION it was built from,
+and `bump_version.sh` then bumps it and tags the new number — but not always:
+#273 and #274 were both built as 3.0.259, so image 3.0.260 never existed and
+their bumps are v3.0.260 and v3.0.261. `v3.0.249` above is a git tag.
+`0035_batch_e_chains` is 0034's shape for all eight at once: twenty `COMMENT ON
+TABLE` statements naming each table's chain, `KS_WRITE_*` and writing module,
+and `REQUIRED_REVISION` moved to it, so every gated path in an older image
+refuses the database.
+
+**One revision, directly before the first of these flips.** The bump refuses
+every older image whatever tables it comments, so eight revisions would buy
+seven more deploys and seven more windows in which an image-only rollback
+needs a downgrade, and lock nothing more. It goes out before the first of the
+eight flips (planned from 2026-10-10) and not earlier — owner decision 16's
+rule for 0034 — because from the day it lands, rolling an image back below it
+for any reason takes the downgrade below.
+
+**What it adds is an outage, not a wall.** In 3.0.263 to 3.0.270 every gated
+path that writes one of these tables already stands down on an owner row read
+as itself (DN-22a, DN-22b, both older than 0034): the operational copy, the
+classification copy, chain 3's backfills, ids-diffs and comment ship. What the
+lock adds is that such an image cannot run quietly beside a latched chain —
+the dashboard answers 401 under `KS_USER_STORE=postgres`, and the bot, the
+canary with it, refuses to start. What it does not hold, written in the
+revision:
+
+- **The per-tick landing mirrors never gated**: `upsert_orders` →
+  `mirror_orders` → `write_orders` and `pg_landing._mirror` (expenses,
+  products, categories). The sync runs without a session, so a locked-out
+  image still ships its own copy over chain 3's and chain 6's rows — and the
+  comparisons that would file `owner_row_without_marker` and
+  `order_owner_row_without_marker` are gated, so its 07:30 run fails on the
+  revision instead of naming the overwrite.
+- **It still writes DuckDB**: the sync, the checks, the watchdogs, the reports,
+  the goal and forecast jobs. After a flip those are rows the chain does not
+  hold — `shadow_duckdb_only_rows` for the shadow chains, a handover that
+  reports them for the rest.
+
+**The way back below it.** An image-only rollback below the first image built
+with 0035 — the first whose `/app/core/pg.py` says `REQUIRED_REVISION =
+"0035_batch_e_chains"`; ask the image, since its number is whatever VERSION
+main carries when this merges — needs `alembic downgrade 0034_buyer_chain`
+first, run with the **new** migrate image — an older one
+does not know 0035 — and then all three images moved back, keycrm-migrate with
+web and bot, or `up -d` re-runs `alembic upgrade head` and puts 0035 back.
+Only before the first of these chains latches: after one has written Postgres,
+the way back is `scripts/chain_copy_back.py <chain>`, never a downgrade below
+0035. It also locks out 3.0.271 and 3.0.272, which carry these chains — the
+cost of a bump, not a hazard.
+
+**Deploying it** is any revision's rule: CI rebuilds `keycrm-migrate` with
+`keycrm-web` and the bot, compose runs `migrate` first and holds web and bot on
+`service_completed_successfully`, and the workflow checks `docker wait
+ks-migrate`. Each statement takes SHARE UPDATE EXCLUSIVE on its table
+(measured on 17.2): reads and writes go on — the full replaces of these tables
+are DELETE, not TRUNCATE — and it waits only behind a manual VACUUM or ANALYZE,
+an index build or other DDL. After step 13's flip the restart re-asks step 13's
+preconditions like any deploy's; `migrate` finishing first is what keeps
+`pg_revision` met.
+
+**Measured on a throwaway PostgreSQL 17.2**: 0034 → 0035, down to 0034 and up
+again, each clean, with all 57 table comments equal to the replay of the
+migrations at every step; origin/main's code (0034) refused the 0035 database
+in `require_revision` and in the bot store's `initialise()`, and this code
+refused the 0034 one. Held by `tests/unit/test_batch_e_chains_revision.py`
+(each test names its mutation) and `tests/integration/test_batch_e_lock_pg.py`
+(the round trip and the lock on a real server, in a transaction rolled back).
+Both read what came before from `tests/migration_replay.py`, which runs every
+revision against a recorder rather than restating its text. The unit tests are
+frozen like the revision — 0035's twenty tables, chains, flags and modules as
+literals, nothing read from the modules as they are today — so a later change
+to a chain cannot fail them and tempt an edit of an applied revision.
+
+**A flip waits for the lock-out, at runtime, from this build on.** Each of the
+eight names 0035 as its `LOCKOUT_REVISION`, and a chain's flag moves its writes
+only in a build whose `REQUIRED_REVISION` is that revision or a later one
+(`core.chain_latch.lockout_unmet`, compared by the four-digit number, because
+neither image carries the migrations): until then it runs as duckdb,
+`/api/health` names `lockout` under its `unmet_precondition`, and the canary
+warns `write_chain_precondition_unmet`. A latched chain is not held (OD-19
+(a)). Its writers pass `require_revision()` before the latch, so the database
+is at the lock-out too when the chain first writes Postgres. A chain registered
+later names its own lock-out and cannot flip until a build requires it.
+`tests/unit/test_chain_lockout.py` holds all of it for every chain from #280
+on, and that the revision a chain names comments every table it owns naming its
+module. A table added to a chain afterwards fails there, and the answer is a
+new revision, never an edit of 0035. Chains 1, 4, 6a, 7a and 8 predate the
+rule; 0034 holds them.
+
+**What no code here can hold is the images already built.** 3.0.271 and
+3.0.272 carry the eight chains, require 0034 and have no such rule (3.0.272
+runs in production on 2026-10-09). In them nothing refuses a flip: reproduced
+against a 0034 database, `KS_WRITE_WEEKLY_LEDGER=postgres` latched chain 11a at
+its first write — owner row and ledger row written, no revision asked. So
+**set none of the eight flags until the database says `0035_batch_e_chains`**
+(`SELECT version_num FROM meta.alembic_version`). If this revision has not
+deployed by the time the flips are due, the flips wait for it.
+
 ### Chain 3: the orders, written where they are read (off)
 
 `core/pg_orders_write.py` is the sixth registered write chain:
@@ -1842,9 +1947,11 @@ Postgres's line items of its order carry a stamp from after the latch. A
 basket the chain emptied leaves no line to date and is refused, knowingly too
 strict, with the per-id decision named. No allocator to carry. Proved against
 a real Postgres in `tests/integration/test_chain_copy_back_orders.py`. **What
-is not built**: the soak checks, the restore drill counting the four tables,
-and a lock-out revision for images without the chain (chain 4's 0034 shape —
-an owner's question, not a missing table).
+is not built**: the soak checks and the restore drill counting the four
+tables. The lock-out for images without the chain is revision 0035, shared
+with the other seven chains #280 registered (see "Revision 0035"); it holds
+the backfills and the misses ledger's copy, and not the per-tick orders and
+expenses mirrors, which never asked the revision.
 
 ### The Postgres mirror of landing
 One parse, two stores. `core/landing_rows.py` turns a KeyCRM payload into typed
@@ -1927,9 +2034,10 @@ hold), `step13` (DuckDB would derive `sales_type` from a classification the
 chain freezes), `chain3` (`update_manager_stats` reads the orders; a build
 without chain 3 reads as unmet, not as an import error) and
 `read_fallback_off`. Every fact is local, so `/api/health` answers with
-Postgres down. Order of flips: 7b-4, step 13, chain 3, a lock-out revision
-(directly before the flip, as chain 4 did with 0034 — not in this change),
-chain 5. The way back runs in reverse.
+Postgres down. Order of flips: 7b-4, step 13, chain 3, chain 5, with the
+lock-out revision — 0035, shared by all eight of #280's chains — deployed
+before the first of those eight flips (see "Revision 0035"). The way back runs
+in reverse.
 
 **Three writers, one advisory lock** (`CHAIN_LOCK_KEY`, 'ks' + 5), taken
 first in every transaction. Measured before building: two classifications of
@@ -2407,7 +2515,7 @@ migration now stops both in one place instead.
 
 **Deploying it needs all three images, migrate first.** `REQUIRED_REVISION`
 moved to `0010_order_versions` at the time and `require_revision` raises on any
-mismatch, ahead or behind. It is `0034_buyer_chain` today, and every
+mismatch, ahead or behind. It is `0035_batch_e_chains` today, and every
 revision since has inherited the same rule: rebuild and push `keycrm-migrate`
 alongside `keycrm-web`, and let `docker wait ks-migrate` finish first. The bot
 checks it too, but only in `initialise()`, so a running bot survives the
@@ -4440,9 +4548,13 @@ the chain re-stamped is the copy's work (INFO) and a retired row that differs,
 one written round the chain since the latch, or one only DuckDB holds,
 refuses. The chain map's "run a full sync" rollback
 is wrong under OD-19 (a): a full sync under a latched chain writes Postgres
-again. No lock-out migration: an image older than the chain writes DuckDB from
-the payload and mirrors the same payload, stamping the watermark in one
-transaction, and still pages `owner_row_without_marker`.
+again. No lock-out of its own, and revision 0035 — shipped for the other
+chains #280 registered — holds none of its writers: an image older than the
+chain writes DuckDB from the payload and mirrors the same payload through
+`pg_landing._mirror`, which never asks the revision, stamping the watermark in
+one transaction. What 0035 changes is the evidence: such an image is an outage
+(401, no bot), and its 07:30 comparison fails on the revision instead of
+paging `owner_row_without_marker`.
 
 Proved on PostgreSQL 17.2 (`tests/integration/test_catalogue_writer.py`): the
 one-`xmin` write, retirement, a repeated id, two concurrent full writes with no
@@ -4464,9 +4576,11 @@ two send ledgers (chain 11a `KS_WRITE_WEEKLY_LEDGER`, 11b
 receives every row**. All four default to `duckdb`, which runs the block that
 stood at each call site, moved behind one door per chain (`core/dq_journal.py`,
 `core/watchdog_samples.py`, `core/report_ledger.py`) and walked for anything
-that goes round it. No Postgres revision: every table has been there since
-stage 3. `warehouse_refreshes` and `reconciliation_log` are not ported — both
-are frozen at their writer (step 13, OD-10).
+that goes round it. No schema revision: every table has been there since
+stage 3; revision 0035 only comments them and locks images older than the four
+chains out (see "Revision 0035"). `warehouse_refreshes` and
+`reconciliation_log` are not ported — both are frozen at their writer (step
+13, OD-10).
 
 **A third registry state: the copy stops, the comparison continues.** A chain
 module declares `CHAIN_SHADOW = True`. The hourly `replicate_operational`

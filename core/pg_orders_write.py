@@ -94,6 +94,8 @@ PRECONDITIONS THE FLAG ENFORCES
 moves the writes; until all of it does an unlatched chain runs as duckdb
 whatever the flag says (DN-26's rule, generic in the registry since DN-27):
 
+- `lockout` — this build requires `LOCKOUT_REVISION` (0035), which refuses
+  every image built before the chain (`chain_latch.lockout_unmet`).
 - `goals_bridge` — the goal calculators still render the sales-type bridge
   over DuckDB `orders` (`core/repositories/goals.py`, DN-12). Chain 7b's port
   removes it (OD-14). Moved before that, retail goals diverge from Silver at
@@ -147,6 +149,10 @@ CHAIN = "pg_orders_write"
 CHAIN_TABLES: Tuple[str, ...] = (
     "bronze.orders", "bronze.order_products", "bronze.expenses",
     "app.order_backfill_misses")
+
+# The revision that refuses every image built before this chain; the flag
+# moves nothing until this build requires it (`chain_latch.lockout_unmet`).
+LOCKOUT_REVISION = "0035_batch_e_chains"
 
 # The `sync_metadata` keys that move with it. The store's getter and setter
 # route both through `core.write_chains.chain_for_sync_key` to
@@ -330,6 +336,10 @@ def _landing_pages_unmet() -> Optional[str]:
             "clear it first")
 
 
+def _lockout_unmet() -> Optional[str]:
+    return chain_latch.lockout_unmet(LOCKOUT_REVISION)
+
+
 def _backup_unmet() -> List[str]:
     from core import backup_evidence
 
@@ -458,7 +468,8 @@ def _live_unmet() -> List[Tuple[str, str]]:
     when every one holds. Never raises."""
     reasons: List[Tuple[str, str]] = []
     # The checks are looked up when asked, so a test standing one in is read.
-    for key, check in (("goals_bridge", _goals_bridge_unmet), (_STEP13, _step13_unmet),
+    for key, check in ((chain_latch.LOCKOUT_KEY, _lockout_unmet),
+                       ("goals_bridge", _goals_bridge_unmet), (_STEP13, _step13_unmet),
                        ("chain1", _chain1_unmet),
                        ("landing_pages_clear", _landing_pages_unmet)):
         try:
