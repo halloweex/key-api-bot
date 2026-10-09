@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.275
+
+- CLAUDE.md: step 13 and KS_READ_FALLBACK=off are on in production
+- The rehearsal's judge runs as root, so it can read the evidence
+- Before a flip, an append row only Postgres holds is refused
+- Chain 5's precondition list starts with the lockout
+- Chain 7b-4 (review): CLAUDE.md says when it may merge, to keep the line, and what refuses
+- Chain 7b-4 (review): retired is not removable, and the refusal's reach named
+- Chain 7b-4 (review): every goal calculator against numbers computed in Python
+- Chain 7b-4 (tidy): two leftovers the full-suite review found
+- Chain 7b-4 (6/6): the sweep stops setting KS_GOALS_HISTORY, and M18 says what it kills now
+- Chain 7b-4 (5/6): CLAUDE.md says the bridge is gone and the variable retired
+- Chain 7b-4 (4/6): chains 3 and 5 stop waiting for the goal bridge
+- Chain 7b-4 (3/6): the goal calculators read Silver only; KS_GOALS_HISTORY retired
+- Chain 7b-4 (2/6): retire the goals semantics dry run
+- Chain 7b-4 (1/6): step 13 stops asking about the goal bridge
+
+
 ## 3.0.274
 
 - Version statements that do not rot and hold for every merge
