@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.274
+
+- Version statements that do not rot and hold for every merge
+- 0035's tests are frozen like the revision
+- A batch-E chain's flag waits for its lock-out at runtime
+- CLAUDE.md: revision 0035, what it locks and what it does not
+- 0035 on a real PostgreSQL: the refusal, the round trip and the lock
+- Tests for 0035, against what the migrations themselves leave behind
+- Revision 0035 locks images without the batch-E chains out
+
+
 ## 3.0.273
 
 - F6 review: say what a flip does with an append row only Postgres holds
