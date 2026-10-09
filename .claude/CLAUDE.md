@@ -1672,9 +1672,11 @@ reads UNKNOWN rather than FAIL a stamp inside its 75-minute window. With
 `buyers_on=0` and the chain's owner rows standing it FAILs as a lost marker —
 the buyers step back on DuckDB and nothing shipping it — naming
 `data/write-chain-owners/pg_buyers_write` and `scripts/chain_copy_back.py
-buyers`, and it counts a copy's failure for the day it was stamped. The restore
-drill counts all three tables, because once the chain writes them the nightly
-dump is their only backup.
+buyers`, and it counts a copy's failure for the day it was stamped. `held`
+with owner rows standing is the same lost marker, so B1 names the marker, the
+copy-back and the reader instead of "take the flag back", which would only
+make it `0`. The restore drill counts all three tables, because once the
+chain writes them the nightly dump is their only backup.
 
 **Revision 0034 locks older images out** (PR-4, owner decision 16) and is
 deployed directly before the flip. It changes no schema — three table comments
@@ -1972,7 +1974,9 @@ copy's failure for the day it was stamped — nothing resets the count while the
 chain owns the table — and FAILs owner rows with `orders_on=0` as the marker
 lost (`order_owner_row_without_marker`'s state), naming
 `data/write-chain-owners/pg_orders_write` and `scripts/chain_copy_back.py
-orders`; chain 1's I1 keeps the sticky count, noted in its file.
+orders` — and FAILs the same with `orders_on=pending`, where a precondition
+unmet keeps the mirror shipping and the flag is not the lever, rather than
+read it as a flip waiting for its first write.
 `stage4_soak.sh` passes `orders_on=pending` for a flag the chain has not
 latched under, chain 5's way. The restore drill counts the four tables once
 an owner row names one: orders, expenses and misses `grows`, line items
@@ -2116,8 +2120,9 @@ over 26 h old and the shape the standing watch would file.
 `chain_manager_intervals_broken` and `chain_manager_retail_disagrees` (WARN),
 and a NULL `set_at` as `chain_required_column_null` — one read,
 `pg_managers_write.SHAPE_SQL`, shared with the preflight. Soak checks M1 (the
-replica stayed away; with `managers_on=0` and owner rows standing, a FAIL as a
-lost marker naming `data/write-chain-owners/pg_managers_write` and
+replica stayed away; with `managers_on=0` or `pending` and owner rows
+standing, a FAIL as a lost marker naming
+`data/write-chain-owners/pg_managers_write` and
 `scripts/chain_copy_back.py managers`; a failure counts for its day) and M2
 (the shape and `last_sync_managers` under 26 h);
 `stage4_soak.sh` passes `managers_on=pending` for a flag the chain has not
@@ -3606,9 +3611,16 @@ chain 1's flip (2026-09-30) the handover died on `KS_PG_DSN is not set` — safe
 exit 1 before anything was written, web back in 8 s. `docker compose run
 --rm --no-deps -T web` gives the one-off exactly web's environment, volumes and
 networks, so the DSN, `./data` and the route to Postgres are web's own and not
-a second copy that can drift. On flip day pass the flip time to the soak
-(`SOAK_INVENTORY_FLIP_AT='<latch time>' deploy/stage4_soak.sh`): without it I1
-reads the last pre-flip copy as a lapse for 75 minutes, by construction. At
+a second copy that can drift. I1 dates the handover by chain 1's owner rows,
+then by `SOAK_INVENTORY_FLIP_AT`, and with neither reads a copy's stamp inside
+its 75-minute window as UNKNOWN, so on flip day pass the flip time
+(`SOAK_INVENTORY_FLIP_AT='<latch time>' deploy/stage4_soak.sh`) until the
+chain's first write. I1 counts a copy's failure only after the handover and
+for the day it was stamped, and with `inventory_on=0` and owner rows standing
+FAILs as the marker lost, naming `data/write-chain-owners/pg_inventory_write`
+and `scripts/chain_copy_back.py inventory`. E1 counts a failure on
+`app.manual_expenses` for its day too, and once chain 8 holds an owner row,
+only after it: nothing resets the count while the copy stands down. At
 production's size — 162,883 history rows, 56,277 movements —
 the whole copy-back is ~9 s on a laptop, because rows go in 1,000 to a
 statement. `executemany` runs once per row in DuckDB's client: about eight
@@ -4698,13 +4710,13 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
   Postgres before it reads, refusing if anything is left.
 
 **Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
-since its owner rows; H2 (`29_h2`) — the 07:30 run filed no `shadow_*` above
-INFO. D8, 20, 21 and 22 stop gating on the journal's copy once chain 9 writes
-it directly (the flag, the latch, or its owner row); chain 1's preflight does
-the same on the flag or the latch (chain 7b's goals dry run did, until 7b-4
-retired it). Every guard names its
-mutation; a run over all of them found five that did not catch theirs, now
-closed in the tests.
+since its owner rows, a failure counting for the day it was stamped; H2
+(`29_h2`) — the 07:30 run filed no `shadow_*` above INFO. D8, 20, 21 and 22
+stop gating on the journal's copy once chain 9 writes it directly (the flag,
+the latch, or its owner row); chain 1's preflight does the same on the flag
+or the latch (chain 7b's goals dry run did, until 7b-4 retired it). Every
+guard names its mutation; a run over all of them found five that did not
+catch theirs, now closed in the tests.
 
 ### Chain 7b: the goals read Silver, and a GET never writes (OD-14)
 
