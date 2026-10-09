@@ -19,9 +19,10 @@ built (chain 5's design, M1–M11), and each with the mutation it kills:
 - the dashboard's `{managers}` join and the route follow the chain.
 
 Everything goes through the repository methods every caller reaches. The
-four preconditions the chain is held by are facts no environment variable
-sets — the goal bridge, step 13, chain 3 — so the fixture holds them met; the
-tests in `tests/unit/test_managers_chain.py` prove they hold the chain back.
+preconditions the chain is held by include facts no environment variable
+sets — step 13, chain 3 (the goal bridge was one until chain 7b-4) — so the
+fixture holds them met; the tests in `tests/unit/test_managers_chain.py`
+prove they hold the chain back.
 """
 from __future__ import annotations
 

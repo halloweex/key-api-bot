@@ -49,16 +49,16 @@ logger = logging.getLogger(__name__)
 #
 # Chain 3 (`pg_orders_write`) is the sixth: the orders, their line items, their
 # expenses and the backfill-miss ledger, off by default (`KS_WRITE_ORDERS`),
-# and held on DuckDB until the goal bridge is gone, step 13 and chain 1 are in
-# force and the backups have proved themselves (`unmet_precondition`,
-# OD-13 (a)). Registered with the flag off, it stands nothing down: the order
+# and held on DuckDB until step 13 and chain 1 are in force and the backups
+# have proved themselves (`unmet_precondition`, OD-13 (a); the goal bridge it
+# also waited on went in chain 7b-4). Registered with the flag off, it stands nothing down: the order
 # shippers ask `stood_down_among`, which evaluates it and finds duckdb.
 #
 # Chain 5 (`pg_managers_write`) is the seventh: `bronze.managers` and
 # `app.manager_classifications`, off by default (`KS_WRITE_MANAGERS`), and held
-# on DuckDB until the goal bridge is gone, step 13 and chain 3 are in force and
-# `KS_READ_FALLBACK=off` (`unmet_precondition`). Registered with the flag off,
-# it stands nothing down.
+# on DuckDB until step 13 and chain 3 are in force and `KS_READ_FALLBACK=off`
+# (`unmet_precondition`; the goal bridge it also waited on went in 7b-4).
+# Registered with the flag off, it stands nothing down.
 WRITE_CHAINS = (pg_inventory_write, pg_expenses_write, pg_goals_write,
                 pg_expense_types_write, pg_buyers_write, pg_orders_write,
                 pg_managers_write)

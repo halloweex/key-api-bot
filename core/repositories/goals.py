@@ -154,31 +154,16 @@ _SHARED_GOAL_TABLES_SQL = """
 # other value — `bridge` included — refuses every history read
 # (`core/pg_goals_read.py`), so a value naming the deleted history is never
 # answered from Silver in silence.
-
-# The tables the deleted bridge read out of DuckDB. Chains 3 and 5 still ask
-# for this name in their `goals_bridge` preconditions; it goes with them.
-SALES_TYPE_BRIDGE_TABLES = frozenset(
-    {"bronze.orders", "bronze.managers", "app.manager_classifications"})
-
-
-def sales_type_bridge_owners() -> Dict[str, Tuple[str, ...]]:
-    """`{chain: tables}` for every registered write chain that has moved a
-    table in `SALES_TYPE_BRIDGE_TABLES`. Nothing reads it but chain 5's
-    tests; it goes with chains 3 and 5's `goals_bridge`. Never raises."""
-    from core.write_chains import WRITE_CHAINS, _chain_state, chain_name
-
-    owners: Dict[str, Tuple[str, ...]] = {}
-    for chain in WRITE_CHAINS:
-        owned = frozenset(getattr(chain, "CHAIN_TABLES", ())) & SALES_TYPE_BRIDGE_TABLES
-        if not owned:
-            continue
-        try:
-            moved = _chain_state(chain)["mode"] != "duckdb"
-        except Exception:  # noqa: BLE001 — unreadable is moved
-            moved = True
-        if moved:
-            owners[chain_name(chain)] = tuple(sorted(owned))
-    return owners
+#
+# The bridge was guarded from three sides while it lived, and each guard went
+# with it: step 13's `goals_bridge` precondition and its registry walk
+# (`sales_type_bridge_owners`), chains 3 and 5's own `goals_bridge`, which held
+# the two chains that own `bronze.orders`, `bronze.managers` and
+# `app.manager_classifications` on DuckDB while this file rendered
+# `silver_sales_type_case(DUCKDB)`, and the CI tripwire that required them to.
+# Nothing here reads those three tables any more, so a chain moving them
+# changes no goal: what makes the goal history Postgres' is step 13's
+# `reader:KS_READ_GOALS` and `read_fallback_off`.
 
 
 # ─── The history, from Silver (chain 7b-2; the only one since 7b-4) ─────────

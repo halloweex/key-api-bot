@@ -4,9 +4,10 @@
 and the backfill-miss ledger to Postgres once `KS_WRITE_ORDERS=postgres` and
 every precondition holds (OD-13 (a)). Production has the flag off; what is
 pinned here is that off means today's behaviour, that on means Postgres and
-nothing else, and that the flag cannot move the writes before the goal
-bridge, step 13, chain 1 and the backups say it may. Against a real Postgres
-the writer is proved in `tests/integration/test_orders_chain_writer.py`.
+nothing else, and that the flag cannot move the writes before step 13,
+chain 1 and the backups say it may (the goal bridge went in chain 7b-4).
+Against a real Postgres the writer is proved in
+`tests/integration/test_orders_chain_writer.py`.
 
 Each test names the mutation it exists to fail on.
 """
@@ -55,8 +56,7 @@ def flags(monkeypatch):
 @pytest.fixture
 def met(flags):
     """Every precondition held: the chain moves on its flag alone."""
-    for name in ("_goals_bridge_unmet", "_step13_unmet", "_chain1_unmet",
-                 "_landing_pages_unmet"):
+    for name in ("_step13_unmet", "_chain1_unmet", "_landing_pages_unmet"):
         flags.setattr(pow_, name, lambda: None)
     flags.setattr(pow_, "_backup_unmet", lambda: [])
     return flags
@@ -131,11 +131,10 @@ class TestTheFlag:
         """Every chain-3 precondition but step 13's met, and step 13's own
         switch ready: `KS_WRITE_WAREHOUSE=postgres` with nothing unmet and a
         Postgres that answered. `_step13_unmet` is the real one, and so is
-        the goal bridge's owner walk that asks this chain during step 13's
-        start — the path under test."""
+        step 13's start — the path under test."""
         from core import warehouse_cutover
 
-        for name in ("_goals_bridge_unmet", "_chain1_unmet", "_landing_pages_unmet"):
+        for name in ("_chain1_unmet", "_landing_pages_unmet"):
             flags.setattr(pow_, name, lambda: None)
         flags.setattr(pow_, "_backup_unmet", lambda: [])
         flags.setattr(warehouse_cutover, "_read_postgres_in_a_worker",
@@ -190,17 +189,13 @@ class TestTheFlag:
         assert pow_.writes_postgres() is True and pow_.mode() == "postgres"
 
     def test_chain_5_is_not_held_through_it_either(self, step13_ready):
-        """Chain 5's precondition is chain 3's mode, and chain 5 is a bridge
+        """Chain 5's precondition is chain 3's mode, and chain 5 was a bridge
         owner too: asked during step 13's start it asked chain 3, which held.
-        Mutation: as above."""
+        Mutation: hold on `step13` whatever its verdict."""
         from core import pg_managers_write, read_fallback
-        from core.repositories import goals
         from core.runtime_modes import configure_modes
 
         step13_ready.setenv(pg_managers_write.WRITE_ENV, "postgres")
-        # Chain 7b has ported the classification out of the bridge: chain 5's
-        # own `goals_bridge` holds (test_managers_chain.py's arrangement).
-        step13_ready.setattr(goals, "SALES_TYPE_BRIDGE_TABLES", frozenset({"bronze.orders"}))
         step13_ready.setattr(read_fallback, "refusing", lambda: True)
         configure_modes()
         assert pow_._held is None
@@ -303,8 +298,8 @@ class TestThePreconditions:
         assert pow_.unmet_precondition() is None
 
     @pytest.mark.parametrize("name,key", [
-        ("_goals_bridge_unmet", "goals_bridge"), ("_step13_unmet", "step13"),
-        ("_chain1_unmet", "chain1"), ("_landing_pages_unmet", "landing_pages_clear"),
+        ("_step13_unmet", "step13"), ("_chain1_unmet", "chain1"),
+        ("_landing_pages_unmet", "landing_pages_clear"),
     ])
     def test_each_one_unmet_alone_is_named(self, met, name, key):
         """Mutation: drop any one check from `unmet_precondition` — its row
@@ -329,12 +324,21 @@ class TestThePreconditions:
         with patch("core.pg.get_pool", new=AsyncMock(side_effect=AssertionError("asked"))):
             assert pow_.unmet_precondition()   # unmet today, and answered
 
-    def test_the_goals_bridge_holds_it_today_and_goes_with_the_bridge(self, flags):
+    def test_the_goal_bridge_is_no_precondition_any_more(self, met):
+        """Chain 7b-4 deleted the DN-12 bridge: no goal calculator reads
+        DuckDB `orders`, so nothing about the goals holds this chain — the
+        goal history is Silver's, and `step13` (still here) makes it
+        Postgres'. Mutations: restore `_goals_bridge_unmet` (it is named
+        here), or put a `goals_bridge` row back among the checks
+        `_live_unmet` walks (it is unmet again, here)."""
         from core.repositories import goals
 
-        assert pow_._goals_bridge_unmet().startswith("goals_bridge")
-        flags.delattr(goals, "SALES_TYPE_BRIDGE_TABLES")
-        assert pow_._goals_bridge_unmet() is None
+        assert not hasattr(pow_, "_goals_bridge_unmet")
+        assert not hasattr(goals, "SALES_TYPE_BRIDGE_TABLES")
+        assert pow_.unmet_precondition() is None
+        assert [key for key, _why in pow_._live_unmet()] == []
+        met.setattr(pow_, "_step13_unmet", lambda: "step13: unmet in this test")
+        assert [key for key, _why in pow_._live_unmet()] == ["step13"]
 
     def test_step13_is_the_cutover_s_cached_verdict(self, flags):
         from core import warehouse_cutover
@@ -1021,22 +1025,24 @@ class TestThePreflight:
             out = await pow_.preflight()
         assert out["ok"] is False
         keys = {r.split(":", 1)[0] for r in out["reasons"]}
-        assert {"goals_bridge", "step13", "chain1", "postgres"} <= keys
+        assert {"step13", "chain1", "postgres"} <= keys
+        assert "goals_bridge" not in keys
 
     @pytest.mark.asyncio
     async def test_each_precondition_is_one_reason(self, flags):
         """The real chain 3, flag off, nothing stood in but the backup
-        markers: the goal bridge's reason carries its lever after a "; ", and
-        the preflight used to split the joined answer on it — `/api/health`
-        published "port chain 7b first (OD-14)" as a precondition of its own
-        (batch-E review). Mutation: split
-        `unmet_precondition()` on "; " again."""
+        markers: one reason per precondition, in order, and no goal bridge
+        among them since chain 7b-4. (Its reason carried its lever after a
+        "; ", and the preflight used to split the joined answer on it —
+        `/api/health` published "port chain 7b first (OD-14)" as a
+        precondition of its own, batch-E review; the test below holds the
+        reasons that still carry one.) Mutation: publish the joined
+        `unmet_precondition()` as one reason."""
         flags.setattr(pow_, "_backup_unmet", lambda: ["pitr_drill: never"])
         with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("no pg"))):
             out = await pow_.preflight()
         assert [r.split(":", 1)[0] for r in out["reasons"]] == [
-            "goals_bridge", "step13", "chain1", "pitr_drill", "postgres"]
-        assert "; port chain 7b first (OD-14)" in out["reasons"][0]
+            "step13", "chain1", "pitr_drill", "postgres"]
 
     @pytest.mark.asyncio
     async def test_a_retired_page_and_the_hold_are_one_reason_each(self, flags):
@@ -1045,7 +1051,7 @@ class TestThePreflight:
         from core import alerting
 
         met = flags
-        for name in ("_goals_bridge_unmet", "_step13_unmet", "_chain1_unmet"):
+        for name in ("_step13_unmet", "_chain1_unmet"):
             met.setattr(pow_, name, lambda: None)
         met.setattr(pow_, "_backup_unmet", lambda: [])
         # The real check, over a delivered page a stood-down check reported.
