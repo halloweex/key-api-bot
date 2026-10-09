@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.273
+
+- F6 review: say what a flip does with an append row only Postgres holds
+- F7 review: a per-key membership test must be against something hashed
+- F8 review: a fall of exactly 1% in buyer_contacts ships
+- F1 review: pin how long the buyer reship's guard waits for the lock
+- F6 review: the pre-flip levers name the state the shippers need
+- F13, F14, F15, F17: the copy-back's and buyer writer's prose says what the code does
+- F7: the handover classification builds each exclusion set once
+- F10: pin the mirrored handover's two conservative branches
+- F9: pin the buyer reship's loop
+- F8: pin buyer_contacts' two snapshot tiers by value
+- F2, F4: pin the buyer writer's emptied contact list and its id order
+- F1, F3: pin what the detached buyer reship is handed and gives back
+- F6: before a flip, a key only Postgres holds is CRITICAL
+
+
 ## 3.0.272
 
 - CI: 40 minutes for the suite, which outgrew 20
