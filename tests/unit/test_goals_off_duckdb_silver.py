@@ -17,8 +17,11 @@ stays here proves the Silver history and what never depended on the bridge:
   * **the shared fixtures** — the equivalence fixture (one manager per branch
     of the sales-type CASE) and the three-year history;
   * **empty history** — the placeholder never overwrites a stored rate;
-  * **the forecast signal**, and **what the smart goal narrows to**, against
-    numbers written out here, in Python.
+  * **the forecast signal**, **what the smart goal narrows to**, and **every
+    calculator** — seasonality, YoY yearly and per month, the weekly weights
+    and the cap, for every sales type — against numbers written out here, in
+    Python. The last replaces the comparison with the bridge's own bodies,
+    which was the only independent answer the Silver bodies had.
 
 `tests/unit/test_goals_history_silver.py` holds the Silver selection and the
 retired switch; the two-engine half is in
@@ -28,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import statistics
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
@@ -41,6 +45,7 @@ from unittest.mock import AsyncMock, patch
 from core.duckdb_constants import (
     B2B_MANAGER_ID,
     EXHIBITION_SOURCE_ID,
+    KNOWN_SALES_TYPES,
     RETAIL_MANAGER_IDS,
 )
 from core.duckdb_store import DuckDBStore
@@ -478,17 +483,25 @@ def _history_sales_type(source_id, manager_id):
     return "b2b" if manager_id == B2B_MANAGER_ID else "retail"
 
 
-def _monthly_history(sales_type):
-    """`{(year, month): (revenue, days with orders)}`, returns left out;
-    `None` is every sales type — what a read that lost its filter sees."""
-    revenue, days = defaultdict(Decimal), defaultdict(set)
+def _history_days(sales_type):
+    """`(Kyiv date, total)` for every order the history counts, returns left
+    out; `None` is every sales type — what a read that lost its filter sees,
+    and what `'all'` asks for."""
     for _oid, src, status, total, when, mgr in _history_rows():
         if status in RETURN_STATUSES:
             continue
         if sales_type is not None and _history_sales_type(src, mgr) != sales_type:
             continue
-        day = when.date()   # `when` is Kyiv-aware, so this is the Kyiv date
-        revenue[(day.year, day.month)] += Decimal(str(total))
+        # `when` is Kyiv-aware, so this is the Kyiv date.
+        yield when.date(), Decimal(str(total))
+
+
+def _monthly_history(sales_type):
+    """`{(year, month): (revenue, days with orders)}`, returns left out;
+    `None` is every sales type — what a read that lost its filter sees."""
+    revenue, days = defaultdict(Decimal), defaultdict(set)
+    for day, total in _history_days(sales_type):
+        revenue[(day.year, day.month)] += total
         days[(day.year, day.month)].add(day)
     return {k: (float(revenue[k]), len(days[k])) for k in revenue}
 
@@ -561,3 +574,196 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
                 for m in range(1, 13)]
         assert caps == pytest.approx(
             [_expected_cap("retail", m) for m in range(1, 13)], rel=1e-9)
+
+
+# ─── Every calculator, in written-out numbers ───────────────────────────────
+#
+# Until chain 7b-4 the Silver bodies of seasonality, YoY and the weekly
+# weights were held to the bridge's separately written bodies
+# (`TestTheAnswersAreTheSame`). The bridge is gone, and the two-engine test
+# runs one text on two engines, so a mistake in that text answers alike on
+# both. Here the same arithmetic is done in Python from the rows
+# `_history_rows` wrote — what `_expected_cap` already did for the cap, done
+# for the rest — so a Silver body that computes the wrong thing fails on its
+# own. Review mutations (7b-4): MS2 `MIN(revenue) AS max_revenue`, MS3 the
+# monthly YoY divided by `curr.revenue`, MS5 the index over `max_revenue`,
+# and `LEAST(4, …)` in the weekly body.
+
+MONEY = 0.0101     # the answer rounds to the cent
+RATIO = 1.01e-4    # and these to four places
+
+# The weights a month or week without orders is filled with, written out
+# rather than imported from the module under test.
+DEFAULT_WEEKLY_WEIGHTS = {1: 0.23, 2: 0.23, 3: 0.23, 4: 0.23, 5: 0.08}
+
+
+def _history_filter(sales_type):
+    """A sales type as `_history_days` takes it: `'all'` is every one."""
+    return None if sales_type == "all" else sales_type
+
+
+def _weighted_by_recency(rates):
+    """The oldest pair weighs 1.0 and the newest 2.0, linear between."""
+    if len(rates) == 1:
+        return rates[0]
+    weights = [1.0 + i / (len(rates) - 1) for i in range(len(rates))]
+    return sum(r * w for r, w in zip(rates, weights)) / sum(weights)
+
+
+def _expected_seasonality(sales_type):
+    """Per calendar month, over the years in which it had 20 days of orders
+    or more: the mean, the least and the greatest year, how many, their
+    sample deviation, and the mean over the mean of every month's mean."""
+    by_month = defaultdict(list)
+    history = _monthly_history(_history_filter(sales_type))
+    for (_year, month), (revenue, days) in sorted(history.items()):
+        if days >= 20:
+            by_month[month].append(revenue)
+    if not by_month:
+        return {}
+    means = {month: statistics.mean(r) for month, r in by_month.items()}
+    grand = statistics.mean(means.values())
+    out = {}
+    for month, revenues in sorted(by_month.items()):
+        n = len(revenues)
+        out[month] = {
+            "month": month,
+            "avg_revenue": means[month],
+            "min_revenue": min(revenues),
+            "max_revenue": max(revenues),
+            "sample_size": n,
+            "std_dev": statistics.stdev(revenues) if n > 1 else 0.0,
+            "seasonality_index": means[month] / grand,
+            "confidence": "high" if n >= 3 else "medium" if n >= 2 else "low",
+        }
+    return out
+
+
+def _expected_yoy(sales_type):
+    """Full years — eleven months with orders or more — paired in order, and
+    per calendar month the consecutive years with 25 days of orders each,
+    every rate `(this - last) / last`; both weighted by recency. The fixture
+    ends before the running Kyiv year, so no year is left out for that."""
+    history = _monthly_history(_history_filter(sales_type))
+    revenue, months = defaultdict(Decimal), defaultdict(set)
+    for (year, month), (month_revenue, _days) in history.items():
+        revenue[year] += Decimal(str(month_revenue))
+        months[year].add(month)
+    full = sorted(year for year in revenue if len(months[year]) >= 11)
+    rates = [float((revenue[b] - revenue[a]) / revenue[a])
+             for a, b in zip(full, full[1:]) if revenue[a] > 0]
+    monthly = {}
+    for month in range(1, 13):
+        by_year = {y: r for (y, m), (r, n) in history.items()
+                   if m == month and n >= 25}
+        pairs = [(by_year[y] - by_year[y - 1]) / by_year[y - 1]
+                 for y in sorted(by_year) if by_year.get(y - 1)]
+        if pairs:
+            monthly[month] = _weighted_by_recency(pairs)
+    return {
+        "overall_yoy": _weighted_by_recency(rates) if rates else 0.10,
+        "monthly_yoy": monthly,
+        "yearly_data": [{"year": y, "revenue": float(revenue[y])} for y in full],
+        "sample_size": len(rates),
+    }
+
+
+def _expected_weekly(sales_type):
+    """Week of month 1-5 by day (`ceil(day / 7)`, the 29th to the 31st in the
+    fifth): each week's share of its month, averaged over the months it
+    occurs in; anything unmeasured is the default."""
+    weekly = defaultdict(Decimal)
+    for day, total in _history_days(_history_filter(sales_type)):
+        weekly[(day.year, day.month, min(5, math.ceil(day.day / 7)))] += total
+    totals = defaultdict(Decimal)
+    for (year, month, _week), revenue in weekly.items():
+        totals[(year, month)] += revenue
+    shares = defaultdict(list)
+    for (year, month, week), revenue in weekly.items():
+        shares[(month, week)].append(revenue / totals[(year, month)])
+    out = {month: dict(DEFAULT_WEEKLY_WEIGHTS) for month in range(1, 13)}
+    for (month, week), share in shares.items():
+        out[month][week] = float(sum(share) / len(share))
+    return out
+
+
+class TestEveryCalculatorInWrittenOutNumbers:
+    """Seasonality, YoY (yearly and per month), the weekly weights and the
+    cap, for every sales type, against the numbers above. What the Monday job
+    and the POST store is these answers column by column
+    (`test_goals_read_paths_do_not_write.py::TestWhatIsStored`), so the
+    stored rows are pinned through them."""
+
+    def test_the_fixture_tells_each_mutation_apart(self):
+        """Otherwise the numbers below would agree with a body that made the
+        mistake, and prove nothing."""
+        assert HISTORY_END.year < date.today().year, (
+            "the running Kyiv year would drop a year from the yearly read")
+        for sales_type in ("retail", "b2b", "all"):
+            # Retail grows every year, so every month tells; b2b's amount is
+            # fixed per month, so only the months whose day counts differ do.
+            every = all if sales_type == "retail" else any
+            seasonal = _expected_seasonality(sales_type)
+            assert len(seasonal) == 12, sales_type
+            # MS2 and MS5: a month with two years that differ.
+            assert every(m["sample_size"] >= 2 and m["min_revenue"] < m["max_revenue"]
+                         and m["avg_revenue"] < m["max_revenue"]
+                         for m in seasonal.values()), sales_type
+            # MS3: dividing by this year instead of the last moves the rate.
+            assert every(abs(rate) > 0.01 for rate
+                         in _expected_yoy(sales_type)["monthly_yoy"].values()), sales_type
+            # LEAST(4, …): the 29th to the 31st are a week of their own.
+            assert abs(_expected_weekly(sales_type)[1][5]
+                       - DEFAULT_WEEKLY_WEIGHTS[5]) > 0.01, sales_type
+        retail = _expected_yoy("retail")
+        assert len(retail["monthly_yoy"]) == 12 and retail["sample_size"] == 1
+        # December has three years, so two pairs: the recency weighting shows.
+        assert sorted(y for (y, m), (_r, n) in _monthly_history("retail").items()
+                      if m == 12 and n >= 25) == [2023, 2024, 2025]
+        assert _expected_seasonality("internal") == {}, "no internal orders"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("sales_type", [*KNOWN_SALES_TYPES, "all"])
+    async def test_the_calculators(self, store, sales_type):
+        await _seed_history(store)
+        seasonal = await store.calculate_seasonality_indices(sales_type)
+        yoy = await store.calculate_yoy_growth(sales_type)
+        weekly = await store.calculate_weekly_patterns(sales_type)
+        caps = [await store._dynamic_growth_cap(month, sales_type)
+                for month in range(1, 13)]
+
+        want = _expected_seasonality(sales_type)
+        assert set(seasonal) == set(want), sales_type
+        for month, row in want.items():
+            got = seasonal[month]
+            for key in ("avg_revenue", "min_revenue", "max_revenue", "std_dev"):
+                assert got[key] == pytest.approx(row[key], abs=MONEY), (
+                    sales_type, month, key)
+            assert got["seasonality_index"] == pytest.approx(
+                row["seasonality_index"], abs=RATIO), (sales_type, month)
+            assert (got["month"], got["sample_size"], got["confidence"]) == (
+                month, row["sample_size"], row["confidence"]), (sales_type, month)
+
+        want_yoy = _expected_yoy(sales_type)
+        assert yoy["sample_size"] == want_yoy["sample_size"], sales_type
+        assert yoy["overall_yoy"] == pytest.approx(want_yoy["overall_yoy"], abs=RATIO)
+        assert [y["year"] for y in yoy["yearly_data"]] == [
+            y["year"] for y in want_yoy["yearly_data"]], sales_type
+        assert [y["revenue"] for y in yoy["yearly_data"]] == pytest.approx(
+            [y["revenue"] for y in want_yoy["yearly_data"]], abs=MONEY)
+        assert set(yoy["monthly_yoy"]) == set(want_yoy["monthly_yoy"]), sales_type
+        for month, rate in want_yoy["monthly_yoy"].items():
+            assert yoy["monthly_yoy"][month] == pytest.approx(rate, abs=RATIO), (
+                sales_type, month)
+
+        want_weekly = _expected_weekly(sales_type)
+        assert {m: set(w) for m, w in weekly.items()} == {
+            m: set(w) for m, w in want_weekly.items()}, sales_type
+        for month, weeks in want_weekly.items():
+            for week, weight in weeks.items():
+                assert weekly[month][week] == pytest.approx(weight, abs=RATIO), (
+                    sales_type, month, week)
+
+        assert caps == pytest.approx(
+            [_expected_cap(_history_filter(sales_type), month)
+             for month in range(1, 13)], rel=1e-9)
