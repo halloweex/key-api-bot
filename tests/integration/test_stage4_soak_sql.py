@@ -1338,6 +1338,46 @@ class TestB1BuyersCopiesStoodDown:
         assert v == "UNKNOWN" and "SOAK_BUYERS_FLIP_AT" in detail, detail
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("attempted,expected", [(timedelta(hours=23), "FAIL"),
+                                                    (timedelta(hours=25), "PASS")])
+    async def test_a_failure_is_judged_a_day_at_a_time(self, pool, attempted, expected):
+        """The hourly copy stamps app.buyer_gender failing while the flag and
+        the latch disagree, then stands down silently once they agree, and
+        only a successful copy would reset the count. O1's rule (chain 3
+        review). Mutation: drop the 24 hours."""
+        async with scenario(pool) as conn:
+            await clean_buyers(conn)
+            await owners(conn, ago(days=4))
+            await mirror_state(conn, "app.buyer_gender", ok_at=ago(days=5),
+                               attempted_at=NOW - attempted, failures=3,
+                               error="owned by Postgres since 2030-06-01")
+            v, detail = await verdict(conn, self.FILE, buyers_on="1")
+        assert v == expected, detail
+
+    @pytest.mark.asyncio
+    async def test_a_lost_marker_fails_b1_once_and_nothing_else(self, pool):
+        """Owner rows in Postgres, no marker, the flag at duckdb: the script
+        passes 0, the buyers step writes DuckDB again, and nothing carries it
+        to Postgres — the buyers mirror and the hourly copy both stand down on
+        the owner rows — so every buyer reader there stops moving. Chain 4 is
+        latched in production. Mutation: judge 0 as not applicable without
+        reading the owner rows."""
+        verdicts = {}
+        for path in FILES:
+            if not path.name[3:].startswith("b"):
+                continue
+            async with scenario(pool) as conn:
+                await clean_buyers(conn)
+                await owners(conn, ago(days=2))
+                verdicts[path.name[:2]] = await verdict(conn, path.name, buyers_on="0")
+        v, detail = verdicts.pop("23")
+        assert v == "FAIL", detail
+        assert "data/write-chain-owners/pg_buyers_write" in detail, detail
+        assert "scripts/chain_copy_back.py buyers" in detail, detail
+        assert all(v == "PASS" and d.startswith("not applicable")
+                   for v, d in verdicts.values()), verdicts
+
+    @pytest.mark.asyncio
     async def test_held_and_invalid_fail_with_their_reason(self, pool):
         async with scenario(pool) as conn:
             v, detail = await verdict(conn, self.FILE, buyers_on="held",
@@ -1908,6 +1948,40 @@ class TestM1ManagersCopyStoodDown:
         assert v == "UNKNOWN" and "SOAK_MANAGERS_FLIP_AT" in detail, detail
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("attempted,expected", [(timedelta(hours=23), "FAIL"),
+                                                    (timedelta(hours=25), "PASS")])
+    async def test_a_failure_is_judged_a_day_at_a_time(self, pool, attempted, expected):
+        """Nothing resets `failures_since_ok` while the chain owns the tables:
+        the replica stands down without a success to clear it. O1's rule
+        (chain 3 review). Mutation: drop the 24 hours."""
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager_owners(conn, ago(days=4))
+            await mirror_state(conn, "bronze.managers", ok_at=ago(days=5),
+                               attempted_at=NOW - attempted, failures=2, error="boom")
+            v, detail = await verdict(conn, self.FILE, managers_on="1")
+        assert v == expected, detail
+
+    @pytest.mark.asyncio
+    async def test_a_lost_marker_fails_m1_and_not_m2(self, pool):
+        """Owner rows in Postgres, no marker, the flag at duckdb: the script
+        passes 0, a classification is written to DuckDB again, and the replica
+        stands down on the owner rows, so it never reaches Postgres. M1 says
+        so and names the marker and the copy-back; M2 has no chain writing
+        Postgres to judge. Mutation: judge 0 as not applicable without reading
+        the owner rows."""
+        async with scenario(pool) as conn:
+            await clean_managers(conn)
+            await manager_owners(conn, ago(days=2))
+            v, detail = await verdict(conn, self.FILE, managers_on="0")
+            v2, detail2 = await verdict(conn, "31_m2_classification_shape.sql",
+                                        managers_on="0")
+        assert v == "FAIL", detail
+        assert "data/write-chain-owners/pg_managers_write" in detail, detail
+        assert "scripts/chain_copy_back.py managers" in detail, detail
+        assert v2 == "PASS" and detail2.startswith("not applicable"), detail2
+
+    @pytest.mark.asyncio
     async def test_the_states_that_judge_nothing(self, pool):
         async with scenario(pool) as conn:
             v, detail = await verdict(conn, self.FILE, managers_on="0")
@@ -2108,6 +2182,38 @@ class TestChain3IsJudgedOnlyOnceItMoved:
                    for v, d in verdicts.values()), verdicts
 
     @pytest.mark.asyncio
+    async def test_a_lost_marker_fails_o1_once_and_nothing_else(self, pool):
+        """Owner rows in Postgres and no marker, the flag at duckdb: the script
+        passes 0, and the writes follow the flag back to DuckDB while the
+        sync's per-tick mirror — which asks only the local answer — ships
+        DuckDB's orders over the chain's every tick (DN-22a,
+        `order_owner_row_without_marker`). O1 says so, naming the marker and
+        the copy-back; O2–O5 have no chain writing Postgres to judge.
+        Mutation: judge 0 as not applicable without reading the owner rows."""
+        verdicts = {}
+        for name in O_FILES:
+            async with scenario(pool) as conn:
+                await clean_orders(conn)
+                await order_owners(conn, ago(days=2))
+                verdicts[name] = await verdict(conn, name, orders_on="0")
+        v, detail = verdicts.pop(O_FILES[0])
+        assert v == "FAIL", detail
+        assert "data/write-chain-owners/pg_orders_write" in detail, detail
+        assert "scripts/chain_copy_back.py orders" in detail, detail
+        assert "since 03.06 12:00 Kyiv" in detail, detail
+        assert all(v == "PASS" and d.startswith("not applicable")
+                   for v, d in verdicts.values()), verdicts
+
+    @pytest.mark.asyncio
+    async def test_another_chains_owner_rows_are_not_chain_3s(self, pool):
+        """Mutation: read every `owner:` row rather than chain 3's four."""
+        async with scenario(pool) as conn:
+            await clean_orders(conn)
+            await owners(conn, ago(days=2))
+            v, detail = await verdict(conn, O_FILES[0], orders_on="0")
+        assert v == "PASS" and detail.startswith("not applicable"), detail
+
+    @pytest.mark.asyncio
     async def test_a_state_nobody_named_is_unknown_everywhere_but_invalid_fails_o1(self, pool):
         for name in O_FILES:
             async with scenario(pool) as conn:
@@ -2190,6 +2296,24 @@ class TestO1OrdersCopiesStoodDown:
         assert v == "PASS"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("attempted,expected", [(timedelta(hours=23), "FAIL"),
+                                                    (timedelta(hours=25), "PASS")])
+    async def test_a_failure_is_judged_a_day_at_a_time(self, pool, attempted, expected):
+        """Nothing resets `failures_since_ok` while the chain owns the table:
+        only a successful copy does, and the copy stands down silently once
+        the flag and the latch agree again. So a stamp after the handover
+        stood for ever; now it counts for the day it was stamped, and a cause
+        that keeps going restamps it every hour. Mutation: drop the 24 hours."""
+        async with scenario(pool) as conn:
+            await clean_orders(conn)
+            await order_owners(conn, ago(days=4))
+            await mirror_state(conn, "app.order_backfill_misses", ok_at=ago(days=5),
+                               attempted_at=NOW - attempted, failures=3,
+                               error="owned by Postgres since 2030-06-01")
+            v, detail = await verdict(conn, self.FILE, orders_on="1")
+        assert v == expected, detail
+
+    @pytest.mark.asyncio
     async def test_without_owner_rows_the_flip_time_decides_and_without_it_unknown(self, pool):
         async with scenario(pool) as conn:
             await clean_orders(conn)
@@ -2222,14 +2346,23 @@ class TestO2OrdersWatermark:
         assert "newest change 05.06 03:00 Kyiv" in detail, detail
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("minutes,expected", [(89, "PASS"), (90, "FAIL"), (240, "FAIL")])
-    async def test_a_row_not_rewritten_for_ninety_minutes_fails(self, pool, minutes, expected):
+    @pytest.mark.parametrize("age,shown,expected", [
+        (timedelta(minutes=104), 104, "PASS"),
+        (timedelta(minutes=105), 105, "PASS"),
+        (timedelta(minutes=105, seconds=1), 105, "FAIL"),
+        (timedelta(minutes=240), 240, "FAIL"),
+    ])
+    async def test_a_row_older_than_the_canarys_bound_fails(self, pool, age, shown, expected):
+        """105 minutes: the 90 the canary excuses for a lock wait plus the 15
+        it allows the step once the wait is subtracted — exactly 105 is a tick
+        the canary calls waiting, a second more one it pages. Mutation: the
+        old 90, or `>=`."""
         async with scenario(pool) as conn:
             await clean_orders(conn)
             await order_owners(conn, ago(days=2))
-            await orders_synced(conn, stamped_at=ago(minutes=minutes))
+            await orders_synced(conn, stamped_at=NOW - age)
             v, detail = await verdict(conn, self.FILE, orders_on="1")
-        assert v == expected and f"rewritten {minutes} min ago (limit 90)" in detail, detail
+        assert v == expected and f"rewritten {shown} min ago (limit 105)" in detail, detail
 
     @pytest.mark.asyncio
     async def test_missing_fails_unless_the_handover_is_recent(self, pool):
@@ -2350,18 +2483,49 @@ class TestO3IsReconcileOrderVersions:
 
 
 class TestO2SharesTheCanarysBound:
-    def test_the_lock_wait_bound(self):
-        """O2's bound is the canary's for this chain's step: a wait for the
-        heavy-job lock excuses itself up to it, and past it the canary pages
-        `orders_sync_failing` on its own. A report stricter than the page
-        would FAIL a tick the canary calls waiting. Mutation: change either."""
-        from bot.canary import ORDERS_CHAIN, ORDERS_SYNC_LOCK_WAIT_MAX_S
+    O2 = _uncommented((SQL_DIR / "33_o2_orders_watermark.sql").read_text(encoding="utf-8"))
 
-        sql = _uncommented((SQL_DIR / "33_o2_orders_watermark.sql").read_text(encoding="utf-8"))
-        limit = str(ORDERS_SYNC_LOCK_WAIT_MAX_S // 60)
-        assert set(re.findall(r"interval '(\d+) minutes'", sql)) == {limit}
-        assert re.findall(r"age_min >= (\d+)", sql) == [limit]
+    def test_the_lock_wait_bound(self):
+        """O2's bound is the longest the canary goes without paging for this
+        chain's step: a wait for the heavy-job lock excuses itself up to
+        `ORDERS_SYNC_LOCK_WAIT_MAX_S`, and the clock left once the wait is
+        subtracted may still be `ORDERS_SYNC_STALE_S` old — 90 + 15 minutes.
+        A report stricter than the page would FAIL a tick the canary calls
+        waiting. Mutation: change either constant, or put the limit back at
+        the lock wait alone (90), as O2 had it."""
+        from bot.canary import ORDERS_CHAIN, ORDERS_SYNC_LOCK_WAIT_MAX_S, ORDERS_SYNC_STALE_S
+
+        limit = (ORDERS_SYNC_LOCK_WAIT_MAX_S + ORDERS_SYNC_STALE_S) // 60
+        assert (ORDERS_SYNC_LOCK_WAIT_MAX_S + ORDERS_SYNC_STALE_S) % 60 == 0
+        assert set(re.findall(r"interval '(\d+) minutes'", self.O2)) == {str(limit)}
+        # Judged as an interval, so the boundary is the canary's to the second.
+        assert len(re.findall(r"stamped_at > interval '(\d+) minutes'", self.O2)) == 1
+        assert re.findall(r"limit (\d+)\)", self.O2) == [str(limit)]
         assert ORDERS_CHAIN == "pg_orders_write"
+
+    def test_the_canary_is_quiet_up_to_that_bound_and_pages_past_it(self):
+        """The arithmetic above, checked against the page itself rather than
+        against its constants: a step whose last success is exactly the bound
+        old, with the longest wait the canary excuses, is not paged; one
+        second more is. If the canary's subtraction ever changes shape, this
+        fails before O2 and the page disagree. Mutation: page on `>=` in the
+        canary, or stop subtracting the wait."""
+        from bot.canary import (
+            ORDERS_CHAIN, ORDERS_SYNC_LOCK_WAIT_MAX_S, ORDERS_SYNC_STALE_S,
+            check_orders_sync_chain,
+        )
+
+        def page(ok_age):
+            return check_orders_sync_chain({"write_chains": {ORDERS_CHAIN: {
+                "mode": "postgres",
+                "sync_step": {"consecutive_failures": 0,
+                              "last_ok_age_s": ok_age,
+                              "last_attempt_age_s": ORDERS_SYNC_LOCK_WAIT_MAX_S + 60,
+                              "lock_wait_s": ORDERS_SYNC_LOCK_WAIT_MAX_S}}}})
+
+        bound = ORDERS_SYNC_LOCK_WAIT_MAX_S + ORDERS_SYNC_STALE_S
+        assert page(bound) == []
+        assert [key for key, _ in page(bound + 1)] == ["orders_sync_failing"]
 
 
 @needs_pg
@@ -2379,31 +2543,57 @@ class TestO4HalfwrittenOrders:
         assert v == "FAIL" and detail.startswith("1 order(s) worth 100.00 written since "
                                                  "the handover"), detail
         assert f"e.g. {{{CHAIN3_IDS[0]}}}" in detail, detail
+        assert "none of them in app.order_backfill_misses" in detail, detail
 
     @pytest.mark.asyncio
-    async def test_a_young_one_a_recorded_one_a_whole_one_and_a_free_one_pass(self, pool):
+    async def test_a_young_one_a_whole_one_and_a_free_one_pass(self, pool):
         async with scenario(pool) as conn:
             await clean_orders(conn)
             await order_owners(conn, ago(days=2))
             await chain_order(conn, CHAIN3_IDS[0], lines=0, created_at=ago(hours=5))
-            await chain_order(conn, CHAIN3_IDS[1], lines=0, created_at=ago(days=3))
-            await order_miss(conn, CHAIN3_IDS[1], checked_at=ago(days=10))
             await chain_order(conn, CHAIN3_IDS[2], lines=2, created_at=ago(days=3))
             await chain_order(conn, CHAIN3_IDS[3], total=0, lines=0, created_at=ago(days=3))
             v, detail = await verdict(conn, self.FILE, orders_on="1")
         assert v == "PASS" and detail.startswith("every order written since the handover"), \
             detail
+        assert "ledger" not in detail, detail
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("hours,expected", [(3, "PASS"), (7, "FAIL")])
-    async def test_an_expired_ledger_row_is_forgiven_for_six_hours(self, pool, hours, expected):
-        """An entry expires after 30 days and the next run records it again;
-        the repair runs every 2 h. Mutation: drop the six hours."""
+    async def test_a_ledger_row_does_not_excuse_one(self, pool):
+        """The repair re-fetches a bare order through the chain's own writer
+        and ledgers whatever the store still holds empty afterwards, so a
+        writer that drops line items launders its own orders into the ledger
+        (review of chain 3's soak checks). Measured on production 2026-10-09:
+        no such order in the 120 days before the flip. Both FAIL; the detail
+        says how many the repair had already asked about. Mutation: exclude
+        an order with a ledger row, as O4 first did."""
         async with scenario(pool) as conn:
             await clean_orders(conn)
-            await order_owners(conn, ago(days=40))
-            await chain_order(conn, CHAIN3_IDS[0], lines=0, created_at=ago(days=35))
-            await order_miss(conn, CHAIN3_IDS[0], checked_at=ago(days=30, hours=hours))
+            await order_owners(conn, ago(days=2))
+            await chain_order(conn, CHAIN3_IDS[0], lines=0, created_at=ago(days=1))
+            await order_miss(conn, CHAIN3_IDS[0], checked_at=ago(hours=20))
+            await chain_order(conn, CHAIN3_IDS[1], total=250, lines=0, created_at=ago(days=1))
+            v, detail = await verdict(conn, self.FILE, orders_on="1")
+        assert v == "FAIL" and detail.startswith("2 order(s) worth 350.00 written since "
+                                                 "the handover"), detail
+        assert f"e.g. {{{CHAIN3_IDS[1]},{CHAIN3_IDS[0]}}}" in detail, detail
+        assert "1 of them in app.order_backfill_misses" in detail, detail
+        assert "0 in the 120 days before the flip" in detail, detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("hours,expected", [(5, "PASS"), (7, "FAIL")])
+    async def test_the_six_hours_are_the_repairs_and_a_ledger_row_adds_none(self, pool, hours,
+                                                                              expected):
+        """Three of the repair's 2-hour intervals: a run held back by the
+        heavy-job lock, or a timer a deploy restarted, is not a defect. Past
+        them a ledgered order fails like any other. Mutation: drop the six
+        hours, or forgive the ledgered one."""
+        async with scenario(pool) as conn:
+            await clean_orders(conn)
+            await order_owners(conn, ago(days=2))
+            await chain_order(conn, CHAIN3_IDS[0], lines=0, created_at=ago(hours=hours),
+                              mirrored_at=ago(hours=1))
+            await order_miss(conn, CHAIN3_IDS[0], checked_at=ago(minutes=50))
             v, detail = await verdict(conn, self.FILE, orders_on="1")
         assert v == expected, detail
 

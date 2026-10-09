@@ -4,7 +4,7 @@
 -- container's flag and latch marker and passes:
 --   managers_on        1 (latched: chain 5 has written Postgres, whatever
 --                      KS_WRITE_MANAGERS says — DN-06), 0 (duckdb or unset and
---                      not latched), pending (the flag says postgres and the
+--                      no latch marker), pending (the flag says postgres and the
 --                      chain has not latched: its preconditions are judged in
 --                      web, not here — `pg_managers_write.unmet_precondition`),
 --                      invalid, unknown
@@ -27,9 +27,24 @@
 -- in that last case, which is UNKNOWN: a healthy flip's last pre-flip copy can
 -- sit inside the window until the chain's first write.
 --
+-- A failure counts for the day it was stamped, like the rest of the report
+-- (chain 3's review): only a successful copy resets `failures_since_ok`, and
+-- the replica stands down without one, so the count stood for ever. A
+-- `last_ok_at` after the handover is rows already replaced, and stays.
+--
+-- With managers_on=0 the owner rows are read too: rows naming one of chain 5's
+-- tables with no marker and the flag at duckdb are the marker lost. A
+-- classification follows the flag back to DuckDB, and the replica stands down
+-- on the owner rows, so it never reaches Postgres — with
+-- `chain_latch_disagrees` the only page. M2 stays "not applicable"; this one
+-- FAILs.
+--
 -- WHAT A FAIL MEANS
 -- - invalid: KS_WRITE_MANAGERS is a value no chain understands; the chain is
 --   stood down and nothing is written anywhere. Fix the .env line.
+-- - owner rows and managers_on=0: the marker is lost. Restore
+--   data/write-chain-owners/pg_managers_write, else
+--   scripts/chain_copy_back.py managers.
 -- - a table written or failing after the handover: something is writing
 --   DuckDB's copy over the chain's. Read M2, then the web log for 'replicate:'.
 WITH clock AS (
@@ -59,7 +74,8 @@ wanted (table_name) AS (
 judged AS (
     SELECT w.table_name,
            CASE
-               WHEN s.failures_since_ok > 0 AND s.last_attempted_at > since.at THEN
+               WHEN s.failures_since_ok > 0 AND s.last_attempted_at > since.at
+                    AND s.last_attempted_at > clock.now - interval '24 hours' THEN
                    format('failing (%s): %s', s.failures_since_ok,
                           left(regexp_replace(COALESCE(s.last_error, ''), '\s+', ' ', 'g'), 120))
                WHEN s.last_ok_at > since.at THEN
@@ -68,6 +84,7 @@ judged AS (
            END AS problem
     FROM wanted w
     CROSS JOIN since
+    CROSS JOIN clock
     LEFT JOIN meta.mirror_state s ON s.table_name = w.table_name
 ),
 agg AS (
@@ -78,7 +95,7 @@ agg AS (
 )
 SELECT 'M1 managers copy stood down'::text AS "check",
        CASE flag.state
-           WHEN '0' THEN 'PASS'
+           WHEN '0' THEN CASE WHEN owner.at IS NULL THEN 'PASS' ELSE 'FAIL' END
            WHEN '1' THEN CASE WHEN agg.n = 0 THEN 'PASS'
                               WHEN since.guessed THEN 'UNKNOWN'
                               ELSE 'FAIL' END
@@ -87,7 +104,17 @@ SELECT 'M1 managers copy stood down'::text AS "check",
            ELSE 'UNKNOWN'
        END AS verdict,
        CASE flag.state
-           WHEN '0' THEN 'not applicable: chain 5 still writes DuckDB (KS_WRITE_MANAGERS is not postgres and no latch marker)'
+           WHEN '0' THEN CASE
+               WHEN owner.at IS NULL THEN
+                   'not applicable: chain 5 still writes DuckDB (KS_WRITE_MANAGERS is not postgres and no latch marker)'
+               ELSE format(
+                   'chain 5 owns its tables in Postgres since %s Kyiv (owner rows), and '
+                   'data/write-chain-owners/pg_managers_write is gone with KS_WRITE_MANAGERS not '
+                   'postgres: the marker is lost, a classification is written to DuckDB again '
+                   'and the replica stands down on the owner rows, so it never reaches Postgres '
+                   '(chain_latch_disagrees). Restore the marker, else '
+                   'scripts/chain_copy_back.py managers',
+                   to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed || ' ' || since.said, 500)
                               ELSE 'neither table written by a copy ' || since.said END
            WHEN 'pending' THEN
@@ -99,4 +126,4 @@ SELECT 'M1 managers copy stood down'::text AS "check",
            WHEN 'unknown' THEN 'could not read KS_WRITE_MANAGERS from the web container'
            ELSE format('managers_on=%s is not one of 0, 1, pending, invalid, unknown', flag.state)
        END AS detail
-FROM flag CROSS JOIN agg CROSS JOIN since;
+FROM flag CROSS JOIN agg CROSS JOIN since CROSS JOIN owner;

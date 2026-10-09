@@ -1,4 +1,4 @@
--- O4 (chain 3) — an order with revenue and no line items is repaired or recorded.
+-- O4 (chain 3) — every order the chain writes with revenue has its line items.
 --
 -- Only under chain 3; the variables are O1's.
 --
@@ -20,19 +20,34 @@
 -- clock it stamps; the owner rows, else the given flip time), carrying
 -- revenue (the repair's own `grand_total > 0`), with no line item, created
 -- over 6 hours ago — three of the repair's intervals, so a run held back by
--- the heavy-job lock and a timer restarted by a deploy are not a defect — and
--- with no ledger row checked inside its 30 days plus those 6 hours (an entry
--- expires, and the next run records it again). A header the 05:15 refresh
--- rewrote is in that set: its lines were never touched, so it is either whole
--- or in the ledger already. A created_at nobody stored reads as `mirrored_at`,
--- which only makes the order look younger. With neither an owner row nor a
--- flip time nothing dates the chain's writes: UNKNOWN, pass SOAK_ORDERS_FLIP_AT.
+-- the heavy-job lock and a timer restarted by a deploy are not a defect. A
+-- header the 05:15 refresh rewrote is in that set: its lines were never
+-- touched, so it was whole before. A created_at nobody stored reads as
+-- `mirrored_at`, which only makes the order look younger. With neither an
+-- owner row nor a flip time nothing dates the chain's writes: UNKNOWN, pass
+-- SOAK_ORDERS_FLIP_AT.
+--
+-- A LEDGER ROW DOES NOT EXCUSE ONE (chain 3's review). The repair re-fetches
+-- a bare order through the same writer the chain writes with, then ledgers
+-- whatever the store still holds empty (`halfwritten_among`, read after the
+-- write) — so a writer that drops line items launders every order it dropped
+-- into app.order_backfill_misses, and a check that forgave a ledger row would
+-- PASS exactly that writer. And the ledger has nothing honest to excuse:
+-- measured on production 2026-10-09, read-only, bronze.orders held no order
+-- with grand_total > 0 and no line item in the 120 days before the flip, and
+-- the ledger's 43 rows were last checked 2026-08-08. So an order in the set
+-- FAILs whether or not it is ledgered, and the detail says how many are: a
+-- ledgered one is an order the repair asked KeyCRM about again and still
+-- stored empty — KeyCRM serving it bare, or the writer dropping it again;
+-- nothing here tells which.
 --
 -- WHAT A FAIL MEANS
 -- The ids are named. Read halfwritten_repair in /api/jobs — when it last ran
 -- and what it found — then fetch one id from KeyCRM: line items that arrive
--- mean the chain's write dropped them; none, and no ledger row, mean the
--- record did not land.
+-- mean the chain's write dropped them (and, for a ledgered one, the repair's
+-- write through it too); none mean KeyCRM serves the order bare, which the 120
+-- days before the flip never saw — ask the shop why. Unledgered past 6 h:
+-- the repair has not reached it, or its record did not land.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
@@ -54,7 +69,9 @@ since AS (
     FROM owner CROSS JOIN flag
 ),
 halfwritten AS (
-    SELECT o.id, o.grand_total
+    SELECT o.id, o.grand_total,
+           EXISTS (SELECT 1 FROM app.order_backfill_misses m WHERE m.order_id = o.id)
+               AS ledgered
     FROM bronze.orders o
     CROSS JOIN clock
     CROSS JOIN since
@@ -62,13 +79,10 @@ halfwritten AS (
       AND o.grand_total > 0
       AND COALESCE(o.created_at, o.mirrored_at) < clock.now - interval '6 hours'
       AND NOT EXISTS (SELECT 1 FROM bronze.order_products p WHERE p.order_id = o.id)
-      AND NOT EXISTS (
-          SELECT 1 FROM app.order_backfill_misses m
-          WHERE m.order_id = o.id
-            AND m.checked_at > clock.now - interval '30 days' - interval '6 hours')
 ),
 agg AS (
     SELECT count(*) AS n,
+           count(*) FILTER (WHERE ledgered) AS ledgered,
            COALESCE(sum(grand_total), 0) AS total,
            (array_agg(id ORDER BY grand_total DESC, id))[1:10] AS sample
     FROM halfwritten
@@ -90,11 +104,19 @@ SELECT 'O4 half-written orders'::text AS "check",
                    'no owner row and no flip time, so nothing dates the chain''s writes: '
                    'pass SOAK_ORDERS_FLIP_AT'
                WHEN agg.n > 0 THEN format(
-                   '%s order(s) worth %s written %s with revenue, no line items and no ledger '
-                   'row, created over 6 h ago, e.g. %s',
-                   agg.n, agg.total, since.said, left(agg.sample::text, 120))
+                   '%s order(s) worth %s written %s with revenue and no line items, created '
+                   'over 6 h ago, e.g. %s; %s',
+                   agg.n, agg.total, since.said, left(agg.sample::text, 120),
+                   CASE WHEN agg.ledgered = 0 THEN
+                            'none of them in app.order_backfill_misses: the repair has not '
+                            'reached them, or its record did not land'
+                        ELSE format(
+                            '%s of them in app.order_backfill_misses: the repair re-fetched '
+                            'them and still stored none — KeyCRM or the writer, nothing here '
+                            'tells which. A ledger row no longer excuses one: 0 in the 120 '
+                            'days before the flip (measured 2026-10-09)', agg.ledgered) END)
                ELSE 'every order written ' || since.said
-                    || ' with revenue has its line items, or a ledger row from the repair' END
+                    || ' with revenue has its line items' END
            ELSE format('orders_on=%s: see O1', flag.state)
        END AS detail
 FROM flag CROSS JOIN agg CROSS JOIN since;

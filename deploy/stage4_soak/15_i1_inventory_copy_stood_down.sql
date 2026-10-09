@@ -29,6 +29,18 @@
 --   75 min — or failing: the stand-down has lapsed. Without a flip time this
 --   reads FAIL for the first 75 min after the flip by construction; pass
 --   SOAK_INVENTORY_FLIP_AT on flip day.
+--
+-- KNOWN AND LEFT (chain 3's review, 2026-10-10): `failing` is sticky here.
+-- Only a successful copy resets `failures_since_ok`, and under the chain the
+-- copy stamps the six tables failing while the flag and the latch disagree,
+-- then stands down silently once they agree — so one such episode FAILs this
+-- check for as long as the chain owns the tables. O1, B1 and M1 now count a
+-- failure only when it was stamped after the handover and inside the last
+-- 24 h. Not done here because this check is not their shape: it has no owner
+-- rows, only the flip time, and judges every failure ever stamped, the ones
+-- from before the flip included — the same fix means giving it O1's handover
+-- clock first. Until then a FAIL that reads `failing` with an old
+-- meta.mirror_state.last_attempted_at is history, not a copy at work.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
