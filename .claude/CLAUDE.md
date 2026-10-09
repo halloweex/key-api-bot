@@ -1949,9 +1949,20 @@ DuckDB holds under any refreshed order read as a basket the chain shrank and
 Postgres's line items of its order carry a stamp from after the latch. A
 basket the chain emptied leaves no line to date and is refused, knowingly too
 strict, with the per-id decision named. No allocator to carry. Proved against
-a real Postgres in `tests/integration/test_chain_copy_back_orders.py`. **What
-is not built**: the soak checks and the restore drill counting the four
-tables. The lock-out for images without the chain is revision 0035, shared
+a real Postgres in `tests/integration/test_chain_copy_back_orders.py`.
+**Soak checks O1–O5**: the hourly copy of the misses and the two ids-diffs
+stood down (no `last_ok_at` or failure on the misses, no `backfilled_at` on
+the bronze three, after the owner rows — else `SOAK_ORDERS_FLIP_AT`, else a
+75-minute window read as UNKNOWN; the chain stamps `last_ok_at` on the bronze
+three itself, so there that column says nothing); `last_sync_orders`
+rewritten within the canary's 90-minute lock-wait bound, judged by the row's
+stamp because its value is KeyCRM's clock; `reconcile_order_versions`' three
+predicates, asked live; no order the chain wrote with revenue and no line
+items past 6 h without a ledger row; and the standing watch's chain-3 group.
+`stage4_soak.sh` passes `orders_on=pending` for a flag the chain has not
+latched under, chain 5's way. The restore drill counts the four tables once
+an owner row names one: orders, expenses and misses `grows`, line items
+`either`. The lock-out for images without the chain is revision 0035, shared
 with the other seven chains #280 registered (see "Revision 0035"); it holds
 the backfills and the misses ledger's copy, and not the per-tick orders and
 expenses mirrors, which never asked the revision.
