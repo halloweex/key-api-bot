@@ -380,3 +380,304 @@ class TestTheRunbookTellsTheShippersApart:
         assert len(names) == len(WRITE_CHAINS)
         for name, chain in zip(names, WRITE_CHAINS):
             assert chain_transfer.resolve_chain(name) is chain
+
+
+# ─── F7's guard: a per-key membership test is against something hashed ─────
+#
+# The quadratic shape is a membership test inside a comprehension's condition
+# against a container scanned element by element: once per key, over every
+# key. `set(x)` there was the form F7 removed; a list (`k not in carried`, with
+# `carried` a list comprehension) is the same cost under another spelling, and
+# the review showed it passing both the first guard and the timing bound. So
+# the walk below asks of every such test whether its right-hand side can be
+# SHOWN to be hashed — a set or a mapping, built or annotated so in the scope
+# that names it — and fails closed on anything it cannot show.
+
+_HASHED_TYPES = frozenset({
+    "AbstractSet", "FrozenSet", "Set", "MutableSet", "KeysView",
+    "Mapping", "MutableMapping", "Dict", "set", "frozenset", "dict",
+})
+
+# Bounded by construction, so a scan per element costs nothing that grows: the
+# chain's own tables (a handful), kept a tuple because the function iterates
+# them in order as well. Each entry must still be needed, or it is stale.
+_LINEAR_SCAN_EXEMPT = {("_soak_without_a_check", "mirrored")}
+
+
+def _annotated_hashed(ann) -> bool:
+    import ast
+
+    if isinstance(ann, ast.Subscript):
+        base = ann.value
+        if isinstance(base, ast.Name) and base.id == "Optional":
+            return _annotated_hashed(ann.slice)
+        return _annotated_hashed(base)
+    if isinstance(ann, ast.Name):
+        return ann.id in _HASHED_TYPES
+    if isinstance(ann, ast.Attribute):
+        return ann.attr in _HASHED_TYPES
+    return False
+
+
+def _scope_bindings(scope) -> dict:
+    """`{name: [binding]}` for one function (or the module), not descending
+    into the functions it defines. A binding is `("param", annotation)`,
+    `("value", expr)` — None where the value cannot be read off the target —
+    or `("ann", annotation, expr)`."""
+    import ast
+
+    out: dict = {}
+
+    def bind(name, binding):
+        out.setdefault(name, []).append(binding)
+
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        a = scope.args
+        for arg in (a.posonlyargs + a.args + a.kwonlyargs
+                    + [x for x in (a.vararg, a.kwarg) if x is not None]):
+            bind(arg.arg, ("param", arg.annotation))
+
+    def gather(node):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                bind(child.name, ("value", None))
+                continue
+            if isinstance(child, ast.Lambda):
+                continue
+            if isinstance(child, ast.Assign):
+                for target in child.targets:
+                    for name in ast.walk(target):
+                        if isinstance(name, ast.Name):
+                            bind(name.id, ("value", child.value
+                                           if target is name else None))
+            elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+                bind(child.target.id, ("ann", child.annotation, child.value))
+            elif isinstance(child, (ast.AugAssign, ast.For, ast.AsyncFor,
+                                    ast.NamedExpr)):
+                target = child.target
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name):
+                        bind(name.id, ("value", None))
+            elif isinstance(child, (ast.With, ast.AsyncWith)):
+                for item in child.items:
+                    for name in ast.walk(item.optional_vars or ast.Pass()):
+                        if isinstance(name, ast.Name):
+                            bind(name.id, ("value", None))
+            gather(child)
+
+    gather(scope)
+    return out
+
+
+def _unhashed_membership(source: str):
+    """`[(function, line, test, name)]`: every `in`/`not in` inside a
+    comprehension's condition whose right-hand side is not a name the walk
+    can show is bound to a set or a mapping in the scope that names it, nor
+    a dict's `.keys()`. A column tuple (`.columns`) and a literal of
+    constants are bounded by the schema and the source, and pass."""
+    import ast
+
+    tree = ast.parse(source)
+    returns = {n.name: _annotated_hashed(n.returns) for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    bindings: dict = {}
+
+    def scoped(scope):
+        if scope not in bindings:
+            bindings[scope] = _scope_bindings(scope)
+        return bindings[scope]
+
+    def hashed(value, chain) -> bool:
+        if isinstance(value, (ast.Set, ast.Dict, ast.SetComp, ast.DictComp)):
+            return True
+        if isinstance(value, ast.Call):
+            func = value.func
+            if isinstance(func, ast.Name):
+                return func.id in {"set", "frozenset", "dict"} or returns.get(func.id, False)
+            return isinstance(func, ast.Attribute) and func.attr == "keys"
+        if isinstance(value, ast.BinOp) and isinstance(
+                value.op, (ast.BitAnd, ast.BitOr, ast.Sub, ast.BitXor)):
+            return hashed(value.left, chain)
+        if isinstance(value, ast.Name):
+            return resolve(value.id, chain)
+        return False
+
+    def resolve(name, chain) -> bool:
+        for depth in range(len(chain) - 1, -1, -1):
+            found = scoped(chain[depth]).get(name)
+            if not found:
+                continue
+            outer = chain[:depth + 1]
+
+            def ok(binding):
+                if binding[0] == "param":
+                    return _annotated_hashed(binding[1])
+                if binding[0] == "ann":
+                    return _annotated_hashed(binding[1]) or (
+                        binding[2] is not None and hashed(binding[2], outer))
+                return binding[1] is not None and hashed(binding[1], outer)
+
+            return all(ok(b) for b in found)
+        return False
+
+    out = []
+
+    def visit(node, chain, in_condition):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            chain = chain + [node]
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp,
+                             ast.GeneratorExp)):
+            for gen in node.generators:
+                visit(gen.iter, chain, in_condition)
+                for cond in gen.ifs:
+                    visit(cond, chain, True)
+            parts = ([node.key, node.value] if isinstance(node, ast.DictComp)
+                     else [node.elt])
+            for part in parts:
+                visit(part, chain, in_condition)
+            return
+        if isinstance(node, ast.Compare) and in_condition:
+            for op, right in zip(node.ops, node.comparators):
+                if not isinstance(op, (ast.In, ast.NotIn)):
+                    continue
+                if isinstance(right, ast.Attribute) and right.attr == "columns":
+                    continue
+                if isinstance(right, (ast.Tuple, ast.List, ast.Set)) and all(
+                        isinstance(e, ast.Constant) for e in right.elts):
+                    continue
+                # Only a name bound to a hashed value, or a dict's view, is
+                # a lookup here: a call — `set(drop)`, a helper returning a
+                # set — is rebuilt for every key, which is F7 itself.
+                if isinstance(right, ast.Name) and resolve(right.id, chain):
+                    continue
+                if (isinstance(right, ast.Call)
+                        and isinstance(right.func, ast.Attribute)
+                        and right.func.attr == "keys"):
+                    continue
+                where = next((c.name for c in reversed(chain)
+                              if hasattr(c, "name")), "<module>")
+                named = right.id if isinstance(right, ast.Name) else None
+                out.append((where, node.lineno, ast.unparse(node), named))
+        for child in ast.iter_child_nodes(node):
+            visit(child, chain, in_condition)
+
+    visit(tree, [tree], False)
+    return out
+
+
+class TestTheClassificationIsLinear:
+    """F7 (review of #265). `classify_handover` tested `k not in set(x)`
+    inside four comprehensions, which builds the set again for every key.
+    After a full re-fetch through chain 4 every buyer is rewritten and every
+    one differs, so one classification cost 15 s at 33 000 buyers — paid in
+    the stopped window, three times over in the runbook. The answer was
+    always right; only the time was quadratic."""
+
+    def test_no_comprehension_in_the_module_builds_a_set_per_element(self):
+        """Structural, so it cannot flake: no comprehension's condition in
+        `core/chain_transfer.py` calls `set()` or `frozenset()`. Mutation
+        killed: any of the four `k not in set(...)` put back."""
+        import ast
+        import inspect
+
+        tree = ast.parse(inspect.getsource(chain_transfer))
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp,
+                                     ast.GeneratorExp)):
+                continue
+            for gen in node.generators:
+                for cond in gen.ifs:
+                    for call in ast.walk(cond):
+                        if (isinstance(call, ast.Call)
+                                and isinstance(call.func, ast.Name)
+                                and call.func.id in {"set", "frozenset"}):
+                            offenders.append(call.lineno)
+        assert offenders == [], offenders
+
+    def test_every_per_key_membership_test_is_against_a_hashed_container(self):
+        """The review of F7: the guard above names one spelling. A list is
+        the same quadratic — `[k for k in differing if k not in carried]` in
+        the mirrored differ branch passed it, and passed the timing bound at
+        4.8 s of 5 — so every membership test in a comprehension's condition
+        must be against something the walk can SHOW is a set or a mapping,
+        and anything it cannot show fails. Mutations killed: `k not in
+        carried`, `k not in written`, `k not in dropped` (lists), and
+        `set(...)`, `sorted(...)` or `list(...)` on the right-hand side."""
+        import inspect
+
+        found = _unhashed_membership(inspect.getsource(chain_transfer))
+        exempt = {(where, name) for where, _line, _test, name in found
+                  if (where, name) in _LINEAR_SCAN_EXEMPT}
+        assert [f for f in found if (f[0], f[3]) not in _LINEAR_SCAN_EXEMPT] == []
+        assert exempt == _LINEAR_SCAN_EXEMPT, "a stale exemption"
+
+    @pytest.mark.parametrize("snippet, flagged", [
+        ("def f(keys, drop):\n    gone = [k for k in drop]\n"
+         "    return [k for k in keys if k not in gone]", True),
+        ("def f(keys, drop):\n    gone = set(drop)\n"
+         "    return [k for k in keys if k not in gone]", False),
+        ("def f(keys, drop):\n    return [k for k in keys if k not in set(drop)]", True),
+        ("def f(keys, drop):\n    return [k for k in keys if k not in sorted(drop)]", True),
+        ("def f(keys, drop: AbstractSet[int]):\n"
+         "    return [k for k in keys if k not in drop]", False),
+        ("def f(keys, drop: Sequence[int]):\n"
+         "    return [k for k in keys if k not in drop]", True),
+        ("def f(keys, a, b):\n    both = a.keys() & b.keys()\n"
+         "    return [k for k in keys if k in both]", False),
+        ("def f(keys, drop, flag):\n    gone = set(drop)\n"
+         "    if flag:\n        gone = list(drop)\n"
+         "    return [k for k in keys if k in gone]", True),
+        ("def f(keys, spec):\n    return [c for c in keys if c in spec.compare.columns]",
+         False),
+    ])
+    def test_the_walk_tells_a_scan_from_a_lookup(self, snippet, flagged):
+        """The walk itself, on the shapes it has to tell apart — so a guard
+        that passed by seeing nothing cannot pass silently."""
+        assert bool(_unhashed_membership(snippet)) is flagged
+
+    def test_forty_thousand_rewritten_buyers_classify_in_well_under_a_second(self, specs):
+        """The review's case at production's size and beyond: every buyer
+        rewritten and differing only in city, as many contacts only DuckDB
+        holds of rewritten buyers, and — since the review of F7, which found
+        the after-latch `ahead` path never reached here — as many only
+        Postgres holds. Quadratic, the first two were 18 s and 63 s. Each
+        path is timed on its own call: one bound over all of them let a
+        single path regressed through at 4.8 s of 5. 2 s a call is still
+        some fifty times what a linear call takes."""
+        import time
+
+        n = 40_000
+        buyers, contacts = specs[BUYERS], specs[CONTACTS]
+        city = buyers.compare.columns.index("city")
+
+        def moved(row):
+            return row[:city] + ("Київ",) + row[city + 1:]
+
+        dk = {i: _buyer(buyers, i) for i in range(1, n + 1)}
+        pg = {i: moved(row) for i, row in dk.items()}
+        dk_contacts = {(i, "phone", f"+3805{i}"): _contact(contacts, i, f"+3805{i}")
+                       for i in range(1, n + 1)}
+        pg_contacts = {(i, "phone", f"+3806{i}"): _contact(contacts, i, f"+3806{i}")
+                       for i in range(1, n + 1)}
+        rewritten = frozenset(range(1, n + 1))
+
+        def timed(*args):
+            started = time.perf_counter()
+            issues = classify_handover(*args, moved_on=True, rewritten=rewritten)
+            return issues, time.perf_counter() - started
+
+        on_buyers, buyers_took = timed(buyers, dk, pg)
+        on_dk_contacts, missing_took = timed(contacts, dk_contacts, {})
+        on_pg_contacts, ahead_took = timed(contacts, {}, pg_contacts)
+
+        assert [(i.check_name, i.severity.value, i.count) for i in on_buyers] == [
+            ("handover_rows_differ", "INFO", n)]
+        assert [(i.check_name, i.severity.value, i.count) for i in on_dk_contacts] == [
+            ("handover_rows_missing", "INFO", n)]
+        assert [(i.check_name, i.severity.value, i.count) for i in on_pg_contacts] == [
+            ("handover_rows_ahead", "INFO", n)]
+        for path, took in (("differ", buyers_took), ("missing", missing_took),
+                           ("ahead", ahead_took)):
+            assert took < 2, f"{took:.1f} s on the {path} path for {n} rewritten keys"

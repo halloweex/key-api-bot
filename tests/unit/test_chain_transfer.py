@@ -228,6 +228,242 @@ class TestAKeyOnlyDuckdbHolds:
         assert missing.sample_ids == (2,)
 
 
+def _operational_full_replace_specs():
+    """Every chain table the hourly copy replaces whole — the tables the
+    pre-flip rule below is about — derived from the registry, so a chain
+    added later is judged by it without being named here."""
+    from core.write_chains import WRITE_CHAINS
+
+    return [s for chain in WRITE_CHAINS
+            for s in chain_transfer.chain_specs(chain)
+            if s.kind == "operational" and not s.is_append]
+
+
+class TestAKeyOnlyPostgresHolds:
+    """F6 (review of #265). Before a flip, Postgres is the hourly copy of
+    DuckDB and nothing else, so a key only Postgres holds is one DuckDB
+    deleted after the copy last ran. It used to be INFO — "the next full
+    replace removes" it — but the copy stands down the moment the chain
+    routes to Postgres, so after the flip there is no next one: the review
+    reproduced a withdrawn expense back on /expenses and in the ad spend,
+    3 500 where 1 000 was typed."""
+
+    def _expense(self, id):
+        spec = _spec(pg_expenses_write, "app.manual_expenses")
+        return _row(spec, id=id, expense_date=date(2026, 9, 15),
+                    category="marketing", expense_type="Facebook Ads",
+                    amount=Decimal("2500.00"), currency="UAH", created_at=T0,
+                    updated_at=None)
+
+    def test_before_a_flip_it_is_refused_with_the_copy_as_its_lever(self):
+        """Mutation killed: the INFO `handover_rows_ahead` ("which the next
+        full replace removes") this was before the fix."""
+        spec = _spec(pg_expenses_write, "app.manual_expenses")
+        (issue,) = classify_handover(spec, {1: self._expense(1)},
+                                     {1: self._expense(1), 2: self._expense(2)},
+                                     moved_on=False)
+        assert (issue.check_name, issue.severity.value) == (
+            "handover_rows_ahead", "CRITICAL")
+        assert issue.sample_ids == (2,)
+        assert "POST /api/jobs/replicate_operational/trigger" in issue.description
+        assert "flag at duckdb" in issue.description
+        assert "next full replace removes" not in issue.description
+
+    def test_after_the_latch_it_is_the_writer_s_row(self):
+        """Postgres is the writer once owner rows exist, so the same key is its
+        later write — the size of the copy-back. Mutation killed: the new rule
+        applied on both sides of the latch."""
+        spec = _spec(pg_expenses_write, "app.manual_expenses")
+        (issue,) = classify_handover(spec, {1: self._expense(1)},
+                                     {1: self._expense(1), 2: self._expense(2)},
+                                     moved_on=True)
+        assert (issue.check_name, issue.severity.value) == (
+            "handover_rows_ahead", "INFO")
+        assert "since the chain was latched" in issue.description
+
+    @pytest.mark.parametrize(
+        "spec", _operational_full_replace_specs(), ids=lambda s: s.pg_table)
+    def test_every_full_replace_table_of_every_chain(self, spec):
+        """The rule is the table's shape, not chain 8's: every table the hourly
+        copy replaces whole loses that copy at the flip. No DuckDB row at all,
+        so even a by-age sweep has no floor to excuse it. Mutation killed: the
+        CRITICAL scoped to `app.manual_expenses` alone."""
+        key = ("pg-only",)
+        row = tuple(object() for _ in spec.compare.columns)
+        issues = classify_handover(spec, {}, {key: row}, moved_on=False)
+        assert {(i.check_name, i.severity.value) for i in issues} == {
+            ("handover_rows_ahead", "CRITICAL")}, spec.pg_table
+
+    def test_a_row_the_sweep_removed_is_retention_and_a_newer_one_is_not(self):
+        """Chain 10's samples are swept by age every thirty minutes in DuckDB
+        and followed by the hourly copy, so a Postgres row older than anything
+        DuckDB still holds is the sweep having run since — and after a flip
+        Postgres's own writer sweeps it by the same rule. A row newer than that
+        is not retention. Mutations killed: drop the exception (every chain-10
+        handover refuses on a lagging sweep), or apply it to the newer row."""
+        spec = _spec_of("app.memory_samples")
+        assert spec.prune_clock == "sampled_at"
+        oldest_kept = T0
+        aged, newer = T0 - timedelta(days=15), T0 + timedelta(minutes=5)
+        sample = lambda at: _row(spec, sampled_at=at)  # noqa: E731
+        dk = {oldest_kept: sample(oldest_kept)}
+        pg = {aged: sample(aged), oldest_kept: sample(oldest_kept),
+              newer: sample(newer)}
+        issues = classify_handover(spec, dk, pg, moved_on=False)
+        found = {(i.check_name, i.severity.value): i.count for i in issues}
+        assert found == {("handover_rows_ahead", "INFO"): 1,
+                         ("handover_rows_ahead", "CRITICAL"): 1}
+        (info,) = [i for i in issues if i.severity.value == "INFO"]
+        assert "sweep" in info.description and "sampled_at" in info.description
+
+    @pytest.mark.parametrize(
+        "spec",
+        [s for s in _operational_full_replace_specs() if not s.prune_clock],
+        ids=lambda s: s.pg_table)
+    def test_an_older_ghost_is_still_a_ghost_where_nothing_sweeps(self, spec):
+        """The age exception is the SWEEP's, and only a table both stores
+        sweep by age has one. Every other table is judged with DuckDB holding
+        a row, and the key only Postgres holds older than it in EVERY column —
+        so an exception widened to any clock (`spec.clock`, or any other
+        column read as an age) finds it "older than anything DuckDB still
+        holds" and waves it through. The review's case: a withdrawn expense
+        typed three days before the one DuckDB kept. Mutation killed: the
+        exception read off `spec.clock` as well as `spec.prune_clock` — the
+        parametrised test above passes DuckDB no row, so it has no floor and
+        could not see it."""
+        kept, ghost = ("kept",), ("ghost",)
+        newer = tuple(T0 for _ in spec.compare.columns)
+        older = tuple(T0 - timedelta(days=3) for _ in spec.compare.columns)
+        issues = classify_handover(spec, {kept: newer},
+                                   {kept: newer, ghost: older}, moved_on=False)
+        assert [(i.check_name, i.severity.value, i.count)
+                for i in issues] == [
+            ("handover_rows_ahead", "CRITICAL", 1)], spec.pg_table
+
+    def test_the_review_s_older_withdrawn_expense_is_refused(self):
+        """The same, in chain 8's own columns: expense 1 typed on T0 - 3 d and
+        withdrawn in DuckDB after the last copy, expense 2 kept."""
+        spec = _spec(pg_expenses_write, "app.manual_expenses")
+        assert spec.prune_clock is None and spec.clock
+
+        def expense(id, created_at):
+            return _row(spec, id=id, expense_date=date(2026, 9, 15),
+                        category="marketing", expense_type="Facebook Ads",
+                        amount=Decimal("1000.00"), currency="UAH",
+                        created_at=created_at, updated_at=None)
+
+        (issue,) = classify_handover(
+            spec, {2: expense(2, T0)},
+            {1: expense(1, T0 - timedelta(days=3)), 2: expense(2, T0)},
+            moved_on=False)
+        assert (issue.check_name, issue.severity.value, issue.sample_ids) == (
+            "handover_rows_ahead", "CRITICAL", (1,))
+
+    def test_an_append_table_keeps_its_own_rule(self):
+        """Out of F6's scope and unchanged: the copy never deletes from an
+        append table, so its lever would not clear one. Pinned so the new
+        branch cannot swallow it."""
+        spec = _spec(pg_inventory_write, "app.stock_movements")
+        row = lambda i: _row(spec, id=i, offer_id=1, product_id=101,  # noqa: E731
+                             movement_type="stock_out", quantity_before=40,
+                             quantity_after=37, delta=-3, reserve_before=2,
+                             reserve_after=2, recorded_at=T0, source="sync")
+        (issue,) = classify_handover(spec, {1: row(1)}, {1: row(1), 9: row(9)},
+                                     moved_on=False)
+        assert (issue.check_name, issue.severity.value) == (
+            "handover_rows_ahead", "INFO")
+        assert "next full replace" not in issue.description
+
+    def test_an_append_table_says_what_a_flip_does_with_them(self):
+        """The review of F6: still INFO before a flip, so `--handover` exits
+        0 over them, and the finding read as if they were harmless — "a
+        writer that is not the copy put them there". A flip keeps them as the
+        record, which is right if DuckDB lost them (a restore older than the
+        last copy) and a phantom movement if something wrote round the copy.
+        The severity is the owner's to change; the sentence says both causes
+        and what the flip does. Mutation killed: the old sentence."""
+        spec = _spec(pg_inventory_write, "app.stock_movements")
+        row = lambda i: _row(spec, id=i, offer_id=1, recorded_at=T0)  # noqa: E731
+        (issue,) = classify_handover(spec, {1: row(1)}, {1: row(1), 9: row(9)},
+                                     moved_on=False)
+        assert issue.severity.value == "INFO"
+        assert "A flip keeps them as the record" in issue.description
+        assert "restored" in issue.description
+        assert "by id before flipping" in issue.description
+
+
+def _preflip_criticals():
+    """Every CRITICAL the pre-flip rule can file, on every table of every
+    registered chain: a key only DuckDB holds, a key both hold differently,
+    a key only Postgres holds — each on its own, so each branch speaks."""
+    from core.write_chains import WRITE_CHAINS
+
+    found = []
+    for chain in WRITE_CHAINS:
+        for spec in chain_transfer.chain_specs(chain):
+            width = len(spec.compare.columns)
+            one = tuple(object() for _ in range(width))
+            other = tuple(object() for _ in range(width))
+            key = ("k",)
+            for dk, pg in (({key: one}, {}), ({key: one}, {key: other}),
+                           ({}, {key: one})):
+                found += [(spec.pg_table, i) for i in classify_handover(
+                    spec, dk, pg, moved_on=False)
+                    if i.severity.value == "CRITICAL"]
+    return found
+
+
+class TestThePreFlipLeversNameTheStateTheShippersNeed:
+    """The review of F6 (#265). The pre-flip rule applies wherever no owner
+    rows exist — which includes the flag already at postgres with nothing
+    latched (chain 8 since 2026-09-17), and a marker whose first write
+    failed, which `_marker_steps` sends through `--handover` first. In both
+    every shipper of DuckDB's rows stands down, so a lever saying "bring web
+    back with the flag unchanged" clears nothing there: the review followed
+    it, the ghost stayed, the next write latched the chain, and the next
+    `--handover` read the same ghost as INFO and exited 0. A lever has to
+    name the state the shippers need — the flag at duckdb and no marker —
+    whatever state it is read in."""
+
+    def test_no_pre_flip_lever_says_the_flag_unchanged(self):
+        """Mutation killed: any lever put back to "with the flag unchanged"."""
+        stale = sorted({table for table, issue in _preflip_criticals()
+                        if "flag unchanged" in issue.description})
+        assert stale == []
+
+    def test_every_lever_that_brings_web_back_names_the_flag_and_the_marker(self):
+        found = [(table, issue) for table, issue in _preflip_criticals()
+                 if "web back" in issue.description]
+        # Not vacuous: the hourly copy's tables, the replicated pair, chain
+        # 4's and chain 3's landings and chain 6's catalogue all say it.
+        tables = {table for table, _ in found}
+        assert {"app.manual_expenses", "bronze.offers", "bronze.managers",
+                "bronze.buyers", "bronze.buyer_contacts", "bronze.orders",
+                "bronze.products"} <= tables, sorted(tables)
+        wrong = sorted({table for table, issue in found
+                        if not ("flag at duckdb" in issue.description
+                                and "no marker" in issue.description)})
+        assert wrong == []
+
+    def test_the_review_s_ghost_says_it(self):
+        """Chain 8's withdrawn expense, the review's case, in full."""
+        spec = _spec(pg_expenses_write, "app.manual_expenses")
+        row = tuple(object() for _ in spec.compare.columns)
+        (issue,) = classify_handover(spec, {}, {2: row}, moved_on=False)
+        assert issue.severity.value == "CRITICAL"
+        assert "its flag at duckdb and no marker" in issue.description
+        assert "POST /api/jobs/replicate_operational/trigger" in issue.description
+
+
+def _spec_of(table):
+    """A chain table's spec by name, whichever chain declares it."""
+    from core.write_chains import WRITE_CHAINS
+
+    (spec,) = [s for chain in WRITE_CHAINS
+               for s in chain_transfer.chain_specs(chain) if s.pg_table == table]
+    return spec
+
+
 class TestAppendTablesHaveNoNewer:
     @staticmethod
     def _movement(spec, id, after=37, at=T0):
@@ -287,6 +523,35 @@ class TestAppendTablesHaveNoNewer:
             spec, dk, pg, moved_on=True)}
         assert by_name["handover_rows_behind_watermark"].count == 1
         assert by_name["handover_rows_ahead"].count == 1
+
+    def test_the_finding_says_which_side_of_the_watermark_the_copy_reads(self):
+        """F15 (review of #265). The copy reads `>=` an inclusive watermark and
+        `>` an exclusive one, so what it can never bring back is a row below
+        the first and at or below the second. The finding said "at or below"
+        and "only from that MAX upwards" for both, which misstated the rule
+        for exactly the table `inclusive` exists for. Mutation killed: the
+        one fixed wording."""
+        movements = _spec(pg_inventory_write, "app.stock_movements")
+        assert movements.append.inclusive is False
+        moved = lambda i: self._movement(movements, i)  # noqa: E731
+        (exclusive,) = [i for i in classify_handover(
+            movements, {5: moved(5)}, {3: moved(3), 5: moved(5)}, moved_on=True)
+            if i.check_name == "handover_rows_behind_watermark"]
+        assert "sit at or below" in exclusive.description
+        assert "only above that MAX" in exclusive.description
+
+        history = _spec(pg_inventory_write, "app.inventory_sku_history")
+        assert history.append.inclusive is True
+        day = date(2026, 9, 17)
+        snap = lambda d, o: _row(history, date=d, offer_id=o, quantity=5,  # noqa: E731
+                                 reserve=0, price=Decimal("90.00"))
+        (inclusive,) = [i for i in classify_handover(
+            history, {(day, 1): snap(day, 1)},
+            {(day, 1): snap(day, 1), (day - timedelta(days=1), 2): snap(day - timedelta(days=1), 2)},
+            moved_on=True) if i.check_name == "handover_rows_behind_watermark"]
+        assert "sit below" in inclusive.description
+        assert "at or below" not in inclusive.description
+        assert "the MAX included" in inclusive.description
 
 
 class TestMutableTablesAreEqualOrNewer:

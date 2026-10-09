@@ -2761,6 +2761,148 @@ class TestTheAdminBuyerReship:
         assert self._post(flags).status_code == 503
         assert admin._RESHIP_SLOT["claimed"] is False
 
+    # ── What the detached run is handed, and what it gives back (F1, F3) ──
+    #
+    # The tests above all stop at "started". These follow the task the route
+    # detaches: one event loop for the request and the run, so the run can be
+    # awaited and the call it made read back.
+
+    @staticmethod
+    async def _post_and_finish(flags, *paths):
+        """POST each path in turn on one client, awaiting the detached reship
+        each one started before the next is sent. `[(status, slot claimed
+        after the run)]`."""
+        import asyncio
+        import time as _time
+
+        import httpx
+
+        from core.permissions import ADMIN_USER_IDS
+        from web.main import app
+        from web.routes.api import admin
+        from web.routes.api._deps import limiter
+        from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
+
+        limiter.reset()
+        flags.setattr(admin, "_RESHIP_SLOT", {"claimed": False})
+        flags.setattr(admin, "_BACKGROUND_TASKS", set())
+        admin_id = sorted(ADMIN_USER_IDS)[0]
+
+        async def _resolve(session):
+            return {"user_id": admin_id, "role": "admin"}
+
+        flags.setattr("web.routes.auth._resolve_session", _resolve)
+        cookie = session_serializer.dumps(create_session_data(
+            {"id": str(admin_id), "first_name": "T", "last_name": "U",
+             "username": "t", "auth_date": str(int(_time.time()))}, role="admin"))
+        out = []
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://t",
+                                     cookies={SESSION_COOKIE: cookie}) as client:
+            for path in paths:
+                res = await client.post(path)
+                runs = [t for t in list(admin._BACKGROUND_TASKS)
+                        if t.get_name() == "reship_buyers"]
+                await asyncio.gather(*runs, return_exceptions=True)
+                await asyncio.sleep(0)              # the done callbacks
+                out.append((res.status_code, admin._RESHIP_SLOT["claimed"]))
+        return out
+
+    @pytest.mark.asyncio
+    async def test_the_run_is_handed_the_chunk_it_was_asked_for(self, flags, pool, reship):
+        """F1. Mutation killed: `chunk=2000` (or any constant) in place of
+        `chunk=chunk_size` — the query parameter accepted and ignored."""
+        BASE = "/api/mirror/backfill/buyers"
+        assert await self._post_and_finish(flags, BASE, BASE + "?chunk_size=100") == [
+            (200, False), (200, False)]
+        assert [c.kwargs["chunk"] for c in reship.await_args_list] == [2000, 100]
+
+    @pytest.mark.asyncio
+    async def test_every_portion_waits_for_the_heavy_job_lock(self, flags, pool, reship):
+        """F1. The route's promise that each portion lands between two sync
+        ticks: the reship is handed a guard that holds the scheduler's
+        heavy-job lock (`_run_incremental_sync` holds it every minute), and
+        that gives up — `False`, the run stops — when the lock stays busy.
+        Without it the review interleaved a sync tick between a portion's
+        DuckDB read and its Postgres write, and the stale read overwrote the
+        fresh mirror. Mutations killed: no `portion_guard=`, or a guard that
+        does not take that lock."""
+        import asyncio
+
+        from core.scheduler import get_scheduler
+        from web.routes.api import admin
+
+        lock = asyncio.Lock()
+        flags.setattr(get_scheduler(), "_heavy_job_lock", lock)
+        assert await self._post_and_finish(
+            flags, "/api/mirror/backfill/buyers") == [(200, False)]
+        guard = reship.await_args.kwargs.get("portion_guard")
+        assert guard is not None, "the reship was handed no portion guard"
+
+        async with guard() as go:
+            assert go is True and lock.locked()
+        assert not lock.locked()
+
+        flags.setattr(admin, "SYNC_ALL_LOCK_WAIT_S", 0.05)
+        async with lock:                                # a sync tick holds it
+            async with guard() as go:
+                assert go is False
+
+    @pytest.mark.asyncio
+    async def test_the_guard_waits_as_long_as_the_full_sync_does(self, flags, pool, reship):
+        """The review of F1. The test above proves the guard takes the heavy
+        lock and can give up; it did not prove how long it waits. A reship is
+        detached, outside any request budget, and a full sync or a resync
+        holds the lock for minutes — so it waits `SYNC_ALL_LOCK_WAIT_S` (300 s)
+        as the full buyer sync does, not the 20 s a request can afford
+        (`HEAVY_LOCK_WAIT_S`), after which every reship that met a sync would
+        stop. The two waits are moved apart here — the request budget huge,
+        the reship's tiny — so the wrong one cannot pass by being slow: it
+        times out. Mutations killed: `_heavy_lock(HEAVY_LOCK_WAIT_S)`, or any
+        constant, in the guard."""
+        import asyncio
+
+        from core.scheduler import get_scheduler
+        from web.routes.api import admin
+
+        assert admin.SYNC_ALL_LOCK_WAIT_S == 300
+        assert admin.SYNC_ALL_LOCK_WAIT_S > admin.HEAVY_LOCK_WAIT_S
+
+        lock = asyncio.Lock()
+        flags.setattr(get_scheduler(), "_heavy_job_lock", lock)
+        assert await self._post_and_finish(
+            flags, "/api/mirror/backfill/buyers") == [(200, False)]
+        guard = reship.await_args.kwargs["portion_guard"]
+
+        flags.setattr(admin, "HEAVY_LOCK_WAIT_S", 3600)
+        flags.setattr(admin, "SYNC_ALL_LOCK_WAIT_S", 0.05)
+
+        async def gives_up() -> bool:
+            async with guard() as go:
+                return go
+
+        async with lock:
+            assert await asyncio.wait_for(gives_up(), 5) is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", [
+        {"return_value": {"status": "done"}},
+        {"side_effect": RuntimeError("the lock stayed busy")},
+    ], ids=["finished", "failed"])
+    async def test_a_run_that_ended_gives_the_slot_back(self, flags, pool, reship, outcome):
+        """F3. The slot a request claims is released by the task's done
+        callback — after a run that finished and after one that raised — or
+        every later reship is refused as "already running" until web
+        restarts, and the documented recovery for a stopped run (run it
+        again) is gone. Mutation killed: no
+        `task.add_done_callback(_release_reship_slot)` — the review saw
+        [200, 409]."""
+        reship.configure_mock(**outcome)
+        assert await self._post_and_finish(
+            flags, "/api/mirror/backfill/buyers", "/api/mirror/backfill/buyers") == [
+            (200, False), (200, False)]
+        assert reship.await_count == 2
+
 
 # ─── DN-22b: the daily comparisons stand down with their shippers ───────────
 

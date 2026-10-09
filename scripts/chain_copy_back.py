@@ -11,8 +11,9 @@
 `--handover` is the read-only question both directions need answered, and it
 comes first in both. **Before flipping a chain** it is the gate: exit 0 says
 everything DuckDB holds has reached Postgres, and anything CRITICAL is a row the
-flip would strand, because the shipper stands down the moment the chain routes
-to Postgres and a replicated table has no backfill (a mirrored one has a lever
+flip would strand — or, for a row DuckDB deleted that only Postgres still
+holds, keep — because the shipper stands down the moment the chain routes to
+Postgres and a replicated table has no backfill (a mirrored one has a lever
 the finding names: chain 4's buyers the reship, `POST /api/mirror/backfill/buyers`;
 chain 3's orders and expenses `POST /api/mirror/backfill/orders` and
 `/expenses`, or the resync for a row both hold differently). **Before rolling
@@ -304,7 +305,9 @@ def _handover(issues, args: argparse.Namespace) -> int:
     the copy-back, either before deciding to flip a chain or before deciding
     to bring one back. The value is the same in both directions: a key DuckDB
     holds and Postgres does not is stranded by a flip, and nothing after the
-    flip can carry it across.
+    flip can carry it across — and, before a flip, a key Postgres holds that
+    DuckDB deleted is kept by it, because the copy that would remove it
+    stands down at the flip.
     """
     rows = [_row(i) for i in issues]
     if args.json:

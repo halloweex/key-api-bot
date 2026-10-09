@@ -28,11 +28,14 @@ with an offer catalogued in DuckDB after the last hourly shipment, and the
 So `copy_back` asks the handover question of the two stores **as they stand,
 before anything is written** — the same classification `handover_check` runs —
 and refuses on any CRITICAL. What it refuses is anything the write would
-destroy and cannot bring back: a key only DuckDB holds, a DuckDB value that is
-provably later than Postgres's, two rows under one key in a table that writes
-each row once, and a Postgres row below the append watermark the copy never
-reads. The dry run asks the same question, so it says what `--execute` will
-refuse.
+destroy and cannot bring back: a key only DuckDB holds — bar the two it may
+delete, a row a by-age sweep has already removed from Postgres and a contact
+or line item the chain's rewrite of its owner dropped (`classify_handover`
+says when each holds) — a DuckDB value that is provably later than
+Postgres's, two rows under one key in a table that writes each row once, and
+a Postgres row the append copy never reads, below its watermark (or at it,
+where the copy reads strictly above). The dry run asks the same question, so
+it says what `--execute` will refuse.
 
 A ROW THAT IS IN NEITHER STORE: THE REPORT LEDGERS' SPOOL
 
@@ -306,6 +309,28 @@ _REWRITE_STAMP = {"bronze.buyers": ("bronze.buyers", "id"),
 # rightly, proves nothing. An expense carries no such stamp.
 _SOURCE_CLOCK = {"bronze.buyers": ("updated_at",), "bronze.orders": ("updated_at",)}
 
+# What every pre-flip lever below needs before it can clear anything: a
+# shipper of DuckDB's rows — the hourly copy, a landing mirror and its
+# backfill, `replicate_managers`, the sync that feeds both stores — and every
+# one of them runs only while the chain writes DuckDB. The pre-flip rule
+# applies wherever no owner rows exist, which is also two states in which the
+# chain already routes to Postgres: its flag at postgres and nothing written
+# yet (chain 8 from 2026-09-17), and a marker whose first write failed, which
+# `_marker_steps` sends through `--handover` first. The levers said "with the
+# flag unchanged", which is right only with the flag at duckdb and no marker.
+# In those two states the shippers stay down, and the chain's next write
+# latches it over the very rows the finding names — which the next
+# `--handover`, now after the latch, reads as the chain's own: INFO, exit 0
+# (the review of F6 reproduced it in both states). So the levers name the
+# state the shippers need, which is the state before any flip, whatever state
+# they are read in.
+_WEB_ON_DUCKDB = (
+    "Bring web back with the chain writing DuckDB: its flag at duckdb and no "
+    "marker under data/write-chain-owners. Routed to Postgres (the flag at "
+    "postgres, or a marker) it stands down every shipper of DuckDB's rows, "
+    "and its next write latches it over these rows."
+)
+
 
 @dataclass(frozen=True)
 class _MirrorWords:
@@ -350,11 +375,11 @@ _BUYER_WORDS = _MirrorWords(
     missing_before=(
         "The buyers mirror and its hourly ids-diff both stand down the "
         "moment this chain routes to Postgres, so a flip now strands "
-        "them. Bring web back with the flag unchanged, run "
+        "them. " + _WEB_ON_DUCKDB + " Then run "
         "POST /api/mirror/backfill/buyers — it re-ships every buyer "
         "DuckDB holds, with its contacts — and check again."),
     differ_before=(
-        " Bring web back with the flag unchanged, run "
+        " " + _WEB_ON_DUCKDB + " Then run "
         "POST /api/mirror/backfill/buyers — it re-ships every buyer "
         "DuckDB holds, with its contacts — and check again."),
     newer=(
@@ -382,10 +407,10 @@ _BUYER_WORDS = _MirrorWords(
         "also fills city and region, decision 3), which rewrites them "
         "in Postgres after the latch. Then ask again."),
     ahead_lever_child=(
-        "POST /api/mirror/backfill/buyers re-ships every buyer DuckDB "
-        "holds with its contacts, which removes a contact of theirs that "
-        "only Postgres has; a contact of a buyer DuckDB does not hold is "
-        "a buyer of its own to decide."),
+        _WEB_ON_DUCKDB + " Then POST /api/mirror/backfill/buyers re-ships "
+        "every buyer DuckDB holds with its contacts, which removes a contact "
+        "of theirs that only Postgres has; a contact of a buyer DuckDB does "
+        "not hold is a buyer of its own to decide."),
     ahead_lever_owner=(
         "Re-shipping never deletes a buyer, so decide per id: delete it "
         "from Postgres (with its contacts and verdict) if nothing should "
@@ -436,12 +461,12 @@ _ORDER_WORDS = _MirrorWords(
     missing_before=(
         "The order and expense mirrors and their hourly ids-diffs all stand "
         "down the moment this chain routes to Postgres, so a flip now "
-        "strands them. Bring web back with the flag unchanged, run "
+        "strands them. " + _WEB_ON_DUCKDB + " Then run "
         "POST /api/mirror/backfill/orders and POST /api/mirror/backfill/expenses "
         "— each ships what Postgres lacks — and check again."),
     differ_before=(
-        " Bring web back with the flag unchanged and re-fetch those orders — "
-        + _RESYNC + " in DuckDB, and the sync's mirrors ship each one — then "
+        " " + _WEB_ON_DUCKDB + " Then re-fetch those orders — "
+        + _RESYNC + " in DuckDB, and the sync's mirrors ship each one — and "
         "check again."),
     newer=(
         "{n} row(s) differ and DuckDB's version is the later one by KeyCRM's "
@@ -466,9 +491,9 @@ _ORDER_WORDS = _MirrorWords(
         "the chain (" + _RESYNC + "), which rewrites them in Postgres after "
         "the latch. Then ask again."),
     ahead_lever_child=(
-        _RESYNC + " in both stores, which removes a line item of theirs that "
-        "only Postgres has; a line item of an order DuckDB does not hold is "
-        "an order of its own to decide."),
+        _WEB_ON_DUCKDB + " Then " + _RESYNC + " in both stores, which removes "
+        "a line item of theirs that only Postgres has; a line item of an "
+        "order DuckDB does not hold is an order of its own to decide."),
     ahead_lever_owner=(
         "Nothing re-ships a deletion, so decide per id: delete it from "
         "Postgres if nothing should hold it, or find the writer that put it "
@@ -554,19 +579,19 @@ def _catalogue_texts(rows: str, sync: str) -> MirroredTexts:
         missing_preflip=(
             "The mirror stands down the moment this chain routes to Postgres, "
             "and nothing ships a row KeyCRM no longer serves, so a flip now "
-            "strands them. Bring web back with the flag unchanged and run "
+            "strands them. " + _WEB_ON_DUCKDB + " Then run "
             "POST /api/mirror/backfill/catalogue?dry_run=false — it carries "
             "every row the daily comparison calls retired (product 1055) — "
             f"while a row DuckDB wrote after the mirror's last shipment is "
             f"shipped by {sync}. Then check again."),
         differ_preflip=(
-            f" Bring web back with the flag unchanged: {sync} re-ships "
-            "KeyCRM's payload to both stores. A retired row that differs is "
-            "re-shipped by nothing — decide it per id. Then check again."),
+            " " + _WEB_ON_DUCKDB + f" Then {sync} re-ships KeyCRM's payload "
+            "to both stores. A retired row that differs is re-shipped by "
+            "nothing — decide it per id. Then check again."),
         ahead_preflip=(
-            f"If KeyCRM still serves them, {sync} writes them to DuckDB too; "
-            "otherwise decide per id — delete them from Postgres, or find the "
-            "writer that put them there."),
+            "If KeyCRM still serves them: " + _WEB_ON_DUCKDB + f" Then {sync} "
+            "writes them to DuckDB too. Otherwise decide per id — delete them "
+            "from Postgres, or find the writer that put them there."),
         missing_after=(
             f"The chain's writer never deletes {rows}, so DuckDB holds "
             "something Postgres never had — stranded at the flip (the carry "
@@ -661,11 +686,18 @@ def _shared_clock(source: MirroredTable | BucketedTable) -> Tuple[str, ...]:
     only when every column it names is also **shipped and compared** — carried
     as a value, so the Postgres copy holds the same stamp DuckDB wrote, and
     Postgres's own writer stamps it the same way when it rewrites the row.
-    Today that is `app.manual_expenses` (`COALESCE(updated_at, created_at)`)
-    and `app.inventory_history` (`recorded_at`).
+    Which tables that gives is the derivation's answer, not a list kept here:
+    `tests/unit/test_chain_transfer.py::TestTheClockIsDerived` pins it table
+    by table, with why — `app.manual_expenses`
+    (`COALESCE(updated_at, created_at)`) and `app.inventory_history`
+    (`recorded_at`) first, and every chain since that declares one
+    (`app.revenue_goals`, `app.buyer_gender`, the journal, the samples, the
+    ledgers, ...). Chain 5's replicated tables take theirs here too
+    (`chain_specs`); the mirrored tables do not — a buyer's and an order's
+    clock is KeyCRM's own `updated_at`, declared in `_SOURCE_CLOCK`.
 
-    Everywhere else the stamp orders nothing across the two stores:
-    `offer_stocks.synced_at` is DuckDB's alone, against Postgres's
+    Everywhere else the stamp orders nothing across the two stores, for
+    example: `offer_stocks.synced_at` is DuckDB's alone, against Postgres's
     `mirrored_at`; `offers.synced_at` is shipped but never compared, because
     one sync stamps every row it touched with one transaction-stable value;
     `sku_inventory_status.updated_at` is restamped on all rows by every
@@ -898,6 +930,20 @@ def _later_in_duckdb(spec: TableTransfer, dk_row, pg_row) -> bool:
     return dk is not None and pg is not None and dk > pg
 
 
+def _minus(keys: Sequence[Any], drop: Sequence[Any]) -> List[Any]:
+    """`keys` without `drop`, in `keys`' order, with the set built once.
+
+    The comprehensions this replaces tested `k not in set(drop)`, which builds
+    the set again for every key — quadratic in the rewritten set, and that set
+    is every buyer after a full re-fetch through chain 4: the review of #265
+    (F7) measured one classification at 15 s for 33 000 rewritten buyers and
+    57-67 s for as many contacts, each paid in the stopped window, three times
+    over in the runbook. Hoisted, 0.03 s, and the same answer.
+    """
+    dropped = set(drop)
+    return [k for k in keys if k not in dropped]
+
+
 def classify_handover(
     spec: TableTransfer,
     dk_rows: Mapping[Any, Tuple[Any, ...]],
@@ -915,20 +961,46 @@ def classify_handover(
     of Postgres by key, and mutable tables in Postgres are equal or newer", and
     this is that contract, table shape by table shape:
 
-    - **A key only DuckDB holds** is CRITICAL in both states. Before a flip it
-      is a row the flip would strand: the shipper stands down the moment the
-      chain routes to Postgres and these tables have no backfill. After one, a
-      full-replace copy-back would delete it, and an append table would keep
-      it on one side only, so the comparison could never be clean.
+    - **A key only DuckDB holds** is CRITICAL in both states, with two
+      exceptions, each INFO and each a row the copy-back deletes. On a table
+      both stores sweep by age (`prune_clock`), a row older than anything
+      Postgres still holds is retention — DuckDB's sweep lagging the
+      writer's — in either state. After the latch, a child row of a mirrored
+      table (a contact, a line item) whose owner the chain's writer rewrote
+      is one that rewrite dropped (see Mirrored tables). Otherwise: before a
+      flip it is a row the flip would strand — the shipper stands down the
+      moment the chain routes to Postgres and these tables have no backfill;
+      after one, a full-replace copy-back would delete it, and an append
+      table would keep it on one side only, so the comparison could never be
+      clean.
     - **Append-only tables** have no "newer": a row is written once, so the
       same key with different values is two events, CRITICAL in both states.
-      A Postgres row at or below DuckDB's watermark that DuckDB does not hold
-      is CRITICAL too — the copy-back reads only above it, so that row can
-      never come back.
+      A Postgres row DuckDB does not hold that the copy-back cannot read is
+      CRITICAL too, because it can never come back: the copy reads from
+      DuckDB's watermark upwards — `>=` for an inclusive one
+      (`inventory_sku_history`, a day written whole), `>` otherwise
+      (`stock_movements`) — so that is a row below the watermark, or at it
+      for an exclusive one. A row at an inclusive watermark is read back, and
+      is the copy's work.
     - **Mutable tables before a flip** must be equal. DuckDB is the only
       writer and Postgres is fed only by copying it, so Postgres cannot
       legitimately be newer — every difference is the copy being broken, and
-      the right answer is to refuse.
+      the right answer is to refuse. That includes a key only Postgres holds:
+      a row DuckDB deleted after the copy last ran (F6, review of #265). The
+      copy's full replace would remove it, but it stands down the moment the
+      chain routes to Postgres, so after the flip nothing does and the row
+      stays in the new source of truth. The lever is the copy itself — web
+      up with the chain writing DuckDB, `replicate_operational` ships, ask
+      again. Not "with the flag unchanged": this half of the rule also
+      applies with the flag already at postgres and nothing latched, and
+      with a marker whose first write failed, and in both the copy stays
+      down and the chain's next write latches it over the row
+      (`_WEB_ON_DUCKDB`). One exception, on a table both stores sweep by age
+      (`prune_clock`) and only there: a row older than anything DuckDB still
+      holds is its sweep having run since the copy, which Postgres's own
+      writer repeats after a flip — INFO. A row's own clock is not a sweep:
+      a withdrawn expense typed before every expense DuckDB still holds is
+      as much a ghost as a newer one.
     - **Mutable tables after the latch**: Postgres is the writer, so a
       difference is its later write — INFO, the work the copy-back carries —
       unless the row's own clock, carried by both stores, says DuckDB's version
@@ -937,6 +1009,8 @@ def classify_handover(
       no shared clock exists the difference is taken as Postgres being newer
       and the description says so; `--handover` clean before the flip is what
       makes that true by construction, which is why the runbook requires it.
+      A key only Postgres holds is the writer's row for the same reason —
+      INFO, the size of the copy-back.
     - **Mirrored tables** (chain 4's buyers and contacts) are stricter, because
       they can be: Postgres dates every write of a buyer (`_REWRITTEN_BY`).
       Before a flip, a key only Postgres holds is CRITICAL as well — nothing
@@ -1030,7 +1104,7 @@ def classify_handover(
                 "DuckDB's prune has not yet. A copy-back deletes them, as "
                 "retention would."
             ))
-            missing = [k for k in missing if k not in set(aged)]
+            missing = _minus(missing, aged)
     if missing and spec.texts is not None and moved_on:
         # Chain 6: nothing explains one. Its writer never deletes, and a row
         # only DuckDB holds has no Postgres row the chain could have rewritten.
@@ -1048,7 +1122,7 @@ def classify_handover(
         child = spec.pg_table != spec.rewrite_clock
         dropped = [k for k in missing
                    if child and owned_by_rewritten(dk_rows[k])]
-        stranded = [k for k in missing if k not in set(dropped)]
+        stranded = _minus(missing, dropped)
         if dropped:
             info("handover_rows_missing", dropped,
                  say(_words(spec).dropped, dropped))
@@ -1085,8 +1159,10 @@ def classify_handover(
             why = (
                 "The shipper stands down the moment this chain routes to "
                 "Postgres and these tables have no backfill, so a flip now "
-                "strands them. Bring web back with the flag unchanged, let "
-                "replicate_operational run, and check again."
+                "strands them. " + _WEB_ON_DUCKDB + " Then let "
+                "replicate_operational ship "
+                "(POST /api/jobs/replicate_operational/trigger), stop it, and "
+                "check again."
             )
         critical("handover_rows_missing", missing, (
             f"{len(missing)} row(s) in DuckDB's {dk_table} have no "
@@ -1126,7 +1202,7 @@ def classify_handover(
         ))
     elif differing and spec.texts is not None:
         carried = [k for k in differing if owned_by_rewritten(pg_rows[k])]
-        unexplained = [k for k in differing if k not in set(carried)]
+        unexplained = _minus(differing, carried)
         if carried:
             info("handover_rows_differ", carried, (
                 f"{len(carried)} row(s) differ between DuckDB's {dk_table} "
@@ -1146,9 +1222,9 @@ def classify_handover(
         if newer:
             critical("handover_rows_newer_in_duckdb", newer,
                      say(_words(spec).newer, newer))
-        differing = [k for k in differing if k not in set(newer)]
+        differing = _minus(differing, newer)
         carried = [k for k in differing if owned_by_rewritten(pg_rows[k])]
-        unexplained = [k for k in differing if k not in set(carried)]
+        unexplained = _minus(differing, carried)
         if carried:
             info("handover_rows_differ", carried,
                  say(_words(spec).carried, carried))
@@ -1172,8 +1248,7 @@ def classify_handover(
                 "decide they are to be discarded, before running this "
                 "again."
             ))
-        refused = set(newer_in_duckdb)
-        overwritten = [k for k in differing if k not in refused]
+        overwritten = _minus(differing, newer_in_duckdb)
         if overwritten:
             clockless = "" if spec.clock else (
                 f" Neither store keeps a per-row time for {table} that "
@@ -1200,22 +1275,25 @@ def classify_handover(
                 or (not spec.append.inclusive and pg_rows[key][position] == floor)
             ]
             if behind:
+                where, reads = (("below", "from that MAX upwards, the MAX "
+                                 "included")
+                                if spec.append.inclusive else
+                                ("at or below", "only above that MAX"))
                 critical("handover_rows_behind_watermark", behind, (
-                    f"{len(behind)} row(s) in {table} sit at or below "
+                    f"{len(behind)} row(s) in {table} sit {where} "
                     f"DuckDB's MAX({spec.append.watermark}) = {floor} and "
                     f"are not in DuckDB's {dk_table}. Nothing deletes from "
                     "an append-only table, so DuckDB lost them or "
                     "something other than the shipper and the chain's own "
                     "writer put them in Postgres — and a copy-back, which "
-                    "carries this table only from that MAX upwards, could "
-                    "never bring them back."
+                    f"carries this table {reads}, could never bring them "
+                    "back."
                 ))
-            unreachable = set(behind)
-            ahead = [key for key in ahead if key not in unreachable]
+            ahead = _minus(ahead, behind)
     if ahead and spec.texts is not None:
         written = ([k for k in ahead if owned_by_rewritten(pg_rows[k])]
                    if moved_on else [])
-        older = [k for k in ahead if k not in set(written)]
+        older = _minus(ahead, written)
         if written:
             info("handover_rows_ahead", written, (
                 f"{len(written)} row(s) in {table} are not in DuckDB's "
@@ -1248,26 +1326,83 @@ def classify_handover(
         # After the latch, decided by data like the other two branches: a row
         # only Postgres holds is the chain's only for a buyer it rewrote.
         written = [k for k in ahead if owned_by_rewritten(pg_rows[k])]
-        older = [k for k in ahead if k not in set(written)]
+        older = _minus(ahead, written)
         if written:
             info("handover_rows_ahead", written,
                  say(_words(spec).ahead_written, written))
         if older:
             critical("handover_rows_ahead", older,
                      say(_words(spec).ahead_older, older))
-    elif ahead:
+    elif ahead and moved_on:
         info("handover_rows_ahead", ahead, (
             f"{len(ahead)} row(s) in {table} are not in DuckDB's "
-            f"{dk_table}. "
-            + ("Written since the chain was latched — the size of the "
-               "copy-back."
-               if moved_on else
-               "Nothing writes Postgres here but the hourly copy of "
-               "DuckDB, so these are rows DuckDB has deleted since it "
-               "last ran, which the next full replace removes — or, for "
-               "an append-only table that never deletes, a writer that "
-               "is not the copy.")
+            f"{dk_table}. Written since the chain was latched — the size of "
+            "the copy-back."
         ))
+    elif ahead and spec.is_append:
+        # Before a flip, and left INFO on purpose (the review of F6 asked; it
+        # is the owner's decision to change). Two causes read the same here:
+        # DuckDB lost rows the copy had already shipped — a file restored from
+        # before the last copy, with nothing written since (a later write
+        # would reuse an id and differ, CRITICAL above) — and then keeping
+        # them is right, Postgres floors its sequence on its own MAX after the
+        # flip; or a writer round the copy put them there, a phantom event.
+        # Refusing would refuse the first with no lever but deleting real
+        # history, so the finding says what a flip does with them instead.
+        info("handover_rows_ahead", ahead, (
+            f"{len(ahead)} row(s) in {table} are not in DuckDB's "
+            f"{dk_table}, above its MAX({spec.append.watermark}). Nothing "
+            "writes Postgres here but the hourly copy of DuckDB, and nothing "
+            "deletes from an append-only table, so either DuckDB lost rows "
+            "the copy had already shipped (a DuckDB file restored from "
+            "before the last copy) or a writer that is not the copy put them "
+            "there. A flip keeps them as the record: right for the first, a "
+            "phantom event for the second, and nothing here can tell which, "
+            "so this does not refuse. Look at them by id before flipping."
+        ))
+    elif ahead:
+        # Before a flip, a table the hourly copy replaces whole. Postgres is
+        # that copy of DuckDB and nothing else, so a key only it holds is one
+        # DuckDB deleted after the copy last ran (or a writer round the copy).
+        # The copy would remove it on its next run — but it stands down the
+        # moment the chain routes to Postgres, so after the flip there is no
+        # next run, and the row stays in the store the flip makes the source
+        # of truth: the review's withdrawn expense, back in the ad spend. One
+        # exception, derived like the DuckDB side's `handover_rows_pruned`: on
+        # a table both stores sweep by age, a row older than anything DuckDB
+        # still holds is its sweep having run since the copy, and after a
+        # flip Postgres's own writer sweeps it by the same rule.
+        aged: List[Any] = []
+        if spec.prune_clock:
+            at = spec.compare.columns.index(spec.prune_clock)
+            floor = min((v for v in (_as_utc(r[at]) for r in dk_rows.values())
+                         if v is not None), default=None)
+            aged = [k for k in ahead if floor is not None
+                    and (_as_utc(pg_rows[k][at]) or floor) < floor]
+        if aged:
+            info("handover_rows_ahead", aged, (
+                f"{len(aged)} row(s) in {table} are not in DuckDB's "
+                f"{dk_table} and are older than anything it still holds, on "
+                f"a table both stores sweep by age by {spec.prune_clock}: "
+                "DuckDB's sweep removed them after the hourly copy last ran. "
+                "The next copy removes them before a flip, and Postgres's own "
+                "writer sweeps them by the same rule after one."
+            ))
+        ghosts = _minus(ahead, aged)
+        if ghosts:
+            critical("handover_rows_ahead", ghosts, (
+                f"{len(ghosts)} row(s) in {table} are not in DuckDB's "
+                f"{dk_table}. Nothing writes Postgres here but the hourly "
+                "copy of DuckDB, so DuckDB deleted them after that copy last "
+                "ran, or a writer that is not the copy put them there. The "
+                "copy's full replace would remove them, but it stands down "
+                "the moment this chain routes to Postgres: after a flip "
+                "nothing removes them, and they stay in the store the flip "
+                "makes the source of truth. " + _WEB_ON_DUCKDB + " Then let "
+                "replicate_operational ship "
+                "(POST /api/jobs/replicate_operational/trigger), stop it, and "
+                "ask again."
+            ))
     return issues
 
 
@@ -1449,7 +1584,7 @@ def _spool_issues(chain: ModuleType) -> List[IntegrityIssue]:
         return []
     state = pending()
     unreadable = list(state.get("unreadable") or ())
-    readable = [w for w in state.get("weeks") or () if w not in set(unreadable)]
+    readable = _minus(state.get("weeks") or (), unreadable)
     table = chain.CHAIN_TABLES[0]
     folder = f"data/report-ledger-pending/{chain.CHAIN}/"
     issues: List[IntegrityIssue] = []
@@ -2465,10 +2600,9 @@ def _replicated_tables(chain: ModuleType) -> Tuple[str, ...]:
 # What brings Postgres back level with DuckDB before a flip: the copy runs at
 # web's start, and the manager_stats job runs it again on demand.
 _REPLICATED_LEVER = (
-    "Bring web back with the flag unchanged — its startup copy "
-    "(replicate_managers) runs at once, and "
-    "POST /api/jobs/manager_stats/trigger runs it again now — stop it, and "
-    "ask again."
+    _WEB_ON_DUCKDB + " Its startup copy (replicate_managers) then runs at "
+    "once, and POST /api/jobs/manager_stats/trigger runs it again now — stop "
+    "it, and ask again."
 )
 
 
@@ -2480,13 +2614,17 @@ def _replicated_handover(
 ) -> List[IntegrityIssue]:
     """The operational verdicts, said for a table `replicate_managers` copies.
 
-    Three changes, each a defect the plain rule had for this pair:
+    Three changes, each found as a defect the plain rule had for this pair:
 
-    - **Before a flip, a key only Postgres holds is CRITICAL, not INFO.** The
-      operational rule calls it a row DuckDB deleted that "the next full
-      replace removes" — and after a flip there is no next full replace. A
-      ghost interval would stay in the store a flip makes the source of truth,
-      and silently reclassify the orders it covers.
+    - **Before a flip, a key only Postgres holds is said for this pair.** It
+      is CRITICAL here as in the operational rule — after a flip there is no
+      next full replace to remove it — and a ghost interval would stay in the
+      store a flip makes the source of truth and silently reclassify the
+      orders it covers. This pair found that first; the operational rule
+      called the same key INFO until F6 (review of #265) made it CRITICAL for
+      every table the hourly copy replaces whole. The severity is still set
+      here, so the pair does not depend on the rule it was first stricter
+      than.
     - **The pre-flip lever names this pair's shipper.** `replicate_operational`
       never ships these tables, so sending an operator to let it run sent them
       to wait for nothing.

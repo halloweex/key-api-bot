@@ -1547,10 +1547,12 @@ routed differently:
 - **One writer of buyer rows**, `core.pg_buyer_rows._write_buyer_rows` — the
   mirror and, since PR-3, the chain both run it. The rows go on the caller's
   transaction (the chain proves its first write by the owner row sharing an
-  `xmin` with the row) and it never touches `meta.mirror_state`, which stays
-  the mirror's. It lives outside the chain module on purpose: the registry
-  walk derives `BUYER_UNIT` from the function that writes it and skips chain
-  modules.
+  `xmin` with the row) and it never stamps the buyers' rows of
+  `meta.mirror_state`, which stay the mirror's — a dropped derivation mark is
+  recorded there, but under `meta.derivation_signal`, `core.pg_derivation`'s
+  own row, on a connection outside the caller's transaction. It lives
+  outside the chain module on purpose: the registry walk derives
+  `BUYER_UNIT` from the function that writes it and skips chain modules.
 - **`app.buyer_gender.decided_at` is compared** every morning (decision 7):
   the hourly derive restamps only the verdicts it writes and the copy ships
   the value as it stands. Per row now, so a re-derive is forgiven for the
@@ -1986,11 +1988,12 @@ key).
 **The way back** is `scripts/chain_copy_back.py managers`. `chain_specs`
 derives the pair from a fourth source — `pg_replication.REPLICATED_SHAPES`
 and `mirror_reconciliation.REPLICATED_TABLES` — and the handover differs from
-an operational table's in three places: before a flip a key only Postgres
-holds is **CRITICAL** (there is no next full replace to remove a ghost
-interval), the pre-flip lever is `replicate_managers` and
-`POST /api/jobs/manager_stats/trigger`, and after the latch a key only DuckDB
-holds is a DuckDB write after it. Expect one pre-flip CRITICAL naming a
+an operational table's in two places: the pre-flip lever is
+`replicate_managers` and `POST /api/jobs/manager_stats/trigger`, and after the
+latch a key only DuckDB holds is a DuckDB write after it. Before a flip a key
+only Postgres holds is **CRITICAL** (there is no next full replace to remove a
+ghost interval) — this pair's rule first, and every full-replace operational
+table's since F6 (review of #265). Expect one pre-flip CRITICAL naming a
 `(manager, 1970-01-01)` baseline: the script's own connect runs `_m0006` for
 a manager synced since web's last start; `up -d web` ships it. A chain
 declaring `CHAIN_COPY_BACK_OWES_FULL_REBUILD` gets `warehouse_dirty='full'`
@@ -3321,15 +3324,37 @@ DuckDB had catalogued after the last shipment deleted by the copy it then
 stand — in the dry run as well — and any CRITICAL refuses before anything is
 written:
 
-- a key only DuckDB holds;
+- a key only DuckDB holds — bar two the copy may delete, each INFO: a row
+  older than anything Postgres holds on a table both stores sweep by age
+  (DuckDB's sweep lagging the writer's), and after the latch a contact or
+  line item the chain's rewrite of its owner dropped (decision 6, below);
+- before a flip, a key only Postgres holds in a table the hourly copy replaces
+  whole: a row DuckDB deleted after the copy last ran. The copy would remove
+  it, but it stands down at the flip, so the flip would keep it in the store
+  the page reads — the review of #265 (F6) reproduced a withdrawn expense back
+  in the ad spend. The lever is the copy itself, with the chain writing DuckDB
+  (the flag at duckdb, no marker). One exception, and only on a table both
+  stores sweep by age (chain 10's samples): a row older than anything DuckDB
+  still holds is its sweep, which Postgres's own writer repeats after a flip.
+  A row's own clock is no sweep — an older withdrawn expense is a ghost too.
+  An append table's key only Postgres holds, above DuckDB's watermark, stays
+  INFO and is **not** refused: a DuckDB file restored from before the last
+  copy and a writer round the copy look the same there, and refusing the
+  first leaves no lever but deleting real history. The finding says the flip
+  keeps them; whether it should refuse is the owner's to decide;
 - in an append-only table, two different rows under one key. There is no
   "newer" there: they are two events, and the usual one is a movement id both
   allocators issued, because Postgres floors its sequence on its own MAX(id);
-- in an append-only table, a Postgres row at or below DuckDB's watermark, which
-  a copy reading only above it can never bring back;
+- in an append-only table, a Postgres row the copy can never read back: below
+  DuckDB's watermark, or at it where the copy reads strictly above
+  (`stock_movements`; `inventory_sku_history` re-reads its watermark day with
+  `>=`, so a row on that day is carried);
 - a DuckDB version later than Postgres's by a clock both stores carry as a value
-  (`manual_expenses`, `inventory_history`, `revenue_goals` — whose two writers
-  stamp `updated_at` from the web container's clock for exactly this reason).
+  — derived per table from the daily spec (`_shared_clock`; `manual_expenses`
+  and `inventory_history` first, then every chain that carries one, such as
+  `revenue_goals`, whose two writers stamp `updated_at` from the web
+  container's clock for exactly this reason), and for a buyer or an order
+  KeyCRM's own `updated_at`. `TestTheClockIsDerived` lists every one.
 
 Any other difference after the latch is taken as Postgres being newer, and that
 is true by construction only when `--handover` was clean before the flip —
@@ -3401,8 +3426,14 @@ docker compose run --rm --no-deps -T web \
 # BEFORE A FLIP: first, with web still up, /api/health must show
 #   write_chains.pg_inventory_write.preflight.ok = true (DN-24). Then this:
 #   exit 0, or do not flip. A CRITICAL is a row the flip would
-#   strand: up -d web with the flag unchanged, let replicate_operational ship
-#   (POST /api/jobs/replicate_operational/trigger), stop, ask again.
+#   strand, or one DuckDB deleted that the flip would keep: up -d web with the
+#   chain writing DuckDB — KS_WRITE_INVENTORY=duckdb and no marker under
+#   data/write-chain-owners — let replicate_operational ship
+#   (POST /api/jobs/replicate_operational/trigger), stop, ask again. Not
+#   "the flag unchanged": the handover asks the same pre-flip question with
+#   the flag already at postgres and nothing latched, or with a marker whose
+#   first write failed, and there the copy stays down and the next write
+#   latches the chain over the row.
 # TO ROLL BACK: the same command with --dry-run (also the default), then with
 #   --execute. Exit 0 released. 1 not committed (a difference rolled back, or
 #   a traceback before COMMIT): DuckDB as it was, latch kept. 2 refused before

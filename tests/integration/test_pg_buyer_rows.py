@@ -8,11 +8,13 @@ what chain 4's writer will run. These pin what both depend on:
 - an UPDATE moves `mirrored_at`, which is how the search index finds a changed
   buyer (`pg_search_index_read.high_watermark`/`buyers_frame`) — nothing
   tested that before;
-- a shrunk contact list shrinks in Postgres;
+- a shrunk contact list shrinks in Postgres, an emptied one empties;
 - the derivation signal rises once for a batch that wrote something, never for
   an empty one;
-- the core alone never touches `meta.mirror_state`, because the chain must not
-  stamp the mirror's watermark.
+- the core alone never stamps the buyers' rows of `meta.mirror_state`, because
+  the chain must not stamp the mirror's watermark. (A dropped derivation mark
+  is recorded there under `meta.derivation_signal`, which is
+  `core.pg_derivation`'s row, not the mirror's.)
 
 Ids come from far above production's range and are removed afterwards; the
 watermark rows and the signal are compared as deltas or restored, because the
@@ -39,13 +41,13 @@ BASE = 9_600_000
 STATES = ("bronze.buyers", "bronze.buyer_contacts")
 
 
-def _buyer(n, *, name=None, phones=None):
+def _buyer(n, *, name=None, phones=None, emails=None):
     return Buyer.from_api({
         "id": BASE + n, "full_name": name or f"Покупець {n}",
         "created_at": "2026-09-01 10:00:00+00:00",
         "updated_at": "2026-09-02T11:30:00Z",
         "phone": phones if phones is not None else [f"+38050{n:07d}"],
-        "email": [f"b{n}@example.test"],
+        "email": emails if emails is not None else [f"b{n}@example.test"],
     })
 
 
@@ -172,6 +174,29 @@ async def test_a_shrunk_contact_list_shrinks(pg):
 
 
 @pytest.mark.asyncio
+async def test_a_contact_list_that_empties_empties(pg):
+    """F2 (review of #265). A buyer KeyCRM now serves with no number and no
+    email is handed with an empty list — `parse_buyers` yields `(id, [])` —
+    and its old contacts must go. Every other case here keeps at least one
+    contact (`_buyer` adds an email unless told not to), so moving the DELETE
+    under `if buyer_contacts:` passed the whole suite while Postgres kept a
+    number KeyCRM no longer serves, for the mirror, the reship and chain 4's
+    writer alike — all three run this function. Mutation killed: that move."""
+    from core.pg_buyers import mirror_buyers
+
+    await mirror_buyers([_buyer(11, phones=["+380511"], emails=[])])
+    assert [c[2] for c in await _contacts(pg, [BASE + 11])] == ["+380511"]
+
+    emptied = _buyer(11, phones=[], emails=[])
+    assert parse_buyers([emptied]).contacts == [(BASE + 11, [])]
+    result = await mirror_buyers([emptied])
+
+    assert result.get("error") is None, result
+    assert await _contacts(pg, [BASE + 11]) == []
+    assert set(await _buyers(pg, [BASE + 11])) == {BASE + 11}
+
+
+@pytest.mark.asyncio
 async def test_the_signal_rises_once_for_a_batch_and_never_for_an_empty_one(pg):
     from core.pg_buyer_rows import _write_buyer_rows
     from core.pg_buyers import _write
@@ -192,7 +217,7 @@ async def test_the_signal_rises_once_for_a_batch_and_never_for_an_empty_one(pg):
 
 
 @pytest.mark.asyncio
-async def test_the_core_alone_never_touches_mirror_state(pg):
+async def test_the_core_alone_never_stamps_the_buyers_watermarks(pg):
     from core.pg_buyer_rows import _write_buyer_rows
     from core.pg_buyers import _write
 
