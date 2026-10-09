@@ -1701,8 +1701,12 @@ it does not do, both written down in the revision:
 #280 registered chains 3, 5, 6, 7b-3, 9, 10, 11a and 11b, all off, and shipped
 no revision, so a database at 0034 still admitted images 3.0.263 to 3.0.270 —
 built between chain 4's lock and #280, and knowing none of these chains.
-Image numbers here are what `/app/VERSION` and the Docker Hub tag say; the git
-tag of the same code is one higher (`v3.0.249` above is a git tag).
+Image numbers here are what `/app/VERSION` and the Docker Hub tag say, each
+read from `git show <merge>:VERSION`. The git tag of the same code is usually
+one higher — `deploy.yml` tags the image with the VERSION it was built from,
+and `bump_version.sh` then bumps it and tags the new number — but not always:
+#273 and #274 were both built as 3.0.259, so image 3.0.260 never existed and
+their bumps are v3.0.260 and v3.0.261. `v3.0.249` above is a git tag.
 `0035_batch_e_chains` is 0034's shape for all eight at once: twenty `COMMENT ON
 TABLE` statements naming each table's chain, `KS_WRITE_*` and writing module,
 and `REQUIRED_REVISION` moved to it, so every gated path in an older image
@@ -1738,8 +1742,10 @@ revision:
   reports them for the rest.
 
 **The way back below it.** An image-only rollback below the first image built
-with 0035 (3.0.273 if it is the next merge to main) needs `alembic downgrade
-0034_buyer_chain` first, run with the **new** migrate image — an older one
+with 0035 — the first whose `/app/core/pg.py` says `REQUIRED_REVISION =
+"0035_batch_e_chains"`; ask the image, since its number is whatever VERSION
+main carries when this merges — needs `alembic downgrade 0034_buyer_chain`
+first, run with the **new** migrate image — an older one
 does not know 0035 — and then all three images moved back, keycrm-migrate with
 web and bot, or `up -d` re-runs `alembic upgrade head` and puts 0035 back.
 Only before the first of these chains latches: after one has written Postgres,

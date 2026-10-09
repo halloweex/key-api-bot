@@ -12,8 +12,10 @@ and the shadow chains 9, 10, 11a and 11b (`pg_dq_journal_write`,
 `pg_watchdog_write`, `pg_weekly_ledger_write`, `pg_traffic_ledger_write`). It
 shipped no revision, so a database at 0034 still admits the images built
 between chain 4's lock and #280 — 3.0.263 to 3.0.270, image numbers as
-`/app/VERSION` and the Docker Hub tag read them (the git tag of the same code
-is one higher) — and none of those knows any of these chains.
+`/app/VERSION` and the Docker Hub tag read them, each from `git show
+<merge>:VERSION` (the git tag of the same code is usually one higher; #273 and
+#274 were both built as 3.0.259) — and none of those knows any of these
+chains.
 
 `REQUIRED_REVISION` is the lock, as it was for chain 4 (0034, owner decision
 16): every gated path refuses a database at a revision other than its own. One
