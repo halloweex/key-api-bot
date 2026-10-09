@@ -40,6 +40,7 @@
 # The fourth declares the stage-5 parallel period: the moment the last
 # KS_WRITE_* flag flipped (52_p3_parallel_period.sql, OD-17 (a)).
 # Chain 5's flip day: SOAK_MANAGERS_FLIP_AT='<latch time>' (30_m1_managers_copy_stood_down.sql).
+# Chain 3's flip day: SOAK_ORDERS_FLIP_AT='<latch time>' (32_o1_orders_copies_stood_down.sql).
 #
 # Exit: 0 when every check passes, 1 on any FAIL, 2 when nothing failed but at
 # least one check is UNKNOWN.
@@ -119,6 +120,18 @@ latch_state() {
     fi
 }
 
+# When the markers were read, taken before the first of them. A marker found
+# missing is read here, and the owner rows beside it are read by the SQL some
+# thirty psql sessions later, so a chain that takes its latch in between — the
+# first write on flip day, minutes after the start — would read as a lost
+# marker: a healthy first write takes the marker and only then claims the
+# owner rows, dated by its transaction's `now()`. So O1 and M1 read owner rows
+# dated after this moment as a latch taken during the report, UNKNOWN, and
+# only older ones as the marker lost. The host's clock is Postgres's: a
+# container has no clock of its own. To the second, truncated, so it can only
+# err early, and early reads a latch in that second as UNKNOWN, never FAIL.
+MARKERS_READ_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
 INVENTORY_ON="$(flag_state KS_WRITE_INVENTORY postgres duckdb)"
 INVENTORY_LATCHED="$(latch_state pg_inventory_write)"
 DQ_PG_WAREHOUSE_ON="$(flag_state KS_DQ_PG_WAREHOUSE on off)"
@@ -158,7 +171,8 @@ fi
 # chain 7b-4). So a flag that says
 # postgres on a chain that has not latched is `pending` — the first tick after
 # the flip writes, and latches, within a minute — and M1 names where web
-# publishes why it is held. Latched outranks the flag, as everywhere here.
+# publishes why it is held. Latched outranks the flag, as everywhere here. A
+# latch taken while this report runs is M1's UNKNOWN, by MARKERS_READ_AT.
 MANAGERS_ON="$(flag_state KS_WRITE_MANAGERS postgres duckdb)"
 MANAGERS_LATCHED="$(latch_state pg_managers_write)"
 MANAGERS_FLIP_AT="${SOAK_MANAGERS_FLIP_AT:-}"
@@ -170,6 +184,28 @@ elif [ "$MANAGERS_ON" = "1" ] && [ "$MANAGERS_LATCHED" = "0" ]; then
     MANAGERS_ON=pending
 elif [ "$MANAGERS_ON" = "1" ] && [ "$MANAGERS_LATCHED" = "unknown" ]; then
     MANAGERS_ON=unknown
+fi
+
+# Chain 3 (`pg_orders_write`) is chain 5's shape: its preconditions — the
+# lockout, step 13, chain 1, the backup evidence, no page the stand-down
+# retires — are read in web, and a process that found one unmet stays held
+# until it restarts. So a flag that says postgres on a chain that has not
+# latched is `pending`, and O1 names where web publishes why. It latches on
+# its first write, the first order KeyCRM changes after the start: minutes, in
+# the day — so on flip day it can latch while this report runs, which O1
+# reads by MARKERS_READ_AT as UNKNOWN. The latch outranks the flag, as
+# everywhere here.
+ORDERS_ON="$(flag_state KS_WRITE_ORDERS postgres duckdb)"
+ORDERS_LATCHED="$(latch_state pg_orders_write)"
+ORDERS_FLIP_AT="${SOAK_ORDERS_FLIP_AT:-}"
+ORDERS_NOTE=""
+if [ "$ORDERS_LATCHED" = "1" ] && [ "$ORDERS_ON" != "1" ]; then
+    ORDERS_NOTE=" (latched: chain 3 owns its tables in Postgres, and KS_WRITE_ORDERS says otherwise — only scripts/chain_copy_back.py undoes that)"
+    ORDERS_ON=1
+elif [ "$ORDERS_ON" = "1" ] && [ "$ORDERS_LATCHED" = "0" ]; then
+    ORDERS_ON=pending
+elif [ "$ORDERS_ON" = "1" ] && [ "$ORDERS_LATCHED" = "unknown" ]; then
+    ORDERS_ON=unknown
 fi
 
 # Chain 9 (OD-02 (c)): where the quality journal is written. D8, 20, 21 and 22
@@ -322,6 +358,9 @@ run_check() {
             -v buyers_override_floor="$BUYERS_OVERRIDE_FLOOR" \
             -v managers_on="$MANAGERS_ON" \
             -v managers_flip_at="$MANAGERS_FLIP_AT" \
+            -v orders_on="$ORDERS_ON" \
+            -v orders_flip_at="$ORDERS_FLIP_AT" \
+            -v markers_read_at="$MARKERS_READ_AT" \
             -v dq_journal_direct="$DQ_JOURNAL_DIRECT" \
             -v watchdogs_on="$WATCHDOGS_ON" \
             -v weekly_ledger_on="$WEEKLY_LEDGER_ON" \
@@ -374,6 +413,7 @@ echo "  dq_journal_direct=$DQ_JOURNAL_DIRECT (KS_WRITE_DQ_JOURNAL)"
 echo "  watchdogs_on=$WATCHDOGS_ON (KS_WRITE_WATCHDOGS), weekly_ledger_on=$WEEKLY_LEDGER_ON (KS_WRITE_WEEKLY_LEDGER), traffic_ledger_on=$TRAFFIC_LEDGER_ON (KS_WRITE_TRAFFIC_LEDGER)"
 echo "  buyers_on=$BUYERS_ON (KS_WRITE_BUYERS)${BUYERS_NOTE}${BUYERS_HELD_BY:+, held by $BUYERS_HELD_BY}${BUYERS_FLIP_AT:+, buyers flip at $BUYERS_FLIP_AT}${BUYERS_OVERRIDE_FLOOR:+, override floor $BUYERS_OVERRIDE_FLOOR}"
 echo "  managers_on=$MANAGERS_ON (KS_WRITE_MANAGERS)${MANAGERS_NOTE}${MANAGERS_FLIP_AT:+, managers flip at $MANAGERS_FLIP_AT}"
+echo "  orders_on=$ORDERS_ON (KS_WRITE_ORDERS)${ORDERS_NOTE}${ORDERS_FLIP_AT:+, orders flip at $ORDERS_FLIP_AT}"
 echo "  duckdb_off=$DUCKDB_OFF (KS_DUCKDB), in .env: $DUCKDB_OFF_ENV${DUCKDB_ENV_CHANGED_AT:+ (edited $DUCKDB_ENV_CHANGED_AT)}, file record: $FILE_LAST${FILE_SINCE:+ since $FILE_SINCE}${FILE_CHECKED_AT:+, checked $FILE_CHECKED_AT}${FILE_MISSING_AT:+, last missing $FILE_MISSING_AT}${PARALLEL_FROM:+, parallel period from $PARALLEL_FROM}"
 echo
 printf '%s' "$ROWS" | awk '

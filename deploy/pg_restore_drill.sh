@@ -128,6 +128,23 @@ CHAIN5_DRILL_TABLES=(
     "app.manager_classifications:grows"
 )
 CHAIN5_OWNER_SQL="SELECT count(*) FROM meta.chain_watermarks WHERE key IN ('owner:bronze.managers', 'owner:app.manager_classifications')"
+# Chain 3's four (KS_WRITE_ORDERS), counted the same way and from the same
+# moment: an owner row in live meta.chain_watermarks (CHAIN3_OWNER_SQL). Before
+# it they are copies — the orders, line items and expenses of DuckDB's mirror,
+# the misses of the hourly full replace — and with the chain off the drill reads
+# what it always read. After it this dump is the only backup of every order
+# taken since the flip. Nothing deletes an order or an expense — both are
+# upserted, by the chain as by the mirror before it — and the misses are
+# upserted by the chain alone, so those three grow. An order's line items are
+# deleted and laid down again whenever it is written, and an order that lost a
+# line is one row fewer, so they may shrink.
+CHAIN3_DRILL_TABLES=(
+    "bronze.orders:grows"
+    "bronze.order_products:either"
+    "bronze.expenses:grows"
+    "app.order_backfill_misses:grows"
+)
+CHAIN3_OWNER_SQL="SELECT count(*) FROM meta.chain_watermarks WHERE key IN ('owner:bronze.orders', 'owner:bronze.order_products', 'owner:bronze.expenses', 'owner:app.order_backfill_misses')"
 # Absolute floor first, because two of these tables are small and a percentage
 # of a small number is not a margin. app.order_versions gains ~100 rows a day
 # and app.stock_movements a few hundred, so a day of lag is well inside both.
@@ -239,13 +256,18 @@ drill_from_remote() {
     echo "  rule: restored <= live within max(${DRILL_MARGIN_ROWS} rows, ${DRILL_MARGIN_PCT}% of live)"
     local entry table direction live restored gap allow verdict bad=0 owned
     local tables=("${DRILL_TABLES[@]}")
-    # Chain 5's two once it owns them. A read that fails counts them: the
-    # direction is the stricter one, and the counts below then say whether
-    # live can be read at all.
+    # Chain 5's two and chain 3's four, each once its chain owns them. A read
+    # that fails counts them: the direction is the stricter one, and the
+    # counts below then say whether live can be read at all.
     owned="$(docker exec -i ks-postgres psql -U ks_readonly -d ks -tAc \
         "$CHAIN5_OWNER_SQL" 2>/dev/null || echo ERR)"
     if [ "$owned" != 0 ]; then
         tables+=("${CHAIN5_DRILL_TABLES[@]}")
+    fi
+    owned="$(docker exec -i ks-postgres psql -U ks_readonly -d ks -tAc \
+        "$CHAIN3_OWNER_SQL" 2>/dev/null || echo ERR)"
+    if [ "$owned" != 0 ]; then
+        tables+=("${CHAIN3_DRILL_TABLES[@]}")
     fi
     for entry in "${tables[@]}"; do
         table="${entry%%:*}"; direction="${entry##*:}"
