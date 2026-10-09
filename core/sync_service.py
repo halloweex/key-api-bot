@@ -35,7 +35,7 @@ from core.pg_landing import (
     mirror_expenses,
     mirror_products,
 )
-from core import read_fallback, warehouse_cutover
+from core import duckdb_switch, read_fallback, warehouse_cutover
 from bot.config import DEFAULT_TIMEZONE
 
 logger = get_logger(__name__)
@@ -1552,8 +1552,14 @@ class SyncService:
                     logger.info(f"  Chunk {chunk_num}: Saved {order_count} orders, {expense_count} expenses")
 
                     # Force WAL checkpoint after each chunk to prevent WAL corruption
-                    # on aarch64 (DuckDB 1.4.x bug with large WAL files)
-                    await self.store.checkpoint()
+                    # on aarch64 (DuckDB 1.4.x bug with large WAL files).
+                    #
+                    # Not under KS_DUCKDB=off: the store is unconnected there and
+                    # its checkpoint a no-op already, but a no-op by accident is
+                    # one connection away from a CHECKPOINT of a file this
+                    # process must not touch (stage 5, PR-1).
+                    if not duckdb_switch.is_off():
+                        await self.store.checkpoint()
 
                 current_start = current_end + timedelta(days=1)
 
@@ -2086,14 +2092,24 @@ async def init_and_sync(full_sync_days: int = 730) -> None:
         await warehouse_cutover.settle_writer(store)
     except Exception as e:
         logger.error(f"Warehouse writer not settled at boot: {e}", exc_info=True)
-    stats = await store.get_stats()
     # The orders held where they are written — Postgres under chain 3, whose
     # DuckDB copy never grows and on a fresh DuckDB would read as empty on
     # every boot, pulling 730 days from KeyCRM each time (`orders_held`). On
     # DuckDB the count `get_stats` already read.
-    held = stats["orders"]
-    if _orders_off_duckdb():
+    #
+    # Under KS_DUCKDB=off (stage 5, PR-1) `get_stats` is not asked at all: it
+    # counts DuckDB's tables, which is the one thing this boot must not do,
+    # and the only number taken from it was the orders — `orders_held` asks
+    # the store they are written to. Without chain 3 that store is DuckDB,
+    # and the refusal leaves here for web's startup to contain.
+    stats = None
+    if duckdb_switch.is_off():
         held = await store.orders_held()
+    else:
+        stats = await store.get_stats()
+        held = stats["orders"]
+        if _orders_off_duckdb():
+            held = await store.orders_held()
 
     # If no orders, do a full sync
     if held == 0:
@@ -2101,7 +2117,10 @@ async def init_and_sync(full_sync_days: int = 730) -> None:
         sync_service = await get_sync_service()
         await sync_service.full_sync(days_back=full_sync_days)
     else:
-        logger.info(f"{held} orders held, DuckDB has {stats['products']} products")
+        if stats is None:
+            logger.info(f"{held} orders held (KS_DUCKDB=off: no DuckDB counts)")
+        else:
+            logger.info(f"{held} orders held, DuckDB has {stats['products']} products")
         # Do incremental sync
         sync_service = await get_sync_service()
         await sync_service.incremental_sync()

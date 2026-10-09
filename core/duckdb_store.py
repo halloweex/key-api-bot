@@ -619,7 +619,14 @@ class DuckDBStore(
         `close()` has closed (`StoreClosedError`) — decided under the lock,
         so a caller that was queued behind `close()` cannot slip in after it.
         A call with the default reopens a closed store on purpose.
+
+        Under `KS_DUCKDB=off` the switch refuses here, as the first act,
+        before anything touches the disk: `open_file` below refuses as well,
+        but only after this method has created `data/` and `duckdb_tmp/`, so
+        a refused connect used to leave two directories behind. Under `on`
+        `guard()` does nothing.
         """
+        duckdb_switch.guard()
         DB_DIR.mkdir(parents=True, exist_ok=True)
 
         async with self._lock:
@@ -726,6 +733,12 @@ class DuckDBStore(
         """
         async with self._lock:
             conn = self._connection
+            if conn is None and duckdb_switch.is_off():
+                # The store `get_store()` publishes under off is unconnected,
+                # so there is nothing to checkpoint — said, so that the hourly
+                # job's silence is not read as a checkpoint that ran.
+                logger.info("DuckDB checkpoint skipped: KS_DUCKDB=off, the "
+                            "store is not connected")
             if conn:
                 try:
                     conn.execute("CHECKPOINT")
@@ -2993,11 +3006,19 @@ class DuckDBStore(
         that was in no backup at all look covered. It rides in the off-site
         bundle since 2026-08-20 (deploy/offsite_parquet.sh); this copy still
         does not include it, because this is a copy of the analytics file.
+
+        Under `KS_DUCKDB=off` the switch refuses here, as the first act, for
+        `connect()`'s reason: everything below up to `connection()` touches
+        the disk beside the file — `backups/` made, a stale temp copy
+        deleted, the file stat'ed — and a refusal caught by the `except`
+        further down was a daily "DB backup FAILED" alert on top of the
+        switch's own page. Under `on` `guard()` does nothing.
         """
         import os
         import shutil
         import time
 
+        duckdb_switch.guard()
         src = Path(self.db_path)
         dest = Path(dest_dir) if dest_dir else src.parent / "backups"
         dest.mkdir(parents=True, exist_ok=True)
@@ -4069,10 +4090,24 @@ _store_lock = asyncio.Lock()
 
 
 async def get_store() -> DuckDBStore:
-    """Get singleton DuckDB store instance (coroutine-safe)."""
+    """Get singleton DuckDB store instance (coroutine-safe).
+
+    Under `KS_DUCKDB=off` the store is published **unconnected** (stage 5,
+    PR-1). About 150 call sites reach `get_store()`, and most of them only
+    hold the store as the object their router hangs off — `_users_run`,
+    `_perms_run`, `_sms_run`, every `KS_READ_*` router, every Postgres
+    writer — and decide where the read goes before they touch a connection.
+    Refusing here refused all of them for what none of them was about to do.
+    The constructor touches no file; `connection()` connects lazily, through
+    `connect()`, whose first act is the switch, so the tripwire now stands
+    where the file is actually reached and names that site.
+    """
     global _store_instance
     async with _store_lock:
         if _store_instance is None:
+            if duckdb_switch.is_off():
+                _store_instance = DuckDBStore()
+                return _store_instance
             # Published only once connected. It used to be assigned before
             # `connect()`, so a connect that raised still left a singleton
             # behind, and web's startup — which catches a failed first

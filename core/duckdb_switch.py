@@ -19,13 +19,17 @@ on `/api/health` as `duckdb_switch.opened_while_off` (sites and counts, never
 an exception's text: the endpoint is public), and paged CRITICAL by the canary
 as `duckdb_opened_while_off`.
 
-**`off` does not make web work without DuckDB.** That is stage 5's code
-decoupling (the boot sync's zero-orders gate, `get_stats` behind
-`/api/health`, the every-boot migrations, the inventory views...). Under `off`
-today almost everything web does reaches `get_store()` and is refused, so
-order intake stops and the dashboard answers errors. Web's startup contains
-the refusal rather than dying of it only so that `/api/health` answers and the
-page can be seen. Never set it in production before that decoupling.
+**`off` does not yet make web work without DuckDB.** That is stage 5's code
+decoupling (`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`). Since its PR-1,
+`get_store()` under `off` hands out the store unconnected, so a caller that
+only hosts a Postgres router on it works, and the tripwire stands at
+`connection()`, where the file is reached. What still reaches it is the
+stage 5 sweep's `KNOWN_RESIDUAL` (`tests/unit/test_duckdb_off_sweep.py`) —
+order intake among it: the order step inherits its watermark from DuckDB
+until Postgres holds one, so every sync tick's order step is refused. Web's
+startup contains a refusal rather than dying of it, so `/api/health` answers
+and the page can be seen. Never set it in production before that list is
+empty.
 
 COUNTED WHERE IT IS RAISED
 
@@ -61,6 +65,7 @@ process that opens the file under `off`.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -85,6 +90,11 @@ _VALID = (ON, OFF)
 # outside them is the site — `module:function`.
 _PLUMBING = frozenset({__name__, "core.duckdb_store"})
 _PLUMBING_PACKAGES = ("contextlib", "asyncio", "functools", "concurrent")
+
+# The application's own packages. A frame outside them, reached after the walk
+# has left the running task's coroutine, is what turns the event loop rather
+# than a caller (`_site`).
+APPLICATION = ("core", "web", "bot", "scripts", "deploy")
 
 # Bounded, because it is published: a site is a code location, and there are
 # only so many, but a counter keyed on anything must say where it stops. Past
@@ -160,15 +170,52 @@ def is_off() -> bool:
     return mode() == OFF
 
 
+def _plumbing(module: str) -> bool:
+    return module in _PLUMBING or module.split(".")[0] in _PLUMBING_PACKAGES
+
+
+def _task_root() -> Optional[Any]:
+    """The coroutine the running task was created with, or None outside a
+    task (no running loop in this thread, or a coroutine that is not one)."""
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return None
+    if task is None:
+        return None
+    coro = task.get_coro()
+    return coro if getattr(coro, "cr_frame", None) is not None else None
+
+
 def _site() -> str:
-    """`module:function` of the first frame outside the plumbing."""
+    """`module:function` of the first frame outside the plumbing.
+
+    Unless the walk has already passed the running task's own coroutine and
+    the frame it reaches is outside the application (`APPLICATION`): that
+    frame is not a caller but whatever turns the event loop — uvicorn in
+    production, a test function on a laptop — and the caller is the task
+    itself. A read handed to `asyncio.ensure_future(...)`, `shield` or
+    `create_task` starts a task whose coroutine is the store's own method,
+    which is plumbing, so the walk went straight through it: the boot sync's
+    order watermark was named after the test that ran the loop
+    (`tests…:test_target_off_pg`), and in production would have been named
+    after uvicorn. Such a site is the task's coroutine, marked `(task)`."""
+    root = _task_root()
+    root_frame = root.cr_frame if root is not None else None
+    left_the_task = False
     frame = sys._getframe(1)
     while frame is not None:
         module = frame.f_globals.get("__name__", "?")
-        if (module not in _PLUMBING
-                and module.split(".")[0] not in _PLUMBING_PACKAGES):
+        if not _plumbing(module):
+            if left_the_task and module.split(".")[0] not in APPLICATION:
+                break
             return f"{module}:{frame.f_code.co_name}"
+        if frame is root_frame:
+            left_the_task = True
         frame = frame.f_back
+    if left_the_task:
+        module = root_frame.f_globals.get("__name__", "?")
+        return f"{module}:{root.cr_code.co_name} (task)"
     return "unknown"
 
 
@@ -304,6 +351,16 @@ def health_block() -> Dict[str, Any]:
         "error": mode_error(),
         "opened_while_off": opened(),
     }
+
+
+def reset_counts() -> None:
+    """Forget every count and keep the mode. Tests only: a sweep that asks,
+    step by step, which paths still reach for the file under `off` empties
+    the counts between steps without reading the switch again — `reset()`
+    would leave it unconfigured, and the next open would configure it from
+    whatever the environment says by then."""
+    with _lock:
+        _opened.clear()
 
 
 def reset() -> None:
