@@ -3121,7 +3121,9 @@ its OvercommitTracker stopped our query with code 241. Our own hourly ship had
 finished 18 minutes earlier. `ch_cohorts.fetch` now asks again after 1 s and
 3 s on code 241 alone, and only the last refusal reaches the fallback.
 
-`KS_READ_FALLBACK` (`duckdb` default | `off`) is read in `configure_modes()`,
+`KS_READ_FALLBACK` (`duckdb` default | `off`; production `off` since
+2026-10-09 08:01 UTC, ahead of step 13 — the owner shortened the clean week
+to the rehearsal) is read in `configure_modes()`,
 before the boot sync. **Under `off`, `fall_back` raises `ReadUnavailable`**
 (DN-20b) instead of letting its caller read DuckDB, and one exception handler
 in `web/main.py` answers it, from any route, with a 503 carrying `surface` —
@@ -3601,11 +3603,14 @@ bounded at 5 s, and publishes the answer.
   KeyCRM once a minute. The DuckDB path is unchanged, a failure escaping it
   included.
 
-### Step 13: the switch is built, and not switched (DN-28, DN-29)
+### Step 13: the switch, thrown on 2026-10-09 (DN-28, DN-29)
 
 `KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts:
 `duckdb` (default) or `postgres`. It is read in `configure_modes()`, before
-the boot sync, and **production does not set it**. An unknown value runs as
+the boot sync. **Production set it to `postgres` on 2026-10-09 at 08:18 UTC**,
+after a rehearsal on the production backups passed 11 checks of 11 and
+seventeen minutes after `KS_READ_FALLBACK=off`; the first Postgres derivation
+after it validated at 08:24. An unknown value runs as
 `duckdb` and publishes the error on `/api/health` (`warehouse_writer_mode`),
 where the canary warns `warehouse_mode_invalid`; it never raises, since web is
 the only syncer. After a flip the same typo is the way back, so it pages as
