@@ -1668,7 +1668,11 @@ verdicts and the override floor, the selection's backlog, integrity — and
 knows a fifth state for this chain, `held`: flagged, unlatched and a reader
 not on postgres, reported by B1 as the flip that did not move. B1 dates the
 handover by the owner rows, then by `SOAK_BUYERS_FLIP_AT`, and with neither
-reads UNKNOWN rather than FAIL a stamp inside its 75-minute window. The restore
+reads UNKNOWN rather than FAIL a stamp inside its 75-minute window. With
+`buyers_on=0` and the chain's owner rows standing it FAILs as a lost marker —
+the buyers step back on DuckDB and nothing shipping it — naming
+`data/write-chain-owners/pg_buyers_write` and `scripts/chain_copy_back.py
+buyers`, and it counts a copy's failure for the day it was stamped. The restore
 drill counts all three tables, because once the chain writes them the nightly
 dump is their only backup.
 
@@ -1955,10 +1959,20 @@ stood down (no `last_ok_at` or failure on the misses, no `backfilled_at` on
 the bronze three, after the owner rows — else `SOAK_ORDERS_FLIP_AT`, else a
 75-minute window read as UNKNOWN; the chain stamps `last_ok_at` on the bronze
 three itself, so there that column says nothing); `last_sync_orders`
-rewritten within the canary's 90-minute lock-wait bound, judged by the row's
-stamp because its value is KeyCRM's clock; `reconcile_order_versions`' three
-predicates, asked live; no order the chain wrote with revenue and no line
-items past 6 h without a ledger row; and the standing watch's chain-3 group.
+rewritten within 105 minutes, the longest the canary goes without paging (its
+90-minute lock wait plus the 15 it allows after it, derived from its constants
+by a test), judged by the row's stamp because its value is KeyCRM's clock;
+`reconcile_order_versions`' three predicates, asked live; no order the chain
+wrote with revenue and no line items past 6 h, ledgered or not; and the
+standing watch's chain-3 group. A ledger row no longer excuses one: the repair
+re-fetches through the chain's own writer and ledgers whatever is still empty,
+so it would launder a writer that drops line items, and production held 0 such
+orders in the 120 days before the flip (measured 2026-10-09). O1 counts a
+copy's failure for the day it was stamped — nothing resets the count while the
+chain owns the table — and FAILs owner rows with `orders_on=0` as the marker
+lost (`order_owner_row_without_marker`'s state), naming
+`data/write-chain-owners/pg_orders_write` and `scripts/chain_copy_back.py
+orders`; chain 1's I1 keeps the sticky count, noted in its file.
 `stage4_soak.sh` passes `orders_on=pending` for a flag the chain has not
 latched under, chain 5's way. The restore drill counts the four tables once
 an owner row names one: orders, expenses and misses `grows`, line items
@@ -2102,7 +2116,10 @@ over 26 h old and the shape the standing watch would file.
 `chain_manager_intervals_broken` and `chain_manager_retail_disagrees` (WARN),
 and a NULL `set_at` as `chain_required_column_null` — one read,
 `pg_managers_write.SHAPE_SQL`, shared with the preflight. Soak checks M1 (the
-replica stayed away) and M2 (the shape and `last_sync_managers` under 26 h);
+replica stayed away; with `managers_on=0` and owner rows standing, a FAIL as a
+lost marker naming `data/write-chain-owners/pg_managers_write` and
+`scripts/chain_copy_back.py managers`; a failure counts for its day) and M2
+(the shape and `last_sync_managers` under 26 h);
 `stage4_soak.sh` passes `managers_on=pending` for a flag the chain has not
 latched under, since only web holds the step-13 and chain-3 verdicts. The restore drill
 counts both tables once the chain owns them (`grows`: nothing deletes a
