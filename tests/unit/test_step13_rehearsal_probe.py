@@ -134,8 +134,9 @@ def test_p1_without_a_seeded_page_is_unknown_never_pass():
 
 def test_p1_names_the_unmet_keys_when_there_was_no_flip():
     verdict, detail = probe.judge_p1(p1_ev(
-        snapshot=snap("duckdb", unmet=["goals_bridge"], cut_unmet=["goals_bridge"])))
-    assert verdict == FAIL and "goals_bridge" in detail
+        snapshot=snap("duckdb", unmet=["utm_parse_postgres"],
+                      cut_unmet=["utm_parse_postgres"])))
+    assert verdict == FAIL and "utm_parse_postgres" in detail
 
 
 @pytest.mark.parametrize("change", [

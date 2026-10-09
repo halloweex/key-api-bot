@@ -405,9 +405,9 @@ async def stores(tmp_path, monkeypatch):
     # evidence hold (`pg_orders_write.unmet_precondition`); none of them is
     # what this module is about, and every one is a local read.
     monkeypatch.setattr(pg_orders_write, "unmet_precondition", lambda: None)
-    # Chain 5 is held on DuckDB by facts no environment variable sets (the
-    # goal bridge, step 13, chain 3); this harness proves where its latch is
-    # taken, not whether it may move.
+    # Chain 5 is held on DuckDB by facts no environment variable sets (step
+    # 13, chain 3); this harness proves where its latch is taken, not whether
+    # it may move.
     monkeypatch.setattr(pg_managers_write, "unmet_precondition", lambda: None)
     # Chain 6's precondition taken as met: setting KS_WRITE_INVENTORY=postgres
     # here would move chain 1's own calls; the precondition itself is proved

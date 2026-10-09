@@ -516,7 +516,8 @@ def _derivation_mode() -> dict:
 
 def _goals_history() -> dict:
     """KS_GOALS_HISTORY as a goal history read takes it (chain 7b): `mode`
-    (`bridge` or `silver`), or null and the `error` every such read raises —
+    (`silver`, the only history since 7b-4 retired the variable), or null and
+    the `error` every such read raises —
     the variable is read at each read, not at start, so this is asked on each
     request, with no I/O. Judged by the canary."""
     from core import pg_goals_read

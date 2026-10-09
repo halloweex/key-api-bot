@@ -1,16 +1,18 @@
 """The goal calculators' Silver history means the same thing in both engines.
 
-Chain 7b-2's unit tests prove the Silver bodies select what the DN-12 bridge
-selects, on DuckDB's Silver. This is about Postgres: under
-`KS_GOALS_HISTORY=silver` and `KS_READ_GOALS=postgres` every history read is
-answered by `silver.orders`, and three things are proved against a real
-server:
+The unit tests prove the Silver bodies select the orders written out for them,
+on DuckDB's Silver (`tests/unit/test_goals_history_silver.py`). This is about
+Postgres: under `KS_READ_GOALS=postgres` every history read is answered by
+`silver.orders` — the only history since chain 7b-4 deleted the DN-12 bridge
+and retired `KS_GOALS_HISTORY` (production sets it to `silver`, which reads
+the same) — and three things are proved against a real server:
 
   * **T11, two engines** — the three-year history in DuckDB and its Silver
     copied into `silver.orders`: seasonality, YoY, weekly patterns, the
     twelve growth caps, last year's month, the recent months, the bounds and
-    the smart goal, equal to the bridge's answer to 1e-6 relative. The places
-    the two engines could part are `EXTRACT` (BIGINT against NUMERIC), the
+    the smart goal, equal to DuckDB Silver's answer to 1e-6 relative (it was
+    the bridge's answer until 7b-4, and the two were equal). The places the
+    two engines could part are `EXTRACT` (BIGINT against NUMERIC), the
     division of a day number by seven, `STDDEV` and a DECIMAL divided into a
     DOUBLE or a NUMERIC.
   * **met by construction, on Postgres** — DuckDB's `orders`, `managers`,
@@ -53,8 +55,8 @@ SILVER_COLUMNS = ("id, source_id, status_id, grand_total, ordered_at, buyer_id, 
 PG_TABLES = ("silver.orders", "gold.daily_revenue", "app.revenue_predictions",
              "app.revenue_goals")
 
-# Every DuckDB table the goal history, the ML signal and the bridge read. Under
-# silver + postgres none of them may be asked.
+# Every DuckDB table the goal history and the ML signal read, and the two the
+# deleted bridge did. Under postgres none of them may be asked.
 DUCKDB_HISTORY = re.compile(
     r"(?<![\w.])(orders|managers|manager_classifications|silver_orders|"
     r"gold_daily_revenue|revenue_predictions|revenue_goals)(?![\w])",
@@ -137,8 +139,8 @@ def _duckdb_refused(store):
             found = DUCKDB_HISTORY.search(sql)
             if found:
                 raise AssertionError(
-                    f"DuckDB {found.group(1)!r} was read under silver + "
-                    f"postgres: {' '.join(sql.split())[:160]}")
+                    f"DuckDB {found.group(1)!r} was read under "
+                    f"KS_READ_GOALS=postgres: {' '.join(sql.split())[:160]}")
 
         def execute(self, sql, *a, **k):
             self._check(sql)
@@ -167,36 +169,31 @@ class TestTwoEngines:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
     async def test_the_history_reads(self, history, monkeypatch, sales_type):
-        monkeypatch.setenv("KS_GOALS_HISTORY", "bridge")
-        bridge = await _history_answers(history, sales_type)
-
-        monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
+        monkeypatch.setenv("KS_GOALS_HISTORY", "silver")   # production's line
         duckdb_silver = await _history_answers(history, sales_type)
 
         monkeypatch.setenv("KS_READ_GOALS", "postgres")
 
         def _no_duckdb(*_a, **_k):
-            raise AssertionError("a history read reached DuckDB under silver + postgres")
+            raise AssertionError("a history read reached DuckDB under KS_READ_GOALS=postgres")
 
         with patch.object(type(history), "connection", _no_duckdb):
             postgres = await _history_answers(history, sales_type)
 
-        assert len(bridge["seasonality"]) == 12 and bridge["yoy"]["sample_size"] >= 1
-        assert _close(duckdb_silver) == _close(bridge)
-        assert _close(postgres) == _close(bridge)
+        assert len(duckdb_silver["seasonality"]) == 12
+        assert duckdb_silver["yoy"]["sample_size"] >= 1
+        assert _close(postgres) == _close(duckdb_silver)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("sales_type", ["retail", "b2b"])
     async def test_the_smart_goal_and_the_stored_tables(
         self, history, monkeypatch, sales_type,
     ):
-        monkeypatch.setenv("KS_GOALS_HISTORY", "bridge")
         await history.recalculate_goal_tables(include_weekly=True)
-        bridge = _without_clock(await asyncio.wait_for(
+        duckdb_silver = _without_clock(await asyncio.wait_for(
             history.generate_smart_goals(2026, 10, sales_type), TIMEOUT_S))
-        bridge_tables = await history._compute_goal_tables(include_weekly=True)
+        duckdb_tables = await history._compute_goal_tables(include_weekly=True)
 
-        monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
         monkeypatch.setenv("KS_READ_GOALS", "postgres")
         postgres_tables = await history._compute_goal_tables(include_weekly=True)
         await history.recalculate_goal_tables(include_weekly=True)
@@ -204,11 +201,11 @@ class TestTwoEngines:
             postgres = _without_clock(await asyncio.wait_for(
                 history.generate_smart_goals(2026, 10, sales_type), TIMEOUT_S))
 
-        assert _close(postgres) == _close(bridge)
-        assert bridge["monthly"]["lastYearRevenue"] > 0
-        assert postgres_tables["history_bounds"] == bridge_tables["history_bounds"]
+        assert _close(postgres) == _close(duckdb_silver)
+        assert duckdb_silver["monthly"]["lastYearRevenue"] > 0
+        assert postgres_tables["history_bounds"] == duckdb_tables["history_bounds"]
         for key in ("seasonal", "yoy", "weekly_rows"):
-            assert _close(postgres_tables[key]) == _close(bridge_tables[key]), key
+            assert _close(postgres_tables[key]) == _close(duckdb_tables[key]), key
 
 
 class TestMetByConstructionOnPostgres:
@@ -238,8 +235,9 @@ class TestMetByConstructionOnPostgres:
 class TestCompactionShape:
     """T14. DuckDB's Silver emptied — what a compaction leaves after step 13 —
     and nothing moves, because Postgres answers. Mutation M17: send one body
-    to DuckDB explicitly (the growth cap through `_bridge_rows` with a
-    DuckDB rendering), and the caps fall to 0.35 here."""
+    to DuckDB explicitly (the growth cap on the store's own connection with
+    a DuckDB rendering, as the deleted bridge read), and the caps fall to
+    0.35 here."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])

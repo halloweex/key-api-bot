@@ -63,15 +63,14 @@ by the caller — `datetime.now(timezone.utc)` — never Postgres' `now()`; Duck
 
 HELD ON DUCKDB UNTIL WHAT READS THE TABLES FOLLOWS
 
-`unmet_precondition()` names five things; until all hold an unlatched chain
-runs as duckdb whatever its flag says (DN-26's hook, generic in the registry):
+`unmet_precondition()` names four things; until all hold an unlatched chain
+runs as duckdb whatever its flag says (DN-26's hook, generic in the registry).
+`goals_bridge` was a fifth, while the goal calculators read DuckDB's
+classification through the DN-12 sales-type bridge; chain 7b-4 deleted the
+bridge, and the goal history is Silver's, which step 13 makes Postgres':
 
 - `lockout` — this build requires `LOCKOUT_REVISION` (0035), which refuses
   every image built before the chain (`chain_latch.lockout_unmet`).
-- `goals_bridge` — the goal calculators read DuckDB's classification through
-  the sales-type bridge until chain 7b deletes it (7b-4). Spelled exactly as
-  chain 3 spells it: `tests/unit/test_goals_off_duckdb_silver.py` requires every
-  chain declaring a bridge table to name it.
 - `step13` — while DuckDB derives Silver it derives `sales_type` from a
   classification this chain would freeze.
 - `chain3` — `update_manager_stats` reads the orders, and the copy-backs must
@@ -215,28 +214,9 @@ def env_writes_postgres() -> bool:
 
 # ─── Preconditions ───────────────────────────────────────────────────────────
 
-# The tables the goal calculators' bridge reads out of DuckDB that this chain
-# would freeze. Asked of `core.repositories.goals` by name, so the day chain 7b
-# deletes the bridge — and the constant with it — this holds by itself.
-_BRIDGE_TABLES: Tuple[str, ...] = CHAIN_TABLES
-
 # Chain 3's module, asked by name: a build without it is unmet, not an import
 # error that would make the whole question unreadable.
 _CHAIN3 = "core.pg_orders_write"
-
-
-def _goals_bridge_unmet() -> Optional[str]:
-    try:
-        from core.repositories import goals
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        return f"goals_bridge: the goal module cannot be read ({type(exc).__name__})"
-    bridged = getattr(goals, "SALES_TYPE_BRIDGE_TABLES", frozenset())
-    held = [t for t in _BRIDGE_TABLES if t in bridged]
-    if held:
-        return ("goals_bridge: the goal calculators still read DuckDB's "
-                + " and ".join(held) + " through the sales-type bridge (DN-12), so "
-                "port chain 7b first (OD-14)")
-    return None
 
 
 def _step13_unmet() -> Optional[str]:
@@ -282,7 +262,6 @@ def _read_fallback_unmet() -> Optional[str]:
 # would read `_read_fallback_unmet` as "read_fallback".
 _CHECKS = (
     (chain_latch.LOCKOUT_KEY, lambda: chain_latch.lockout_unmet(LOCKOUT_REVISION)),
-    ("goals_bridge", _goals_bridge_unmet),
     ("step13", _step13_unmet),
     ("chain3", _chain3_unmet),
     ("read_fallback_off", _read_fallback_unmet),

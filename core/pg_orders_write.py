@@ -92,14 +92,13 @@ PRECONDITIONS THE FLAG ENFORCES
 
 `unmet_precondition()` names what must hold before `KS_WRITE_ORDERS=postgres`
 moves the writes; until all of it does an unlatched chain runs as duckdb
-whatever the flag says (DN-26's rule, generic in the registry since DN-27):
+whatever the flag says (DN-26's rule, generic in the registry since DN-27).
+`goals_bridge` was the first, while the goal calculators rendered the DN-12
+sales-type bridge over DuckDB `orders`; chain 7b-4 deleted the bridge, and the
+goal history is Silver's, which step 13 makes Postgres':
 
 - `lockout` — this build requires `LOCKOUT_REVISION` (0035), which refuses
   every image built before the chain (`chain_latch.lockout_unmet`).
-- `goals_bridge` — the goal calculators still render the sales-type bridge
-  over DuckDB `orders` (`core/repositories/goals.py`, DN-12). Chain 7b's port
-  removes it (OD-14). Moved before that, retail goals diverge from Silver at
-  the first new order and step 13's own `goals_bridge` precondition fails.
 - `step13` — Postgres alone derives the warehouse (`warehouse_cutover`). On a
   DuckDB that still derives, frozen landing would freeze Silver and Gold.
 - `chain1` — inventory writes Postgres: DuckDB's SKU rebuild reads DuckDB
@@ -231,23 +230,6 @@ def env_writes_postgres() -> bool:
 
 # ─── Preconditions ───────────────────────────────────────────────────────────
 
-# The tables the goal calculators' bridge reads out of DuckDB that this chain
-# would freeze. Asked of `core.repositories.goals` by name, so the day chain 7b
-# deletes the bridge — and the constant with it — this holds by itself.
-_BRIDGE_TABLE = "bronze.orders"
-
-
-def _goals_bridge_unmet() -> Optional[str]:
-    try:
-        from core.repositories import goals
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        return f"goals_bridge: the goal module cannot be read ({type(exc).__name__})"
-    if _BRIDGE_TABLE in getattr(goals, "SALES_TYPE_BRIDGE_TABLES", frozenset()):
-        return ("goals_bridge: the goal calculators still read DuckDB orders "
-                "through the sales-type bridge (DN-12); port chain 7b first "
-                "(OD-14)")
-    return None
-
 
 def _step13_unmet() -> Optional[str]:
     from core import warehouse_cutover
@@ -375,10 +357,11 @@ def unmet_reasons() -> List[str]:
     """Every reason `KS_WRITE_ORDERS=postgres` must not move the writes yet,
     one entry per precondition, in order; empty when none. What the
     preflight publishes, entry for entry. A reason may carry a "; " of its
-    own — the goal bridge's lever, the retired pages', and the hold, which
-    quotes every reason it held on — so the joined `unmet_precondition()`
-    cannot be split back into them: split, `/api/health` published "port
-    chain 7b first (OD-14)" as a precondition of its own (batch-E review).
+    own — the retired pages', and the hold, which quotes every reason it held
+    on — so the joined `unmet_precondition()` cannot be split back into them:
+    split, `/api/health` published the goal bridge's lever, "port chain 7b
+    first (OD-14)", as a precondition of its own (batch-E review), while
+    that precondition existed.
 
     Never raises and never asks Postgres (module docstring): every fact is a
     cached verdict, an environment variable, a marker file or this process's
@@ -404,14 +387,15 @@ def unmet_reasons() -> List[str]:
     published either way.
 
     **Step 13's verdict is a fact only once it has been reached.** Before
-    `warehouse_cutover.configure_mode` has decided — and while it decides,
-    because the goal bridge's owners it gathers are read by asking the write
-    chains for their mode — `step13` reads unmet and means "not decided yet".
-    It still keeps the chain on DuckDB, but it is never held on: held, it
-    made every start under `KS_WRITE_WAREHOUSE=postgres` hold this chain for
-    good, at the very start that found step 13 in force (and chain 5, whose
-    precondition is this chain, with it). The start's verdict
-    (`settle_hold()`) is taken after step 13's."""
+    `warehouse_cutover.configure_mode` has decided, `step13` reads unmet and
+    means "not decided yet". It still keeps the chain on DuckDB, but it is
+    never held on: held, it made every start under
+    `KS_WRITE_WAREHOUSE=postgres` hold this chain for good, at the very start
+    that found step 13 in force (and chain 5, whose precondition is this
+    chain, with it) — step 13's start asked this chain its mode while it
+    decided, gathering the DN-12 goal bridge's owners, until chain 7b-4
+    deleted the bridge. The start's verdict (`settle_hold()`) is taken after
+    step 13's."""
     global _held
 
     found = _live_unmet()
@@ -469,8 +453,7 @@ def _live_unmet() -> List[Tuple[str, str]]:
     reasons: List[Tuple[str, str]] = []
     # The checks are looked up when asked, so a test standing one in is read.
     for key, check in ((chain_latch.LOCKOUT_KEY, _lockout_unmet),
-                       ("goals_bridge", _goals_bridge_unmet), (_STEP13, _step13_unmet),
-                       ("chain1", _chain1_unmet),
+                       (_STEP13, _step13_unmet), ("chain1", _chain1_unmet),
                        ("landing_pages_clear", _landing_pages_unmet)):
         try:
             why = check()

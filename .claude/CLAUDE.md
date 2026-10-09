@@ -1906,14 +1906,15 @@ a day) and a NULL `checked_at` in the misses.
 
 **Preconditions, every one read locally** (`unmet_precondition()`, published
 through the registry, `write_chain_precondition_unmet` on the canary):
-`goals_bridge` (the goal calculators still read DuckDB orders until chain 7b),
 `step13` (Postgres alone derives the warehouse), `chain1` (DuckDB's SKU rebuild
 reads DuckDB order lines), the backup evidence — `pitr_drill` and
 `remote_restore` under 8 days, `pg_offsite` under 36 h, from the markers the
 host scripts now write on success only (`core/backup_evidence.py`; one provider,
 OD-01 (c) cancelled 2026-10-01; their ages, and only their ages, are
 `/api/health`'s `backups`) — and `landing_pages_clear`: no delivered page
-under a condition the stand-down retires. While any is unmet an unlatched chain
+under a condition the stand-down retires. (`goals_bridge` was first among them
+while the goal calculators read DuckDB orders through the DN-12 bridge; chain
+7b-4 deleted the bridge.) While any is unmet an unlatched chain
 runs as duckdb whatever its flag says. **And held is held until the process
 ends** (`held_until_restart`): the markers age and are rewritten by the
 host's drills, and a page resolves, inside a running web, and with the flag
@@ -1922,10 +1923,12 @@ write — no stopped window, no `--handover` (found in review). The first unmet
 answer under the flag is remembered, from the start (`configure_modes()`)
 on, so the flip happens only at a start that found everything met. **Except
 `step13` before step 13 has decided** (`warehouse_cutover.verdict_reached()`):
-step 13's start gathers the goal bridge's owners by asking this chain its
-mode, before its own verdict exists, and remembering that "unmet" held chain
-3 — and chain 5 through it — for good on every start that found step 13 in
-force (batch-E review). It still keeps the chain on DuckDB; it is not held on.
+step 13's start used to ask this chain its mode before its own verdict
+existed — gathering the goal bridge's owners, until 7b-4 deleted the bridge —
+and remembering that "unmet" held chain 3 — and chain 5 through it — for good
+on every start that found step 13 in force (batch-E review). The start asks
+no chain now; the guard stays for any ask before the verdict. It still keeps
+the chain on DuckDB; it is not held on.
 `preflight` adds what Postgres says: the three bronze tables backfilled and
 their mirrors not failing. It is asked beside chain 1's, never after it: each
 is bounded at 5 s, and two in a row with Postgres hung were the canary's whole
@@ -2027,17 +2030,19 @@ catalogue rule would have excused it as retired (seeded baselines carry
 `core/pg_managers_write.py` is a registered write chain for `bronze.managers`
 and `app.manager_classifications` — `pg_replication.MANAGER_UNIT`, whole —
 under `KS_WRITE_MANAGERS=postgres`. **Off in production, and held even if
-set**: `unmet_precondition()` names `goals_bridge` (the goal calculators read
-DuckDB's classification until 7b-4 deletes the bridge — spelled as chain 3
-spells it, so the tripwire in `test_goals_off_duckdb_silver.py` finds the
-hold), `step13` (DuckDB would derive `sales_type` from a classification the
-chain freezes), `chain3` (`update_manager_stats` reads the orders; a build
-without chain 3 reads as unmet, not as an import error) and
-`read_fallback_off`. Every fact is local, so `/api/health` answers with
-Postgres down. Order of flips: 7b-4, step 13, chain 3, chain 5, with the
+set**: `unmet_precondition()` names `lockout` (this build requires revision
+0035, which refuses every image built before the chain), `step13` (DuckDB
+would derive `sales_type` from a classification the chain freezes), `chain3`
+(`update_manager_stats` reads the orders; a build without chain 3 reads as
+unmet, not as an import error) and `read_fallback_off`. `goals_bridge` was a
+fifth until chain 7b-4 deleted the bridge through which the goal calculators
+read DuckDB's classification. Every fact is local, so `/api/health` answers
+with Postgres down. Order of flips: step 13, chain 3, chain 5, with the
 lock-out revision — 0035, shared by all eight of #280's chains — deployed
-before the first of those eight flips (see "Revision 0035"). The way back runs
-in reverse.
+before the first of those eight flips (see "Revision 0035"). 7b-4 had to come
+before chain 3, since chains 3 and 5 held on its `goals_bridge`, and not
+before step 13, whose own `goals_bridge` `KS_GOALS_HISTORY=silver` met. The
+way back runs in reverse.
 
 **Three writers, one advisory lock** (`CHAIN_LOCK_KEY`, 'ks' + 5), taken
 first in every transaction. Measured before building: two classifications of
@@ -2088,7 +2093,7 @@ and a NULL `set_at` as `chain_required_column_null` — one read,
 `pg_managers_write.SHAPE_SQL`, shared with the preflight. Soak checks M1 (the
 replica stayed away) and M2 (the shape and `last_sync_managers` under 26 h);
 `stage4_soak.sh` passes `managers_on=pending` for a flag the chain has not
-latched under, since only web can evaluate the bridge. The restore drill
+latched under, since only web holds the step-13 and chain-3 verdicts. The restore drill
 counts both tables once the chain owns them (`grows`: nothing deletes a
 manager, and the writer's one DELETE is followed by the INSERT of the same
 key).
@@ -3824,9 +3829,9 @@ revision, the landing mirror on, every Silver/Gold/UTM read switch on
 `postgres` (a test reads every string in `core/`, `web/` and `bot/` for a
 `KS_READ_*` or `KS_*_STORE` name, so a new one has to be put on the list or
 excluded by name — `KS_SMS_STORE` is read inline and the first walk missed
-it), cohorts on ClickHouse with `KS_CH_URL`, **the goal calculators off the
-DN-12 bridge** (`goals_bridge`: `KS_GOALS_HISTORY=silver`, see "Chain 7b"),
-**`bronze.expenses` holding its history**
+it), cohorts on ClickHouse with `KS_CH_URL` (`goals_bridge` — the goal
+calculators off the DN-12 bridge — was one until chain 7b-4 deleted the
+bridge; see "Chain 7b"), **`bronze.expenses` holding its history**
 (`expenses_backfilled` — see "OD-10: the DuckDB-only doors"), **no door OD-10
 has not answered** (`od10_doors`: `OD10_DOORS` is every function in `web/`
 naming DuckDB's Silver, its order-lines view, Gold, UTM or an inventory view
@@ -3978,8 +3983,8 @@ of main at 3.0.264, revision 0034; the image it ran was built at revision
 
 On 2026-10-07, with P6 and D1 reworked and main merged (an image built from
 this branch, 3.0.267, revision 0034), the first local run did not flip:
-chain 7b had added `goals_bridge` (`KS_GOALS_HISTORY=silver`) to the
-preconditions and reh-web's list lacked it — and the script, deciding the
+chain 7b had added `goals_bridge` (`KS_GOALS_HISTORY=silver`; 7b-4 removed it
+again) to the preconditions and reh-web's list lacked it — and the script, deciding the
 flip with a grep that `utm_parse`'s `"mode": "postgres"` matched, ran every
 phase after F1 anyway. The script now asks the probe for the writer's mode
 out of the snapshot P1 judges, and a test runs this tree's
@@ -4659,8 +4664,9 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
 **Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
 since its owner rows; H2 (`29_h2`) — the 07:30 run filed no `shadow_*` above
 INFO. D8, 20, 21 and 22 stop gating on the journal's copy once chain 9 writes
-it directly (the flag, the latch, or its owner row); chain 1's preflight and
-chain 7b's goals dry run do the same on the flag or the latch. Every guard names its
+it directly (the flag, the latch, or its owner row); chain 1's preflight does
+the same on the flag or the latch (chain 7b's goals dry run did, until 7b-4
+retired it). Every guard names its
 mutation; a run over all of them found five that did not catch theirs, now
 closed in the tests.
 
@@ -4668,10 +4674,11 @@ closed in the tests.
 
 The goal calculators — seasonality, YoY, weekly patterns, the growth cap, and
 a smart goal's last-year and recent-months reads — read the whole order
-history, and since DN-12 they read it through a bridge: DuckDB `orders`
-narrowed by `silver_sales_type_case` rendered over DuckDB's `managers` and
-`manager_classifications`. Step 13 freezes all three. Two changes, neither of
-which moves a number in production by itself.
+history. From DN-12 they read it through a bridge: DuckDB `orders` narrowed by
+`silver_sales_type_case` rendered over DuckDB's `managers` and
+`manager_classifications`. Step 13 freezes all three. Three changes, none of
+which moved a number in production by itself; since 7b-4 they read Silver and
+nothing else.
 
 **7b-1 — compute, then store once.** The calculators return and store
 nothing; `recalculate_goal_tables` is the one writer of `seasonal_indices`,
@@ -4701,75 +4708,102 @@ recency weighting multiplied DuckDB `Decimal`s by float weights —
 `TypeError`, in the Monday job and in `GET /api/goals/growth`. The yearly
 read now never takes the current Kyiv year, and every term is a float.
 
-**7b-2 — `KS_GOALS_HISTORY` chooses which orders count**: `bridge` (default,
-today's) or `silver` — every history read over `{silver_orders}` through
+**7b-2 — `KS_GOALS_HISTORY` chose which orders count**: `bridge` (the default
+then) or `silver` — every history read over `{silver_orders}` through
 `_goals_run`, so the engine is `KS_READ_GOALS`', and DN-20's counting and
-refusal cover it. An unknown value raises at the read, never at import —
-counting another set of orders in silence would be the worse failure — and
-since every goal read then answers 500 and the Monday job fails, neither of
-which pages anybody, `/api/health` publishes `goals_history {mode, error}`
-and the canary pages `goals_history_mode_invalid`, CRITICAL like
-`write_chain_flag_invalid`, with the variable as its lever. Not
-`KS_READ_GOALS` reused: that is `postgres` in production already, so a reuse
-would have moved the reads at the deploy; it names an engine, this names a
-row set; and an engine switch put back must never change semantics. Not
-`KS_READ_*` either — the step-13 walk reads those as engines.
-**`is_active_source` is deliberately absent** (OQ-1, the owner's): source 3
-is the 2024 website on Opencart — 2 055 retail orders, ₴5.0M, July to
-December 2024, before Shopify took over — and dropping it shrinks 2024, so
-retail YoY would move from 0.50 to 0.82 and October's retail goal from ₴4.0M
-to ₴4.2M. Without it, Silver selects exactly the bridge's orders.
+refusal cover it. Not `KS_READ_GOALS` reused: that was `postgres` in
+production already, so a reuse would have moved the reads at the deploy; it
+names an engine, this named a row set; and an engine switch put back must
+never change semantics. Not `KS_READ_*` either — the step-13 walk reads those
+as engines. **`is_active_source` is deliberately absent** (OQ-1, the
+owner's): source 3 is the 2024 website on Opencart — 2 055 retail orders,
+₴5.0M, July to December 2024, before Shopify took over — and dropping it
+shrinks 2024, so retail YoY would move from 0.50 to 0.82 and October's retail
+goal from ₴4.0M to ₴4.2M. Without it, Silver selected exactly the bridge's
+orders.
 
 Measured with the built code on the 2026-08-31 production backup, as of
 2026-10-01: the orders each side counts are identical for every sales type
 (retail 42 054), and **1 207 numbers — every calculator for every sales type,
 the Monday job's store and the smart goal for four months — show 0
 differences**. The one rule that could differ is the return: KeyCRM's status
-group decides before the status list (0 orders in production). On a real
-Postgres the same bodies answer the bridge's numbers to 1e-6
-(`tests/integration/test_goals_history_two_engines.py`), including with
-DuckDB's orders, classification, Silver and Gold refused at the statement and
-with DuckDB's Silver emptied.
+group decides before the status list (0 orders in production).
 
-**The flip**: `KS_GOALS_HISTORY=silver` with `KS_READ_GOALS=postgres`, after
-`scripts/goals_semantics_dryrun.py --backup <that day's backup>` exits 0,
-run as the web service (`docker compose run --rm --no-deps -T web`) once
-that morning's 07:30 `mirror_landing` run has reached the journal copy
-(hourly); not before 04:00 on a Monday, so the first Monday job under
-`silver` is watched. **Exit 0 needs both halves.** The backup half runs the
-real goal methods both ways over a read-only in-memory copy and files every
-difference under its cause — but it reads DuckDB's Silver on both sides,
-and the flip reads Postgres', so a Postgres Silver missing or misclassifying
-orders would have read clean there (review of 7b-2). The Postgres half
-reads, as `ks_readonly` through `utm_reclassify_dryrun.py`'s door (never
-`KS_PG_DSN`), the verdict of the one comparison that sets the two Silvers
-against each other at one instant: the latest `mirror_landing` run's
-`reconcile_silver`, from Postgres' copy of the quality journal. Clean only
-when the copy is under 75 min old and not failing — unless chain 9 writes the
-journal in Postgres (`reads_postgres()`: its flag or its latch), when the run
-is read from the writer and the stood-down copy's frozen mark is no reason,
-as in chain 1's preflight — the run under 30 h (chain
-1's preflight limits, read from it), the run did not fail in
-`reconcile_silver`, `setup` or unparseably, it filed nothing against
-`silver.orders`, and neither switch that stands `reconcile_silver` down is
-set here — `KS_MIRROR_LANDING` off, or `KS_WRITE_WAREHOUSE` anything but
-`duckdb` — since it files nothing then. A backup whose
-`sync_metadata.warehouse_writer` reads `postgres` (switched, or a way back
-still owed its validated full tick) is refused: its Silver is frozen and the
-comparison stood down, so neither half could answer. Before the warehouse
-switch neither can hold, since `goals_bridge` is one of its preconditions;
-a re-flip after one is when they would. Exit 1 is a difference or Postgres Silver not proved,
-each named; 2 a refusal (no read-only login, one that can write, Postgres
-unreachable, a backup after the switch); `--backup-only` skips the Postgres half and exits 3 on a clean
-backup, never 0. What the verdict cannot see is a Postgres Silver that went
-wrong after that run, which is why it is the flip day's run. Rollback is unsetting the
-variable and `up -d web`, number-neutral by the same measurement, while the
-bridge exists. `goals_bridge` in step 13's readiness is **met only under
-`silver`** — DuckDB's orders freeze at the switch whoever owns them — and its
-detail names any write chain already owning a bridge table, which is when
-retail goals start diverging. The CI tripwire in
-`tests/unit/test_goals_off_duckdb_silver.py` stays until the bridge is
-deleted (7b-4, after the flip's soak); chains 3 and 5 wait for that. The
+**The flip** — `KS_GOALS_HISTORY=silver` with `KS_READ_GOALS=postgres` — was
+made on 2026-10-07 08:20 UTC, on the owner's yes, after
+`scripts/goals_semantics_dryrun.py` exited 0 on that day's backup: its backup
+half ran the real goal methods both ways over a read-only copy, and its
+Postgres half read, as `ks_readonly`, the latest `mirror_landing` run's
+`reconcile_silver` (DuckDB's Silver against Postgres' at one instant), since
+the backup half read DuckDB's Silver on both sides. A three-day soak followed
+(to 2026-10-10 08:20 UTC).
+
+**7b-4 — the bridge deleted, the variable retired. It merges only after the
+flip's soak has ended (2026-10-10 08:20 UTC)**: a merge deploys itself, and
+until then the way back is the bridge this deletes. On this build, unsetting
+the variable — the rollback the soak was run under — reads Silver with
+nothing to say so (`/api/health` shows `silver`, the canary is quiet), and
+setting `bridge` refuses every calculator read. (Once step 13 is in force,
+that rollback on the build before this one is itself step 13's way back,
+since `goals_bridge` is one of its preconditions there.) Every history read has
+one body, `{silver_orders}` through `_goals_run`; the bridge bodies,
+`_orders_sales_type_predicate`, `_bridge_rows`, `history_from_silver`,
+`SALES_TYPE_BRIDGE_TABLES` and `sales_type_bridge_owners` are gone.
+`KS_GOALS_HISTORY` is read only to refuse: **unset and `silver` both read
+Silver; any other value — `bridge` included — raises at every read of the
+calculators' history** (never at import, so web cannot crash-loop on it):
+the goal widget (`/goals/smart`), `/goals/seasonality`, `/goals/growth`,
+`/goals/weekly-patterns`, `/goals/forecast`, `POST /goals/recalculate` and
+the Monday job fail with nothing written. `GET /goals`, `/goals/history` and
+setting or resetting a goal never read that history — a recent window of
+Silver, `is_active_source` included — and answer as before;
+`test_goals_history_silver.py` reads every goal route off the app and holds
+it to one of the two lists. A value naming a history that no longer exists
+is a configuration nobody can satisfy; answering it from Silver in silence
+would hide that. `/api/health` publishes `goals_history {mode: silver |
+null, error}` and the canary pages `goals_history_mode_invalid`, CRITICAL
+like `write_chain_flag_invalid`; its lever, like the refusal, is to set the
+variable to `silver`.
+
+**Retired is not removable: keep production's `.env` line
+(`KS_GOALS_HISTORY=silver`) for as long as an image from before 7b-4 can be
+a rollback target.** Such an image reads unset as `bridge`. Rolled back to
+without the line, it counts the goals from DuckDB's orders and
+classification — frozen copies once chain 3 or 5 has latched, while the
+latch keeps the writes in Postgres — and, after step 13, its own
+`goals_bridge` is unmet, so the start runs as duckdb: the way back, a full
+DuckDB rebuild, a CRITICAL `warehouse_preconditions_unmet`, and the soak
+clock restarting. (An unlatched chain 3 or 5 is held on such an image
+whatever the line says: the bridge is a code constant there.)
+`deploy/step13_rehearsal.sh` keeps the line for the same reason. With the
+line there is no switch back to make: an image from before 7b-4 reads
+Silver under it too.
+
+What guarded the bridge went with it: step 13's `goals_bridge` precondition
+and its registry walk (so step 13's start asks no write chain its mode any
+more; chain 3's guard for an ask before the verdict stays), chains 3 and 5's
+own `goals_bridge`, the CI tripwire in `test_goals_off_duckdb_silver.py`, and
+the dry run, retired rather than reduced — with no bridge there is nothing to
+compare, and no flip left for it to gate. What guards Silver stays: the
+orders it selects, pinned to written-out ids on every branch of the CASE
+(`test_goals_history_silver.py`); every calculator — seasonality, YoY yearly
+and per month, the weekly weights and the cap — against numbers computed in
+Python from the fixture's rows, for every sales type
+(`test_goals_off_duckdb_silver.py`), which replaced the comparison with the
+bridge's bodies: that was the bodies' only independent answer, since the
+two-engine test runs one text on both engines (review of 7b-4: three
+mutations to the seasonality and monthly-YoY bodies passed every goal test
+until then); no goal read naming DuckDB's `orders`,
+`managers` or `manager_classifications`; the two engines answering alike to
+1e-6, with DuckDB's history refused at the statement and its Silver emptied
+(`tests/integration/test_goals_history_two_engines.py`); and step 13's
+`reader:KS_READ_GOALS` and `read_fallback_off`, which make the Silver
+Postgres'. Production's numbers do not move: under `KS_GOALS_HISTORY=silver`
+a before/after run of every calculator, the stored tables, the smart goal for
+four months, the suggested goals and the historical revenue — every sales
+type, on DuckDB and on Postgres Silver, 276 Postgres statements with their
+parameters — over one synthetic three-year store gave the same bytes on the
+commit before 7b-4 and after it, and again with the variable unset. The
 three goal tables' writer moving to Postgres is 7b-3's, below.
 
 ### Chain 7b-3: the goal and forecast tables' writer (off)
@@ -4824,7 +4858,8 @@ from its first branch. Weekly rows are sorted in Python: the residual goes to
 `max(...)`, which breaks ties by insertion order.
 
 **Held until its inputs are Postgres** (`unmet_precondition`, 6a's
-arrangement): `KS_GOALS_HISTORY=silver`, `KS_READ_GOALS=postgres` with a DSN,
+arrangement): `KS_GOALS_HISTORY` understood (unset or `silver` since 7b-4 —
+anything else refuses every history read), `KS_READ_GOALS=postgres` with a DSN,
 `KS_READ_FALLBACK=off` as configured at start, and `KS_READ_FORECAST_INPUT=
 postgres` (the training frame; on in production since 2026-09-16, so it
 costs nothing and stops a later rollback of that flag training on DuckDB Gold).
@@ -4841,13 +4876,6 @@ own constants plus 2 h 30 min, so a missed Monday or Thursday is in that
 morning's 07:00 run. **Training is twice weekly, not daily**; a flat limit
 would have to exceed the Thu→Mon gap.
 
-**The goals dry run** (`scripts/goals_semantics_dryrun.py`) pins the chain's
-two answers to DuckDB and makes its pool raise (`held_off_chain_7b3`): run as
-the web service under a latched chain it would store into production Postgres
-and latch from a one-off. Each wall is tested on its own — the pins under a
-latched chain and under a flagged one whose precondition holds, the pool by
-calling both writers inside the pins.
-
 **The way back.** Flagged and not yet latched: unset, `up -d web`, free.
 Latched: `scripts/chain_copy_back.py forecast` (specs derived, no sequence,
 no sync key; the stamps forgiven as above), then the flag, then
@@ -4856,8 +4884,8 @@ fix the *content* — they write wherever the chain writes — but only the
 copy-back releases a latch. The model artefact (`data/revenue_model.joblib`
 and its JSON siblings) is a file and does not move.
 
-**The flip**, after `KS_GOALS_HISTORY=silver` with `KS_READ_FALLBACK=off`
-live, one flag a day, outside Mon/Thu 03:20–04:40 Kyiv and ≥ 65 min after any
+**The flip**, after `KS_READ_FALLBACK=off` is live (the goal history is
+Silver's since 7b-4), one flag a day, outside Mon/Thu 03:20–04:40 Kyiv and ≥ 65 min after any
 write to these tables, before step 13: `/api/health` shows the chain
 `duckdb`/unlatched and `goals_history.mode` silver; record `/api/goals/smart`
 and `/api/revenue/forecast`; `docker compose stop web bot`; `chain_copy_back.py
@@ -5123,4 +5151,4 @@ GET /api/admin/resync/status/{job_id}
 
 ---
 
-*Last updated: 2026-10-08*
+*Last updated: 2026-10-09*

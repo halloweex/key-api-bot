@@ -68,13 +68,18 @@ KYIV = ZoneInfo("Europe/Kyiv")
 GOAL_TABLES = ("seasonal_indices", "growth_metrics", "weekly_patterns",
                "revenue_predictions", "revenue_goals")
 
-# The history semantics the calculators run under (`KS_GOALS_HISTORY`): the
-# DN-12 bridge, and Silver through the goal router (chain 7b-2).
-HISTORIES = ("bridge", "silver")
+# The two values of the retired `KS_GOALS_HISTORY` that read — unset and
+# `silver`, both Silver through the goal router since chain 7b-4 deleted the
+# DN-12 bridge. Any other value refuses every history read
+# (`tests/unit/test_goals_history_silver.py`).
+HISTORIES = (None, "silver")
 
 
-def _history(monkeypatch, mode: str) -> None:
-    monkeypatch.setenv("KS_GOALS_HISTORY", mode)
+def _history(monkeypatch, mode) -> None:
+    if mode is None:
+        monkeypatch.delenv("KS_GOALS_HISTORY", raising=False)
+    else:
+        monkeypatch.setenv("KS_GOALS_HISTORY", mode)
 
 
 def _fingerprint(conn) -> dict:
@@ -225,7 +230,7 @@ class TestNoGetWrites:
         monkeypatch.setattr(pg_forecast_write, "persist_goal_tables", _recorder)
         monkeypatch.setattr(pg_forecast_write, "store_predictions", _recorder)
         monkeypatch.setattr("core.pg_goals_read.fetch", _nothing)
-        _history(monkeypatch, "bridge")
+        _history(monkeypatch, None)
         chain_latch.latch(pg_forecast_write.CHAIN, pg_forecast_write.WRITE_ENV)
         assert pg_forecast_write.writes_postgres()
 
@@ -383,7 +388,7 @@ class TestTheWriterIsOneTransaction:
     async def test_a_failure_anywhere_leaves_every_table_as_it_was(
         self, store, statement, monkeypatch,
     ):
-        _history(monkeypatch, "bridge")
+        _history(monkeypatch, None)
         await _seed_history(store)
         await store.recalculate_goal_tables(include_weekly=True)
         # A week later, more orders: every stored number would move.

@@ -151,8 +151,8 @@ UNSWEPT_ROUTES = {
     "DELETE /api/goals/{period_type}",
     "POST /api/duckdb/sync-buyers",
     "POST /api/goals",
-    # Reads the order history through the goals router once
-    # KS_GOALS_HISTORY=silver (chain 7b-2), before its one write.
+    # Reads the order history through the goals router (Silver, the only
+    # history since chain 7b-4), before its one write.
     "POST /api/goals/recalculate",
     "POST /api/revenue/forecast/train",
     "POST /api/revenue/forecast/tune",
