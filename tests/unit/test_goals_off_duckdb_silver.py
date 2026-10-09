@@ -1,4 +1,4 @@
-"""The goal calculators stop reading DuckDB Silver (DN-12, a bridge).
+"""The goal calculators stop reading DuckDB Silver (DN-12), and read Silver.
 
 Seasonality, YoY, weekly patterns, the growth cap and the two history reads of
 `generate_smart_goals` narrowed `orders` through an EXISTS over DuckDB
@@ -7,32 +7,31 @@ every newer order; the next compaction empties it, the EXISTS matches nothing,
 and `calculate_yoy_growth` wrote its 0.10 placeholder over the measured rate —
 which the hourly full replace carried into Postgres.
 
-The replacement renders the one definition, `silver_sales_type_case`, over
-`orders o`. Four things are proved here:
+DN-12 replaced it with a bridge — `silver_sales_type_case` rendered over
+DuckDB `orders` — and chain 7b-2 with `{silver_orders}` through the goal
+router, whose engine is `KS_READ_GOALS`'. Chain 7b-4 deleted the bridge, and
+with it the tests that compared it against the Silver EXISTS, its compaction
+shape and the tripwire that held chains 3 and 5 while it was rendered. What
+stays here proves the Silver history and what never depended on the bridge:
 
-  * **equivalence** — on every branch of that CASE, it selects exactly the order
-    ids the Silver EXISTS selected while Silver was current, and the calculators
-    built on it answer exactly what they answered before;
-  * **compaction shape** — with `silver_orders` emptied, nothing moves;
+  * **the shared fixtures** — the equivalence fixture (one manager per branch
+    of the sales-type CASE) and the three-year history;
   * **empty history** — the placeholder never overwrites a stored rate;
-  * **the tripwire** — the bridge reads DuckDB `orders`, `managers` and
-    `manager_classifications`, so it is right only while those chains have not
-    moved. The test fails the moment one of them is registered as a write
-    chain while `goals.py` still renders the DuckDB case.
+  * **the forecast signal**, and **what the smart goal narrows to**, against
+    numbers written out here, in Python.
 
-The forecast signal's two-engine test lives with its siblings in
-`tests/integration/test_goals_two_engines.py`.
+`tests/unit/test_goals_history_silver.py` holds the Silver selection and the
+retired switch; the two-engine half is in
+`tests/integration/test_goals_history_two_engines.py`.
 """
 from __future__ import annotations
 
-import ast
 import asyncio
 import logging
 import statistics
 from collections import defaultdict
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -42,29 +41,13 @@ from unittest.mock import AsyncMock, patch
 from core.duckdb_constants import (
     B2B_MANAGER_ID,
     EXHIBITION_SOURCE_ID,
-    KNOWN_SALES_TYPES,
     RETAIL_MANAGER_IDS,
 )
 from core.duckdb_store import DuckDBStore
 from core.models import OrderStatus
 
-REPO = Path(__file__).resolve().parents[2]
-GOALS = REPO / "core" / "repositories" / "goals.py"
 KYIV = ZoneInfo("Europe/Kyiv")
 TIMEOUT_S = 60
-
-# The old filter, verbatim, kept here as the reference the new predicate is
-# measured against. It lived in `DuckDBStore._build_sales_type_filter`.
-def _silver_exists(sales_type: str):
-    if sales_type == "all":
-        return "1=1", []
-    return ("EXISTS (SELECT 1 FROM silver_orders sv "
-            "WHERE sv.id = o.id AND sv.sales_type = ?)", [sales_type])
-
-
-def _new(sales_type: str):
-    from core.repositories.goals import _orders_sales_type_predicate
-    return _orders_sales_type_predicate(sales_type)
 
 
 # ─── The equivalence fixture ────────────────────────────────────────────────
@@ -173,12 +156,6 @@ async def _seed_equivalence(store, scenario: str) -> None:
     await store.refresh_warehouse_layers(trigger="manual")
 
 
-def _ids(conn, predicate):
-    clause, params = predicate
-    return {r[0] for r in conn.execute(
-        f"SELECT o.id FROM orders o WHERE {clause}", params).fetchall()}
-
-
 @pytest_asyncio.fixture
 async def store(tmp_path):
     s = DuckDBStore(db_path=tmp_path / "goals.duckdb")
@@ -187,34 +164,6 @@ async def store(tmp_path):
         yield s
     finally:
         await s.close()
-
-
-class TestTheNewPredicateSelectsWhatSilverSelected:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("scenario", sorted(EXPECTED))
-    async def test_every_sales_type_on_every_branch(self, store, scenario):
-        await _seed_equivalence(store, scenario)
-        async with store.connection() as conn:
-            silver_rows = conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0]
-            assert silver_rows == len(ORDERS), "Silver was not built — nothing compared"
-            for sales_type in (*KNOWN_SALES_TYPES, "all"):
-                old = _ids(conn, _silver_exists(sales_type))
-                new = _ids(conn, _new(sales_type))
-                assert new == old, (scenario, sales_type, sorted(new ^ old))
-                expected = (ALL_IDS if sales_type == "all"
-                            else EXPECTED[scenario][sales_type])
-                assert new == expected, (scenario, sales_type, sorted(new ^ expected))
-
-    @pytest.mark.asyncio
-    async def test_the_partition_is_whole(self, store):
-        """Every order lands in exactly one sales_type, so no branch is empty
-        by accident and the four sets above cannot overlap."""
-        await _seed_equivalence(store, "classified")
-        async with store.connection() as conn:
-            seen = [_ids(conn, _new(t)) for t in KNOWN_SALES_TYPES]
-        assert set().union(*seen) == ALL_IDS
-        assert sum(len(s) for s in seen) == len(ALL_IDS)
-        assert all(seen), "a sales type selected nothing — the fixture lost a branch"
 
 
 class TestTheSummaryFallbackReadsTheRowsOwnSalesType:
@@ -337,59 +286,6 @@ async def _smart(store, sales_type):
         store.recalculate_goal_tables(include_weekly=True), TIMEOUT_S)
     return _without_clock(await asyncio.wait_for(
         store.generate_smart_goals(2026, 10, sales_type), TIMEOUT_S))
-
-
-class TestTheCalculatorsAnswerWhatTheyAnsweredBefore:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("sales_type", ["retail", "b2b"])
-    async def test_through_the_new_predicate_and_through_the_silver_exists(
-        self, store, sales_type,
-    ):
-        """OD-14: the bridge changes where the answer is read, never the answer.
-        The same calculators, once through the old EXISTS and once through the
-        new predicate, over a current Silver."""
-        await _seed_history(store)
-        new = await _calculators(store, sales_type)
-        with patch("core.repositories.goals._orders_sales_type_predicate",
-                   _silver_exists):
-            old = await _calculators(store, sales_type)
-        assert new == old
-        seasonality, yoy, _weekly, _caps = new
-        assert len(seasonality) == 12, "the fixture no longer reaches every month"
-        assert yoy["sample_size"] >= 1, "no pair of full years — YoY compared nothing"
-
-
-class TestCompactionShape:
-    """`silver_orders` emptied — what a compaction leaves after step 13."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
-    async def test_nothing_moves_when_silver_is_empty(self, store, sales_type):
-        await _seed_history(store)
-        before = await _calculators(store, sales_type)
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM silver_orders")
-        after = await _calculators(store, sales_type)
-        assert after == before
-
-        seasonality, yoy, weekly, _caps = after
-        assert len(seasonality) == 12
-        assert yoy["sample_size"] >= 1 and yoy["overall_yoy"] != 0.10
-        assert all(len(weekly[m]) == 5 for m in range(1, 13))
-
-    @pytest.mark.asyncio
-    async def test_the_smart_goal_does_not_move_either(self, store):
-        """`generate_smart_goals` read the same filter at two more sites — the
-        growth cap and last year's month — and persists the three tables it
-        recomputes. Gold is left alone: only Silver is emptied here."""
-        await _seed_history(store)
-        before = await _smart(store, "retail")
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM silver_orders")
-        after = await _smart(store, "retail")
-        assert after == before
-        assert before["monthly"]["lastYearRevenue"] > 0
-        assert before["monthly"]["recent3MonthAvg"] > 0
 
 
 class TestAnEmptyHistoryLeavesTheStoredRateAlone:
@@ -567,12 +463,10 @@ class TestTheForecastSignal:
 
 # ─── What the smart goal narrows to, in written-out numbers ─────────────────
 #
-# `TestTheCalculatorsAnswerWhatTheyAnsweredBefore` compares the old filter with
-# the new one by patching the predicate, and `TestCompactionShape` compares a
-# store with itself before and after — so a site that stops calling the
-# predicate at all loses its filter on both sides and passes both (DN-12
-# review, mutations x1, x2 and cap). These expect numbers computed here, in
-# Python, from the rows as `_history_rows` wrote them.
+# A comparison of one history against another passes when both lose a filter
+# — DN-12's review found three sites that did (mutations x1, x2 and cap). These
+# expect numbers computed here, in Python, from the rows as `_history_rows`
+# wrote them, so a Silver body that stops narrowing fails on its own.
 
 RETURN_STATUSES = frozenset(int(s) for s in OrderStatus.return_statuses())
 
@@ -642,14 +536,12 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
             "a clamped cap cannot show a filter being lost")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("history", ["bridge", "silver"])
     @pytest.mark.parametrize("sales_type", ["retail", "b2b"])
     async def test_last_year_the_recent_months_and_the_cap(
-        self, store, monkeypatch, sales_type, history,
+        self, store, sales_type,
     ):
-        """Under both histories (chain 7b-2): numbers written out here, so a
-        Silver body that lost its filter fails as a bridge one did."""
-        monkeypatch.setenv("KS_GOALS_HISTORY", history)
+        """Numbers written out here, so a Silver body that lost its filter
+        fails as a bridge one did (mutations x1, x2 and cap)."""
         await _seed_history(store)
         monthly = (await _smart(store, sales_type))["monthly"]
         year, month = self.TARGET
@@ -661,168 +553,11 @@ class TestTheSmartGoalNarrowsToItsOwnSalesType:
             _expected_cap(sales_type, month), abs=1e-4)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("history", ["bridge", "silver"])
-    async def test_the_cap_for_every_month(self, store, monkeypatch, history):
+    async def test_the_cap_for_every_month(self, store):
         """December has three years in the fixture and so two pairs — the one
         month where the standard deviation is not zero."""
-        monkeypatch.setenv("KS_GOALS_HISTORY", history)
         await _seed_history(store)
         caps = [await store._dynamic_growth_cap(m, "retail")
                 for m in range(1, 13)]
         assert caps == pytest.approx(
             [_expected_cap("retail", m) for m in range(1, 13)], rel=1e-9)
-
-
-# ─── The tripwire ───────────────────────────────────────────────────────────
-#
-# The bridge reads three DuckDB tables. Once any of them changes hands, DuckDB's
-# copy freezes, and retail goals silently diverge from Postgres Silver at the
-# first reclassification (critique 8). Chain 5 (managers, classifications) and
-# chain 3 (orders) must therefore not MOVE before the chain 7b port — or before
-# this predicate is re-pointed at Postgres — and this is what enforces it.
-#
-# Moving, not registering. Chain 3 registered on 2026-10-01 with its flag off:
-# its writes still go to DuckDB, so the bridge reads what it always read. What
-# must hold is that no such chain can move while this file renders the DuckDB
-# case, so every chain declaring a bridge table must name the bridge in its own
-# `unmet_precondition` — an unmet precondition holds an unlatched chain on
-# DuckDB whatever its flag says (`core.write_chains._chain_state`).
-
-PREDICATE_TABLES = frozenset(
-    {"bronze.orders", "bronze.managers", "app.manager_classifications"})
-
-
-def _renders_duckdb_case(source: str) -> list[int]:
-    """Lines calling `silver_sales_type_case` for DuckDB — explicitly, by
-    keyword, or through the default, which is DuckDB."""
-    lines = []
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name != "silver_sales_type_case":
-            continue
-        args = list(node.args) + [k.value for k in node.keywords if k.arg == "dialect"]
-        if not args or (isinstance(args[0], ast.Name) and args[0].id == "DUCKDB") \
-                or (isinstance(args[0], ast.Constant) and args[0].value is None):
-            lines.append(node.lineno)
-    return lines
-
-
-def _declared_chain_tables() -> dict[str, frozenset]:
-    """`{module: CHAIN_TABLES}` for every chain — registered, and also any
-    module under `core/` that declares the name, parsed rather than imported,
-    so a chain that forgot to register cannot slip past."""
-    from core.write_chains import WRITE_CHAINS, chain_name
-
-    out = {chain_name(c): frozenset(c.CHAIN_TABLES) for c in WRITE_CHAINS}
-    for path in (REPO / "core").rglob("*.py"):
-        for node in ast.parse(path.read_text(encoding="utf-8")).body:
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                if any(isinstance(t, ast.Name) and t.id == "CHAIN_TABLES" for t in targets) \
-                        and node.value is not None:
-                    tables = {n.value for n in ast.walk(node.value)
-                              if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-                    out.setdefault(path.stem, frozenset(tables))
-    return out
-
-
-def _tripped(chains: dict[str, frozenset], goals_source: str) -> dict[str, list[str]]:
-    rendered = _renders_duckdb_case(goals_source)
-    if not rendered:
-        return {}
-    return {name: sorted(tables & PREDICATE_TABLES)
-            for name, tables in chains.items() if tables & PREDICATE_TABLES}
-
-
-def _holds_itself_back(module_name: str) -> bool:
-    """Whether a chain declaring a bridge table names the bridge among its own
-    reasons not to move. Asked of the registered module, with no flag set —
-    the reason must be there whatever else is or is not met."""
-    from core.write_chains import WRITE_CHAINS, chain_name
-
-    chain = next((c for c in WRITE_CHAINS if chain_name(c) == module_name), None)
-    if chain is None:
-        return False
-    check = getattr(chain, "unmet_precondition", None)
-    return bool(check) and "goals_bridge" in (check() or "")
-
-
-class TestTheTripwire:
-    def test_no_chain_owning_what_the_bridge_reads_can_move(self):
-        """Mutation: drop `_goals_bridge_unmet` from chain 3's preconditions —
-        its flag would then move the orders while the calculators read them
-        out of a DuckDB that stopped receiving them."""
-        chains = _declared_chain_tables()
-        assert chains, "no write chain found — the walk is not looking"
-        tripped = _tripped(chains, GOALS.read_text(encoding="utf-8"))
-        free = sorted(name for name in tripped if not _holds_itself_back(name))
-        assert not free, (
-            f"write chain(s) {free} own tables the goal calculators still "
-            f"read from DuckDB (core/repositories/goals.py renders "
-            f"silver_sales_type_case(DUCKDB) at lines "
-            f"{_renders_duckdb_case(GOALS.read_text(encoding='utf-8'))}) and do "
-            f"not hold themselves on DuckDB while it does. Once they move, "
-            f"DuckDB's copy freezes and retail goals diverge from Postgres "
-            f"Silver at the first reclassification. Port chain 7b, re-point "
-            f"the predicate at Postgres, or name `goals_bridge` in the chain's "
-            f"unmet_precondition.")
-
-    def test_today_the_owners_are_chains_3_and_5_and_both_hold_themselves_back(self):
-        """Not vacuous: the walk sees both declarations and both holds, and
-        nothing else. Chain 3 owns the orders the bridge counts and chain 5
-        the classification it decides retail by; a third owner — or either
-        one losing a table from its declaration — fails here first."""
-        tripped = _tripped(_declared_chain_tables(), GOALS.read_text(encoding="utf-8"))
-        assert tripped == {
-            "pg_orders_write": ["bronze.orders"],
-            "pg_managers_write": ["app.manager_classifications", "bronze.managers"],
-        }
-        assert _holds_itself_back("pg_orders_write")
-        assert _holds_itself_back("pg_managers_write")
-
-    def test_chain_5_holds_itself_back(self):
-        """Not vacuous: the walk sees chain 5's declaration and its hold.
-        Mutation: drop `goals_bridge` from `pg_managers_write`'s preconditions
-        — its flag would then move the classification while the calculators
-        read it out of a DuckDB that stopped receiving it."""
-        tripped = _tripped(_declared_chain_tables(), GOALS.read_text(encoding="utf-8"))
-        assert tripped["pg_managers_write"] == [
-            "app.manager_classifications", "bronze.managers"]
-        assert _holds_itself_back("pg_managers_write")
-
-    def test_an_unregistered_declaration_cannot_hold_itself_back(self):
-        """A module that declares a bridge table and never registered has no
-        registry to hold it — the walk parses `core/`, and this is why."""
-        assert not _holds_itself_back("pg_nobody_write")
-
-    def test_the_bridge_is_what_it_watches_today(self):
-        """Not vacuous: the detector sees today's rendering. When chain 7b
-        lands and this fails, delete the tripwire with the bridge."""
-        assert _renders_duckdb_case(GOALS.read_text(encoding="utf-8"))
-
-    @pytest.mark.parametrize("table", sorted(PREDICATE_TABLES))
-    def test_it_trips_on_each_table(self, table):
-        source = "silver_sales_type_case(DUCKDB)"
-        assert _tripped({"chain_x": frozenset({"app.other", table})}, source) \
-            == {"chain_x": [table]}
-
-    @pytest.mark.parametrize("call", [
-        "silver_sales_type_case(DUCKDB)",
-        "silver_sales_type_case()",
-        "silver_sales_type_case(dialect=DUCKDB)",
-        "store.silver_sales_type_case(None)",
-    ])
-    def test_it_sees_every_spelling_of_duckdb(self, call):
-        assert _renders_duckdb_case(call) == [1]
-
-    def test_a_postgres_rendering_does_not_trip(self):
-        chains = {"chain_x": frozenset({"bronze.orders"})}
-        assert _tripped(chains, "silver_sales_type_case(POSTGRES)") == {}
-        assert _tripped(chains, "") == {}
-
-    def test_a_chain_elsewhere_does_not_trip(self):
-        chains = {"chain_x": frozenset({"app.manual_expenses", "bronze.offers"})}
-        assert _tripped(chains, "silver_sales_type_case(DUCKDB)") == {}

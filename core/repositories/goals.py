@@ -7,8 +7,7 @@ from collections import defaultdict
 from datetime import datetime, date, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
-from core.duckdb_constants import DEFAULT_TZ, _date_in_kyiv
-from core.models import OrderStatus
+from core.duckdb_constants import DEFAULT_TZ
 from core import read_fallback
 
 logger = logging.getLogger(__name__)
@@ -143,57 +142,29 @@ _SHARED_GOAL_TABLES_SQL = """
 
 # ─── Which orders a goal calculator counts ──────────────────────────────────
 #
-# A BRIDGE, and it expires (DN-12, critique 8 of the stage-4 plan).
+# Silver's, and only Silver's (chain 7b-4).
 #
-# The calculators below — seasonality, YoY, weekly patterns, the growth cap and
-# the two history reads of `generate_smart_goals` — used to narrow `orders` with
-# an EXISTS over DuckDB `silver_orders`. Silver stops moving at step 13, so
-# from then on that EXISTS drops every newer order and seasonality and YoY skew
-# a little further each week; the next compaction empties it, the EXISTS
-# matches nothing, and `calculate_yoy_growth` persisted its 0.10 fallback over
-# the measured value — which the hourly replace then carried into Postgres.
-#
-# So the answer Silver would have stored is computed here instead, from the one
-# definition — `silver_sales_type_case` — rendered over `orders o`. It selects
-# exactly the rows the EXISTS did while Silver was current
-# (`tests/unit/test_goals_off_duckdb_silver.py` proves it on every branch).
-#
-# It reads DuckDB `manager_classifications` and `managers`, so it is right only
-# while DuckDB still holds the classification (chain 5) and the orders (chain
-# 3). The chain 7b port replaces it: `KS_GOALS_HISTORY=silver` reads the same
-# history from Silver (below), and the bridge is what `bridge` — the default,
-# today's numbers — still runs. Until the bridge is deleted (7b-4) a chain
-# owning `bronze.orders`, `bronze.managers` or `app.manager_classifications`
-# must not MOVE: a tripwire in that same test fails unless every such chain
-# holds itself on DuckDB while this file still renders the DuckDB case (chain
-# 3's `goals_bridge` precondition is the first). Registering one is not moving
-# it — with its flag off it writes DuckDB as before, and the bridge reads what
-# it always read.
-#
-# The step-13 readiness (`core/warehouse_cutover.py`, DN-28) asks the run-time
-# half: `goals_bridge` is met only once `KS_GOALS_HISTORY` names `silver`, and
-# its detail names any chain that already owns one of the three tables
-# (`sales_type_bridge_owners`) — retail goals diverging from that moment.
-# Delete both with the bridge.
+# From DN-12 to chain 7b-4 the calculators below read a BRIDGE: DuckDB
+# `orders` narrowed by `silver_sales_type_case` rendered over DuckDB's
+# `managers` and `manager_classifications` — right only while DuckDB held all
+# three, and step 13 freezes them. Chain 7b-2 added the Silver history beside
+# it under `KS_GOALS_HISTORY`; production read Silver from 2026-10-07 08:20
+# UTC, after a dry run that found 0 differences; 7b-4 deleted the bridge.
+# `KS_GOALS_HISTORY` is retired: unset and `silver` both mean Silver, and any
+# other value — `bridge` included — refuses every history read
+# (`core/pg_goals_read.py`), so a value naming the deleted history is never
+# answered from Silver in silence.
 
-# The tables the bridge reads out of DuckDB, by the names the write chains
-# declare them under.
+# The tables the deleted bridge read out of DuckDB. Chains 3 and 5 still ask
+# for this name in their `goals_bridge` preconditions; it goes with them.
 SALES_TYPE_BRIDGE_TABLES = frozenset(
     {"bronze.orders", "bronze.managers", "app.manager_classifications"})
 
 
 def sales_type_bridge_owners() -> Dict[str, Tuple[str, ...]]:
-    """`{chain: tables}` for every registered write chain that has MOVED a
-    table the bridge reads from DuckDB — writes it to Postgres, is latched, or
-    has a flag nobody can read (`write_chains`' stood-down rule). Empty is the
-    tripwire green.
-
-    Moved, not declared: a registered chain whose writes still go to DuckDB
-    leaves the bridge reading what it always read. Chain 3 registered on
-    2026-10-01 with its flag off, and asked of the declaration this would have
-    failed step 13's `goals_bridge` at the next start — a full DuckDB rebuild
-    owed to a chain that moved nothing. Never raises; a chain whose state
-    cannot be read counts as moved, the louder answer."""
+    """`{chain: tables}` for every registered write chain that has moved a
+    table in `SALES_TYPE_BRIDGE_TABLES`. Nothing reads it but chain 5's
+    tests; it goes with chains 3 and 5's `goals_bridge`. Never raises."""
     from core.write_chains import WRITE_CHAINS, _chain_state, chain_name
 
     owners: Dict[str, Tuple[str, ...]] = {}
@@ -210,41 +181,20 @@ def sales_type_bridge_owners() -> Dict[str, Tuple[str, ...]]:
     return owners
 
 
-def _orders_sales_type_predicate(sales_type: str) -> tuple[str, List[Any]]:
-    """`(clause, params)` selecting one `sales_type` over `orders o`.
-
-    `'all'` is no predicate at all. An unknown value raises, as the Silver
-    filter did: it used to fall through an else and quietly mean retail.
-    """
-    from core.duckdb_constants import KNOWN_SALES_TYPES
-    from core.duckdb_store import silver_sales_type_case
-    from core.sql_dialect import DUCKDB
-
-    if sales_type == "all":
-        return "1=1", []
-    if sales_type not in KNOWN_SALES_TYPES:
-        raise ValueError(
-            f"unknown sales_type {sales_type!r}; expected one of "
-            f"{', '.join(KNOWN_SALES_TYPES)} or 'all'"
-        )
-    return f"({silver_sales_type_case(DUCKDB)}) = ?", [sales_type]
-
-
-# ─── The same history, from Silver (chain 7b-2, `KS_GOALS_HISTORY=silver`) ──
+# ─── The history, from Silver (chain 7b-2; the only one since 7b-4) ─────────
 #
-# What replaces the bridge. Every calculator reads `{silver_orders}` through
-# `_goals_run`, so the engine is `KS_READ_GOALS`' — Postgres Silver keeps
-# deriving after step 13, from whichever store holds the classification — and
-# a read DuckDB answers is counted (DN-20a), or refused under
-# `KS_READ_FALLBACK=off` (DN-20b). Nothing below names DuckDB's `orders`,
-# `managers` or `manager_classifications`.
+# Every calculator reads `{silver_orders}` through `_goals_run`, so the engine
+# is `KS_READ_GOALS`' — Postgres Silver keeps deriving after step 13, from
+# whichever store holds the classification — and a read DuckDB answers is
+# counted (DN-20a), or refused under `KS_READ_FALLBACK=off` (DN-20b). Nothing
+# below names DuckDB's `orders`, `managers` or `manager_classifications`.
 #
-# Silver's columns select what the bridge selects: `is_return` (KeyCRM's status
-# group first, the status list for rows synced before it) for the status list,
-# `order_date` for the per-row Kyiv date, `sales_type` for the CASE rendered
-# over `orders`. Measured on the 2026-08-31 production copy: 0 differing orders
-# of 46 961, for every sales type, and every calculator output and every smart
-# goal identical, on DuckDB and on Postgres.
+# Silver's columns select what the deleted bridge selected: `is_return`
+# (KeyCRM's status group first, the status list for rows synced before it) for
+# the status list, `order_date` for the per-row Kyiv date, `sales_type` for the
+# CASE the bridge rendered over `orders`. Measured on the 2026-08-31 production
+# copy: 0 differing orders of 46 961, for every sales type, and every
+# calculator output and every smart goal identical, on DuckDB and on Postgres.
 #
 # **`is_active_source` is deliberately absent** (OQ-1, the owner's question).
 # Every dashboard read carries it; a growth baseline must not. Source 3 is the
@@ -253,7 +203,7 @@ def _orders_sales_type_predicate(sales_type: str) -> tuple[str, List[Any]]:
 # order on both. Dropping them shrinks 2024: retail YoY moves from 0.50 to
 # 0.82, five monthly caps hit the 0.50 ceiling, and next month's retail goal
 # moves from ₴4.0M to ₴4.2M. The bridge never filtered on source, so leaving it
-# out is what keeps the numbers. A test pins a source-3 order as counted.
+# out is what kept the numbers. A test pins a source-3 order as counted.
 #
 # `{where}` is `_silver_history_where`'s, and every date bound is a parameter
 # computed in Python from the Kyiv clock — never `CURRENT_DATE`, which the two
@@ -325,7 +275,8 @@ _SILVER_MONTHLY_YOY_SQL = """
 """
 
 # `growth_metrics.period_start`/`period_end`: the first and last order date of
-# the whole history, every sales type and every status — the bridge's question.
+# the whole history, every sales type and every status — the question the
+# bridge asked of `orders`, asked of Silver.
 _SILVER_BOUNDS_SQL = """
     SELECT MIN(s.order_date), MAX(s.order_date) FROM {silver_orders} s
 """
@@ -414,7 +365,8 @@ _SILVER_RECENT_MONTHS_SQL = """
 def _silver_history_where(sales_type: str) -> tuple[str, List[Any]]:
     """`(clause, params)` over `{silver_orders} s`: not a return, and one
     `sales_type` unless `'all'`. No `is_active_source` — see above. An unknown
-    sales_type raises, as the bridge's predicate does."""
+    sales_type raises: it used to fall through an else and quietly mean
+    retail."""
     from core.duckdb_constants import KNOWN_SALES_TYPES
 
     if sales_type == "all":
@@ -427,12 +379,14 @@ def _silver_history_where(sales_type: str) -> tuple[str, List[Any]]:
     return "NOT s.is_return AND s.sales_type = ?", [sales_type]
 
 
-def _history_from_silver() -> bool:
-    """`KS_GOALS_HISTORY` — asked at every history read, and it raises on a
-    value it does not know (`core/pg_goals_read.py`)."""
+def _refuse_a_retired_history() -> None:
+    """`KS_GOALS_HISTORY`, asked at every history read: unset or `silver`
+    reads Silver, and anything else raises — `bridge` included, since chain
+    7b-4 deleted it (`core/pg_goals_read.py`). Asked first, so a refused value
+    reads nothing and writes nothing."""
     from core import pg_goals_read
 
-    return pg_goals_read.history_from_silver()
+    pg_goals_read.history_mode()
 
 
 def _first_of_next_month(d: date) -> date:
@@ -965,16 +919,11 @@ class GoalsMixin:
     # autocommitted upserts, so a crash or a refused read between them left
     # this week's indices beside last week's `yoy_growth` and `growth_metrics`.
     #
-    # Every history read below has two bodies, chosen at the read by
-    # `KS_GOALS_HISTORY` (chain 7b-2): the DN-12 bridge on the store's own
-    # connection (`bridge`, the default), or Silver through `_goals_run`
-    # (`silver`). The two branches sit side by side in each method so the
-    # body each one hands its reader is a module constant a walk can read.
-
-    async def _bridge_rows(self, sql: str, params=()) -> List[Tuple]:
-        """One read of the DN-12 bridge, on the store's own connection."""
-        async with self.connection() as conn:
-            return conn.execute(sql, list(params)).fetchall()
+    # Every history read below reads Silver through `_goals_run`, after
+    # `_refuse_a_retired_history()`; the body each hands its reader is a
+    # module constant a walk can read. Until chain 7b-4 each had a second
+    # body — the DN-12 bridge over DuckDB `orders` — chosen by
+    # `KS_GOALS_HISTORY`.
 
     async def calculate_seasonality_indices(
         self, sales_type: str = "retail",
@@ -991,56 +940,10 @@ class GoalsMixin:
         Returns:
             Dictionary mapping month (1-12) to seasonality data
         """
-        if _history_from_silver():
-            where, params = _silver_history_where(sales_type)
-            return _seasonality_answer(await self._goals_run(
-                _SILVER_SEASONALITY_SQL.replace("{where}", where), params))
-
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
-
-        # Get monthly revenue totals for all available history (only complete months with 25+ days)
-        sql = f"""
-            WITH monthly_data AS (
-                SELECT
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                    SUM(o.grand_total) as revenue,
-                    COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
-                FROM orders o
-                WHERE o.status_id NOT IN {return_statuses}
-                    AND {sales_filter}
-                GROUP BY
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
-                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
-                HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 20
-            ),
-            monthly_stats AS (
-                SELECT
-                    month,
-                    AVG(revenue) as avg_revenue,
-                    MIN(revenue) as min_revenue,
-                    MAX(revenue) as max_revenue,
-                    COUNT(*) as sample_size,
-                    STDDEV(revenue) as std_dev
-                FROM monthly_data
-                GROUP BY month
-            ),
-            overall_avg AS (
-                SELECT AVG(avg_revenue) as grand_avg FROM monthly_stats
-            )
-            SELECT
-                ms.month,
-                ms.avg_revenue,
-                ms.min_revenue,
-                ms.max_revenue,
-                ms.sample_size,
-                ms.std_dev,
-                ms.avg_revenue / oa.grand_avg as seasonality_index
-            FROM monthly_stats ms, overall_avg oa
-            ORDER BY ms.month
-        """
-        return _seasonality_answer(await self._bridge_rows(sql, sales_params))
+        _refuse_a_retired_history()
+        where, params = _silver_history_where(sales_type)
+        return _seasonality_answer(await self._goals_run(
+            _SILVER_SEASONALITY_SQL.replace("{where}", where), params))
 
     async def calculate_yoy_growth(self, sales_type: str = "retail") -> Dict[str, Any]:
         """Year-over-year growth, overall and per month. Reads only.
@@ -1068,72 +971,19 @@ class GoalsMixin:
         # would have failed from 2026-11-02, and `GET /goals/growth` with it.
         this_year = date(datetime.now(DEFAULT_TZ).year, 1, 1)
 
-        if _history_from_silver():
-            where, params = _silver_history_where(sales_type)
-            yearly = await self._goals_run(
-                _SILVER_YEARLY_SQL.replace("{where}", where), params + [this_year])
-            monthly = await self._goals_run(
-                _SILVER_MONTHLY_YOY_SQL.replace("{where}", where), params)
-            return _yoy_answer(yearly, monthly)
-
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
-        yearly_sql = f"""
-            WITH yearly_data AS (
-                SELECT
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                    SUM(o.grand_total) as revenue,
-                    COUNT(DISTINCT EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})) as months_active
-                FROM orders o
-                WHERE o.status_id NOT IN {return_statuses}
-                    AND {sales_filter}
-                    AND {_date_in_kyiv('o.ordered_at')} < ?
-                GROUP BY EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')})
-            )
-            SELECT year, revenue FROM yearly_data
-            WHERE months_active >= 11
-            ORDER BY year
-        """
-        yearly_results = await self._bridge_rows(yearly_sql, sales_params + [this_year])
-
-        # Return per-year-pair rows so we can apply recency weights in Python
-        monthly_yoy_sql = f"""
-            WITH monthly_by_year AS (
-                SELECT
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                    SUM(o.grand_total) as revenue,
-                    COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
-                FROM orders o
-                WHERE o.status_id NOT IN {return_statuses}
-                    AND {sales_filter}
-                GROUP BY
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
-                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
-                HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
-            )
-            SELECT
-                curr.month,
-                curr.year as curr_year,
-                (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0) as yoy_growth
-            FROM monthly_by_year curr
-            JOIN monthly_by_year prev
-                ON curr.month = prev.month
-                AND curr.year = prev.year + 1
-            ORDER BY curr.month, curr.year
-        """
-        monthly_yoy_results = await self._bridge_rows(monthly_yoy_sql, sales_params)
-        return _yoy_answer(yearly_results, monthly_yoy_results)
+        _refuse_a_retired_history()
+        where, params = _silver_history_where(sales_type)
+        yearly = await self._goals_run(
+            _SILVER_YEARLY_SQL.replace("{where}", where), params + [this_year])
+        monthly = await self._goals_run(
+            _SILVER_MONTHLY_YOY_SQL.replace("{where}", where), params)
+        return _yoy_answer(yearly, monthly)
 
     async def _history_bounds(self) -> Tuple[Optional[date], Optional[date]]:
         """The first and last Kyiv order date anywhere in the history —
         `growth_metrics.period_start`/`period_end`."""
-        if _history_from_silver():
-            rows = await self._goals_run(_SILVER_BOUNDS_SQL)
-            return (rows[0][0], rows[0][1]) if rows else (None, None)
-        rows = await self._bridge_rows(
-            f"SELECT MIN({_date_in_kyiv('ordered_at')}), "
-            f"MAX({_date_in_kyiv('ordered_at')}) FROM orders")
+        _refuse_a_retired_history()
+        rows = await self._goals_run(_SILVER_BOUNDS_SQL)
         return (rows[0][0], rows[0][1]) if rows else (None, None)
 
     async def calculate_weekly_patterns(
@@ -1156,52 +1006,10 @@ class GoalsMixin:
     async def _weekly_patterns(self, sales_type: str):
         """`(patterns, rows)` — `rows` are `[month, week, weight, sample_size]`
         as stored: the measured weeks only, the weight unrounded."""
-        if _history_from_silver():
-            where, params = _silver_history_where(sales_type)
-            return _weekly_answer(await self._goals_run(
-                _SILVER_WEEKLY_SQL.replace("{where}", where), params))
-
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
-
-        # Calculate weekly revenue within each month instance
-        sql = f"""
-            WITH weekly_data AS (
-                SELECT
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                    -- Week of month: 1-5 based on day of month
-                    LEAST(5, CEIL(EXTRACT(DAY FROM {_date_in_kyiv('o.ordered_at')}) / 7.0)::int) as week_of_month,
-                    SUM(o.grand_total) as revenue
-                FROM orders o
-                WHERE o.status_id NOT IN {return_statuses}
-                    AND {sales_filter}
-                GROUP BY
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
-                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}),
-                    LEAST(5, CEIL(EXTRACT(DAY FROM {_date_in_kyiv('o.ordered_at')}) / 7.0)::int)
-            ),
-            monthly_totals AS (
-                SELECT year, month, SUM(revenue) as month_total
-                FROM weekly_data
-                GROUP BY year, month
-            ),
-            weekly_weights AS (
-                SELECT
-                    wd.month,
-                    wd.week_of_month,
-                    AVG(wd.revenue / NULLIF(mt.month_total, 0)) as avg_weight,
-                    COUNT(*) as sample_size
-                FROM weekly_data wd
-                JOIN monthly_totals mt ON wd.year = mt.year AND wd.month = mt.month
-                GROUP BY wd.month, wd.week_of_month
-            )
-            SELECT month, week_of_month, avg_weight, sample_size
-            FROM weekly_weights
-            ORDER BY month, week_of_month
-        """
-        results = await self._bridge_rows(sql, sales_params)
-        return _weekly_answer(results)
+        _refuse_a_retired_history()
+        where, params = _silver_history_where(sales_type)
+        return _weekly_answer(await self._goals_run(
+            _SILVER_WEEKLY_SQL.replace("{where}", where), params))
 
     async def _compute_goal_tables(self, *, include_weekly: bool) -> Dict[str, Any]:
         """Every number the shared tables will hold, read and computed, and
@@ -1407,72 +1215,28 @@ class GoalsMixin:
         Falls back to 0.35 if insufficient data.
 
         **Called without the store lock**, like `_get_ml_forecast_total`: it
-        reads on a connection of its own (and, under chain 7b's Silver
-        history, through `_goals_run`, which takes the lock itself on the
-        DuckDB path), and that lock is not reentrant — so
-        `generate_smart_goals` asks for it before it opens its own. It used to
-        take that connection as an argument.
+        reads through `_goals_run`, which takes the lock itself on the DuckDB
+        path, and that lock is not reentrant — so `generate_smart_goals` asks
+        for it before it opens its own. It used to take that connection as an
+        argument.
         """
-        if _history_from_silver():
-            where, params = _silver_history_where(sales_type)
-            rows = await self._goals_run(
-                _SILVER_GROWTH_CAP_SQL.replace("{where}", where),
-                [target_month] + params)
-            return _growth_cap(rows[0] if rows else None)
-
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
-
-        sql = f"""
-            WITH monthly_by_year AS (
-                SELECT
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                    SUM(o.grand_total) as revenue,
-                    COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
-                FROM orders o
-                WHERE EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) = ?
-                    AND o.status_id NOT IN {return_statuses}
-                    AND {sales_filter}
-                GROUP BY EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')})
-                HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
-            ),
-            yoy_pairs AS (
-                SELECT
-                    (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0) as yoy
-                FROM monthly_by_year curr
-                JOIN monthly_by_year prev ON curr.year = prev.year + 1
-            )
-            SELECT AVG(yoy) as avg_yoy, STDDEV(yoy) as std_yoy, COUNT(*) as cnt
-            FROM yoy_pairs
-        """
-        rows = await self._bridge_rows(sql, [target_month] + sales_params)
+        _refuse_a_retired_history()
+        where, params = _silver_history_where(sales_type)
+        rows = await self._goals_run(
+            _SILVER_GROWTH_CAP_SQL.replace("{where}", where),
+            [target_month] + params)
         return _growth_cap(rows[0] if rows else None)
 
     async def _last_year_month_revenue(
         self, target_year: int, target_month: int, sales_type: str,
     ) -> float:
         """The target month a year earlier — signal 1's baseline."""
-        if _history_from_silver():
-            where, params = _silver_history_where(sales_type)
-            first = date(target_year - 1, target_month, 1)
-            rows = await self._goals_run(
-                _SILVER_LAST_YEAR_SQL.replace("{where}", where),
-                [first, _first_of_next_month(first)] + params)
-            value = rows[0][0] if rows else None
-            return float(value or 0) if value else 0
-
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
-        last_year_sql = f"""
-            SELECT SUM(o.grand_total) as revenue
-            FROM orders o
-            WHERE EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) = ?
-                AND EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) = ?
-                AND o.status_id NOT IN {return_statuses}
-                AND {sales_filter}
-        """
-        rows = await self._bridge_rows(
-            last_year_sql, [target_year - 1, target_month] + sales_params)
+        _refuse_a_retired_history()
+        where, params = _silver_history_where(sales_type)
+        first = date(target_year - 1, target_month, 1)
+        rows = await self._goals_run(
+            _SILVER_LAST_YEAR_SQL.replace("{where}", where),
+            [first, _first_of_next_month(first)] + params)
         value = rows[0][0] if rows else None
         return float(value or 0) if value else 0
 
@@ -1489,37 +1253,11 @@ class GoalsMixin:
         production.
         """
         month_start = datetime.now(DEFAULT_TZ).date().replace(day=1)
-        if _history_from_silver():
-            where, params = _silver_history_where(sales_type)
-            rows = await self._goals_run(
-                _SILVER_RECENT_MONTHS_SQL.replace("{where}", where),
-                params + [month_start])
-            value = rows[0][0] if rows else None
-            return float(value or 0) if value else 0
-
-        return_statuses = tuple(int(s) for s in OrderStatus.return_statuses())
-        sales_filter, sales_params = _orders_sales_type_predicate(sales_type)
-        recent_avg_sql = f"""
-            WITH monthly_revenue AS (
-                SELECT
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}) as year,
-                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')}) as month,
-                    SUM(o.grand_total) as revenue,
-                    COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) as days_with_orders
-                FROM orders o
-                WHERE o.status_id NOT IN {return_statuses}
-                    AND {sales_filter}
-                    AND {_date_in_kyiv('o.ordered_at')} < ?
-                GROUP BY
-                    EXTRACT(YEAR FROM {_date_in_kyiv('o.ordered_at')}),
-                    EXTRACT(MONTH FROM {_date_in_kyiv('o.ordered_at')})
-                HAVING COUNT(DISTINCT DATE({_date_in_kyiv('o.ordered_at')})) >= 25
-                ORDER BY year DESC, month DESC
-                LIMIT 3
-            )
-            SELECT AVG(revenue) as avg_revenue FROM monthly_revenue
-        """
-        rows = await self._bridge_rows(recent_avg_sql, sales_params + [month_start])
+        _refuse_a_retired_history()
+        where, params = _silver_history_where(sales_type)
+        rows = await self._goals_run(
+            _SILVER_RECENT_MONTHS_SQL.replace("{where}", where),
+            params + [month_start])
         value = rows[0][0] if rows else None
         return float(value or 0) if value else 0
 

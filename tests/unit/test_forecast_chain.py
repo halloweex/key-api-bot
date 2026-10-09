@@ -140,10 +140,10 @@ class TestThePreconditions:
         assert set(chain.CHAIN_TABLES) <= tables
 
     @pytest.mark.parametrize("take_away, names", [
-        # 1. The history must be Silver, not the DN-12 bridge — `== silver`,
-        # not `!= bridge`: a typo is unmet too.
+        # 1. KS_GOALS_HISTORY understood. Since chain 7b-4 unset and silver
+        # both read Silver; the retired `bridge` and a typo refuse every
+        # history read, so a recalculation could store nothing.
         (lambda m: m.setenv("KS_GOALS_HISTORY", "bridge"), "KS_GOALS_HISTORY"),
-        (lambda m: m.delenv("KS_GOALS_HISTORY"), "KS_GOALS_HISTORY"),
         (lambda m: m.setenv("KS_GOALS_HISTORY", "silvr"), "KS_GOALS_HISTORY"),
         # 2. …and Postgres' Silver.
         (lambda m: m.setenv("KS_READ_GOALS", "duckdb"), "KS_READ_GOALS"),
@@ -174,6 +174,15 @@ class TestThePreconditions:
         assert state["mode"] == "duckdb" and state["unmet_precondition"] == unmet
         tables, _ = write_chains.stood_down_tables_checked()
         assert not set(chain.CHAIN_TABLES) & tables
+
+    def test_an_unset_history_is_met(self, ready):
+        """Chain 7b-4 retired `KS_GOALS_HISTORY`: unset reads Silver, as
+        `silver` does, so it holds nothing. Mutation: keep the clause at
+        `== silver` on the raw variable — unset would hold the chain."""
+        ready.setenv(chain.WRITE_ENV, "postgres")
+        ready.delenv("KS_GOALS_HISTORY")
+        assert chain.unmet_precondition() is None
+        assert chain.writes_postgres() is True
 
     def test_the_environment_saying_off_is_not_the_configured_mode(self, ready):
         """The process refuses by the mode it was configured with. Reading the

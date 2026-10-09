@@ -139,24 +139,35 @@ class TestTheGoalsJob:
     async def test_a_working_postgres_is_read_and_both_tables_are_written(
         self, live, monkeypatch, tmp_path,
     ):
+        """The history is Silver's since chain 7b-4 deleted the DN-12 bridge,
+        and under `KS_READ_GOALS=postgres` that is Postgres' `silver.orders`:
+        the job's month has to be there for the indices to be written from a
+        working Postgres. (Under the bridge it was read out of DuckDB
+        `orders`, and this test never put anything in Postgres.)"""
         from core.scheduler import BackgroundScheduler
+        from tests.integration.test_goals_history_two_engines import PG_TABLES, _copy_silver
         from tests.unit.test_read_fallback_off_consumers import (
             _goal_tables,
             _goals_store,
             _serve,
         )
 
-        _pool, get_pool = live
+        pool, get_pool = live
         store = await _goals_store(tmp_path)
         try:
+            assert await _copy_silver(pool, store) == 25
             _serve(monkeypatch, store)
             result = await BackgroundScheduler()._run_seasonality_calc()
 
             assert get_pool.await_count > 0
             assert "skipped" not in result, result
+            assert result["retail_months"] == 1, result
             assert await _goal_tables(store) == (1, 1)
             assert read_fallback.refusals() == {}
         finally:
+            async with pool.acquire() as conn:
+                for table in PG_TABLES:
+                    await conn.execute(f"DELETE FROM {table}")
             await store.close()
 
     @pytest.mark.asyncio

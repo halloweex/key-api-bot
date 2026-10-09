@@ -289,9 +289,10 @@ class HealthResponse(BaseModel):
         None,
         description=(
             "Which orders the goal calculators count (chain 7b): `mode` is "
-            "KS_GOALS_HISTORY as a goal history read takes it — bridge or "
-            "silver — or null with `error` when the value is not understood, "
-            "and then every goal history read raises. Judged by the canary."
+            "silver — Silver is the only history since chain 7b-4 retired "
+            "KS_GOALS_HISTORY — or null with `error` when the variable holds "
+            "anything but unset or silver (bridge included), and then every "
+            "goal history read raises. Judged by the canary."
         ),
     )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(

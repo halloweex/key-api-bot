@@ -1296,16 +1296,17 @@ def duckdb_silent(payload: Optional[dict]) -> Optional[bool]:
 
 
 def check_goals_history_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
-    """Judge the `goals_history` block: a KS_GOALS_HISTORY web does not
-    understand (chain 7b).
+    """Judge the `goals_history` block: a KS_GOALS_HISTORY web refuses
+    (chain 7b). Since chain 7b-4 the variable is retired — unset and `silver`
+    both read Silver — so this is anything else, `bridge` included.
 
     Critical, unlike the siblings above, and for `write_chain_flag_invalid`'s
     reason: those run as duckdb and nothing fails, while this one raises at
-    every goal history read on purpose — counting a different set of orders
-    in silence is the worse failure — so the dashboard's goal widget and
-    every `/goals/*` page answer 500 and the Monday job fails, and none of
-    those pages anybody by itself. An absent block is not a failure; an older
-    web publishes none.
+    every goal history read on purpose — a value naming a history that does
+    not exist must not be answered in silence — so the dashboard's goal
+    widget and every `/goals/*` page answer 500 and the Monday job fails, and
+    none of those pages anybody by itself. An absent block is not a failure;
+    an older web publishes none.
     """
     block = (payload or {}).get("goals_history")
     if isinstance(block, dict) and block.get("error"):
@@ -1518,8 +1519,9 @@ async def run_canary(
             severity = "warn"
         duckdb_silent_seen = duckdb_silent(payload)
 
-        # A KS_GOALS_HISTORY web does not understand: every goal history read
-        # raises, so this pages rather than warns.
+        # A KS_GOALS_HISTORY web refuses (anything but unset or silver since
+        # chain 7b-4): every goal history read raises, so this pages rather
+        # than warns.
         goals_history_failures = check_goals_history_mode(payload)
         for key, message in goals_history_failures:
             fail(key, message)
@@ -1663,7 +1665,7 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("duckdb_mode_invalid",
      "Set KS_DUCKDB to on or off in .env, then recreate web"),
     ("goals_history_mode_invalid",
-     "Set KS_GOALS_HISTORY to bridge or silver (or remove it) in .env, then recreate web; every goal read fails until then"),
+     "Remove KS_GOALS_HISTORY from .env (or set it to silver: the bridge is deleted), then recreate web; every goal read fails until then"),
     # Last: when an engine is down its own key names the cause, and a fallback
     # or a refusal is what that cause cost the pages. A route is a cause of
     # its own, and its lever is `.env`, so it goes first of the three.

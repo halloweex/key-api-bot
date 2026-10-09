@@ -154,7 +154,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "web restarts and opens no DuckDB file under KS_DUCKDB=off, or runs on"),
     # KS_DUCKDB set to a value web did not understand: ran as `on` (OD-09).
     "duckdb_mode_invalid": _c("web restarts with a valid KS_DUCKDB"),
-    # KS_GOALS_HISTORY set to a value web does not understand: every goal
+    # KS_GOALS_HISTORY set to a value web refuses — anything but unset or
+    # silver since chain 7b-4 retired it, `bridge` included: every goal
     # history read raises — the goal widget, /goals/*, the Monday job (7b).
     "goals_history_mode_invalid": _c("web runs with a valid KS_GOALS_HISTORY"),
     # Derivation marks dropped and demonstrably not being healed: the latest
