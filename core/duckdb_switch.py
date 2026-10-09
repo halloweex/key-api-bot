@@ -19,13 +19,17 @@ on `/api/health` as `duckdb_switch.opened_while_off` (sites and counts, never
 an exception's text: the endpoint is public), and paged CRITICAL by the canary
 as `duckdb_opened_while_off`.
 
-**`off` does not make web work without DuckDB.** That is stage 5's code
-decoupling (the boot sync's zero-orders gate, `get_stats` behind
-`/api/health`, the every-boot migrations, the inventory views...). Under `off`
-today almost everything web does reaches `get_store()` and is refused, so
-order intake stops and the dashboard answers errors. Web's startup contains
-the refusal rather than dying of it only so that `/api/health` answers and the
-page can be seen. Never set it in production before that decoupling.
+**`off` does not yet make web work without DuckDB.** That is stage 5's code
+decoupling (`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`). Since its PR-1,
+`get_store()` under `off` hands out the store unconnected, so a caller that
+only hosts a Postgres router on it works, and the tripwire stands at
+`connection()`, where the file is reached. What still reaches it is the
+stage 5 sweep's `KNOWN_RESIDUAL` (`tests/unit/test_duckdb_off_sweep.py`) —
+order intake among it: the order step inherits its watermark from DuckDB
+until Postgres holds one, so every sync tick's order step is refused. Web's
+startup contains a refusal rather than dying of it, so `/api/health` answers
+and the page can be seen. Never set it in production before that list is
+empty.
 
 COUNTED WHERE IT IS RAISED
 
