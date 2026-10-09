@@ -22,6 +22,7 @@ not most laptops and not the gate's slim image.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -50,11 +51,12 @@ FIRST_ARK = "ark-20260823T212918Z.tar.gz"
 OLDER = ["20260901T000000Z", "20260902T000000Z", "20260903T000000Z"]
 
 # Runs the real ark_freeze.py with this interpreter, the container's paths
-# mapped back to the host's. It records every call, and three knobs stand in
-# for what a real container can do to the run: no image on the host, a writer
-# touching the source while it is frozen, and a verification that fails on one
-# path only — the downloaded copy's, which nothing else can make fail without
-# breaking a check that runs before it.
+# mapped back to the host's, under the umask a real container starts with. It
+# records every call, and three knobs stand in for what a real container can
+# do to the run: no image on the host, a writer touching the source while it
+# is frozen, and a verification that fails on one path only — the downloaded
+# copy's, which nothing else can make fail without breaking a check that runs
+# before it.
 FAKE_DOCKER = r'''#!{python}
 import os, subprocess, sys
 
@@ -99,6 +101,9 @@ if "--verify" in cmd:
     if under and under in cmd[cmd.index("--verify") + 1]:
         print("fake docker: verification refused", file=sys.stderr)
         sys.exit(1)
+# A container starts with the runtime's umask, 0022, and never the caller's:
+# the script's own `umask 077` does not reach anything the freeze writes.
+os.umask(0o022)
 rc = subprocess.call(cmd)
 if os.environ.get("FAKE_DOCKER_TOUCH_SOURCE") and "--source" in cmd:
     with open(cmd[cmd.index("--source") + 1], "ab") as fh:
@@ -360,6 +365,25 @@ class TestTheShipment:
             [d.name for d in world.ark_dirs()] + [".ark_ship.lock"]), list(world.arks.iterdir())
         assert sorted(p.name for p in (world.root / "data").iterdir()) == ["analytics.duckdb"]
 
+    def test_the_ark_is_private_whatever_its_root(self, world):
+        """The Ark is plaintext. The freeze runs in a container, whose umask is
+        0022 whatever the script's is, so an Ark root that already existed
+        open to everyone — anything but a root this script created — used to
+        hold a 0755 Ark of 0644 files. The Ark is closed now; the root itself
+        is the operator's choice and may be a directory others use, so it is
+        left as it was."""
+        world.arks.mkdir()
+        world.arks.chmod(0o755)
+        run = world.run("--source", "data/analytics.duckdb")
+        assert run.code == 0, run.out
+        [ark] = world.ark_dirs()
+        assert ark.stat().st_mode & 0o777 == 0o700, oct(ark.stat().st_mode)
+        opened = [f"{p.relative_to(ark)} {oct(p.stat().st_mode & 0o777)}"
+                  for p in ark.rglob("*") if p.stat().st_mode & 0o077]
+        assert not opened, opened
+        assert (ark / "tables" / "orders.parquet").stat().st_mode & 0o777 == 0o600
+        assert world.arks.stat().st_mode & 0o777 == 0o755, "it changed the operator's root"
+
     def test_a_relative_source_is_the_callers_and_not_the_repositorys(self, world):
         """The script moves to the repository root; a path typed elsewhere
         must still mean what it meant where it was typed."""
@@ -417,11 +441,11 @@ class TestEncryption:
 # ── what it verifies after the download ───────────────────────────────────────
 
 class TestTheVerificationAfterDownload:
-    @pytest.mark.parametrize("victim,expected", [
-        ("tar.gz.gpg", "sha256 mismatch"),
-        ("sha256", "manifest that came back"),
+    @pytest.mark.parametrize("victim,expected,step", [
+        ("tar.gz.gpg", "sha256 mismatch", "verify the copy off-site"),
+        ("sha256", "manifest that came back", "record the shipment"),
     ])
-    def test_a_file_that_arrived_damaged_refuses(self, world, victim, expected):
+    def test_a_file_that_arrived_damaged_refuses(self, world, victim, expected, step):
         """The upload reports success and the file that landed is not the file
         that was sent — indistinguishable from a good night without the
         read-back. One file at a time, or the manifest check would hide
@@ -433,9 +457,12 @@ class TestTheVerificationAfterDownload:
                         FAKE_SFTP_CORRUPT=f"ark-{ark.name}.{victim}")
         assert run.code == 1, run.out
         assert expected in run.out
-        assert "FAILED at: verify the copy off-site" in run.out
+        assert f"FAILED at: {step}" in run.out
         assert "ARK SHIPPED" not in run.out
         assert set(before) <= set(world.shipped()), "it pruned after a failed verification"
+        # No record off-site claims this Ark was verified: a damaged manifest
+        # is taken back down, not left for retention to count.
+        assert f"ark-{ark.name}.sha256" not in world.shipped(), world.shipped()
         # The local Ark is not the problem: it is kept, with the way to finish.
         assert world.ark_dirs() == [ark]
         assert f"--ark {ark}" in run.out
@@ -451,6 +478,9 @@ class TestTheVerificationAfterDownload:
         assert run.code == 1, run.out
         assert expected in run.out
         assert "ARK SHIPPED" not in run.out
+        [ark] = world.ark_dirs()
+        assert f"ark-{ark.name}.sha256" not in world.shipped(), \
+            "a copy that does not open is recorded as a verified shipment"
 
     def test_an_unpacked_copy_that_differs_from_the_ark_refuses(self, world):
         """The last comparison before the verification: file for file against
@@ -482,6 +512,9 @@ class TestTheVerificationAfterDownload:
         assert "downloaded copy did not verify" in run.out
         assert all((world.remote / f"ark-{s}.sha256").exists() for s in OLDER), \
             "it pruned after the downloaded copy failed"
+        [ark] = world.ark_dirs()
+        assert f"ark-{ark.name}.sha256" not in world.shipped(), \
+            "a copy that did not verify is recorded as a verified shipment"
 
 
 # ── what it refuses before anything exists ────────────────────────────────────
@@ -549,6 +582,35 @@ class TestRefusals:
         assert "under ./data" in run.out
         assert not target.exists()
         assert not run.docker_runs
+
+    @pytest.mark.parametrize("where,value", [
+        ("out", "ark"), ("env", "ark"), ("out", "."), ("out", "deploy/ark"),
+    ])
+    def test_an_ark_inside_the_repository_is_refused(self, world, where, value):
+        """The repository is public, and the Ark is plaintext: every customer's
+        phone number, in a byte copy and in Parquet. `.gitignore` covers
+        data/ and nothing an Ark is made of, so an Ark anywhere else in the
+        working tree is one `git add .` from being published — the class of
+        the twelve `.env.bak*` files and the 5 550 scrubbed phone numbers.
+        A relative BACKUP_ARK_DIR resolves against the repository, which is
+        how this happens without anybody typing the path."""
+        def tree():
+            return sorted(p.relative_to(world.root).as_posix()
+                          for p in world.root.rglob("*")
+                          if not p.name.startswith("calls-"))
+
+        before = tree()
+        if where == "out":
+            run = world.run("--source", "data/analytics.duckdb", "--out", value)
+        else:
+            env_file = world.root / "deploy" / "backup.env"
+            env_file.write_text(env_file.read_text().replace(
+                f"BACKUP_ARK_DIR={world.arks}", f"BACKUP_ARK_DIR={value}"))
+            run = world.run("--source", "data/analytics.duckdb")
+        assert run.code == 2, run.out
+        assert "inside the repository" in run.out
+        assert not run.docker_runs and not run.sftp
+        assert tree() == before, "it wrote into the repository's working tree"
 
     def test_the_default_is_outside_data_and_the_freezer_agrees(self):
         """Two places spell the default and a test holds them equal; neither
@@ -622,6 +684,53 @@ class TestShippingAnExistingArk:
         assert "size differs: tables/orders.parquet" in run.out
         assert not world.remote.exists() or not world.shipped()
         assert not run.gpg
+
+    def test_an_ark_already_recorded_off_site_is_verified_and_never_sent_again(self, world):
+        """gpg's output differs on every run, and the transport deletes the
+        remote file before renaming its replacement into place: a second
+        upload of a shipped Ark destroyed the verified copy before the new
+        one was verified, and a damaged second upload left none at all.
+        `--ark` is what the script tells an operator to run after any
+        failure, a prune's included, so it must be safe on a shipped Ark."""
+        first = world.run("--source", "data/analytics.duckdb")
+        assert first.code == 0, first.out
+        [ark] = world.ark_dirs()
+        cipher = world.remote / f"ark-{ark.name}.tar.gz.gpg"
+        manifest = world.remote / f"ark-{ark.name}.sha256"
+        sent = cipher.read_bytes(), manifest.read_bytes()
+
+        # Anything put now would land damaged.
+        run = world.run("--ark", ark, FAKE_SFTP_CORRUPT=cipher.name)
+        assert run.code == 0, run.out
+        assert "ARK SHIPPED AND VERIFIED" in run.out
+        assert "not sent again" in run.out
+        assert not [c for c in run.sftp
+                    if c.lstrip("-").split()[0] in ("put", "rename", "rm")], run.sftp
+        assert (cipher.read_bytes(), manifest.read_bytes()) == sent
+        # Fetched back and verified as hard as a fresh shipment: decrypted,
+        # compared with the local Ark, and L0-L2 on the downloaded copy.
+        assert not [c for c in run.gpg if "--symmetric" in c], run.gpg
+        assert len([c for c in run.gpg if " -d " in f" {c} "]) == 1, run.gpg
+        assert "VERIFY OK" in run.out.split("verify the downloaded copy")[1], run.out
+
+    def test_a_recorded_copy_that_does_not_verify_is_not_replaced(self, world):
+        """The other half: a recorded copy that no longer verifies is not sent
+        over either. Replacing it is a decision about the only record of a
+        verified shipment, so the run stops and says how to take it."""
+        first = world.run("--source", "data/analytics.duckdb")
+        assert first.code == 0, first.out
+        [ark] = world.ark_dirs()
+        cipher = world.remote / f"ark-{ark.name}.tar.gz.gpg"
+        cipher.write_bytes(cipher.read_bytes()[:-5])
+
+        run = world.run("--ark", ark)
+        assert run.code == 1, run.out
+        assert "sha256 mismatch" in run.out and "ARK SHIPPED" not in run.out
+        assert "is not replaced" in run.out
+        assert f"ark-{ark.name}.sha256" in run.out   # what to remove, by name
+        assert not [c for c in run.sftp
+                    if c.lstrip("-").split()[0] in ("put", "rename", "rm")], run.sftp
+        assert f"ark-{ark.name}.sha256" in world.shipped()
 
     @pytest.mark.parametrize("make", ["not-a-stamp", "no-manifest"])
     def test_a_directory_that_is_not_an_ark_is_refused(self, world, make):
@@ -700,6 +809,63 @@ class TestRetention:
         assert "nothing pruned" in run.out
         assert all((world.remote / f"ark-{s}.sha256").exists() for s in OLDER)
 
+    def test_a_shipment_that_failed_verification_is_not_one_of_the_two(self, world):
+        """OD-S5-6 keeps two Arks, and a copy that failed its read-back is not
+        an Ark. It used to keep its manifest — which went up before the read-
+        back — and so took one of the two places and pushed a verified Ark
+        out, while the summary said `held 2 of 2`."""
+        # Renamed as they are made: two freezes in one second share a stamp.
+        older = world.freeze_here()
+        older = older.rename(older.with_name("20200101T000000Z"))
+        broken = world.freeze_here()
+        broken = broken.rename(broken.with_name("20200102T000000Z"))
+
+        a = world.run("--ark", older)
+        assert a.code == 0, a.out
+        b = world.run("--ark", broken, FAKE_SFTP_CORRUPT=f"ark-{broken.name}.tar.gz.gpg")
+        assert b.code == 1 and "sha256 mismatch" in b.out, b.out
+        c = world.run("--source", "data/analytics.duckdb")
+        assert c.code == 0, c.out
+        newest = (set(world.ark_dirs()) - {older, broken}).pop()
+
+        assert world.shipped() == sorted([
+            f"ark-{older.name}.sha256", f"ark-{older.name}.tar.gz.gpg",
+            f"ark-{newest.name}.sha256", f"ark-{newest.name}.tar.gz.gpg",
+        ]), world.shipped()
+        assert f"swept: ark-{broken.name}.tar.gz.gpg" in c.out
+        assert "held      2 of 2" in c.out
+
+    def test_a_prune_that_cannot_delete_does_not_fail_a_verified_shipment(self, world):
+        """The Ark is up and verified when the prune runs, so a deletion that
+        fails is reported and stands down — it does not turn the run into
+        FAILED with advice to ship again."""
+        real = world.bin / "sftp-real"
+        (world.bin / "sftp").rename(real)
+        # Every batch made of nothing but `-rm` lines — the sweep and the
+        # prune — dies the way sftp does when the connection drops.
+        (world.bin / "sftp").write_text(
+            "#!/usr/bin/env bash\n"
+            'batch="$(cat)"\n'
+            "if ! printf '%s\\n' \"$batch\" | grep -qvE '^-rm '; then exit 255; fi\n"
+            f"printf '%s\\n' \"$batch\" | \"{real}\" \"$@\"\n")
+        (world.bin / "sftp").chmod(0o755)
+        world.seed_remote(*OLDER, extras=(f"ark-{OLDER[0]}.tar.gz.gpg.part",))
+
+        run = world.run("--source", "data/analytics.duckdb")
+        assert run.code == 0, run.out
+        assert "ARK SHIPPED AND VERIFIED" in run.out
+        assert "FAILED" not in run.out and "--ark" not in run.out
+        assert run.out.index("VERIFY OK") < run.out.index("── prune off-site")
+        [stuck] = re.findall(r"^  not pruned (.*)$", run.out, re.M)
+        for stamp in OLDER[:2]:
+            assert f"could not delete ark-{stamp}" in run.out
+            assert f"ark-{stamp}.sha256" in world.shipped()
+            assert f"ark-{stamp}" in stuck.split(), stuck
+        # The summary is reached with its own debris still there now, and
+        # must not call it somebody else's.
+        assert f"could not delete ark-{OLDER[0]}.tar.gz.gpg.part" in run.out
+        assert "also here" not in run.out, run.out
+
     def test_a_newer_ark_already_off_site_stops_the_prune(self, world):
         """Anchored to the Ark this run verified: if it is not among the
         newest N, the listing is not what it seems, and nothing is deleted."""
@@ -776,6 +942,30 @@ def test_nothing_in_the_repository_schedules_or_calls_it():
         assert (REPO / exempt).exists(), f"an exemption outlived its file: {exempt}"
 
 
+def test_the_documents_say_the_second_arks_are_kept_by_count():
+    """OD-S5-6 keeps two of deploy/ark_ship.sh's Arks off-site, by count, in
+    the directory the first Ark went to. The runbook and the freezer's
+    docstring are where somebody reads how long an Ark lives, and after the
+    pruning existed both still said nothing there is pruned, or that the Ark
+    is never rotated. Each now names the knob that prunes and the decision
+    behind it, and the sentences that said otherwise are gone."""
+    assert re.search(r'^RETAIN="\$\{BACKUP_ARK_RETAIN:-2\}"$', SCRIPT.read_text(), re.M)
+
+    def flat(text):
+        return " ".join(text.split())
+
+    runbook = flat((DEPLOY / "step05-preflight-runbook.md").read_text())
+    docstring = flat(_load_ark_freeze().__doc__)
+    for name, text in (("the runbook", runbook), ("ark_freeze.py", docstring)):
+        assert "BACKUP_ARK_RETAIN" in text and "OD-S5-6" in text, name
+    for stale in ("Nothing there is pruned today",
+                  "Nothing prunes it, here or there",
+                  "once in the deploy that removes DuckDB",
+                  "never rotated: once before the first landing write"):
+        assert stale not in runbook, stale
+    assert "twice in the whole migration** and never rotated" not in docstring
+
+
 def test_the_help_says_where_the_ark_goes_and_touches_nothing(world):
     run = world.run("--help")
     assert run.code == 0
@@ -835,6 +1025,59 @@ class TestTheFreezer:
         mounted = {"/root/ark"}
         monkeypatch.setattr(ark_freeze.os.path, "ismount", lambda p: str(p) in mounted)
         assert not ark_freeze.leaves_with_the_container(out)
+
+    @pytest.mark.parametrize("bad,rows", [
+        ("the wrong shape", "SELECT * FROM (VALUES (1), (2)) t(id)"),
+        ("a key the PRIMARY KEY refuses",
+         "SELECT * FROM (VALUES (1, 'a', 1.00, 1), (1, 'b', 2.00, 2)) t(id, phone, grand_total, n)"),
+        ("a NULL in a NOT NULL column",
+         "SELECT * FROM (VALUES (1, NULL::VARCHAR, 1.00, 1), (2, NULL, 2.00, 2)) t(id, phone, grand_total, n)"),
+    ])
+    def test_l2_restores_every_table_rather_than_counting_its_parquet(
+            self, tmp_path, capsys, bad, rows):
+        """L2 is the restore RESTORE.md tells a stranger to make: schema.sql
+        into an empty engine, then each table's Parquet INSERTed into its
+        table. Counting the Parquet passed a file that cannot be loaded —
+        with the right number of rows, its manifest entry refreshed so L0
+        holds, and the byte copy untouched so L1 holds."""
+        ark_freeze = _load_ark_freeze()
+        source = tmp_path / "analytics.duckdb"
+        _warehouse(source)
+        ark = ark_freeze.freeze(source, tmp_path / "arks")
+        assert ark_freeze.verify(ark) == 0
+
+        pq = ark / "tables" / "orders.parquet"
+        pq.unlink()
+        duckdb.connect().execute(f"COPY ({rows}) TO '{pq}' (FORMAT PARQUET)")
+        manifest = json.loads((ark / "manifest.json").read_text())
+        assert manifest["tables"]["orders"] == 2
+        manifest["files"]["tables/orders.parquet"] = {
+            "bytes": pq.stat().st_size, "sha256": _sha256(pq)}
+        (ark / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        capsys.readouterr()
+
+        assert ark_freeze.verify(ark) == 1, bad
+        out = capsys.readouterr().out
+        assert re.search(r"L0 files: \d+ checked, 0 bad", out), out
+        assert "L1 frozen db: 2 tables, 0 mismatched" in out
+        assert re.search(r"ERROR .*orders.* does not restore", out), out
+
+    def test_l2_loads_a_foreign_keys_parent_before_its_child(self, tmp_path):
+        """Each table is restored into an engine of its own, so the largest
+        table bounds the memory and not the whole warehouse; a table that
+        references another gets its parent loaded first, or the restore
+        would refuse what a full one accepts."""
+        ark_freeze = _load_ark_freeze()
+        source = tmp_path / "fk.duckdb"
+        conn = duckdb.connect(str(source))
+        conn.execute("CREATE TABLE a_parent (id INTEGER PRIMARY KEY)")
+        conn.execute("CREATE TABLE b_child (id INTEGER, "
+                     "parent_id INTEGER REFERENCES a_parent (id))")
+        conn.execute("INSERT INTO a_parent VALUES (1), (2)")
+        conn.execute("INSERT INTO b_child VALUES (10, 1), (11, 2)")
+        conn.close()
+        ark = ark_freeze.freeze(source, tmp_path / "arks")
+        assert ark_freeze.verify(ark) == 0
 
     def test_the_container_guard_refuses_the_default_and_not_a_choice(self, tmp_path, monkeypatch):
         ark_freeze = _load_ark_freeze()

@@ -20,7 +20,8 @@
 # WHAT ONE RUN DOES, IN ORDER
 #   1. Refuses whatever it can see is wrong before any Ark or upload exists:
 #      no remote or no passphrase file (78); a .wal beside the source, --out
-#      under ./data, too little disk, no image, the lock held (2).
+#      under ./data or anywhere in the repository, too little disk, no image,
+#      the lock held (2).
 #   2. --source: freezes the file into <out>/<stamp> in a throwaway container
 #      of the image production runs (--network none, --pull never, the file
 #      mounted alone and read-only), hashing it before and after. The byte
@@ -28,21 +29,38 @@
 #      was not static — and the half-made Ark is deleted. Then it prints
 #      SOURCE RELEASED: nothing after that line reads the source again.
 #   3. Verifies the local Ark at all three levels — L0 checksums, L1 the byte
-#      copy opens and counts, L2 schema.sql and Parquet replayed into an empty
-#      engine. A freeze that does not verify is kept for inspection and not
-#      shipped.
+#      copy opens and counts, L2 schema.sql replayed into an empty engine and
+#      every table's Parquet loaded into the table it creates. A freeze that
+#      does not verify is kept for inspection and not shipped.
 #   4. Packs <stamp>/ and ark_freeze.py into one tar.gz (RESTORE.md tells a
 #      stranger to verify with it, and the repository may be gone by then),
 #      encrypts it, records the plaintext's sha256 and deletes the plaintext.
-#   5. Uploads ark-<stamp>.tar.gz.gpg, then ark-<stamp>.sha256 — the sha256
-#      of the ciphertext, in the clear — each under .part and renamed.
-#   6. Downloads both back. The manifest must be byte for byte the one sent;
-#      the ciphertext must hash to it; it must decrypt with the passphrase
-#      file to the very tarball that was encrypted; unpacked, every file must
-#      equal the local Ark's; and ark_freeze.py --verify (L0–L2) must pass on
-#      the DOWNLOADED copy, run with the ark_freeze.py that copy carries.
-#   7. Sweeps its own debris and keeps BACKUP_ARK_RETAIN (2) of its own Arks,
-#      by count, anchored to the one it has just verified.
+#   5. Uploads ark-<stamp>.tar.gz.gpg under .part and renames it.
+#   6. Downloads it back. It must hash to what was sent; it must decrypt with
+#      the passphrase file to the very tarball that was encrypted; unpacked,
+#      every file must equal the local Ark's; and ark_freeze.py --verify
+#      (L0–L2) must pass on the DOWNLOADED copy, run with the ark_freeze.py
+#      that copy carries.
+#   7. Only then uploads ark-<stamp>.sha256 — the sha256 of the ciphertext, in
+#      the clear — and reads it back. A manifest off-site is the record that
+#      its Ark came back and verified: retention counts nothing else, and a
+#      ciphertext without one is debris, swept by the next run. A manifest
+#      that comes back different is taken down again, not left to be counted.
+#   8. Sweeps its own debris and keeps BACKUP_ARK_RETAIN (2) of its own Arks,
+#      by count, anchored to the one it has just verified. A deletion that
+#      fails is reported and stands down; the Ark is up and verified, so the
+#      run still succeeds.
+#
+# AN ARK ALREADY RECORDED OFF-SITE IS NEVER SENT AGAIN. gpg's output differs
+# on every run, so a second upload is a different file, and the transport
+# removes the old one before it can rename the new one into place: the
+# verified copy would be gone before its replacement was verified, and a
+# damaged replacement would leave none. So `--ark` on a stamp whose manifest
+# is off-site sends nothing. It fetches that copy back and verifies it as in
+# 6, against its manifest instead of a hash taken here, then prunes. A copy
+# that does not verify is not replaced either: replacing it is a decision
+# about the only record of a verified shipment, and the run says how to take
+# it — remove ark-<stamp>.sha256 off-site by hand and run `--ark` again.
 #
 # ON THE HOST, AS ROOT — the week's step 3
 #   cd /opt/key-api-bot
@@ -62,12 +80,20 @@
 # nightly backup instead — `--source data/backups/analytics-<stamp>.duckdb`.
 #
 # WHERE THINGS GO
-#   Local Ark   --out, else BACKUP_ARK_DIR, else /root/ark/key-api-bot — mode
-#               700, root's, because the Ark is plaintext. Never under ./data:
-#               the disk watchdog books growth there as `other` and pages at
-#               +0.75 GB a week. Outside it, the Ark is `unattributed`, judged
-#               by persistence — an Ark over ~2 GB will still read as growth
-#               there, and that is this Ark, on purpose.
+#   Local Ark   <out>/<stamp>, where <out> is --out, else BACKUP_ARK_DIR, else
+#               /root/ark/key-api-bot. The Ark is plaintext, so ark_freeze.py
+#               makes <stamp> mode 700 and every file in it 600, root's, from
+#               the moment it exists — the container's umask is 0022 whatever
+#               this script's is. <out> itself is the operator's choice and is
+#               left as it is: a new one is made 700, one that exists may be a
+#               directory other things use. Never under ./data: the disk
+#               watchdog books growth there as `other` and pages at +0.75 GB a
+#               week. Outside it, the Ark is `unattributed`, judged by
+#               persistence — an Ark over ~2 GB will still read as growth
+#               there, and that is this Ark, on purpose. Never anywhere else
+#               in the repository either: its tree is public, `.gitignore`
+#               covers data/ and nothing an Ark is made of, and one `git add .`
+#               would publish every customer's phone number.
 #   Scratch     <out>/.ship.XXXXXX, removed on every exit. At its peak it holds
 #               the ciphertext, then the decrypted tarball and the unpacked
 #               copy beside the Ark: the disk check asks for 4x the source
@@ -83,8 +109,9 @@
 # never the dumps' and never the Parquet archive's, so no family's retention
 # can list another's files whatever any glob is edited into.
 #
-# EXIT  0 shipped and verified · 1 a step failed (it says which; the local
-#       Ark is kept) · 2 refused, nothing frozen or sent · 78 not configured
+# EXIT  0 shipped and verified (a deletion the prune could not make is named,
+#       not failed) · 1 a step failed (it says which; the local Ark is kept)
+#       · 2 refused, nothing frozen or sent · 78 not configured
 #
 # NOT HERE: cron, alerts (whoever runs this is reading it), chattr (the
 # operator's, once the run says ARK SHIPPED), deleting the local Ark, and
@@ -105,7 +132,8 @@ usage: deploy/ark_ship.sh --source FILE [--out DIR]
   --ark DIR      ship and verify an Ark already frozen (a run that failed
                  after its freeze) without freezing again
   --out DIR      where Arks and the scratch space live: BACKUP_ARK_DIR,
-                 else /root/ark/key-api-bot. Never under ./data
+                 else /root/ark/key-api-bot. Never under ./data, nor
+                 anywhere else in the repository, whose tree is public
 
 Run by hand, as root, on the host. See the header for the week's runbook.
 EOF
@@ -208,6 +236,13 @@ case "$OUT_ROOT/" in
     "$DATA_ABS/"*)
         refuse "--out $OUT_ROOT is under ./data, where the disk watchdog pages growth as 'other' at +0.75 GB a week; put the Ark outside it (default /root/ark/key-api-bot)" ;;
 esac
+# The rest of the tree is worse, not better: ./data is at least ignored by git.
+# A relative BACKUP_ARK_DIR resolves here, so this is reached without anybody
+# typing the repository's path.
+case "$OUT_ROOT/" in
+    "$REPO/"*)
+        refuse "--out $OUT_ROOT is inside the repository ($REPO), whose tree is public; the Ark is plaintext, every customer's phone number, and .gitignore does not cover it — one 'git add .' would publish it. Put it outside (default /root/ark/key-api-bot)" ;;
+esac
 # docker -v splits on ':' and an sftp batch on whitespace.
 for p in "$OUT_ROOT" "$SOURCE" "$ARK_IN" "$REPO"; do
     case "$p" in
@@ -262,6 +297,8 @@ STAMP=""
 SOURCE_SHA=""
 PLAIN_SHA=""
 ENC_SHA=""
+ENC_SAID="sent"   # where ENC_SHA came from, for the message that compares it
+ALREADY=""        # set when this Ark's manifest was off-site before the run
 
 step() { STEP="$1"; printf '── %s\n' "$1"; }
 
@@ -275,6 +312,11 @@ on_error() {
     trap - ERR
     set +e
     printf 'ark_ship: FAILED at: %s\n' "$STEP" >&2
+    if [ -n "$ALREADY" ]; then
+        printf '%s\n' \
+            "ark-$STAMP is recorded off-site as verified by its manifest, ark-$STAMP.sha256, and a recorded copy is not replaced." \
+            "If the transport failed, run again. If the copy off-site is damaged, remove ark-$STAMP.sha256 from $ARK_REMOTE_DIR by hand; the next --ark then ships the Ark anew." >&2
+    fi
     if [ -n "$ARK_DIR" ] && [ -d "$ARK_DIR" ]; then
         printf 'the local Ark is kept: %s\n' "$ARK_DIR" >&2
         printf 'finish without freezing again:  deploy/ark_ship.sh --ark %s\n' "$ARK_DIR" >&2
@@ -369,33 +411,45 @@ pack_and_encrypt() {
     echo "packed: $enc ($(( $(_size "$WORK/$enc") / 1024 )) KB)"
 }
 
-upload() {
-    step "upload"
-    local enc="ark-$STAMP.tar.gz.gpg" manifest="ark-$STAMP.sha256"
+# Whether this Ark is recorded off-site already. A listing that cannot be read
+# stops the run before anything is sent: shipping blind could send over the
+# verified copy this question exists to protect.
+look_off_site() {
+    step "look for this Ark off-site"
+    local names
     remote_prepare
-    # The manifest last: a stamp with a manifest is a finished shipment, and
-    # that is what retention counts.
-    remote_put "$WORK/$enc" "$enc"
-    remote_put "$WORK/$manifest" "$manifest"
-    rm -f "$WORK/$enc"
-    echo "shipped: $REMOTE:$ARK_REMOTE_DIR/{$enc,$manifest}"
+    names="$(remote_names)" \
+        || fail "could not list $ARK_REMOTE_DIR, so whether ark-$STAMP is already there is unknown; nothing was sent"
+    if grep -qxF "ark-$STAMP.sha256" <<< "$names"; then ALREADY=1; fi
+    return 0
 }
 
-verify_off_site() {
-    step "verify the copy off-site"
-    local enc="ark-$STAMP.tar.gz.gpg" manifest="ark-$STAMP.sha256"
-    local back="$WORK/back" got
+upload() {
+    step "upload"
+    local enc="ark-$STAMP.tar.gz.gpg"
+    # The ciphertext alone. Its manifest goes up only once the copy has come
+    # back and verified (record_shipment): until then this is a file and not
+    # a shipment, and a run that dies here leaves debris the next one sweeps.
+    remote_put "$WORK/$enc" "$enc"
+    rm -f "$WORK/$enc"
+    echo "shipped: $REMOTE:$ARK_REMOTE_DIR/$enc"
+}
+
+# Fetches the copy of $STAMP off-site and proves it is this Ark: it hashes to
+# $ENC_SHA; it decrypts with the passphrase file — to the very tarball that was
+# encrypted, when this run encrypted one; unpacked, it is $STAMP/ and an
+# ark_freeze.py, equal to the local Ark file for file; and it verifies L0-L2
+# with the ark_freeze.py it carries.
+fetch_and_verify() {
+    local enc="ark-$STAMP.tar.gz.gpg" back="$WORK/back" got
     mkdir "$back"
 
     # There is no remote shell on a Storage Box, so the only sha256 of the
     # remote copy that can exist is one taken of its bytes, here.
-    remote_get "$manifest" "$back/$manifest"
-    cmp -s "$WORK/$manifest" "$back/$manifest" \
-        || fail "the manifest that came back is not the one that went up"
     remote_get "$enc" "$back/$enc"
     got="$(_sha256 "$back/$enc")"
     [ "$got" = "$ENC_SHA" ] \
-        || fail "sha256 mismatch on $enc: sent $ENC_SHA, off-site holds $got"
+        || fail "sha256 mismatch on $enc: $ENC_SAID $ENC_SHA, off-site holds $got"
     echo "verified: $enc $got"
 
     # A sha256 of ciphertext is satisfied by a file encrypted under a
@@ -405,8 +459,10 @@ verify_off_site() {
         -o "$back/ark.tar.gz" -d "$back/$enc" \
         || fail "the copy that landed off-site will not decrypt with $ENV_PASSFILE"
     rm -f "$back/$enc"
-    [ "$(_sha256 "$back/ark.tar.gz")" = "$PLAIN_SHA" ] \
-        || fail "the copy off-site decrypts to something other than the tarball that was encrypted"
+    if [ -n "$PLAIN_SHA" ]; then
+        [ "$(_sha256 "$back/ark.tar.gz")" = "$PLAIN_SHA" ] \
+            || fail "the copy off-site decrypts to something other than the tarball that was encrypted"
+    fi
 
     mkdir "$back/x"
     tar -C "$back/x" -xzf "$back/ark.tar.gz"
@@ -416,18 +472,62 @@ verify_off_site() {
     fi
     diff -rq "$ARK_DIR" "$back/x/$STAMP" \
         || fail "the copy that came back is not the Ark: the files above differ"
-    cmp -s "$FREEZER" "$back/x/ark_freeze.py" \
-        || fail "the ark_freeze.py that came back is not the one that went up"
+    # The verifier must be the one that went up — when this run sent it. A
+    # copy an earlier run sent carries the ark_freeze.py of its day, which this
+    # checkout may have moved past; that one is what a stranger will have,
+    # and the verification below runs with it either way.
+    if [ -z "$ALREADY" ]; then
+        cmp -s "$FREEZER" "$back/x/ark_freeze.py" \
+            || fail "the ark_freeze.py that came back is not the one that went up"
+    fi
     echo "verified: the downloaded copy equals $ARK_DIR, file for file"
 
     step "verify the downloaded copy (L0-L2)"
     # The plan's bar, and the reason for all of the above: the copy that is
-    # off-site — not the one on this disk — replays into an empty engine, with
-    # the verifier it carries, which is what a stranger will have.
+    # off-site — not the one on this disk — restores into an empty engine,
+    # with the verifier it carries, which is what a stranger will have.
     verify_in_container "$back/x/$STAMP" "$back/x/ark_freeze.py" \
         || fail "the downloaded copy did not verify"
     # Plaintext again; its only use has been served.
     rm -rf "$back"
+}
+
+verify_off_site() {
+    step "verify the copy off-site"
+    fetch_and_verify
+}
+
+# The manifest goes up last of all, once the copy has come back and verified:
+# a stamp with a manifest is a verified shipment, and that is all retention
+# counts. It is read back like everything else, and one that comes back
+# different is taken down again — a record that does not say what was
+# verified would be counted, and a check by hand against it would fail.
+record_shipment() {
+    step "record the shipment"
+    local manifest="ark-$STAMP.sha256"
+    remote_put "$WORK/$manifest" "$manifest"
+    remote_get "$manifest" "$WORK/$manifest.back"
+    if ! cmp -s "$WORK/$manifest" "$WORK/$manifest.back"; then
+        remote_rm "$manifest" || true
+        fail "the manifest that came back is not the one that went up; it was taken down again, and the ciphertext stays unrecorded until the Ark is shipped again"
+    fi
+    echo "recorded: $REMOTE:$ARK_REMOTE_DIR/$manifest"
+}
+
+# An Ark recorded off-site already: nothing is sent over it (see the header).
+# Its copy is fetched back and held to the same bar as a fresh shipment,
+# against the hash its manifest records rather than one taken here.
+verify_recorded() {
+    step "verify the copy already off-site"
+    local manifest="ark-$STAMP.sha256" name="" rest=""
+    echo "ark-$STAMP is recorded off-site already: not sent again, fetched back and verified"
+    remote_get "$manifest" "$WORK/$manifest"
+    read -r ENC_SHA name rest < "$WORK/$manifest" || true
+    if ! [[ "$ENC_SHA" =~ ^[0-9a-f]{64}$ ]] || [ "$name" != "ark-$STAMP.tar.gz.gpg" ] || [ -n "$rest" ]; then
+        fail "$manifest off-site is not a manifest this script writes"
+    fi
+    ENC_SAID="its manifest says"
+    fetch_and_verify
 }
 
 # What this script minted, and nothing else: ark-<stamp>.tar.gz.gpg and
@@ -443,7 +543,8 @@ ark_stamp_of() {   # <remote name>
     return 0
 }
 
-# Finished shipments, newest first — keyed on the manifest, which goes up last.
+# Verified shipments, newest first — keyed on the manifest, which goes up only
+# once its copy has come back and verified.
 ark_stamps() {
     remote_names \
         | grep -E '^ark-[0-9]{8}T[0-9]{6}Z\.sha256$' \
@@ -452,8 +553,9 @@ ark_stamps() {
 }
 
 # Its own litter only: a .part from an upload that never came back, and a
-# ciphertext whose manifest never landed. A manifest without its ciphertext is
-# the record that a shipment happened and is left for count retention.
+# ciphertext with no manifest — a copy that never came back verified, or whose
+# run died before it could record it. A manifest without its ciphertext is the
+# record that a shipment happened and is left for count retention.
 ark_debris() {
     local names name base stamp
     names="$(remote_names)" || return 1
@@ -465,29 +567,37 @@ ark_debris() {
         if [ "$base" != "$name" ]; then
             printf '%s\n' "$name"
         elif [ "$base" != "ark-$stamp.sha256" ] \
-             && ! printf '%s\n' "$names" | grep -qxF "ark-$stamp.sha256"; then
+             && ! grep -qxF "ark-$stamp.sha256" <<< "$names"; then
             printf '%s\n' "$name"
         fi
     done <<< "$names"
 }
 
 HELD="?"
+STUCK=""
 prune() {
     step "prune off-site"
     local junk s stamps kept old
+    # The Ark is up, verified and recorded by now, so nothing here may fail
+    # the run: a listing nobody can read, a count nobody can read and a
+    # deletion that does not happen each stand the deletion down and say so.
+    # (A prune that failed the run once sent the operator to ship again.)
+    #
     # Debris before RETAIN is even read: a typo in backup.env must not keep
     # this script's own litter on the box.
     if junk="$(ark_debris)"; then
         for s in $junk; do
             [ -n "$s" ] || continue
-            remote_rm "$s"
-            echo "swept: $s (debris of an interrupted upload)"
+            if remote_rm "$s"; then
+                echo "swept: $s (debris of an upload that never came back verified)"
+            else
+                echo "could not delete $s — left off-site; the next run sweeps it" >&2
+            fi
         done
     else
         echo "could not list $ARK_REMOTE_DIR — nothing swept" >&2
     fi
-    # Count, never age, and a count nobody can read is not zero: the Ark is up
-    # and verified, so only the deletion stands down.
+    # Count, never age, and a count nobody can read is not zero.
     RETAIN="$(printf '%s' "$RETAIN" | tr -d '[:space:]')"
     case "$RETAIN" in
         ''|*[!0-9]*) echo "BACKUP_ARK_RETAIN=$RETAIN is not a number — nothing pruned" >&2; return 0 ;;
@@ -510,17 +620,27 @@ prune() {
     fi
     for s in $old; do
         [ -n "$s" ] || continue
-        remote_rm "ark-$s.tar.gz.gpg" "ark-$s.sha256"
-        echo "pruned: ark-$s"
+        # The manifest first: a prune cut short then leaves a ciphertext with
+        # no record — debris, swept next time — and never a record of a copy
+        # that is no longer there, which retention would go on counting.
+        if remote_rm "ark-$s.sha256" "ark-$s.tar.gz.gpg"; then
+            echo "pruned: ark-$s"
+        else
+            echo "could not delete ark-$s — left off-site; the next run prunes it, or delete it by hand" >&2
+            STUCK="${STUCK:+$STUCK }ark-$s"
+        fi
     done
     HELD="$(printf '%s\n' "$kept" | grep -c . || true)"
+    return 0
 }
 
 summary() {
     local others
+    # Its own .part too: a sweep that could not delete one has said so above,
+    # and the run now reaches this line after it.
     others="$(remote_names 2>/dev/null \
         | grep -E '^ark-' \
-        | grep -vE '^ark-[0-9]{8}T[0-9]{6}Z\.(tar\.gz\.gpg|sha256)$' \
+        | grep -vE '^ark-[0-9]{8}T[0-9]{6}Z\.(tar\.gz\.gpg|sha256)(\.part)?$' \
         | tr '\n' ' ' || true)"
     echo
     echo "ARK SHIPPED AND VERIFIED"
@@ -530,9 +650,16 @@ summary() {
         echo "            (the silence check's first record of this file should carry the same hash)"
     fi
     echo "  off-site  $ARK_REMOTE_DIR/ark-$STAMP.tar.gz.gpg  sha256 $ENC_SHA"
-    echo "  verified  fetched back, sha256 equal, decrypted to the tarball sent, equal to the"
+    if [ -n "$ALREADY" ]; then
+        echo "  sent      not again: recorded off-site by an earlier run, and a recorded copy"
+        echo "            is never sent over"
+        echo "  verified  fetched back, sha256 equal to its manifest, decrypted, equal to the"
+    else
+        echo "  verified  fetched back, sha256 equal, decrypted to the tarball sent, equal to the"
+    fi
     echo "            local Ark file for file, L0-L2 OK on the downloaded copy"
     echo "  held      $HELD of $RETAIN Arks minted by this script"
+    [ -z "$STUCK" ] || echo "  not pruned $STUCK (the deletion failed: the next run prunes them, or delete them by hand)"
     [ -z "$others" ] || echo "  also here $others(not minted here; never counted or touched)"
     echo "next:  chattr +i -R $ARK_DIR"
 }
@@ -548,8 +675,14 @@ step "verify the local Ark (L0-L2)"
 verify_in_container "$ARK_DIR" "$FREEZER" \
     || fail "the Ark at $ARK_DIR did not verify; it is kept for inspection and not shipped"
 
-pack_and_encrypt
-upload
-verify_off_site
+look_off_site
+if [ -n "$ALREADY" ]; then
+    verify_recorded
+else
+    pack_and_encrypt
+    upload
+    verify_off_site
+    record_shipment
+fi
 prune
 summary

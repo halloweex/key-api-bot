@@ -7,14 +7,20 @@ requirement is the opposite one: keep everything, be able to restore anything,
 for as long as it takes. A mechanism that runs every night cannot satisfy it,
 because every night it also throws something away.
 
-So the Ark is taken **twice in the whole migration** and never rotated:
+So the Ark is taken **twice in the whole migration**, and neither is rotated
+on a schedule:
 
   1. before the first landing write to Postgres — after that moment DuckDB
      stops being the only writer of truth, and "what was in DuckDB" stops
-     being reproducible (2026-08-23, deploy/step05-preflight-runbook.md);
+     being reproducible (2026-08-23, deploy/step05-preflight-runbook.md).
+     Nothing prunes it, on this disk or off it;
   2. at the start of the week of silence, from the file once nothing writes
      it any more — web stopped, KS_DUCKDB about to go `off`. That one is
-     frozen, shipped, fetched back and verified by deploy/ark_ship.sh.
+     frozen, shipped, fetched back and verified by deploy/ark_ship.sh, which
+     keeps its own Arks off-site by count, never by age: BACKUP_ARK_RETAIN,
+     two by the owner's decision OD-S5-6. So freezing it again pushes the
+     oldest of that script's Arks out, and never the first, whose name is not
+     one it mints. No local Ark is deleted by anything.
 
 WHAT GOES IN, AND WHY EACH PART IS NECESSARY
 
@@ -79,6 +85,8 @@ a week, and an Ark is a deliberate, permanent step of that size. Inside a
 container that path is the container's own layer and leaves with it, so with
 the default and no mount there the freeze is refused rather than reported
 complete. The first Ark (2026-08-23) lives in data/ark/, from before this.
+Wherever it goes, the Ark's own directory is mode 700 and its files 600: it is
+plaintext, and the root it lands in may be open to everyone.
 
 Only `duckdb` and the standard library. No import from `core/`, by design: this
 script must keep working after the modules it archives have been deleted.
@@ -304,13 +312,20 @@ def freeze(source: Path, out_root: Path) -> Path:
     # Written once. An existing directory of this name is an Ark already —
     # perhaps shipped, perhaps immutable — and a second freeze into it would
     # leave a manifest describing files from two moments.
+    #
+    # And closed from the moment it exists: the Ark is plaintext, every
+    # customer's phone number. Inside a container the umask is 0022 whatever
+    # the caller's was, so without a mode here the Ark is a 0755 directory of
+    # 0644 files wherever its root was already open to everyone. A umask can
+    # only take bits away, so 0700 is what any umask leaves of it; files
+    # written inside are closed to 0600 before the freeze reports complete.
     try:
-        ark.mkdir(parents=True, exist_ok=False)
+        ark.mkdir(mode=0o700, parents=True, exist_ok=False)
     except FileExistsError:
         log(f"{ark} exists already; an Ark is never written into another", "ERROR")
         raise SystemExit(1)
-    (ark / "tables").mkdir()
-    (ark / "views").mkdir()
+    (ark / "tables").mkdir(mode=0o700)
+    (ark / "views").mkdir(mode=0o700)
 
     log(f"source  {source}  ({source.stat().st_size / 1024**2:,.0f} MB)")
     log(f"ark     {ark}")
@@ -392,12 +407,57 @@ def freeze(source: Path, out_root: Path) -> Path:
         stamp=stamp, version=duckdb_version,
         tables=len(tables), views=len(views),
     ), encoding="utf-8")
+    # DuckDB, shutil.copy2 (which copies the source's mode) and write_text
+    # all leave group and world bits a umask allowed.
+    for f in ark.rglob("*"):
+        f.chmod(0o700 if f.is_dir() else 0o600)
 
     log(f"{len(tables)} tables, {len(views)} views, {total / 1024**2:,.0f} MB", "OK")
     log(f"ark complete: {ark}", "OK")
     log("make it immutable and exclude it from every retention script:", "OK")
     log(f"    chattr +i -R {ark}", "OK")
     return ark
+
+
+def _restored_count(ark: Path, ddl: str, table: str) -> int:
+    """Restore one table the way RESTORE.md says to, and count what landed.
+
+    Each table goes into an engine of its own, so the largest table bounds the
+    memory this takes, not the whole warehouse: the verification runs in
+    memory, under the container's limit. A table
+    whose FOREIGN KEY references another gets that one loaded first, or the
+    restore would refuse rows a whole one accepts. The warehouse declares none
+    today (core/migrations.py m0007 dropped order_products'), and the cost of
+    being right is small.
+    """
+    probe = duckdb.connect(":memory:")
+    try:
+        probe.execute(ddl)
+        try:
+            parents: dict[str, set[str]] = {}
+            for child, parent in probe.execute("""
+                SELECT table_name, referenced_table FROM duckdb_constraints()
+                WHERE constraint_type = 'FOREIGN KEY' AND referenced_table IS NOT NULL
+            """).fetchall():
+                parents.setdefault(child, set()).add(parent)
+        except duckdb.Error:   # a DuckDB with no referenced_table column
+            parents = {}
+
+        loaded: set[str] = set()
+
+        def load(name: str) -> None:
+            if name in loaded:
+                return
+            loaded.add(name)
+            for parent in sorted(parents.get(name, ())):
+                load(parent)
+            path = str(ark / "tables" / f"{name}.parquet").replace("'", "''")
+            probe.execute(f"INSERT INTO {_quote(name)} SELECT * FROM read_parquet('{path}')")
+
+        load(table)
+        return probe.execute(f"SELECT COUNT(*) FROM {_quote(table)}").fetchone()[0]
+    finally:
+        probe.close()
 
 
 def verify(ark: Path) -> int:
@@ -448,32 +508,46 @@ def verify(ark: Path) -> int:
             log(f"L1 cannot open frozen database: {exc}", "ERROR")
             failures += 1
 
-    # L2 — the parquet answers on its own, through schema.sql and nothing else.
-    # This is the level that survives the deletion of the application, and the
-    # only one that proves the archive is readable rather than merely present.
+    # L2 — the parquet restores on its own, through schema.sql and nothing
+    # else. This is the level that survives the deletion of the application,
+    # and the only one that proves the archive is readable rather than merely
+    # present. It is the restore RESTORE.md tells a stranger to make: schema.sql
+    # into an empty engine, then each table's Parquet INSERTed into the table
+    # it creates, and counted there. Counting the Parquet on its own — what
+    # this did until 2026-10 — passed a file that cannot be loaded: the wrong
+    # columns, a type that does not cast, a key its PRIMARY KEY refuses.
     schema = ark / "schema.sql"
     if schema.exists():
+        ddl = schema.read_text()
+        probe = duckdb.connect(":memory:")
         try:
-            probe = duckdb.connect(":memory:")
-            probe.execute(schema.read_text())
-            checked = bad = 0
-            for t, expected in manifest["tables"].items():
-                pq = ark / "tables" / f"{t}.parquet"
-                if not pq.exists():
-                    continue
-                got = probe.execute(
-                    f"SELECT COUNT(*) FROM read_parquet('{pq}')").fetchone()[0]
-                checked += 1
-                if got != expected:
-                    log(f"parquet {t}: manifest {expected}, file {got}", "ERROR")
-                    bad += 1
-            probe.close()
-            failures += bad
-            log(f"L2 schema+parquet: {checked} tables replayed, {bad} mismatched",
-                "OK" if not bad else "ERROR")
+            probe.execute(ddl)
+            replays = True
         except duckdb.Error as exc:
             log(f"L2 schema.sql does not replay: {exc}", "ERROR")
             failures += 1
+            replays = False
+        finally:
+            probe.close()
+        if replays:
+            checked = bad = 0
+            for t, expected in manifest["tables"].items():
+                if not (ark / "tables" / f"{t}.parquet").exists():
+                    continue
+                checked += 1
+                try:
+                    got = _restored_count(ark, ddl, t)
+                except duckdb.Error as exc:
+                    log(f"parquet {t} does not restore into schema.sql's table: {exc}",
+                        "ERROR")
+                    bad += 1
+                    continue
+                if got != expected:
+                    log(f"parquet {t}: manifest {expected}, restored {got}", "ERROR")
+                    bad += 1
+            failures += bad
+            log(f"L2 schema+parquet: {checked} tables replayed, {bad} mismatched",
+                "OK" if not bad else "ERROR")
 
     if failures:
         log(f"VERIFY FAILED: {failures} problem(s)", "ERROR")
@@ -519,9 +593,9 @@ convenience.
 directory. Otherwise it is deploy/ark_freeze.py in the repository.)
 
 Three levels: file checksums, then the frozen database's own counts, then —
-the one that matters — replaying `schema.sql` into an empty engine and reading
-the Parquet through it. The third level is what proves this archive can be read
-after the code that wrote it is gone.
+the one that matters — replaying `schema.sql` into an empty engine and loading
+every table's Parquet into the table it creates, as above. The third level is
+what proves this archive can be read after the code that wrote it is gone.
 
 ## What is not here
 

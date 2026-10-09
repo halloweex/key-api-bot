@@ -94,11 +94,17 @@ answer than any calendar window.
 ## B. The Ark
 
 A frozen copy of the warehouse as it was before Postgres ever held a landing
-row. Taken **twice in the whole migration**, never rotated: once before the
-first landing write, once in the deploy that removes DuckDB.
+row. Taken **twice in the whole migration**: once before the first landing
+write — this section, and that Ark is never pruned anywhere — and once at the
+start of the week of silence, from the static file, by `deploy/ark_ship.sh`.
+That script keeps its own Arks off-site by count, `BACKUP_ARK_RETAIN`, two by
+the owner's decision OD-S5-6: freezing the second Ark again pushes the oldest
+of its own out, never the first Ark, whose name it does not mint. It deletes
+no local Ark.
 
 It is not a backup. Backups rotate — `keep=2` for the file — and rotation is
-deletion on a schedule. This is the opposite requirement.
+deletion on a schedule. Neither Ark is on a schedule: the only deletion is the
+count above, and it happens only when somebody ships another.
 
 ### B1. Freeze
 
@@ -189,10 +195,13 @@ SSH_OPTS=(-p "${BACKUP_SSH_PORT:-23}" -i "$BACKUP_SSH_KEY" \
 tar -C data/ark -czf "/tmp/ark-$STAMP.tar.gz" "$STAMP"
 sha256sum "/tmp/ark-$STAMP.tar.gz"
 
-# `ark/`, not the archive directory itself. Nothing there is pruned today —
-# `deploy/offsite_parquet.sh` selects victims with
-# `grep -o 'ks-warehouse-[0-9]\{8\}-[0-9]\{6\}\.tar'`, which cannot match
-# this name — but relying on somebody never widening that regex is not a plan.
+# `ark/`, not the archive directory itself. `deploy/offsite_parquet.sh`
+# selects victims with `grep -o 'ks-warehouse-[0-9]\{8\}-[0-9]\{6\}\.tar'`,
+# which cannot match this name — but relying on somebody never widening that
+# regex is not a plan. Since PR-11 `deploy/ark_ship.sh` does prune in `ark/`:
+# by count (BACKUP_ARK_RETAIN, two by OD-S5-6) and over the two names it
+# mints alone, `ark-<stamp>.tar.gz.gpg` and `ark-<stamp>.sha256`. This plain
+# `.tar.gz` is neither, so it is never counted, swept or pruned.
 printf 'cd %s\n-mkdir ark\n' "$BACKUP_REMOTE_DIR" \
     | sftp -b - -P "${BACKUP_SSH_PORT:-23}" -i "$BACKUP_SSH_KEY" "$BACKUP_REMOTE"
 rsync --archive --partial -e "ssh ${SSH_OPTS[*]}" \
@@ -220,9 +229,13 @@ as the VPS, so one account-level event still takes both. Naming that is not a
 plan to fix it — for a frozen pre-migration snapshot the disk was the risk
 worth closing — but nobody should read "off-site" as more than it is.
 
-**Retention.** Nothing prunes it, here or there. That is deliberate: this is
-one cold artifact taken once, not a rotation, and the day it needs deleting is
-the day the migration is finished and somebody decides so on purpose.
+**Retention.** Nothing prunes this Ark, here or there. That is deliberate:
+this is one cold artifact taken once, not a rotation, and the day it needs
+deleting is the day the migration is finished and somebody decides so on
+purpose. It shares `ark/` off-site with the second Ark's copies, which
+`deploy/ark_ship.sh` does prune — by count, BACKUP_ARK_RETAIN (OD-S5-6: two),
+and only names of the form `ark-<stamp>.tar.gz.gpg`/`.sha256`, which this one
+is not; `tests/unit/test_ark_ship_script.py` holds it to that.
 
 ### The first Ark, 2026-08-23
 
