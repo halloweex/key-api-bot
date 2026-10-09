@@ -41,7 +41,7 @@ EVERY RELEASE IS RECORDED (OD-17 (a))
 
 A release writes one `lever_used` row to `app.alert_events` inside its own
 transaction (`core/lever_journal.py`), and exit 3 writes one when the owner
-rows still stand: a copy-back is a rollback lever, and the 30-day parallel
+rows still stand: a copy-back is a rollback lever, and the 14-day parallel
 period and the week of silence both restart on one. Before this nothing
 durable recorded it — the release deletes rows and unlinks a file, and this
 script's report dies with its `--rm` container.
@@ -204,7 +204,7 @@ async def _run(args: argparse.Namespace) -> int:
             "REFUSED: KS_DUCKDB=off in this container's environment, and a "
             "copy-back writes the DuckDB file. Nothing was read and nothing "
             "was written.\n"
-            "  A copy-back is a rollback lever: it restarts the 30-day "
+            "  A copy-back is a rollback lever: it restarts the 14-day "
             "parallel period and the week of silence. If that is the "
             "decision, run the same command with -e KS_DUCKDB=on.",
             file=sys.stderr,

@@ -831,6 +831,47 @@ class TestTheExitCodes:
         assert printed["latch"] == latch
 
 
+class TestUnderTheWeekOfSilence:
+    """`KS_DUCKDB=off` in the container's environment — a one-off of the web
+    service inherits it from `.env`. A copy-back writes the DuckDB file and is
+    a rollback lever, so it is refused before it reads either store: exit 2,
+    the refusal counted like any other open, and the line saying which period
+    restarts if it is done anyway — the 14-day parallel period of OD-17 as
+    amended on 08.10, not the 30 days it named before (stage 5, PR-0)."""
+
+    @pytest.mark.parametrize("argv", [["expenses", "--execute"],
+                                      ["expenses", "--dry-run"],
+                                      ["expenses", "--handover"]])
+    def test_it_is_refused_with_nothing_read_and_nothing_written(
+        self, argv, monkeypatch, tmp_path, capsys,
+    ):
+        """Mutation: drop the `except DuckDBOpenedWhileOff` in `_run` — the
+        refusal leaves as a traceback, not as exit 2."""
+        from core import duckdb_switch
+        from scripts import chain_copy_back as script
+
+        data = tmp_path / "data"
+        monkeypatch.setattr("core.duckdb_store.DB_DIR", data)
+        monkeypatch.setattr("core.duckdb_store.DB_PATH", data / "analytics.duckdb")
+        monkeypatch.setenv(duckdb_switch.ENV, "off")
+        copy_back, handover = AsyncMock(), AsyncMock()
+        get_pool = AsyncMock(side_effect=AssertionError("Postgres was read"))
+        with patch("core.chain_transfer.copy_back", new=copy_back), \
+             patch("core.chain_transfer.handover_check", new=handover), \
+             patch("core.pg.get_pool", new=get_pool):
+            assert script.main(argv) == 2
+
+        copy_back.assert_not_awaited()
+        handover.assert_not_awaited()
+        get_pool.assert_not_awaited()
+        assert not data.exists(), "nothing written: not even the data directory"
+        assert list(duckdb_switch.opened()) == ["scripts.chain_copy_back:_run"]
+        err = capsys.readouterr().err
+        assert err.startswith("REFUSED: KS_DUCKDB=off"), err
+        assert "restarts the 14-day parallel period" in " ".join(err.split())
+        assert "-e KS_DUCKDB=on" in err
+
+
 class TestChain7aIsCarriedLikeTheOthers:
     """DN-25. The goals chain is derived into the copy-back from the lists that
     already exist — no fifth description of `app.revenue_goals` — and the

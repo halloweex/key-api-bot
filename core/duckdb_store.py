@@ -619,7 +619,14 @@ class DuckDBStore(
         `close()` has closed (`StoreClosedError`) — decided under the lock,
         so a caller that was queued behind `close()` cannot slip in after it.
         A call with the default reopens a closed store on purpose.
+
+        Under `KS_DUCKDB=off` the switch refuses here, as the first act,
+        before anything touches the disk: `open_file` below refuses as well,
+        but only after this method has created `data/` and `duckdb_tmp/`, so
+        a refused connect used to leave two directories behind. Under `on`
+        `guard()` does nothing.
         """
+        duckdb_switch.guard()
         DB_DIR.mkdir(parents=True, exist_ok=True)
 
         async with self._lock:
