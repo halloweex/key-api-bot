@@ -1304,9 +1304,11 @@ def check_goals_history_mode(payload: Optional[dict]) -> "list[tuple[str, str]]"
     reason: those run as duckdb and nothing fails, while this one raises at
     every goal history read on purpose — a value naming a history that does
     not exist must not be answered in silence — so the dashboard's goal
-    widget and every `/goals/*` page answer 500 and the Monday job fails, and
-    none of those pages anybody by itself. An absent block is not a failure;
-    an older web publishes none.
+    widget (`/goals/smart`), the other calculator pages under `/goals/` and
+    `POST /goals/recalculate` answer 500 and the Monday job fails, and none
+    of those pages anybody by itself (`GET /goals`, `/goals/history` and
+    setting a goal never read that history, and answer). An absent block is
+    not a failure; an older web publishes none.
     """
     block = (payload or {}).get("goals_history")
     if isinstance(block, dict) and block.get("error"):
@@ -1665,7 +1667,7 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("duckdb_mode_invalid",
      "Set KS_DUCKDB to on or off in .env, then recreate web"),
     ("goals_history_mode_invalid",
-     "Remove KS_GOALS_HISTORY from .env (or set it to silver: the bridge is deleted), then recreate web; every goal read fails until then"),
+     "Set KS_GOALS_HISTORY=silver in .env and keep the line (an image from before 7b-4 reads it unset as the bridge), then recreate web; the calculators, smart goal and Monday job fail until then"),
     # Last: when an engine is down its own key names the cause, and a fallback
     # or a refusal is what that cause cost the pages. A route is a cause of
     # its own, and its lever is `.env`, so it goes first of the three.

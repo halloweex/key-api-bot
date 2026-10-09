@@ -24,7 +24,12 @@ What is proved here, without a database server (the two-engine half is in
   * **the retired switch** (T13) — unset and `silver` read Silver; `bridge`
     and a typo raise at every history read, with nothing written, and at
     none of the imports; under Silver the engine flag's typo stops them too;
-  * **the refusal is seen** — `/api/health` publishes it and the canary pages.
+  * **the refusal is seen** — `/api/health` publishes it and the canary pages,
+    and both, like the refusal itself, say "set it to `silver`", never
+    "remove it": an image from before 7b-4 reads unset as the bridge;
+  * **what a refusal stops** — route by route, read off the app: the six
+    that read the calculators' history answer 500, the four that never did
+    answer.
 
 Each guard names the mutation that bites it.
 """
@@ -429,6 +434,21 @@ class TestTheSwitch:
             pg_goals_read.history_mode()
         assert "deleted (chain 7b-4)" in str(raised.value)
 
+    @pytest.mark.parametrize("value", ["bridge", "silvr"])
+    def test_the_refusal_says_set_it_to_silver_never_remove_it(self, monkeypatch, value):
+        """Unset reads Silver on this build and `bridge` on every image from
+        before 7b-4 — so a production `.env` that lost the line would, on an
+        image rollback, read the goals out of DuckDB's frozen orders and
+        classification, and after step 13 hold its `goals_bridge`, which
+        runs the start as the way back. The message names the one value
+        every image reads as Silver. Mutation: "Remove the variable" back."""
+        _history(monkeypatch, value)
+        with pytest.raises(ValueError) as raised:
+            pg_goals_read.history_mode()
+        message = str(raised.value)
+        assert f"Set it to {pg_goals_read.SILVER!r}" in message, message
+        assert "remove" not in message.lower(), message
+
     def test_a_typo_raises_naming_the_variable(self, monkeypatch):
         _history(monkeypatch, "silvr")
         with pytest.raises(ValueError, match="KS_GOALS_HISTORY='silvr'"):
@@ -546,8 +566,9 @@ class TestARefusedValueStopsEveryHistoryRead:
 
 class TestARefusalIsSeen:
     """The raise is where it belongs — at the read — but on its own it reached
-    nobody: a 500 on the goal widget and on `/goals/*`, and a Monday job error
-    in a log (review of 7b). `/api/health` publishes it and the canary pages
+    nobody: a 500 on the goal widget and the other calculator routes
+    (`TestWhatARefusalStops` names them), and a Monday job error in a log
+    (review of 7b). `/api/health` publishes it and the canary pages
     it, the way `KS_READ_FALLBACK`, `KS_UTM_PARSE` and `KS_WRITE_WAREHOUSE`
     are seen — `bridge` included since chain 7b-4.
 
@@ -631,11 +652,103 @@ class TestARefusalIsSeen:
         assert result.severity == "critical"
         assert result.failure_keys == ["goals_history_mode_invalid"]
         lever = canary._what_to_do(result)
-        assert "KS_GOALS_HISTORY" in lever
         # The lever names the way out, and never the deleted history as one.
-        assert "Remove KS_GOALS_HISTORY" in lever and "to bridge" not in lever
+        # Nor removing the line: an image from before 7b-4 reads unset as the
+        # bridge, so the way out is the one value every image reads as Silver.
+        assert "KS_GOALS_HISTORY=silver" in lever and "to bridge" not in lever
+        assert "remove" not in lever.lower(), lever
 
     def test_it_is_a_registered_condition(self):
         from core.alerting import Kind, spec_for
 
         assert spec_for("goals_history_mode_invalid").kind is Kind.CONDITION
+
+
+# ─── What a refusal stops, route by route ─────────────────────────────────
+
+# What reads the calculators' history, and so answers 500 under a refused
+# value; and what never read it — a recent window of Silver, with
+# `is_active_source` — and answers as before.
+REFUSED_ROUTES = frozenset({
+    ("GET", "/api/goals/smart"), ("GET", "/api/goals/seasonality"),
+    ("GET", "/api/goals/growth"), ("GET", "/api/goals/weekly-patterns"),
+    ("GET", "/api/goals/forecast"), ("POST", "/api/goals/recalculate"),
+})
+ANSWERED_ROUTES = frozenset({
+    ("GET", "/api/goals"), ("GET", "/api/goals/history"),
+    ("POST", "/api/goals"), ("DELETE", "/api/goals/{period_type}"),
+})
+_ROUTE_REQUESTS = {
+    "/api/goals/history": ("/api/goals/history", {"period_type": "monthly"}),
+    "/api/goals/forecast": ("/api/goals/forecast", {"year": 2026, "month": 10}),
+    "/api/goals/{period_type}": ("/api/goals/monthly", {}),
+}
+_ROUTE_PARAMS = {("POST", "/api/goals"): {"period_type": "monthly", "amount": 1000}}
+
+
+def _goal_routes():
+    from tests.routes_helper import iter_endpoints
+    from web.main import app
+
+    return {(method, e.path) for e in iter_endpoints(app)
+            if e.path == "/api/goals" or e.path.startswith("/api/goals/")
+            for method in e.methods if method not in ("HEAD", "OPTIONS")}
+
+
+class TestWhatARefusalStops:
+    """The docs said a refused `KS_GOALS_HISTORY` failed "the goal widget,
+    `/goals/*`, the POST and the Monday job" (review of 7b-4); three goal
+    routes never read the calculators' history and answer — from Silver,
+    which is not a silent substitute there, since it is all they ever read.
+    The split is pinned here so the docs cannot drift from it again.
+    Mutation: a calculator read added to `get_goals`, or the refusal taken
+    out of one calculator — a route changes column."""
+
+    def test_every_goal_route_is_on_one_list(self):
+        """Read off the app, so a goal route added tomorrow must be put on a
+        list — and in the docs — the day it is registered."""
+        assert _goal_routes() == REFUSED_ROUTES | ANSWERED_ROUTES
+        assert not REFUSED_ROUTES & ANSWERED_ROUTES
+
+    @pytest.mark.parametrize("value", [None, "bridge"])
+    def test_which_answer_and_which_refuse(self, monkeypatch, value):
+        import time
+
+        from fastapi.testclient import TestClient
+
+        from core.permissions import ADMIN_USER_IDS
+        from web.main import app
+        from web.ratelimit import limiter
+        from web.routes.auth import (
+            SESSION_COOKIE,
+            create_session_data,
+            session_serializer,
+        )
+
+        admin = sorted(ADMIN_USER_IDS)[0]
+
+        async def _resolve(session):
+            return {"user_id": admin, "role": "admin"}
+
+        monkeypatch.setattr("web.routes.auth._resolve_session", _resolve)
+        monkeypatch.delenv("KS_WRITE_GOALS", raising=False)
+        _history(monkeypatch, value)
+        client = TestClient(app, raise_server_exceptions=False)
+        client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data(
+            {"id": str(admin), "first_name": "T", "last_name": "U", "username": "t",
+             "auth_date": str(int(time.time()))}, role="admin")))
+
+        statuses = {}
+        try:
+            for method, path in sorted(REFUSED_ROUTES | ANSWERED_ROUTES):
+                url, params = _ROUTE_REQUESTS.get(path, (path, {}))
+                params = {**params, **_ROUTE_PARAMS.get((method, path), {})}
+                limiter.reset()
+                statuses[(method, path)] = client.request(
+                    method, url, params=params).status_code
+        finally:
+            limiter.reset()
+
+        refused = 500 if value == "bridge" else 200
+        assert statuses == {**{r: refused for r in REFUSED_ROUTES},
+                            **{r: 200 for r in ANSWERED_ROUTES}}, statuses
