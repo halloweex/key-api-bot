@@ -1765,7 +1765,10 @@ refused the 0034 one. Held by `tests/unit/test_batch_e_chains_revision.py`
 (each test names its mutation) and `tests/integration/test_batch_e_lock_pg.py`
 (the round trip and the lock on a real server, in a transaction rolled back).
 Both read what came before from `tests/migration_replay.py`, which runs every
-revision against a recorder rather than restating its text.
+revision against a recorder rather than restating its text. The unit tests are
+frozen like the revision — 0035's twenty tables, chains, flags and modules as
+literals, nothing read from the modules as they are today — so a later change
+to a chain cannot fail them and tempt an edit of an applied revision.
 
 **A flip waits for the lock-out, at runtime, from this build on.** Each of the
 eight names 0035 as its `LOCKOUT_REVISION`, and a chain's flag moves its writes
