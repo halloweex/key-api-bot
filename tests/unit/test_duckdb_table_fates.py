@@ -74,9 +74,6 @@ RENDERED_DDL = {
     ("core/ch_silver.py", "_SILVER_DDL"): "ClickHouse, not DuckDB",
     ("deploy/ark_freeze.py", "dump_schema"):
         "writes the frozen file's own tables out as text; executes nothing",
-    ("scripts/goals_semantics_dryrun.py", "copy_backup"):
-        "copies the tables its TABLES names out of a backup ATTACHed "
-        "READ_ONLY into an in-memory database (`:memory:`) — never the file",
 }
 
 # Switch names in the code that do not decide a DuckDB table's writer.

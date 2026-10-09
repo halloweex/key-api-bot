@@ -461,11 +461,6 @@ HOST_TOOLS = {
         "verifies the frozen copy and an in-memory probe, never the live file",
     ("deploy/dq_history.py", "<module>"):
         "reads a backup under data/backups, read-only",
-    ("scripts/goals_semantics_dryrun.py", "copy_backup"):
-        "an in-memory database that ATTACHes a backup under data/backups "
-        "READ_ONLY, never the live file; chain 7b-2's pre-flip measurement, "
-        "run once before KS_GOALS_HISTORY=silver (2026-10-07), long before "
-        "the week of silence",
     ("deploy/duckdb_table_fates_check.py", "read_catalogue"):
         "the table-fate manifest's check, run by hand: the newest nightly "
         "backup, read-only; it refuses the live file by name, by inode and "
