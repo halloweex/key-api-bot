@@ -382,6 +382,9 @@ def test_process(state, sweep_network, production_host, monkeypatch):
         jobs = list(scheduler._job_info)
         for job_id in jobs:
             job = scheduler._scheduler.get_job(job_id)
+            if job is None:  # registered, then taken off the scheduler
+                record.collect(f"job:{job_id}", "not scheduled")
+                continue
             status = await run_step(job.func(*job.args, **job.kwargs))
             record.collect(f"job:{job_id}", status)
         # The control: the tripwire still stands in this state.
