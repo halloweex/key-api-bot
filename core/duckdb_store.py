@@ -733,6 +733,12 @@ class DuckDBStore(
         """
         async with self._lock:
             conn = self._connection
+            if conn is None and duckdb_switch.is_off():
+                # The store `get_store()` publishes under off is unconnected,
+                # so there is nothing to checkpoint — said, so that the hourly
+                # job's silence is not read as a checkpoint that ran.
+                logger.info("DuckDB checkpoint skipped: KS_DUCKDB=off, the "
+                            "store is not connected")
             if conn:
                 try:
                     conn.execute("CHECKPOINT")
@@ -4084,10 +4090,24 @@ _store_lock = asyncio.Lock()
 
 
 async def get_store() -> DuckDBStore:
-    """Get singleton DuckDB store instance (coroutine-safe)."""
+    """Get singleton DuckDB store instance (coroutine-safe).
+
+    Under `KS_DUCKDB=off` the store is published **unconnected** (stage 5,
+    PR-1). About 150 call sites reach `get_store()`, and most of them only
+    hold the store as the object their router hangs off — `_users_run`,
+    `_perms_run`, `_sms_run`, every `KS_READ_*` router, every Postgres
+    writer — and decide where the read goes before they touch a connection.
+    Refusing here refused all of them for what none of them was about to do.
+    The constructor touches no file; `connection()` connects lazily, through
+    `connect()`, whose first act is the switch, so the tripwire now stands
+    where the file is actually reached and names that site.
+    """
     global _store_instance
     async with _store_lock:
         if _store_instance is None:
+            if duckdb_switch.is_off():
+                _store_instance = DuckDBStore()
+                return _store_instance
             # Published only once connected. It used to be assigned before
             # `connect()`, so a connect that raised still left a singleton
             # behind, and web's startup — which catches a failed first

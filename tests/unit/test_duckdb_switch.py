@@ -18,8 +18,17 @@ reading the code (core/duckdb_switch.py). What is held here:
   exemptions written down here;
 - the weekly compaction, the one scheduled host process that opens the live
   file, opens it through the switch;
-- web's startup survives the refusal, `/api/health` publishes it, and the
-  canary pages it CRITICAL and keeps the watch only while web runs `off`.
+- the store under `off` (stage 5, PR-1): `get_store()` publishes it
+  unconnected and the tripwire stands at `connection()`; under `on` it is
+  connected before it is published, as ever;
+- web's startup under `off` boots on that store without asking DuckDB's
+  counts, survives a boot sync that failed or was refused, and a route that
+  reaches the file answers 503 naming `duckdb`; `/api/health` publishes the
+  sites, and the canary pages them CRITICAL and keeps the watch only while
+  web runs `off`.
+
+What still reaches the file under `off`, in the state production will be in,
+is `tests/unit/test_duckdb_off_sweep.py`'s.
 
 Each guard names the mutation that makes it fail.
 """
@@ -286,14 +295,83 @@ class TestTheOpener:
         asyncio.run(boot())
         assert list(duckdb_switch.opened()) == [f"{__name__}:reads"]
 
-    def test_the_singleton_is_not_left_half_built(self, monkeypatch):
+    def test_on_the_singleton_is_connected_before_it_is_published(
+        self, monkeypatch, tmp_path,
+    ):
+        """`on` is as it always was: `get_store()` connects, then publishes.
+        Mutation: publish before `connect()` (the store a failed connect left
+        behind used to be handed to web's second attempt)."""
+        import core.duckdb_store as store_module
+
+        monkeypatch.setattr(store_module, "DB_DIR", tmp_path)
+        published_at_connect = []
+        real = store_module.DuckDBStore.connect
+
+        async def connect(self, **kwargs):
+            published_at_connect.append(store_module._store_instance)
+            await real(self, **kwargs)
+
+        monkeypatch.setattr(store_module.DuckDBStore, "connect", connect)
+
+        async def get():
+            store = await store_module.get_store()
+            try:
+                assert store._connection is not None
+            finally:
+                await store_module.close_store()
+
+        asyncio.run(get())
+        assert published_at_connect == [None]
+
+    def test_on_a_failed_connect_leaves_no_singleton(self, monkeypatch):
+        import core.duckdb_store as store_module
+
+        monkeypatch.setattr(store_module.DuckDBStore, "connect",
+                            AsyncMock(side_effect=OSError("disk")))
+        with pytest.raises(OSError):
+            asyncio.run(store_module.get_store())
+        assert store_module._store_instance is None
+
+    def test_off_the_singleton_is_published_unconnected(self, duckdb_off):
+        """Stage 5, PR-1: under off `get_store()` touches no file and refuses
+        nothing — about 150 callers hold the store only as the host of a
+        router that goes to Postgres — and the tripwire stands at
+        `connection()`, naming who reached for the file. Mutation: connect in
+        `get_store()` under off again (the first caller is refused and no
+        singleton is published)."""
+        import core.duckdb_store as store_module
+
+        async def a_router_host():
+            return await store_module.get_store()
+
+        async def a_reader():
+            store = await store_module.get_store()
+            async with store.connection():
+                pass
+
+        store = asyncio.run(a_router_host())
+        assert store is store_module._store_instance and store._connection is None
+        assert duckdb_switch.opened() == {}
+        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+            asyncio.run(a_reader())
+        assert list(duckdb_switch.opened()) == [f"{__name__}:a_reader"]
+        assert store_module._store_instance is store and store._connection is None
+        assert not duckdb_off.exists()
+        asyncio.run(store_module.close_store())
+        assert store_module._store_instance is None
+
+    def test_off_a_checkpoint_of_the_unconnected_store_says_so(self, monkeypatch, caplog):
         import core.duckdb_store as store_module
 
         _off(monkeypatch)
-        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
-            asyncio.run(store_module.get_store())
-        assert store_module._store_instance is None
-        assert not Path(store_module.DB_PATH).exists()
+
+        async def checkpoint():
+            await (await store_module.get_store()).checkpoint()
+
+        with caplog.at_level(logging.INFO, logger="core.duckdb_store"):
+            asyncio.run(checkpoint())
+        assert "checkpoint skipped: KS_DUCKDB=off" in caplog.text
+        assert duckdb_switch.opened() == {}
 
     def test_sites_are_bounded_and_the_rest_are_other(self, monkeypatch, tmp_path):
         """Published, so bounded: a counter keyed on anything says where it
@@ -906,31 +984,80 @@ class TestTheStartup:
                             MagicMock(return_value=MagicMock(is_ready=True)))
         return main
 
-    def test_off_starts_with_no_store_and_counts_the_boot(self, monkeypatch):
-        """The boot sync's first act opens the file. Under off web must not
-        die of the refusal — only a web that answers /api/health lets the
-        canary page it. Mutation: delete the `except
-        duckdb_switch.DuckDBOpenedWhileOff` branch in `startup_event` (the
-        generic one asks for the store again, and the second refusal ends the
-        startup)."""
+    def _off_boot(self, monkeypatch, data, init_and_sync):
+        """web's real `startup_event` under off (`duckdb_off`, whose directory
+        is `data`), around the boot sync it is given; the campaign restore
+        recorded rather than written. Returns (main, restore)."""
         import core.duckdb_store as store_module
 
         main = self._stub(monkeypatch)
-        monkeypatch.setenv(duckdb_switch.ENV, "off")
-
-        async def boot_sync(**_):
-            await store_module.get_store()
-
-        monkeypatch.setattr(main, "init_and_sync", boot_sync)
+        restore = AsyncMock(return_value=False)
+        monkeypatch.setattr(store_module.DuckDBStore, "backfill_sms_campaign_record",
+                            restore)
+        monkeypatch.setattr(main, "init_and_sync", init_and_sync)
         # web's logger does not propagate (core.observability), so it is read
         # where it is called.
         monkeypatch.setattr(main, "logger", MagicMock())
         asyncio.run(main.startup_event())
         main.start_scheduler.assert_awaited_once()
-        said = " ".join(str(c.args[0]) for c in main.logger.critical.call_args_list)
-        assert "web starts with no DuckDB store" in said
+        assert not data.exists(), "the file, the WAL and the spill directory untouched"
+        return main, restore
+
+    def test_off_boots_without_opening_the_file(self, monkeypatch, duckdb_off):
+        """Stage 5, PR-1: the boot sync runs on the unconnected store, the
+        counts web used to log are not asked for, and the campaign restore —
+        the SMS router's, Postgres under KS_SMS_STORE=postgres — still runs.
+        Mutation: call `get_stats()` in the success branch under off again."""
+        import core.duckdb_store as store_module
+
+        hosts = []
+
+        async def boot_sync(**_):
+            hosts.append(await store_module.get_store())
+
+        main, restore = self._off_boot(monkeypatch, duckdb_off, boot_sync)
+        assert duckdb_switch.opened() == {}
+        [store] = hosts
+        assert store._connection is None
+        restore.assert_awaited_once()
+        said = " ".join(str(c.args[0]) for c in main.logger.info.call_args_list)
+        assert "KS_DUCKDB=off, so DuckDB is not opened" in said
+        assert "Dashboard ready (KS_DUCKDB=off)" in said
+        assert "all queries use DuckDB" not in said
+
+    def test_off_a_failed_boot_sync_does_not_end_the_startup(self, monkeypatch, duckdb_off):
+        """The generic handler asked `get_stats()` before anything else, and
+        under off that raised a second refusal out of the handler, uncaught:
+        any failed boot sync — KeyCRM down, Postgres down — was a crash loop
+        of the only process that syncs orders. Mutation: drop the
+        `duckdb_switch.is_off()` branch in that handler."""
+
+        async def boot_sync(**_):
+            raise OSError("KeyCRM is down")
+
+        main, restore = self._off_boot(monkeypatch, duckdb_off, boot_sync)
+        assert duckdb_switch.opened() == {}
+        restore.assert_awaited_once()
+        warned = " ".join(str(c.args[0]) for c in main.logger.warning.call_args_list)
+        assert "boot sync failed under KS_DUCKDB=off" in warned
+
+    def test_off_a_refused_boot_sync_is_contained_and_counted(self, monkeypatch, duckdb_off):
+        """A path stage 5 has not decoupled yet — or orders still held in
+        DuckDB, with chain 3 off — reaches for the file inside the boot sync:
+        counted where it was refused, and web starts all the same, on the
+        unconnected store. Mutation: delete the `except
+        duckdb_switch.DuckDBOpenedWhileOff` branch in `startup_event`."""
+        import core.duckdb_store as store_module
+
+        async def boot_sync(**_):
+            async with (await store_module.get_store()).connection():
+                pass
+
+        main, restore = self._off_boot(monkeypatch, duckdb_off, boot_sync)
         assert list(duckdb_switch.opened()) == [f"{__name__}:boot_sync"]
-        assert not Path(store_module.DB_PATH).exists()
+        said = " ".join(str(c.args[0]) for c in main.logger.critical.call_args_list)
+        assert "the boot sync reached for the DuckDB file and was refused" in said
+        restore.assert_awaited_once()
 
     def test_on_is_the_path_it_always_was(self, monkeypatch):
         main = self._stub(monkeypatch)
@@ -942,7 +1069,129 @@ class TestTheStartup:
         monkeypatch.setattr(main, "get_store", AsyncMock(return_value=store))
         asyncio.run(main.startup_event())
         store.backfill_sms_campaign_record.assert_awaited_once()
+        store.get_stats.assert_awaited_once()
         assert duckdb_switch.opened() == {}
+
+    @pytest.mark.parametrize("orders, ends", [(0, True), (5, False)])
+    def test_on_a_failed_boot_sync_still_asks_duckdb_first(self, orders, ends, monkeypatch):
+        """Under `on` the handler is what it was: the store is asked for its
+        counts, and an empty DuckDB with chain 3 off ends the startup."""
+        main = self._stub(monkeypatch)
+        store = MagicMock()
+        store.get_stats = AsyncMock(return_value={"orders": orders})
+        store.backfill_sms_campaign_record = AsyncMock(return_value=False)
+        monkeypatch.setattr(main, "init_and_sync", AsyncMock(side_effect=OSError("down")))
+        monkeypatch.setattr(main, "get_store", AsyncMock(return_value=store))
+        if ends:
+            with pytest.raises(OSError):
+                asyncio.run(main.startup_event())
+        else:
+            asyncio.run(main.startup_event())
+            main.start_scheduler.assert_awaited_once()
+        store.get_stats.assert_awaited_once()
+
+
+class TestTheBootSync:
+    """`init_and_sync` under off asks the store the orders are written to
+    whether there is history, and never DuckDB's counts (stage 5, PR-1).
+    Under `on` the order is pinned in `test_warehouse_writer.py`
+    (settle, stats, sync)."""
+
+    def _boot(self, monkeypatch, held):
+        from core import sync_service as mod
+
+        store = MagicMock()
+        store.get_stats = AsyncMock(side_effect=AssertionError("DuckDB's counts"))
+        store.orders_held = AsyncMock(return_value=held)
+        store.refresh_sku_inventory_status = AsyncMock(return_value=0)
+        service = MagicMock()
+        service.full_sync = AsyncMock()
+        service.incremental_sync = AsyncMock()
+        monkeypatch.setattr(mod, "get_store", AsyncMock(return_value=store))
+        monkeypatch.setattr(mod, "get_sync_service", AsyncMock(return_value=service))
+        monkeypatch.setattr(mod, "init_meilisearch", AsyncMock(return_value=False))
+        monkeypatch.setattr(mod.warehouse_cutover, "settle_writer", AsyncMock())
+        asyncio.run(mod.init_and_sync())
+        store.get_stats.assert_not_awaited()
+        store.orders_held.assert_awaited_once()
+        return service
+
+    def test_off_history_held_is_an_incremental_sync(self, monkeypatch, duckdb_off):
+        """Mutation: ask `get_stats()` under off again."""
+        service = self._boot(monkeypatch, held=46_000)
+        service.incremental_sync.assert_awaited_once()
+        service.full_sync.assert_not_awaited()
+
+    def test_off_no_history_is_a_full_sync(self, monkeypatch, duckdb_off):
+        service = self._boot(monkeypatch, held=0)
+        service.full_sync.assert_awaited_once()
+        service.incremental_sync.assert_not_awaited()
+
+
+class TestTheFullSync:
+    """`full_sync` checkpoints after each 30-day chunk. Under off the store is
+    unconnected and its checkpoint a no-op already; skipped by name, so the
+    no-op is not one connection away from a CHECKPOINT (stage 5, PR-1)."""
+
+    def _chunked(self, store):
+        from tests.unit.test_warehouse_writer import _service, _sync
+
+        service = _service(store, orders=[{"id": 1, "status_id": 1}])
+        _sync(lambda: service.full_sync(days_back=45))
+
+    def _store(self):
+        from tests.unit.test_warehouse_writer import _FullSyncStore
+
+        store = _FullSyncStore()
+        store.checkpoint = AsyncMock()
+        return store
+
+    def test_on_every_chunk_is_checkpointed(self):
+        store = self._store()
+        self._chunked(store)
+        assert store.checkpoint.await_count == 2
+
+    def test_off_no_chunk_is(self, duckdb_off):
+        """Mutation: drop the `is_off()` guard around the chunk's checkpoint."""
+        store = self._store()
+        self._chunked(store)
+        store.checkpoint.assert_not_awaited()
+
+
+class TestARefusalOnAnHTTPPath:
+    """Stage 5, PR-1: a route that reaches for the file under off answers
+    503 naming `duckdb`, beside `ReadUnavailable` — not the 500 it fell
+    through to. The refusal is counted where it was raised, and the site
+    stays on /api/health: a response is public to the page."""
+
+    def test_it_is_a_503_naming_the_surface(self, admin_client, monkeypatch):  # noqa: F811
+        from fastapi.routing import APIRoute
+
+        from web.main import app
+
+        _off(monkeypatch)
+
+        async def reaches_for_the_file():
+            from core.duckdb_store import get_store
+
+            async with (await get_store()).connection():
+                pass
+
+        # First, ahead of the SPA's catch-all, and taken out again after.
+        route = APIRoute("/api/_test_reaches_for_duckdb", reaches_for_the_file,
+                         methods=["GET"])
+        app.router.routes.insert(0, route)
+        try:
+            response = admin_client.get(route.path)
+        finally:
+            app.router.routes.remove(route)
+        assert response.status_code == 503, response.text
+        assert response.json() == {
+            "error": "Service Unavailable",
+            "detail": "This page needs the DuckDB file, which is switched off.",
+            "surface": "duckdb"}
+        assert list(duckdb_switch.opened()) == [f"{__name__}:reaches_for_the_file"]
+        assert "reaches_for_the_file" not in response.text
 
 
 class TestWhatWebPublishes:
@@ -957,15 +1206,22 @@ class TestWhatWebPublishes:
     def test_off_publishes_every_site_that_reached_for_the_file(
         self, admin_client, monkeypatch,  # noqa: F811
     ):
-        """Health itself asks for the store, so under off today its first
-        answer already carries a site — the tripwire proving itself. Mutation:
-        drop `duckdb_switch` from `health_check`'s answer."""
+        """Health itself still counts DuckDB's tables (`get_stats`, until
+        stage 5's PR-3), so under off its first answer already carries a
+        site — the tripwire proving itself. The 60 s stats cache is emptied
+        first: a count cached under `on` by an earlier request is not a reach
+        for the file. Mutation: drop `duckdb_switch` from `health_check`'s
+        answer."""
+        from web.routes.api import health as health_routes
+
+        monkeypatch.setitem(health_routes._stats_cache, "data", None)
+        monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
         _off(monkeypatch)
         health = admin_client.get("/api/health").json()
         block = health["duckdb_switch"]
         assert block["mode"] == "off"
-        assert any(site.startswith("web.routes.api.health:")
-                   for site in block["opened_while_off"]), block
+        assert list(block["opened_while_off"]) == [
+            "web.routes.api.health:health_check"], block
         assert "tried to open" not in json.dumps(block)
         [(key, _line)] = canary.check_duckdb_switch(health)
         assert key == "duckdb_opened_while_off"
