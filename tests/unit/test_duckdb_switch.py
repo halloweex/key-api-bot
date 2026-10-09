@@ -459,6 +459,9 @@ HOST_TOOLS = {
         "the Ark is frozen from the file read-only, before the week starts",
     ("deploy/ark_freeze.py", "verify"):
         "verifies the frozen copy and an in-memory probe, never the live file",
+    ("deploy/ark_freeze.py", "_restored_count"):
+        "L2's restore: one in-memory engine per table, fed the Ark's Parquet; "
+        "it opens no file at all",
     ("deploy/dq_history.py", "<module>"):
         "reads a backup under data/backups, read-only",
     ("deploy/duckdb_table_fates_check.py", "read_catalogue"):
