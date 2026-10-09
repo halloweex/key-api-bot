@@ -3000,11 +3000,19 @@ class DuckDBStore(
         that was in no backup at all look covered. It rides in the off-site
         bundle since 2026-08-20 (deploy/offsite_parquet.sh); this copy still
         does not include it, because this is a copy of the analytics file.
+
+        Under `KS_DUCKDB=off` the switch refuses here, as the first act, for
+        `connect()`'s reason: everything below up to `connection()` touches
+        the disk beside the file — `backups/` made, a stale temp copy
+        deleted, the file stat'ed — and a refusal caught by the `except`
+        further down was a daily "DB backup FAILED" alert on top of the
+        switch's own page. Under `on` `guard()` does nothing.
         """
         import os
         import shutil
         import time
 
+        duckdb_switch.guard()
         src = Path(self.db_path)
         dest = Path(dest_dir) if dest_dir else src.parent / "backups"
         dest.mkdir(parents=True, exist_ok=True)

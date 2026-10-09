@@ -7,7 +7,8 @@ reading the code (core/duckdb_switch.py). What is held here:
 - the mode: unset is `on`, today; a value nobody understands runs `on` and
   says so; a process that never configured reads it on its first open;
 - the opener: under `off` it refuses before the driver runs — the file is not
-  created, and the store's `connect()` refuses before it makes a directory —
+  created, and the store's `connect()` and `backup_database()` refuse before
+  they touch the disk beside the file —
   counts at the raise, names the site (a task's coroutine when the walk would
   otherwise name whatever turns the loop), bounds the sites, and publishes no
   exception text;
@@ -184,6 +185,38 @@ class TestTheOpener:
         # `asyncio.run` made `connect()` itself the task, so the site is it.
         assert duckdb_switch.opened()["core.duckdb_store:connect (task)"]["count"] == 1, (
             "counted once: connect's refusal, not open_file's as well")
+
+    def test_a_refused_backup_touches_nothing_beside_the_file(self, monkeypatch, tmp_path):
+        """The backup is the other reach for the file that went to the disk
+        before the switch: `backups/` made, stale temp copies deleted, the
+        file stat'ed and the disk measured — and an alert sent if that came
+        out short — all before `connection()` refused. Under off the switch
+        is its first act too, so a frozen file's neighbours stay exactly as
+        they were (review of stage 5's PR-0). Mutation: move
+        `duckdb_switch.guard()` below `dest.mkdir` in `backup_database`."""
+        from core.duckdb_store import DuckDBStore
+
+        data = tmp_path / "data"
+        data.mkdir()
+        frozen = data / "analytics.duckdb"
+        frozen.write_bytes(b"frozen")
+        left_by_a_kill = data / "elsewhere" / ".analytics-20261009-020000.duckdb.tmp"
+        left_by_a_kill.parent.mkdir()
+        left_by_a_kill.write_bytes(b"half a copy")
+        _off(monkeypatch)
+        store = DuckDBStore(db_path=frozen)
+        alert = AsyncMock()
+        monkeypatch.setattr(store, "_send_warehouse_alert", alert)
+
+        # Beside the file, as the daily job asks; and into a directory that
+        # holds a temp copy a kill left, which the backup would clear first.
+        for dest_dir in (None, left_by_a_kill.parent):
+            with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+                asyncio.run(store.backup_database(dest_dir=dest_dir))
+        assert sorted(p.name for p in data.iterdir()) == ["analytics.duckdb", "elsewhere"]
+        assert left_by_a_kill.read_bytes() == b"half a copy"
+        alert.assert_not_awaited()
+        assert sum(e["count"] for e in duckdb_switch.opened().values()) == 2
 
     def test_on_still_makes_both_directories(self, monkeypatch, tmp_path):
         from core.duckdb_store import DuckDBStore

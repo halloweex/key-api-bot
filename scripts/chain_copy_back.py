@@ -159,7 +159,25 @@ def _parse(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _refused_while_off() -> int:
+    # The week of silence (OD-17 (a)): this container inherited KS_DUCKDB=off
+    # from web's environment. A copy-back writes DuckDB and is a rollback
+    # lever, so it restarts the parallel period and the week; doing it anyway
+    # is a decision, made by saying so.
+    print(
+        "REFUSED: KS_DUCKDB=off in this container's environment, and a "
+        "copy-back writes the DuckDB file. Nothing was read and nothing "
+        "was written.\n"
+        "  A copy-back is a rollback lever: it restarts the 14-day "
+        "parallel period and the week of silence. If that is the "
+        "decision, run the same command with -e KS_DUCKDB=on.",
+        file=sys.stderr,
+    )
+    return 2
+
+
 async def _run(args: argparse.Namespace) -> int:
+    from core import duckdb_switch
     from core.chain_transfer import (
         CommittedNotReleased, CopyBackRefused, copy_back, handover_check,
         resolve_chain,
@@ -179,6 +197,19 @@ async def _run(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
 
+    # The switch is asked before anything else is read, and that is what makes
+    # the refusal's "nothing was read" true where it is written for — a
+    # one-off of web, step 13 switched: there `configure_modes()` below reads
+    # the schema revision on a Postgres connection of its own, asking up to
+    # three times over ~37 s when Postgres does not answer, all for a run
+    # this refuses anyway (review of stage 5's PR-0). `guard()` reads
+    # KS_DUCKDB the way `configure_modes()` would, and counts the refusal
+    # under this function, as the store's `connect()` did.
+    try:
+        duckdb_switch.guard()
+    except DuckDBOpenedWhileOff:
+        return _refused_while_off()
+
     # The latch is read from the marker files, and `configure_modes` is the one
     # call every entry point makes to load it. Called here for the same reason
     # the writers' entry points call it: a process that decided for itself
@@ -196,20 +227,9 @@ async def _run(args: argparse.Namespace) -> int:
     try:
         await store.connect()
     except DuckDBOpenedWhileOff:
-        # The week of silence (OD-17 (a)): this container inherited
-        # KS_DUCKDB=off from web's environment. A copy-back writes DuckDB and
-        # is a rollback lever, so it restarts the parallel period and the
-        # week; doing it anyway is a decision, made by saying so.
-        print(
-            "REFUSED: KS_DUCKDB=off in this container's environment, and a "
-            "copy-back writes the DuckDB file. Nothing was read and nothing "
-            "was written.\n"
-            "  A copy-back is a rollback lever: it restarts the 14-day "
-            "parallel period and the week of silence. If that is the "
-            "decision, run the same command with -e KS_DUCKDB=on.",
-            file=sys.stderr,
-        )
-        return 2
+        # Asked above already; `configure_modes()` reads KS_DUCKDB again, and
+        # whatever it decided, the store's own refusal says the same thing.
+        return _refused_while_off()
     except duckdb.IOException as exc:
         # The driver says "Could not set lock on file ... held by PID n". True,
         # and it does not say what to do about it.
