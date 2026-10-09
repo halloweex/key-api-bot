@@ -70,9 +70,9 @@ ROUTED = ("get_goals", "get_smart_goals", "get_historical_revenue",
 # It reaches the router along four paths, and each is excluded from the walk
 # below by name, with what it routes checked separately: its ML signal,
 # `_get_ml_forecast_total`, which reads Gold and `revenue_predictions` (since
-# DN-12); and, under `KS_GOALS_HISTORY=silver` (chain 7b-2), the three history
-# reads it asks before taking its own connection — the growth cap, last
-# year's month and the recent months — which read `{silver_orders}`. None of
+# DN-12); and the three history reads it asks before taking its own
+# connection — the growth cap, last year's month and the recent months —
+# which read `{silver_orders}` (chain 7b-2; the only history since 7b-4). None of
 # the four names a table Postgres holds only as a replica, so the three
 # seasonality tables stay read where they are written.
 #

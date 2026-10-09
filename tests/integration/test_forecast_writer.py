@@ -27,8 +27,9 @@ to stay true around it:
 - the standing watch reads what it judges.
 
 The inputs are a three-year history seeded in DuckDB and its Silver copied
-into `silver.orders`, so the calculators read Postgres Silver as they will in
-production (`KS_GOALS_HISTORY=silver`, `KS_READ_GOALS=postgres`).
+into `silver.orders`, so the calculators read Postgres Silver as they do in
+production (`KS_READ_GOALS=postgres`; `KS_GOALS_HISTORY=silver`, which since
+chain 7b-4 reads as unset does).
 
 Skipped without `KS_PG_DSN`. Run with `TZ=UTC` like every two-engine test.
 """
@@ -344,7 +345,8 @@ class TestTheGoalTablesTransaction:
     async def test_the_placeholder_never_overwrites_a_measured_rate(self, stores):
         """With no pair of full years the overall rate is the 0.10 guess, and
         a stored measurement is kept — through the repository, over an emptied
-        Postgres Silver, the compaction shape the bridge once failed in."""
+        Postgres Silver, the compaction shape the DuckDB EXISTS once failed
+        in (DN-12)."""
         store, pool, env = stores
         await _seed_set(pool)
         async with pool.acquire() as conn:
