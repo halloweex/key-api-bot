@@ -635,6 +635,8 @@ APP_DSN="postgresql://ks_app:$APP_PW@$REH_PG:5432/ks"
 # preconditions name is set here, and a test runs the tree's own
 # `evaluate_preconditions` over this list with F1's and phase 0's additions:
 # KS_GOALS_HISTORY came with chain 7b, was missing, and held the flip back.
+# Chain 7b-4 retired it (unset reads Silver too, and step 13 no longer asks);
+# the line stays so the script also rehearses an image from before that.
 WEB_ENV=(
     -e TZ=Europe/Kyiv
     -e KS_ROLE=web

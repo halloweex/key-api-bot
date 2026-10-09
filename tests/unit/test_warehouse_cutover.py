@@ -236,10 +236,9 @@ MET_ENV = {
     **{name: "postgres" for name in wc.WAREHOUSE_READERS},
     "KS_READ_COHORTS": "clickhouse",
     "KS_CH_URL": "http://ch:8123",
-    "KS_GOALS_HISTORY": "silver",
 }
 MET_FACTS = wc.Facts(revision=REQUIRED_REVISION, required_revision=REQUIRED_REVISION,
-                     bridge_owners={}, expenses_backfilled=True)
+                     expenses_backfilled=True)
 
 
 # A door somebody adds after OD-10 retired every one there was (2026-09-30):
@@ -260,7 +259,6 @@ def _breaking(key: str):
         "mirror_landing": ("KS_MIRROR_LANDING", "0"),
         "cohorts_clickhouse": ("KS_READ_COHORTS", "duckdb"),
         "ch_url": ("KS_CH_URL", " "),
-        "goals_bridge": ("KS_GOALS_HISTORY", "bridge"),
     }
     if key in simple:
         name, value = simple[key]
@@ -305,10 +303,11 @@ class TestTheEvaluator:
     def test_the_plans_list_is_all_there(self):
         """The DN-28 list, item by item: own; twins on; UTM parse postgres;
         fallback off; DSN and revision; KS_MIRROR_LANDING; every Silver, Gold
-        and UTM reader postgres; cohorts with KS_CH_URL; the DN-12 tripwire."""
+        and UTM reader postgres; cohorts with KS_CH_URL. The DN-12 tripwire
+        (`goals_bridge`) left the list with the bridge (chain 7b-4)."""
         assert {"pg_derive_own", "pg_twins_on", "utm_parse_postgres",
                 "read_fallback_off", "pg_dsn", "pg_revision", "mirror_landing",
-                "cohorts_clickhouse", "ch_url", "goals_bridge"} <= set(KEYS)
+                "cohorts_clickhouse", "ch_url"} <= set(KEYS)
         assert {f"reader:{name}" for name in wc.WAREHOUSE_READERS} <= set(KEYS)
         assert "reader:KS_READ_TRAFFIC" in KEYS   # the UTM reader
         # And the review's: no page open under a check the switch retires.
@@ -323,7 +322,7 @@ class TestTheEvaluator:
         unmet = wc.evaluate_preconditions({"KS_MIRROR_LANDING": "0",
                                            "KS_WRITE_WAREHOUSE": "postgress"}, wc.Facts(
             revision="0000_somebody_elses", required_revision=REQUIRED_REVISION,
-            expenses_backfilled=False, bridge_owners=None, bridge_error="x",
+            expenses_backfilled=False,
             open_retired=None, open_retired_error="x", od10_doors=A_DOOR))
         assert [u.key for u in unmet] == KEYS
 
@@ -333,7 +332,7 @@ class TestTheEvaluator:
 
     def test_an_empty_environment_names_everything_it_can(self):
         unmet = wc.evaluate_preconditions({}, wc.Facts(
-            revision_error="not asked: KS_PG_DSN is not set", bridge_owners={}))
+            revision_error="not asked: KS_PG_DSN is not set"))
         assert [u.key for u in unmet] == [
             k for k in KEYS
             if k not in ("value_understood", "mirror_landing",
@@ -349,49 +348,26 @@ class TestTheEvaluator:
 
     def test_an_unreadable_revision_says_why(self):
         facts = wc.Facts(revision_error="SchemaVersionError: behind",
-                         required_revision=REQUIRED_REVISION, bridge_owners={})
+                         required_revision=REQUIRED_REVISION)
         (u,) = wc.evaluate_preconditions(MET_ENV, facts)
         assert u.key == "pg_revision" and "SchemaVersionError" in u.detail
 
-    def test_an_unreadable_registry_is_said_under_the_bridge(self):
-        env = {**MET_ENV, "KS_GOALS_HISTORY": "bridge"}
-        facts = dataclasses.replace(MET_FACTS, bridge_owners=None,
-                                    bridge_error="ImportError: gone")
-        (u,) = wc.evaluate_preconditions(env, facts)
-        assert u.key == "goals_bridge" and "ImportError" in u.detail
-
-    def test_under_silver_the_registry_does_not_matter(self):
-        """Met by construction: no calculator reads the three tables then
-        (`tests/unit/test_goals_history_silver.py`), so who owns them, or a
-        registry that cannot say, changes nothing. Mutation M19: judge the
-        owners alone again, and the owned case here is unmet."""
-        for facts in (
-            dataclasses.replace(MET_FACTS, bridge_owners=None, bridge_error="x"),
-            dataclasses.replace(MET_FACTS, bridge_owners={
-                "pg_orders_write": ("bronze.orders",)}),
-        ):
-            assert wc.evaluate_preconditions(MET_ENV, facts) == []
-
-    @pytest.mark.parametrize("value", [None, "", "bridge", " Bridge "])
-    def test_the_bridge_is_unmet_with_nobody_owning_anything(self, value):
-        """Step 13 freezes DuckDB's orders and classification whether or not
-        a chain owns them, so the bridge alone holds the switch. Mutation
-        M19's other half: evaluate owners only, and this is met."""
+    @pytest.mark.parametrize("value", [None, "", "silver", "bridge", "silvr"])
+    def test_the_goal_history_is_no_precondition_any_more(self, value):
+        """Chain 7b-4 deleted the DN-12 bridge: no goal calculator reads
+        DuckDB's orders, managers or manager_classifications under any value
+        of the retired `KS_GOALS_HISTORY` — a value other than silver refuses
+        every goal history read, and the canary pages it
+        (`goals_history_mode_invalid`), so step 13 has nothing to wait for.
+        What makes the goal history Postgres' is `reader:KS_READ_GOALS` and
+        `read_fallback_off`, both still here. Mutation: put `goals_bridge`
+        back in `PRECONDITIONS` — `bridge`, unset or a typo is unmet again."""
         env = dict(MET_ENV)
-        if value is None:
-            env.pop("KS_GOALS_HISTORY")
-        else:
+        if value is not None:
             env["KS_GOALS_HISTORY"] = value
-        (u,) = wc.evaluate_preconditions(env, MET_FACTS)
-        assert u.key == "goals_bridge"
-        assert "KS_GOALS_HISTORY is 'bridge'" in u.detail
-        assert "diverging" not in u.detail
-
-    def test_a_value_it_does_not_understand_is_unmet_by_its_class(self):
-        env = {**MET_ENV, "KS_GOALS_HISTORY": "silvr"}
-        (u,) = wc.evaluate_preconditions(env, MET_FACTS)
-        assert u.key == "goals_bridge"
-        assert "'silvr'" in u.detail and "ValueError" in u.detail
+        assert wc.evaluate_preconditions(env, MET_FACTS) == []
+        assert "goals_bridge" not in KEYS
+        assert not [f for f in dataclasses.fields(wc.Facts) if "bridge" in f.name]
 
     def test_the_mirror_is_read_as_the_mirror_reads_it(self, monkeypatch):
         """One rule for `KS_MIRROR_LANDING`, the mirror's own."""
@@ -640,91 +616,6 @@ class TestAPageUnderARetiredCheckHoldsTheSwitch:
         assert "RuntimeError" in u.detail and "/secret/path" not in u.detail
 
 
-# ─── The DN-12 tripwire, at run time ─────────────────────────────────────────
-
-
-class TestTheBridgeTripwire:
-    def test_it_is_green_today(self):
-        from core.repositories.goals import sales_type_bridge_owners
-
-        assert sales_type_bridge_owners() == {}
-
-    def test_it_watches_the_tables_the_static_tripwire_watches(self):
-        """Two answers to one question — CI's and the deployed build's — must
-        be about the same tables."""
-        from core.repositories.goals import SALES_TYPE_BRIDGE_TABLES
-
-        tree = ast.parse((REPO / "tests/unit/test_goals_off_duckdb_silver.py")
-                         .read_text(encoding="utf-8"))
-        (assign,) = [n for n in tree.body if isinstance(n, ast.Assign)
-                     and any(isinstance(t, ast.Name) and t.id == "PREDICATE_TABLES"
-                             for t in n.targets)]
-        tables = {n.value for n in ast.walk(assign.value)
-                  if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-        assert tables == set(SALES_TYPE_BRIDGE_TABLES)
-
-    @staticmethod
-    def _chain(monkeypatch, table, env):
-        import types
-
-        from core import write_chains
-
-        chain = types.ModuleType("core.pg_chain_x_write")
-        chain.WRITE_ENV = "KS_WRITE_CHAIN_X"
-        chain.CHAIN_TABLES = ("app.other", table)
-        chain.env_writes_postgres = env
-        monkeypatch.setattr(write_chains, "WRITE_CHAINS",
-                            write_chains.WRITE_CHAINS + (chain,))
-        return chain
-
-    @pytest.mark.parametrize("table", ["bronze.orders", "bronze.managers",
-                                       "app.manager_classifications"])
-    def test_a_chain_declaring_one_with_its_flag_off_moves_nothing(self, monkeypatch, table):
-        """Registered is not moved (chain 3, 2026-10-01): its writes still go
-        to DuckDB, so the bridge reads what it always read. Mutation: count
-        the declaration — a flag-off registration would then fail step 13's
-        `goals_bridge` at the next start, a full DuckDB rebuild for nothing."""
-        from core.repositories.goals import sales_type_bridge_owners
-
-        self._chain(monkeypatch, table, lambda: False)
-        assert sales_type_bridge_owners() == {}
-
-    @pytest.mark.parametrize("state", ["flag", "latched", "typo"])
-    def test_a_chain_that_moved_trips_it(self, monkeypatch, state):
-        """Its writes left DuckDB — by its flag, by a latch whatever the flag
-        says, or by a flag nobody can read (stood down, so written nowhere)."""
-        from core import chain_latch
-        from core.repositories.goals import sales_type_bridge_owners
-
-        def typo():
-            raise RuntimeError("KS_WRITE_CHAIN_X='postgrse' is not understood")
-
-        self._chain(monkeypatch, "bronze.orders",
-                    {"flag": lambda: True, "latched": lambda: False,
-                     "typo": typo}[state])
-        if state == "latched":
-            chain_latch.latch("pg_chain_x_write")
-        assert sales_type_bridge_owners() == {"pg_chain_x_write": ("bronze.orders",)}
-
-    @pytest.mark.parametrize("table", ["bronze.orders", "bronze.managers",
-                                       "app.manager_classifications"])
-    def test_a_chain_owning_one_trips_it_and_is_named(self, monkeypatch, table):
-        from core.repositories.goals import sales_type_bridge_owners
-
-        self._chain(monkeypatch, table, lambda: True)
-        assert sales_type_bridge_owners() == {"pg_chain_x_write": (table,)}
-
-        facts = asyncio.run(wc.gather_facts({}))
-        env = {**MET_ENV, "KS_GOALS_HISTORY": "bridge"}
-        (u,) = [u for u in wc.evaluate_preconditions(env, facts)
-                if u.key == "goals_bridge"]
-        assert "pg_chain_x_write" in u.detail and table in u.detail
-        assert "diverging" in u.detail
-        # Ported, the chain owning it changes nothing.
-        assert [u for u in wc.evaluate_preconditions(MET_ENV, facts)
-                if u.key == "goals_bridge"] == []
-
-
 # ─── Gathering and publishing ────────────────────────────────────────────────
 
 
@@ -873,13 +764,30 @@ class TestGatheringTheFacts:
                       if isinstance(n, ast.Constant) and isinstance(n.value, str)}
         assert " ".join(wc._EXPENSES_HISTORY_SQL.split()) in statements
 
-    def test_a_registry_that_raises_is_a_reason_by_its_class(self, caplog):
-        with caplog.at_level(logging.ERROR, logger="core.warehouse_cutover"), \
-                patch("core.repositories.goals.sales_type_bridge_owners",
-                      side_effect=RuntimeError("registry at /opt/app")):
-            facts = asyncio.run(wc.gather_facts({}))
-        assert facts.bridge_owners is None and facts.bridge_error == "RuntimeError"
-        assert "registry at /opt/app" in caplog.text
+    def test_gathering_asks_no_write_chain_its_mode(self, monkeypatch):
+        """The registry walk went with the DN-12 bridge (chain 7b-4): step
+        13's facts no longer ask any write chain for its mode, so its start
+        cannot ask chain 3 or 5 a question whose answer waits on step 13's
+        own verdict. Mutation: walk the chains' modes in `_local_facts`
+        again, as `sales_type_bridge_owners` did — inside its `try`, so only
+        a record of the asking can see it."""
+        from core import write_chains
+
+        asked = []
+
+        def chain_state(chain, *a, **k):
+            asked.append(write_chains.chain_name(chain))
+            return {"mode": "duckdb", "error": None}
+
+        def chain_modes(*a, **k):
+            asked.append("chain_modes")
+            return {}
+
+        monkeypatch.setattr(write_chains, "_chain_state", chain_state)
+        monkeypatch.setattr(write_chains, "chain_modes", chain_modes)
+        facts = asyncio.run(wc.gather_facts({}))
+        assert asked == []
+        assert facts.open_retired_error is None
 
 
 class TestReadiness:

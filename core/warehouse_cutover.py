@@ -76,8 +76,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
-from core.pg_goals_read import HISTORY_ENV as GOALS_HISTORY, SILVER, history_mode_of
-
 logger = logging.getLogger(__name__)
 
 ENV = "KS_WRITE_WAREHOUSE"
@@ -193,14 +191,15 @@ def writes_postgres() -> bool:
 def verdict_reached() -> bool:
     """`configure_mode` has decided this process's mode.
 
-    False before it has run, and **False while it runs**: the facts it
-    gathers for `postgres` include the goal bridge's owners, and those are
-    read by asking every write chain over a bridge table for its mode —
-    which asks that chain's preconditions, step 13's own verdict among them.
-    `writes_postgres()` is False then, and means "not decided yet", never
-    "decided against". A chain that remembers its first unmet answer (chain
-    3's start hold) must not remember that one: it would hold the chain for
-    the life of the process on the very start that found step 13 in force."""
+    False before it has run, and while it runs. `writes_postgres()` is False
+    then, and means "not decided yet", never "decided against". A chain that
+    remembers its first unmet answer (chain 3's start hold) must not remember
+    that one: it would hold the chain for the life of the process on the very
+    start that found step 13 in force. Until chain 7b-4 the start itself asked
+    that question — the facts it gathered included the DN-12 goal bridge's
+    owners, read by asking every write chain over a bridge table for its mode
+    (the batch-E review). The bridge is gone and the start no longer asks; any
+    consumer that does before the verdict still gets "not decided yet"."""
     return _mode is not None
 
 
@@ -449,9 +448,6 @@ PRECONDITIONS: Tuple[Tuple[str, str], ...] = (
     *((f"reader:{name}", f"{name}=postgres") for name in WAREHOUSE_READERS),
     ("cohorts_clickhouse", f"{COHORTS}=clickhouse"),
     ("ch_url", f"{CH_URL} set"),
-    ("goals_bridge", f"{GOALS_HISTORY}={SILVER}: the goal calculators read "
-                     "Silver, not DuckDB's orders and classification through "
-                     "the DN-12 bridge (chain 7b)"),
     ("od10_doors", "every DuckDB-only door reading Silver ported or retired "
                    "(OD-10)"),
     ("retired_conditions_clear", "no delivered page open under a condition "
@@ -492,9 +488,8 @@ class Unmet:
 class Facts:
     """What the environment cannot say. `revision` is what Postgres answered,
     None with `revision_error` when it could not be asked or did not answer.
-    `bridge_owners` is None with `bridge_error` when the registry could not be
-    read; `open_retired` likewise with `open_retired_error` when the Alert
-    Gate could not. `od10_doors` is `OD10_DOORS`, handed in so the evaluator
+    `open_retired` is None with `open_retired_error` when the Alert Gate could
+    not be read. `od10_doors` is `OD10_DOORS`, handed in so the evaluator
     stays pure over what it is given. `expenses_backfilled` is whether
     `bronze.expenses` has its history (`EXPENSES_HISTORY`), None with
     `expenses_backfill_error` when it was not asked or not answered — asked
@@ -507,8 +502,6 @@ class Facts:
     expenses_backfilled: Optional[bool] = None
     expenses_backfill_error: Optional[str] = None
     expenses_history_row: bool = True
-    bridge_owners: Optional[Mapping[str, Tuple[str, ...]]] = field(default_factory=dict)
-    bridge_error: Optional[str] = None
     open_retired: Optional[Mapping[str, Optional[str]]] = field(default_factory=dict)
     open_retired_error: Optional[str] = None
     od10_doors: Tuple[Tuple[str, str], ...] = ()
@@ -594,37 +587,6 @@ def evaluate_preconditions(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
     need("ch_url", bool((env.get(CH_URL) or "").strip()),
          f"{CH_URL} is not set: ClickHouse is the only independent aggregation "
          "of Gold once DuckDB stops")
-
-    # Met by construction under `silver`: no goal calculator reads DuckDB
-    # `orders`, `managers` or `manager_classifications` then
-    # (`tests/unit/test_goals_history_silver.py` runs them with those three
-    # gone), and `reader:KS_READ_GOALS` above makes "Silver" Postgres Silver.
-    # Under `bridge` it is unmet whoever owns those tables — step 13 freezes
-    # them — and the owners, when there are any, are what makes it urgent.
-    try:
-        history = history_mode_of(env.get(GOALS_HISTORY))
-    except ValueError:
-        need("goals_bridge", False,
-             f"{GOALS_HISTORY} is {_read(env, GOALS_HISTORY)!r}, which this "
-             "build does not understand (ValueError): every goal read refuses "
-             f"it. Set {SILVER!r}.")
-    else:
-        if facts.bridge_owners is None:
-            owners = (f" Whether a write chain already owns one of them is "
-                      f"unknown: the registry could not be read "
-                      f"({facts.bridge_error}).")
-        elif facts.bridge_owners:
-            owned = "; ".join(f"{chain}: {', '.join(tables)}"
-                              for chain, tables in sorted(facts.bridge_owners.items()))
-            owners = (f" And write chain(s) already own them — {owned}: retail "
-                      "goals are diverging from Postgres Silver now.")
-        else:
-            owners = ""
-        need("goals_bridge", history == SILVER,
-             f"{GOALS_HISTORY} is {history!r}: the goal calculators read DuckDB "
-             "orders, managers and manager_classifications (the DN-12 bridge), "
-             f"which this switch freezes. Set {GOALS_HISTORY}={SILVER} "
-             f"(chain 7b).{owners}")
 
     need("od10_doors", not facts.od10_doors,
          f"{len(facts.od10_doors)} door(s) still read DuckDB's Silver with no "
@@ -765,21 +727,14 @@ async def _read_postgres(env: Mapping[str, str], *,
 
 
 def _local_facts() -> Dict[str, Any]:
-    """The facts this process holds itself — the write-chain registry and the
-    Alert Gate's delivered map. No I/O, so never behind the bound Postgres is
-    read under: a start that could not reach Postgres must not also report
-    these two as unread, naming preconditions nobody failed. Never raises."""
-    owners: Optional[Mapping[str, Tuple[str, ...]]]
-    bridge_error = None
-    try:
-        from core.repositories.goals import sales_type_bridge_owners
+    """The facts this process holds itself — the Alert Gate's delivered map
+    and the OD-10 doors. No I/O, so never behind the bound Postgres is read
+    under: a start that could not reach Postgres must not also report these
+    as unread, naming preconditions nobody failed. Never raises.
 
-        owners = sales_type_bridge_owners()
-    except Exception as exc:  # noqa: BLE001 — reported as unmet, by class
-        logger.error("cutover readiness: the write-chain registry could not be "
-                     "read: %s: %s", type(exc).__name__, exc)
-        owners, bridge_error = None, type(exc).__name__
-
+    The write-chain registry was one of them until chain 7b-4: step 13 asked
+    which chain had moved a table the DN-12 goal bridge read out of DuckDB.
+    The bridge is deleted, and with it the question."""
     open_retired: Optional[Mapping[str, Optional[str]]]
     open_retired_error = None
     try:
@@ -789,8 +744,7 @@ def _local_facts() -> Dict[str, Any]:
                      type(exc).__name__, exc)
         open_retired, open_retired_error = None, type(exc).__name__
 
-    return {"bridge_owners": owners, "bridge_error": bridge_error,
-            "open_retired": open_retired, "open_retired_error": open_retired_error,
+    return {"open_retired": open_retired, "open_retired_error": open_retired_error,
             "od10_doors": OD10_DOORS}
 
 

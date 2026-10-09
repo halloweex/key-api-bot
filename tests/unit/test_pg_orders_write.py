@@ -147,12 +147,13 @@ class TestTheFlag:
         return flags
 
     def test_step_13s_own_start_does_not_hold_it(self, step13_ready):
-        """Step 13's start gathers the goal bridge's owners, and that asks
-        this chain for its mode — before step 13 has decided, so `step13`
-        read unmet and the hold remembered it: every start that found step
-        13 in force held chain 3 until the process ended (the batch-E
-        review). Mutation: hold on `step13` whether or not step 13 has
-        reached its verdict."""
+        """Step 13's start gathered the DN-12 goal bridge's owners, and that
+        asked this chain for its mode — before step 13 had decided, so
+        `step13` read unmet and the hold remembered it: every start that
+        found step 13 in force held chain 3 until the process ended (the
+        batch-E review). Chain 7b-4 deleted the bridge and the start no
+        longer asks; the start still flips. Mutation: walk the chains' modes
+        in step 13's `_local_facts` again — chain 3 is asked undecided."""
         from core import warehouse_cutover
         from core.runtime_modes import configure_modes
 
@@ -165,10 +166,27 @@ class TestTheFlag:
 
         step13_ready.setattr(pow_, "_step13_unmet", spy)
         configure_modes()
-        assert any(asked_undecided), "the path under test was not taken"
+        assert not any(asked_undecided), "step 13's start asked chain 3 again"
         assert warehouse_cutover.writes_postgres() is True
         assert pow_._held is None
         assert pow_.unmet_precondition() is None
+        assert pow_.writes_postgres() is True and pow_.mode() == "postgres"
+
+    def test_an_ask_before_step_13s_verdict_is_not_held(self, step13_ready):
+        """The guard the batch-E review added outlives the bridge: whoever
+        asks before `configure_mode` has decided reads `step13` unmet, and
+        that means "not decided yet" — never a hold. Mutation: hold on
+        `step13` whether or not step 13 has reached its verdict."""
+        from core import warehouse_cutover
+        from core.runtime_modes import configure_modes
+
+        step13_ready.setattr(warehouse_cutover, "_mode", None)
+        assert not warehouse_cutover.verdict_reached()
+        assert pow_.unmet_precondition().startswith("step13: ")
+        assert pow_._held is None
+        configure_modes()
+        assert warehouse_cutover.writes_postgres() is True
+        assert pow_._held is None
         assert pow_.writes_postgres() is True and pow_.mode() == "postgres"
 
     def test_chain_5_is_not_held_through_it_either(self, step13_ready):

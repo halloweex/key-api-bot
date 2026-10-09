@@ -394,14 +394,15 @@ def unmet_reasons() -> List[str]:
     published either way.
 
     **Step 13's verdict is a fact only once it has been reached.** Before
-    `warehouse_cutover.configure_mode` has decided — and while it decides,
-    because the goal bridge's owners it gathers are read by asking the write
-    chains for their mode — `step13` reads unmet and means "not decided yet".
-    It still keeps the chain on DuckDB, but it is never held on: held, it
-    made every start under `KS_WRITE_WAREHOUSE=postgres` hold this chain for
-    good, at the very start that found step 13 in force (and chain 5, whose
-    precondition is this chain, with it). The start's verdict
-    (`settle_hold()`) is taken after step 13's."""
+    `warehouse_cutover.configure_mode` has decided, `step13` reads unmet and
+    means "not decided yet". It still keeps the chain on DuckDB, but it is
+    never held on: held, it made every start under
+    `KS_WRITE_WAREHOUSE=postgres` hold this chain for good, at the very start
+    that found step 13 in force (and chain 5, whose precondition is this
+    chain, with it) — step 13's start asked this chain its mode while it
+    decided, gathering the DN-12 goal bridge's owners, until chain 7b-4
+    deleted the bridge. The start's verdict (`settle_hold()`) is taken after
+    step 13's."""
     global _held
 
     found = _live_unmet()
