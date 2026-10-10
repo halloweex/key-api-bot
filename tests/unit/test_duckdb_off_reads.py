@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -256,6 +257,53 @@ class TestTheWarehouseStatus:
         assert body["duckdb_frozen"] == {"last_refresh": "x"}
         store.get_warehouse_status.assert_awaited_once()
         pool.assert_not_awaited()
+
+    @pytest.mark.skipif(not os.getenv("KS_PG_DSN", "").strip(),
+                        reason="needs a live PostgreSQL at KS_PG_DSN")
+    def test_under_off_the_copy_is_read_from_a_real_postgres(self, duckdb_off):
+        """The two statements against the schema at head, not a fake pool:
+        the last row by id, and the last hour counted by `refreshed_at`. The
+        rows are this test's own, taken out again after."""
+        from core.pg import close_pool, get_pool
+        from web.routes.api.admin import _duckdb_refresh_status
+
+        old, new = 2_000_000_001, 2_000_000_002
+
+        async def run():
+            pool = await get_pool()
+            try:
+                async with pool.acquire() as conn:
+                    before = await conn.fetchval(
+                        "SELECT COUNT(*) FROM app.warehouse_refreshes "
+                        "WHERE refreshed_at > now() - INTERVAL '1 hour'")
+                    await conn.execute(
+                        "INSERT INTO app.warehouse_refreshes (id, refreshed_at, "
+                        "trigger, duration_ms, bronze_orders, silver_rows, "
+                        "gold_revenue_rows, gold_products_rows, checksum_match, "
+                        "validation_passed) VALUES "
+                        "($1, now() - INTERVAL '3 hours', 'scheduled', 10, 1, 1, "
+                        "1, 1, true, true), "
+                        "($2, now(), 'dirty_flag', 1834.50, 46620, 46620, 2106, "
+                        "9000, true, false)", old, new)
+                try:
+                    return before, await _duckdb_refresh_status(None)
+                finally:
+                    async with pool.acquire() as conn:
+                        await conn.execute(
+                            "DELETE FROM app.warehouse_refreshes WHERE id IN ($1, $2)",
+                            old, new)
+            finally:
+                await close_pool()
+
+        before, frozen = asyncio.run(run())
+        assert frozen["status"] == "off" and "error" not in frozen, frozen
+        assert frozen["last_trigger"] == "dirty_flag"
+        assert frozen["last_duration_ms"] == 1834.5
+        assert (frozen["bronze_orders"], frozen["gold_revenue_rows"]) == (46620, 2106)
+        assert frozen["validation_passed"] is False
+        assert frozen["recent_refreshes"] == before + 1
+        assert datetime.fromisoformat(frozen["last_refresh"]).tzinfo is not None
+        assert duckdb_switch.opened() == {}
 
     @pytest.mark.parametrize("seeded", [False, True], ids=["empty", "one_refresh"])
     def test_the_copy_builds_duckdbs_own_answer(self, seeded):
