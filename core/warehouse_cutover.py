@@ -57,6 +57,11 @@ needed in place; DN-29 is the switch.
   everything note it in the record, and the way back then empties DuckDB's
   `silver_order_utm` so the full tick it owes re-parses every verdict under
   the rules in force — see THE UTM DOORS.
+- **Under `KS_DUCKDB=off`** (stage 5, OD-S5-2 (a)) the record is read from
+  its frozen copy in Postgres, `app.sync_metadata`, and never written; a
+  door's re-parse is noted in a local marker beside the DuckDB file, and the
+  first start back under `on` merges it into DuckDB's record — see THE RECORD
+  UNDER KS_DUCKDB=off.
 - **`evaluate_preconditions(env, facts)`** names every unmet precondition of
   the switch, one entry each, so the readiness a person reads is a list of
   things to do rather than a "no". Pure over what it is handed. Postgres is
@@ -74,7 +79,11 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
+
+from core import duckdb_switch
+from core.duckdb_constants import DB_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -857,6 +866,8 @@ def start_bound_s() -> float:
 # the Sunday compaction (only the derived tables are dropped there), and the
 # hourly copy carries the row to `app.sync_metadata` like every other key; it
 # is never deleted, so it is not one of the transient keys that copy excludes.
+# That copy is what a process under `KS_DUCKDB=off` reads instead, and writes
+# nothing — see THE RECORD UNDER KS_DUCKDB=off.
 #
 # Why both halves are needed, in the order they were found:
 #
@@ -908,20 +919,34 @@ async def read_writer(store) -> Optional[Dict[str, Any]]:
     """The recorded writer, or None when nothing was ever recorded. A value
     that is not the JSON this module writes is read as `postgres` unresolved:
     the cautious answer costs one full DuckDB rebuild, the other would skip
-    one that is owed."""
+    one that is owed.
+
+    Under `KS_DUCKDB=off` it is read from the frozen copy in Postgres
+    (`FROZEN_COPY`) and `store` is not touched — see THE RECORD UNDER
+    KS_DUCKDB=off."""
+    if duckdb_switch.is_off():
+        return await read_frozen_writer()
     async with store.connection() as conn:
         row = conn.execute("SELECT value FROM sync_metadata WHERE key = ?",
                            [WRITER_KEY]).fetchone()
-    if not row or not isinstance(row[0], str) or not row[0]:
+    return parse_record(row[0] if row else None, where="sync_metadata")
+
+
+def parse_record(raw: Any, *, where: str) -> Optional[Dict[str, Any]]:
+    """The record a `sync_metadata` value holds — DuckDB's, or its copy in
+    Postgres — by `read_writer`'s rules: None for no value, the record for
+    the JSON this module writes, and `postgres` unresolved for anything else.
+    `where` names the table in the log. Pure but for that line."""
+    if not isinstance(raw, str) or not raw:
         return None
     try:
-        record = json.loads(row[0])
+        record = json.loads(raw)
         if isinstance(record, dict) and record.get("writer") in _VALID:
             return record
     except ValueError:
         pass
-    logger.error("sync_metadata.%s holds %r, which this build did not write; "
-                 "read as postgres", WRITER_KEY, row[0])
+    logger.error("%s.%s holds %r, which this build did not write; read as "
+                 "postgres", where, WRITER_KEY, raw)
     return {"writer": POSTGRES, "resolved": False, "unreadable": True}
 
 
@@ -936,6 +961,158 @@ async def _write_writer(store, record: Dict[str, Any]) -> None:
 async def _count_utm_rows(store) -> int:
     async with store.connection() as conn:
         return int(conn.execute("SELECT COUNT(*) FROM silver_order_utm").fetchone()[0])
+
+
+# ─── THE RECORD UNDER KS_DUCKDB=off ──────────────────────────────────────────
+#
+# Stage 5's week of silence runs web with `KS_DUCKDB=off`, and the record lives
+# in the file web may not open. Two things touched it there: every settle —
+# the boot, the scheduler's start, and every `pg_warehouse_derive` tick until
+# one settles, so once a minute behind a settle that failed — and every door
+# that re-parses all UTM verdicts in Postgres alone (`/api/traffic/reclassify`,
+# `scripts/backfill_utm.py`). The owner's answer, OD-S5-2 (a), 2026-10-10:
+#
+# - **The settle reads the frozen copy and writes nothing.** `app.sync_metadata`
+#   is the hourly copy of DuckDB's `sync_metadata`, and the record has not
+#   moved in DuckDB since step 13's first start under `postgres` resolved it —
+#   which `off`'s coherence verdict requires (stage 5's PR-2, `writer_record`). So
+#   the copy is the record, and settling under `off` is reading it and closing
+#   the `warehouse` group when a page of it is open, which asks no store. The
+#   soak's P2–P4 read the same copy and see the `since` they need, unchanged.
+# - **A door's re-parse is noted beside the file**, in `UTM_MARKER` — the
+#   decision the record would have carried, kept where the file it describes
+#   is and written the way a latch marker is (temp file, fsync, rename, fsync
+#   the directory), because losing it costs the way back a re-parse it owes.
+#   The parse itself goes to Postgres exactly as under `on`.
+# - **The first start back under `on` merges it**, before it settles anything
+#   and so before the scheduler registers a job: `UTM_REPARSED` becomes the
+#   later of the record's and the marker's, the record is written, and the
+#   marker removed. A later way back from step 13 then empties DuckDB's
+#   `silver_order_utm` and re-parses every verdict under the rules in force,
+#   as it would had the reclassify run under `on`. Without a marker a start
+#   under `on` does what it always did; the one thing it adds is the stat.
+#
+# Option (b), the record in `meta.chain_watermarks` where the hourly copy does
+# not reach, and (c), the record moved to Postgres in both modes, were not
+# taken: (c) changes `on`, and both would leave the way back reading a record
+# the file it describes does not hold.
+
+FROZEN_COPY = "app.sync_metadata"
+_FROZEN_WRITER_SQL = f"SELECT value FROM {FROZEN_COPY} WHERE key = $1"
+
+# Beside the DuckDB file whose verdicts it describes, as the write-chain
+# markers are (`core.chain_latch.MARKER_DIR`); `tests/conftest.py` redirects it.
+UTM_MARKER: Path = DB_DIR / "warehouse-utm-reparsed-at"
+
+
+async def read_frozen_writer(conn=None) -> Optional[Dict[str, Any]]:
+    """The record as its frozen copy in Postgres holds it, by `parse_record`'s
+    rules. On `conn`, or on the application's pool after the revision check.
+    Raises what the read raises; the settle's callers catch it and the next
+    one asks again."""
+    if conn is None:
+        from core.pg import get_pool, require_revision
+
+        pool = await get_pool()
+        await require_revision()
+        async with pool.acquire() as acquired:
+            return await read_frozen_writer(acquired)
+    return parse_record(await conn.fetchval(_FROZEN_WRITER_SQL, WRITER_KEY),
+                        where=FROZEN_COPY)
+
+
+def _instant(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _later(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    """The later of two `UTM_REPARSED` stamps; one that cannot be read loses
+    to one that can, and two that cannot keep the first."""
+    if a is None or b is None:
+        return b if a is None else a
+    at, bt = _instant(a), _instant(b)
+    if at is None or bt is None:
+        return b if at is None and bt is not None else a
+    return b if bt > at else a
+
+
+def utm_marker_stamp() -> Optional[str]:
+    """When a door last re-parsed every UTM verdict in Postgres alone under
+    `KS_DUCKDB=off`, or None when no marker is there. A marker whose stamp
+    cannot be read is dated by its mtime: the file existing is the note, its
+    content only says when. Raises an `OSError` other than its absence —
+    an unreadable directory is not an absent note."""
+    try:
+        stat = UTM_MARKER.stat()
+    except FileNotFoundError:
+        return None
+    try:
+        data = json.loads(UTM_MARKER.read_text(encoding="utf-8"))
+        stamp = data.get(UTM_REPARSED) if isinstance(data, dict) else None
+        if _instant(stamp) is not None:
+            return stamp
+    except (OSError, ValueError) as exc:
+        logger.warning("%s is unreadable (%s); dated by its mtime", UTM_MARKER, exc)
+    return datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+
+
+def _note_utm_marker() -> str:
+    """Write the marker, keeping the later of its stamp and now. Returns it."""
+    from core.chain_latch import _write_marker
+
+    stamp = _later(utm_marker_stamp(), _now_iso())
+    _write_marker(UTM_MARKER, json.dumps({UTM_REPARSED: stamp}, sort_keys=True))
+    return stamp
+
+
+def _with_marker(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """`record` with the marker's note over it, when there is one: the record
+    as it will stand once a start under `on` merges the marker. What
+    `status()` publishes as `writer` under `off`."""
+    stamp = utm_marker_stamp()
+    if stamp is None or not isinstance(record, dict):
+        return record
+    return {**record, UTM_REPARSED: _later(record.get(UTM_REPARSED), stamp)}
+
+
+async def _merge_utm_marker(store, record: Optional[Dict[str, Any]]):
+    """Under `on`: a marker left by a period under `off` goes into DuckDB's
+    record, and is removed once the record holds it. No marker, no write —
+    `record` back as it came. The record it writes is the one
+    `note_utm_reparsed_in_postgres` would have written then: `postgres`, so
+    the way back owes the re-parse, and unresolved when there was none to
+    keep. A marker the removal could not take is merged again by the next
+    start, which `_later` makes harmless."""
+    stamp = utm_marker_stamp()
+    if stamp is None:
+        return record
+    if record is None or record.get("writer") != POSTGRES:
+        record = {"writer": POSTGRES, "since": _now_iso(), "resolved": False}
+    record = {key: value for key, value in record.items() if key != "unreadable"}
+    record[UTM_REPARSED] = _later(record.get(UTM_REPARSED), stamp)
+    await _write_writer(store, record)
+    try:
+        from core.chain_latch import _fsync_dir
+
+        UTM_MARKER.unlink()
+        _fsync_dir(UTM_MARKER.parent)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.error("the UTM re-parse marker %s is merged into the record but "
+                     "could not be removed (%s); the next start merges it again",
+                     UTM_MARKER, exc)
+    logger.warning(
+        "the UTM verdicts were re-parsed in Postgres alone at %s while "
+        "KS_DUCKDB was off: noted in DuckDB's warehouse writer record, so a way "
+        "back from KS_WRITE_WAREHOUSE=postgres re-parses DuckDB's verdicts", stamp)
+    return record
 
 
 # ─── THE UTM DOORS ───────────────────────────────────────────────────────────
@@ -961,11 +1138,21 @@ async def note_utm_reparsed_in_postgres(store) -> None:
     in the record, so the way back re-parses DuckDB's. Noted before the parse —
     one that then fails costs the way back a re-parse it did not need, the
     other order would cost it one it did. Nothing unless `postgres` is the
-    mode. Raises what DuckDB raises; the doors log it and parse anyway."""
+    mode. Raises what DuckDB raises; the doors log it and parse anyway.
+
+    Under `KS_DUCKDB=off` the note goes into `UTM_MARKER` instead, and `store`
+    is not touched: the first start back under `on` merges it into the record
+    (THE RECORD UNDER KS_DUCKDB=off). Raises what the file system raises."""
     global _writer_record
     if not writes_postgres():
         return
     async with _record_lock():
+        if duckdb_switch.is_off():
+            stamp = _note_utm_marker()
+            if isinstance(_writer_record, dict):
+                _writer_record = {**_writer_record, UTM_REPARSED: _later(
+                    _writer_record.get(UTM_REPARSED), stamp)}
+            return
         record = await read_writer(store)
         if record is None or record.get("writer") != POSTGRES:
             # Not recorded yet — the settle that would have raised. The
@@ -1014,15 +1201,21 @@ async def settle_writer(store) -> Dict[str, Any]:
     once settled. Raises what DuckDB raises; a caller that cannot afford that
     catches it, and the next caller tries again. Under `postgres` a group the
     ledger would not let it close leaves the process unsettled, so the next
-    caller tries that again too."""
+    caller tries that again too.
+
+    Under `KS_DUCKDB=off` it reads the frozen copy and writes nothing
+    (`_settle_frozen`); `store` is not touched and may be None. Under `on`
+    a marker a period under `off` left is merged into the record first."""
     global _settled, _held, _full_validated, _reclassify_needed, _writer_record
     global _value_unmet, _held_since
     if _settled:
         return status()
+    if duckdb_switch.is_off():
+        return await _settle_frozen()
     async with _record_lock():
         if _settled:
             return status()
-        record = await read_writer(store)
+        record = await _merge_utm_marker(store, await read_writer(store))
         settled = True
         if writes_postgres():
             if record is None or record.get("writer") != POSTGRES:
@@ -1077,6 +1270,44 @@ async def settle_writer(store) -> Dict[str, Any]:
                 "tick's own parse does not refill it"
                 if _reclassify_needed else "")
         _writer_record = record
+        _settled = settled
+    return status()
+
+
+async def _settle_frozen() -> Dict[str, Any]:
+    """`settle_writer` under `KS_DUCKDB=off`: the record from its frozen copy
+    in Postgres, nothing written anywhere, and the `warehouse` group closed
+    when the record is not resolved or a page of it is open — `resolve_group`
+    asks no store. Raises what the Postgres read raises.
+
+    A process that does not write Postgres alone is not settled here: the way
+    back it would owe marks DuckDB dirty and empties its UTM verdicts, and
+    neither can be done without the file. `off`'s coherence verdict (stage
+    5's PR-2, `warehouse_postgres`) holds such a process on `on`, so this is a
+    safeguard and says so."""
+    global _settled, _writer_record
+    async with _record_lock():
+        if _settled:
+            return status()
+        record = await read_frozen_writer()
+        settled = True
+        if writes_postgres():
+            if not (record and record.get("writer") == POSTGRES and record.get("resolved")):
+                logger.warning(
+                    "KS_DUCKDB=off: %s.%s says %r, not postgres resolved — the record "
+                    "this process cannot write, so it is left as it is", FROZEN_COPY,
+                    WRITER_KEY, record)
+            if not (record or {}).get("resolved") or _warehouse_pages_open():
+                if not await _resolve_the_warehouse_group():
+                    settled = False
+                    logger.warning("the warehouse group is not yet closed; the next "
+                                   "derivation tick tries again")
+        else:
+            logger.error(
+                "KS_DUCKDB=off while %s ran as %s: what a change of writer owes "
+                "DuckDB cannot be settled without the file, and nothing is",
+                ENV, mode())
+        _writer_record = _with_marker(record)
         _settled = settled
     return status()
 

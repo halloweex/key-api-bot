@@ -247,7 +247,7 @@ def _a_fresh_orders_chain_hold(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _a_fresh_warehouse_writer(monkeypatch):
+def _a_fresh_warehouse_writer(monkeypatch, tmp_path):
     """Every test starts as a process that has read nothing and settled
     nothing about the warehouse writer (DN-29).
 
@@ -269,3 +269,7 @@ def _a_fresh_warehouse_writer(monkeypatch):
         monkeypatch.setattr(wc, name, value)
     # Chain 5: the way back a start refused while a chain was latched.
     monkeypatch.setattr(wc, "_way_back_refused", ())
+    # Stage 5, PR-6: the note a door's re-parse leaves under KS_DUCKDB=off,
+    # beside the DuckDB file — a decision, like the latch markers, so never
+    # the real `data/`, and never one test's note in the next one's start.
+    monkeypatch.setattr(wc, "UTM_MARKER", tmp_path / "warehouse-utm-reparsed-at")

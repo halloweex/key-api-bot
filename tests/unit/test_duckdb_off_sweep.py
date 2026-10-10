@@ -103,9 +103,6 @@ DSN = os.getenv("KS_PG_DSN")
 
 KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     # ── web's boot ──
-    # The warehouse writer's record is DuckDB's `sync_metadata` row (PR-6).
-    ("boot:init_and_sync", "core.warehouse_cutover:read_writer"): BOTH,
-    ("boot:scheduler_start", "core.warehouse_cutover:read_writer"): BOTH,
     # A watermark absent from Postgres is inherited from DuckDB, read in a
     # task of its own by the order step and by the catalogue step (PR-5) —
     # in the boot's sync tick, and in every tick after it. Live only: refused
@@ -124,7 +121,6 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     ("job:db_backup", "core.scheduler:_run_backup"): BOTH,                      # PR-7
     ("job:dq_integrity_check", "core.scheduler:_run_dq_integrity"): BOTH,       # PR-7
     ("job:dq_mirror_landing", "core.scheduler:_landing"): BOTH,                 # PR-7
-    ("job:pg_warehouse_derive", "core.warehouse_cutover:read_writer"): BOTH,    # PR-6
     # The shadow chains' DuckDB copy, written after Postgres (PR-4).
     ("job:disk_watchdog", "core.shadow_writes:into_duckdb"): LIVES,
     ("job:dq_integrity_check", "core.shadow_writes:into_duckdb"): LIVES,

@@ -4260,17 +4260,22 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 and PR-1).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1 and PR-6).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
 `orders_held()` instead of `get_stats()`, a failed boot sync no longer ends
 the startup (the handler used to ask DuckDB first), and a route refused the
-file answers 503 `surface: duckdb` beside `ReadUnavailable`. Under `on`
-nothing changed. **Web still does not run clean under `off`**: what the sweep
-in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
-exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
-scheduler's catch-up, the DuckDB half of the integrity scan and of the
+file answers 503 `surface: duckdb` beside `ReadUnavailable`. The warehouse
+writer's record is read from its frozen copy in Postgres, `app.sync_metadata`,
+and never written (PR-6, OD-S5-2 (a)); a door that re-parses every UTM
+verdict in Postgres alone notes it in `data/warehouse-utm-reparsed-at`
+instead, and the first start back under `on` merges that into DuckDB's record,
+so a later way back from step 13 still re-parses DuckDB's verdicts — the one
+thing `on` does differently, and only when the marker is there. Otherwise,
+under `on` nothing changed. **Web still does not run clean under `off`**: what
+the sweep in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file
+is exactly its `KNOWN_RESIDUAL` — the scheduler's catch-up, the DuckDB half of the integrity scan and of the
 mirror landing, the shadow chains' DuckDB copies, the report weeks and the
 order and catalogue watermarks inherited from DuckDB, `db_backup`,
 `/api/health` still counting DuckDB's tables, and `/api/summary?source_id=3`.

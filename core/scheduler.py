@@ -332,10 +332,16 @@ class BackgroundScheduler:
 
     @staticmethod
     async def _settle_warehouse_writer() -> None:
-        """`warehouse_cutover.settle_writer`, never raising."""
-        from core import warehouse_cutover
+        """`warehouse_cutover.settle_writer`, never raising.
+
+        Without a store under KS_DUCKDB=off: the record is read from its
+        frozen copy in Postgres there and nothing is written (stage 5, PR-6)."""
+        from core import duckdb_switch, warehouse_cutover
 
         try:
+            if duckdb_switch.is_off():
+                await warehouse_cutover.settle_writer(None)
+                return
             from core.duckdb_store import get_store
 
             await warehouse_cutover.settle_writer(await get_store())
