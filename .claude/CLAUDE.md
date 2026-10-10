@@ -4260,8 +4260,8 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1, PR-3
-and PR-4).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1, PR-3,
+PR-4 and PR-8).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
@@ -4285,14 +4285,21 @@ until the drop: the finding dates its rows on Postgres's clock, its lever says
 rows of a week under `off` are expected and never names
 `scripts/chain_copy_back.py` as the cure (it releases the latch and hands the
 chain back to DuckDB), and the soak's H2 lists it as accepted, not failed, once
-the canary's `watch:duckdb_switch` row exists. Under `on` nothing changed.
-**Web still does not run clean under `off`**: what the sweep in
-`tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
+the canary's `watch:duckdb_switch` row exists. On the read
+path (PR-8) DuckDB answers nothing even by routing: `/api/summary?source_id=3`
+(Opencart, no column in Gold) answers DuckDB's zeros without a connection;
+`/api/warehouse/status` reads DuckDB's last refresh out of its copy,
+`app.warehouse_refreshes`, as `status: off`; and `read_fallback.refusing()`
+holds whatever `KS_READ_FALLBACK` says, so a failed engine, a read switch
+left at `duckdb` (refused by name in `no_address`) and the expenses' NULL
+`backfilled_at` are each a 503 naming the surface, not the tripwire's.
+Under `on` nothing changed. **Web still does not run clean under `off`**: what the sweep
+in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
 exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
 scheduler's catch-up, the DuckDB half of the integrity scan and of the
 mirror landing, the report weeks and the
-order and catalogue watermarks inherited from DuckDB, `db_backup`,
-`/api/warehouse/status` and `/api/summary?source_id=3`.
+order and catalogue watermarks inherited from DuckDB, and `db_backup`; no GET
+route since PR-8.
 The watermarks are not a boot-time reach: with Postgres holding no
 `last_sync_orders`, **every sync tick's order step is refused and order
 intake stops** until PR-5. The sweep runs in the target state (derived from

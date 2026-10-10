@@ -113,6 +113,22 @@ to DuckDB uncounted today and `off` would refuse tomorrow. The canary pages
 them under `duckdb` as `read_routed_to_duckdb` (OD-07): nothing counts such a
 read, so without that the week `off` waits for would read clean while every
 one of them was served from DuckDB.
+
+UNDER `KS_DUCKDB=off` NOTHING HERE MAY ANSWER FROM DUCKDB (STAGE 5, PR-8)
+
+With the file switched off (`core/duckdb_switch.py`) a read that would go to
+DuckDB is refused whatever `KS_READ_FALLBACK` says — `refusing()` holds —
+and so is a read switch left at `duckdb` (or unset), the way `no_engine`
+refuses the cohorts: `no_address` refuses it before the gate lets DuckDB
+answer, naming the switch. Without that each would reach the tripwire, be
+answered 503 all the same and be paged as `duckdb_opened_while_off`, with
+the switch nobody moved named nowhere. It is defence in depth: the stage 5
+verdict holds `off` back while `KS_READ_FALLBACK` or a read switch is short
+of its target, so a process actually running under `off` meets neither.
+`misconfigured` and `no_engine_routes` do not grow for it — under `off`
+every such read is refused, counted and published under
+`read_fallback_mode.refused`, and the canary pages it as `read_refused`.
+Under `KS_DUCKDB=on` every answer here is what it was.
 """
 from __future__ import annotations
 
@@ -269,8 +285,21 @@ def no_engine_routes() -> List[str]:
 
 
 def refusing() -> bool:
-    """Whether a read that would be answered by DuckDB is refused instead."""
-    return mode() == OFF
+    """Whether a read that would be answered by DuckDB is refused instead:
+    under `KS_READ_FALLBACK=off`, and under `KS_DUCKDB=off` whatever that
+    says — the file a fallback would read is switched off (stage 5, PR-8).
+    `mode()` stays what was configured; this is the answer to act on."""
+    if mode() == OFF:
+        return True
+    from core import duckdb_switch
+
+    return duckdb_switch.is_off()
+
+
+def _names_duckdb(name: str) -> bool:
+    """Whether the read switch `name` sends its reads to DuckDB — set to
+    `duckdb`, or unset, which every switch reads as `duckdb`."""
+    return (os.getenv(name, "").strip().lower() or DUCKDB) == DUCKDB
 
 
 def _tally(table: Dict[str, Dict[str, object]], surface: str) -> int:
@@ -326,8 +355,11 @@ def no_engine(surface: str, why: str) -> None:
 
     Under `duckdb` that is routing, not a failure: nothing is counted and
     nothing is said, per request. Under `off` it is refused like a fallback.
-    One caller today, the cohorts: they have no Postgres body, so under
-    `off` a live ClickHouse is the only thing that may answer them (DN-20b).
+    The cohorts call it: they have no Postgres body, so under `off` a live
+    ClickHouse is the only thing that may answer them (DN-20b). And, under
+    `KS_DUCKDB=off` alone, the expenses' history gate: a Postgres that
+    holds no history of `bronze.expenses` leaves no engine for the
+    statements that read it (stage 5, PR-8).
     """
     if refusing():
         _refuse(surface, why, None)
@@ -345,13 +377,23 @@ def no_address(surface: str, switch: Any) -> None:
     configuration, published once at start under `misconfigured`, and the
     page keeps answering from DuckDB exactly as it always has. A switch that
     names DuckDB, or names nothing, is a routing decision under either mode
-    and is never refused here.
+    and is never refused here — while the file is there to read.
+
+    Under `KS_DUCKDB=off` it is not (stage 5, PR-8): such a switch leaves
+    DuckDB as the only engine, and it is refused like `no_engine`'s, naming
+    the switch. A switch whose value this module does not know is left to
+    the gate's own `enabled()`, which raises on it.
     """
     if not refusing():
         return
     line = _unaddressed(switch.ENV)
     if line:
         _refuse(surface, line, None)
+    from core import duckdb_switch
+
+    if duckdb_switch.is_off() and _names_duckdb(switch.ENV):
+        _refuse(surface, f"{switch.ENV}={DUCKDB} while "
+                         f"{duckdb_switch.ENV}={duckdb_switch.OFF}", None)
 
 
 READ_UNAVAILABLE = "read_unavailable"

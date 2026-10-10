@@ -341,6 +341,78 @@ class TestDuckdbUnchanged:
             "under duckdb the block keeps the shape it always had")
 
 
+# ─── Under KS_DUCKDB=off: DuckDB answers nothing (stage 5, PR-8) ───────────
+
+class TestUnderDuckdbOff:
+    """With the file switched off, a read DuckDB would answer is refused —
+    whatever `KS_READ_FALLBACK` says, and whatever engine the switch names.
+    Each refusal is a 503 naming the surface, counted as a refusal and never
+    as a fallback, and nothing reaches for the file: without this each was
+    the tripwire's, a 503 naming `duckdb` and a CRITICAL page that named no
+    switch. Under on, `test_a_switch_left_at_duckdb_is_not_a_fallback` above
+    holds what was.
+
+    The managers screen reads the classification before its read switch,
+    and that list is chain 5's under off — a chain short of Postgres holds
+    `off` back (design section 6) — so here it is answered from Postgres,
+    as in the state off runs in, and the switch is what is asked."""
+
+    @pytest.fixture(autouse=True)
+    def _chain5_moved(self, monkeypatch):
+        from core import pg_managers_read, pg_managers_write
+
+        monkeypatch.setattr(pg_managers_write, "reads_postgres", lambda: True)
+        monkeypatch.setattr(pg_managers_read, "fetch_all_managers",
+                            AsyncMock(return_value=[]))
+
+    @pytest.mark.parametrize("fallback", [None, "off"], ids=["unset", "off"])
+    @pytest.mark.parametrize("case", CASES, ids=repr)
+    def test_a_switch_left_at_duckdb_is_a_503_naming_the_surface(
+        self, case, fallback, admin_client, stores, duckdb_off, monkeypatch, caplog,
+    ):
+        from core import duckdb_switch
+
+        (switch, _value), = case.env.items()
+        monkeypatch.setenv(switch, "duckdb")
+        _mode(monkeypatch, fallback)
+
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            response = admin_client.get(case.path, params=case.params)
+
+        assert response.status_code == 503, response.text
+        assert response.json()["surface"] == case.surface
+        assert read_fallback.counts() == {}
+        assert read_fallback.refusals()[case.surface]["count"] >= 1
+        assert f"{switch}=duckdb while KS_DUCKDB=off" in caplog.text
+        assert duckdb_switch.opened() == {}
+
+    @pytest.mark.parametrize("case", CASES, ids=repr)
+    def test_a_failed_engine_is_refused_under_the_default_mode(
+        self, case, admin_client, stores, duckdb_off, monkeypatch, caplog,
+    ):
+        """`KS_READ_FALLBACK` unset, the mode that falls back — and under
+        KS_DUCKDB=off it refuses, since there is nothing to fall back to."""
+        from core import duckdb_switch
+
+        _switches(monkeypatch, case.env)
+        _mode(monkeypatch, None)
+        assert read_fallback.mode() == "duckdb"
+
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            response = admin_client.get(case.path, params=case.params)
+
+        assert response.status_code == 503, response.text
+        assert response.json()["surface"] == case.surface
+        assert read_fallback.counts() == {}
+        assert read_fallback.refusals()[case.surface]["count"] >= 1
+        assert "falling back to DuckDB" not in caplog.text
+        assert duckdb_switch.opened() == {}
+
+        block = admin_client.get("/api/health").json()["read_fallback_mode"]
+        assert block["mode"] == "duckdb"
+        assert block["refused"][case.surface]["count"] >= 1
+
+
 # ─── Cohorts: a live ClickHouse or nothing ─────────────────────────────────
 
 @pytest.fixture
@@ -511,26 +583,34 @@ class TestEveryRoute:
     surface it refused. A handler anywhere between a route and a router that
     turns the refusal into an answer — `except Exception: return {}` in a
     service — is found here whether or not anybody thought to list the
-    route. The two ways a gate refuses are swept apart: an engine that fails,
-    and a switch with no address."""
+    route. The ways a gate refuses are swept apart: an engine that fails, a
+    switch with no address, and — under `KS_DUCKDB=off`, with
+    `KS_READ_FALLBACK` left at its default — every switch left at DuckDB
+    (stage 5, PR-8)."""
 
-    @pytest.mark.parametrize("state", ["engine_fails", "no_address"])
+    @pytest.mark.parametrize("state", ["engine_fails", "no_address",
+                                       "switches_at_duckdb_off"])
     def test_a_refusal_is_a_503_naming_its_surface(
-        self, state, sweep_client, stores, no_network, monkeypatch,
+        self, state, sweep_client, stores, no_network, monkeypatch, request,
     ):
         from core import ch_cohorts
         from web.main import app
         from web.ratelimit import limiter
 
-        _every_switch_on(monkeypatch)
-        if state == "engine_fails":
-            monkeypatch.setenv("KS_CH_URL", "http://nowhere.invalid:8123")
-            monkeypatch.setattr(ch_cohorts, "fetch",
-                                AsyncMock(side_effect=OSError("clickhouse down")))
+        if state == "switches_at_duckdb_off":
+            # Every switch unset, as `stores` leaves them: each names DuckDB.
+            request.getfixturevalue("duckdb_off")
+            _mode(monkeypatch, None)
         else:
-            monkeypatch.delenv("KS_PG_DSN", raising=False)
-            monkeypatch.delenv("KS_CH_URL", raising=False)
-        _mode(monkeypatch, "off")
+            _every_switch_on(monkeypatch)
+            if state == "engine_fails":
+                monkeypatch.setenv("KS_CH_URL", "http://nowhere.invalid:8123")
+                monkeypatch.setattr(ch_cohorts, "fetch",
+                                    AsyncMock(side_effect=OSError("clickhouse down")))
+            else:
+                monkeypatch.delenv("KS_PG_DSN", raising=False)
+                monkeypatch.delenv("KS_CH_URL", raising=False)
+            _mode(monkeypatch, "off")
 
         routes = swept_routes(app)
         refused_routes, violations = [], []

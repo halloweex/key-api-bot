@@ -45,8 +45,8 @@ are swept in `down` only, so what a route reaches only once Postgres has
 answered is not here: that is PR-9's integration variant, on a seeded
 Postgres. Each is called with its required parameters, and again per value of
 every optional parameter that can pick a branch and with the header's filters
-together (`optional_variants`): `/api/summary?source_id=3` reaches the file
-where `/api/summary` does not.
+together (`optional_variants`): `/api/summary?source_id=3` reached the file
+where `/api/summary` did not, until PR-8.
 
 WHAT A STEP IS RUN AS
 
@@ -134,10 +134,9 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     ("job:traffic_report", "core.report_ledger:already_sent"): LIVES,
     ("job:weekly_report", "core.report_ledger:already_sent"): LIVES,
     # ── the GET routes ──
-    ("GET /api/warehouse/status", "web.routes.api.admin:get_warehouse_status"): DOWNS,   # PR-8
-    # Opencart has no column in Gold: Postgres is not asked, DuckDB answers
-    # the zeros (design 2.7). An optional parameter's branch (`optional_variants`).
-    ("GET /api/summary?source_id=3", "core.repositories.revenue:get_summary_stats"): DOWNS,  # PR-8
+    # None since PR-8: `/api/warehouse/status` reads DuckDB's last refresh
+    # out of its Postgres copy, and `/api/summary?source_id=3` — Opencart,
+    # no column in Gold — answers DuckDB's zeros without a connection.
 }
 
 
@@ -294,9 +293,10 @@ def name_the_key(monkeypatch) -> None:
 #
 # A route's base request carries its required parameters only
 # (`test_read_fallback_http._request_for`), so a branch an optional one picks
-# is never taken there — and `/api/summary?source_id=3` reaches the file where
-# `/api/summary` does not: Opencart has no column in Gold, so Postgres is not
-# asked and DuckDB answers (design 2.7). Every route is called again, once per
+# is never taken there — and `/api/summary?source_id=3` reached the file where
+# `/api/summary` did not: Opencart has no column in Gold, so Postgres is not
+# asked and DuckDB answered (design 2.7), until PR-8 answered its zeros
+# without it. Every route is called again, once per
 # value of each optional parameter that can pick a branch — the domains below,
 # read from the validators, and every boolean turned from its default — and
 # once with the header's filters together.
@@ -542,18 +542,28 @@ class TestTheSweepUnderARefusingPostgres:
         assert {f"GET {key}" for key in variants} <= set(result["steps"])
         assert not [key for key, status in variants.items() if status == 422]
 
-    def test_the_routes_left_answer_as_they_do_today(self, down):
-        """Of the routes left, the two whose refusal reaches web's handler —
-        the warehouse status, and the summary for a source with no column in
-        Gold — answer 503 naming `duckdb` (PR-1) rather than the 500 they fell
-        through to, until PR-8."""
+    def test_the_routes_pr8_paid_answer_without_the_file(self, down):
+        """PR-8, in the week's own state. The two routes that reached the
+        file answered 503 naming `duckdb` until it (PR-1's handler); now the
+        summary for a source with no column in Gold answers DuckDB's zeros,
+        and the warehouse status nests DuckDB's last refresh as `off` — from
+        its Postgres copy, so here, with Postgres refusing, as the error's
+        class. No route's refusal names `duckdb` any more. Mutation: drop
+        either `off` branch — the route is back in the list, and here."""
+        from tests.unit.duckdb_off_sweep_run import PAID_BY_PR8
+
         result = down[ROUTES]
         answered = {**result["routes"], **result["variants"]}
-        surfaces = result["surfaces"]
-        for key in ("/api/warehouse/status", "/api/summary?source_id=3"):
-            assert (answered[key], surfaces[key]) == (503, "duckdb"), key
-        assert sorted(k for k, s in surfaces.items() if s == "duckdb") == [
-            "/api/summary?source_id=3", "/api/warehouse/status"]
+        for key in PAID_BY_PR8:
+            assert answered[key] == 200, key
+        assert [k for k, s in result["surfaces"].items() if s == "duckdb"] == []
+        summary = result["bodies"]["/api/summary?source_id=3"]
+        assert {k: summary[k] for k in ("totalOrders", "totalRevenue", "avgCheck",
+                                        "totalReturns", "returnsRevenue")} == {
+            "totalOrders": 0, "totalRevenue": 0, "avgCheck": 0,
+            "totalReturns": 0, "returnsRevenue": 0}
+        frozen = result["bodies"]["/api/warehouse/status"]["duckdb_frozen"]
+        assert frozen["status"] == "off" and frozen["error"], frozen
 
     def test_health_says_off_and_is_healthy(self, down):
         """PR-3, in the week's own state: the three health routes reach
@@ -687,8 +697,9 @@ class TestTheInstruments:
 
     def test_a_route_is_also_called_with_the_optional_values_that_pick_a_branch(self):
         """`_request_for` sends the required parameters only, and
-        `/api/summary?source_id=3` reaches the file where `/api/summary` does
-        not (review of PR-1, design 2.7). Mutation: return no variants."""
+        `/api/summary?source_id=3` reached the file where `/api/summary` did
+        not (review of PR-1, design 2.7; PR-8 paid it). Mutation: return no
+        variants."""
         from web.main import app
         from tests.unit.test_read_fallback_http import swept_routes
 

@@ -480,9 +480,9 @@ async def get_warehouse_status(request: Request):
         # answer an operator reads as the warehouse's state.
         status = {"writer": warehouse_cutover.POSTGRES,
                   "postgres": await _pg_derivation_status(),
-                  "duckdb_frozen": await store.get_warehouse_status()}
+                  "duckdb_frozen": await _duckdb_refresh_status(store)}
     else:
-        status = await store.get_warehouse_status()
+        status = await _duckdb_refresh_status(store)
         # Under KS_PG_DERIVE=own Postgres derives on its own signal, and a
         # status page that showed only DuckDB's refreshes would describe the
         # engine the dashboard is leaving.
@@ -502,6 +502,87 @@ async def get_warehouse_status(request: Request):
         cutover = {**warehouse_cutover.status(),
                    "readiness_error": type(e).__name__}
     return {**status, "cutover": cutover}
+
+
+async def _duckdb_refresh_status(store) -> dict:
+    """DuckDB's last warehouse refresh — its own `warehouse_refreshes`, or,
+    under KS_DUCKDB=off, the hourly copy of that table in Postgres.
+
+    Under off the file is not read (stage 5, PR-8). The copy holds the same
+    rows: DuckDB has not derived since step 13, so its last refresh is as old
+    as the switch, and the copy went across before the week began — the
+    table is history there (OD-S5-4). The answer is DuckDB's own keys, plus
+    `status: off` and the table they came from; a Postgres that cannot be
+    read leaves `status: off` and the error's class alone, the way every
+    fact on this page is published. Under on, the store's answer, untouched."""
+    from core import duckdb_switch
+
+    if not duckdb_switch.is_off():
+        return await store.get_warehouse_status()
+    from core.pg_operational import REFRESHES_TABLE
+
+    try:
+        last, recent = await asyncio.wait_for(
+            _read_frozen_refreshes(), _FROZEN_STATUS_TIMEOUT_S)
+    except Exception as e:  # noqa: BLE001 — a status page reports, it does not fail
+        logger.error("frozen warehouse_refreshes unreadable: %s: %s",
+                     type(e).__name__, e)
+        return {"status": duckdb_switch.OFF, "error": type(e).__name__}
+    return {"status": duckdb_switch.OFF, "source": REFRESHES_TABLE,
+            **_refresh_fields(last, recent)}
+
+
+# A status page answers; a Postgres that hangs costs this block, not the page.
+_FROZEN_STATUS_TIMEOUT_S = 5
+
+
+async def _read_frozen_refreshes():
+    """The last row and the last hour's count: DuckDB's two statements, over
+    the copy (`core.pg_operational.REFRESHES_TABLE`)."""
+    from core.pg import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        last = await conn.fetchrow(
+            "SELECT refreshed_at, trigger, duration_ms, bronze_orders, "
+            "silver_rows, gold_revenue_rows, gold_products_rows, "
+            "checksum_match, validation_passed FROM app.warehouse_refreshes "
+            "ORDER BY id DESC LIMIT 1")
+        recent = await conn.fetchval(
+            "SELECT COUNT(*) FROM app.warehouse_refreshes "
+            "WHERE refreshed_at > now() - INTERVAL '1 hour'")
+    return last, recent
+
+
+def _refresh_fields(last, recent) -> dict:
+    """`DuckDBStore.get_warehouse_status`'s answer, built from a row of the
+    same nine columns in the same order. A test holds the two answers equal,
+    key for key and value for value."""
+    if last is None:
+        return {
+            "last_refresh": None,
+            "last_trigger": None,
+            "last_duration_ms": None,
+            "bronze_orders": 0,
+            "silver_rows": 0,
+            "gold_revenue_rows": 0,
+            "gold_products_rows": 0,
+            "checksum_match": None,
+            "validation_passed": None,
+            "recent_refreshes": 0,
+        }
+    return {
+        "last_refresh": last[0].isoformat() if last[0] else None,
+        "last_trigger": last[1],
+        "last_duration_ms": float(last[2]) if last[2] else None,
+        "bronze_orders": last[3],
+        "silver_rows": last[4],
+        "gold_revenue_rows": last[5],
+        "gold_products_rows": last[6],
+        "checksum_match": last[7],
+        "validation_passed": last[8],
+        "recent_refreshes": recent or 0,
+    }
 
 
 async def _pg_derivation_status() -> dict:

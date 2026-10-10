@@ -470,7 +470,7 @@ def test_routes(state, sweep_network, production_host, admin_client,  # noqa: F8
 
     record = Recorder("routes")
     record.collect("before")
-    statuses, variants, surfaces, health = {}, {}, {}, {}
+    statuses, variants, surfaces, health, bodies = {}, {}, {}, {}, {}
 
     def call(key: str, path: str, params: dict) -> int:
         limiter.reset()
@@ -489,6 +489,9 @@ def test_routes(state, sweep_network, production_host, admin_client,  # noqa: F8
                           degraded_by=body.get("degraded_by"),
                           duckdb=(body.get("duckdb") or {}).get("status"),
                           migrations=body.get("migrations"))
+        if key in PAID_BY_PR8:
+            # What the two routes PR-8 took off the list answer instead.
+            bodies[key] = body
         record.collect(f"GET {key}", str(response.status_code))
         return response.status_code
 
@@ -501,4 +504,8 @@ def test_routes(state, sweep_network, production_host, admin_client,  # noqa: F8
             key = variant_key(endpoint.path, variant)
             variants[key] = call(key, path, {**params, **variant})
     record.write(routes=statuses, variants=variants, surfaces=surfaces,
-                 health=health, file=state.unchanged())
+                 health=health, bodies=bodies, file=state.unchanged())
+
+
+# The routes stage 5's PR-8 decoupled, whose answers the sweep keeps.
+PAID_BY_PR8 = ("/api/warehouse/status", "/api/summary?source_id=3")

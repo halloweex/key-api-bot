@@ -196,7 +196,8 @@ def _read_fallback_mode() -> dict:
     (OD-07).
 
     Under `off`, also `refused` — `{surface: {count, last_at}}`, the reads
-    answered 503 rather than from DuckDB (DN-20b). Under `duckdb` only once
+    answered 503 rather than from DuckDB (DN-20b) — and under `KS_DUCKDB=off`
+    whatever the mode, which refuses there too (stage 5, PR-8). Under `duckdb` only once
     something was refused: the one refusal that mode knows is a read of a
     table a write chain owns (`read_fallback.chain_refusal`), and without it
     the block keeps the shape it has always had there."""
