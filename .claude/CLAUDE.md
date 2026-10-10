@@ -4260,7 +4260,7 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 and PR-1).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1 and PR-5).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
@@ -4271,12 +4271,16 @@ nothing changed. **Web still does not run clean under `off`**: what the sweep
 in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
 exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
 scheduler's catch-up, the DuckDB half of the integrity scan and of the
-mirror landing, the shadow chains' DuckDB copies, the report weeks and the
-order and catalogue watermarks inherited from DuckDB, `db_backup`,
+mirror landing, the shadow chains' DuckDB copies, `db_backup`,
 `/api/health` still counting DuckDB's tables, and `/api/summary?source_id=3`.
-The watermarks are not a boot-time reach: with Postgres holding no
-`last_sync_orders`, **every sync tick's order step is refused and order
-intake stops** until PR-5. The sweep runs in the target state (derived from
+**What was inherited from DuckDB is read from its copy** (PR-5): a sync
+window, freshness stand-in or digest beat Postgres holds no key for comes
+from `app.sync_metadata` — DuckDB's table as the hourly copy last shipped it,
+which stopped moving at the latches (`core/pg_frozen_metadata.py`) — the
+freshness check's bootstrap gate asks Postgres too, and an unreadable copy
+is `sync_watermarks_unwatched`, never "fresh install"; the report ledgers
+adopt nothing under `off`. Before it, every tick's order step was refused
+and order intake stopped. The sweep runs in the target state (derived from
 the registries, every chain latched, step 13 met). It boots web, starts the
 scheduler and runs every registered job — each as the tick that comes once
 every window an earlier step armed has passed, on a fresh sync service —

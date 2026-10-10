@@ -106,18 +106,6 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     # The warehouse writer's record is DuckDB's `sync_metadata` row (PR-6).
     ("boot:init_and_sync", "core.warehouse_cutover:read_writer"): BOTH,
     ("boot:scheduler_start", "core.warehouse_cutover:read_writer"): BOTH,
-    # A watermark absent from Postgres is inherited from DuckDB, read in a
-    # task of its own by the order step and by the catalogue step (PR-5) —
-    # in the boot's sync tick, and in every tick after it. Live only: refused
-    # Postgres stops each step first. One row per key (`name_the_key`).
-    ("boot:init_and_sync",
-     "core.duckdb_store:get_last_sync_time (task) [last_sync_orders]"): LIVES,
-    ("boot:init_and_sync",
-     "core.duckdb_store:get_last_sync_time (task) [last_sync_products]"): LIVES,
-    ("job:incremental_sync",
-     "core.duckdb_store:get_last_sync_time (task) [last_sync_orders]"): LIVES,
-    ("job:incremental_sync",
-     "core.duckdb_store:get_last_sync_time (task) [last_sync_products]"): LIVES,
     # The catch-up reads DuckDB's ages before Postgres replaces them (PR-7).
     ("boot:scheduler_start", "core.scheduler:_schedule_catchup_runs"): BOTH,
     # ── the jobs ──
@@ -133,10 +121,6 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     # What only DuckDB holds, copied and compared (PR-4, PR-7).
     ("job:dq_mirror_landing", "core.mirror_reconciliation:reconcile_operational"): LIVES,
     ("job:replicate_operational", "core.pg_operational:replicate_operational"): LIVES,
-    # The digest marker and the reports' adopted weeks (PR-5).
-    ("job:dq_digest", "core.dq_journal:digest_inputs"): LIVES,
-    ("job:traffic_report", "core.report_ledger:already_sent"): LIVES,
-    ("job:weekly_report", "core.report_ledger:already_sent"): LIVES,
     # ── the GET routes ──
     ("GET /api/duckdb/stats", "web.routes.api.health:get_duckdb_stats"): DOWNS,       # PR-3
     ("GET /api/health", "web.routes.api.health:health_check"): DOWNS,                 # PR-3

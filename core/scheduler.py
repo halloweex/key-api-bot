@@ -2098,6 +2098,23 @@ class BackgroundScheduler:
                     "chain watermarks unreadable, freshness check will report "
                     "the moved syncs unwatched: %s", e)
 
+            # Under KS_DUCKDB=off, DuckDB's own `sync_metadata` rows — the
+            # inherited stamps and the bootstrap gate — are read as Postgres
+            # last copied them, for the same reason (stage 5, PR-5). A read
+            # that fails leaves them None, and the check names what it then
+            # cannot judge rather than reading the file.
+            frozen_sync_rows = None
+            from core import duckdb_switch
+
+            if duckdb_switch.is_off():
+                try:
+                    from core.pg_frozen_metadata import frozen_sync_rows as read_copy
+                    frozen_sync_rows = await read_copy()
+                except Exception as e:
+                    logger.error(
+                        "app.sync_metadata unreadable, freshness check will "
+                        "report what it rests on unwatched: %s", e)
+
             # The DuckDB checks over Silver, Gold and UTM that do not run while
             # Postgres alone derives them (DN-28). Read once, so the scan and
             # `duckdb_looked` below agree on one answer: a check the scan
@@ -2113,6 +2130,7 @@ class BackgroundScheduler:
                     issues = check_internal_integrity(
                         conn, inventory_calendar=inventory_calendar,
                         chain_watermarks=chain_watermarks,
+                        frozen_sync_rows=frozen_sync_rows,
                         raised_out=raised_checks, pairing_out=duckdb_measured,
                         stood_down=stood_down)
             except Exception as e:

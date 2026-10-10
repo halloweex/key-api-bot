@@ -43,6 +43,9 @@ UNDER `postgres`: AT LEAST ONCE, NEVER TWICE (OD-16 (a))
   before the flip and not yet copied — the double send OD-16's window
   ("Wednesday to Sunday, after a copy") guards by procedure, guarded here in
   code too. It is written into Postgres with DuckDB's own values, and logged.
+  Not under `KS_DUCKDB=off`, where the file is not opened: by then every
+  chain is latched, and the weeks before the flip reached Postgres by the
+  hourly copy before it — Postgres alone answers (stage 5, PR-5).
 - **Postgres unreachable at the gate raises**: the job fails, nothing is sent,
   and tomorrow's tick asks again.
 
@@ -303,6 +306,13 @@ async def already_sent(store, ledger: Ledger, week_start: date, sales_type: str)
         return True
     if await chain.find_sent(week_start, sales_type) is not None:
         return True
+    from core import duckdb_switch
+
+    if duckdb_switch.is_off():
+        # No adopting under KS_DUCKDB=off (stage 5, PR-5): Postgres is the
+        # authority, and a week delivered before the flip reached it by the
+        # hourly copy before the flip did. The file is not opened.
+        return False
     async with store.connection() as conn:
         dk = report.fetch_sent(conn, week_start, sales_type)
     if dk is not None:

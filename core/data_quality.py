@@ -30,8 +30,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta, timezone
 from enum import Enum
 from typing import (
-    AbstractSet, Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple,
+    AbstractSet, Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence,
+    Set, Tuple,
 )
+
+from core import duckdb_switch
 
 logger = logging.getLogger(__name__)
 
@@ -474,6 +477,7 @@ def _freshness_check(
     now: Optional[datetime] = None,
     *,
     chain_watermarks: Optional[Dict[str, str]] = None,
+    frozen_rows: Optional[Mapping[str, str]] = None,
 ) -> List[IntegrityIssue]:
     """Flag sync_metadata entities whose last_sync_* is older than its threshold.
 
@@ -499,24 +503,70 @@ def _freshness_check(
     stamp is exactly the age of what Postgres then holds. Chain 3 declares it
     for its sync window, and the store's getter answers the same stand-in
     (`DuckDBStore.get_last_sync_time`), so this judges what the sync reads.
+
+    The read and the judgement are apart (`_judge_freshness`), because under
+    `KS_DUCKDB=off` DuckDB's `sync_metadata` is not read here at all: its
+    rows are `frozen_rows`, the same table as Postgres last copied it
+    (`core.pg_frozen_metadata.frozen_sync_rows`, read by the async caller),
+    and `conn` is not touched. None there means the copy could not be read.
+    Under `on`, `frozen_rows` is not consulted and the read is DuckDB's, as
+    it always was (stage 5, PR-5).
     """
+    if duckdb_switch.is_off():
+        return _judge_freshness(frozen_rows, now, chain_watermarks=chain_watermarks,
+                                from_the_copy=True)
+    rows = conn.execute(
+        "SELECT key, value FROM sync_metadata WHERE key LIKE 'last_sync_%'"
+    ).fetchall()
+    return _judge_freshness(dict(rows), now, chain_watermarks=chain_watermarks)
+
+
+def _judge_freshness(
+    rows: Optional[Mapping[str, str]],
+    now: Optional[datetime] = None,
+    *,
+    chain_watermarks: Optional[Dict[str, str]] = None,
+    from_the_copy: bool = False,
+) -> List[IntegrityIssue]:
+    """`_freshness_check`'s verdict over rows already read — pure.
+
+    `rows` are `{key: value}` of DuckDB's `sync_metadata`, its `last_sync_*`
+    keys only. Under `on` they are DuckDB's own, read by `_freshness_check`,
+    and this is the judgement that always stood there.
+
+    `from_the_copy` is `KS_DUCKDB=off`: the rows are Postgres's copy of that
+    table, and None means it could not be read. Two things then follow from
+    Postgres alone. **The bootstrap gate** reads both Postgres sources — the
+    copy and `chain_watermarks` — so "no sync history at all" is said only of
+    a Postgres that holds none, and never of a copy that failed to read. And
+    an entity whose verdict would rest on the copy — a key Postgres does not
+    hold, of a chain that inherits, or of one that has not moved — is
+    **unwatched** when the copy is unreadable, rather than "never synced"."""
     from core.write_chains import WRITE_CHAINS, chain_name, stood_down_sync_keys_checked
 
     issues: List[IntegrityIssue] = []
     if now is None:
         now = datetime.now().astimezone()
 
-    rows = conn.execute(
-        "SELECT key, value FROM sync_metadata WHERE key LIKE 'last_sync_%'"
-    ).fetchall()
-    seen = {k[len("last_sync_"):]: v for k, v in rows}
+    copy_unread = from_the_copy and rows is None
+    seen = {k[len("last_sync_"):]: v for k, v in (rows or {}).items()}
     # No sync history at all → fresh/bootstrap install, not a stall. Skip to
     # avoid spurious "never synced" issues before the first sync completes.
-    if not seen:
+    if not from_the_copy and not seen:
         return []
 
     moved_keys, chain_errors = stood_down_sync_keys_checked()
     moved = {key[len("last_sync_"):] for key in moved_keys}
+    # Under `off` the same gate, over everything Postgres holds: the copy read
+    # and empty, and no watermark of a moved chain — read and empty too, when
+    # any chain has moved. A read that failed is not an empty one.
+    if from_the_copy and not copy_unread and not seen and not (
+            moved_keys and chain_watermarks is None) and not any(
+            (chain_watermarks or {}).values()):
+        return []
+    inherits = {k[len("last_sync_"):] for c in WRITE_CHAINS
+                if getattr(c, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
+                for k in getattr(c, "CHAIN_SYNC_KEYS", ())}
     # Entities whose watermark cannot be judged this run: every moved one when
     # the caller brought no watermarks, and those of a chain whose KS_WRITE_* is
     # not understood (DN-01) — nobody knows which store holds theirs.
@@ -524,6 +574,17 @@ def _freshness_check(
     for name in chain_errors:
         chain = next(c for c in WRITE_CHAINS if chain_name(c) == name)
         blind.update(k[len("last_sync_"):] for k in getattr(chain, "CHAIN_SYNC_KEYS", ()))
+    # Under `off` with the copy unreadable: every entity whose verdict would
+    # rest on the copy. A moved key Postgres holds is judged as it stands, and
+    # a moved key of a chain that does not inherit is "never synced" without
+    # it — the copy was never its stand-in.
+    copy_blind: Set[str] = set()
+    if copy_unread:
+        copy_blind = {e for e in FRESHNESS_THRESHOLDS
+                      if e not in moved
+                      or (e in inherits and chain_watermarks is not None
+                          and not chain_watermarks.get(f"last_sync_{e}"))}
+        blind |= copy_blind
     # Only what this check judges. A moved key with no threshold — the search
     # index's cursor, chain 3's since OD-15 — is watched in no mode, so naming
     # it here would say that a stall of it went unwatched this run.
@@ -531,6 +592,18 @@ def _freshness_check(
     if blind:
         why = ("; ".join(f"{n}: {e}" for n, e in sorted(chain_errors.items()))
                if chain_errors else "")
+        reasons = []
+        if why:
+            reasons.append(f"Their chain's flag is not understood — {why}.")
+        if blind - copy_blind and not why:
+            reasons.append(
+                "Their chain writes Postgres and this check was called without "
+                "`chain_watermarks=` from core.pg_chain_watermarks.read_values.")
+        if copy_blind & blind:
+            reasons.append(
+                "KS_DUCKDB=off, and DuckDB's sync_metadata as Postgres copied it "
+                "(app.sync_metadata) could not be read, so the stamp they would "
+                "be judged by is not in hand.")
         issues.append(IntegrityIssue(
             check_name="sync_watermarks_unwatched",
             table_name="sync_metadata",
@@ -540,14 +613,9 @@ def _freshness_check(
             description=(
                 f"the watermarks of {', '.join(sorted(blind))} are not judged this "
                 "run, so a stall of those syncs is NOT being watched. "
-                + (f"Their chain's flag is not understood — {why}." if why else
-                   "Their chain writes Postgres and this check was called without "
-                   "`chain_watermarks=` from core.pg_chain_watermarks.read_values.")
+                + " ".join(reasons)
             ),
         ))
-    inherits = {k[len("last_sync_"):] for c in WRITE_CHAINS
-                if getattr(c, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
-                for k in getattr(c, "CHAIN_SYNC_KEYS", ())}
     inherited: Set[str] = set()
     for entity in moved:
         frozen = seen.pop(entity, None)
@@ -565,7 +633,8 @@ def _freshness_check(
         raw = seen.get(entity)
         if not raw:
             where = ("meta.chain_watermarks" if entity in moved
-                     else "sync_metadata")
+                     else "app.sync_metadata (DuckDB's, as Postgres copied it)"
+                     if from_the_copy else "sync_metadata")
             issues.append(IntegrityIssue(
                 check_name=f"freshness_{entity}",
                 table_name=entity,
@@ -597,8 +666,10 @@ def _freshness_check(
                 description=(
                     f"{entity} last synced {age_h:.1f}h ago "
                     f"(threshold {max_hours}h) — sync may be stalled"
-                    + (" (DuckDB's stamp from before the switch: no sync under "
-                       "the flag has written meta.chain_watermarks yet)"
+                    + (" (DuckDB's stamp from before the switch"
+                       + (", as Postgres copied it" if from_the_copy else "")
+                       + ": no sync under the flag has written "
+                       "meta.chain_watermarks yet)"
                        if entity in inherited else "")
                 ),
             ))
@@ -1496,11 +1567,17 @@ def check_internal_integrity(
     *,
     inventory_calendar: "Optional[Tuple[Optional[date], FrozenSet[date]]]" = None,
     chain_watermarks: Optional[Dict[str, str]] = None,
+    frozen_sync_rows: Optional[Mapping[str, str]] = None,
     raised_out: Optional[List[str]] = None,
     pairing_out: Optional[Dict[str, Dict[str, int]]] = None,
     stood_down: Optional[AbstractSet[str]] = None,
 ) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
+
+    `frozen_sync_rows` is what the freshness check judges under
+    `KS_DUCKDB=off` in place of DuckDB's `sync_metadata`: its `last_sync_*`
+    rows as Postgres last copied them (`_freshness_check`). Not read under
+    `on`.
 
     `pairing_out`, when given, receives what a check measured where its
     findings alone would not say it — today the attribution counts, under the
@@ -1594,7 +1671,8 @@ def check_internal_integrity(
     ))
 
     # Freshness — catch silent sync-pipeline stalls (e.g. categories 45d stale).
-    issues += _freshness_check(conn, chain_watermarks=chain_watermarks)
+    issues += _freshness_check(conn, chain_watermarks=chain_watermarks,
+                               frozen_rows=frozen_sync_rows)
 
     # Cross-metric consistency — revenue and product pages read different
     # columns, so orders billed at zero make them disagree without saying so.
