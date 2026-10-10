@@ -258,7 +258,16 @@ def compared_in_shadow() -> FrozenSet[str]:
     paging, the frozen chains' answer. A chain held only by owner rows — its
     marker lost — follows its flag again, is not here, and stays stood down
     with `chain_latch_disagrees` paging.
+
+    Empty under KS_DUCKDB=off (stage 5, PR-4): the shadow write stands down
+    there (`core.shadow_writes.into_duckdb`), so DuckDB is no longer a copy of
+    anything and the tables stand down like a frozen chain's — the comparison
+    does not open the file to read them. Local state, no I/O.
     """
+    from core import duckdb_switch
+
+    if duckdb_switch.is_off():
+        return frozenset()
     return frozenset(
         table
         for chain in WRITE_CHAINS if is_shadow(chain)

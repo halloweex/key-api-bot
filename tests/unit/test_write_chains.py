@@ -1040,6 +1040,32 @@ class TestWhatStandsDown:
         from core.pg_operational import _FULL_REPLACE
         assert set(CHAIN_TABLES) <= {pg for pg, _d, _c, _o in _FULL_REPLACE}
 
+    @pytest.mark.parametrize("duckdb", ["on", "off"])
+    def test_the_shadow_chains_tables_are_compared_only_while_duckdb_is_on(
+            self, duckdb, flags):
+        """Every registered shadow chain latched: its tables stand down for
+        the copy under either mode, and are compared facing Postgres→DuckDB
+        only under KS_DUCKDB=on — under off the shadow write stands down
+        (stage 5, PR-4), so there is nothing in DuckDB to compare and the
+        comparison does not open the file for them. Derived from the
+        registry, so a shadow chain added later is held here the day it
+        registers. Mutation: drop the `off` answer in `compared_in_shadow`."""
+        from core import chain_latch, duckdb_switch
+        from core.write_chains import (
+            chain_name, compared_in_shadow, shadow_chains, stood_down_tables,
+        )
+
+        flags.setenv(duckdb_switch.ENV, duckdb)
+        duckdb_switch.configure_mode()
+        shadowed = set()
+        for chain in shadow_chains():
+            chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
+            shadowed.update(chain.CHAIN_TABLES)
+        assert len(shadowed) == 8, shadowed
+        assert shadowed <= stood_down_tables()
+        assert compared_in_shadow() == (
+            frozenset(shadowed) if duckdb == "on" else frozenset())
+
 
 # ─── DN-22a: the order write path asks the registry ──────────────────────────
 #

@@ -125,12 +125,8 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     ("job:dq_integrity_check", "core.scheduler:_run_dq_integrity"): BOTH,       # PR-7
     ("job:dq_mirror_landing", "core.scheduler:_landing"): BOTH,                 # PR-7
     ("job:pg_warehouse_derive", "core.warehouse_cutover:read_writer"): BOTH,    # PR-6
-    # The shadow chains' DuckDB copy, written after Postgres (PR-4).
-    ("job:disk_watchdog", "core.shadow_writes:into_duckdb"): LIVES,
-    ("job:dq_integrity_check", "core.shadow_writes:into_duckdb"): LIVES,
-    ("job:dq_mirror_landing", "core.shadow_writes:into_duckdb"): LIVES,
-    ("job:memory_monitor", "core.shadow_writes:into_duckdb"): LIVES,
-    # What only DuckDB holds, copied and compared (PR-4, PR-7).
+    # What only DuckDB holds, copied and compared (PR-7). The shadow tables
+    # are no longer among them (PR-4).
     ("job:dq_mirror_landing", "core.mirror_reconciliation:reconcile_operational"): LIVES,
     ("job:replicate_operational", "core.pg_operational:replicate_operational"): LIVES,
     # The digest marker and the reports' adopted weeks (PR-5).
@@ -595,6 +591,17 @@ class TestTheSweepUnderALivePostgres:
         a few seconds later skipped and read nothing (review of PR-1).
         Mutation: drop the fresh sync service in the runner's job loop."""
         _judge_the_order_tick(live[PROCESS])
+
+    def test_the_shadow_writes_were_reached_and_stood_down(self, live):
+        """PR-4's rows left the list because the DuckDB half stands down,
+        not because nothing reached it: with Postgres answering, the journal
+        (chain 9) and the samples (chain 10) wrote Postgres and stood their
+        shadow down, and no shadow failed. Mutation: drop the `off` return in
+        `into_duckdb` — the four rows come back, and the failures with them."""
+        result = live[PROCESS]
+        assert {"pg_dq_journal_write", "pg_watchdog_write"} <= set(
+            result["shadow_stood_down"]), result["shadow_stood_down"]
+        assert result["shadow_failures"] == []
 
 
 class TestTheList:

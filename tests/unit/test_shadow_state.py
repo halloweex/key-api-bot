@@ -127,6 +127,18 @@ class TestTheRegistrySplitsTheAnswer:
         assert write_chains.compared_in_shadow() == frozenset({SENDS})
         assert write_chains.chain_modes()["pg_fake_shadow_write"]["mismatch"] is True
 
+    def test_under_duckdb_off_nothing_is_compared_in_shadow(
+            self, shadow_chain, duckdb_off):
+        """Stage 5, PR-4: under KS_DUCKDB=off the shadow write stands down,
+        so DuckDB is no longer a copy of anything — the table stays stood
+        down for the copy and is not compared either, and the comparison
+        does not open the file for it. Mutation: drop the `off` answer in
+        `compared_in_shadow`."""
+        shadow_chain()
+        assert SENDS in write_chains.stood_down_tables()
+        assert write_chains.compared_in_shadow() == frozenset()
+        assert write_chains.chain_modes()["pg_fake_shadow_write"]["shadow"] is True
+
     def test_the_health_block_answers_without_postgres(self):
         """`compared_in_shadow` is asked by the comparison, but the block that
         publishes `shadow` is read while Postgres is down. Mutation: read the
@@ -434,6 +446,38 @@ class TestTheJobComparesTheShadow:
         assert not [i for i in issues if i.table_name == SENDS]
 
 
+    @pytest.mark.asyncio
+    async def test_under_duckdb_off_the_shadow_tables_are_not_read(
+            self, shadow_chain, pg, tmp_path, monkeypatch):
+        """Stage 5, PR-4: with the shadow standing down under KS_DUCKDB=off,
+        neither half of the ledger is read — not Postgres's rows with their
+        clock, not DuckDB's — and nothing is filed on it. The store was
+        opened under on, so what DuckDB is still asked for (the history
+        tables, PR-7) does not trip the switch here. Mutation: drop the
+        `off` answer in `compared_in_shadow`."""
+        from core import duckdb_switch, mirror_reconciliation
+        from core.mirror_reconciliation import reconcile_operational
+
+        shadow_chain()
+        log = []
+        pg(_Pool(log, rows=[ROW]))
+        store = await _store(tmp_path, log, [ROW])
+        read = []
+        real = mirror_reconciliation.read_duckdb_side
+
+        def spy(conn, specs):
+            read.extend(spec.pg_table for spec in specs)
+            return real(conn, specs)
+
+        monkeypatch.setattr(mirror_reconciliation, "read_duckdb_side", spy)
+        monkeypatch.setenv(duckdb_switch.ENV, "off")
+        duckdb_switch.configure_mode()
+        issues = await reconcile_operational(store, now=NOW)
+        assert SENDS not in read, read
+        assert not [e for e in log if e[0] == "postgres"], log
+        assert not [i for i in issues if i.table_name == SENDS]
+
+
 # ─── The copy-back: the prune rule and the carried keys ──────────────────────
 
 
@@ -566,6 +610,21 @@ class TestIntoDuckdb:
         shadow_writes.reset()
         await store.close()
 
+    @pytest.mark.asyncio
+    async def test_under_on_nothing_stands_down(self, tmp_path):
+        """The counter exists for off alone: a write under on is attempted,
+        whatever happens to it, and never counted as stood down."""
+        from core import shadow_writes
+        from core.duckdb_store import DuckDBStore
+
+        shadow_writes.reset()
+        store = DuckDBStore(db_path=tmp_path / "on.duckdb")
+        await store.connect()
+        assert await shadow_writes.into_duckdb(store, "pg_x_write", lambda conn: None)
+        assert shadow_writes.stood_down() == {}
+        shadow_writes.reset()
+        await store.close()
+
     def test_the_failure_is_published_by_class_only(self):
         from core import shadow_writes
 
@@ -574,6 +633,194 @@ class TestIntoDuckdb:
         published = str(shadow_writes.failures())
         assert "secret" not in published and "RuntimeError" in published
         shadow_writes.reset()
+
+
+# ─── Under KS_DUCKDB=off the shadow stands down (stage 5, PR-4) ─────────────
+
+W_START = date(2026, 9, 21)
+
+
+def _door_journal(monkeypatch):
+    from core import dq_journal, pg_dq_journal_write as chain
+    from core.data_quality import journal_rows
+
+    async def persist_run(values, issues, discrepancies):
+        return journal_rows(41, values, issues, discrepancies)
+
+    monkeypatch.setattr(chain, "persist_run", persist_run)
+
+    async def door(store):
+        assert await dq_journal.journal_run(
+            store, started_at=NOW, ended_at=NOW, as_of=NOW, window_start=NOW.date(),
+            window_end=NOW.date(), layer="integrity", issues=[],
+            discrepancies=[]) == 41
+    return chain, door
+
+
+def _door_digest_marker(monkeypatch):
+    from core import dq_journal, pg_dq_journal_write as chain
+
+    monkeypatch.setattr(chain, "set_digest_marker", _async_none)
+
+    async def door(store):
+        await dq_journal.mark_digest_sent(store, NOW.isoformat())
+    return chain, door
+
+
+def _door_disk(monkeypatch):
+    from core import pg_watchdog_write as chain, watchdog_samples
+
+    async def disk_tick(sample, dir_now, **kw):
+        return {"history": None, "dir_week_ago": None, "dir_six_ago": None,
+                "remainder": [], "deleted": 0}
+
+    monkeypatch.setattr(chain, "disk_tick", disk_tick)
+
+    async def door(store):
+        sample = {"sampled_at": NOW, "db_size_mb": 2_000.0, "disk_pct_used": 40.0,
+                  "disk_free_gb": 100.0, "disk_used_bytes": 1}
+        reads = await watchdog_samples.disk_tick(store, sample, {"duckdb": 7})
+        assert reads["persisted"] is True
+    return chain, door
+
+
+def _door_memory(monkeypatch):
+    from core import pg_watchdog_write as chain, watchdog_samples
+
+    async def memory_tick(mem, **kw):
+        return {"last": None, "peak_24h": None}
+
+    monkeypatch.setattr(chain, "memory_tick", memory_tick)
+
+    async def door(store):
+        mem = {"working_set": 600 << 20, "page_cache": 100 << 20,
+               "limit": 1 << 30, "oom_kills": 0}
+        reads = await watchdog_samples.memory_tick(store, mem)
+        assert reads["persisted"] is True
+    return chain, door
+
+
+def _door_ledger(name):
+    def make(monkeypatch):
+        from core import report_ledger
+
+        ledger = getattr(report_ledger, name)
+        chain = ledger.chain()
+        monkeypatch.setattr(report_ledger, "RETRY_DELAYS", (0,))
+
+        async def mark_sent(week_start, sales_type, revenue, orders, sent_at):
+            return None
+
+        monkeypatch.setattr(chain, "mark_sent", mark_sent)
+
+        async def door(store):
+            assert await report_ledger.mark_sent(
+                store, ledger, W_START, "retail", 10.0, 3) == "recorded"
+        return chain, door
+    return make
+
+
+async def _async_none(*args, **kwargs):
+    return None
+
+
+# Every door a shadow chain writes DuckDB through: the journal and its digest
+# marker (9), the disk and memory samples (10), the two report ledgers (11a,
+# 11b). A ledger's drain goes through the same `_shadow` as its record.
+SHADOW_DOORS = {
+    "journal": _door_journal, "digest_marker": _door_digest_marker,
+    "disk_samples": _door_disk, "memory_samples": _door_memory,
+    "weekly_ledger": _door_ledger("WEEKLY"), "traffic_ledger": _door_ledger("TRAFFIC"),
+}
+
+
+class TestUnderDuckdbOffTheShadowStandsDown:
+    """Stage 5, PR-4: under KS_DUCKDB=off the DuckDB half of every shadow
+    chain's write returns before `store.connection()` — the file is not
+    opened, the write is not attempted, and it is not a failure: counted
+    apart as stood down, and nothing at ERROR. Postgres, the writer of
+    record, has the row. OD-S5-3 (a): a way back to on reads the week's rows
+    as `shadow_missing_in_duckdb` (WARN) until the drop."""
+
+    @pytest.fixture
+    def off(self, flags, duckdb_off):
+        from core import shadow_writes
+
+        shadow_writes.reset()
+        yield duckdb_off
+        shadow_writes.reset()
+
+    @pytest.mark.asyncio
+    async def test_the_primitive_opens_nothing_and_counts_no_failure(
+            self, off, caplog):
+        """Mutation: drop the `off` return in `into_duckdb` — the store's
+        `connection()` is refused, the refusal is counted as the tripwire's
+        site and as a shadow failure, and logged at ERROR."""
+        import logging
+
+        from core import duckdb_switch, shadow_writes
+        from core.duckdb_store import DuckDBStore
+
+        called = []
+        store = DuckDBStore(db_path=off / "analytics.duckdb")
+        with caplog.at_level(logging.DEBUG, logger="core.shadow_writes"):
+            ok = await shadow_writes.into_duckdb(store, "pg_x_write", called.append)
+        assert ok is False and called == []
+        assert duckdb_switch.opened() == {}
+        assert shadow_writes.failures() == {}
+        entry = shadow_writes.stood_down_of("pg_x_write")
+        assert entry["count"] == 1 and entry["last_at"]
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert not off.exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("door", sorted(SHADOW_DOORS))
+    async def test_every_door_writes_postgres_and_leaves_the_file_alone(
+            self, door, off, flags):
+        """Each shadow door with its chain at postgres: the Postgres half
+        answers, the DuckDB half stands down, the file is not opened.
+        Mutation: drop the `off` return in `into_duckdb`."""
+        from core import duckdb_switch, shadow_writes
+        from core.duckdb_store import DuckDBStore
+
+        chain, run = SHADOW_DOORS[door](flags)
+        flags.setenv(chain.WRITE_ENV, "postgres")
+        store = DuckDBStore(db_path=off / "analytics.duckdb")
+        await run(store)
+        assert duckdb_switch.opened() == {}, door
+        assert shadow_writes.failures() == {}, door
+        assert shadow_writes.stood_down_of(chain.CHAIN)["count"] == 1, door
+        assert not off.exists()
+
+    def test_every_registered_shadow_chain_has_a_door_here(self):
+        """The doors are the shadow chains' writers; a shadow chain added
+        without one here would stand down untested."""
+        from core import report_ledger
+
+        tested = {
+            "pg_dq_journal_write", "pg_watchdog_write",
+            report_ledger.WEEKLY.chain().CHAIN, report_ledger.TRAFFIC.chain().CHAIN,
+        }
+        assert {write_chains.chain_name(c) for c in write_chains.shadow_chains()} == tested
+
+    def test_health_publishes_the_count_under_off_only(self, off, monkeypatch):
+        """Beside `shadow_failures`, never inside it — and absent under on,
+        where nothing stands down, so on's answer is the one it always was."""
+        from core import duckdb_switch, shadow_writes
+        from web.routes.api import health
+
+        shadow_writes._record_stood_down("pg_watchdog_write")
+        block = health._write_chains()
+        health._shadow_entries(block)
+        entry = block["pg_watchdog_write"]
+        assert entry["shadow_stood_down"]["count"] == 1
+        assert entry["shadow_failures"]["count"] == 0
+
+        monkeypatch.setenv(duckdb_switch.ENV, "on")
+        duckdb_switch.configure_mode()
+        block = health._write_chains()
+        health._shadow_entries(block)
+        assert "shadow_stood_down" not in block["pg_watchdog_write"]
 
 
 def _py_files(*dirs):

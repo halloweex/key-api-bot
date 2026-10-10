@@ -443,7 +443,13 @@ def test_process(state, sweep_network, production_host, monkeypatch):
         return jobs
 
     jobs = asyncio.run(sweep())
-    record.write(jobs=jobs, file=state.unchanged())
+    from core import shadow_writes
+
+    # Which shadow chains reached their DuckDB half and stood it down (PR-4),
+    # and which counted a failure there instead.
+    record.write(jobs=jobs, file=state.unchanged(),
+                 shadow_stood_down=sorted(shadow_writes.stood_down()),
+                 shadow_failures=sorted(shadow_writes.failures()))
 
 
 def test_routes(state, sweep_network, production_host, admin_client,  # noqa: F811

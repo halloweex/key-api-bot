@@ -4260,8 +4260,8 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1 and
-PR-3).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1, PR-3
+and PR-4).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
@@ -4272,12 +4272,20 @@ file answers 503 `surface: duckdb` beside `ReadUnavailable`. `/api/health`,
 `duckdb.status` and `migrations.status` read `off`, `fatal` is null, and
 `duckdb` is never in `degraded_by` — so the canary's probe and the Docker
 healthcheck are neither a tripwire site nor an outage, and a healthy probe
-writes `duckdb_silent: true`. Under `on`
+writes `duckdb_silent: true`. The shadow chains (9, 10, 11a, 11b) stand
+their DuckDB half down before `store.connection()` (PR-4): counted apart as
+`shadow_stood_down` under `off`, never as a failure or at ERROR;
+`compared_in_shadow()` is empty, so the daily comparison does not read those
+tables, and `duckdb_written()` reads every table False. Under `on`, in the
+target state, DuckDB still writes exactly ten tables — the shadow chains'
+eight, `sync_metadata` and `schema_migrations` — pinned in
+`test_duckdb_table_fates.py`. After a week under `off` a way back reads the
+week's rows as `shadow_missing_in_duckdb` (WARN, OD-S5-3 (a)). Under `on`
 nothing changed. **Web still does not run clean under `off`**: what the sweep
 in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
 exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
 scheduler's catch-up, the DuckDB half of the integrity scan and of the
-mirror landing, the shadow chains' DuckDB copies, the report weeks and the
+mirror landing, the report weeks and the
 order and catalogue watermarks inherited from DuckDB, `db_backup`,
 `/api/warehouse/status` and `/api/summary?source_id=3`.
 The watermarks are not a boot-time reach: with Postgres holding no

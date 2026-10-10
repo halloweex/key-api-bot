@@ -452,15 +452,21 @@ def _shadow_entries(block: dict) -> None:
     public). Postgres held each of those rows; the daily comparison finds
     them as `shadow_missing_in_duckdb`, and this says when to look in the
     log. A chain that declares `pending()` — the report ledgers' spool —
-    also publishes what is waiting to be recorded. Local state, no I/O."""
-    from core import shadow_writes
+    also publishes what is waiting to be recorded. Under KS_DUCKDB=off, also
+    `shadow_stood_down`: the DuckDB halves not attempted because the file is
+    switched off (stage 5, PR-4) — not failures, so apart from them, and
+    absent under on, where nothing stands down. Local state, no I/O."""
+    from core import duckdb_switch, shadow_writes
     from core.write_chains import WRITE_CHAINS, chain_name, is_shadow
 
+    duckdb_off = duckdb_switch.is_off()
     for chain in WRITE_CHAINS:
         entry = block.get(chain_name(chain))
         if not isinstance(entry, dict) or not is_shadow(chain):
             continue
         entry["shadow_failures"] = shadow_writes.failures_of(chain_name(chain))
+        if duckdb_off:
+            entry["shadow_stood_down"] = shadow_writes.stood_down_of(chain_name(chain))
         pending = getattr(chain, "pending", None)
         if callable(pending):
             try:

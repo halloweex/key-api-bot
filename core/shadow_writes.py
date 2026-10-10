@@ -28,6 +28,21 @@ half, and it has exactly one rule set:
 It never uses the phrase `core/read_fallback.py` logs. A shadow is not a
 fallback — the soak greps for that phrase, and a log line here carrying it
 would read as a read port failing (`tests/unit/test_shadow_state.py`).
+
+UNDER `KS_DUCKDB=off` THE SHADOW STANDS DOWN (stage 5, PR-4)
+
+The week of silence forbids opening the file, and these writes are the one
+thing every shadow chain still hands it. So under `off` the DuckDB half
+returns before `store.connection()`: nothing is opened, nothing is written,
+and it is **not a failure** — Postgres, the writer of record, holds the row,
+and nothing is broken about a copy the operator switched off. It is counted
+apart (`stood_down()`, published under `off` beside `shadow_failures`), never
+logged at ERROR. The consequence is named rather than discovered (OD-S5-3
+(a)): after a week under `off` the DuckDB copies lack that week's rows, and a
+way back to `on` reads them as `shadow_missing_in_duckdb` (WARN, the digest)
+until DuckDB is dropped. `write_chains.compared_in_shadow()` is empty under
+`off` for the same reason, so the daily comparison does not read those
+tables either.
 """
 from __future__ import annotations
 
@@ -44,6 +59,30 @@ _lock = threading.Lock()
 # comparison is the durable record, this is the "when" a reader of the health
 # block needs to go and look at the log.
 _failures: Dict[str, Dict[str, Any]] = {}
+# `{chain: {"count", "last_at"}}`: DuckDB halves not attempted because the
+# process runs under KS_DUCKDB=off. Apart from `_failures` on purpose — a
+# switched-off copy is not a copy that failed.
+_stood_down: Dict[str, Dict[str, Any]] = {}
+
+
+def _record_stood_down(chain: str) -> None:
+    with _lock:
+        entry = _stood_down.setdefault(chain, {"count": 0, "last_at": None})
+        entry["count"] += 1
+        entry["last_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def stood_down() -> Dict[str, Dict[str, Any]]:
+    """A copy of the per-chain stand-down counters. No I/O, never raises."""
+    with _lock:
+        return {chain: dict(entry) for chain, entry in _stood_down.items()}
+
+
+def stood_down_of(chain: str) -> Dict[str, Any]:
+    """One chain's stand-down counter, zero when it never stood down."""
+    with _lock:
+        entry = _stood_down.get(chain)
+        return dict(entry) if entry else {"count": 0, "last_at": None}
 
 
 def _record(chain: str, exc: BaseException) -> None:
@@ -73,6 +112,7 @@ def reset() -> None:
     """For tests: forget every counter."""
     with _lock:
         _failures.clear()
+        _stood_down.clear()
 
 
 async def into_duckdb(store, chain: str, write: Callable[[Any], Any]) -> bool:
@@ -82,7 +122,17 @@ async def into_duckdb(store, chain: str, write: Callable[[Any], Any]) -> bool:
     `write` built from the values Postgres was handed — the chain's existing
     DuckDB statements, so each table has one DuckDB spelling. Never raises an
     `Exception`; a cancellation still goes through.
+
+    Under KS_DUCKDB=off, False before anything is opened: stood down,
+    counted apart from the failures, and not an error (module docstring).
     """
+    from core import duckdb_switch
+
+    if duckdb_switch.is_off():
+        _record_stood_down(chain)
+        logger.debug("shadow write stood down: %s — KS_DUCKDB=off, Postgres "
+                     "holds the row and DuckDB is not opened", chain)
+        return False
     try:
         async with store.connection() as conn:
             conn.execute("BEGIN TRANSACTION")
