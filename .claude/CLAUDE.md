@@ -4260,20 +4260,26 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 and PR-1).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1 and
+PR-3).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
 `orders_held()` instead of `get_stats()`, a failed boot sync no longer ends
 the startup (the handler used to ask DuckDB first), and a route refused the
-file answers 503 `surface: duckdb` beside `ReadUnavailable`. Under `on`
+file answers 503 `surface: duckdb` beside `ReadUnavailable`. `/api/health`,
+`/health/detailed` and `/api/duckdb/stats` reach for nothing (PR-3):
+`duckdb.status` and `migrations.status` read `off`, `fatal` is null, and
+`duckdb` is never in `degraded_by` — so the canary's probe and the Docker
+healthcheck are neither a tripwire site nor an outage, and a healthy probe
+writes `duckdb_silent: true`. Under `on`
 nothing changed. **Web still does not run clean under `off`**: what the sweep
 in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
 exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
 scheduler's catch-up, the DuckDB half of the integrity scan and of the
 mirror landing, the shadow chains' DuckDB copies, the report weeks and the
 order and catalogue watermarks inherited from DuckDB, `db_backup`,
-`/api/health` still counting DuckDB's tables, and `/api/summary?source_id=3`.
+`/api/warehouse/status` and `/api/summary?source_id=3`.
 The watermarks are not a boot-time reach: with Postgres holding no
 `last_sync_orders`, **every sync tick's order step is refused and order
 intake stops** until PR-5. The sweep runs in the target state (derived from

@@ -25,7 +25,11 @@ reading the code (core/duckdb_switch.py). What is held here:
   counts, survives a boot sync that failed or was refused, and a route that
   reaches the file answers 503 naming `duckdb`; `/api/health` publishes the
   sites, and the canary pages them CRITICAL and keeps the watch only while
-  web runs `off`.
+  web runs `off`;
+- the health endpoints under `off` (stage 5, PR-3) reach for nothing:
+  `duckdb.status` and the ledger say `off`, there is no FATAL, and `duckdb`
+  is not a cause of degradation — so the canary's healthy probe of the week
+  pages nothing and says the week holds.
 
 What still reaches the file under `off`, in the state production will be in,
 is `tests/unit/test_duckdb_off_sweep.py`'s.
@@ -1204,28 +1208,120 @@ class TestWhatWebPublishes:
         assert canary.duckdb_silent(health) is None
 
     def test_off_publishes_every_site_that_reached_for_the_file(
-        self, admin_client, monkeypatch,  # noqa: F811
+        self, admin_client, monkeypatch, duckdb_off,  # noqa: F811
     ):
-        """Health itself still counts DuckDB's tables (`get_stats`, until
-        stage 5's PR-3), so under off its first answer already carries a
-        site — the tripwire proving itself. The 60 s stats cache is emptied
-        first: a count cached under `on` by an earlier request is not a reach
-        for the file. Mutation: drop `duckdb_switch` from `health_check`'s
+        """A path that reached for the file under off is on the next health
+        answer, by its site — and health itself adds none: it stopped counting
+        DuckDB's tables under off (stage 5, PR-3), so a site there is
+        somebody else's. Mutation: drop `duckdb_switch` from `health_check`'s
         answer."""
-        from web.routes.api import health as health_routes
+        from core.duckdb_store import get_store
 
-        monkeypatch.setitem(health_routes._stats_cache, "data", None)
-        monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
-        _off(monkeypatch)
+        async def reaches_for_the_file():
+            async with (await get_store()).connection():
+                pass
+
+        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+            asyncio.run(reaches_for_the_file())
         health = admin_client.get("/api/health").json()
         block = health["duckdb_switch"]
         assert block["mode"] == "off"
         assert list(block["opened_while_off"]) == [
-            "web.routes.api.health:health_check"], block
+            f"{__name__}:reaches_for_the_file"], block
         assert "tried to open" not in json.dumps(block)
         [(key, _line)] = canary.check_duckdb_switch(health)
         assert key == "duckdb_opened_while_off"
         assert canary.duckdb_silent(health) is False
+
+
+class TestHealthUnderOff:
+    """Stage 5, PR-3: under off the health endpoints do not reach for the
+    file. `/api/health` publishes `duckdb.status=off`, `migrations.status=off`
+    and no FATAL, and `duckdb` is not a cause of degradation — so the probe
+    the canary takes every 15 minutes, and the Docker healthcheck every 30 s,
+    are neither a site of the tripwire nor an outage. Under on every answer
+    is what it was; the tests of `health_check`, the FATAL and the ledger
+    hold that."""
+
+    @pytest.fixture
+    def stats_cache_empty(self, monkeypatch):
+        """A count an earlier request cached under on is not an answer under
+        off — and would hide a `get_stats` that still ran."""
+        from web.routes.api import health as health_routes
+
+        monkeypatch.setitem(health_routes._stats_cache, "data", None)
+        monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
+
+    def test_health_is_healthy_and_reaches_nothing(
+        self, admin_client, duckdb_off, stats_cache_empty,  # noqa: F811
+    ):
+        """The design's proof: one `/api/health` under off opens nothing,
+        reads healthy, and the canary judging that very payload pages neither
+        `health_status` nor `duckdb_opened_while_off`, and the week's watch
+        says silent. Mutations: drop the `off` branch of the stats block
+        (`health_check` becomes a site, `degraded_by == ["duckdb"]`), or of
+        the ledger or the FATAL (each a site)."""
+        response = admin_client.get("/api/health")
+        assert response.status_code == 200, response.text
+        health = response.json()
+        assert duckdb_switch.opened() == {}
+        assert health["duckdb_switch"]["opened_while_off"] == {}
+        assert health["status"] == "healthy", health["degraded_by"]
+        assert health["degraded_by"] == []
+        assert health["duckdb"]["status"] == "off"
+        assert health["duckdb"]["fatal"] is None
+        assert health["duckdb"]["latency_ms"] is None
+        assert health["migrations"] == {"status": "off"}
+        assert not duckdb_off.exists()
+
+        result = asyncio.run(_probe(health))
+        assert "health_status" not in result.failure_keys, result.failures
+        assert "duckdb_opened_while_off" not in result.failure_keys
+        assert result.health_status == "healthy"
+        assert result.duckdb_silent is True
+
+    def test_detailed_health_and_the_stats_route_say_off(
+        self, admin_client, duckdb_off, stats_cache_empty,  # noqa: F811
+    ):
+        """`/health/detailed` reads healthy for DuckDB's part, and
+        `/api/duckdb/stats` answers `off` instead of an error naming the
+        refusal. Mutation: drop either `off` branch."""
+        detailed = admin_client.get("/api/health/detailed").json()
+        assert detailed["components"]["duckdb"] == {"status": "off"}
+        assert detailed["status"] == "healthy"
+        assert admin_client.get("/api/duckdb/stats").json() == {"status": "off"}
+        assert duckdb_switch.opened() == {}
+        assert not duckdb_off.exists()
+
+    def test_under_on_the_store_is_asked_as_ever(
+        self, admin_client, monkeypatch, stats_cache_empty,  # noqa: F811
+    ):
+        """The other side of every branch: under on the three answers come
+        from the store — its counts, its ledger, its FATAL marker — and a
+        store that cannot count still degrades health as `duckdb`."""
+        from web.routes.api import health as health_routes
+
+        store = MagicMock()
+        store.get_stats = AsyncMock(return_value={"orders": 7, "products": 3})
+        store.schema_status = MagicMock(return_value={"status": "ok", "applied": 9})
+        store.fatal_status = MagicMock(return_value=None)
+        monkeypatch.setattr(health_routes, "get_store", AsyncMock(return_value=store))
+        health = admin_client.get("/api/health").json()
+        assert health["duckdb"]["status"] == "connected"
+        assert health["duckdb"]["orders"] == 7
+        assert health["migrations"] == {"status": "ok", "applied": 9}
+        assert store.fatal_status.called
+        assert admin_client.get("/api/duckdb/stats").json() == {
+            "status": "connected", "orders": 7, "products": 3}
+        assert admin_client.get("/api/health/detailed").json()[
+            "components"]["duckdb"]["status"] == "connected"
+
+        store.get_stats = AsyncMock(side_effect=RuntimeError("cannot count"))
+        monkeypatch.setitem(health_routes._stats_cache, "data", None)
+        monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
+        health = admin_client.get("/api/health").json()
+        assert health["duckdb"]["status"] == "error"
+        assert health["degraded_by"] == ["duckdb"]
 
 
 # ─── The canary ──────────────────────────────────────────────────────────────
@@ -1279,8 +1375,11 @@ class TestTheCanary:
 
     @pytest.mark.asyncio
     async def test_its_lever_outranks_the_outage_it_causes(self):
-        """Under off today web cannot work, so health is degraded too — the
-        cause is the switch, and its lever comes first."""
+        """An open under off can come with an outage beside it — health
+        degraded for another cause, a path that needed the file failing with
+        it. Health no longer degrades for DuckDB under off (PR-3), so the
+        outage is somebody else's symptom, and the switch's lever comes
+        first."""
         payload = _healthy_payload()
         payload["status"] = "degraded"
         payload["duckdb_switch"] = {"mode": "off", "value": "off", "error": None,

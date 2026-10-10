@@ -138,9 +138,6 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     ("job:traffic_report", "core.report_ledger:already_sent"): LIVES,
     ("job:weekly_report", "core.report_ledger:already_sent"): LIVES,
     # ── the GET routes ──
-    ("GET /api/duckdb/stats", "web.routes.api.health:get_duckdb_stats"): DOWNS,       # PR-3
-    ("GET /api/health", "web.routes.api.health:health_check"): DOWNS,                 # PR-3
-    ("GET /api/health/detailed", "web.routes.api.health:detailed_health_check"): DOWNS,  # PR-3
     ("GET /api/warehouse/status", "web.routes.api.admin:get_warehouse_status"): DOWNS,   # PR-8
     # Opencart has no column in Gold: Postgres is not asked, DuckDB answers
     # the zeros (design 2.7). An optional parameter's branch (`optional_variants`).
@@ -553,17 +550,28 @@ class TestTheSweepUnderARefusingPostgres:
         """Of the routes left, the two whose refusal reaches web's handler —
         the warehouse status, and the summary for a source with no column in
         Gold — answer 503 naming `duckdb` (PR-1) rather than the 500 they fell
-        through to; the three that swallow it answer 200, degraded, until
-        PR-3."""
+        through to, until PR-8."""
         result = down[ROUTES]
         answered = {**result["routes"], **result["variants"]}
         surfaces = result["surfaces"]
         for key in ("/api/warehouse/status", "/api/summary?source_id=3"):
             assert (answered[key], surfaces[key]) == (503, "duckdb"), key
-        for path in ("/api/health", "/api/health/detailed", "/api/duckdb/stats"):
-            assert answered[path] == 200, path
         assert sorted(k for k, s in surfaces.items() if s == "duckdb") == [
             "/api/summary?source_id=3", "/api/warehouse/status"]
+
+    def test_health_says_off_and_is_healthy(self, down):
+        """PR-3, in the week's own state: the three health routes reach
+        nothing (none is in the list), `/api/health` reads healthy with no
+        cause, and DuckDB's block and ledger say `off` — with Postgres
+        refusing, so nothing else degrades it either. Mutation: drop the
+        `off` branch of `health_check`'s stats block — `degraded_by` would
+        read `["duckdb"]` here, beside its site in the list."""
+        result = down[ROUTES]
+        for path in ("/api/health", "/api/health/detailed", "/api/duckdb/stats"):
+            assert result["routes"][path] == 200, path
+        assert result["health"] == {
+            "status": "healthy", "degraded_by": [],
+            "duckdb": "off", "migrations": {"status": "off"}}
 
 
 class TestTheSweepUnderALivePostgres:

@@ -355,6 +355,39 @@ async def test_run_canary_all_green():
     assert result.cert_days_remaining and result.cert_days_remaining > 50
 
 
+def _healthy_payload_under_duckdb_off():
+    """What web publishes under KS_DUCKDB=off with nothing opened (stage 5,
+    PR-3): the `duckdb` block and the ledger say `off`, nothing degrades for
+    them, and the switch's block is empty."""
+    payload = _healthy_payload()
+    payload["degraded_by"] = []
+    payload["duckdb"] = {"status": "off", "latency_ms": None, "fatal": None}
+    payload["migrations"] = {"status": "off"}
+    payload["duckdb_switch"] = {"mode": "off", "value": "off", "error": None,
+                                "opened_while_off": {}}
+    return payload
+
+
+@pytest.mark.asyncio
+async def test_run_canary_a_healthy_payload_under_duckdb_off_is_green():
+    """The week of silence's healthy probe: nothing pages, and the probe can
+    say the week holds. Mutation: judge `duckdb.status != "connected"` as a
+    failure — every probe of the week would page `health_status`."""
+    def handler(request):
+        return httpx.Response(200, json=_healthy_payload_under_duckdb_off())
+
+    future = datetime.now(timezone.utc) + timedelta(days=60)
+    fake_cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+
+    async with _mock_transport(handler) as client:
+        with patch.object(canary, "_fetch_peer_cert", return_value=fake_cert):
+            result = await run_canary(DASHBOARD, client=client)
+    assert result.ok is True and result.severity == "ok", result.failures
+    assert result.failure_keys == []
+    assert result.health_status == "healthy"
+    assert result.duckdb_silent is True
+
+
 @pytest.mark.asyncio
 async def test_run_canary_flags_degraded_status_as_critical():
     payload = _healthy_payload()

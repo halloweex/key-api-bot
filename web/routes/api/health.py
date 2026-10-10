@@ -633,15 +633,34 @@ async def _derivation_block() -> dict:
     return {**_derivation_mode(), **_signal_reads(), **await _dropped_marks()}
 
 
+def _duckdb_off() -> bool:
+    """KS_DUCKDB=off: this process may not open the DuckDB file, so the
+    health endpoints neither count its tables nor read its schema ledger or
+    FATAL marker, and say `off` in their place (stage 5, PR-3). Local state,
+    no I/O. Under `on` every answer below is what it always was."""
+    from core import duckdb_switch
+
+    return duckdb_switch.is_off()
+
+
 @router.get("/health", response_model=HealthResponse)
 @limiter.limit("60/minute")
 async def health_check(request: Request):
     """Health check endpoint for Docker/load balancer monitoring."""
     uptime_seconds = int(time.time() - START_TIME)
+    duckdb_off = _duckdb_off()
 
     now = time.time()
     async with _stats_cache_lock:
-        if _stats_cache["data"] and now < _stats_cache["expires_at"]:
+        if duckdb_off:
+            # The file is switched off, not failing: no counts to cache, no
+            # latency to time, and `duckdb` is not a cause of degradation. A
+            # count read here would be the tripwire's first site on every
+            # probe — the Docker healthcheck asks every 30 s.
+            duckdb_stats = None
+            duckdb_status = "off"
+            db_latency_ms = None
+        elif _stats_cache["data"] and now < _stats_cache["expires_at"]:
             duckdb_stats = _stats_cache["data"]
             duckdb_status = "connected"
             db_latency_ms = 0.0
@@ -714,11 +733,17 @@ async def health_check(request: Request):
     # The schema ledger. A migration that fails is retried on the next boot and
     # never recorded as applied, so it cannot be skipped past — but somebody has
     # to be able to see it without reading container logs, which is this.
-    try:
-        store = await get_store()
-        migrations = dict(store.schema_status())
-    except Exception as e:
-        migrations = {"status": "unknown", "error": str(e)}
+    # Under KS_DUCKDB=off no DuckDB migration runs in this process (they run
+    # inside `connect()`, after the switch), so the ledger has nothing to say:
+    # `off`, never `unknown`, which would read as a ledger that failed.
+    if duckdb_off:
+        migrations = {"status": "off"}
+    else:
+        try:
+            store = await get_store()
+            migrations = dict(store.schema_status())
+        except Exception as e:
+            migrations = {"status": "unknown", "error": str(e)}
 
     # Same rule as the DuckDB block above, for the same reason: the ledger
     # reports a failure to *read* it as raw exception text, which on this
@@ -734,13 +759,19 @@ async def health_check(request: Request):
     # 60 s stats cache: the store drops the invalidated instance and the next
     # read reconnects and answers, so without this the page a dead DuckDB
     # raises would resolve over a write that still fails. Counts and a kind,
-    # never the exception text — this endpoint is public.
-    try:
-        store = await get_store()
-        duckdb_fatal = store.fatal_status()
-    except Exception as e:
-        logger.warning(f"Health check DuckDB fatal status error: {e}")
+    # never the exception text — this endpoint is public. Null under
+    # KS_DUCKDB=off: no instance is opened to be invalidated, and the
+    # index-short marker beside the file stays on disk for the way back,
+    # which is where it matters again.
+    if duckdb_off:
         duckdb_fatal = None
+    else:
+        try:
+            store = await get_store()
+            duckdb_fatal = store.fatal_status()
+        except Exception as e:
+            logger.warning(f"Health check DuckDB fatal status error: {e}")
+            duckdb_fatal = None
 
     # The copy that carries the money. Its own watchdog lives in bot/canary.py,
     # out of this container — a mirror that stopped shipping used to wait for
@@ -765,9 +796,10 @@ async def health_check(request: Request):
 
     # What made it degraded, one word per cause, so the canary can name it:
     # a FATAL the reconnect answered past is not a web that is down, and its
-    # lever is not a migration's (batch-E review).
+    # lever is not a migration's (batch-E review). A store switched off is
+    # not one that did not answer.
     degraded_by = [cause for cause, degraded in (
-        ("duckdb", not duckdb_stats),
+        ("duckdb", not duckdb_off and not duckdb_stats),
         ("migrations", migrations.get("status") == "failed"),
         ("duckdb_fatal", bool(duckdb_fatal)),
     ) if degraded]
@@ -808,19 +840,22 @@ async def detailed_health_check(request: Request):
     components = {}
     overall_status = "healthy"
 
-    # 1. DuckDB check
-    try:
-        with Timer("health_duckdb") as timer:
-            store = await get_store()
-            duckdb_stats = await store.get_stats()
-        components["duckdb"] = {
-            "status": "connected",
-            "latency_ms": round(timer.elapsed_ms, 2),
-            **duckdb_stats,
-        }
-    except Exception as e:
-        components["duckdb"] = {"status": "error", "error": str(e)}
-        overall_status = "degraded"
+    # 1. DuckDB check — `off`, and not a degradation, under KS_DUCKDB=off
+    if _duckdb_off():
+        components["duckdb"] = {"status": "off"}
+    else:
+        try:
+            with Timer("health_duckdb") as timer:
+                store = await get_store()
+                duckdb_stats = await store.get_stats()
+            components["duckdb"] = {
+                "status": "connected",
+                "latency_ms": round(timer.elapsed_ms, 2),
+                **duckdb_stats,
+            }
+        except Exception as e:
+            components["duckdb"] = {"status": "error", "error": str(e)}
+            overall_status = "degraded"
 
     # 2. Meilisearch check
     try:
@@ -901,7 +936,11 @@ async def detailed_health_check(request: Request):
 @router.get("/duckdb/stats")
 @limiter.limit("60/minute")
 async def get_duckdb_stats(request: Request):
-    """Get DuckDB analytics store statistics."""
+    """Get DuckDB analytics store statistics — `{"status": "off"}` under
+    KS_DUCKDB=off, where the file is not opened to be counted. The route
+    keeps its name until stage 5 deletes the code (OD-S5-8)."""
+    if _duckdb_off():
+        return {"status": "off"}
     try:
         store = await get_store()
         stats = await store.get_stats()
