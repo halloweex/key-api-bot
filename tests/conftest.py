@@ -162,13 +162,17 @@ def _duckdb_switch_on_and_forgotten(monkeypatch):
 
     A developer's shell or `.env` carrying `KS_DUCKDB=off` would refuse every
     store the suite opens, and a test that switched it off must not hand the
-    refusal to the next one. Tests that mean `off` set it after this ran."""
-    from core import duckdb_switch
+    refusal to the next one. Tests that mean `off` set it after this ran.
+    Off's verdict goes with it (core/duckdb_off.py): the switch keeps the
+    keys, the verdict's module the details."""
+    from core import duckdb_off, duckdb_switch
 
     monkeypatch.delenv(duckdb_switch.ENV, raising=False)
     duckdb_switch.reset()
+    duckdb_off.reset()
     yield
     duckdb_switch.reset()
+    duckdb_off.reset()
 
 
 @pytest.fixture

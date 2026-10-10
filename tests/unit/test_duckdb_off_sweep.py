@@ -21,10 +21,13 @@ the fallback walk finds, at the engine it names; every chain in
 `WRITE_CHAINS` at `postgres` and latched; every `STORE_SWITCHES` name at
 `postgres`; every precondition of step 13 met (`MET_ENV`, which
 `tests/unit/test_warehouse_writer.py` keeps true); `KS_READ_FALLBACK=off`;
-and `KS_DUCKDB=off`. It is applied through the real `configure_modes()`, and
-`assert_target_state` then asks every cached verdict whether it got there. A
-registry that grows a precondition this state does not meet fails here,
-naming it, rather than sweeping a different state in silence.
+and `KS_DUCKDB=off`. It is applied through the real `configure_modes()` as web
+calls it, so off's own coherence verdict (`core/duckdb_off.py`, PR-2) is
+reached too, and `assert_target_state` then asks every cached verdict whether
+it got there — off's last, which must hold: a held-back process runs `on`, and
+the sweep would be measuring a web that opens the file on purpose. A registry
+that grows a precondition this state does not meet fails here, naming it,
+rather than sweeping a different state in silence.
 
 TWO FLAVOURS OF POSTGRES
 
@@ -183,6 +186,12 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool) -> None:
         monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection",
                             AsyncMock(return_value=True))
         monkeypatch.setattr(wc, "_expenses_backfilled", AsyncMock(return_value=True))
+        # Off's two Postgres facts, as production's copy holds them (design
+        # 4.1): step 13's record resolved, and copied after the last latch.
+        from core import duckdb_off
+
+        monkeypatch.setattr(duckdb_off, "_frozen_facts_on_its_own_connection",
+                            AsyncMock(return_value=frozen_facts_met()))
     # The process-wide caches the modes are read into, put back afterwards.
     from core import pg_derivation, pg_utm_parse
 
@@ -191,17 +200,31 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool) -> None:
         for name in names:
             monkeypatch.setattr(module, name, getattr(module, name))
     monkeypatch.setattr("core.sync_service._sync_service", None)
-    configure_modes()
+    configure_modes(web=True)
     assert_target_state()
+
+
+# What `core.duckdb_off` reads from Postgres when off's verdict is met.
+WRITER_RESOLVED = {"writer": "postgres", "since": "2026-10-01T06:00:00+00:00",
+                   "resolved": True, "resolved_at": "2026-10-01T06:00:01+00:00"}
+
+
+def frozen_facts_met() -> dict:
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    return {"writer": dict(WRITER_RESOLVED), "copied_at": now,
+            "latched_at": now - timedelta(hours=1)}
 
 
 def assert_target_state() -> None:
     """Every cached verdict says the state was reached — and if one does not,
-    which, rather than a sweep of some other state."""
-    from core import pg_orders_write, read_fallback, warehouse_cutover as wc
+    which, rather than a sweep of some other state. Off's own verdict last:
+    it reads the others, and a held-back web names them by key."""
+    from core import duckdb_off, pg_orders_write, read_fallback, warehouse_cutover as wc
     from core.write_chains import chain_modes
 
-    assert duckdb_switch.is_off() and duckdb_switch.mode_error() is None
+    assert duckdb_switch.value() == "off" and duckdb_switch.mode_error() is None
     unmet = [u.key for u in wc.preconditions_unmet()]
     assert wc.writes_postgres() and not unmet, f"step 13 unmet: {unmet}"
     assert read_fallback.mode() == "off"
@@ -214,6 +237,9 @@ def assert_target_state() -> None:
                  or state["mismatch"] or state["error"]}
     assert not not_moved, not_moved
     assert pg_orders_write.mode() == "postgres", "chain 3 held on DuckDB"
+    assert duckdb_switch.held_back() == (), (
+        f"off held back: {[(u.key, u.detail) for u in duckdb_off.unmet()]}")
+    assert duckdb_switch.is_off()
 
 
 @pytest.fixture

@@ -393,8 +393,10 @@ class TestTheOpener:
         with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff) as raised:
             duckdb_switch.open_file(tmp_path / "a.duckdb")
         block = duckdb_switch.health_block()
-        assert set(block) == {"mode", "value", "error", "opened_while_off"}
+        # `held_back` under off only: None here, no verdict reached (PR-2).
+        assert set(block) == {"mode", "value", "error", "opened_while_off", "held_back"}
         assert block["mode"] == "off" and block["value"] == "off"
+        assert block["held_back"] is None
         for entry in block["opened_while_off"].values():
             assert set(entry) == {"count", "last_at"}
         assert str(raised.value) not in json.dumps(block)
@@ -987,9 +989,14 @@ class TestTheStartup:
     def _off_boot(self, monkeypatch, data, init_and_sync):
         """web's real `startup_event` under off (`duckdb_off`, whose directory
         is `data`), around the boot sync it is given; the campaign restore
-        recorded rather than written. Returns (main, restore)."""
+        recorded rather than written. Returns (main, restore).
+
+        Off's coherence verdict (PR-2) is answered as met: its keys are
+        `test_duckdb_off_verdict.py`'s, and what these sweep is the startup
+        of a web that does run off."""
         import core.duckdb_store as store_module
 
+        monkeypatch.setattr("core.duckdb_off.evaluate", lambda env, facts: [])
         main = self._stub(monkeypatch)
         restore = AsyncMock(return_value=False)
         monkeypatch.setattr(store_module.DuckDBStore, "backfill_sms_campaign_record",
@@ -1058,6 +1065,41 @@ class TestTheStartup:
         said = " ".join(str(c.args[0]) for c in main.logger.critical.call_args_list)
         assert "the boot sync reached for the DuckDB file and was refused" in said
         restore.assert_awaited_once()
+
+    def test_off_held_back_starts_as_on_and_opens_the_file(self, monkeypatch, duckdb_off):
+        """Stage 5's PR-2, OD-S5-1 (a): a precondition of off unmet, and web
+        runs `on` — the store is connected before it is handed out, the boot
+        sync runs on it, nothing is refused, and the unmet key is published.
+        Mutation: drop the `settle()` call from `configure_modes(web=True)`."""
+        import core.duckdb_store as store_module
+        from core import duckdb_off as verdict
+
+        main = self._stub(monkeypatch)
+        monkeypatch.setattr(verdict, "evaluate", lambda env, facts: [
+            verdict.Unmet(verdict.USER_STORE, "KS_USER_STORE is 'duckdb'")])
+        monkeypatch.setattr(store_module.DuckDBStore, "backfill_sms_campaign_record",
+                            AsyncMock(return_value=False))
+        connected = []
+
+        async def boot_sync(**_):
+            store = await store_module.get_store()
+            connected.append(store._connection is not None)
+            await store_module.close_store()
+
+        monkeypatch.setattr(main, "init_and_sync", boot_sync)
+        monkeypatch.setattr(main, "logger", MagicMock())
+        try:
+            asyncio.run(main.startup_event())
+        finally:
+            # Under on the startup asks the store for its counts after the
+            # boot sync, and that store is connected.
+            asyncio.run(store_module.close_store())
+        assert connected == [True], "on: connected before it is handed out"
+        assert duckdb_switch.mode() == "on" and duckdb_switch.value() == "off"
+        assert duckdb_switch.held_back() == (verdict.USER_STORE,)
+        assert duckdb_switch.opened() == {}
+        assert (duckdb_off / "analytics.duckdb").exists(), "held back, the file is opened"
+        assert duckdb_switch.health_block()["held_back"] == [verdict.USER_STORE]
 
     def test_on_is_the_path_it_always_was(self, monkeypatch):
         main = self._stub(monkeypatch)

@@ -62,6 +62,20 @@ Read once, in `core.runtime_modes.configure_modes()`, before the boot sync —
 and, unlike the other cached modes, lazily on the first open if no entry point
 configured it: a script that forgot `configure_modes()` must not be the one
 process that opens the file under `off`.
+
+OFF IS A CLAIM, CHECKED AT THE START (stage 5's PR-2)
+
+In web, `off` holds only when nothing web does still needs the file: step 13
+in force, every write chain on Postgres, the user list there, step 13's
+record and the chains' frozen watermarks in Postgres' copy, and no page open
+that a check `off` stands down would announce resolved unseen
+(`core/duckdb_off.py`). One of them unmet and web runs `on` — the owner's
+OD-S5-1 (a): the file is opened, order intake goes on, the week of silence
+does not start — publishes the unmet keys as `duckdb_switch.held_back`, and
+the canary pages `duckdb_off_held_back` CRITICAL. The verdict is reached once
+per process (`hold`) and kept. A script under `off` reaches none and stays
+`off`: it is not the syncer, and it must not open the file in a week web is
+keeping silent.
 """
 from __future__ import annotations
 
@@ -74,7 +88,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Union
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +119,12 @@ OTHER = "other"
 _mode: Optional[str] = None
 _value: Optional[str] = None
 _mode_error: Optional[str] = None
+# The verdict on `off` (`core.duckdb_off`, stage 5's PR-2): None until web's
+# start under `off` has reached it, then the keys it found unmet — empty when
+# `off` holds. Kept for the life of the process, like step 13's: a start that
+# ran `on` must not be handed a scheduler that runs `off`, nor the other way
+# round.
+_held_back: Optional[Tuple[str, ...]] = None
 
 _lock = threading.Lock()
 _opened: Dict[str, Dict[str, object]] = {}
@@ -124,8 +144,13 @@ class DuckDBOpenedWhileOff(RuntimeError):
 
 
 def configure_mode() -> str:
-    """Read `KS_DUCKDB` once. Never raises. Called by `configure_modes()`."""
-    global _mode, _value, _mode_error
+    """Read `KS_DUCKDB` once. Never raises. Called by `configure_modes()`.
+
+    A verdict that held `off` back to `on` in this process (`hold`) is kept:
+    the second `configure_modes()` — the scheduler's — reads `off` again and
+    still runs `on`. A value other than `off` forgets the verdict, which was
+    about `off` alone."""
+    global _mode, _value, _mode_error, _held_back
     previous = _mode
     raw = os.getenv(ENV)
     value = (raw or "").strip().lower()
@@ -135,6 +160,10 @@ def configure_mode() -> str:
     else:
         mode = ON
         error = f"{ENV}={value!r} is not one of {_VALID}; running as {ON!r}"
+    if mode != OFF:
+        _held_back = None
+    elif _held_back:
+        mode = ON
     # Once per cause, as `read_fallback.configure_mode` does: web's startup and
     # the scheduler both configure.
     if error and error != _mode_error:
@@ -168,6 +197,30 @@ def mode_error() -> Optional[str]:
 
 def is_off() -> bool:
     return mode() == OFF
+
+
+def hold(unmet: Sequence[str]) -> str:
+    """Record the verdict on `off` for this process and return the mode it
+    leaves: `on` when `unmet` names any key — held back, OD-S5-1 (a): the
+    file is opened, order intake goes on, the week of silence does not start
+    — and `off` as configured when it names none. Called by
+    `core.duckdb_off.settle()`, in web only and only when `KS_DUCKDB=off` was
+    read. Local state, never raises."""
+    global _mode, _held_back
+    _held_back = tuple(unmet)
+    if _held_back and _mode == OFF:
+        _mode = ON
+    return mode()
+
+
+def held_back() -> Optional[Tuple[str, ...]]:
+    """The keys of `off`'s verdict this process found unmet: empty when it
+    holds, None when no verdict was reached — `KS_DUCKDB` is not `off`, the
+    process is not web (a script stays `off`), or nothing configured the
+    modes. Without a verdict `off` refuses every open, which is the safe
+    direction: a process that never asked must not open the file."""
+    mode()
+    return _held_back
 
 
 def _plumbing(module: str) -> bool:
@@ -345,12 +398,20 @@ def opened() -> Dict[str, Dict[str, object]]:
 def health_block() -> Dict[str, Any]:
     """What `/api/health` publishes as `duckdb_switch`. Local state, no I/O,
     no exception text."""
-    return {
+    block: Dict[str, Any] = {
         "mode": mode(),
         "value": value(),
         "error": mode_error(),
         "opened_while_off": opened(),
     }
+    # Under `KS_DUCKDB=off` only, so `on` publishes what it always did: the
+    # keys `off`'s verdict found unmet — the process then runs `on` and the
+    # canary pages `duckdb_off_held_back` — `[]` when it holds, None before
+    # any verdict. Keys, never details: this endpoint is public, and the
+    # details quote the environment; they are in web's log.
+    if _value == OFF:
+        block["held_back"] = None if _held_back is None else list(_held_back)
+    return block
 
 
 def reset_counts() -> None:
@@ -366,7 +427,7 @@ def reset_counts() -> None:
 def reset() -> None:
     """Forget the mode and every count. Tests only; a process never forgets
     its own."""
-    global _mode, _value, _mode_error
+    global _mode, _value, _mode_error, _held_back
     with _lock:
         _opened.clear()
-    _mode = _value = _mode_error = None
+    _mode = _value = _mode_error = _held_back = None

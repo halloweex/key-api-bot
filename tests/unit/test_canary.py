@@ -594,6 +594,9 @@ def test_format_alert_includes_failures_and_extras():
     (["cert_expiring"], "Dashboard critical"),
     (["write_chain_flag_invalid"], "Dashboard critical"),
     (["warehouse_preconditions_unmet"], "Warehouse switch held back"),
+    (["duckdb_off_held_back"], "DuckDB switch held back"),
+    # Step 13 held makes `warehouse_postgres` off's symptom: its title first.
+    (["duckdb_off_held_back", "warehouse_preconditions_unmet"], "Warehouse switch held back"),
     (["cert_expiring", "health_status"], "Dashboard DOWN"),
 ])
 def test_a_critical_title_says_down_only_for_an_outage(keys, title):
@@ -799,3 +802,74 @@ class TestBuyerSync:
             last_error_class="KeyCRMConnectionError"))
         assert "no success for 100 min" in message
         assert "KeyCRMConnectionError" in message
+
+
+# ─── KS_DUCKDB=off held back (stage 5's PR-2) ────────────────────────────────
+
+class TestOffHeldBack:
+    """Web read KS_DUCKDB=off and runs `on` because a precondition of off is
+    unmet (core/duckdb_off.py, OD-S5-1 (a)): CRITICAL, titled for what it is
+    — the site serves — and the week-of-silence watch is not written."""
+
+    @staticmethod
+    def _held(keys):
+        payload = _healthy_payload()
+        payload["duckdb_switch"] = {"mode": "on", "value": "off", "error": None,
+                                    "opened_while_off": {}, "held_back": keys}
+        return payload
+
+    async def _probe(self, payload):
+        def handler(request):
+            return httpx.Response(200, json=payload)
+
+        future = datetime.now(timezone.utc) + timedelta(days=60)
+        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+        async with _mock_transport(handler) as client:
+            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
+                return await run_canary(DASHBOARD, client=client)
+
+    @pytest.mark.parametrize("block", [
+        None, {}, {"mode": "on", "opened_while_off": {}},
+        {"mode": "off", "value": "off", "held_back": []},
+        {"mode": "off", "value": "off", "held_back": None},
+        {"mode": "on", "held_back": "user_store"},
+    ])
+    def test_off_holding_or_no_verdict_says_nothing(self, block):
+        payload = {} if block is None else {"duckdb_switch": block}
+        assert canary.check_duckdb_off_held_back(payload) == []
+
+    def test_it_names_every_unmet_key(self):
+        [(key, line)] = canary.check_duckdb_off_held_back(
+            {"duckdb_switch": {"held_back": ["chain:pg_orders_write", "user_store"]}})
+        assert key == "duckdb_off_held_back"
+        assert line == canary.DUCKDB_HELD_BACK_LINE + "chain:pg_orders_write, user_store"
+
+    @pytest.mark.asyncio
+    async def test_it_pages_critical_with_its_title_and_lever(self):
+        """Mutation: make the severity `warn` in `run_canary`."""
+        result = await self._probe(self._held(["writer_record"]))
+        assert result.severity == "critical"
+        assert result.failure_keys == ["duckdb_off_held_back"]
+        message = canary.format_alert(result, DASHBOARD)
+        assert message.splitlines()[0] == "\U0001f6a8 <b>DuckDB switch held back</b>"
+        assert "DOWN" not in message
+        assert canary._what_to_do(result).startswith("web runs on and opens DuckDB")
+        assert result.duckdb_silent is None, "web runs on: the week's watch is not written"
+
+    @pytest.mark.asyncio
+    async def test_step_13_held_names_its_own_lever_first(self):
+        payload = self._held(["warehouse_postgres"])
+        payload["warehouse_writer_mode"] = {"mode": "duckdb", "value": "postgres",
+                                            "error": None,
+                                            "preconditions_unmet": ["pg_revision"]}
+        result = await self._probe(payload)
+        assert set(result.failure_keys) == {"duckdb_off_held_back",
+                                            "warehouse_preconditions_unmet"}
+        assert "cutover.unmet" in canary._what_to_do(result)
+
+    def test_it_is_a_registered_condition_and_its_lever_one_line(self):
+        from core.alerting import REGISTRY, Kind
+
+        assert REGISTRY["duckdb_off_held_back"].kind is Kind.CONDITION
+        action = dict(canary._ACTIONS)["duckdb_off_held_back"]
+        assert "\n" not in action and len(action) <= 150

@@ -32,6 +32,9 @@ P4 = "53_p4_week_of_silence.sql"
 F1 = "22_f1_read_fallbacks.sql"
 
 TRIPWIRE = "duckdb_opened_while_off"
+# KS_DUCKDB=off held on `on` by an unmet precondition (stage 5's PR-2): P4's
+# breach and not P3's (OD-S5-7).
+HELD_BACK = "duckdb_off_held_back"
 LEVER_PAGES = ("write_chain_flag_mismatch", "warehouse_hold_stuck",
                "warehouse_preconditions_unmet", "warehouse_way_back_refused")
 FALLBACK_PAGES = ("read_fallback_used", "read_routed_to_duckdb")
@@ -54,7 +57,7 @@ def record(*, last="UNCHANGED", since=None, reason="baseline", checked=None,
 
 
 async def clear(conn):
-    keys = [TRIPWIRE, *LEVER_PAGES, *FALLBACK_PAGES]
+    keys = [TRIPWIRE, HELD_BACK, *LEVER_PAGES, *FALLBACK_PAGES]
     await conn.execute(
         "DELETE FROM app.alert_events WHERE condition_key = ANY($1::text[]) "
         "OR left(condition_key, 6) = 'lever:'", keys)
@@ -191,6 +194,19 @@ class TestTheFilesReadWhatTheCodeWrites:
         assert f"('{key}', 'web opened DuckDB')" in code
         assert f"'{canary.DUCKDB_SWITCH_WATCH_KEY}'" in code
         assert canary.DUCKDB_SWITCH_WATCH_GAP_S == canary.READ_FALLBACK_WATCH_GAP_S
+
+    def test_off_held_back_is_p4s_breach_and_not_p3s(self):
+        """OD-S5-7: a held-back web runs on, so the week of silence is not
+        running; the parallel period is not broken, since DuckDB became a
+        writer of nothing. The key is the canary's. Mutation: drop it from
+        P4's `breach_keys`, or add it to P3's."""
+        from bot import canary
+
+        [(key, _)] = canary.check_duckdb_off_held_back(
+            {"duckdb_switch": {"held_back": ["user_store"]}})
+        assert key == HELD_BACK
+        assert f"('{key}', 'web held on DuckDB')" in self.code(P4)
+        assert key not in self.code(P3)
 
     @pytest.mark.parametrize("name, span, extra", [
         (P1, 24, {"record_max_age": "3 hours"}),
@@ -550,6 +566,18 @@ class TestP3ParallelPeriod:
         assert v == "PASS" and "(a chain latched): 4 d 0 h" in detail, detail
 
     @pytest.mark.asyncio
+    async def test_off_held_back_does_not_restart_it(self, pool):
+        """OD-S5-7: the parallel period is not broken by off held on `on` —
+        fired in the day, or standing. Mutation: add it to `breach_keys`."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.watched(conn)
+            await page(conn, HELD_BACK, at=ago(hours=2))
+            await series(conn, HELD_BACK, state="firing", first=ago(hours=2))
+            v, detail = await verdict(conn, P3, parallel_from=DECLARED)
+        assert v == "PASS" and "10 d 0 h" in detail, detail
+
+    @pytest.mark.asyncio
     async def test_a_lever_restarts_it(self, pool):
         async with scenario(pool) as conn:
             await clear(conn)
@@ -894,6 +922,24 @@ class TestP4WeekOfSilence:
             await watch(conn, "watch:read_fallbacks", since=ago(minutes=10), probes=0)
             v, detail = await verdict(conn, P4, duckdb_off="1", **record())
         assert v == "FAIL" and "latest probe found an open" in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_off_held_back_breaks_it(self, pool):
+        """Web read off and ran on (PR-2): it opened the file at boot, so the
+        week is not running — inside the day and while the page stands.
+        Mutation: drop `duckdb_off_held_back` from `breach_keys`."""
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.silent(conn)
+            await page(conn, HELD_BACK, at=ago(hours=2))
+            v, detail = await verdict(conn, P4, duckdb_off="1", **record())
+        assert v == "FAIL" and "web held on DuckDB" in detail, detail
+        async with scenario(pool) as conn:
+            await clear(conn)
+            await self.silent(conn)
+            await series(conn, HELD_BACK, state="firing", first=ago(days=2))
+            v, detail = await verdict(conn, P4, duckdb_off="1", **record())
+        assert v == "FAIL" and f"still paging: {HELD_BACK}" in detail, detail
 
     @pytest.mark.asyncio
     async def test_levers_and_fallbacks_break_it_too(self, pool):

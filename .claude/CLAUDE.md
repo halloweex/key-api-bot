@@ -4260,7 +4260,7 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1 and PR-6).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1, PR-6 and PR-2).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
@@ -4276,8 +4276,21 @@ thing `on` does differently, and only when the marker is there. A marker its
 removal left behind is found spent by the next start — its note already in
 the record, or the record `duckdb` since after it, the way back it fed done —
 and is only removed again: merging it once more used to start a second full
-DuckDB rebuild on every restart. Otherwise,
-under `on` nothing changed. **Web still does not run clean under `off`**: what
+DuckDB rebuild on every restart. **Off is a
+claim checked at web's start** (PR-2, `core/duckdb_off.py`, OD-S5-1 (a)):
+step 13 in force, every chain on Postgres (`chain:<name>`, read off
+`WRITE_CHAINS`, never listed), `KS_USER_STORE=postgres`, step 13's record
+resolved in the frozen copy and that copy shipped after the newest `owner:`
+row, and no page open that a check off stands down would announce resolved
+unseen — `pk_uniqueness_` of the three tables no chain judges, `shadow_*`,
+and the `mirror_*` pages of the three history tables, which the mirror job
+marks under `on` (the one other addition `on` sees: a mark on a delivered
+gate entry that only this verdict reads). One unmet and web runs **`on`** —
+the file opened, orders taken, the week not started — publishing the keys as
+`duckdb_switch.held_back` and paging CRITICAL `duckdb_off_held_back`, P4's
+breach and not P3's (OD-S5-7). Web's verdict alone (`configure_modes(web=True)`,
+kept for the process); a script under `off` stays `off`. Otherwise, under
+`on` nothing changed. **Web still does not run clean under `off`**: what
 the sweep in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file
 is exactly its `KNOWN_RESIDUAL` — the scheduler's catch-up, the DuckDB half of the integrity scan and of the
 mirror landing, the shadow chains' DuckDB copies, the report weeks and the
@@ -4358,7 +4371,8 @@ decision to restart both clocks, said out loud.
 - **P4** the week of silence, under `off` only. Starts at the latest of the
   `watch:duckdb_switch` clean-since (the canary writes it only while web runs
   `off`, on F1's 35-minute rule), the file's unchanged-since, the last edit of
-  `.env`, every breach of all four kinds — the file's `missing_at` among them —
+  `.env`, every breach of all four kinds — the file's `missing_at` among them,
+  and a `duckdb_off_held_back` page, since a held web opens the file —
   and F1's watch. `.env` is asked because the Sunday compaction and the
   nightly off-site start their sidecars from it, not from web's environment,
   and only the switch in the sidecar refuses their read-only open: web `off` with `.env` not saying `off` the way
