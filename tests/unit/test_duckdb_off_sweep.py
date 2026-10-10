@@ -106,21 +106,16 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     # The warehouse writer's record is DuckDB's `sync_metadata` row (PR-6).
     ("boot:init_and_sync", "core.warehouse_cutover:read_writer"): BOTH,
     ("boot:scheduler_start", "core.warehouse_cutover:read_writer"): BOTH,
-    # The catch-up reads DuckDB's ages before Postgres replaces them (PR-7).
-    ("boot:scheduler_start", "core.scheduler:_schedule_catchup_runs"): BOTH,
     # ── the jobs ──
-    ("job:db_backup", "core.scheduler:_run_backup"): BOTH,                      # PR-7
-    ("job:dq_integrity_check", "core.scheduler:_run_dq_integrity"): BOTH,       # PR-7
-    ("job:dq_mirror_landing", "core.scheduler:_landing"): BOTH,                 # PR-7
     ("job:pg_warehouse_derive", "core.warehouse_cutover:read_writer"): BOTH,    # PR-6
     # The shadow chains' DuckDB copy, written after Postgres (PR-4).
     ("job:disk_watchdog", "core.shadow_writes:into_duckdb"): LIVES,
     ("job:dq_integrity_check", "core.shadow_writes:into_duckdb"): LIVES,
     ("job:dq_mirror_landing", "core.shadow_writes:into_duckdb"): LIVES,
     ("job:memory_monitor", "core.shadow_writes:into_duckdb"): LIVES,
-    # What only DuckDB holds, copied and compared (PR-4, PR-7).
+    # The shadow chains' tables, compared facing Postgres→DuckDB (PR-4). The
+    # history tables beside them stand down under off since PR-7.
     ("job:dq_mirror_landing", "core.mirror_reconciliation:reconcile_operational"): LIVES,
-    ("job:replicate_operational", "core.pg_operational:replicate_operational"): LIVES,
     # ── the GET routes ──
     ("GET /api/duckdb/stats", "web.routes.api.health:get_duckdb_stats"): DOWNS,       # PR-3
     ("GET /api/health", "web.routes.api.health:health_check"): DOWNS,                 # PR-3

@@ -81,7 +81,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any, Awaitable, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
+)
 
 from core.data_quality import IntegrityIssue, Severity
 from core.landing_rows import CATEGORY_COLUMNS, PRODUCT_COLUMNS
@@ -1145,14 +1147,17 @@ def read_duckdb_side(
 
 
 async def reconcile_mirror(
-    dk_side: Mapping[
+    dk_side: Optional[Mapping[
         str, Tuple[Mapping[int, Tuple[Any, ...]], Mapping[int, Optional[datetime]]]
-    ],
+    ]],
     *,
     specs: Sequence[MirroredTable] = MIRRORED_TABLES,
     now: Optional[datetime] = None,
     grace_minutes: int = MIRROR_GRACE_MINUTES,
     max_samples: int = 10,
+    read_duckdb: Optional[Callable[[Sequence[MirroredTable]], Awaitable[Mapping[
+        str, Tuple[Mapping[int, Tuple[Any, ...]], Mapping[int, Optional[datetime]]]
+    ]]]] = None,
 ) -> List[IntegrityIssue]:
     """Compare an already-read DuckDB side against Postgres.
 
@@ -1160,6 +1165,13 @@ async def reconcile_mirror(
     break a sync — a check that cannot run has produced no verdict, and the job
     above records that as a failed run so the layer goes stale instead of
     reading clean. See `fetch_last_success_ages`.
+
+    Or, with `dk_side=None`, a DuckDB side read only when needed: `read_duckdb`
+    is awaited with the specs that survived the stand-down, after it, and not
+    at all when none did. That is how the job calls it under `KS_DUCKDB=off`
+    (stage 5, PR-7), where every table here belongs to a latched chain and
+    nothing is left to read; a spec that survives is read, and the read is
+    refused and counted like any other reach for the file.
     """
     from core import pg_landing
     from core.pg import get_pool, require_revision
@@ -1201,6 +1213,8 @@ async def reconcile_mirror(
     specs = tuple(s for s in specs if s.pg_table not in held)
     if not specs:
         return issues
+    if dk_side is None:
+        dk_side = await read_duckdb(specs)
     watermarks = await fetch_watermarks(pool)
 
     for spec in specs:
@@ -4043,6 +4057,14 @@ async def reconcile_operational(
     # — once the shipper had overwritten them — report two agreeing copies.
     # `chain_owner_unregistered` below says which tables and why.
     stood_down = stood_down | chain_latch.owned_tables(owners)
+    # Under KS_DUCKDB=off the history tables too, as their copy does
+    # (`pg_operational.DUCKDB_HISTORY_TABLES`, OD-S5-4): DuckDB's side is the
+    # frozen file, and the last copy is the record (stage 5, PR-7).
+    from core import duckdb_switch
+    from core.pg_operational import stood_down_under_off
+
+    stood_down = stood_down | stood_down_under_off()
+    duckdb_off = duckdb_switch.is_off()
 
     # The third state (OD-02 (c)): a shadow chain writing Postgres still
     # hands DuckDB every row, so its tables come back off the stood-down set
@@ -4075,8 +4097,12 @@ async def reconcile_operational(
     # the grace forgives on the side that always has a clock.
     pg_first = {spec.pg_table: await fetch_pg_rows_with_clock(pool, spec)
                 for spec in shadow_specs}
-    async with store.connection() as conn:
-        dk_side = read_duckdb_side(conn, whole)
+    # Under KS_DUCKDB=off DuckDB is opened only for something to read — here
+    # and for the fingerprints below. Under on, as it always was.
+    dk_side: Dict[str, Any] = {}
+    if whole or not duckdb_off:
+        async with store.connection() as conn:
+            dk_side = read_duckdb_side(conn, whole)
 
     for spec in whole:
         dk_rows, dk_synced = dk_side[spec.pg_table]
@@ -4097,8 +4123,10 @@ async def reconcile_operational(
     # ── the two fingerprinted ──
     appended = tuple(
         s for s in APPEND_ONLY_TABLES if s.pg_table not in stood_down)
-    async with store.connection() as conn:
-        dk_prints = {s.pg_table: fingerprints(conn, s) for s in appended}
+    dk_prints: Dict[str, Any] = {}
+    if appended or not duckdb_off:
+        async with store.connection() as conn:
+            dk_prints = {s.pg_table: fingerprints(conn, s) for s in appended}
 
     suspects: Dict[str, List[int]] = {}
     for spec in appended:

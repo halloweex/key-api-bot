@@ -1604,7 +1604,8 @@ def check_internal_integrity(
     while one is open (`retired_conditions_clear` in
     `core.warehouse_cutover`, which says why holding them was the worse
     answer). Empty unless `KS_WRITE_WAREHOUSE=postgres` switched with every
-    precondition met, or the way back is still holding (DN-29).
+    precondition met, or the way back is still holding (DN-29) — and, under
+    `KS_DUCKDB=off`, `DUCKDB_OFF_STOOD_DOWN` besides (stage 5, PR-7).
 
     Cheap by design: only DB scans, no external I/O. Suitable for running
     every few hours alongside the heavier reconciliation job.
@@ -1626,7 +1627,7 @@ def check_internal_integrity(
     if stood_down is None:
         from core.warehouse_cutover import stood_down_duckdb_checks
 
-        stood_down = stood_down_duckdb_checks()
+        stood_down = stood_down_duckdb_checks() | duckdb_off_stood_down()
 
     def guarded(name: str, run) -> List[IntegrityIssue]:
         if name in stood_down:
@@ -1648,14 +1649,23 @@ def check_internal_integrity(
         would compare a frozen DuckDB, and DN-23's twins stand in alone."""
         return [] if name in stood_down else run()
 
+    def bare(name: str, run) -> List[IntegrityIssue]:
+        """A check that runs bare, by its finding's name, skipped only when it
+        is stood down — today only under `KS_DUCKDB=off`
+        (`DUCKDB_OFF_STOOD_DOWN`). Under `on` it runs as it always has."""
+        return [] if name in stood_down else run()
+
     # PK uniqueness on critical tables.
     issues += landing("pk_uniqueness_orders",
                       lambda: _pk_uniqueness_check(conn, "orders", "id"))
     issues += landing("pk_uniqueness_order_products",
                       lambda: _pk_uniqueness_check(conn, "order_products", "id"))
-    issues += _pk_uniqueness_check(conn, "products", "id")
-    issues += _pk_uniqueness_check(conn, "buyers", "id")
-    issues += _pk_uniqueness_check(conn, "categories", "id")
+    issues += bare("pk_uniqueness_products",
+                   lambda: _pk_uniqueness_check(conn, "products", "id"))
+    issues += bare("pk_uniqueness_buyers",
+                   lambda: _pk_uniqueness_check(conn, "buyers", "id"))
+    issues += bare("pk_uniqueness_categories",
+                   lambda: _pk_uniqueness_check(conn, "categories", "id"))
 
     # FK orphans (DuckDB doesn't enforce FK; we validate manually).
     issues += landing("fk_orphan_order_products_order_id", lambda: _fk_orphan_check(
@@ -1791,6 +1801,33 @@ ORDER_LANDING_CHECKS: FrozenSet[str] = frozenset({
     "status_group_agreement",
     "orders_without_line_items",
 })
+
+
+# The DuckDB integrity checks that stand down under `KS_DUCKDB=off` with no
+# Postgres twin (stage 5, PR-7; owner's decision OD-S5-5). Each reads a table
+# a write chain has taken to Postgres — products and categories (chain 6),
+# buyers (chain 4) — so DuckDB's copy is frozen, and Postgres declares
+# `PRIMARY KEY (id)` on all three: a duplicate there is refused at the
+# INSERT, which is the guarantee the check exists to verify in DuckDB, where
+# historic upserts predate the constraint. The finding's name is the check's
+# and the condition's, so this set is also what such a page is held under:
+# a page of theirs delivered before the switch has no check left to clear it
+# (the `off` verdict's `retired_pages_clear`, PR-2). Every other check over
+# DuckDB already stands down in the target state — Silver, Gold and UTM with
+# step 13, the order tables with chain 3 — and the freshness check and the
+# snapshot continuity read Postgres; the integrity job hands the scan a
+# connection that refuses (`duckdb_switch.RefusedConnection`), so a check
+# that still reaches for the file is counted where it reached.
+DUCKDB_OFF_STOOD_DOWN: FrozenSet[str] = frozenset({
+    "pk_uniqueness_products",
+    "pk_uniqueness_buyers",
+    "pk_uniqueness_categories",
+})
+
+
+def duckdb_off_stood_down() -> FrozenSet[str]:
+    """`DUCKDB_OFF_STOOD_DOWN` under `KS_DUCKDB=off`, nothing under `on`."""
+    return DUCKDB_OFF_STOOD_DOWN if duckdb_switch.is_off() else frozenset()
 
 
 def unverified_conditions(raised: Sequence[str], issues: List[IntegrityIssue]) -> List[str]:

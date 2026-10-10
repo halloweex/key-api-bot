@@ -46,8 +46,8 @@ def main() -> None:
     # it is refused before the driver runs. The source is a backup, not the
     # live file, but the week of silence retires this branch of the nightly
     # off-site at its start (after the second Ark is off-site), and under
-    # `off` db_backup is refused in web anyway, so tonight's source would be
-    # stale. Said in a line a person can act on, not a traceback.
+    # `off` web does not register db_backup (stage 5, PR-7), so tonight's
+    # source would be stale. Said in a line a person can act on, not a traceback.
     from core.duckdb_switch import DuckDBOpenedWhileOff
 
     try:

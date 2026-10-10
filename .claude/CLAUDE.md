@@ -4260,7 +4260,7 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1 and PR-5).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1, PR-5 and PR-7).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
@@ -4269,10 +4269,9 @@ the startup (the handler used to ask DuckDB first), and a route refused the
 file answers 503 `surface: duckdb` beside `ReadUnavailable`. Under `on`
 nothing changed. **Web still does not run clean under `off`**: what the sweep
 in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
-exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
-scheduler's catch-up, the DuckDB half of the integrity scan and of the
-mirror landing, the shadow chains' DuckDB copies, `db_backup`,
-`/api/health` still counting DuckDB's tables, and `/api/summary?source_id=3`.
+exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the shadow
+chains' DuckDB copies and their daily comparison, `/api/health` still
+counting DuckDB's tables, and `/api/summary?source_id=3`.
 **What was inherited from DuckDB is read from its copy** (PR-5): a sync
 window, freshness stand-in or digest beat Postgres holds no key for comes
 from `app.sync_metadata` — DuckDB's table as the hourly copy last shipped it,
@@ -4283,11 +4282,22 @@ adopt nothing under `off`. That finding carries every entity it names
 (`IntegrityIssue.unverified`) and the integrity job holds each one, not only
 the moved keys — an entity no chain moved rests on the copy alone, and a run
 that could not read it must not announce its page resolved. Before it, every
-tick's order step was refused and order intake stopped. The sweep runs in
+tick's order step was refused and order intake stopped. **The jobs stand down rather than fail** (PR-7):
+`duckdb_checkpoint` and `db_backup` are not registered, the catch-up asks
+Postgres alone, the mirror landing reads DuckDB only for what survives the
+stand-down, and the integrity scan is handed a connection that refuses
+(`duckdb_switch.RefusedConnection` — a check that still reaches is counted
+where it reached) with `pk_uniqueness_{products,buyers,categories}` stood down
+and no twin (`DUCKDB_OFF_STOOD_DOWN`, OD-S5-5), so its run is a verdict with no
+`error_message`. The copied tables no chain owns — `app.sync_metadata`,
+`app.warehouse_refreshes`, `app.reconciliation_log` — freeze as history
+(`pg_operational.DUCKDB_HISTORY_TABLES`, OD-S5-4), neither copied nor
+compared; a page their stood-down checks delivered before the switch is the
+`off` verdict's `retired_pages_clear` to wait for (PR-2). The sweep runs in
 the target state (derived from the registries, every chain latched, step 13
-met). It boots web, starts the
-scheduler and runs every registered job — each as the tick that comes once
-every window an earlier step armed has passed, on a fresh sync service —
+met). It boots web, starts the scheduler and runs every registered job —
+each as the tick that comes once every window an earlier step armed has
+passed, on a fresh sync service —
 with Postgres refusing and, wherever `KS_PG_DSN` is set (CI fails if it
 skipped), with Postgres live, emptied first and put back after. It calls
 every GET route **with Postgres refusing only**: with its required
