@@ -147,7 +147,25 @@ esac
 exit 0
 """
 
-FAKES = {"sftp": FAKE_SFTP, "gpg": FAKE_GPG, "flock": FAKE_FLOCK, "docker": FAKE_DOCKER}
+# The agent the scripts start themselves, in a gpg home of their own (see
+# gpg_private_home in deploy/pg_offsite_lib.sh). FAKE_GPG_AGENT=fail exits the
+# way the real one did on 2026-10-10, with its own reason on stderr.
+FAKE_GPG_AGENT = r"""#!/usr/bin/env bash
+printf 'agent %s\n' "$*" >> "${FAKE_GPG_CALLS%.log}-agent.log"
+if [ "${FAKE_GPG_AGENT:-}" = fail ]; then
+    echo "gpg-agent[1]: socket name '/x/S.gpg-agent' is too long" >&2
+    exit 2
+fi
+exit 0
+"""
+
+FAKE_GPGCONF = r"""#!/usr/bin/env bash
+printf 'gpgconf %s\n' "$*" >> "${FAKE_GPG_CALLS%.log}-agent.log"
+exit 0
+"""
+
+FAKES = {"sftp": FAKE_SFTP, "gpg": FAKE_GPG, "flock": FAKE_FLOCK, "docker": FAKE_DOCKER,
+         "gpg-agent": FAKE_GPG_AGENT, "gpgconf": FAKE_GPGCONF}
 
 
 class Run:
@@ -164,6 +182,11 @@ class Run:
     @property
     def gpg(self):
         path = self.root / "calls-gpg.log"
+        return path.read_text().splitlines() if path.exists() else []
+
+    @property
+    def agent(self):
+        path = self.root / "calls-gpg-agent.log"
         return path.read_text().splitlines() if path.exists() else []
 
     @property
@@ -346,6 +369,37 @@ class TestTheShipment:
         assert sum(1 for c in run.gpg if "--symmetric" in c) == 2, run.gpg
         assert sum(1 for c in run.gpg if "-d" in c.split()) == 1, run.gpg
         assert "opens with" in run.out
+
+    def test_gpg_runs_in_a_home_of_its_own_and_leaves_no_agent(self, world):
+        """2026-10-10: the 07:40 run died at "encrypt" on gpg's "failed to
+        start gpg-agent: General error". The run now starts the agent itself
+        in a fresh 0700 home, and stops it and removes the home on the way
+        out — one daemon a day left behind would be the next unbounded
+        thing on this host."""
+        world.dump()
+        run = world.run()
+        assert run.code == 0, run.out
+        starts = [c for c in run.agent if c.startswith("agent ")]
+        assert len(starts) == 1, run.agent
+        home = starts[0].split("--homedir ", 1)[1].split()[0]
+        assert home.startswith("/tmp/ks-gnupg."), home
+        assert f"gpgconf --homedir {home} --kill gpg-agent" in run.agent, run.agent
+        assert not Path(home).exists(), "the private gpg home outlived the run"
+
+    def test_an_agent_that_will_not_start_says_why(self, world):
+        """gpg itself only ever says "General error". The agent, started by
+        the script, says what it was — and that is what reaches the alert."""
+        world.dump()
+        run = world.run(FAKE_GPG_AGENT="fail")
+        assert run.code != 0, run.out
+        assert "socket name '/x/S.gpg-agent' is too long" in run.out, run.out
+        assert "gpg-agent would not start" in run.out
+        assert not [c for c in run.gpg if "--symmetric" in c]
+        assert not any(world.remote_root.rglob("*.gpg"))
+        assert not world.marker.exists()
+        home = next(c for c in run.agent if c.startswith("agent ")).split(
+            "--homedir ", 1)[1].split()[0]
+        assert not Path(home).exists(), "a failed run left its gpg home behind"
 
     def test_an_empty_dump_is_not_a_backup(self, world):
         world.dump(body="")
@@ -808,3 +862,34 @@ def test_real_gpg_round_trips(tmp_path):
                     str(passfile), "-o", str(back), "-d", str(enc)],
                    check=True, capture_output=True)
     assert back.read_text() == plain.read_text()
+
+
+@pytest.mark.skipif(not (shutil.which("gpg") and shutil.which("gpg-agent")
+                         and shutil.which("gpgconf")), reason="needs a real GnuPG")
+def test_real_gpg_round_trips_in_the_private_home(tmp_path):
+    """The helper the scripts use, against a real agent: it starts, gpg
+    encrypts and decrypts through it, and release leaves no home behind."""
+    passfile = tmp_path / "pass"
+    passfile.write_text("a-passphrase\n")
+    plain = tmp_path / "plain"
+    plain.write_text("0501234567 Ivanenko\n")
+    script = f"""
+set -euo pipefail
+cd {REPO}
+source deploy/pg_offsite_lib.sh
+gpg_private_home
+home="$GNUPGHOME"
+trap gpg_private_home_release EXIT
+gpg --symmetric --cipher-algo AES256 --batch --yes \\
+    --passphrase-file {passfile} -o {tmp_path}/plain.gpg {plain}
+gpg --batch --yes --quiet --passphrase-file {passfile} \\
+    -o {tmp_path}/back -d {tmp_path}/plain.gpg
+echo "HOME_WAS=$home"
+"""
+    done = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                          env={**os.environ, "HOME": str(tmp_path)}, timeout=60)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (tmp_path / "back").read_text() == plain.read_text()
+    home = done.stdout.split("HOME_WAS=", 1)[1].strip()
+    assert home.startswith("/tmp/ks-gnupg.")
+    assert not Path(home).exists()

@@ -50,6 +50,46 @@ _sha256() {
     fi
 }
 
+# A gpg home of the run's own, with its agent started by us.
+#
+# GnuPG 2.x routes even a passphrase-only `--symmetric` through gpg-agent and
+# refuses outright when the agent will not start — --pinentry-mode loopback
+# and --no-symkey-cache do not avoid it (tried). On 2026-10-10 the 07:40 run
+# died at "encrypt" with gpg's whole account of it being
+#     gpg: failed to start gpg-agent '/usr/bin/gpg-agent': General error
+# which is gpg relaying that the agent exited, not why. Two changes, each for
+# one half of that:
+#
+#   * The home is a fresh 0700 directory under /tmp, so the run no longer
+#     depends on whatever state root's ~/.gnupg and its socket directory are
+#     in after somebody else's gpg session on this host — and the path stays
+#     short: a socket path over ~107 bytes is one of the ways the agent exits
+#     with exactly that message (reproduced).
+#   * The agent is started here, with its stderr in the run's log, so if it
+#     still will not start the alert carries its own reason (socket name too
+#     long, no space left, …) instead of "General error".
+#
+# The bound lives with the creation: every caller releases in its EXIT path,
+# or each run would leave one agent daemon behind for good.
+gpg_private_home() {
+    GNUPGHOME="$(mktemp -d /tmp/ks-gnupg.XXXXXX)" || return 1
+    chmod 700 "$GNUPGHOME"
+    export GNUPGHOME
+    if command -v gpg-agent >/dev/null 2>&1; then
+        if ! gpg-agent --homedir "$GNUPGHOME" --daemon >/dev/null; then
+            echo "gpg-agent would not start in $GNUPGHOME — its own reason is the line above" >&2
+            return 1
+        fi
+    fi
+}
+
+gpg_private_home_release() {
+    [ -n "${GNUPGHOME:-}" ] && [ -d "$GNUPGHOME" ] || return 0
+    case "$GNUPGHOME" in /tmp/ks-gnupg.*) ;; *) return 0 ;; esac
+    gpgconf --homedir "$GNUPGHOME" --kill gpg-agent >/dev/null 2>&1 || true
+    rm -rf "$GNUPGHOME"
+}
+
 _sftp_batch() { sftp -b - "${SFTP_OPTS[@]}" "$REMOTE"; }
 
 remote_prepare() {

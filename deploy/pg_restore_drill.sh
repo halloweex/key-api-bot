@@ -153,7 +153,7 @@ drill_from_remote() {
     # trap on this function would only fire on the path where nothing went
     # wrong — the one path that does not need cleaning up after.
     # shellcheck disable=SC2064
-    trap "docker rm -f -v '$container' >/dev/null 2>&1 || true; rm -rf '$scratch'" EXIT
+    trap "docker rm -f -v '$container' >/dev/null 2>&1 || true; rm -rf '$scratch'; gpg_private_home_release" EXIT
 
     echo "── the copy under test ──────────────────────────────────"
     stamp="$(remote_stamps | head -1 || true)"
@@ -166,6 +166,8 @@ drill_from_remote() {
     echo "  $stamp  ($(( $(_size "$scratch/$enc_dump") / 1024 )) KB encrypted)"
 
     echo "── verify and decrypt ───────────────────────────────────"
+    # The same isolated gpg home the shipper encrypts in — see pg_offsite_lib.sh.
+    gpg_private_home || fail "gpg-agent would not start — see the line above"
     # Before decrypting, not after: a corrupted download that gpg happens to
     # accept would otherwise be restored and counted, and the drill would
     # report on bytes nobody proved were the bytes that were sent.

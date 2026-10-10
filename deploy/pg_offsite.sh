@@ -107,6 +107,7 @@ finish() {
                 && mv "$LOG_FILE.trim" "$LOG_FILE"
         fi
     fi
+    gpg_private_home_release
     rm -rf "$LOG" "$STEP_FILE" "$STAGE" "$VERIFY"
 }
 trap finish EXIT
@@ -205,6 +206,7 @@ run_push() {
     fi
 
     step "encrypt"
+    gpg_private_home
     # --passphrase-file, never --passphrase: an argument is visible in this
     # host's process table to every user on it for as long as gpg runs, and so
     # is an environment variable through /proc. Same call shape as the env.gpg
