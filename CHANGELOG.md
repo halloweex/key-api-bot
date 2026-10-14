@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.279
+
+- Backups: every gpg runs in a home of its own and asks again for a lost agent
+
+
 ## 3.0.278
 
 
