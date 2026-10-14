@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.278
+
+
+
 ## 3.0.277
 
 - Stage 5 PR-1 review: the routes test's docstring names both 503s
