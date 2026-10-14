@@ -62,6 +62,10 @@ CONFIG="deploy/backup.env"
 # writes. Sourced after backup.env, from the repository root.
 # shellcheck source=/dev/null
 source deploy/pg_offsite_lib.sh
+# Every gpg goes through gpg_safe: a home of its own and a second ask when
+# the agent is missing (deploy/gpg_safe.sh says why).
+# shellcheck source=/dev/null
+source deploy/gpg_safe.sh
 
 MARKER="${BACKUP_PG_MARKER:-data/.pg_offsite_last_ok}"
 # Fourteen off-site, the same count pg_backup.sh keeps locally. The two
@@ -211,9 +215,9 @@ run_push() {
     # that already rides in the Parquet archive, same passphrase, so a restore
     # needs one escrowed secret and not two.
     local enc_dump="ks-$stamp.dump.gpg" enc_roles="roles-$stamp.sql.gpg" manifest="ks-$stamp.sha256"
-    gpg --symmetric --cipher-algo AES256 --batch --yes \
+    gpg_safe --symmetric --cipher-algo AES256 --batch --yes \
         --passphrase-file "$ENV_PASSFILE" -o "$STAGE/$enc_dump" "$dump"
-    gpg --symmetric --cipher-algo AES256 --batch --yes \
+    gpg_safe --symmetric --cipher-algo AES256 --batch --yes \
         --passphrase-file "$ENV_PASSFILE" -o "$STAGE/$enc_roles" "$roles"
     [ -s "$STAGE/$enc_dump" ] && [ -s "$STAGE/$enc_roles" ] \
         || { echo "gpg produced an empty file" >&2; return 1; }
@@ -280,7 +284,7 @@ run_push() {
     # Those are the operator's escrow check and the Monday drill respectively.
     local plain
     plain="$VERIFY/plain.dump"
-    if ! gpg --batch --yes --quiet --passphrase-file "$ENV_PASSFILE" \
+    if ! gpg_safe --batch --yes --quiet --passphrase-file "$ENV_PASSFILE" \
             -o "$plain" -d "$VERIFY/$enc_dump"; then
         echo "the copy that landed off-site will not decrypt with $ENV_PASSFILE" >&2
         return 1

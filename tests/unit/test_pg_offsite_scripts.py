@@ -89,6 +89,13 @@ exit 0
 # something else.
 FAKE_GPG = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_GPG_CALLS"
+if [ "${FAKE_GPG_NO_AGENT:-}" = always ] || {
+        [ -n "${FAKE_GPG_NO_AGENT_ONCE:-}" ] && [ ! -e "$FAKE_GPG_NO_AGENT_ONCE" ]; }; then
+    [ -n "${FAKE_GPG_NO_AGENT_ONCE:-}" ] && : > "$FAKE_GPG_NO_AGENT_ONCE"
+    echo "gpg: failed to start gpg-agent '/usr/bin/gpg-agent': General error" >&2
+    echo "gpg: problem with the agent: No agent running" >&2
+    exit 2
+fi
 out=""; in=""; pf=""; mode=enc
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -187,7 +194,7 @@ def world(tmp_path):
     root = tmp_path / "repo"
     (root / "deploy").mkdir(parents=True)
     for name in ("pg_offsite.sh", "pg_offsite_lib.sh", "notify.sh",
-                 "offsite_check.sh", "pg_restore_drill.sh"):
+                 "offsite_check.sh", "pg_restore_drill.sh", "gpg_safe.sh"):
         shutil.copy(DEPLOY / name, root / "deploy" / name)
 
     bin_dir = tmp_path / "bin"
@@ -256,6 +263,7 @@ def world(tmp_path):
                 "FAKE_SFTP_CALLS": str(root / "calls-sftp.log"),
                 "FAKE_GPG_CALLS": str(root / "calls-gpg.log"),
                 "FAKE_DOCKER_CALLS": str(root / "calls-docker.log"),
+                "GPG_SAFE_DELAYS": "0 0",
             })
             env.update({k: str(v) for k, v in env_extra.items()})
             done = subprocess.run(
@@ -351,6 +359,42 @@ class TestTheShipment:
         assert sum(1 for c in run.gpg if "--symmetric" in c) == 2, run.gpg
         assert sum(1 for c in run.gpg if "-d" in c.split()) == 1, run.gpg
         assert "opens with" in run.out
+
+    def test_a_missing_agent_is_asked_again_and_the_night_ships(self, world, tmp_path):
+        """2026-10-10 07:40 UTC: a root SSH login eleven seconds earlier left
+        gpg with no agent, the run stopped at `encrypt`, and the night's copy
+        went off-site only when somebody re-ran it by hand. gpg_safe asks a
+        call that found no agent again, so the same night ships on its own."""
+        world.dump()
+        run = world.run(FAKE_GPG_NO_AGENT_ONCE=tmp_path / "agent-lost-once")
+        assert run.code == 0, run.out
+        assert "asking again" in run.out
+        assert world.marker.exists()
+        # one refused encryption, then the two and the read-back as ever
+        assert sum(1 for c in run.gpg if "--symmetric" in c) == 3, run.gpg
+        assert sum(1 for c in run.gpg if "-d" in c.split()) == 1, run.gpg
+
+    def test_an_agent_that_never_comes_back_still_fails_the_night(self, world):
+        """Asking again is bounded: three calls, then the failure the alert
+        has always carried, and no marker for a copy that never left."""
+        world.dump()
+        run = world.run(FAKE_GPG_NO_AGENT="always")
+        assert run.code != 0, run.out
+        assert "No agent running" in run.out
+        assert not world.marker.exists()
+        assert len([c for c in run.gpg if c]) == 3, run.gpg
+        assert not any(world.remote_root.rglob("*.gpg"))
+
+    def test_every_gpg_call_gets_a_home_of_its_own(self, world):
+        """The fix for that night is the home: each call runs in a fresh
+        /tmp/ks-gnupg.* directory and leaves none behind, so no call ever asks
+        root's default sockets, which systemd holds while a session is open."""
+        world.dump()
+        before = set(Path("/tmp").glob("ks-gnupg.*"))
+        run = world.run()
+        assert run.code == 0, run.out
+        assert all(c.split()[0] == "--no-keyring" for c in run.gpg if c), run.gpg
+        assert set(Path("/tmp").glob("ks-gnupg.*")) == before
 
     def test_an_empty_dump_is_not_a_backup(self, world):
         world.dump(body="")

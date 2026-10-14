@@ -192,6 +192,10 @@ CONFIG="deploy/backup.env"
 
 # shellcheck source=/dev/null
 source deploy/pg_offsite_lib.sh
+# Every gpg goes through gpg_safe: a home of its own and a second ask when
+# the agent is missing (deploy/gpg_safe.sh says why).
+# shellcheck source=/dev/null
+source deploy/gpg_safe.sh
 
 DUMPS_REMOTE_DIR="$PG_REMOTE_DIR"
 ARK_REMOTE_DIR="${BACKUP_ARK_REMOTE_DIR:-${BACKUP_REMOTE_DIR:-key-api-bot}/ark}"
@@ -397,7 +401,7 @@ pack_and_encrypt() {
     # --passphrase-file, never --passphrase: an argument is in the process
     # table for as long as gpg runs. Same call and same passphrase as the
     # Postgres dumps, so a restore needs one escrowed secret and not two.
-    gpg --symmetric --cipher-algo AES256 --batch --yes \
+    gpg_safe --symmetric --cipher-algo AES256 --batch --yes \
         --passphrase-file "$ENV_PASSFILE" -o "$WORK/$enc" "$plain"
     # The plaintext tarball is a third copy of every phone number on this
     # disk, and its only use — the hash above — has been served.
@@ -455,7 +459,7 @@ fetch_and_verify() {
     # A sha256 of ciphertext is satisfied by a file encrypted under a
     # passphrase nobody holds any more. It must open with the file this host
     # holds, into the very tarball that was encrypted.
-    gpg --batch --yes --quiet --passphrase-file "$ENV_PASSFILE" \
+    gpg_safe --batch --yes --quiet --passphrase-file "$ENV_PASSFILE" \
         -o "$back/ark.tar.gz" -d "$back/$enc" \
         || fail "the copy that landed off-site will not decrypt with $ENV_PASSFILE"
     rm -f "$back/$enc"
