@@ -74,8 +74,13 @@ OD-S5-1 (a): the file is opened, order intake goes on, the week of silence
 does not start — publishes the unmet keys as `duckdb_switch.held_back`, and
 the canary pages `duckdb_off_held_back` CRITICAL. The verdict is reached once
 per process (`hold`) and kept. A script under `off` reaches none and stays
-`off`: it is not the syncer, and it must not open the file in a week web is
-keeping silent.
+`off`: it is not the syncer, and it must not open the file in a week web may
+be keeping silent. It cannot tell whether web is: the host's sidecars start
+from `.env`, and the Sunday compaction's runs with web stopped. So while web
+is held back the weekly compaction and the nightly DuckDB snapshot are
+refused too, as web writes the file on — a hold is to be cleared, not lived
+in, and each refusal says so (`HELD_BACK_NOTE`) instead of saying only that
+the week has started (review of PR-2).
 """
 from __future__ import annotations
 
@@ -128,6 +133,17 @@ _held_back: Optional[Tuple[str, ...]] = None
 
 _lock = threading.Lock()
 _opened: Dict[str, Dict[str, object]] = {}
+
+# What a host sidecar refused under `off` says about the week, after the
+# sentence saying that a web running `off` has started it: the sidecar reads
+# `KS_DUCKDB` from `.env` and reaches no verdict, so it is refused whether web
+# runs `off` or was held back on `on` — and held back, web goes on writing the
+# file the refusal leaves uncompacted and unsnapshotted (review of PR-2). One
+# sentence for every such refusal, short because weekly_compact.sh quotes 300
+# characters of the line it ends; `/api/health` publishes `held_back` under
+# `off` alone (`health_block`).
+HELD_BACK_NOTE = (f"If web is held back (/api/health duckdb_switch.held_back), it "
+                  f"has not: meet those keys or set {ENV}={ON}")
 
 
 class DuckDBOpenedWhileOff(RuntimeError):

@@ -80,8 +80,20 @@ must not hand a scheduler that runs `off`, nor the other way round.
 **Only web.** `configure_modes(web=True)` is web's startup and its scheduler;
 a script under off reaches no verdict and stays off, refusing every open — the
 safe direction for a one-off, which is not the syncer, and a blip in its own
-read of Postgres must not open the file in the middle of a week web is
+read of Postgres must not open the file in the middle of a week web may be
 keeping silent.
+
+**Which is also what a hold costs on the host** (review of PR-2). The weekly
+compaction and the nightly DuckDB snapshot are such scripts: started from
+`.env`, which says off, and unable to read web's verdict — the compaction's
+wrapper has stopped web before its sidecar starts. So while web is held back
+both are refused, and the file web goes on writing is neither compacted nor
+snapshotted off-site for as long as the hold lasts; web's own `db_backup`
+still runs, since web runs `on`. Their refusals say the week has started only
+for a web running off, and name the hold beside it
+(`duckdb_switch.HELD_BACK_NOTE`). P4 reads the hold as a breach and the
+canary pages it; its lever is the way out — meet the keys, or put
+`KS_DUCKDB=on` back in `.env` — since a hold is not a state to live in.
 """
 from __future__ import annotations
 

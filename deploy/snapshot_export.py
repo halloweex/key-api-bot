@@ -45,19 +45,28 @@ def main() -> None:
     # and this sidecar is started with the whole `.env`: under KS_DUCKDB=off
     # it is refused before the driver runs. The source is a backup, not the
     # live file, but the week of silence retires this branch of the nightly
-    # off-site at its start (after the second Ark is off-site), and under
-    # `off` db_backup is refused in web anyway, so tonight's source would be
-    # stale. Said in a line a person can act on, not a traceback.
+    # off-site at its start (after the second Ark is off-site), and under a
+    # web running `off` db_backup is refused there anyway, so tonight's source
+    # would be stale. Not under a web held back on `on` (core/duckdb_off.py):
+    # it writes the file and takes its backups, and this sidecar, which reads
+    # `.env` and not web's verdict, is refused all the same — so the line
+    # says the week has started only for a web that runs off. Said in a line
+    # a person can act on, not a traceback.
+    from core import duckdb_switch
     from core.duckdb_switch import DuckDBOpenedWhileOff
 
     try:
         manifest = compact.phase1_export()
     except DuckDBOpenedWhileOff:
+        # This file is mounted from the host's checkout and `core` comes from
+        # the image, so an image older than the hold has no note to add — and
+        # its web cannot be held back either, so the line is still true.
+        held_back = getattr(duckdb_switch, "HELD_BACK_NOTE", None)
         compact.log("KS_DUCKDB=off: the nightly DuckDB snapshot is refused before it "
-                    "opens the backup (the week of silence, OD-17 (a)). Nothing was "
-                    "exported or shipped. Remove daily_offsite.sh from root's crontab: "
-                    "it is retired at the start of the week of silence, once the "
-                    "second Ark is off-site", "ERROR")
+                    "opens the backup; nothing was exported or shipped. If web runs "
+                    "off and the second Ark is off-site, the week of silence has "
+                    "started: remove daily_offsite.sh from root's crontab."
+                    + (f" {held_back}" if held_back else ""), "ERROR")
         sys.exit(1)
 
     previous = {}

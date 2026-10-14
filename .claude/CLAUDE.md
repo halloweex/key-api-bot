@@ -4300,7 +4300,14 @@ unmet and web runs **`on`** —
 the file opened, orders taken, the week not started — publishing the keys as
 `duckdb_switch.held_back` and paging CRITICAL `duckdb_off_held_back`, P4's
 breach and not P3's (OD-S5-7). Web's verdict alone (`configure_modes(web=True)`,
-kept for the process); a script under `off` stays `off`. Otherwise, under
+kept for the process); a script under `off` stays `off`. So do the Sunday
+compaction's and the nightly snapshot's sidecars, which read `.env` and not
+the verdict: while web is held back both are refused and the file web goes on
+writing is neither compacted nor shipped. Their refusals say the week has
+started only of a web running off and name the hold beside it
+(`duckdb_switch.HELD_BACK_NOTE`), and the page's lever offers `KS_DUCKDB=on`
+as the other way out — a hold is a state to leave. Each key's detail in web's
+log names the value it found (a chain's flag, not its name). Otherwise, under
 `on` nothing changed. **Web still does not run clean under `off`**: what
 the sweep in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file
 is exactly its `KNOWN_RESIDUAL` — the scheduler's catch-up, the DuckDB half of the integrity scan and of the

@@ -853,7 +853,7 @@ class TestOffHeldBack:
         message = canary.format_alert(result, DASHBOARD)
         assert message.splitlines()[0] == "\U0001f6a8 <b>DuckDB switch held back</b>"
         assert "DOWN" not in message
-        assert canary._what_to_do(result).startswith("web runs on and opens DuckDB")
+        assert canary._what_to_do(result).startswith("web runs on;")
         assert result.duckdb_silent is None, "web runs on: the week's watch is not written"
 
     @pytest.mark.asyncio
@@ -873,3 +873,19 @@ class TestOffHeldBack:
         assert REGISTRY["duckdb_off_held_back"].kind is Kind.CONDITION
         action = dict(canary._ACTIONS)["duckdb_off_held_back"]
         assert "\n" not in action and len(action) <= 150
+
+    def test_its_lever_says_what_a_hold_stops_and_both_ways_out(self):
+        """Review of PR-2: the host's sidecars read `.env`, not web's
+        verdict, so while web is held back the nightly DuckDB snapshot and
+        the Sunday compaction are refused as web writes the file on. The page
+        is where the operator learns a hold is a state to leave — and that
+        putting `KS_DUCKDB=on` back is a way out as much as meeting the keys,
+        the same two the condition's resolution names. Mutation: the old
+        lever, which named neither."""
+        from core.alerting import REGISTRY
+        from core.duckdb_switch import ENV, ON
+
+        action = dict(canary._ACTIONS)["duckdb_off_held_back"]
+        assert f"{ENV}={ON}" in action and "meet each key" in action
+        assert "snapshots" in action and "compacts" in action
+        assert f"{ENV}={ON}" in REGISTRY["duckdb_off_held_back"].clears

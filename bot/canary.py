@@ -1679,8 +1679,11 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("warehouse_way_back_refused",
      "Copy the named chains back first (scripts/chain_copy_back.py, chain 5 before chain 3), then recreate web for the way back; nothing derives meanwhile unless KS_PG_DERIVE=own"),
     # After step 13's: when it is held, `warehouse_postgres` is its symptom.
+    # The host's sidecars read `.env`, not the verdict, so a hold also stops
+    # the nightly snapshot and the Sunday compaction of the file web writes
+    # (core/duckdb_off.py) — a state to leave, by either way out.
     ("duckdb_off_held_back",
-     "web runs on and opens DuckDB: meet each key (web's log: 'precondition(s) of off'), then up -d web"),
+     "web runs on; cron neither snapshots nor compacts DuckDB: meet each key (web's log: 'precondition(s) of off') or set KS_DUCKDB=on, then up -d web"),
     ("mirror_", "Check meta.mirror_state and web's log; the mirror re-ships itself"),
     ("dq_", "Check /api/jobs — nothing is verifying the warehouse meanwhile"),
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),

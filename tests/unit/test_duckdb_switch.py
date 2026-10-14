@@ -912,7 +912,28 @@ class TestTheCompaction:
         assert first.startswith(
             "🚨 Compact aborted: compact failed (exit 1): KS_DUCKDB=off: the weekly "
             "compaction is refused before it opens the DuckDB file"), first
-        assert "Remove weekly_compact.sh from root's crontab" in first, first
+        assert "remove weekly_compact.sh from root's crontab" in first, first
+
+    def test_the_cron_does_not_say_a_held_back_week_has_started(
+        self, live, monkeypatch, capsys, tmp_path, fake_bin,
+    ):
+        """Review of PR-2: this sidecar reads `KS_DUCKDB` from `.env` and
+        reaches no verdict, so it is refused under a web held back on `on`
+        (core/duckdb_off.py) as under one running off — and its line said the
+        week of silence had started and the cron line should go, while web
+        wrote the file it had just left uncompacted. The removal is now said
+        of a web running off, and the hold is named beside it — whole, inside
+        the 300 characters the wrapper quotes. Mutation: the old line."""
+        from tests.unit.test_weekly_compact_wrapper import _run as wrapper_run
+
+        monkeypatch.setenv("FORCE_COMPACT", "1")
+        _off(monkeypatch)
+        with pytest.raises(SystemExit):
+            live.main()
+        run = wrapper_run(tmp_path / "wrapper", fake_bin, capsys.readouterr().out, 1, "")
+        first = run.notify.splitlines()[0]
+        assert first.endswith(duckdb_switch.HELD_BACK_NOTE), first
+        assert "If web runs off, the week of silence has started" in first, first
 
 
 class TestTheNightlySnapshot:
@@ -966,10 +987,45 @@ class TestTheNightlySnapshot:
         printed = capsys.readouterr().out
         assert ("KS_DUCKDB=off: the nightly DuckDB snapshot is refused before it opens "
                 "the backup") in printed, printed
-        assert "Remove daily_offsite.sh from root's crontab" in printed
+        assert "remove daily_offsite.sh from root's crontab" in printed
         assert reached == []
         assert list(duckdb_switch.opened()) == ["compact_duckdb:phase1_export"]
         assert not compact.EXPORT_DIR.exists() and not module.PREVIOUS_PATH.exists()
+
+    def test_it_does_not_say_a_held_back_week_has_started(
+        self, snapshot, monkeypatch, capsys,
+    ):
+        """Review of PR-2: started from `.env`, this sidecar is refused under
+        a web held back on `on` too, and said the week of silence had started
+        and its cron line should go, while web wrote the file and took the
+        backups it no longer shipped. Mutation: the old line."""
+        module, _ = snapshot
+        _off(monkeypatch)
+        with pytest.raises(SystemExit):
+            module.main()
+        [line] = [ln for ln in capsys.readouterr().out.splitlines()
+                  if "nightly DuckDB snapshot is refused" in ln]
+        assert line.endswith(duckdb_switch.HELD_BACK_NOTE), line
+        assert ("If web runs off and the second Ark is off-site, the week of "
+                "silence has started") in line, line
+
+    def test_an_image_older_than_the_hold_still_refuses_in_a_line(
+        self, snapshot, monkeypatch, capsys,
+    ):
+        """This file is mounted from the host's checkout while `core` comes
+        from the image: an image built before the note has none to add, and
+        importing it by name would turn every nightly refusal into an
+        ImportError. Its web cannot be held back either, so the line without
+        the note is still true. Mutation: import `HELD_BACK_NOTE` by name."""
+        module, _ = snapshot
+        monkeypatch.delattr(duckdb_switch, "HELD_BACK_NOTE")
+        _off(monkeypatch)
+        with pytest.raises(SystemExit) as exit_:
+            module.main()
+        assert exit_.value.code == 1
+        printed = capsys.readouterr().out
+        assert "remove daily_offsite.sh from root's crontab." in printed, printed
+        assert "held_back" not in printed
 
 
 # ─── Web: it starts, and it says so ──────────────────────────────────────────
