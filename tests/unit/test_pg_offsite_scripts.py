@@ -90,7 +90,8 @@ exit 0
 FAKE_GPG = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_GPG_CALLS"
 if [ "${FAKE_GPG_NO_AGENT:-}" = always ] || {
-        [ -n "${FAKE_GPG_NO_AGENT_ONCE:-}" ] && [ ! -e "$FAKE_GPG_NO_AGENT_ONCE" ]; }; then
+        [ -n "${FAKE_GPG_NO_AGENT_ONCE:-}" ] && [ ! -e "$FAKE_GPG_NO_AGENT_ONCE" ]; } || {
+        [ -n "${FAKE_GPG_NO_AGENT_AT:-}" ] && [ "$(grep -c . "$FAKE_GPG_CALLS")" = "$FAKE_GPG_NO_AGENT_AT" ]; }; then
     [ -n "${FAKE_GPG_NO_AGENT_ONCE:-}" ] && : > "$FAKE_GPG_NO_AGENT_ONCE"
     echo "gpg: failed to start gpg-agent '/usr/bin/gpg-agent': General error" >&2
     echo "gpg: problem with the agent: No agent running" >&2
@@ -373,6 +374,17 @@ class TestTheShipment:
         # one refused encryption, then the two and the read-back as ever
         assert sum(1 for c in run.gpg if "--symmetric" in c) == 3, run.gpg
         assert sum(1 for c in run.gpg if "-d" in c.split()) == 1, run.gpg
+
+    def test_the_read_back_survives_a_lost_agent_too(self, world):
+        """The verification decrypt is called under `if !`, where errexit is
+        off inside gpg_safe: the third call loses its agent, is asked again,
+        and the night still ships and verifies."""
+        world.dump()
+        run = world.run(FAKE_GPG_NO_AGENT_AT=3)
+        assert run.code == 0, run.out
+        assert "asking again" in run.out and "opens with" in run.out
+        assert world.marker.exists()
+        assert sum(1 for c in run.gpg if "-d" in c.split()) == 2, run.gpg
 
     def test_an_agent_that_never_comes_back_still_fails_the_night(self, world):
         """Asking again is bounded: three calls, then the failure the alert
@@ -692,6 +704,16 @@ class TestTheRemoteDrill:
         # Live is read through the SELECT-only role and never through ks_app.
         live_reads = [c for c in run.docker if "ks-postgres" in c]
         assert live_reads and all("-U ks_readonly" in c for c in live_reads), live_reads
+
+    @pytest.mark.parametrize("call", [4, 5], ids=["dump", "roles"])
+    def test_a_lost_agent_on_either_decrypt_is_asked_again(self, world, call):
+        """Both decrypts sit behind `|| fail`. The shipment made calls 1-3, so
+        the drill's dump decrypt is call 4 and its roles decrypt call 5."""
+        self._shipped(world)
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **RESTORED,
+                        FAKE_GPG_NO_AGENT_AT=call)
+        assert run.code == 0, run.out
+        assert "PASS" in run.out and "asking again" in run.out
 
     def test_a_corrupted_remote_copy_is_caught_before_it_is_restored(self, world):
         self._shipped(world)

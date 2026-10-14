@@ -166,3 +166,74 @@ gpg_safe --batch --yes --quiet --passphrase-file {passfile} \\
     assert set(Path("/tmp").glob("ks-gnupg.*")) == before
     # nothing about a new keybox in the log of a symmetric job
     assert "keybox" not in done.stderr, done.stderr
+
+
+# A command the wrapper runs besides gpg that fails. `sleep`, `rm` and `cat`
+# are external commands, so a wrapper of the same name on PATH stands in for
+# them; the two that touch files fail only on the wrapper's own home.
+FAKE_SLEEP = r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE_SLEEPS"
+case "$1" in ''|*[!0-9.]*) echo "sleep: invalid time interval '$1'" >&2; exit 1 ;; esac
+exit 0
+"""
+FAILS_ON_HOME = r"""#!/usr/bin/env bash
+case "$*" in *ks-gnupg*) echo "{name}: injected failure" >&2; exit 1 ;; esac
+exec {real} "$@"
+"""
+
+
+def _run_with(tmp_path, mode, prelude="", failing=()):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    fakes = {"gpg": FAKE_GPG, "gpgconf": FAKE_GPGCONF, "sleep": FAKE_SLEEP}
+    for name in failing:
+        fakes[name] = FAILS_ON_HOME.format(name=name, real=shutil.which(name))
+    for name, body in fakes.items():
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+    calls, sleeps = tmp_path / "calls", tmp_path / "sleeps"
+    calls.write_text("")
+    sleeps.write_text("")
+    script = f"""
+set -Eeuo pipefail
+trap 'echo "ERR trap fired rc=$?"' ERR
+source {LIB}
+{prelude}
+gpg_safe --batch -o out in
+echo "gpg_safe ok"
+"""
+    env = {**os.environ,
+           "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+           "FAKE_CALLS": str(calls), "FAKE_GPGCONF_CALLS": str(tmp_path / "conf"),
+           "FAKE_SLEEPS": str(sleeps), "FAKE_MODE": mode}
+    env.pop("GPG_SAFE_DELAYS", None)
+    done = subprocess.run(["bash", "-c", script], env=env, capture_output=True,
+                          text=True, timeout=30)
+    return (done, done.stdout + done.stderr,
+            [ln for ln in calls.read_text().splitlines() if ln],
+            [ln for ln in sleeps.read_text().splitlines() if ln])
+
+
+def test_unset_after_sourcing_keeps_the_defaults(tmp_path):
+    """Under `set -u` an unset GPG_SAFE_DELAYS used to end the shell with no
+    ERR trap — so no alert — and leave the home behind."""
+    done, out, calls, sleeps = _run_with(tmp_path, "no-agent-once",
+                                         prelude="unset GPG_SAFE_DELAYS")
+    assert "gpg_safe ok" in out and "ERR trap fired" not in out, out
+    assert len(calls) == 2 and sleeps == ["3"], (calls, sleeps)
+
+
+def test_a_malformed_delay_costs_only_the_wait(tmp_path):
+    done, out, calls, sleeps = _run_with(tmp_path, "no-agent-once",
+                                         prelude='GPG_SAFE_DELAYS="x y"')
+    assert "gpg_safe ok" in out and "ERR trap fired" not in out, out
+    assert len(calls) == 2 and sleeps == ["x"], (calls, sleeps)
+
+
+@pytest.mark.parametrize("tool", ["rm", "cat"])
+def test_a_failing_helper_never_stands_in_for_gpg(tmp_path, tool):
+    """gpg succeeded; a failed rm of the home or cat of its stderr must not
+    fail the call, or the caller's trap names a step gpg completed."""
+    done, out, calls, sleeps = _run_with(tmp_path, "ok", failing=(tool,))
+    assert "gpg_safe ok" in out and "ERR trap fired" not in out, out
+    assert done.returncode == 0, out

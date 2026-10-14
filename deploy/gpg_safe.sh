@@ -52,21 +52,26 @@ gpg_safe() {
     # path is limited to about a hundred bytes.
     home="$(mktemp -d /tmp/ks-gnupg.XXXXXX)" || return 1
     err="$home/stderr"
+    # The default again, not only at the top: a caller that unsets it after
+    # sourcing would otherwise die on `set -u` with no ERR trap and no alert.
     # shellcheck disable=SC2086  # the delays are a list of words on purpose
-    for delay in $GPG_SAFE_DELAYS ""; do
+    for delay in ${GPG_SAFE_DELAYS-3 10} ""; do
         rc=0
         GNUPGHOME="$home" gpg --no-keyring "$@" 2>"$err" || rc=$?
-        cat "$err" >&2
+        # `|| true` on everything that is not gpg: the caller's errexit and ERR
+        # trap reach in here, and a failed cat, sleep or rm must not stand in
+        # for gpg's own status, or name a step for a gpg call that succeeded.
+        cat "$err" >&2 || true
         if [ "$rc" -eq 0 ] || [ -z "$delay" ] \
                 || ! grep -qE "$_GPG_SAFE_NO_AGENT" "$err"; then
             break
         fi
         echo "gpg: no agent (attempt $attempt), asking again in ${delay}s" >&2
         gpgconf --homedir "$home" --kill gpg-agent >/dev/null 2>&1 || true
-        sleep "$delay"
+        sleep "$delay" || true          # a malformed delay costs only the wait
         attempt=$((attempt + 1))
     done
     gpgconf --homedir "$home" --kill all >/dev/null 2>&1 || true
-    rm -rf "$home"
+    rm -rf "$home" || true
     return "$rc"
 }

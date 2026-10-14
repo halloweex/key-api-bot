@@ -66,6 +66,13 @@ BACKUP_SHELL = [
 BACKUP_SCRIPTS = [p for p in BACKUP_SHELL if p.name not in _SOURCED]
 
 
+def _calls(text: str) -> str:
+    """The code lines with every backslash continuation joined, so a command
+    whose arguments start on the next line reads as one command: `gpg \\` then
+    `--symmetric ...` is a gpg call like any other."""
+    return re.sub(r"\\\n\s*", " ", "\n".join(_code_lines(text)))
+
+
 def _code_lines(text: str):
     """Lines that run, not lines that explain.
 
@@ -147,7 +154,7 @@ def test_a_passphrase_is_never_on_a_command_line():
         # env.gpg and invokes nothing. `gpg_safe` is gpg (deploy/gpg_safe.sh),
         # and every invocation goes through it — which is what
         # test_gpg_runs_only_through_gpg_safe holds.
-        if not re.search(r"(?<![\w./-])gpg(?:_safe)?\s+-", "\n".join(code)):
+        if not re.search(r"(?<![\w./-])gpg(?:_safe)?\s+-", _calls(text)):
             continue
         users.append(path.name)
         for line in code:
@@ -189,7 +196,7 @@ def test_gpg_runs_only_through_gpg_safe():
     for path in shell:
         if path in definers:
             continue
-        code = "\n".join(_code_lines(path.read_text()))
+        code = _calls(path.read_text())
         direct = re.findall(r"(?<![\w./-])gpg\s+-\S*", code)
         assert not direct, (
             f"{path.relative_to(REPO)} runs gpg directly ({direct[0]}); use "
@@ -203,6 +210,11 @@ def test_gpg_runs_only_through_gpg_safe():
             )
     assert {"offsite_parquet.sh", "pg_offsite.sh", "pg_restore_drill.sh",
             "ark_ship.sh"} <= set(callers), callers
+
+    # The walk itself, on the shape a review found it missing: a call whose
+    # options start on the continuation line.
+    probe = "f() {\n    gpg \\\n        --symmetric --batch -o out in\n}\n"
+    assert re.findall(r"(?<![\w./-])gpg\s+-\S*", _calls(probe)), "continuation not joined"
 
     lib = "\n".join(_code_lines(definers[0].read_text()))
     assert 'home="$(mktemp -d ' in lib, "gpg_safe's home must be made fresh per call"
