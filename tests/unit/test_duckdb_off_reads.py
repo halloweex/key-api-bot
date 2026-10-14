@@ -474,3 +474,137 @@ class TestTheRule:
         read_fallback.configure_mode()
         read_fallback.no_address("traffic", pg_traffic_read)
         assert read_fallback.refusals() == {}
+
+
+# ─── What the canary and the log make of it ────────────────────────────────
+
+def _health_blocks() -> dict:
+    """The three blocks of a real `/api/health` the canary judges reads by,
+    built by the endpoint's own functions — not a hand-written payload, so
+    the canary is held to what web publishes."""
+    from web.routes.api import health
+
+    return {"read_fallbacks": health._read_fallbacks(),
+            "read_fallback_mode": health._read_fallback_mode(),
+            "duckdb_switch": health._duckdb_switch()}
+
+
+class TestTheCanaryJudgesWhatWebActsOn:
+    """Review of PR-8: `refusing()` holds under `KS_DUCKDB=off` whatever
+    `KS_READ_FALLBACK` says, while `read_fallback_mode.mode` publishes what
+    was configured. The canary gated `read_routed_to_duckdb` on that `mode`
+    alone, so a read refused with a 503 was also paged as "served from DuckDB
+    uncounted", and the OD-07 watch read the probe as unclean."""
+
+    def test_under_off_a_refused_route_is_paged_as_refused_alone(
+        self, fresh_read_fallback, duckdb_off, monkeypatch,  # noqa: F811
+    ):
+        """Mutation: gate `_routed_to_duckdb` on `read_fallback_mode.mode`
+        alone again — `read_routed_to_duckdb` beside `read_refused`, and the
+        watch False."""
+        from bot import canary
+
+        monkeypatch.setenv("KS_READ_FALLBACK", "duckdb")
+        monkeypatch.setenv("KS_READ_COHORTS", "duckdb")
+        read_fallback.configure_mode()
+        with pytest.raises(read_fallback.ReadUnavailable):
+            read_fallback.no_engine("cohorts", "KS_READ_COHORTS=duckdb")
+        payload = _health_blocks()
+        assert payload["read_fallback_mode"]["mode"] == "duckdb", "what was configured"
+        assert payload["read_fallback_mode"]["no_engine"], "still published"
+        assert payload["read_fallback_mode"]["refused"]["cohorts"]["count"] == 1
+        assert canary.check_read_routes(payload) == []
+        assert canary.read_fallbacks_clean(payload) is True
+        assert [key for key, _ in canary.check_read_refusals(payload)] == ["read_refused"]
+        assert duckdb_switch.opened() == {}
+
+    @pytest.mark.parametrize("fallback", ["duckdb", "off"])
+    @pytest.mark.parametrize("switch", ["on", "off"])
+    def test_routed_is_paged_exactly_when_web_would_serve_it(
+        self, switch, fallback, fresh_read_fallback, monkeypatch,  # noqa: F811
+    ):
+        """Derived, not listed: in each of the four states the canary pages a
+        route as served from DuckDB exactly when web is not refusing it. Under
+        `on` that is today's answer — `duckdb` pages, `off` does not."""
+        from bot import canary
+
+        monkeypatch.setenv(duckdb_switch.ENV, switch)
+        duckdb_switch.configure_mode()
+        monkeypatch.setenv("KS_READ_FALLBACK", fallback)
+        monkeypatch.setenv("KS_READ_COHORTS", "duckdb")
+        read_fallback.configure_mode()
+        payload = _health_blocks()
+        paged = [key for key, _ in canary.check_read_routes(payload)]
+        assert paged == ([] if read_fallback.refusing() else ["read_routed_to_duckdb"])
+        assert canary.read_fallbacks_clean(payload) is read_fallback.refusing()
+        if switch == "on":
+            assert paged == (["read_routed_to_duckdb"] if fallback == "duckdb" else [])
+
+    def test_a_payload_without_the_switch_block_is_judged_as_before(self):
+        """An older web publishes no `duckdb_switch`: only its
+        `read_fallback_mode.mode` can say a route is refused."""
+        from bot import canary
+
+        block = {"mode": "duckdb", "misconfigured": [],
+                 "no_engine": ["cohorts: KS_READ_COHORTS=duckdb"]}
+        assert [k for k, _ in canary.check_read_routes({"read_fallback_mode": block})] \
+            == ["read_routed_to_duckdb"]
+        assert canary.check_read_routes(
+            {"read_fallback_mode": {**block, "mode": "off"}}) == []
+
+
+class TestTheRefusalNamesWhatRefused:
+    """Review of PR-8: `_refuse` said "KS_READ_FALLBACK=off forbids answering
+    from DuckDB" when `KS_READ_FALLBACK` was `duckdb` and `KS_DUCKDB=off` did
+    the refusing — a reader of the log was sent to the wrong variable."""
+
+    def test_under_off_with_the_fallback_at_duckdb_the_switch_is_named(
+        self, fresh_read_fallback, duckdb_off, monkeypatch, caplog,  # noqa: F811
+    ):
+        """Mutation: hardcode `KS_READ_FALLBACK=off` in the line again."""
+        from core import pg_traffic_read
+
+        monkeypatch.setenv("KS_READ_FALLBACK", "duckdb")
+        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
+        read_fallback.configure_mode()
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            with pytest.raises(read_fallback.ReadUnavailable):
+                read_fallback.no_address("traffic", pg_traffic_read)
+            with pytest.raises(read_fallback.ReadUnavailable):
+                read_fallback.fall_back("dashboard", OSError("down"))
+        lines = [r.getMessage() for r in caplog.records if "read refused" in r.getMessage()]
+        assert len(lines) == 2, lines
+        for line in lines:
+            assert "KS_DUCKDB=off forbids answering from DuckDB" in line, line
+            assert "KS_READ_FALLBACK=off" not in line, line
+
+    def test_a_misconfigured_switch_under_off_is_logged_as_refused(
+        self, fresh_read_fallback, duckdb_off, monkeypatch, caplog,  # noqa: F811
+    ):
+        """The start's line for a switch with no address said "served from
+        DuckDB" under `KS_DUCKDB=off`, where every such read is refused."""
+        monkeypatch.setenv("KS_READ_FALLBACK", "duckdb")
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            read_fallback.configure_mode()
+        (line,) = [r.getMessage() for r in caplog.records if "KS_READ_TRAFFIC" in r.getMessage()]
+        assert "refused (KS_DUCKDB=off)" in line and "served from DuckDB" not in line, line
+
+    @pytest.mark.parametrize("duckdb", ["on", "off"])
+    def test_under_the_fallback_off_the_line_is_what_it_was(
+        self, duckdb, fresh_read_fallback, monkeypatch, caplog,  # noqa: F811
+    ):
+        """`KS_READ_FALLBACK=off` refuses in either mode and is named first:
+        under `on` the line is byte for byte today's."""
+        monkeypatch.setenv(duckdb_switch.ENV, duckdb)
+        duckdb_switch.configure_mode()
+        monkeypatch.setenv("KS_READ_FALLBACK", "off")
+        read_fallback.configure_mode()
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"), \
+                pytest.raises(read_fallback.ReadUnavailable):
+            read_fallback.fall_back("dashboard", None)
+        (line,) = [r.getMessage() for r in caplog.records if "read refused" in r.getMessage()]
+        assert line == ("read refused: dashboard — its engine failed, and "
+                        "KS_READ_FALLBACK=off forbids answering from DuckDB "
+                        "(1 refused since start)"), line

@@ -4293,8 +4293,12 @@ path (PR-8) DuckDB answers nothing even by routing: `/api/summary?source_id=3`
 holds whatever `KS_READ_FALLBACK` says, so a failed engine, a read switch
 left at `duckdb` (refused by name in `no_address`) and the expenses' NULL
 `backfilled_at` are each a 503 naming the surface, not the tripwire's.
-Under `on` nothing changed. **Web still does not run clean under `off`**: what the sweep
-in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
+`read_fallback_mode.mode` keeps publishing what was configured, so the canary
+reads `duckdb_switch.mode` beside it: such a route is paged as `read_refused`
+alone, never also as `read_routed_to_duckdb`, and the refusal's log line names
+the variable that refused. Under `on` nothing changed. **Web still does not
+run clean under `off`**: what the sweep in `tests/unit/test_duckdb_off_sweep.py`
+finds reaching for the file is
 exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
 scheduler's catch-up, the DuckDB half of the integrity scan and of the
 mirror landing, the hourly copy of what only DuckDB holds, the report

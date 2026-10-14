@@ -200,7 +200,9 @@ def _read_fallback_mode() -> dict:
     whatever the mode, which refuses there too (stage 5, PR-8). Under `duckdb` only once
     something was refused: the one refusal that mode knows is a read of a
     table a write chain owns (`read_fallback.chain_refusal`), and without it
-    the block keeps the shape it has always had there."""
+    the block keeps the shape it has always had there. `mode` stays what was
+    configured under `KS_DUCKDB=off` too; `duckdb_switch.mode` beside it says
+    the reads are refused, and the canary reads both."""
     from core import read_fallback
 
     block = {

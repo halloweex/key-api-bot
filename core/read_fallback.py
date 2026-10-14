@@ -239,7 +239,7 @@ def configure_mode() -> str:
             logger.error(
                 "%s — every read behind it is %s. Set the address or unset "
                 "the flag.", line,
-                "refused (KS_READ_FALLBACK=off)" if _mode == OFF
+                f"refused ({_refusal_cause()})" if refusing()
                 else "served from DuckDB")
     _misconfigured = misconfigured
     return _mode
@@ -296,6 +296,19 @@ def refusing() -> bool:
     return duckdb_switch.is_off()
 
 
+def _refusal_cause() -> str:
+    """The variable that makes `refusing()` hold, as a log line names it:
+    `KS_READ_FALLBACK=off` first, which refuses in either mode and is the
+    only cause under `KS_DUCKDB=on` — so a line there reads as it always
+    has — and otherwise `KS_DUCKDB=off` (stage 5, PR-8). Only asked once
+    `refusing()` holds."""
+    if mode() == OFF:
+        return f"{ENV}={OFF}"
+    from core import duckdb_switch
+
+    return f"{duckdb_switch.ENV}={duckdb_switch.OFF}"
+
+
 def _names_duckdb(name: str) -> bool:
     """Whether the read switch `name` sends its reads to DuckDB — set to
     `duckdb`, or unset, which every switch reads as `duckdb`."""
@@ -319,8 +332,8 @@ def _refuse(surface: str, why: str, exc: Optional[BaseException]) -> NoReturn:
     """
     count = _tally(_refused, surface)
     logger.error(
-        "read refused: %s — %s, and %s=off forbids answering from DuckDB "
-        "(%d refused since start)%s", surface, why, ENV, count,
+        "read refused: %s — %s, and %s forbids answering from DuckDB "
+        "(%d refused since start)%s", surface, why, _refusal_cause(), count,
         f": {exc}" if exc is not None else "",
         exc_info=exc if isinstance(exc, BaseException) else None,
     )
