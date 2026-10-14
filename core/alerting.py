@@ -321,9 +321,14 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # shipment that has already overwritten rows and cannot be un-shipped.
     "chain_latch_disagrees": _c(
         "the marker and the owner rows agree again — a human, not a job"),
+    # On a table the chain stamps itself and keeps a record of (chain 6's
+    # catalogue) it also stops at the chain's next write, which moves the
+    # watermark back onto an instant the record carries — the stamp that was
+    # not the chain's is then out of the check's sight, not repaired.
     "chain_shipper_overwrote": _c(
         "nothing repairs the rows it replaced; it stops when the chain is "
-        "handed back with scripts/chain_copy_back.py, which releases the latch"),
+        "handed back with scripts/chain_copy_back.py, which releases the latch, "
+        "or, on a table the chain stamps itself, at the chain's next write"),
     # Owner rows naming a table no chain in the running build declares — an
     # image older than the chain (DN-22b review). The copies stand down on
     # them; the build's own writers do not know the chain, so a human decides.

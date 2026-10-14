@@ -32,7 +32,22 @@
 #   asking twice writes nothing twice.
 #
 # Running without an agent is not an option. Measured on the host's gpg 2.4.4:
-# --symmetric with --no-autostart writes the file and still exits 2.
+# --symmetric with --no-autostart writes the file and still exits 2. Only
+# encryption needs it: a decrypt with no agent at all returned 0 with the right
+# plaintext (review of #290), so the second ask on the read-backs and the
+# drill's decrypts is a guard that has never yet had to fire.
+#
+# Asked again only when that reads the same bytes: the call's last argument is
+# a named regular file. gpg reads a pipe or stdin to the end before it finds the
+# agent missing, so a second ask would encrypt an empty stream and return 0 —
+# a 70-byte ciphertext that every `[ -s file ]` check accepts (reproduced in
+# the review). A stream gets one attempt, as gpg alone always did.
+#
+# Bounds. Waiting: 3 s and 10 s, plus up to ~7 s per ask while gpg gives up on
+# a socket — about half a minute at worst. Litter: the home and its agent's
+# socket directory are removed with the call; a call killed by a signal leaves
+# its home in /tmp, because a sourced function must not take the caller's
+# traps — its agent exits when the socket directory goes.
 #
 # Sourced from the repository root, like deploy/pg_offsite_lib.sh. It defines
 # and does not act, and it sets no shell options: errexit and the ERR trap
@@ -47,7 +62,11 @@ GPG_SAFE_DELAYS="${GPG_SAFE_DELAYS:-3 10}"
 _GPG_SAFE_NO_AGENT='gpg-agent|No agent running|problem with the agent'
 
 gpg_safe() {
-    local home err rc delay attempt=1
+    local home err rc delay attempt=1 retry=0
+    # Only a named input file can be read twice (see the header).
+    if [ "$#" -gt 0 ] && [ "${!#}" != "-" ] && [ -f "${!#}" ]; then
+        retry=1
+    fi
     # /tmp and not $TMPDIR: the socket can land in the home, and a Unix socket
     # path is limited to about a hundred bytes.
     home="$(mktemp -d /tmp/ks-gnupg.XXXXXX)" || return 1
@@ -62,7 +81,7 @@ gpg_safe() {
         # trap reach in here, and a failed cat, sleep or rm must not stand in
         # for gpg's own status, or name a step for a gpg call that succeeded.
         cat "$err" >&2 || true
-        if [ "$rc" -eq 0 ] || [ -z "$delay" ] \
+        if [ "$rc" -eq 0 ] || [ -z "$delay" ] || [ "$retry" -eq 0 ] \
                 || ! grep -qE "$_GPG_SAFE_NO_AGENT" "$err"; then
             break
         fi
@@ -72,6 +91,9 @@ gpg_safe() {
         attempt=$((attempt + 1))
     done
     gpgconf --homedir "$home" --kill all >/dev/null 2>&1 || true
+    # The d.<hash> directory under /run/user/0/gnupg outlives the agent
+    # otherwise: one per call for as long as a root session is open.
+    gpgconf --homedir "$home" --remove-socketdir >/dev/null 2>&1 || true
     rm -rf "$home" || true
     return "$rc"
 }
