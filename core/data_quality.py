@@ -2291,11 +2291,15 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "Correct the named KS_WRITE_* in .env (duckdb or postgres) and recreate web; until then that chain's writes fail"),
     # Both halves of the ownership latch. Neither is repairable by a job: the
     # first needs a human to decide which copy is right, the second names rows
-    # a shipment has already replaced.
+    # a shipment has already replaced. The shipment is the symptom: a shipper
+    # reaches a chain's table only where it does not see the latch, so the
+    # lever starts there. The catalogue's mirror carries the same KeyCRM
+    # payload the chain writes, so there is nothing to restore — a dump would
+    # only roll the chain's own writes back.
     ("chain_latch_disagrees",
      "Compare data/write-chain-owners/<chain> with the owner: rows in meta.chain_watermarks; scripts/chain_copy_back.py is the only release"),
     ("chain_shipper_overwrote",
-     "Do not re-run the shipper: it replaced rows only Postgres held. Read meta.mirror_state.last_ok_at, then restore from the nightly dump"),
+     "Do not re-run the shipper. Find why it shipped (marker vs owner: rows); restore what it overwrote from the nightly dump, not the catalogue"),
     # The shadow chains (OD-02 (c)): Postgres is the writer, DuckDB is
     # handed each row after the commit. Never a re-ship from DuckDB.
     ("shadow_duckdb_only_rows",
@@ -2508,7 +2512,7 @@ HUMAN_CHECK_NAMES: Dict[str, str] = {
     "sync_watermarks_unwatched": "sync stalls no longer watched",
     "write_chain_flag_invalid": "a write chain's flag is not understood",
     "chain_latch_disagrees": "the two copies of a chain's latch disagree",
-    "chain_shipper_overwrote": "the hourly copy overwrote a table it no longer owns",
+    "chain_shipper_overwrote": "a copy out of DuckDB overwrote a table it no longer owns",
     "chain_owner_unregistered": "a write chain owns tables this build does not know",
     "integrity_check_raised": "integrity checks crashed",
     "mirror_never_shipped": "table never shipped",
