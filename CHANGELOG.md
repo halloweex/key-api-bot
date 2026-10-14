@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.282
+
+- E1 review: the finding names the writer it cannot see, and three tests bite
+- E1 reads the chain's record: chain 6's own writes are not a shipment
+
+
 ## 3.0.281
 
 - gpg_safe: a stream is never asked twice, and the socket directory goes with the call
