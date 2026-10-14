@@ -607,7 +607,7 @@ class TestUnjudgedKeys:
         assert canary.unjudged_keys(None) == [
             "read_fallback_used", "read_routed_to_duckdb", "read_refused",
             "buyer_sync_stalled", "buyer_sync_stalled_chain",
-            "duckdb_opened_while_off", "orders_sync_failing"]
+            "duckdb_opened_while_off", "duckdb_off_held_back", "orders_sync_failing"]
 
     def test_a_payload_with_every_block_judges_all_of_them(self):
         payload = {"read_fallbacks": {}, "read_fallback_mode": {"mode": "duckdb"},
@@ -628,7 +628,7 @@ class TestUnjudgedKeys:
             "buyer_sync_stalled", "buyer_sync_stalled_chain"], "no step block"
         assert canary.unjudged_keys({"read_fallbacks": {}, "read_fallback_mode": {},
                                      **self._CHAIN4}) == [
-            "duckdb_opened_while_off"], "no switch block"
+            "duckdb_opened_while_off", "duckdb_off_held_back"], "no switch block"
 
     def test_only_the_od07_keys_and_the_buyers_steps_are_ever_held(self):
         """Every other payload-derived key keeps today's behaviour; each held
@@ -647,6 +647,8 @@ class TestUnjudgedKeys:
              "write_chains": {canary.BUYER_CHAIN: {"mode": "postgres"}}})}
         emitted |= {k for k, _ in canary.check_duckdb_switch(
             {"duckdb_switch": {"opened_while_off": {"a": _entry(1)}}})}
+        emitted |= {k for k, _ in canary.check_duckdb_off_held_back(
+            {"duckdb_switch": {"held_back": ["user_store"]}})}
         emitted |= {k for k, _ in canary.check_orders_sync_chain(
             {"write_chains": {canary.ORDERS_CHAIN: {
                 "mode": "postgres", "sync_step": {"consecutive_failures": 9}}}})}

@@ -309,9 +309,11 @@ class BackgroundScheduler:
         # landing writers' transactions. See `core/pg_derivation.py`. Web's
         # startup has already done this before its boot sync; calling it again
         # is harmless, and keeps a scheduler started anywhere else correct.
+        # The scheduler runs in web, so `web=True`: KS_DUCKDB=off's verdict,
+        # reached by web's startup, is kept (stage 5's PR-2).
         from core.runtime_modes import configure_modes
 
-        configure_modes()
+        configure_modes(web=True)
 
         # What a change of warehouse writer owes (DN-29), settled before a job
         # is registered — web's boot sync has already done it, so this is a
@@ -332,10 +334,16 @@ class BackgroundScheduler:
 
     @staticmethod
     async def _settle_warehouse_writer() -> None:
-        """`warehouse_cutover.settle_writer`, never raising."""
-        from core import warehouse_cutover
+        """`warehouse_cutover.settle_writer`, never raising.
+
+        Without a store under KS_DUCKDB=off: the record is read from its
+        frozen copy in Postgres there and nothing is written (stage 5, PR-6)."""
+        from core import duckdb_switch, warehouse_cutover
 
         try:
+            if duckdb_switch.is_off():
+                await warehouse_cutover.settle_writer(None)
+                return
             from core.duckdb_store import get_store
 
             await warehouse_cutover.settle_writer(await get_store())
@@ -2417,6 +2425,10 @@ class BackgroundScheduler:
 
             retired_reported: set = set()
             retired_verdicts: set = set()
+            # What `reconcile_operational` found, when it reached a verdict:
+            # its findings over the three tables only DuckDB writes are marked
+            # for KS_DUCKDB=off's verdict (`duckdb_off.note_history_reported`).
+            operational_found: Optional[list] = None
             # Every check this run asked, verdict or raise, in order — so that
             # a stand-down can be read off the run itself. Absent findings
             # cannot say it: `compare_gold` excuses a cell whose orders synced
@@ -2428,7 +2440,7 @@ class BackgroundScheduler:
 
             async def check(name, run) -> bool:
                 """Run one check; True when it returned a verdict."""
-                nonlocal issues
+                nonlocal issues, operational_found
                 checks_run.append(name)
                 try:
                     found = await run()
@@ -2437,6 +2449,8 @@ class BackgroundScheduler:
                     logger.exception("Mirror reconciliation check %s raised", name)
                     return False
                 issues += found
+                if name == "reconcile_operational":
+                    operational_found = list(found)
                 if name in warehouse_cutover.RETIRED_COMPARISONS:
                     retired_verdicts.add(name)
                     retired_reported.update(
@@ -2661,6 +2675,20 @@ class BackgroundScheduler:
                             warehouse_cutover.RETIRED_COMPARISONS))
                 except Exception as e:  # noqa: BLE001 — the next run marks again
                     logger.warning(f"Mirror reconciliation: pages not marked: {e}")
+            # And whose page of the three tables only DuckDB writes, for
+            # KS_DUCKDB=off's verdict (stage 5's PR-2): under off their
+            # comparison stands down, so off waits for the pages it was still
+            # reporting rather than have them announced resolved unseen. Only
+            # a run that compared them, under on, can mark or unmark — and the
+            # mark is read by that verdict alone.
+            if operational_found is not None:
+                try:
+                    from core import duckdb_off, duckdb_switch
+
+                    if not duckdb_switch.is_off():
+                        duckdb_off.note_history_reported(operational_found)
+                except Exception as e:  # noqa: BLE001 — the next run marks again
+                    logger.warning(f"Mirror reconciliation: history pages not marked: {e}")
             # A run in which ClickHouse did not compare cannot announce what
             # only that comparison re-examines as resolved (OD-08) — the Gold
             # half's or the archive's.

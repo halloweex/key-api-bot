@@ -35,6 +35,12 @@
 -- behind it and what started the clock; "covered" is the period done.
 -- Undeclared, the check is not applicable.
 --
+-- NOT A BREACH HERE
+-- `duckdb_off_held_back` — KS_DUCKDB=off held on `on` by an unmet
+-- precondition of off. It breaks the week of silence (P4) and not this period
+-- (owner decision OD-S5-7): DuckDB became a writer of nothing, it is opened as
+-- it was all period.
+--
 -- WHAT IT CANNOT SEE
 -- Whatever P2 and F1 cannot. And it is not the stage-5 gate by itself: the
 -- other preconditions (every chain latched, source reconciliation clean,

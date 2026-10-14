@@ -31,13 +31,19 @@ from __future__ import annotations
 from typing import Dict
 
 
-def configure_modes() -> Dict[str, str]:
+def configure_modes(*, web: bool = False) -> Dict[str, str]:
     """Read every cached mode from the environment, and say what was read.
 
     Idempotent: a second call reads the same environment into the same caches,
     so web's startup and the scheduler can both call it without either having
     to know whether the other already has. The latch is re-read rather than
     assumed unchanged, because a copy-back between two calls releases it.
+
+    `web` is web's own two calls, its startup and its scheduler: the one
+    process `KS_DUCKDB=off`'s coherence verdict is reached in, because it is
+    the one an incoherent `off` may hold on `on` — the only syncer (stage 5's
+    PR-2, `core/duckdb_off.py`). Every other entry point under `off` stays
+    `off` and refuses every open.
     """
     from core import (chain_latch, duckdb_switch, pg_derivation, pg_utm_parse,
                       read_fallback, warehouse_cutover)
@@ -85,4 +91,13 @@ def configure_modes() -> Dict[str, str]:
     from core import pg_orders_write
 
     pg_orders_write.settle_hold()
+    # `KS_DUCKDB=off`'s coherence verdict (stage 5's PR-2), in web only: last,
+    # because it reads step 13's verdict and chain 3's hold above. One unmet
+    # key and web runs `on` (OD-S5-1 (a)), so the mapping says what runs.
+    # Reads nothing unless `off` was read; never raises — see
+    # `core/duckdb_off.py`.
+    if web:
+        from core import duckdb_off
+
+        modes[duckdb_switch.ENV] = duckdb_off.settle()
     return modes

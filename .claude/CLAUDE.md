@@ -4307,8 +4307,7 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1, PR-3,
-PR-4, PR-5, PR-7 and PR-8).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 to PR-8).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
@@ -4354,8 +4353,8 @@ adopt nothing under `off`. That finding carries every entity it names
 (`IntegrityIssue.unverified`) and the integrity job holds each one, not only
 the moved keys — an entity no chain moved rests on the copy alone, and a run
 that could not read it must not announce its page resolved. Before it, every
-tick's order step was refused and order intake stopped. **The jobs stand down rather than fail** (PR-7):
-`duckdb_checkpoint` and `db_backup` are not registered, the catch-up asks
+tick's order step was refused and order intake stopped. **The jobs stand down
+rather than fail** (PR-7): `duckdb_checkpoint` and `db_backup` are not registered, the catch-up asks
 Postgres alone, the mirror landing reads DuckDB only for what survives the
 stand-down, and the integrity scan is handed a connection that refuses
 (`duckdb_switch.RefusedConnection` — a check that still reaches is counted
@@ -4370,17 +4369,60 @@ neither copied nor compared, so `meta.mirror_state.last_ok_at` of the
 `sync_metadata` copy stops with them: nothing may judge that stamp against
 an owner row a chain first writes under `off`. A page their stood-down
 checks delivered before the switch is the `off` verdict's
-`retired_pages_clear` to wait for (PR-2).
-Under `on` nothing changed. **Web still does not run clean under `off`**:
-what the sweep in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the
-file is exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, read by
-the boot's sync, the scheduler's start and `pg_warehouse_derive` (PR-6); no
-GET route since PR-8, and nothing copied or compared out of DuckDB since PR-4
-and PR-7 together. The sweep runs in
-the target state (derived from the registries, every chain latched, step 13
-met). It boots web, starts the scheduler and runs every registered job —
-each as the tick that comes once every window an earlier step armed has
-passed, on a fresh sync service —
+`retired_pages_clear` to wait for (PR-2). The warehouse writer's record is
+read from its frozen copy in Postgres, `app.sync_metadata`, and never
+written (PR-6, OD-S5-2 (a)); a door that re-parses every UTM
+verdict in Postgres alone notes it in `data/warehouse-utm-reparsed-at`
+instead, and the first start back under `on` merges that into DuckDB's record,
+so a later way back from step 13 still re-parses DuckDB's verdicts — the one
+thing `on` does differently, and only when the marker is there. A marker its
+removal left behind is found spent by the next start — its note already in
+the record, or the record `duckdb` since after it, the way back it fed done —
+and is only removed again: merging it once more used to start a second full
+DuckDB rebuild on every restart.
+
+**Off is a claim checked at web's start** (PR-2, `core/duckdb_off.py`,
+OD-S5-1 (a)): step 13 **in force** — `postgres` with every precondition met,
+not a way back that latched chains 3 and 5 refused, which stays `postgres`
+over whatever was unmet (a reader left on DuckDB would be a refusal per
+request); every chain on Postgres (`chain:<name>`, read off `WRITE_CHAINS`,
+never listed); every store switch of `duckdb_table_fates.STORE_SWITCHES`
+step 13 does not already hold at postgres, read off it too (today
+`KS_USER_STORE`, key `user_store`); step 13's record resolved in the frozen
+copy; every chain that keeps a value in DuckDB's `sync_metadata`
+(`CHAIN_SYNC_KEYS`/`CHAIN_MARKER_KEYS`) latched, and the copy shipped after
+the first latch of each — only those, since nothing moves the copy under
+`off` and chain 8's first typed expense mid-week used to hold the next
+deploy back and lose the week; and no page open that a check off stands down
+would announce resolved unseen — `data_quality.DUCKDB_OFF_STOOD_DOWN` (the
+`pk_uniqueness_` of the three tables no chain judges; one list, which PR-7
+stands down by), `shadow_*`, and the `mirror_*` pages of the three history
+tables, which the mirror job marks under `on` (the one other addition `on`
+sees: a mark on a delivered gate entry that only this verdict reads). One
+unmet and web runs **`on`** —
+the file opened, orders taken, the week not started — publishing the keys as
+`duckdb_switch.held_back` and paging CRITICAL `duckdb_off_held_back`, P4's
+breach and not P3's (OD-S5-7). Web's verdict alone (`configure_modes(web=True)`,
+kept for the process); a script under `off` stays `off`. So do the Sunday
+compaction's and the nightly snapshot's sidecars, which read `.env` and not
+the verdict: while web is held back both are refused and the file web goes on
+writing is neither compacted nor shipped. Their refusals say the week has
+started only of a web running off and name the hold beside it
+(`duckdb_switch.HELD_BACK_NOTE`), and the page's lever offers `KS_DUCKDB=on`
+as the other way out — a hold is a state to leave. Each key's detail in web's
+log names the value it found (a chain's flag, not its name). Otherwise, under
+`on` nothing changed. **Nothing the sweep runs reaches for the file
+any more**: `KNOWN_RESIDUAL` in `tests/unit/test_duckdb_off_sweep.py` is
+empty — no boot step since PR-6, no job since PR-4 to PR-7 together, no GET
+route since PR-8 — and a control reach after the last step proves the
+tripwire still stands. That is not yet the week's licence: PR-9 widens the
+sweep (the non-GET routes, the assistant's tools, the websocket, a real
+non-admin session, a seeded Postgres) and walks every entry point that can
+reach the store statically. The sweep runs in the target state (derived from
+the registries, every chain latched, step 13 met, off's own verdict holding).
+It boots web, starts the scheduler and runs every registered job — each as
+the tick that comes once every window an earlier step armed has passed, on a
+fresh sync service —
 with Postgres refusing and, wherever `KS_PG_DSN` is set (CI fails if it
 skipped), with Postgres live, emptied first and put back after. It calls
 every GET route **with Postgres refusing only**: with its required
@@ -4389,8 +4431,8 @@ branch (source, sales type, every boolean) and once with the header's
 filters together; what a route reaches only past a live Postgres is PR-9's
 integration variant. A refused watermark read carries its key, so one row
 is one reach. A site that appears outside the list fails, and so does a row
-the code no longer earns. Each later PR takes its rows out; the week waits
-for the empty set. Not set anywhere until then.
+the code no longer earns. Each PR took its own rows out; the week waits for
+the empty set to survive PR-9's wider sweep. Not set anywhere until then.
 
 **The file's hash** — `deploy/duckdb_silence_check.sh`, a host tool, **not
 installed**: hourly from root's crontab at the start of the week (the line is
@@ -4450,7 +4492,8 @@ decision to restart both clocks, said out loud.
 - **P4** the week of silence, under `off` only. Starts at the latest of the
   `watch:duckdb_switch` clean-since (the canary writes it only while web runs
   `off`, on F1's 35-minute rule), the file's unchanged-since, the last edit of
-  `.env`, every breach of all four kinds — the file's `missing_at` among them —
+  `.env`, every breach of all four kinds — the file's `missing_at` among them,
+  and a `duckdb_off_held_back` page, since a held web opens the file —
   and F1's watch. `.env` is asked because the Sunday compaction and the
   nightly off-site start their sidecars from it, not from web's environment,
   and only the switch in the sidecar refuses their read-only open: web `off` with `.env` not saying `off` the way

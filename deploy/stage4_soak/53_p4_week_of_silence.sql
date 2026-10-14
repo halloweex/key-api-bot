@@ -26,7 +26,13 @@
 --   (`duckdb_env_changed_at`), because nothing says the sidecars read `off`
 --   before the file's last edit;
 -- - the levers: P2's journal rows and pages, every one of them, since off;
--- - the fallbacks: F1's pages and watch.
+-- - the fallbacks: F1's pages and watch;
+-- - off held back: web reads KS_DUCKDB=off and runs `on` because a
+--   precondition of off is unmet (core/duckdb_off.py, OD-S5-1 (a)) — it opens
+--   the file at boot, so the week is not running. The canary pages
+--   `duckdb_off_held_back`; the switch's watch is not written, since web does
+--   not run off. A breach here and not in P3 (OD-S5-7): DuckDB became a writer
+--   of nothing, so the parallel period is not broken.
 --
 -- WHERE THE CLOCK STARTS
 -- The latest of the tripwire watch's clean-since (which is no earlier than
@@ -44,10 +50,10 @@
 -- FAIL: KS_DUCKDB set to a value web does not understand (web runs `on`, the
 -- week is not running); web off while `.env` does not say off, or says it in
 -- a way the switch does not understand (the sidecars would run on); a breach
--- inside the day; a tripwire, lever or fallback page still standing; the
--- latest probe of either watch inside the day found something; the file
--- changed, is missing, or was found missing inside the day (it came back, but
--- nothing vouched for it while it was gone); step 13 on DuckDB.
+-- inside the day; a tripwire, held-back, lever or fallback page still
+-- standing; the latest probe of either watch inside the day found something;
+-- the file changed, is missing, or was found missing inside the day (it came
+-- back, but nothing vouched for it while it was gone); step 13 on DuckDB.
 -- UNKNOWN: web down; `.env` unreadable; either watch missing, not written for
 -- 35 min, or clean for less than the day; no file record, one over 3 h old, or
 -- one that began inside the day. PASS: otherwise, with how many of the 168 h
@@ -91,6 +97,7 @@ rec AS (
 breach_keys AS (
     SELECT v.condition_key, v.kind
     FROM (VALUES ('duckdb_opened_while_off', 'web opened DuckDB'),
+                 ('duckdb_off_held_back', 'web held on DuckDB'),
                  ('write_chain_flag_mismatch', 'a lever page'),
                  ('warehouse_hold_stuck', 'a lever page'),
                  ('warehouse_preconditions_unmet', 'a lever page'),

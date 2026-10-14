@@ -994,8 +994,9 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     would announce it resolved and the next probe page it again as a new
     incident, agent and all. Only these keys, the buyers step's and the week
     of silence's tripwire (`duckdb_opened_while_off`, which stands until web
-    restarts for the same reason): every other payload-derived key keeps
-    today's behaviour.
+    restarts for the same reason) with off's held-back verdict beside it
+    (`duckdb_off_held_back`, the web process's for its life): every other
+    payload-derived key keeps today's behaviour.
 
     The buyers step's two keys are held the same way: both when the probe read
     no `buyer_sync` block, and chain 4's CRITICAL when it read no entry for the
@@ -1024,6 +1025,9 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     # restarts; a probe that read no switch block cannot say it cleared.
     if not isinstance(payload.get("duckdb_switch"), dict):
         keys.append("duckdb_opened_while_off")
+        # Off's verdict is the web process's for its life, so a probe that
+        # read no switch block cannot say a held-back web was replaced.
+        keys.append("duckdb_off_held_back")
     # Chain 3's CRITICAL, held the way chain 4's is: under chain 3 the order
     # step is the only writer of orders, and a hung Postgres — the likeliest
     # cause of the page — hangs /api/health too, which is exactly a blind
@@ -1290,6 +1294,33 @@ def check_duckdb_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
     return []
 
 
+# The first words of the held-back page's line, before the unmet keys.
+DUCKDB_HELD_BACK_LINE = "KS_DUCKDB=off ran as on, unmet: "
+
+
+def check_duckdb_off_held_back(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge `duckdb_switch.held_back`: KS_DUCKDB=off with a precondition of
+    off unmet (stage 5's PR-2, core/duckdb_off.py).
+
+    CRITICAL, titled for what it is: web runs `on` — the owner's OD-S5-1 (a),
+    never a stop, web is the only syncer — so the site serves and orders come
+    in, but somebody set off believing the week of silence starts, and it has
+    not: web opens the file. Like `warehouse_preconditions_unmet`, the switch
+    somebody deployed did not happen. The keys name what to meet; the details
+    are in web's log, since this endpoint is public. Held for the life of the
+    web process, so the page stands until a restart that meets them. An empty
+    list is off holding; an absent block or field is not a failure — an
+    older web publishes none, and `on` publishes no field at all."""
+    block = (payload or {}).get("duckdb_switch")
+    if not isinstance(block, dict):
+        return []
+    held = block.get("held_back")
+    if not isinstance(held, list) or not held:
+        return []
+    return [("duckdb_off_held_back",
+             DUCKDB_HELD_BACK_LINE + ", ".join(str(key) for key in held))]
+
+
 def duckdb_silent(payload: Optional[dict]) -> Optional[bool]:
     """What this probe can say for the week of silence's watch: True when web
     runs `off` and has opened nothing, False when it runs `off` and has, None
@@ -1527,6 +1558,14 @@ async def run_canary(
             severity = "warn"
         duckdb_silent_seen = duckdb_silent(payload)
 
+        # KS_DUCKDB=off held on `on` by an unmet precondition of off. Pages:
+        # the week of silence somebody started has not (OD-S5-1 (a)).
+        held_back = check_duckdb_off_held_back(payload)
+        for key, message in held_back:
+            fail(key, message)
+        if held_back:
+            severity = "critical"
+
         # A KS_GOALS_HISTORY web refuses (anything but unset or silver since
         # chain 7b-4): every goal history read raises, so this pages rather
         # than warns.
@@ -1645,6 +1684,12 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "After a flip this IS the way back (full DuckDB rebuild). Meet each cutover.unmet on /api/warehouse/status or unset KS_WRITE_WAREHOUSE; recreate web"),
     ("warehouse_way_back_refused",
      "Copy the named chains back first (scripts/chain_copy_back.py, chain 5 before chain 3), then recreate web for the way back; nothing derives meanwhile unless KS_PG_DERIVE=own"),
+    # After step 13's: when it is held, `warehouse_postgres` is its symptom.
+    # The host's sidecars read `.env`, not the verdict, so a hold also stops
+    # the nightly snapshot and the Sunday compaction of the file web writes
+    # (core/duckdb_off.py) — a state to leave, by either way out.
+    ("duckdb_off_held_back",
+     "web runs on; cron neither snapshots nor compacts DuckDB: meet each key (web's log: 'precondition(s) of off') or set KS_DUCKDB=on, then up -d web"),
     ("mirror_", "Check meta.mirror_state and web's log; the mirror re-ships itself"),
     ("dq_", "Check /api/jobs — nothing is verifying the warehouse meanwhile"),
     ("alerting_", "Consecutive Telegram delivery failures — check web's log"),
@@ -1720,6 +1765,7 @@ _OUTAGE_KEYS: tuple[str, ...] = ("health_unreachable", "health_http", "health_st
 _CRITICAL_TITLES: tuple[tuple[str, str], ...] = (
     ("warehouse_preconditions_unmet", "Warehouse switch held back"),
     ("warehouse_way_back_refused", "Warehouse way back refused"),
+    ("duckdb_off_held_back", "DuckDB switch held back"),
     ("duckdb_opened_while_off", "DuckDB opened while off"),
 )
 

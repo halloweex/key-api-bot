@@ -310,11 +310,15 @@ async def _seed_live_facts(dsn: str) -> None:
     """What production's Postgres holds that the state reads: an owner row
     for every table of every latched chain — the audit half of the latch, the
     half anything holding a pool stands down on — `bronze.expenses` marked
-    backfilled, step 13's `expenses_backfilled`, and one order."""
+    backfilled, step 13's `expenses_backfilled`, one order, and off's two
+    facts (PR-2): step 13's record resolved in the frozen copy of
+    `sync_metadata`, and that copy shipped after the owner rows."""
     import asyncpg
 
-    from core import chain_latch
+    from core import chain_latch, warehouse_cutover as wc
+    from core.pg_operational import SYNC_METADATA_TABLE
     from core.write_chains import WRITE_CHAINS, chain_name
+    from tests.unit.test_duckdb_off_sweep import WRITER_RESOLVED
 
     conn = await asyncpg.connect(dsn)
     try:
@@ -325,6 +329,13 @@ async def _seed_live_facts(dsn: str) -> None:
             await conn.execute(
                 "INSERT INTO meta.mirror_state (table_name, last_ok_at, backfilled_at) "
                 "VALUES ('bronze.expenses', now(), now())")
+            await conn.execute(
+                "INSERT INTO app.sync_metadata (key, value, updated_at) "
+                "VALUES ($1, $2, now())", wc.WRITER_KEY, json.dumps(WRITER_RESOLVED))
+            # Later than every owner row, which carry this transaction's now().
+            await conn.execute(
+                "INSERT INTO meta.mirror_state (table_name, last_ok_at) "
+                "VALUES ($1, now() + interval '1 second')", SYNC_METADATA_TABLE)
             # History: the boot asks the store the orders are written to
             # whether there is any, and with none it pulls 730 days from
             # KeyCRM instead of taking the path every production boot takes.

@@ -154,6 +154,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "web restarts and opens no DuckDB file under KS_DUCKDB=off, or runs on"),
     # KS_DUCKDB set to a value web did not understand: ran as `on` (OD-09).
     "duckdb_mode_invalid": _c("web restarts with a valid KS_DUCKDB"),
+    # KS_DUCKDB=off with a precondition of off unmet: web runs `on` — opens the
+    # file, takes orders — and the week of silence does not start (stage 5's
+    # PR-2, OD-S5-1 (a)). The verdict is the web process's for its life.
+    "duckdb_off_held_back": _c(
+        "web restarts with every precondition of KS_DUCKDB=off met, or with KS_DUCKDB=on"),
     # KS_GOALS_HISTORY set to a value web refuses — anything but unset or
     # silver since chain 7b-4 retired it, `bridge` included: every read of
     # the calculators' history raises — the goal widget, the calculator GETs
