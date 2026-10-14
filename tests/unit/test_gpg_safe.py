@@ -69,9 +69,10 @@ echo "reached the end"
            "FAKE_CALLS": str(calls), "FAKE_GPGCONF_CALLS": str(conf),
            "FAKE_MODE": mode, "GPG_SAFE_DELAYS": "0 0",
            "GNUPGHOME": caller_home}
+    (tmp_path / "in").write_text("plaintext")
     before = set(Path("/tmp").glob("ks-gnupg.*"))
     done = subprocess.run(["bash", "-c", script], env=env, capture_output=True,
-                          text=True, timeout=30)
+                          text=True, timeout=30, cwd=tmp_path)
     leftover = set(Path("/tmp").glob("ks-gnupg.*")) - before
     lines = [ln for ln in calls.read_text().splitlines() if ln]
     homes = [ln.split("|", 1)[0] for ln in lines]
@@ -92,8 +93,9 @@ def test_a_healthy_call_runs_once_in_a_fresh_home_and_leaves_nothing(tmp_path):
     # the caller's arguments, untouched, behind --no-keyring
     assert args[0] == "--no-keyring --batch --yes --passphrase-file /dev/null -o out in"
     assert not leftover, leftover
-    # every home's agent is stopped on the way out
+    # every home's agent is stopped and its socket directory removed
     assert sum("--kill all" in c for c in conf) == 2, conf
+    assert sum("--remove-socketdir" in c for c in conf) == 2, conf
 
 
 def test_a_call_that_found_no_agent_is_asked_again(tmp_path):
@@ -135,9 +137,9 @@ def test_any_other_failure_is_not_asked_again(tmp_path):
 
 
 def test_the_default_delays_are_bounded():
-    """Two second asks, thirteen seconds in all: the night's job waits a
-    moment for a session to finish, never long enough to run into the next
-    job on the host."""
+    """Two second asks, 3 s and 10 s apart, plus up to ~7 s per ask while gpg
+    gives up on a socket (measured in the review of #290): about half a
+    minute at worst, never long enough to run into the next job on the host."""
     text = LIB.read_text()
     assert 'GPG_SAFE_DELAYS="${GPG_SAFE_DELAYS:-3 10}"' in text
 
@@ -207,8 +209,9 @@ echo "gpg_safe ok"
            "FAKE_CALLS": str(calls), "FAKE_GPGCONF_CALLS": str(tmp_path / "conf"),
            "FAKE_SLEEPS": str(sleeps), "FAKE_MODE": mode}
     env.pop("GPG_SAFE_DELAYS", None)
+    (tmp_path / "in").write_text("plaintext")
     done = subprocess.run(["bash", "-c", script], env=env, capture_output=True,
-                          text=True, timeout=30)
+                          text=True, timeout=30, cwd=tmp_path)
     return (done, done.stdout + done.stderr,
             [ln for ln in calls.read_text().splitlines() if ln],
             [ln for ln in sleeps.read_text().splitlines() if ln])
@@ -237,3 +240,40 @@ def test_a_failing_helper_never_stands_in_for_gpg(tmp_path, tool):
     done, out, calls, sleeps = _run_with(tmp_path, "ok", failing=(tool,))
     assert "gpg_safe ok" in out and "ERR trap fired" not in out, out
     assert done.returncode == 0, out
+
+
+@pytest.mark.parametrize("call", [
+    "printf secret | gpg_safe --symmetric --batch -o out",
+    "printf secret | gpg_safe --symmetric --batch -o out -",
+    "gpg_safe --symmetric --batch -o out < in",
+    "gpg_safe --symmetric --batch -o out does-not-exist",
+], ids=["pipe", "dash", "redirect", "no-such-file"])
+def test_a_stream_is_never_asked_twice(tmp_path, call):
+    """gpg reads a stream to the end before it finds no agent; asked again it
+    would encrypt nothing and return 0. Reproduced in the review of #290: 100
+    000 bytes in, 70 bytes out, decrypting to an empty file. A stream gets one
+    attempt and gpg's own failure, as before gpg_safe."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (("gpg", FAKE_GPG), ("gpgconf", FAKE_GPGCONF)):
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+    calls = tmp_path / "calls"
+    calls.write_text("")
+    (tmp_path / "in").write_text("plaintext")
+    script = f"""
+set -Eeuo pipefail
+source {LIB}
+rc=0
+{call} || rc=$?
+echo "gpg_safe rc=$rc"
+"""
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+           "FAKE_CALLS": str(calls), "FAKE_GPGCONF_CALLS": str(tmp_path / "conf"),
+           "FAKE_MODE": "no-agent-once", "GPG_SAFE_DELAYS": "0 0"}
+    done = subprocess.run(["bash", "-c", script], env=env, capture_output=True,
+                          text=True, timeout=30, cwd=tmp_path)
+    out = done.stdout + done.stderr
+    assert "gpg_safe rc=2" in out, out
+    assert "asking again" not in out
+    assert len([ln for ln in calls.read_text().splitlines() if ln]) == 1
