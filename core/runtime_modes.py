@@ -79,7 +79,7 @@ def configure_modes(*, web: bool = False) -> Dict[str, str]:
     modes = {
         duckdb_switch.ENV: duckdb_switch.configure_mode(),
         pg_derivation.ENV: pg_derivation.configure_mode(),
-        read_fallback.ENV: read_fallback.configure_mode(),
+        read_fallback.ENV: read_fallback.configure_mode(report=False),
         pg_utm_parse.ENV: pg_utm_parse.configure_mode(),
         warehouse_cutover.ENV: warehouse_cutover.configure_mode(),
     }
@@ -100,4 +100,9 @@ def configure_modes(*, web: bool = False) -> Dict[str, str]:
         from core import duckdb_off
 
         modes[duckdb_switch.ENV] = duckdb_off.settle()
+    # The read switches with no address, logged after the verdict and not at
+    # their configure: the line says whether their reads are refused, and a
+    # held-back web serves them from DuckDB though `off` was read. Never
+    # raises — see `read_fallback.report_misconfigured`.
+    read_fallback.report_misconfigured()
     return modes

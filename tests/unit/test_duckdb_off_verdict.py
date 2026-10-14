@@ -589,6 +589,38 @@ class TestWhoReachesIt:
         assert modes[duckdb_switch.ENV] == "on"
         assert duckdb_switch.held_back() == ("warehouse_postgres",)
 
+    @pytest.mark.parametrize("holds, says", [
+        (False, "served from DuckDB"),
+        (True, "refused (KS_DUCKDB=off)"),
+    ])
+    def test_a_switch_with_no_address_is_logged_as_the_verdict_leaves_it(
+        self, holds, says, world, configured, monkeypatch, caplog,
+    ):
+        """A read switch with no address leaves step 13 unmet, so a real start
+        holds `off` back and serves those reads from DuckDB. The one line
+        about the switch said "refused (KS_DUCKDB=off)": it was written when
+        `read_fallback` was configured, before the verdict, and the
+        scheduler's second configure does not write it again (integration of
+        PR-8 with PR-2). `holds` forces a verdict that keeps `off`, so the
+        line is shown to follow the verdict both ways. Mutation: report at
+        `read_fallback.configure_mode`, before the verdict."""
+        from core import read_fallback
+        from core.runtime_modes import configure_modes
+
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setenv("KS_READ_GOLD", "postgres")
+        if holds:
+            monkeypatch.setattr(duckdb_off, "evaluate", lambda env, facts: [])
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            configure_modes(web=True)
+            configure_modes(web=True)
+        assert duckdb_switch.is_off() is holds is read_fallback.refusing()
+        assert bool(duckdb_switch.held_back()) is not holds
+        lines = [r.getMessage() for r in caplog.records if "KS_READ_GOLD" in r.getMessage()]
+        assert lines == [f"KS_READ_GOLD=postgres without KS_PG_DSN — every read "
+                         f"behind it is {says}. Set the address or unset the "
+                         f"flag."], lines
+
     def test_a_script_reaches_none_and_stays_off(self, world, configured, monkeypatch):
         """A one-off is not the syncer, and a blip in its own read must not
         open the file in a week web keeps silent. Mutation: reach the verdict

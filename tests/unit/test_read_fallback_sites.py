@@ -551,17 +551,18 @@ def fresh_read_fallback(monkeypatch):
     from core import pg_derivation
 
     before = (read_fallback._mode, read_fallback._mode_error,
-              list(read_fallback._misconfigured))
+              list(read_fallback._misconfigured), list(read_fallback._unreported))
     derivation = (pg_derivation._mode, pg_derivation._mode_error)
     for name in [n for n in __import__("os").environ if n.startswith("KS_READ_")]:
         monkeypatch.delenv(name, raising=False)
     read_fallback._mode, read_fallback._mode_error = None, None
     read_fallback._misconfigured = []
+    read_fallback._unreported = []
     read_fallback.reset_counts()
     yield read_fallback
     pg_derivation._mode, pg_derivation._mode_error = derivation
     read_fallback._mode, read_fallback._mode_error = before[0], before[1]
-    read_fallback._misconfigured = before[2]
+    read_fallback._misconfigured, read_fallback._unreported = before[2], before[3]
     read_fallback.reset_counts()
 
 
@@ -620,6 +621,28 @@ class TestMisconfiguredReads:
         assert fresh_read_fallback.misconfigured() == [
             "KS_READ_GOLD=postgres without KS_PG_DSN"]
         assert "KS_READ_GOLD=postgres without KS_PG_DSN" in caplog.text
+
+    def test_a_configure_that_does_not_report_leaves_the_line_to_the_report(
+        self, fresh_read_fallback, monkeypatch, caplog,
+    ):
+        """`configure_modes()` configures without reporting and reports after
+        stage 5's verdict, which decides what the line says. The cause is
+        logged once, by the report, and a later configure does not log it
+        again. Mutation: drop a cause the second unreported configure no
+        longer finds new."""
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setenv("KS_READ_GOLD", "postgres")
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            fresh_read_fallback.configure_mode(report=False)
+            fresh_read_fallback.configure_mode(report=False)
+            assert "KS_READ_GOLD" not in caplog.text
+            fresh_read_fallback.report_misconfigured()
+            fresh_read_fallback.configure_mode()
+            fresh_read_fallback.report_misconfigured()
+        lines = [r.getMessage() for r in caplog.records if "KS_READ_GOLD" in r.getMessage()]
+        assert lines == ["KS_READ_GOLD=postgres without KS_PG_DSN — every read "
+                         "behind it is served from DuckDB. Set the address or "
+                         "unset the flag."], lines
 
     def test_clickhouse_needs_its_url(self, fresh_read_fallback, monkeypatch):
         monkeypatch.delenv("KS_CH_URL", raising=False)
