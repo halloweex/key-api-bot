@@ -115,6 +115,10 @@ alert_chat_ids() {
 # the kill switch, the instance signature, and a best-effort row in the
 # alert archive. deploy/notify.sh owns the implementation.
 source deploy/notify.sh
+# Every gpg goes through gpg_safe: a home of its own and a second ask when
+# the agent is missing (deploy/gpg_safe.sh says why).
+# shellcheck source=/dev/null
+source deploy/gpg_safe.sh
 
 _where() { printf '%s · %s' "$(hostname)" "$(date '+%F %H:%M')"; }
 
@@ -229,7 +233,7 @@ SQLITE_BACKUP
             return 1
         fi
         step "encrypt .env"
-        gpg --symmetric --cipher-algo AES256 --batch --yes \
+        gpg_safe --symmetric --cipher-algo AES256 --batch --yes \
             --passphrase-file "$ENV_PASSFILE" \
             -o "$STAGE/env.gpg" .env
         env_state="included (AES256)"

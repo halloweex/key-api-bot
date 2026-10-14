@@ -41,6 +41,10 @@ t0() { date +%s.%N; }
 ms() { echo "$1 $2" | awk '{printf "%.0f", ($2-$1)*1000}'; }
 
 source deploy/notify.sh
+# Every gpg goes through gpg_safe: a home of its own and a second ask when
+# the agent is missing (deploy/gpg_safe.sh says why).
+# shellcheck source=/dev/null
+source deploy/gpg_safe.sh
 
 # A failing drill has to reach a human, or it is a script somebody remembers to
 # run. That was the state this one shipped in: --from-remote printed FAIL: to
@@ -203,7 +207,7 @@ drill_from_remote() {
     got="$(_sha256 "$scratch/$enc_dump")"
     [ -n "$want" ] || fail "$manifest does not mention $enc_dump"
     [ "$want" = "$got" ] || fail "sha256 mismatch on $enc_dump: manifest $want, downloaded $got"
-    gpg --batch --yes --quiet --passphrase-file "$ENV_PASSFILE" \
+    gpg_safe --batch --yes --quiet --passphrase-file "$ENV_PASSFILE" \
         -o "$scratch/ks.dump" -d "$scratch/$enc_dump" \
         || fail "could not decrypt $enc_dump with BACKUP_ENV_PASSFILE"
     [ -s "$scratch/ks.dump" ] || fail "decryption produced an empty file"
@@ -216,7 +220,7 @@ drill_from_remote() {
         want="$(awk -v n="$enc_roles" '$2 == n {print $1}' "$scratch/$manifest")"
         got="$(_sha256 "$scratch/$enc_roles")"
         [ "$want" = "$got" ] || fail "sha256 mismatch on $enc_roles"
-        gpg --batch --yes --quiet --passphrase-file "$ENV_PASSFILE" \
+        gpg_safe --batch --yes --quiet --passphrase-file "$ENV_PASSFILE" \
             -o "$scratch/roles.sql" -d "$scratch/$enc_roles" \
             || fail "could not decrypt $enc_roles"
     else

@@ -168,7 +168,7 @@ def _make_world(tmp_path, *, real_gpg=False):
     tmp_path = tmp_path.resolve()
     root = tmp_path / "repo"
     (root / "deploy").mkdir(parents=True)
-    for name in ("ark_ship.sh", "pg_offsite_lib.sh", "ark_freeze.py"):
+    for name in ("ark_ship.sh", "pg_offsite_lib.sh", "ark_freeze.py", "gpg_safe.sh"):
         shutil.copy(DEPLOY / name, root / "deploy" / name)
     (root / "data").mkdir()
     source = root / "data" / "analytics.duckdb"
