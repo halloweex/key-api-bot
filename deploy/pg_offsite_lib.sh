@@ -12,6 +12,12 @@
 # repository root — neither caller wants a library that cd's underneath it,
 # and only the callers know whether backup.env being absent is fatal.
 #
+# A third caller rides the transport and nothing else: deploy/ark_ship.sh
+# ships the second Ark, pointing $PG_REMOTE_DIR at the Ark's own directory
+# after sourcing this. remote_prepare/put/get/list/rm/names serve it as they
+# are; remote_stamp_of, remote_stamps and remote_debris name the dumps' family
+# alone, and the Ark keeps its own beside its own names.
+#
 # ONE TRANSPORT, WITH ROOM FOR THE SECOND. OD-01 chose the Hetzner Storage Box
 # that already holds the Parquet archive (b) and named a second provider as
 # later work (c) — the Storage Box is the same company as the VPS, so it
