@@ -40,7 +40,11 @@ apart (`stood_down()`, published under `off` beside `shadow_failures`), never
 logged at ERROR. The consequence is named rather than discovered (OD-S5-3
 (a)): after a week under `off` the DuckDB copies lack that week's rows, and a
 way back to `on` reads them as `shadow_missing_in_duckdb` (WARN, the digest)
-until DuckDB is dropped. `write_chains.compared_in_shadow()` is empty under
+until DuckDB is dropped. The finding dates its rows on Postgres's clock and
+its `REMEDIATION` line says rows dated while web ran `off` are expected and
+that `scripts/chain_copy_back.py` is never the cure (it releases the latch);
+the soak's H2 counts the finding as accepted, not failed, once a week under
+`off` has run. `write_chains.compared_in_shadow()` is empty under
 `off` for the same reason, so the daily comparison does not read those
 tables either.
 """

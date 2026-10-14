@@ -4280,9 +4280,14 @@ tables, and `duckdb_written()` reads every table False. Under `on`, in the
 target state, DuckDB still writes exactly ten tables — the shadow chains'
 eight, `sync_metadata` and `schema_migrations` — pinned in
 `test_duckdb_table_fates.py`. After a week under `off` a way back reads the
-week's rows as `shadow_missing_in_duckdb` (WARN, OD-S5-3 (a)). Under `on`
-nothing changed. **Web still does not run clean under `off`**: what the sweep
-in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
+week's rows as `shadow_missing_in_duckdb` (WARN, OD-S5-3 (a)), accepted
+until the drop: the finding dates its rows on Postgres's clock, its lever says
+rows of a week under `off` are expected and never names
+`scripts/chain_copy_back.py` as the cure (it releases the latch and hands the
+chain back to DuckDB), and the soak's H2 lists it as accepted, not failed, once
+the canary's `watch:duckdb_switch` row exists. Under `on` nothing changed.
+**Web still does not run clean under `off`**: what the sweep in
+`tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
 exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
 scheduler's catch-up, the DuckDB half of the integrity scan and of the
 mirror landing, the report weeks and the
@@ -4719,8 +4724,9 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
 
 **Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
 since its owner rows; H2 (`29_h2`) — the 07:30 run filed no `shadow_*` above
-INFO. D8, 20, 21 and 22 stop gating on the journal's copy once chain 9 writes
-it directly (the flag, the latch, or its owner row); chain 1's preflight does
+INFO (bar `shadow_missing_in_duckdb` once web has run `KS_DUCKDB=off`,
+OD-S5-3 (a)). D8, 20, 21 and 22 stop gating on the journal's copy once chain 9
+writes it directly (the flag, the latch, or its owner row); chain 1's preflight does
 the same on the flag or the latch (chain 7b's goals dry run did, until 7b-4
 retired it). Every guard names its
 mutation; a run over all of them found five that did not catch theirs, now

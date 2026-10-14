@@ -848,6 +848,69 @@ def _shadow_calls_inside_a_connection(tree) -> list:
     return out
 
 
+def _copy_back_only_forbidden(text: str) -> bool:
+    """Every clause of `text` that names the copy-back forbids it. Clauses
+    split at `.`, `;` and `:` — a lever line is one sentence of several."""
+    import re
+
+    clauses = [c for c in re.split(r"[.;:]\s", text) if "copy" in c.lower()
+               and "back" in c.lower()]
+    return all("never" in c.lower() for c in clauses)
+
+
+class TestTheAcceptedWarnSaysWhatItIs:
+    """OD-S5-3 (a): after a week under KS_DUCKDB=off that went back to on,
+    `shadow_missing_in_duckdb` (WARN) stands until the drop, accepted, "with an
+    explicit line in REMEDIATION". The lever, the finding and the registry
+    used to name only a failed shadow write — read `shadow_failures`, which a
+    stand-down never feeds and the way back's restart clears — and named
+    `scripts/chain_copy_back.py` as what carries the rows, which releases the
+    latch and hands the chain's writes back to DuckDB (design 2.4)."""
+
+    def test_the_lever_names_the_week_under_off_as_expected(self):
+        """Mutation: put the old lever back — no word of `off`, and an
+        operator after a way back goes looking for failures nobody counted."""
+        from core.data_quality import remediation_for
+
+        (line,) = remediation_for(["shadow_missing_in_duckdb"])
+        assert "KS_DUCKDB=off" in line and "OD-S5-3" in line, line
+        assert _copy_back_only_forbidden(line), line
+        assert "shadow_failures" not in line, line
+
+    def test_the_finding_dates_its_rows_and_names_both_causes(self):
+        """The dates are what tells a row of the week under off from a shadow
+        write that failed: the counters that said "when" are per process, and
+        the way back is a restart. Mutation: drop the dating."""
+        first, last = OLD - timedelta(days=4), OLD
+        dk, dkc = _rows((W1, "retail", "10.00", 3, OLD))
+        pg, pgc = _rows((W1, "retail", "10.00", 3, OLD),
+                        (W2, "retail", "9.00", 2, first),
+                        (W3, "retail", "8.00", 1, last))
+        (issue,) = compare_shadow(_spec(SENDS), dk, dkc, pg, pgc, now=NOW)
+        assert issue.check_name == "shadow_missing_in_duckdb"
+        assert issue.severity is Severity.WARN and issue.count == 2
+        text = issue.description
+        assert first.isoformat(timespec="seconds") in text, text
+        assert last.isoformat(timespec="seconds") in text, text
+        assert "KS_DUCKDB=off" in text and "OD-S5-3 (a)" in text, text
+        assert _copy_back_only_forbidden(text), text
+
+    def test_a_row_with_no_stamp_says_it_cannot_be_dated(self):
+        dk, dkc = _rows((W1, "retail", "10.00", 3, OLD))
+        pg, pgc = _rows((W1, "retail", "10.00", 3, OLD), (W2, "retail", "9.00", 2, OLD))
+        pgc[(W2, "retail")] = None
+        (issue,) = compare_shadow(_spec(SENDS), dk, dkc, pg, pgc, now=NOW)
+        assert "no Postgres stamp" in issue.description, issue.description
+
+    def test_the_registry_never_clears_it_by_a_copy_back(self):
+        """Mutation: put back "scripts/chain_copy_back.py carries the rows"."""
+        from core.alerting import REGISTRY
+
+        clears = REGISTRY["shadow_missing_in_duckdb"].clears
+        assert _copy_back_only_forbidden(clears), clears
+        assert "DuckDB is dropped" in clears, clears
+
+
 class TestTheShadowIsNeverNestedInTheStoreLock:
     def test_no_caller_holds_the_connection(self):
         """Mutation: call `into_duckdb` inside `async with store.connection()`
