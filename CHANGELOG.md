@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.281
+
+- gpg_safe: a stream is never asked twice, and the socket directory goes with the call
+
+
 ## 3.0.280
 
 - gpg_safe review: nothing but gpg names a step, and the guard reads continued lines
