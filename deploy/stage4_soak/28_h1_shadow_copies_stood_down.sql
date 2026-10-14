@@ -30,6 +30,14 @@
 -- row, where the copy stamps every table until the flip and a healthy flip
 -- reads a stamp inside the window until the chain's first write: UNKNOWN then.
 --
+-- A failure counts for the day it was stamped as well (O1's rule, chain 3's
+-- review). Only a successful copy resets `failures_since_ok`, and under the
+-- chain the copy never succeeds: it stamps failing while the flag and the
+-- latch disagree, then stands down silently once they agree — so one episode
+-- after the handover used to FAIL this check for ever. A `last_ok_at` after
+-- the handover is DuckDB's copy already put over the chain's — every row
+-- whose shadow write failed gone — which no later hour undoes, and it stays.
+--
 -- WHAT A FAIL MEANS
 -- - a table written or failing after the handover: the copy is writing
 --   DuckDB's rows over the chain's. Stop it before the next hour: put the
@@ -72,7 +80,8 @@ judged_chain AS (
 problems AS (
     SELECT j.label, t.table_name,
            CASE
-               WHEN s.failures_since_ok > 0 AND s.last_attempted_at > j.since THEN
+               WHEN s.failures_since_ok > 0 AND s.last_attempted_at > j.since
+                    AND s.last_attempted_at > clock.now - interval '24 hours' THEN
                    format('%s failing (%s): %s', t.table_name, s.failures_since_ok,
                           left(regexp_replace(COALESCE(s.last_error, ''), '\s+', ' ', 'g'), 100))
                WHEN s.last_ok_at > j.since THEN
@@ -80,6 +89,7 @@ problems AS (
                           to_char(s.last_ok_at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
            END AS problem
     FROM judged_chain j
+    CROSS JOIN clock
     CROSS JOIN LATERAL unnest(j.tables) AS t (table_name)
     LEFT JOIN meta.mirror_state s ON s.table_name = t.table_name
     WHERE j.state = '1'

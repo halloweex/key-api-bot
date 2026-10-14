@@ -136,7 +136,8 @@ case "$1" in
                 while [ $# -gt 0 ]; do [ "$1" = "-tAc" ] && q="$2"; shift; done
                 if [ -z "$q" ]; then cat >/dev/null; exit 0; fi
                 case "$q" in
-                    *"'owner:"*) tbl="chain5.owners" ;;   # CHAIN5_OWNER_SQL
+                    *"'owner:bronze.managers'"*) tbl="chain5.owners" ;;   # CHAIN5_OWNER_SQL
+                    *"'owner:bronze.orders'"*) tbl="chain3.owners" ;;     # CHAIN3_OWNER_SQL
                     *) tbl="${q##*FROM }" ;;
                 esac
                 key="$(printf '%s' "$tbl" | tr '.a-z' '_A-Z')"
@@ -618,6 +619,17 @@ RESTORED = {
 }
 RESTORED.update({"FAKE_RESTORED_BRONZE_MANAGERS": 40,
                  "FAKE_RESTORED_APP_MANAGER_CLASSIFICATIONS": 43})
+# Chain 3's four, at roughly production's size on 2026-10-01 — and, as in
+# production today, no owner row naming any of them (CHAIN3_OWNER_SQL).
+LIVE.update({"FAKE_LIVE_BRONZE_ORDERS": 52000,
+             "FAKE_LIVE_BRONZE_ORDER_PRODUCTS": 163000,
+             "FAKE_LIVE_BRONZE_EXPENSES": 15600,
+             "FAKE_LIVE_APP_ORDER_BACKFILL_MISSES": 60,
+             "FAKE_LIVE_CHAIN3_OWNERS": 0})
+RESTORED.update({"FAKE_RESTORED_BRONZE_ORDERS": 51950,
+                 "FAKE_RESTORED_BRONZE_ORDER_PRODUCTS": 162850,
+                 "FAKE_RESTORED_BRONZE_EXPENSES": 15580,
+                 "FAKE_RESTORED_APP_ORDER_BACKFILL_MISSES": 58})
 
 
 class TestTheRemoteDrill:
@@ -764,6 +776,65 @@ class TestTheRemoteDrill:
         # The owner question is asked of live, as ks_readonly.
         asked = [c for c in run.docker if "owner:bronze.managers" in c]
         assert asked and all("ks-postgres psql -U ks_readonly" in c for c in asked), asked
+
+    CHAIN3 = (("bronze.orders", "BRONZE_ORDERS"),
+              ("bronze.order_products", "BRONZE_ORDER_PRODUCTS"),
+              ("bronze.expenses", "BRONZE_EXPENSES"),
+              ("app.order_backfill_misses", "APP_ORDER_BACKFILL_MISSES"))
+
+    @pytest.mark.parametrize("owners", [4, None], ids=["owned", "owner-read-fails"])
+    def test_chain_3s_tables_are_counted_once_it_owns_them(self, world, owners):
+        """Once chain 3 writes them this dump is the only backup of every
+        order taken since the flip. An owner read that fails counts them too:
+        the stricter direction. Mutation: drop a line from
+        CHAIN3_DRILL_TABLES, or the owner question."""
+        self._shipped(world)
+        live = dict(LIVE, FAKE_LIVE_CHAIN3_OWNERS=owners if owners is not None else "")
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **live, **RESTORED)
+        assert run.code == 0, run.out
+        for table, _ in self.CHAIN3:
+            assert re.search(rf"^\s+{re.escape(table)}\s+restored", run.out, flags=re.M), \
+                (table, run.out)
+
+    @pytest.mark.parametrize("table,var", [c for c in CHAIN3 if c[0] != "bronze.order_products"])
+    def test_an_order_an_expense_or_a_miss_is_never_deleted(self, world, table, var):
+        """Both stores upsert orders and expenses and never delete them, and
+        under the chain the misses are upserted by it alone — so a dump
+        holding more than live is rows live has lost. Mutation: mark any of
+        the three `either`."""
+        self._shipped(world)
+        live = dict(LIVE, FAKE_LIVE_CHAIN3_OWNERS=4)
+        restored = dict(RESTORED, **{f"FAKE_RESTORED_{var}": LIVE[f"FAKE_LIVE_{var}"] + 1})
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **live, **restored)
+        assert run.code != 0 and "ROWS MISSING FROM LIVE" in run.out, (table, run.out)
+
+    def test_a_line_item_live_no_longer_holds_is_an_order_rewritten(self, world):
+        """An order's line items are deleted and laid down again on every
+        write, so one that lost a line is one row fewer in live than in the
+        dump. Mutation: mark bronze.order_products `grows`."""
+        self._shipped(world)
+        live = dict(LIVE, FAKE_LIVE_CHAIN3_OWNERS=4)
+        restored = dict(RESTORED, FAKE_RESTORED_BRONZE_ORDER_PRODUCTS=163005)
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **live, **restored)
+        assert run.code == 0 and "ROWS MISSING FROM LIVE" not in run.out, run.out
+
+    def test_chain_3s_tables_are_not_counted_before_it_owns_them(self, world):
+        """With the chain off they are copies of DuckDB's, and the drill reads
+        what it read before chain 3 existed: bronze.orders and the rest absent
+        from the table, and a dump holding more than live not a finding.
+        Mutation: count them unconditionally — a default-on change."""
+        self._shipped(world)
+        restored = dict(RESTORED, **{f"FAKE_RESTORED_{var}": 900000
+                                     for _, var in self.CHAIN3})
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **restored)
+        assert run.code == 0, run.out
+        for table, _ in self.CHAIN3:
+            assert not re.search(rf"^\s+{re.escape(table)}\s", run.out, flags=re.M), \
+                (table, run.out)
+        asked = [c for c in run.docker if "owner:bronze.orders" in c]
+        assert asked and all("ks-postgres psql -U ks_readonly" in c for c in asked), asked
+        # Chain 5's question is still its own: one owner query each.
+        assert not [c for c in asked if "owner:bronze.managers" in c], asked
 
     def test_a_table_that_may_shrink_still_has_a_margin(self, world):
         """`either` relaxes the direction, not the size: a restored copy far

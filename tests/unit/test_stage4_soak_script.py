@@ -46,11 +46,21 @@ case "$1" in
     exec)
         if [ "$2" = "keycrm-web" ]; then
             if [ "$3" = "test" ]; then
+                # When a test asks, the moment of every marker read, and the
+                # first one waits past a second boundary, so a clock the script
+                # took after it cannot fall in the same second.
+                if [ -n "${FAKE_MARKER_CLOCK:-}" ]; then
+                    first=""
+                    [ -s "$FAKE_MARKER_CLOCK" ] || first=1
+                    date -u +%s >> "$FAKE_MARKER_CLOCK"
+                    [ -z "$first" ] || sleep 1.1
+                fi
                 # `test -f <marker>`: the latch, read the way the script reads it.
                 case "$5" in
                     */pg_inventory_write) [ -n "${FAKE_INVENTORY_LATCHED:-}" ] && exit 0 ;;
                     */pg_buyers_write) [ -n "${FAKE_BUYERS_LATCHED:-}" ] && exit 0 ;;
                     */pg_managers_write) [ -n "${FAKE_MANAGERS_LATCHED:-}" ] && exit 0 ;;
+                    */pg_orders_write) [ -n "${FAKE_ORDERS_LATCHED:-}" ] && exit 0 ;;
                     */pg_dq_journal_write) [ -n "${FAKE_DQ_JOURNAL_LATCHED:-}" ] && exit 0 ;;
                     */pg_watchdog_write) [ -n "${FAKE_WATCHDOGS_LATCHED:-}" ] && exit 0 ;;
                     */pg_weekly_ledger_write) [ -n "${FAKE_WEEKLY_LEDGER_LATCHED:-}" ] && exit 0 ;;
@@ -66,6 +76,7 @@ case "$1" in
                 KS_READ_SEARCH_INDEX) v="${FAKE_KS_READ_SEARCH_INDEX-__unset__}" ;;
                 KS_READ_DASHBOARD) v="${FAKE_KS_READ_DASHBOARD-__unset__}" ;;
                 KS_WRITE_MANAGERS) v="${FAKE_KS_WRITE_MANAGERS-__unset__}" ;;
+                KS_WRITE_ORDERS) v="${FAKE_KS_WRITE_ORDERS-__unset__}" ;;
                 KS_WRITE_DQ_JOURNAL) v="${FAKE_KS_WRITE_DQ_JOURNAL-__unset__}" ;;
                 KS_WRITE_WATCHDOGS) v="${FAKE_KS_WRITE_WATCHDOGS-__unset__}" ;;
                 KS_WRITE_WEEKLY_LEDGER) v="${FAKE_KS_WRITE_WEEKLY_LEDGER-__unset__}" ;;
@@ -374,6 +385,96 @@ class TestChain5:
         run = _run(tmp_path, SOAK_MANAGERS_FLIP_AT="2026-10-08 10:30+03")
         assert all(re.search(r"managers_flip_at=2026-10-08 10:30\+03(\s|$)", c)
                    for c in run.psql), run.psql
+
+
+class TestChain3:
+    """`orders_on`: chain 5's five states, for `pg_orders_write`. Its
+    preconditions — the lockout, step 13, chain 1, the backup evidence — are
+    web's to judge, so a flag without the latch is pending. Mutation: drop the
+    latch from ORDERS_ON, and a chain latched with its flag put back reads
+    "not applicable" on all five O-checks."""
+
+    def test_unset_is_zero(self, healthy):
+        assert all("orders_on=0 " in c and re.search(r"orders_flip_at=(\s|$)", c)
+                   for c in healthy.psql), healthy.psql
+
+    def test_the_flag_without_the_latch_is_pending(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_ORDERS=" Postgres ")
+        assert all("orders_on=pending " in c for c in run.psql), run.psql
+
+    def test_the_latch_is_one_whatever_the_flag_says(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_ORDERS="duckdb", FAKE_ORDERS_LATCHED="1")
+        assert all("orders_on=1 " in c for c in run.psql), run.psql
+        assert "latched: chain 3 owns its tables" in run.out
+
+    def test_a_typo_on_a_latched_chain_is_still_one(self, tmp_path):
+        """`writes_postgres()` answers True over a value nobody can read when
+        latched, so the stand-down must still be judged."""
+        run = _run(tmp_path, FAKE_KS_WRITE_ORDERS="postgress", FAKE_ORDERS_LATCHED="1")
+        assert all("orders_on=1 " in c for c in run.psql), run.psql
+
+    def test_the_flag_and_the_latch_agree_on_one(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_ORDERS="postgres", FAKE_ORDERS_LATCHED="1")
+        assert all("orders_on=1 " in c for c in run.psql), run.psql
+        assert "latched: chain 3" not in run.out, "nothing disagrees — do not say it does"
+
+    def test_a_value_nobody_understands_is_invalid(self, tmp_path):
+        run = _run(tmp_path, FAKE_KS_WRITE_ORDERS="postgress")
+        assert all("orders_on=invalid " in c for c in run.psql), run.psql
+
+    def test_a_stopped_web_is_unknown(self, tmp_path):
+        run = _run(tmp_path, FAKE_WEB="exited")
+        assert all("orders_on=unknown " in c for c in run.psql), run.psql
+
+    def test_the_flip_time_is_passed_and_reported(self, tmp_path):
+        run = _run(tmp_path, SOAK_ORDERS_FLIP_AT="2026-10-12 10:30+03")
+        assert all(re.search(r"orders_flip_at=2026-10-12 10:30\+03(\s|$)", c)
+                   for c in run.psql), run.psql
+        assert "orders flip at 2026-10-12 10:30+03" in run.out
+
+    def test_the_five_checks_are_in_the_report(self, healthy):
+        """O1–O5, each once, in the order a reader works down them."""
+        labels = [label for label in healthy.rows if label.startswith("O")]
+        assert labels == ["O1 orders copies stood down", "O2 orders watermark",
+                          "O3 order versions", "O4 half-written orders",
+                          "O5 orders integrity"], labels
+
+
+class TestTheMarkerClock:
+    """O1 and M1 judge owner rows standing beside a marker the script found
+    missing, and the script reads the markers some thirty psql sessions before
+    those two files run. A healthy first write takes the marker and then
+    claims the owner rows, so the checks need the moment the markers were
+    read: owner rows dated after it are a chain that latched during the
+    report, not a lost marker (chain 3 soak review, 2026-10-10)."""
+
+    @staticmethod
+    def _read_at(run):
+        stamps = {m.group(1) for c in run.psql
+                  for m in [re.search(r"markers_read_at=(\S*)", c)] if m}
+        assert len(stamps) == 1 and len(run.psql) == len(FILES), (stamps, run.psql)
+        return stamps.pop()
+
+    def test_it_is_passed_in_utc_to_the_second(self, healthy):
+        stamp = self._read_at(healthy)
+        assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stamp), stamp
+
+    def test_it_is_taken_before_any_marker_is_read(self, tmp_path):
+        """Truncated to the second it can only err early, which reads a latch
+        in that second as taken during the report: UNKNOWN, never a false
+        FAIL. Mutation: take it after the marker reads, beside the loop that
+        runs the checks — the fake's first read waits past a second boundary,
+        so this fails."""
+        from datetime import datetime, timezone
+
+        clock = tmp_path / "marker-clock"
+        run = _run(tmp_path, FAKE_MARKER_CLOCK=str(clock))
+        read_at = datetime.strptime(self._read_at(run), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+        reads = [int(x) for x in clock.read_text().split()]
+        assert any(c.endswith("/pg_orders_write") for c in run.calls), run.calls
+        assert any(c.endswith("/pg_managers_write") for c in run.calls), run.calls
+        assert reads and read_at <= min(reads), (read_at, reads)
 
 
 class TestChain9:
