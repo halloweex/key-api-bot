@@ -4279,9 +4279,13 @@ from `app.sync_metadata` — DuckDB's table as the hourly copy last shipped it,
 which stopped moving at the latches (`core/pg_frozen_metadata.py`) — the
 freshness check's bootstrap gate asks Postgres too, and an unreadable copy
 is `sync_watermarks_unwatched`, never "fresh install"; the report ledgers
-adopt nothing under `off`. Before it, every tick's order step was refused
-and order intake stopped. The sweep runs in the target state (derived from
-the registries, every chain latched, step 13 met). It boots web, starts the
+adopt nothing under `off`. That finding carries every entity it names
+(`IntegrityIssue.unverified`) and the integrity job holds each one, not only
+the moved keys — an entity no chain moved rests on the copy alone, and a run
+that could not read it must not announce its page resolved. Before it, every
+tick's order step was refused and order intake stopped. The sweep runs in
+the target state (derived from the registries, every chain latched, step 13
+met). It boots web, starts the
 scheduler and runs every registered job — each as the tick that comes once
 every window an earlier step armed has passed, on a fresh sync service —
 with Postgres refusing and, wherever `KS_PG_DSN` is set (CI fails if it

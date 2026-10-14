@@ -266,6 +266,76 @@ class TestTheFreshnessCheck:
         assert _names(issues) == ["sync_watermarks_unwatched"]
         assert issues[0].count == len(dq.FRESHNESS_THRESHOLDS)
 
+    def test_under_off_an_unreadable_copy_holds_every_entity_it_names(
+            self, flags, duckdb_off):
+        """No chain moved and the copy unreadable: the finding names every
+        entity, and every one is held — none is announced resolved by a run
+        that did not look. Mutation: hold only `stood_down_sync_keys()` (the
+        rule `on` derives the hold by) — no key is moved, so nothing is held,
+        and `_resolve_dq_layer` clears a delivered `freshness_buyers` page."""
+        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=None,
+                                     frozen_rows=None)
+        (unwatched,) = issues
+        everything = sorted(f"freshness_{e}" for e in dq.FRESHNESS_THRESHOLDS)
+        assert sorted(unwatched.unverified) == everything
+        assert dq.unverified_conditions([], issues) == everything
+
+    def test_under_off_some_chains_moved_the_rest_are_held_too(
+            self, flags, duckdb_off):
+        """Chain 1 latched with its watermarks in Postgres, the copy
+        unreadable: offers and stocks are judged from Postgres; the entities
+        the copy would have judged are held, and the run resolves nothing it
+        did not see."""
+        chain_latch.latch("pg_inventory_write")
+        watermarks = _rows(offers=FRESH, stocks=FRESH)
+        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
+                                     frozen_rows=None)
+        (unwatched,) = issues
+        copy_judged = {f"freshness_{e}" for e in dq.FRESHNESS_THRESHOLDS
+                       if e not in ("offers", "stocks")}
+        assert set(unwatched.unverified) == copy_judged
+        assert set(dq.unverified_conditions([], issues)) >= copy_judged
+
+    @pytest.mark.parametrize("flag", [None, "garbage"])
+    def test_under_on_the_hold_is_the_moved_keys_as_before(self, flags, flag):
+        """The control: under on the finding names a subset of the moved keys,
+        so the hold is exactly the one derived from `stood_down_sync_keys()`
+        before this — chain 1 latched with no watermarks handed in, or its
+        flag not understood. Mutation: name every threshold entity in the
+        finding whatever the mode."""
+        from core.write_chains import stood_down_sync_keys
+
+        if flag:
+            flags.setenv("KS_WRITE_INVENTORY", flag)
+        else:
+            chain_latch.latch("pg_inventory_write")
+        issues = dq._judge_freshness(_rows(**ALL_FRESH), NOW,
+                                     chain_watermarks=None if not flag else {})
+        assert _names(issues) == ["sync_watermarks_unwatched"]
+        before = sorted(f"freshness_{k[len('last_sync_'):]}"
+                        for k in stood_down_sync_keys()
+                        if k[len("last_sync_"):] in dq.FRESHNESS_THRESHOLDS)
+        assert before == ["freshness_offers", "freshness_stocks"]
+        assert set(issues[0].unverified) <= set(before)
+        assert dq.unverified_conditions([], issues) == before
+
+    def test_the_held_page_is_not_announced_resolved(self, flags, duckdb_off):
+        """Through `_resolve_dq_layer`, the way the integrity job hands it:
+        under off with the copy unreadable, `freshness_buyers` stays firing."""
+        import asyncio
+        from unittest.mock import patch
+
+        from core.scheduler import BackgroundScheduler
+
+        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=None,
+                                     frozen_rows=None)
+        resolve = AsyncMock(return_value=0)
+        with patch("core.alerting.resolve_group", resolve):
+            asyncio.run(BackgroundScheduler()._resolve_dq_layer(
+                "integrity", issues, None,
+                unverified=dq.unverified_conditions([], issues)))
+        assert "freshness_buyers" in resolve.await_args.kwargs["still_firing"]
+
     @pytest.mark.asyncio
     async def test_under_on_the_rows_are_duckdb_s_and_the_copy_is_ignored(
             self, flags, tmp_path):

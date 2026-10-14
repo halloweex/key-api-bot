@@ -82,6 +82,12 @@ class IntegrityIssue:
     count: int               # number of violating rows
     sample_ids: Tuple[int, ...] = ()  # up to 10 example IDs for triage
     description: str = ""
+    # The page conditions a finding says this run did not re-examine, for
+    # `unverified_conditions` to hold rather than resolve. Set only where the
+    # finding itself is what knows them (`sync_watermarks_unwatched`, whose
+    # entities depend on what the run could read); never persisted — the
+    # journal writes the six fields above.
+    unverified: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -615,6 +621,11 @@ def _judge_freshness(
                 "run, so a stall of those syncs is NOT being watched. "
                 + " ".join(reasons)
             ),
+            # Every entity named above, which under `off` with the copy
+            # unreadable is more than the moved keys `unverified_conditions`
+            # derives on its own: a delivered page of an entity no chain moved
+            # must not be announced resolved by a run that did not look.
+            unverified=tuple(f"freshness_{e}" for e in sorted(blind)),
         ))
     inherited: Set[str] = set()
     for entity in moved:
@@ -1787,7 +1798,9 @@ def unverified_conditions(raised: Sequence[str], issues: List[IntegrityIssue]) -
 
     `raised` are the guard names `check_internal_integrity` reported through
     `raised_out`. The `*_unwatched` findings are the other kind: the check ran
-    but was not handed what it needs to look.
+    but was not handed what it needs to look. A finding that knows which
+    conditions it left unexamined names them in `unverified`, and those are
+    held too.
     """
     names = set()
     for check in raised:
@@ -1803,6 +1816,12 @@ def unverified_conditions(raised: Sequence[str], issues: List[IntegrityIssue]) -
         names.update(f"freshness_{key[len('last_sync_'):]}"
                      for key in stood_down_sync_keys()
                      if key[len("last_sync_"):] in FRESHNESS_THRESHOLDS)
+    # What the finding itself names. Under `on` that is a subset of the moved
+    # keys above, so nothing changes there; under `off` with
+    # `app.sync_metadata` unreadable it is also every entity no chain moved
+    # (stage 5, PR-5), which the moved keys alone would leave to be resolved.
+    for issue in issues:
+        names.update(issue.unverified)
     return sorted(names)
 
 
