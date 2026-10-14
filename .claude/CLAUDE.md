@@ -4579,6 +4579,28 @@ leaves `mirrored_at` alone, or copies a recorded instant — on a retired row
 only a trigger or a migration would date that. The copy-back releases the
 record with the latch.
 
+**E1 reads the record too** (2026-10-14). The daily comparison's
+`chain_shipper_overwrote` took any `last_ok_at` after the owner row for a
+shipment out of DuckDB — true of every chain flipped before this one (chain 3's
+writer stamps it too, but has never been flipped), false here,
+where the writer stamps it on every write. From 2026-10-10 each morning paged
+the chain's own hourly writes CRITICAL, with "restore from the nightly dump" as
+the lever; production's two watermarks were each a stamp in the chain's
+record, and nothing else had written either table since the latch. A chain
+whose writer stamps the watermark now declares the tables
+(`CHAIN_STAMPS_MIRROR_STATE`, held to the code by a walk in
+`tests/unit/test_chain_mirror_stamps.py`), and this one hands E1 the watermark
+and the record in one statement (`read_mirror_stamps`; two reads would let a
+write land between them and look foreign): a recorded instant is the chain's,
+any other after the latch is CRITICAL, and a record nobody can parse is
+CRITICAL saying it could not tell. It sees a foreign stamp only until the
+chain's next write moves the watermark again — the mirror, the one other
+writer that stamps it, ships only with the marker lost, which
+`chain_latch_disagrees` and `owner_row_without_marker` page for as long as it
+lasts. Chain 3 stamps its three bronze watermarks the same way and keeps no
+record, so E1 does not judge those three — a decision written beside its
+declaration, and the only chain the walk lets stamp without one.
+
 **The standing watch** reads both tables four times a day: empty and written
 round (CRITICAL), rows lost (`last_rows − current − around`, CRITICAL, judged
 only once the chain's own write stamped the watermark — the mirror's
