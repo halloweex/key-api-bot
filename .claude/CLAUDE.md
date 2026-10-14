@@ -4581,7 +4581,8 @@ record with the latch.
 
 **E1 reads the record too** (2026-10-14). The daily comparison's
 `chain_shipper_overwrote` took any `last_ok_at` after the owner row for a
-shipment out of DuckDB — true of every chain before this one, false here,
+shipment out of DuckDB — true of every chain flipped before this one (chain 3's
+writer stamps it too, but has never been flipped), false here,
 where the writer stamps it on every write. From 2026-10-10 each morning paged
 the chain's own hourly writes CRITICAL, with "restore from the nightly dump" as
 the lever; production's two watermarks were each a stamp in the chain's

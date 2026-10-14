@@ -315,6 +315,18 @@ class TestTheReader:
         assert got[CATEGORIES].stamps == frozenset() and got[CATEGORIES].unreadable is None
 
     @pytest.mark.asyncio
+    async def test_the_watermark_is_postgres_integer_not_a_python_one(self):
+        """`last_ok_us` is handed on as Postgres worked it out. Recomputing it
+        from the datetime in Python (float seconds × 1e6) would be the
+        rendering this exists to avoid; the row here makes the two disagree by
+        one microsecond, so only the column can satisfy it."""
+        row = _row(PRODUCTS, T0, f'{{"stamps": [{T0}], "previous": null}}')
+        row["last_ok_at"] = row["last_ok_at"] + timedelta(microseconds=1)
+        got = await pg_catalogue_write.read_mirror_stamps(_Conn([row]))
+        assert got[PRODUCTS].last_ok_us == T0
+        assert got[PRODUCTS].last_ok_us in got[PRODUCTS].stamps
+
+    @pytest.mark.asyncio
     async def test_previous_is_never_taken_for_the_chains(self):
         """After a shipment and then a chain write, `previous` IS the
         shipment's instant. Put the watermark back on it and the verdict must
@@ -412,7 +424,11 @@ class TestTheVerdict:
         assert "hourly replication" not in issue.description
 
     def test_one_microsecond_off_is_not_the_chains(self, catalogue):
+        # On a whole millisecond, so the instant and the one beside it share
+        # their millisecond: a comparison that truncated would call them equal
+        # on every run, not on 999 runs in 1000.
         owners, after = catalogue
+        after = after.replace(microsecond=0)
         stamps = {PRODUCTS: _stamp(after, [_us(after) + 1]),
                   CATEGORIES: _stamp(after, [_us(after)])}
         assert set(_overwrote(_chain_latch_findings(owners, {}, stamps))) == {PRODUCTS}
@@ -576,6 +592,18 @@ class TestTheCallerReadsIt:
         pool = _Pool()
         assert await _read_mirror_stamps(pool, {}) == {PRODUCTS: "p", CATEGORIES: "c"}
         assert pool.acquired == 1
+
+    @pytest.mark.asyncio
+    async def test_a_read_that_fails_fails_the_run(self, monkeypatch):
+        """Not contained, as the docstring promises: swallowed, an unreachable
+        Postgres would leave every declared table "not read", and E1 would
+        page the chain's own writes CRITICAL again — the page this replaced."""
+        async def broken(conn):
+            raise ConnectionError("postgres went away")
+
+        monkeypatch.setattr(pg_catalogue_write, "read_mirror_stamps", broken)
+        with pytest.raises(ConnectionError):
+            await _read_mirror_stamps(_Pool(), {CATEGORIES: "2026-10-09T10:45:13+00:00"})
 
     def test_reconcile_operational_hands_the_read_to_the_verdict(self):
         """The verdict is pure; this pins that the comparison actually reads

@@ -3981,10 +3981,13 @@ def _chain_latch_findings(
                 continue                # the chain's own write, recorded
             else:
                 why = (f"at an instant the record {name} keeps of its own "
-                       "writes does not carry, so something else stamped it: a "
-                       "shipper out of DuckDB, which writes a chain's table "
-                       "only while the chain is routed to DuckDB — its marker "
-                       "lost, which chain_latch_disagrees says beside this.")
+                       "writes does not carry, so something else stamped it. "
+                       "In this process that is the sync's mirror out of "
+                       "DuckDB, which writes a chain's table only while the "
+                       "chain reads as routed to DuckDB (its marker lost, "
+                       "which chain_latch_disagrees pages beside this); "
+                       "otherwise a writer outside this process — a script, "
+                       "a manual UPDATE — which nothing else here sees.")
             issues.append(_shipper_overwrote(table, (
                 f"{table} changed hands at {since}, and a write recorded "
                 f"success on it at {last_ok.isoformat()} — after it — {why} "
