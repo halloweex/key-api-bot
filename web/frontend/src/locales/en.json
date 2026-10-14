@@ -1080,5 +1080,9 @@
   "traffic.unknownUntrackedDesc": "Untracked links: shared without UTM parameters",
   "traffic.utmCampaigns": "UTM Campaigns",
   "traffic.utmCampaignsDesc": "Orders and revenue aggregated per UTM campaign",
-  "traffic.whatIsThis": "What is this?"
+  "traffic.whatIsThis": "What is this?",
+  "fileExport.sent": "File sent",
+  "fileExport.sentMessage": "It is in your chat with the bot.",
+  "fileExport.failed": "Export failed",
+  "common.cancel": "Cancel"
 }

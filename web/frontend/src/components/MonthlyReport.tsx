@@ -4,6 +4,8 @@ import { Card, CardHeader, CardTitle, CardContent } from './Card'
 import { SkeletonChart } from './Skeleton'
 import { ApiErrorState } from './ApiErrorState'
 import { ExportCsvButton } from './ExportCsvButton'
+import { useFileExport } from './useFileExport'
+import { exportCsvFromUrl } from '../utils/deliverFile'
 import { useMarketingReport } from '../hooks/useApi'
 import { useFilterStore } from '../store/filterStore'
 import { formatCurrency, formatNumber } from '../utils/formatters'
@@ -239,6 +241,7 @@ export const MonthlyReport = memo(function MonthlyReport() {
 
   const { data, isLoading, error, refetch } = useMarketingReport()
 
+  const { run: runExport } = useFileExport()
   const downloadCsv = useCallback(() => {
     const params = new URLSearchParams({ sales_type: salesType })
     if (period !== 'custom') {
@@ -249,8 +252,9 @@ export const MonthlyReport = memo(function MonthlyReport() {
     }
     if (categoryId) params.set('category_id', String(categoryId))
     if (brand) params.set('brand', brand)
-    window.open(`/api/reports/marketing-summary/export/csv?${params}`, '_blank')
-  }, [period, startDate, endDate, salesType, categoryId, brand])
+    void runExport(() => exportCsvFromUrl(
+      `/api/reports/marketing-summary/export/csv?${params}`, 'marketing-summary.csv'))
+  }, [period, startDate, endDate, salesType, categoryId, brand, runExport])
 
   // Dynamic labels for comparison columns
   const { periodLabel, prevLabel, yoyLabel } = useMemo(() => {

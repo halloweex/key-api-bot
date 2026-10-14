@@ -1080,5 +1080,9 @@
   "traffic.unknownUntrackedDesc": "Невідстежувані посилання: поширюються без UTM параметрів",
   "traffic.utmCampaigns": "UTM-кампанії",
   "traffic.utmCampaignsDesc": "Замовлення та виручка за UTM-кампаніями",
-  "traffic.whatIsThis": "Що це таке?"
+  "traffic.whatIsThis": "Що це таке?",
+  "fileExport.sent": "Файл надіслано",
+  "fileExport.sentMessage": "Він у вашому чаті з ботом.",
+  "fileExport.failed": "Не вдалося експортувати",
+  "common.cancel": "Скасувати"
 }

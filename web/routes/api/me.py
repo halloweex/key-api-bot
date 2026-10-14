@@ -5,12 +5,16 @@ via inline ``get_current_user`` checks. Moved here so they sit under the
 ``api_gate`` umbrella — single audit point for /api/* auth.
 """
 import logging
+import re
+
 from fastapi import APIRouter, Request, HTTPException, Depends
+from pydantic import BaseModel, Field
 
 from web.routes.auth import effective_permissions, require_user
 from core.bot_prefs import default_language_for, read_language, write_language
 from core.config import ADMIN_USER_IDS
 from core.permissions import is_hardcoded_admin
+from ._deps import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -109,3 +113,46 @@ async def update_preferences(request: Request, user: dict = Depends(require_user
             )
 
     return {"language": read_language(user_id, default=fallback)}
+
+
+# ─── a file to my own chat ───────────────────────────────────────────────────
+
+_FILENAME = re.compile(r"^[A-Za-z0-9._-]{0,80}[A-Za-z0-9_-]\.csv$")
+_FILE_MAX_CHARS = 5_000_000
+
+
+class SendFile(BaseModel):
+    filename: str
+    content: str = Field(..., max_length=_FILE_MAX_CHARS)
+
+
+@router.post("/me/send-file")
+@limiter.limit("10/minute")
+async def send_file_to_my_chat(
+    request: Request,
+    body: SendFile,
+    user: dict = Depends(require_user),
+):
+    """Send a CSV the page already holds to the requester's own bot chat.
+
+    The dashboard opens as a Telegram Mini App, whose WebView can neither save
+    a `blob:` download nor follow a download link with the session — Telegram
+    hands `window.open` to the external browser, which is not signed in. So
+    inside Telegram every export button fetches its file as it would anyway,
+    under this user's own permissions, and posts it here. Nothing is read on
+    the server and nothing widens: the content is what this user was just
+    served, and the recipient is this user's own Telegram id, never a list.
+    """
+    from core.telegram_user_files import send_user_document_http
+
+    if not _FILENAME.match(body.filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    user_id = user.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # UTF-8 BOM, as the downloads write it, so Excel reads Cyrillic.
+    data = ("\ufeff" + body.content.lstrip("\ufeff")).encode("utf-8")
+    if not await send_user_document_http(int(user_id), data, body.filename):
+        raise HTTPException(status_code=502, detail="Could not send the file via Telegram")
+    return {"sent": True}

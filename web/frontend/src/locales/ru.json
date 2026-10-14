@@ -1080,5 +1080,9 @@
   "traffic.unknownUntrackedDesc": "Неотслеживаемые ссылки: без UTM параметров",
   "traffic.utmCampaigns": "UTM-кампании",
   "traffic.utmCampaignsDesc": "Заказы и выручка по UTM-кампаниям",
-  "traffic.whatIsThis": "Что это?"
+  "traffic.whatIsThis": "Что это?",
+  "fileExport.sent": "Файл отправлен",
+  "fileExport.sentMessage": "Он в вашем чате с ботом.",
+  "fileExport.failed": "Не удалось экспортировать",
+  "common.cancel": "Отмена"
 }
