@@ -27,6 +27,16 @@
 -- nothing about the shadow: UNKNOWN here, and D8 reports it as the failure it
 -- is.
 --
+-- AFTER A WEEK UNDER KS_DUCKDB=off, A MISSING ROW IS ACCEPTED (OD-S5-3 (a))
+-- Under `off` the shadow stands down by design, so a way back to `on` reads
+-- that week's rows as shadow_missing_in_duckdb every morning until DuckDB is
+-- dropped — a WARN the owner accepted. Once web has run `off` (the canary's
+-- `watch:duckdb_switch` row exists: it is written only under `off`), that
+-- finding is listed as accepted and does not fail; the two CRITICALs still
+-- do. What it cannot see: a shadow write that genuinely failed after such a
+-- week reads as accepted here too. The finding dates its rows on Postgres's
+-- clock and its lever says which are which; the digest still carries it.
+--
 -- WHAT A FAIL MEANS
 -- Read `app.data_quality_issues.description` for the run: it names the table
 -- and the rows. A shadow_duckdb_only_rows is the one that stops a flip in its
@@ -91,11 +101,20 @@ runs AS (
       AND r.started_at >= slot.starts - interval '5 minutes'
       AND r.started_at <= clock.now
 ),
-findings AS (
-    SELECT i.run_id, i.check_name, i.table_name, i.severity, i.count
+off_ran AS (
+    SELECT EXISTS (SELECT 1 FROM app.alert_series
+                   WHERE condition_key = 'watch:duckdb_switch') AS ran
+),
+shadow AS (
+    SELECT i.run_id, i.check_name, i.table_name, i.severity, i.count,
+           (i.check_name = 'shadow_missing_in_duckdb' AND off_ran.ran) AS accepted
     FROM app.data_quality_issues i
     JOIN runs USING (run_id)
+    CROSS JOIN off_ran
     WHERE i.check_name LIKE 'shadow\_%' AND i.severity <> 'INFO'
+),
+findings AS (
+    SELECT * FROM shadow WHERE NOT accepted
 ),
 agg AS (
     SELECT (SELECT count(*) FROM on_chains) AS n_on,
@@ -105,7 +124,10 @@ agg AS (
            (SELECT count(*) FROM findings) AS n_findings,
            (SELECT string_agg(format('%s %s on %s (%s)', check_name, severity, table_name, count),
                               ', ' ORDER BY check_name, table_name)
-              FROM findings) AS listed
+              FROM findings) AS listed,
+           (SELECT string_agg(format('%s on %s (%s)', check_name, table_name, count),
+                              ', ' ORDER BY table_name)
+              FROM shadow WHERE accepted) AS accepted_listed
 )
 SELECT 'H2 shadow comparison (mirror_landing)'::text AS "check",
        CASE
@@ -132,8 +154,10 @@ SELECT 'H2 shadow comparison (mirror_landing)'::text AS "check",
            WHEN agg.n_clean = 0 THEN
                format('the mirror_landing run since %s Kyiv wrote only its error; D8 says which',
                       to_char(slot.starts AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'))
-           ELSE format('%s run(s) since %s Kyiv, zero shadow findings for %s',
-                       agg.n_runs, to_char(slot.starts AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
-                       agg.on_listed)
+           ELSE left(format('%s run(s) since %s Kyiv, zero shadow findings for %s',
+                            agg.n_runs, to_char(slot.starts AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI'),
+                            agg.on_listed)
+                     || COALESCE('; accepted after the week under KS_DUCKDB=off (OD-S5-3 (a)): '
+                                 || agg.accepted_listed, ''), 400)
        END AS detail
 FROM dq_copy CROSS JOIN slot CROSS JOIN agg;

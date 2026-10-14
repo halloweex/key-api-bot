@@ -41,7 +41,9 @@ WHAT AN ENTRY SAYS
   which tables it took. A SHADOW chain's tables (OD-02 (c): chains 9, 10, 11a,
   11b) carry their switch like any other, but moving it does not stop DuckDB
   writing them — Postgres writes first and DuckDB is still handed every row —
-  so `duckdb_written()` reads them True in either mode.
+  so `duckdb_written()` reads them True in either mode — while
+  `KS_DUCKDB=on`. Under `off` it reads every table False: the shadow's
+  DuckDB half stands down there (stage 5, PR-4).
 - `origin` — what could rebuild the rows if every copy were lost: KeyCRM, a
   computation over other tables, or nothing (IRREPLACEABLE). An irreplaceable
   table must travel off-site; that is chain 12's largest blast radius.
@@ -300,7 +302,7 @@ FATES: Dict[str, TableFate] = {
     # ── chain 9: the quality journal and the forensic trail ─────────────────
     # The journal is a SHADOW chain (OD-02 (c)): under KS_WRITE_DQ_JOURNAL
     # Postgres writes first and DuckDB is still handed every row, so
-    # `duckdb_written()` reads these True in either mode.
+    # `duckdb_written()` reads these True in either mode (under KS_DUCKDB=on).
     "data_quality_runs": TableFate(
         MOVED, IRREPLACEABLE, "The journal every check verdict, layer age and "
         "digest delta is read from.",
@@ -478,8 +480,17 @@ def duckdb_written() -> Dict[str, Optional[bool]]:
     retired with the file, and DuckDB writes it on every connect that applies
     a migration until then. The test holds this answer to the writers the
     code has, not to `kind`.
+
+    Under KS_DUCKDB=off every entry is False (stage 5, PR-4): this process
+    may not open the file, so it writes no table in it — the shadow chains'
+    copies included, whose DuckDB half stands down there
+    (`core.shadow_writes.into_duckdb`). No None either: a flag nobody can
+    read routes nowhere near a file that is not opened.
     """
-    from core import write_chains
+    from core import duckdb_switch, write_chains
+
+    if duckdb_switch.is_off():
+        return {name: False for name in FATES}
 
     modes = write_chains.chain_modes()
     chain_mode = {}
