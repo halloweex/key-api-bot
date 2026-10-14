@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.277
+
+- Stage 5 PR-1 review: the routes test's docstring names both 503s
+- Stage 5 PR-1 review: say what off does after PR-1, and what the sweep sweeps
+- Stage 5 PR-1 review: the sweep runs every tick due and counts what it skipped
+- Stage 5 PR-1: the sweep records a registered job taken off the scheduler
+- Stage 5 PR-1: under KS_DUCKDB=off the store is published unconnected
+- Stage 5 PR-0 review: the copy-back and the backup ask the switch first
+- test_duckdb_switch: the L2 restore is a written host-tool exemption
+- Stage 5 PR-11 review: a verified Ark off-site is never sent over or out-counted
+- Soak: CLAUDE.md says O1 and M1 read a latch taken during the report as UNKNOWN
+- Soak: pin that owner rows date the handover before a flip time, in every check on that clock
+- Soak: a latch taken while the report runs is O1's and M1's UNKNOWN, not a lost marker
+- Stage 5 PR-11: the second Ark is shipped, fetched back and verified
+- Soak siblings: CLAUDE.md says what changed in I1, E1, H1 and held/pending
+- Soak siblings: I1 on O1's clock, E1 and H1 a day at a time, held/pending as a lost marker
+- Stage 5 PR-0: the tripwire refuses before the disk and names the task
+- Chain 3: CLAUDE.md says what the soak review changed in O1, O2, O4, B1, M1
+- Chain 3: soak review - a ledger row, a lost marker, the canary's bound, a day
+- Chain 3: CLAUDE.md says what the soak checks and the drill now judge
+- Chain 3: the restore drill counts its four tables once it owns them
+- Chain 3: soak checks O1-O5
+
+
 ## 3.0.276
 
 
