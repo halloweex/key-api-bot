@@ -171,6 +171,27 @@ def _duckdb_switch_on_and_forgotten(monkeypatch):
     duckdb_switch.reset()
 
 
+@pytest.fixture
+def duckdb_off(monkeypatch, tmp_path):
+    """`KS_DUCKDB=off`, read the way web reads it, with the store's directory
+    and file redirected to a directory that does not exist yet. Returns that
+    directory, so a test can say what it expects to find there — under off,
+    usually nothing at all.
+
+    `_never_the_production_database` above redirects the file and not its
+    directory, and `DuckDBStore.connect()` used to make that directory before
+    the switch refused; with the real `data/` already there, a test could not
+    have seen it. Opt-in: a test under `on` keeps the autouse arrangement."""
+    from core import duckdb_switch
+
+    data = tmp_path / "data"
+    monkeypatch.setattr("core.duckdb_store.DB_DIR", data)
+    monkeypatch.setattr("core.duckdb_store.DB_PATH", data / "analytics.duckdb")
+    monkeypatch.setenv(duckdb_switch.ENV, "off")
+    duckdb_switch.configure_mode()
+    return data
+
+
 @pytest.fixture(autouse=True)
 def _goals_history_unset(monkeypatch):
     """Every test starts with KS_GOALS_HISTORY unset — Silver, the only goal

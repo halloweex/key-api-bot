@@ -106,6 +106,27 @@ async def read_unavailable_handler(request: Request, exc: ReadUnavailable):
     )
 
 
+@app.exception_handler(duckdb_switch.DuckDBOpenedWhileOff)
+async def duckdb_opened_while_off_handler(request: Request,
+                                          exc: duckdb_switch.DuckDBOpenedWhileOff):
+    """A route reached for the DuckDB file under `KS_DUCKDB=off` and was
+    refused (stage 5, PR-1). It used to fall through to the 500 below — a
+    bug, in the frontend's reading, where nothing is broken: the file is
+    switched off, and the 503 says it is the store behind the page that is
+    unavailable, as `ReadUnavailable` does. The refusal is already counted
+    and logged at CRITICAL where it was raised (`duckdb_switch.guard`) and
+    published on /api/health; the site and the count stay there, since a
+    response is public to the page."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "error": "Service Unavailable",
+            "detail": "This page needs the DuckDB file, which is switched off.",
+            "surface": "duckdb",
+        },
+    )
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}", exc_info=True)
@@ -194,25 +215,35 @@ async def startup_event():
     try:
         await init_and_sync(full_sync_days=730)
         store = await get_store()
-        stats = await store.get_stats()
-        logger.info(
-            f"DuckDB ready: {stats['orders']} orders, "
-            f"{stats['products']} products, "
-            f"{stats['categories']} categories, "
-            f"{stats['db_size_mb']} MB"
-        )
+        if duckdb_switch.is_off():
+            # The store `get_store()` hands out under off is unconnected
+            # (stage 5, PR-1), and `get_stats` would be the one call here
+            # that opens the file — to log counts nothing reads.
+            logger.info("Boot sync done; KS_DUCKDB=off, so DuckDB is not "
+                        "opened for its counts")
+        else:
+            stats = await store.get_stats()
+            logger.info(
+                f"DuckDB ready: {stats['orders']} orders, "
+                f"{stats['products']} products, "
+                f"{stats['categories']} categories, "
+                f"{stats['db_size_mb']} MB"
+            )
     except duckdb_switch.DuckDBOpenedWhileOff:
-        # KS_DUCKDB=off, and the boot's first act is to open the file. Web
-        # cannot work without it yet — that is stage 5's decoupling — but it
-        # must not die of it either: the refusal is already counted, and only
-        # a web that answers /api/health lets the canary page it
-        # (`duckdb_opened_while_off`). So start with no store, say so, and let
-        # every later path that reaches for one be refused and counted too.
-        # Under `on` this branch cannot be taken: nothing raises it.
+        # KS_DUCKDB=off, and something on the boot sync's path still reached
+        # for the file — orders held in DuckDB because chain 3 is not on, or
+        # a path stage 5 has not decoupled yet. Web must not die of it: the
+        # refusal is already counted, and only a web that answers /api/health
+        # lets the canary page it (`duckdb_opened_while_off`). The store is
+        # the unconnected one `get_store()` publishes under off, so what goes
+        # through it to Postgres still works; every later path that reaches
+        # for the file is refused and counted too. Under `on` this branch
+        # cannot be taken: nothing raises it.
         logger.critical(
-            "KS_DUCKDB=off: web starts with no DuckDB store. Nothing that "
-            "needs one works — order intake included — and every path that "
-            "tries is refused and published under duckdb_switch on /api/health")
+            "KS_DUCKDB=off: the boot sync reached for the DuckDB file and was "
+            "refused. Web starts without it; the site is published under "
+            "duckdb_switch on /api/health")
+        store = await get_store()
     except Exception as e:
         logger.error(f"DuckDB sync failed on startup: {e}", exc_info=True)
         # Don't crash if store has data — serve stale data, scheduler will retry sync
@@ -226,20 +257,31 @@ async def startup_event():
         # connects with it published on /api/health (`_build_view`), so what
         # still ends the startup here is a file, a table or a ledger.
         store = await get_store()
-        stats = await store.get_stats()
-        # Under chain 3 the orders are written to Postgres, so DuckDB's count
-        # says nothing about whether there is history to serve: a Postgres
-        # that failed this boot's sync is retried by the scheduler, and web —
-        # the only syncer — must not crash-loop over it (`pg_orders_write`).
-        from core import pg_orders_write
-
-        if pg_orders_write.mode() != "duckdb":
-            logger.warning("Serving with the boot sync failed under chain 3 — "
-                           "the scheduler retries the order step")
-        elif stats.get("orders", 0) == 0:
-            raise  # Fail fast only if DuckDB has no data at all
+        if duckdb_switch.is_off():
+            # Nothing below may be asked of DuckDB under off: `get_stats`
+            # raised a second refusal out of this handler, uncaught — a crash
+            # loop of the only syncer over any failed boot sync. So the switch
+            # is asked first, and the startup never ends here: the scheduler
+            # retries the sync (stage 5, PR-1). Under `on` the branch below is
+            # what it always was.
+            logger.warning("Serving with the boot sync failed under "
+                           "KS_DUCKDB=off — the scheduler retries the sync")
         else:
-            logger.warning(f"Serving stale data ({stats['orders']} orders) — sync will retry via scheduler")
+            stats = await store.get_stats()
+            # Under chain 3 the orders are written to Postgres, so DuckDB's
+            # count says nothing about whether there is history to serve: a
+            # Postgres that failed this boot's sync is retried by the
+            # scheduler, and web — the only syncer — must not crash-loop over
+            # it (`pg_orders_write`).
+            from core import pg_orders_write
+
+            if pg_orders_write.mode() != "duckdb":
+                logger.warning("Serving with the boot sync failed under chain 3 — "
+                               "the scheduler retries the order step")
+            elif stats.get("orders", 0) == 0:
+                raise  # Fail fast only if DuckDB has no data at all
+            else:
+                logger.warning(f"Serving stale data ({stats['orders']} orders) — sync will retry via scheduler")
 
     # Migrate users from SQLite to DuckDB (one-time, idempotent)
 
@@ -254,7 +296,8 @@ async def startup_event():
     #
     # The write fills NULLs only, so this is a no-op on every boot after the
     # first, and it can never overwrite a campaign the app recorded itself.
-    # No store under KS_DUCKDB=off (above): there is nothing to restore into.
+    # Through the SMS router (`_sms_run`), so under KS_SMS_STORE=postgres it
+    # writes Postgres whatever KS_DUCKDB says; the store is only its host.
     if store is not None:
         try:
             restored = await store.backfill_sms_campaign_record(
@@ -303,7 +346,7 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"Prediction service initialization skipped: {e}")
 
-    logger.info("Dashboard ready - all queries use DuckDB")
+    logger.info(f"Dashboard ready (KS_DUCKDB={duckdb_switch.mode()})")
 
 
 # `_migrate_sqlite_users_to_duckdb` lived here until 2026-09-07.

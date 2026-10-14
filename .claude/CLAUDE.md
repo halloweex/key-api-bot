@@ -4245,17 +4245,51 @@ nightly off-site's snapshot, which runs the same phase, open through the
 switch: their sidecars start from `.env`, so under `off` both are refused
 before the driver runs, each with one line saying its cron line is retired
 at the start of the week. Under `off` an open is refused **before the
-driver runs**, so the file is not even created;
+driver runs**, so the file is not even created — and `DuckDBStore.connect()`
+and `backup_database()` ask first, before either touches the disk beside the
+file (`data/`, `duckdb_tmp/`, `backups/` and the temp copies in it); the
+copy-back asks before `configure_modes()`, which would read Postgres;
 counted **at the raise**, because dozens of callers wrap `get_store()` in
 `except Exception` and a swallowed refusal is exactly the open the week must
 not miss; logged CRITICAL; published as `duckdb_switch.opened_while_off`
 (`{site: {count, last_at}}`, a site being `module:function`, at most 20, never
-exception text); and paged **CRITICAL `duckdb_opened_while_off`**, whose lever
+exception text — and `<coroutine> (task)` when the read ran in a task of its
+own, which the frame walk would otherwise have named after uvicorn); and
+paged **CRITICAL `duckdb_opened_while_off`**, whose lever
 goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
-**`off` does not make web work** — order intake stops and the dashboard
-errors; startup contains the refusal only so `/api/health` answers and the
-page can be seen. It is not set anywhere until the decoupling ships.
+
+**What `off` does, and what it does not yet** (stage 5's decoupling,
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 and PR-1).
+`get_store()` publishes the store **unconnected**: about 150 callers hold it
+only as the host of a router that goes to Postgres, and the tripwire stands
+at `connection()`, where the file is actually reached. The boot asks
+`orders_held()` instead of `get_stats()`, a failed boot sync no longer ends
+the startup (the handler used to ask DuckDB first), and a route refused the
+file answers 503 `surface: duckdb` beside `ReadUnavailable`. Under `on`
+nothing changed. **Web still does not run clean under `off`**: what the sweep
+in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
+exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
+scheduler's catch-up, the DuckDB half of the integrity scan and of the
+mirror landing, the shadow chains' DuckDB copies, the report weeks and the
+order and catalogue watermarks inherited from DuckDB, `db_backup`,
+`/api/health` still counting DuckDB's tables, and `/api/summary?source_id=3`.
+The watermarks are not a boot-time reach: with Postgres holding no
+`last_sync_orders`, **every sync tick's order step is refused and order
+intake stops** until PR-5. The sweep runs in the target state (derived from
+the registries, every chain latched, step 13 met). It boots web, starts the
+scheduler and runs every registered job — each as the tick that comes once
+every window an earlier step armed has passed, on a fresh sync service —
+with Postgres refusing and, wherever `KS_PG_DSN` is set (CI fails if it
+skipped), with Postgres live, emptied first and put back after. It calls
+every GET route **with Postgres refusing only**: with its required
+parameters, then again per value of each optional parameter that can pick a
+branch (source, sales type, every boolean) and once with the header's
+filters together; what a route reaches only past a live Postgres is PR-9's
+integration variant. A refused watermark read carries its key, so one row
+is one reach. A site that appears outside the list fails, and so does a row
+the code no longer earns. Each later PR takes its rows out; the week waits
+for the empty set. Not set anywhere until then.
 
 **The file's hash** — `deploy/duckdb_silence_check.sh`, a host tool, **not
 installed**: hourly from root's crontab at the start of the week (the line is
