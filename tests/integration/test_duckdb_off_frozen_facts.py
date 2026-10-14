@@ -137,13 +137,26 @@ async def verdict_rows(pool):
                     "VALUES ($1, $2, $3)", row["key"], row["value"], row["updated_at"])
 
 
-async def _copied(pool, *, minutes_after_latch: int):
-    """An owner row two hours old and a copy `minutes_after_latch` after it,
-    on one transaction's clock."""
+async def _latched(conn, chains, *, hours_ago: float) -> None:
+    """An owner row for every table of `chains`, claimed `hours_ago`."""
+    from core.chain_latch import owner_key
+
+    for chain in chains:
+        for table in chain.CHAIN_TABLES:
+            await conn.execute(
+                "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
+                "VALUES ($1, 'x', now() - $2 * interval '1 hour')",
+                owner_key(table), hours_ago)
+
+
+async def _copied(pool, *, minutes_after_latch: int, chains=None):
+    """An owner row for every table of every chain (or of `chains`), two
+    hours old, and a copy `minutes_after_latch` after them, on one
+    transaction's clock."""
+    from core.write_chains import WRITE_CHAINS
+
     async with pool.acquire() as conn, conn.transaction():
-        await conn.execute(
-            "INSERT INTO meta.chain_watermarks (key, value, updated_at) "
-            "VALUES ('owner:app.manual_expenses', 'x', now() - interval '2 hours')")
+        await _latched(conn, WRITE_CHAINS if chains is None else chains, hours_ago=2)
         await conn.execute(
             "INSERT INTO meta.mirror_state (table_name, last_ok_at) VALUES "
             "('app.sync_metadata', now() - interval '2 hours' + $1 * interval '1 minute')",
@@ -162,7 +175,10 @@ class TestOffsVerdictReadsTheCopy:
         await _copied(verdict_rows, minutes_after_latch=5)
         facts = await duckdb_off._frozen_facts_on_its_own_connection(DSN)
         assert facts["writer"] == RESOLVED
-        assert facts["copied_at"] - facts["latched_at"] == timedelta(minutes=5)
+        assert set(facts["owners"]) == {
+            t for c in _chains() for t in c.CHAIN_TABLES}
+        assert {facts["copied_at"] - at for at in facts["owners"].values()} == {
+            timedelta(minutes=5)}
         unmet = duckdb_off.evaluate({"KS_USER_STORE": "postgres"}, duckdb_off.Facts(
             writes_postgres=True, warehouse_mode="postgres", chains={
                 k: {"mode": "postgres"} for k in _chain_names()},
@@ -177,7 +193,7 @@ class TestOffsVerdictReadsTheCopy:
             await conn.execute("DELETE FROM app.sync_metadata WHERE key = $1",
                                wc.WRITER_KEY)
         facts = await duckdb_off._frozen_facts_on_its_own_connection(DSN)
-        assert facts == {"writer": None, "copied_at": None, "latched_at": None}
+        assert facts == {"writer": None, "copied_at": None, "owners": {}}
 
     @pytest.mark.asyncio
     async def test_a_copy_older_than_the_latch_holds(self, verdict_rows):
@@ -211,7 +227,87 @@ class TestOffsVerdictReadsTheCopy:
         assert duckdb_switch.held_back() == ()
 
 
+def _chains():
+    from core.write_chains import WRITE_CHAINS
+
+    return WRITE_CHAINS
+
+
 def _chain_names():
     from core.write_chains import WRITE_CHAINS, chain_name
 
     return [chain_name(c) for c in WRITE_CHAINS]
+
+
+def _start(monkeypatch, chains):
+    """A web start under off over `chains` (`chain_modes()`), every other
+    fact met, its verdict and the switch forgotten first: `(mode, held_back,
+    unmet)`."""
+    from core import duckdb_off, duckdb_switch, warehouse_cutover as wc
+
+    duckdb_switch.reset()
+    duckdb_off.reset()
+    monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
+    monkeypatch.setattr("core.write_chains.chain_modes", lambda: chains)
+    monkeypatch.setenv("KS_USER_STORE", "postgres")
+    monkeypatch.setenv("KS_PG_DSN", DSN)
+    monkeypatch.setenv(duckdb_switch.ENV, "off")
+    duckdb_switch.configure_mode()
+    return duckdb_off.settle(), duckdb_switch.held_back(), duckdb_off.unmet()
+
+
+class TestTheWeekIsNotLostToALatchUnderOff:
+    """Review of PR-2: every owner row used to count against the copy, and
+    under off nothing moves the copy — it is DuckDB's table. A chain that is
+    `postgres` by its flag and has not latched passes `chain:<name>` at the
+    start of the week; its first write under off claims an owner row stamped
+    then, and the next start — a deploy in the middle of the week — was held
+    back on `sync_metadata_copied`: it opened the file, and the week was
+    lost."""
+
+    @pytest.mark.asyncio
+    async def test_chain_8_latching_mid_week_does_not_hold_the_next_start(
+        self, verdict_rows, monkeypatch,
+    ):
+        """Production's chain 8: `KS_WRITE_EXPENSES=postgres`, no expense
+        typed yet. It keeps nothing in DuckDB's `sync_metadata`, so its latch
+        says nothing about the copy."""
+        from core import chain_latch, pg_expenses_write
+        from core.write_chains import WRITE_CHAINS, chain_name
+
+        await _seed_writer(verdict_rows, json.dumps(RESOLVED))
+        await _copied(verdict_rows, minutes_after_latch=60, chains=[
+            c for c in WRITE_CHAINS if c is not pg_expenses_write])
+        chains = {k: {"mode": "postgres", "latched": True} for k in _chain_names()}
+        chains[chain_name(pg_expenses_write)] = {
+            "mode": "postgres", "latched": False, "env": "postgres"}
+        assert _start(monkeypatch, chains)[:2] == ("off", ())
+
+        # The first typed expense, under off: the owner row is claimed in the
+        # writing transaction, as `pg_expenses_write` claims it.
+        async with verdict_rows.acquire() as conn, conn.transaction():
+            await chain_latch.claim(conn, pg_expenses_write.CHAIN_TABLES,
+                                    "2026-10-15T10:00:00+00:00")
+        chains[chain_name(pg_expenses_write)]["latched"] = True
+        mode, held, unmet = _start(monkeypatch, chains)
+        assert (mode, held) == ("off", ()), [(u.key, u.detail) for u in unmet]
+
+    @pytest.mark.asyncio
+    async def test_a_chain_that_keeps_a_value_there_and_has_not_latched_holds_the_first(
+        self, verdict_rows, monkeypatch,
+    ):
+        """Its latch would come under off too, and it does freeze a value the
+        copy must carry — so the first start of the week is held, while
+        waiting costs nothing, rather than a start in the middle of it."""
+        from core import pg_expense_types_write
+        from core.write_chains import WRITE_CHAINS, chain_name
+
+        await _seed_writer(verdict_rows, json.dumps(RESOLVED))
+        await _copied(verdict_rows, minutes_after_latch=60, chains=[
+            c for c in WRITE_CHAINS if c is not pg_expense_types_write])
+        chains = {k: {"mode": "postgres", "latched": True} for k in _chain_names()}
+        chains[chain_name(pg_expense_types_write)] = {
+            "mode": "postgres", "latched": False, "env": "postgres"}
+        mode, held, unmet = _start(monkeypatch, chains)
+        assert (mode, held) == ("on", ("sync_metadata_copied",))
+        assert chain_name(pg_expense_types_write) in unmet[0].detail

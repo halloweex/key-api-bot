@@ -149,10 +149,15 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
 
 # ─── The state ───────────────────────────────────────────────────────────────
 
-def apply_target_state(monkeypatch, tmp_path, *, live: bool) -> None:
+def apply_target_state(monkeypatch, tmp_path, *, live: bool,
+                       breaking: Optional[Dict[str, str]] = None) -> None:
     """Set the state production will be in for the week of silence, and read
     it the way web's startup does. `live` reads step 13's Postgres facts from
-    the database at `KS_PG_DSN`; otherwise they are answered as met."""
+    the database at `KS_PG_DSN`; otherwise they are answered as met.
+
+    `breaking` sets variables over that state just before it is read, and
+    then nothing is asserted about it: the caller judges what the start
+    made of the state with one thing wrong."""
     from core import chain_latch, warehouse_cutover as wc
     from core.duckdb_table_fates import STORE_SWITCHES
     from core.pg import REQUIRED_REVISION
@@ -200,8 +205,11 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool) -> None:
         for name in names:
             monkeypatch.setattr(module, name, getattr(module, name))
     monkeypatch.setattr("core.sync_service._sync_service", None)
+    for name, value in (breaking or {}).items():
+        monkeypatch.setenv(name, value)
     configure_modes(web=True)
-    assert_target_state()
+    if breaking is None:
+        assert_target_state()
 
 
 # What `core.duckdb_off` reads from Postgres when off's verdict is met.
@@ -210,11 +218,16 @@ WRITER_RESOLVED = {"writer": "postgres", "since": "2026-10-01T06:00:00+00:00",
 
 
 def frozen_facts_met() -> dict:
+    """Step 13's record resolved, an owner row for every table of every
+    chain, and the copy shipped an hour after them."""
     from datetime import datetime, timedelta, timezone
+
+    from core.write_chains import WRITE_CHAINS
 
     now = datetime.now(timezone.utc)
     return {"writer": dict(WRITER_RESOLVED), "copied_at": now,
-            "latched_at": now - timedelta(hours=1)}
+            "owners": {table: now - timedelta(hours=1)
+                       for chain in WRITE_CHAINS for table in chain.CHAIN_TABLES}}
 
 
 def assert_target_state() -> None:

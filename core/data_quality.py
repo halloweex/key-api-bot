@@ -1704,6 +1704,23 @@ ORDER_LANDING_CHECKS: FrozenSet[str] = frozenset({
 })
 
 
+# The DuckDB integrity checks `KS_DUCKDB=off` stands down with no Postgres twin
+# (stage 5; owner's decision OD-S5-5): the three `_pk_uniqueness_check` calls
+# above that no chain's `landing(...)` takes, over tables a write chain has
+# taken to Postgres — products and categories (chain 6), buyers (chain 4) — on
+# each of which Postgres declares `PRIMARY KEY (id)`. Nothing here stands them
+# down yet; stage 5's PR-7 does, under this name. What reads it today is the
+# `off` verdict (`core.duckdb_off.retired_conditions`): a page of theirs
+# delivered before the switch would have no check left to clear it, so it
+# holds `retired_pages_clear`. One list for both, held to the scan by
+# `tests/unit/test_duckdb_off_verdict.py`.
+DUCKDB_OFF_STOOD_DOWN: FrozenSet[str] = frozenset({
+    "pk_uniqueness_products",
+    "pk_uniqueness_buyers",
+    "pk_uniqueness_categories",
+})
+
+
 def unverified_conditions(raised: Sequence[str], issues: List[IntegrityIssue]) -> List[str]:
     """Conditions this run could not re-examine, from both kinds of blindness.
 

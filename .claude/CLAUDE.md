@@ -4276,16 +4276,27 @@ thing `on` does differently, and only when the marker is there. A marker its
 removal left behind is found spent by the next start — its note already in
 the record, or the record `duckdb` since after it, the way back it fed done —
 and is only removed again: merging it once more used to start a second full
-DuckDB rebuild on every restart. **Off is a
-claim checked at web's start** (PR-2, `core/duckdb_off.py`, OD-S5-1 (a)):
-step 13 in force, every chain on Postgres (`chain:<name>`, read off
-`WRITE_CHAINS`, never listed), `KS_USER_STORE=postgres`, step 13's record
-resolved in the frozen copy and that copy shipped after the newest `owner:`
-row, and no page open that a check off stands down would announce resolved
-unseen — `pk_uniqueness_` of the three tables no chain judges, `shadow_*`,
-and the `mirror_*` pages of the three history tables, which the mirror job
-marks under `on` (the one other addition `on` sees: a mark on a delivered
-gate entry that only this verdict reads). One unmet and web runs **`on`** —
+DuckDB rebuild on every restart.
+
+**Off is a claim checked at web's start** (PR-2, `core/duckdb_off.py`,
+OD-S5-1 (a)): step 13 **in force** — `postgres` with every precondition met,
+not a way back that latched chains 3 and 5 refused, which stays `postgres`
+over whatever was unmet (a reader left on DuckDB would be a refusal per
+request); every chain on Postgres (`chain:<name>`, read off `WRITE_CHAINS`,
+never listed); every store switch of `duckdb_table_fates.STORE_SWITCHES`
+step 13 does not already hold at postgres, read off it too (today
+`KS_USER_STORE`, key `user_store`); step 13's record resolved in the frozen
+copy; every chain that keeps a value in DuckDB's `sync_metadata`
+(`CHAIN_SYNC_KEYS`/`CHAIN_MARKER_KEYS`) latched, and the copy shipped after
+the first latch of each — only those, since nothing moves the copy under
+`off` and chain 8's first typed expense mid-week used to hold the next
+deploy back and lose the week; and no page open that a check off stands down
+would announce resolved unseen — `data_quality.DUCKDB_OFF_STOOD_DOWN` (the
+`pk_uniqueness_` of the three tables no chain judges; one list, which PR-7
+stands down by), `shadow_*`, and the `mirror_*` pages of the three history
+tables, which the mirror job marks under `on` (the one other addition `on`
+sees: a mark on a delivered gate entry that only this verdict reads). One
+unmet and web runs **`on`** —
 the file opened, orders taken, the week not started — publishing the keys as
 `duckdb_switch.held_back` and paging CRITICAL `duckdb_off_held_back`, P4's
 breach and not P3's (OD-S5-7). Web's verdict alone (`configure_modes(web=True)`,

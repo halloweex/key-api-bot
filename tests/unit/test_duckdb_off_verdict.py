@@ -3,10 +3,12 @@
 Off is a claim — nothing web does still needs the DuckDB file — and the
 verdict checks it at web's start: every key, one at a time, holds web on `on`
 and is published by name (OD-S5-1 (a)); under `on` nothing is read; the chain
-keys are derived from the write-chain registry; the verdict is web's alone
-and kept for the life of the process; and the pages a check off stands down
-would leave unseen hold it, the shared `mirror_*` ones through a mark the
-mirror job sets under `on`.
+and store keys are derived from their registries; a way back latched chains
+refused is not step 13 in force; only the chains that keep a value in
+DuckDB's `sync_metadata` are held to its copy, and every one of them latched;
+the verdict is web's alone and kept for the life of the process; and the
+pages a check off stands down would leave unseen hold it, the shared
+`mirror_*` ones through a mark the mirror job sets under `on`.
 """
 from __future__ import annotations
 
@@ -40,11 +42,18 @@ def met_chains() -> dict:
             for c in WRITE_CHAINS}
 
 
+def owners_at(when) -> dict:
+    """An `owner:` row for every table of every registered chain, all claimed
+    at `when` — `{table: updated_at}`, as `read_frozen_facts` hands it back."""
+    return {table: when for chain in WRITE_CHAINS for table in chain.CHAIN_TABLES}
+
+
 def met(**over) -> duckdb_off.Facts:
     """Every key met; `over` breaks the ones a test names."""
-    facts = dict(writes_postgres=True, warehouse_mode="postgres", chains=met_chains(),
+    facts = dict(writes_postgres=True, warehouse_mode="postgres",
+                 warehouse_value="postgres", chains=met_chains(),
                  open_retired={}, pg_asked=True, writer=dict(RESOLVED),
-                 copied_at=NOW, latched_at=NOW - timedelta(hours=1))
+                 copied_at=NOW, owners=owners_at(NOW - timedelta(hours=1)))
     facts.update(over)
     return duckdb_off.Facts(**facts)
 
@@ -54,7 +63,22 @@ def keys_of(unmet) -> list:
 
 
 def frozen_met() -> dict:
-    return {"writer": dict(RESOLVED), "copied_at": NOW, "latched_at": NOW - timedelta(hours=1)}
+    return {"writer": dict(RESOLVED), "copied_at": NOW,
+            "owners": owners_at(NOW - timedelta(hours=1))}
+
+
+def keyed_chains() -> list:
+    """The chains whose latch froze a value in DuckDB's `sync_metadata` —
+    the copy-back's own helper says which."""
+    from core.chain_transfer import _carried_keys
+
+    return [c for c in WRITE_CHAINS if _carried_keys(c)]
+
+
+def unkeyed_chains() -> list:
+    from core.chain_transfer import _carried_keys
+
+    return [c for c in WRITE_CHAINS if not _carried_keys(c)]
 
 
 @pytest.fixture
@@ -64,7 +88,9 @@ def world(monkeypatch):
     answering off's two facts. Returns the mock reading them — each test
     breaks what it is about. `KS_DUCKDB=off` read, no verdict yet."""
     monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
+    monkeypatch.setattr(wc, "_value", wc.POSTGRES)
     monkeypatch.setattr(wc, "_unmet", ())
+    monkeypatch.setattr(wc, "_way_back_refused", ())
     monkeypatch.setattr("core.write_chains.chain_modes", met_chains)
     monkeypatch.setenv("KS_USER_STORE", "postgres")
     monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/ks")
@@ -105,6 +131,43 @@ class TestTheKeys:
                     open_retired={"pk_uniqueness_products": "dq:integrity"})
         assert keys_of(duckdb_off.evaluate({}, facts)) == list(duckdb_off.keys())
 
+    def test_the_store_keys_are_the_store_switches_step_13_does_not_judge(self):
+        """Read off `duckdb_table_fates.STORE_SWITCHES` — the switches whose
+        other side is DuckDB — less the ones step 13's preconditions already
+        hold at postgres (`warehouse_postgres`). Today exactly the user list."""
+        from core.duckdb_table_fates import STORE_SWITCHES
+
+        stores = duckdb_off.store_switches()
+        assert stores == ("KS_USER_STORE",)
+        assert [duckdb_off.store_key(s) for s in stores] == [duckdb_off.USER_STORE]
+        for switch in STORE_SWITCHES:
+            assert switch in stores or switch == wc.ENV or switch in wc.WAREHOUSE_READERS
+
+    def test_a_store_switch_registered_later_is_a_key_and_holds_off(self, monkeypatch):
+        """Review of PR-2: the store key was one literal, so a store switch
+        added to the registry the sweep's target state reads — and kept out
+        of step 13 as not reading the warehouse, as `KS_USER_STORE` is — left
+        off holding with that store's reads going to DuckDB. Mutation: spell
+        the store key out."""
+        from core import duckdb_table_fates
+
+        monkeypatch.setattr(duckdb_table_fates, "STORE_SWITCHES",
+                            (*duckdb_table_fates.STORE_SWITCHES, "KS_NEW_STORE"))
+        assert "new_store" in duckdb_off.keys()
+        unmet = duckdb_off.evaluate(MET_ENV, met())
+        assert keys_of(unmet) == ["new_store"]
+        assert "KS_NEW_STORE is 'duckdb'" in unmet[0].detail
+        assert duckdb_off.evaluate({**MET_ENV, "KS_NEW_STORE": "postgres"}, met()) == []
+
+    def test_a_store_switch_step_13_holds_is_not_a_key_of_its_own(self, monkeypatch):
+        """`KS_SMS_STORE` is one of step 13's readers: `warehouse_postgres`
+        already requires it, so it is not named twice."""
+        from core import duckdb_table_fates
+
+        assert "KS_SMS_STORE" in duckdb_table_fates.STORE_SWITCHES
+        assert "sms_store" not in duckdb_off.keys()
+        assert duckdb_off.evaluate({**MET_ENV, "KS_SMS_STORE": "duckdb"}, met()) == []
+
 
 # ─── One key at a time ───────────────────────────────────────────────────────
 
@@ -120,6 +183,35 @@ class TestEachKeyHoldsOffAlone:
             writes_postgres=False, warehouse_mode="duckdb", warehouse_unmet=("pg_revision",)))
         assert keys_of(unmet) == ["warehouse_postgres"]
         assert "pg_revision" in unmet[0].detail
+
+    @pytest.mark.parametrize("value, unmet13", [
+        ("postgres", ("reader:KS_READ_GOLD",)),
+        ("duckdb", ()),
+        ("postgress", ()),
+    ])
+    def test_a_refused_way_back_is_not_step_13_in_force(self, value, unmet13):
+        """Review of PR-2: once chain 3 or 5 is latched, a start that would
+        run as duckdb — a precondition unmet, the variable unset or a typo —
+        has its way back refused and stays `postgres`. `writes_postgres()` is
+        then True with step 13's preconditions not met, and the key used to
+        pass: off held with a reader, the SMS store or the fallback routed to
+        DuckDB, a refusal on every request. Mutation: judge
+        `writes_postgres` alone."""
+        unmet = duckdb_off.evaluate(MET_ENV, met(
+            warehouse_value=value, warehouse_unmet=unmet13,
+            way_back_refused=("pg_managers_write", "pg_orders_write")))
+        assert keys_of(unmet) == ["warehouse_postgres"]
+        detail = unmet[0].detail
+        assert "way back is refused" in detail and "pg_orders_write" in detail
+        assert f"{wc.ENV}={value!r}" in detail
+        for key in unmet13:
+            assert key in detail
+
+    def test_postgres_with_a_precondition_unmet_is_not_in_force(self):
+        """Belt and braces: whatever the way back did, an unmet precondition
+        is step 13 not in force."""
+        assert keys_of(duckdb_off.evaluate(MET_ENV, met(
+            warehouse_unmet=("pg_derive_own",)))) == ["warehouse_postgres"]
 
     @pytest.mark.parametrize("key", CHAIN_KEYS)
     def test_each_chain(self, key):
@@ -163,17 +255,65 @@ class TestEachKeyHoldsOffAlone:
         (NOW - timedelta(hours=2), NOW - timedelta(hours=1), False),
         (NOW, NOW, False),
         (NOW, NOW - timedelta(seconds=1), True),
-        (NOW, None, True),
         # Naive instants read as UTC, as asyncpg hands `timestamp` back.
         (NOW.replace(tzinfo=None), (NOW - timedelta(hours=1)).replace(tzinfo=None), True),
     ])
     def test_sync_metadata_copied(self, copied, latched, ok):
-        unmet = duckdb_off.evaluate(MET_ENV, met(copied_at=copied, latched_at=latched))
+        unmet = duckdb_off.evaluate(MET_ENV, met(copied_at=copied, owners=owners_at(latched)))
         assert keys_of(unmet) == ([] if ok else ["sync_metadata_copied"])
+
+    def test_a_chain_that_keeps_nothing_there_is_not_judged_by_it(self):
+        """Review of PR-2: chain 8, flagged and with no expense typed yet, is
+        `postgres` and unlatched at the start of the week; its first write
+        under off claims an owner row stamped then, and nothing can move the
+        copy under off. Every owner row used to count, so the next start — a
+        deploy mid-week — was held back here, opened the file and lost the
+        week. A chain whose latch froze no value in DuckDB's `sync_metadata`
+        is not what this key is about. Mutation: take every owner row."""
+        assert unkeyed_chains(), "every chain keeps a key there: nothing to test"
+        owners = owners_at(NOW - timedelta(hours=1))
+        for chain in unkeyed_chains():
+            owners.update({t: NOW + timedelta(days=2) for t in chain.CHAIN_TABLES})
+        assert duckdb_off.evaluate(MET_ENV, met(owners=owners)) == []
+        for chain in unkeyed_chains():
+            for table in chain.CHAIN_TABLES:
+                owners.pop(table)
+        assert duckdb_off.evaluate(MET_ENV, met(owners=owners)) == []
+
+    @pytest.mark.parametrize("chain", keyed_chains(), ids=chain_name)
+    def test_a_keyed_chain_with_no_owner_row_holds(self, chain):
+        """The other half of the same week: a chain that keeps a value there
+        and has not latched would latch under off — after a copy off cannot
+        move — and hold the next start back mid-week. So it holds the first
+        one, while waiting costs nothing. Mutation: skip chains with no
+        owner row."""
+        owners = owners_at(NOW - timedelta(hours=1))
+        for table in chain.CHAIN_TABLES:
+            owners.pop(table)
+        unmet = duckdb_off.evaluate(MET_ENV, met(owners=owners))
+        assert keys_of(unmet) == ["sync_metadata_copied"]
+        assert chain_name(chain) in unmet[0].detail and "no owner row" in unmet[0].detail
+
+    @pytest.mark.parametrize("chain", keyed_chains(), ids=chain_name)
+    def test_a_keyed_chain_latched_after_the_copy_holds(self, chain):
+        owners = owners_at(NOW - timedelta(hours=1))
+        owners.update({t: NOW + timedelta(minutes=1) for t in chain.CHAIN_TABLES})
+        unmet = duckdb_off.evaluate(MET_ENV, met(owners=owners))
+        assert keys_of(unmet) == ["sync_metadata_copied"]
+        assert chain_name(chain) in unmet[0].detail
+
+    def test_a_chain_s_first_latch_is_what_froze_its_keys(self):
+        """Its values stopped moving in DuckDB when its writes moved, at or
+        before its first claim; a table the chain claims later says nothing
+        about them."""
+        chain = next(c for c in keyed_chains() if len(c.CHAIN_TABLES) > 1)
+        owners = owners_at(NOW - timedelta(hours=1))
+        owners[chain.CHAIN_TABLES[-1]] = NOW + timedelta(hours=1)
+        assert duckdb_off.evaluate(MET_ENV, met(owners=owners)) == []
 
     def test_a_postgres_read_that_failed_holds_both_postgres_keys(self):
         unmet = duckdb_off.evaluate(MET_ENV, met(
-            pg_error="ConnectionRefusedError", writer=None, copied_at=None, latched_at=None))
+            pg_error="ConnectionRefusedError", writer=None, copied_at=None, owners={}))
         assert keys_of(unmet) == ["writer_record", "sync_metadata_copied"]
         assert all("ConnectionRefusedError" in u.detail for u in unmet)
 
@@ -309,6 +449,18 @@ class TestTheStart:
         world.assert_not_awaited()
         assert duckdb_switch.held_back() == ("warehouse_postgres",)
 
+    def test_a_refused_way_back_asks_postgres_nothing(self, world, monkeypatch):
+        """A refused way back stays `postgres` with step 13 not in force: off
+        holds on `warehouse_postgres` alone and does not ask Postgres — step
+        13 has paid the start's bound already, and a Postgres it could not
+        reach would otherwise be asked again and named twice. Mutation: ask
+        whenever `writes_postgres()`."""
+        monkeypatch.setattr(wc, "_unmet", (wc.Unmet("pg_revision", "no answer"),))
+        monkeypatch.setattr(wc, "_way_back_refused", ("pg_orders_write",))
+        assert duckdb_off.settle() == "on"
+        world.assert_not_awaited()
+        assert duckdb_switch.held_back() == ("warehouse_postgres",)
+
     def test_a_failed_read_is_asked_again_and_an_answer_is_not(self, world):
         world.side_effect = [OSError("the database system is starting up"), frozen_met()]
         assert duckdb_off.settle() == "off"
@@ -440,26 +592,111 @@ class TestWhoReachesIt:
                     assert not n.keywords, path
 
 
+class TestInTheWeeksTargetState:
+    """The sweep's target state — every chain latched, step 13 met — through
+    the real `configure_modes(web=True)`, with one of step 13's
+    preconditions broken. Chains 3 and 5 latched refuse step 13's way back,
+    so the start stays `postgres` with the precondition unmet; off must not
+    take that for step 13 in force (review of PR-2)."""
+
+    @pytest.mark.parametrize("name, value", [
+        ("KS_READ_GOLD", "duckdb"),      # /api/summary and /api/revenue/trend
+        ("KS_READ_FALLBACK", "duckdb"),  # every Postgres failure served by DuckDB
+        ("KS_PG_DERIVE", "follow"),      # nothing derives Silver and Gold under off
+        ("KS_SMS_STORE", "duckdb"),      # the roster, the sends, the delivery reports
+    ])
+    def test_a_precondition_step_13_does_not_meet_holds_off(
+        self, name, value, monkeypatch, tmp_path, fresh_read_fallback,  # noqa: F811
+    ):
+        from tests.unit.test_duckdb_off_sweep import apply_target_state
+
+        apply_target_state(monkeypatch, tmp_path, live=False, breaking={name: value})
+        assert wc.way_back_refused() and wc.writes_postgres(), "not the refused way back"
+        assert wc.preconditions_unmet(), "the probe did not break step 13"
+        assert duckdb_switch.held_back() == ("warehouse_postgres",)
+        assert duckdb_switch.mode() == "on" and not duckdb_switch.is_off()
+        duckdb_off._frozen_facts_on_its_own_connection.assert_not_awaited()
+
+
 # ─── What off stands down, and its pages ─────────────────────────────────────
 
-def _module_functions(path: str) -> dict:
-    tree = ast.parse((REPO / path).read_text(encoding="utf-8"))
-    return {n.name: n for n in ast.walk(tree)
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+# The scan's wrappers that stand a check down under a predicate of their own
+# — a chain's (`landing`) or step 13's (`guarded`). A check under neither runs
+# whatever any chain or step 13 says, and stands down only under off.
+_OWN_STAND_DOWNS = frozenset({"landing", "guarded"})
+
+
+def _pk_checks_off_stands_down(source: str) -> frozenset:
+    """`pk_uniqueness_<table>` for every `_pk_uniqueness_check` in the
+    integrity scan of `source` that no wrapper in `_OWN_STAND_DOWNS` encloses
+    — bare, as on this branch, or handed as a lambda to `bare(name, ...)`, as
+    stage 5's PR-7 runs them."""
+    tree = ast.parse(source)
+    [scan] = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "check_internal_integrity"]
+    parent = {id(child): node for node in ast.walk(scan)
+              for child in ast.iter_child_nodes(node)}
+    found = set()
+    for node in ast.walk(scan):
+        if not (isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "_pk_uniqueness_check"):
+            continue
+        up, own = parent.get(id(node)), False
+        while up is not None and up is not scan:
+            if isinstance(up, ast.Call) and getattr(up.func, "id", None) in _OWN_STAND_DOWNS:
+                own = True
+                break
+            up = parent.get(id(up))
+        if not own:
+            found.add(f"pk_uniqueness_{node.args[1].value}")
+    return frozenset(found)
+
+
+def _as_pr7_runs_them(source: str) -> str:
+    """The scan as PR-7 (`stage5-pr7-jobs`) writes it: each bare
+    `_pk_uniqueness_check` handed to `bare(name, lambda: ...)`. Unchanged
+    where they are already so."""
+    import re
+
+    return re.sub(
+        r'issues \+= (_pk_uniqueness_check\(conn, "(\w+)", "id"\))',
+        lambda m: f'issues += bare("pk_uniqueness_{m.group(2)}", lambda: {m.group(1)})',
+        source)
 
 
 class TestWhatIsRetired:
-    def test_the_pk_tables_are_the_scan_s_bare_checks(self):
-        """`_pk_uniqueness_check` calls in the integrity scan that no chain's
-        stand-down wraps (`landing(...)`): read out of the scan. Mutation: add
-        a fourth bare call, or wrap one."""
-        scan = _module_functions("core/data_quality.py")["check_internal_integrity"]
-        wrapped = {id(n) for lam in ast.walk(scan) if isinstance(lam, ast.Lambda)
-                   for n in ast.walk(lam)}
-        bare = [n for n in ast.walk(scan) if isinstance(n, ast.Call)
-                and getattr(n.func, "id", None) == "_pk_uniqueness_check"
-                and id(n) not in wrapped]
-        assert tuple(n.args[1].value for n in bare) == duckdb_off.PK_TABLES
+    @pytest.mark.parametrize("shape", ["this branch", "PR-7"])
+    def test_the_pk_conditions_are_the_scan_s_checks_no_stand_down_takes(self, shape):
+        """One list, `data_quality.DUCKDB_OFF_STOOD_DOWN`, held to the scan:
+        the `_pk_uniqueness_check` calls no chain's or step 13's stand-down
+        wraps. Review of PR-2: the walk read only bare calls, and PR-7 hands
+        the same three to `bare(...)` — combined, it found none and failed;
+        PR-7 also names the set `DUCKDB_OFF_STOOD_DOWN`, which made two lists
+        for one set. Mutation: add a fourth unwrapped call, or wrap one in
+        `landing(...)`."""
+        from core.data_quality import DUCKDB_OFF_STOOD_DOWN
+
+        source = (REPO / "core/data_quality.py").read_text(encoding="utf-8")
+        if shape == "PR-7":
+            source = _as_pr7_runs_them(source)
+            assert "bare(\"pk_uniqueness_products\"" in source
+        assert _pk_checks_off_stands_down(source) == DUCKDB_OFF_STOOD_DOWN
+        assert DUCKDB_OFF_STOOD_DOWN <= duckdb_off.retired_conditions()
+
+    def test_the_walk_reads_every_shape_and_skips_what_others_stand_down(self):
+        """Both shapes count; a check a chain (`landing`) or step 13
+        (`guarded`) stands down is theirs, not off's."""
+        source = (
+            "def check_internal_integrity(conn):\n"
+            "    issues += landing('pk_uniqueness_orders',\n"
+            "                      lambda: _pk_uniqueness_check(conn, 'orders', 'id'))\n"
+            "    issues += guarded('silver_arc',\n"
+            "                      lambda: _pk_uniqueness_check(conn, 'silver_orders', 'id'))\n"
+            "    issues += bare('pk_uniqueness_products',\n"
+            "                   lambda: _pk_uniqueness_check(conn, 'products', 'id'))\n"
+            "    issues += _pk_uniqueness_check(conn, 'buyers', 'id')\n")
+        assert _pk_checks_off_stands_down(source) == {
+            "pk_uniqueness_products", "pk_uniqueness_buyers"}
 
     def test_the_shadow_conditions_are_compare_shadow_s(self):
         from tests.unit.test_warehouse_writer import _check_names_reached
