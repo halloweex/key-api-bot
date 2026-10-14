@@ -24,12 +24,12 @@ decoupling (`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`). Since its PR-1,
 `get_store()` under `off` hands out the store unconnected, so a caller that
 only hosts a Postgres router on it works, and the tripwire stands at
 `connection()`, where the file is reached. What still reaches it is the
-stage 5 sweep's `KNOWN_RESIDUAL` (`tests/unit/test_duckdb_off_sweep.py`) —
-order intake among it: the order step inherits its watermark from DuckDB
-until Postgres holds one, so every sync tick's order step is refused. Web's
-startup contains a refusal rather than dying of it, so `/api/health` answers
-and the page can be seen. Never set it in production before that list is
-empty.
+stage 5 sweep's `KNOWN_RESIDUAL` (`tests/unit/test_duckdb_off_sweep.py`);
+what used to be inherited from DuckDB's `sync_metadata` — the order step's
+window among it — is read from its Postgres copy since PR-5
+(`core/pg_frozen_metadata.py`). Web's startup contains a refusal rather
+than dying of it, so `/api/health` answers and the page can be seen. Never
+set it in production before that list is empty.
 
 COUNTED WHERE IT IS RAISED
 
@@ -333,6 +333,31 @@ def open_file(path: Union[str, Path], *, read_only: bool = False,
             replayed / 1e6, time.monotonic() - started, path,
         )
     return con
+
+
+class RefusedConnection:
+    """A DuckDB connection in name only, for code that takes one and must not
+    reach the file under `off`: every statement is refused through `guard()`
+    — counted, logged, raised — and, this module being plumbing to `_site()`,
+    the refusal names the function that issued the statement, not this class.
+
+    The integrity scan is handed one under `off` (stage 5, PR-7): every check
+    over the file stands down there, and one that does not is caught in the
+    act rather than failing on a None in a way the switch would never count.
+    Under `on` nothing hands one out; a statement then raises all the same,
+    since there is no file behind it."""
+
+    def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+        guard()
+        raise RuntimeError("RefusedConnection: there is no DuckDB connection here")
+
+    sql = execute
+
+
+@contextlib.asynccontextmanager
+async def refused_connection():
+    """`async with` a `RefusedConnection` — where `store.connection()` stood."""
+    yield RefusedConnection()
 
 
 def opened() -> Dict[str, Dict[str, object]]:

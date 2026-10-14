@@ -388,41 +388,53 @@ class BackgroundScheduler:
 
         Best-effort throughout. A watchdog that can stop the scheduler from
         starting is worse than no watchdog.
+
+        Under `KS_DUCKDB=off` Postgres is asked first and alone — the layer
+        ages out of the journal's Postgres store, today's snapshot out of
+        `app.inventory_sku_history` — and the DuckDB block, read under `on`
+        and then replaced by those same two answers once their chains moved,
+        is not opened (stage 5, PR-7).
         """
         from datetime import datetime, timedelta, timezone
 
         from apscheduler.triggers.date import DateTrigger
 
+        from core import duckdb_switch
+
         try:
-            from core.data_quality import fetch_last_success_ages
-            from core.duckdb_store import get_store
-            from core.pg_inventory_write import writes_postgres
-
-            store = await get_store()
-            async with store.connection() as conn:
-                ages = fetch_last_success_ages(conn)
-                # Nested: a missing inventory_sku_history must not disable the
-                # data-quality catch-ups above it.
-                try:
-                    inventory_today = conn.execute(
-                        "SELECT 1 FROM inventory_sku_history "
-                        "WHERE date = CURRENT_DATE LIMIT 1"
-                    ).fetchone()
-                except Exception as exc:
-                    logger.debug("inventory catch-up probe skipped: %s", exc)
-                    inventory_today = ()  # treat as present → queue nothing
-
-            # The probe has to ask whichever store the chain actually writes.
-            # Left on DuckDB after the writer moves, it finds no snapshot for
-            # today ever again and queues a catch-up on every boot — for a
-            # table that is being written correctly somewhere else.
-            if writes_postgres():
+            if duckdb_switch.is_off():
                 inventory_today = await _inventory_snapshot_taken_today_pg()
-            # The same rule for the quality journal (chain 9): the ages come
-            # from the store that writes it. DuckDB's, read above inside the
-            # connection the probe needed anyway, are replaced — never merged.
-            if dq_journal.reads_postgres():
                 ages = await dq_journal.last_success_ages_pg()
+            else:
+                from core.data_quality import fetch_last_success_ages
+                from core.duckdb_store import get_store
+                from core.pg_inventory_write import writes_postgres
+
+                store = await get_store()
+                async with store.connection() as conn:
+                    ages = fetch_last_success_ages(conn)
+                    # Nested: a missing inventory_sku_history must not disable the
+                    # data-quality catch-ups above it.
+                    try:
+                        inventory_today = conn.execute(
+                            "SELECT 1 FROM inventory_sku_history "
+                            "WHERE date = CURRENT_DATE LIMIT 1"
+                        ).fetchone()
+                    except Exception as exc:
+                        logger.debug("inventory catch-up probe skipped: %s", exc)
+                        inventory_today = ()  # treat as present → queue nothing
+
+                # The probe has to ask whichever store the chain actually writes.
+                # Left on DuckDB after the writer moves, it finds no snapshot for
+                # today ever again and queues a catch-up on every boot — for a
+                # table that is being written correctly somewhere else.
+                if writes_postgres():
+                    inventory_today = await _inventory_snapshot_taken_today_pg()
+                # The same rule for the quality journal (chain 9): the ages come
+                # from the store that writes it. DuckDB's, read above inside the
+                # connection the probe needed anyway, are replaced — never merged.
+                if dq_journal.reads_postgres():
+                    ages = await dq_journal.last_success_ages_pg()
         except Exception as e:
             logger.warning(f"Catch-up check skipped: {e}")
             return
@@ -637,19 +649,32 @@ class BackgroundScheduler:
             coalesce=True,
         )
 
+        # Two jobs whose subject is the DuckDB file itself, and so not
+        # registered under KS_DUCKDB=off (stage 5, PR-7): a CHECKPOINT of a
+        # file nothing writes, and a daily copy of a file frozen at the start
+        # of the week — the last backup and the Ark are taken before it.
+        from core import duckdb_switch
+
+        duckdb_off = duckdb_switch.is_off()
+        if duckdb_off:
+            logger.info(
+                "duckdb_checkpoint and db_backup not registered: KS_DUCKDB=off "
+                "— this process does not open the DuckDB file")
+
         # Job: DuckDB WAL checkpoint (hourly)
         # Silver full-rebuild every 2 min + Gold incremental rewrites push WAL
         # past 600MB between 6h checkpoints. Hourly keeps MVCC tombstones
         # reaped and RAM pressure lower.
-        self._add_job(
-            job_id="duckdb_checkpoint",
-            name="DuckDB Checkpoint",
-            description="Flush WAL to main database file",
-            func=self._run_duckdb_checkpoint,
-            trigger=IntervalTrigger(hours=1),
-            max_instances=1,
-            coalesce=True,
-        )
+        if not duckdb_off:
+            self._add_job(
+                job_id="duckdb_checkpoint",
+                name="DuckDB Checkpoint",
+                description="Flush WAL to main database file",
+                func=self._run_duckdb_checkpoint,
+                trigger=IntervalTrigger(hours=1),
+                max_instances=1,
+                coalesce=True,
+            )
 
         # Job: Warehouse refresh (every 2 minutes, picks up dirty flag)
         # Decoupled from sync — sync writes Bronze + sets dirty flag,
@@ -690,15 +715,16 @@ class BackgroundScheduler:
         # recoverable from off-site, but at up to a week's resolution. If that
         # becomes uncomfortable, the fix is a more frequent off-site push, not
         # more copies on the same disk.
-        self._add_job(
-            job_id="db_backup",
-            name="DB Backup",
-            description="Consistent on-disk backup of analytics.duckdb (retains 2)",
-            func=self._run_backup,
-            trigger=CronTrigger(hour=4, minute=30),
-            max_instances=1,
-            coalesce=True,
-        )
+        if not duckdb_off:
+            self._add_job(
+                job_id="db_backup",
+                name="DB Backup",
+                description="Consistent on-disk backup of analytics.duckdb (retains 2)",
+                func=self._run_backup,
+                trigger=CronTrigger(hour=4, minute=30),
+                max_instances=1,
+                coalesce=True,
+            )
 
         # Job: Data Quality — Layer 1 integrity (every 6h)
         # Cheap DB-only scans (PK uniqueness, FK orphans, value domains).
@@ -2098,6 +2124,24 @@ class BackgroundScheduler:
                     "chain watermarks unreadable, freshness check will report "
                     "the moved syncs unwatched: %s", e)
 
+            # Under KS_DUCKDB=off, DuckDB's own `sync_metadata` rows — the
+            # inherited stamps and the bootstrap gate — are read as Postgres
+            # last copied them, for the same reason (stage 5, PR-5). A read
+            # that fails leaves them None, and the check names what it then
+            # cannot judge rather than reading the file.
+            frozen_sync_rows = None
+            from core import duckdb_switch
+
+            duckdb_off = duckdb_switch.is_off()
+            if duckdb_off:
+                try:
+                    from core.pg_frozen_metadata import frozen_sync_rows as read_copy
+                    frozen_sync_rows = await read_copy()
+                except Exception as e:
+                    logger.error(
+                        "app.sync_metadata unreadable, freshness check will "
+                        "report what it rests on unwatched: %s", e)
+
             # The DuckDB checks over Silver, Gold and UTM that do not run while
             # Postgres alone derives them (DN-28). Read once, so the scan and
             # `duckdb_looked` below agree on one answer: a check the scan
@@ -2106,13 +2150,26 @@ class BackgroundScheduler:
             from core.warehouse_cutover import stood_down_duckdb_checks
 
             stood_down = stood_down_duckdb_checks()
+            # Under KS_DUCKDB=off the DuckDB half stands down rather than
+            # fails (stage 5, PR-7): the three checks with no twin join the
+            # stood-down set (OD-S5-5), the freshness check and the snapshot
+            # continuity judge what Postgres holds, and the scan is handed a
+            # connection that refuses — so nothing opens the file, the run
+            # carries no `error_message`, and a check that still reaches for
+            # it is counted where it reached. The twins stand in alone.
+            if duckdb_off:
+                from core.data_quality import DUCKDB_OFF_STOOD_DOWN
+
+                stood_down = stood_down | DUCKDB_OFF_STOOD_DOWN
             raised_checks: list = []
             duckdb_measured: Dict[str, Dict[str, int]] = {}
             try:
-                async with store.connection() as conn:
+                async with (duckdb_switch.refused_connection() if duckdb_off
+                            else store.connection()) as conn:
                     issues = check_internal_integrity(
                         conn, inventory_calendar=inventory_calendar,
                         chain_watermarks=chain_watermarks,
+                        frozen_sync_rows=frozen_sync_rows,
                         raised_out=raised_checks, pairing_out=duckdb_measured,
                         stood_down=stood_down)
             except Exception as e:
@@ -2146,7 +2203,9 @@ class BackgroundScheduler:
                 # every guard less the ones that raised and the ones stood down.
                 # A stood-down guard counted as looked would have the line-item
                 # twins compare against a count nobody took, and never file.
-                duckdb_looked = (frozenset() if error_message else
+                # Nothing under KS_DUCKDB=off, where the DuckDB half stood
+                # down whole: what the scan judged there it read from Postgres.
+                duckdb_looked = (frozenset() if error_message or duckdb_off else
                                  (frozenset(GUARDED_CHECK_CONDITIONS)
                                   | pg_warehouse_dq.DUCKDB_BARE_CHECKS)
                                  - frozenset(raised_checks) - stood_down)
@@ -2399,6 +2458,17 @@ class BackgroundScheduler:
                 # in separate blocks: the store's lock is not held across the
                 # network.
                 async def _landing():
+                    # Under KS_DUCKDB=off the DuckDB side is read only for
+                    # what survives the stand-down — under chains 5 and 6,
+                    # nothing (stage 5, PR-7). Under on, read first as always.
+                    from core import duckdb_switch
+
+                    if duckdb_switch.is_off():
+                        async def read_duckdb(specs):
+                            async with store.connection() as conn:
+                                return read_duckdb_side(conn, specs)
+
+                        return await reconcile_mirror(None, read_duckdb=read_duckdb)
                     async with store.connection() as conn:
                         dk_side = read_duckdb_side(conn)
                     return await reconcile_mirror(dk_side)

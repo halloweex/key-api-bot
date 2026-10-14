@@ -291,6 +291,12 @@ async def digest_inputs(
     the beat as of the flip, which the shadow keeps current anyway. Without
     the inherit the first digest after a flip would restate every standing
     finding as new.
+
+    Under `KS_DUCKDB=off` the inherited beat is DuckDB's `sync_metadata` as
+    Postgres last copied it (`app.sync_metadata`, `core.pg_frozen_metadata`),
+    read on the same connection: DuckDB's value as of the last hourly copy,
+    and the file is not opened (stage 5, PR-5). It is asked only while
+    Postgres has never recorded a digest under the chain.
     """
     chain = _chain()
     if not chain.reads_postgres():
@@ -301,9 +307,16 @@ async def digest_inputs(
             sections = await _sections(_DuckReader(conn), layers, now, last_sent_at)
         return last_sent_at, sections
 
+    from core import duckdb_switch
+
+    off = duckdb_switch.is_off()
     async with chain.reading() as conn:
         raw = await chain.digest_marker(conn)
-    if raw is None:
+        if raw is None and off:
+            from core.pg_frozen_metadata import values_on
+
+            raw = (await values_on(conn, (DIGEST_MARKER_KEY,))).get(DIGEST_MARKER_KEY)
+    if raw is None and not off:
         async with store.connection() as conn:
             row = conn.execute(_DK_MARKER_READ, [DIGEST_MARKER_KEY]).fetchone()
         raw = row[0] if row else None

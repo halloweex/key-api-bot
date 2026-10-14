@@ -106,33 +106,11 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     # The warehouse writer's record is DuckDB's `sync_metadata` row (PR-6).
     ("boot:init_and_sync", "core.warehouse_cutover:read_writer"): BOTH,
     ("boot:scheduler_start", "core.warehouse_cutover:read_writer"): BOTH,
-    # A watermark absent from Postgres is inherited from DuckDB, read in a
-    # task of its own by the order step and by the catalogue step (PR-5) —
-    # in the boot's sync tick, and in every tick after it. Live only: refused
-    # Postgres stops each step first. One row per key (`name_the_key`).
-    ("boot:init_and_sync",
-     "core.duckdb_store:get_last_sync_time (task) [last_sync_orders]"): LIVES,
-    ("boot:init_and_sync",
-     "core.duckdb_store:get_last_sync_time (task) [last_sync_products]"): LIVES,
-    ("job:incremental_sync",
-     "core.duckdb_store:get_last_sync_time (task) [last_sync_orders]"): LIVES,
-    ("job:incremental_sync",
-     "core.duckdb_store:get_last_sync_time (task) [last_sync_products]"): LIVES,
-    # The catch-up reads DuckDB's ages before Postgres replaces them (PR-7).
-    ("boot:scheduler_start", "core.scheduler:_schedule_catchup_runs"): BOTH,
     # ── the jobs ──
-    ("job:db_backup", "core.scheduler:_run_backup"): BOTH,                      # PR-7
-    ("job:dq_integrity_check", "core.scheduler:_run_dq_integrity"): BOTH,       # PR-7
-    ("job:dq_mirror_landing", "core.scheduler:_landing"): BOTH,                 # PR-7
     ("job:pg_warehouse_derive", "core.warehouse_cutover:read_writer"): BOTH,    # PR-6
-    # What only DuckDB holds, copied and compared (PR-7). The shadow tables
-    # are no longer among them (PR-4).
-    ("job:dq_mirror_landing", "core.mirror_reconciliation:reconcile_operational"): LIVES,
-    ("job:replicate_operational", "core.pg_operational:replicate_operational"): LIVES,
-    # The digest marker and the reports' adopted weeks (PR-5).
-    ("job:dq_digest", "core.dq_journal:digest_inputs"): LIVES,
-    ("job:traffic_report", "core.report_ledger:already_sent"): LIVES,
-    ("job:weekly_report", "core.report_ledger:already_sent"): LIVES,
+    # Nothing copied or compared out of DuckDB: the shadow chains' tables
+    # stand down under off since PR-4 (`compared_in_shadow()` is empty), and
+    # the history tables beside them since PR-7.
     # ── the GET routes ──
     # None since PR-8: `/api/warehouse/status` reads DuckDB's last refresh
     # out of its Postgres copy, and `/api/summary?source_id=3` — Opencart,
