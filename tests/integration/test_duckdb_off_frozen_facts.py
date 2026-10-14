@@ -280,7 +280,7 @@ class TestTheWeekIsNotLostToALatchUnderOff:
             c for c in WRITE_CHAINS if c is not pg_expenses_write])
         chains = {k: {"mode": "postgres", "latched": True} for k in _chain_names()}
         chains[chain_name(pg_expenses_write)] = {
-            "mode": "postgres", "latched": False, "env": "postgres"}
+            "mode": "postgres", "latched": False, "env": pg_expenses_write.WRITE_ENV}
         assert _start(monkeypatch, chains)[:2] == ("off", ())
 
         # The first typed expense, under off: the owner row is claimed in the
@@ -307,7 +307,8 @@ class TestTheWeekIsNotLostToALatchUnderOff:
             c for c in WRITE_CHAINS if c is not pg_expense_types_write])
         chains = {k: {"mode": "postgres", "latched": True} for k in _chain_names()}
         chains[chain_name(pg_expense_types_write)] = {
-            "mode": "postgres", "latched": False, "env": "postgres"}
+            "mode": "postgres", "latched": False,
+            "env": pg_expense_types_write.WRITE_ENV}
         mode, held, unmet = _start(monkeypatch, chains)
         assert (mode, held) == ("on", ("sync_metadata_copied",))
         assert chain_name(pg_expense_types_write) in unmet[0].detail

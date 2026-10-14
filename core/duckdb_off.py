@@ -362,8 +362,15 @@ def evaluate(env: Mapping[str, str], facts: Facts) -> List[Unmet]:
         state = facts.chains.get(name) or {}
         mode = state.get("mode")
         why = state.get("unmet_precondition") or state.get("error")
+        # The flag's value comes from `env`: `chain_modes()` publishes `env`
+        # as the variable's *name* (`write_chains._chain_state`), and a held
+        # chain's line — the one the canary's lever sends the operator to —
+        # must say what the flag is set to (review of PR-2).
+        flag = env.get(chain.WRITE_ENV)
         need(chain_key(chain), mode == "postgres",
-             f"{chain.WRITE_ENV}={state.get('env')!r} writes {mode or 'nowhere it can say'}"
+             (f"{chain.WRITE_ENV}={flag!r}" if flag is not None
+              else f"{chain.WRITE_ENV} is unset")
+             + f", and the chain writes {mode or 'nowhere it can say'}"
              + (f" ({why})" if why else "")
              + ": its writers would open the DuckDB file")
 

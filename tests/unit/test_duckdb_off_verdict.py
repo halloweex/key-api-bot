@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+import os
 import time
 import types
 from datetime import datetime, timedelta, timezone
@@ -36,7 +37,10 @@ MET_ENV = {"KS_USER_STORE": "postgres"}
 
 
 def met_chains() -> dict:
-    return {chain_name(c): {"env": "postgres", "mode": "postgres", "error": None,
+    """`chain_modes()` with every chain on Postgres — its shape, `env`
+    included: the variable's *name*, as `write_chains._chain_state` publishes
+    it, never its value (review of PR-2; a test holds the two together)."""
+    return {chain_name(c): {"env": c.WRITE_ENV, "mode": "postgres", "error": None,
                             "latched": True, "mismatch": False,
                             "unmet_precondition": None}
             for c in WRITE_CHAINS}
@@ -223,11 +227,58 @@ class TestEachKeyHoldsOffAlone:
         assert "a reason" in unmet[0].detail
 
     def test_a_chain_web_cannot_read_is_unmet_not_skipped(self):
+        chain = WRITE_CHAINS[0]
         chains = met_chains()
-        name = chain_name(WRITE_CHAINS[0])
-        chains[name] = {"env": "postgress", "mode": None, "error": "not understood"}
-        assert keys_of(duckdb_off.evaluate(MET_ENV, met(chains=chains))) == [
-            f"chain:{name}"]
+        chains[chain_name(chain)] = {"env": chain.WRITE_ENV, "mode": None,
+                                     "error": "not understood"}
+        unmet = duckdb_off.evaluate({**MET_ENV, chain.WRITE_ENV: "postgress"},
+                                    met(chains=chains))
+        assert keys_of(unmet) == [f"chain:{chain_name(chain)}"]
+        assert unmet[0].detail.startswith(
+            f"{chain.WRITE_ENV}='postgress', and the chain writes nowhere it can say "
+            "(not understood)"), unmet[0].detail
+
+    def test_the_fixture_is_chain_modes_shape(self):
+        """`met_chains()` stands in for `chain_modes()` everywhere above, so it
+        must be its shape: the same chains, the same fields, and `env` the
+        variable's name. Review of PR-2: the fixture modelled `env` as the
+        value, so a detail that printed it as one passed here while web's log
+        read `KS_WRITE_ORDERS='KS_WRITE_ORDERS'`. Mutation: put
+        `"env": "postgres"` back in `met_chains`."""
+        from core.write_chains import chain_modes
+
+        real = chain_modes()
+        assert set(met_chains()) == set(real)
+        for name, state in met_chains().items():
+            assert set(state) <= set(real[name]), name
+            assert state["env"] == real[name]["env"], name
+
+    def test_a_held_chain_names_its_flags_value_over_the_real_chain_modes(
+        self, monkeypatch,
+    ):
+        """Review of PR-2, reproduced: `KS_WRITE_ORDERS=postgres` with a
+        precondition of chain 3 unmet holds the chain on DuckDB, and its line
+        in web's log — where the canary's lever for `duckdb_off_held_back`
+        sends the operator — printed `KS_WRITE_ORDERS='KS_WRITE_ORDERS'`,
+        hiding that the flag is postgres. Read through the real
+        `chain_modes()`, not a fixture. Mutation: print `state.get('env')`
+        in `evaluate` again."""
+        from core import pg_expenses_write, pg_orders_write
+        from core.write_chains import chain_modes
+
+        monkeypatch.setenv(pg_orders_write.WRITE_ENV, "postgres")
+        monkeypatch.setattr(pg_orders_write, "unmet_precondition", lambda: "a reason")
+        monkeypatch.delenv(pg_expenses_write.WRITE_ENV, raising=False)
+        chains = chain_modes()
+        assert chains["pg_orders_write"]["mode"] == "duckdb"
+        details = {u.key: u.detail
+                   for u in duckdb_off.evaluate(os.environ, met(chains=chains))}
+        held = details["chain:pg_orders_write"]
+        assert held.startswith(
+            "KS_WRITE_ORDERS='postgres', and the chain writes duckdb (a reason)"), held
+        assert "'KS_WRITE_ORDERS'" not in held
+        assert details["chain:pg_expenses_write"].startswith(
+            "KS_WRITE_EXPENSES is unset, and the chain writes duckdb"), details
 
     def test_the_registry_unreadable_holds_every_chain(self):
         unmet = duckdb_off.evaluate(MET_ENV, met(chains=None, chains_error="KeyError"))
