@@ -619,7 +619,14 @@ class DuckDBStore(
         `close()` has closed (`StoreClosedError`) — decided under the lock,
         so a caller that was queued behind `close()` cannot slip in after it.
         A call with the default reopens a closed store on purpose.
+
+        Under `KS_DUCKDB=off` the switch refuses here, as the first act,
+        before anything touches the disk: `open_file` below refuses as well,
+        but only after this method has created `data/` and `duckdb_tmp/`, so
+        a refused connect used to leave two directories behind. Under `on`
+        `guard()` does nothing.
         """
+        duckdb_switch.guard()
         DB_DIR.mkdir(parents=True, exist_ok=True)
 
         async with self._lock:
@@ -2993,11 +3000,19 @@ class DuckDBStore(
         that was in no backup at all look covered. It rides in the off-site
         bundle since 2026-08-20 (deploy/offsite_parquet.sh); this copy still
         does not include it, because this is a copy of the analytics file.
+
+        Under `KS_DUCKDB=off` the switch refuses here, as the first act, for
+        `connect()`'s reason: everything below up to `connection()` touches
+        the disk beside the file — `backups/` made, a stale temp copy
+        deleted, the file stat'ed — and a refusal caught by the `except`
+        further down was a daily "DB backup FAILED" alert on top of the
+        switch's own page. Under `on` `guard()` does nothing.
         """
         import os
         import shutil
         import time
 
+        duckdb_switch.guard()
         src = Path(self.db_path)
         dest = Path(dest_dir) if dest_dir else src.parent / "backups"
         dest.mkdir(parents=True, exist_ok=True)
