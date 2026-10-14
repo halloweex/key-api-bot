@@ -4272,7 +4272,11 @@ and never written (PR-6, OD-S5-2 (a)); a door that re-parses every UTM
 verdict in Postgres alone notes it in `data/warehouse-utm-reparsed-at`
 instead, and the first start back under `on` merges that into DuckDB's record,
 so a later way back from step 13 still re-parses DuckDB's verdicts — the one
-thing `on` does differently, and only when the marker is there. Otherwise,
+thing `on` does differently, and only when the marker is there. A marker its
+removal left behind is found spent by the next start — its note already in
+the record, or the record `duckdb` since after it, the way back it fed done —
+and is only removed again: merging it once more used to start a second full
+DuckDB rebuild on every restart. Otherwise,
 under `on` nothing changed. **Web still does not run clean under `off`**: what
 the sweep in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file
 is exactly its `KNOWN_RESIDUAL` — the scheduler's catch-up, the DuckDB half of the integrity scan and of the

@@ -1081,22 +1081,38 @@ def _with_marker(record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return {**record, UTM_REPARSED: _later(record.get(UTM_REPARSED), stamp)}
 
 
-async def _merge_utm_marker(store, record: Optional[Dict[str, Any]]):
-    """Under `on`: a marker left by a period under `off` goes into DuckDB's
-    record, and is removed once the record holds it. No marker, no write —
-    `record` back as it came. The record it writes is the one
-    `note_utm_reparsed_in_postgres` would have written then: `postgres`, so
-    the way back owes the re-parse, and unresolved when there was none to
-    keep. A marker the removal could not take is merged again by the next
-    start, which `_later` makes harmless."""
-    stamp = utm_marker_stamp()
-    if stamp is None:
-        return record
-    if record is None or record.get("writer") != POSTGRES:
-        record = {"writer": POSTGRES, "since": _now_iso(), "resolved": False}
-    record = {key: value for key, value in record.items() if key != "unreadable"}
-    record[UTM_REPARSED] = _later(record.get(UTM_REPARSED), stamp)
-    await _write_writer(store, record)
+def _marker_spent(record: Optional[Dict[str, Any]], stamp: str) -> bool:
+    """The record already accounts for the marker's note — what a marker the
+    removal could not take meets at the next start. Two records do:
+
+    - `postgres` with a `UTM_REPARSED` at or after the note: merged before;
+    - `duckdb` since at or after the note: the way back that note fed has
+      finished. `note_refresh` writes `duckdb` only after a full DuckDB tick
+      validated and a UTM parse finished, after the way back had emptied
+      `silver_order_utm` for the note — so every verdict was re-parsed after
+      it. Merging it again would rewrite the record as `postgres` unresolved,
+      with a `since` nobody switched at, and take the way back again.
+
+    Anything else — no record, one this build did not write, `duckdb` since
+    before the note (a file older than the week, put back), or a stamp that
+    cannot be read — is not, and the merge takes the cautious reading."""
+    if not isinstance(record, dict) or record.get("unreadable"):
+        return False
+    note = _instant(stamp)
+    if note is None:
+        return False
+    if record.get("writer") == POSTGRES:
+        merged = _instant(record.get(UTM_REPARSED))
+        return merged is not None and merged >= note
+    if record.get("writer") == DUCKDB:
+        since = _instant(record.get("since"))
+        return since is not None and since >= note
+    return False
+
+
+def _remove_utm_marker(why: str) -> None:
+    """Take the marker away, durably. A removal that fails is logged and left
+    to the next start, which finds the note spent (`_marker_spent`)."""
     try:
         from core.chain_latch import _fsync_dir
 
@@ -1105,9 +1121,38 @@ async def _merge_utm_marker(store, record: Optional[Dict[str, Any]]):
     except FileNotFoundError:
         pass
     except OSError as exc:
-        logger.error("the UTM re-parse marker %s is merged into the record but "
-                     "could not be removed (%s); the next start merges it again",
-                     UTM_MARKER, exc)
+        logger.error("the UTM re-parse marker %s %s but could not be removed (%s); "
+                     "the next start finds it spent and tries again",
+                     UTM_MARKER, why, exc)
+
+
+async def _merge_utm_marker(store, record: Optional[Dict[str, Any]]):
+    """Under `on`: a marker left by a period under `off` goes into DuckDB's
+    record, and is removed once the record holds it. No marker, no write —
+    `record` back as it came. The record it writes is the one
+    `note_utm_reparsed_in_postgres` would have written then: `postgres`, so
+    the way back owes the re-parse, and unresolved when there was none to
+    keep. A marker the removal could not take is found again by the next
+    start, whose record already accounts for it (`_marker_spent`): nothing
+    is written and only the removal is tried again."""
+    stamp = utm_marker_stamp()
+    if stamp is None:
+        return record
+    if _marker_spent(record, stamp):
+        logger.warning(
+            "the UTM re-parse marker %s (%s) is already spent — DuckDB's warehouse "
+            "writer record says %r since %s%s — so nothing is merged; removing it",
+            UTM_MARKER, stamp, record.get("writer"), record.get("since"),
+            f", re-parse noted at {record.get(UTM_REPARSED)}"
+            if record.get("writer") == POSTGRES else "")
+        _remove_utm_marker("is spent")
+        return record
+    if record is None or record.get("writer") != POSTGRES:
+        record = {"writer": POSTGRES, "since": _now_iso(), "resolved": False}
+    record = {key: value for key, value in record.items() if key != "unreadable"}
+    record[UTM_REPARSED] = _later(record.get(UTM_REPARSED), stamp)
+    await _write_writer(store, record)
+    _remove_utm_marker("is merged into the record")
     logger.warning(
         "the UTM verdicts were re-parsed in Postgres alone at %s while "
         "KS_DUCKDB was off: noted in DuckDB's warehouse writer record, so a way "
