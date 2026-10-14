@@ -4289,11 +4289,16 @@ stand-down, and the integrity scan is handed a connection that refuses
 (`duckdb_switch.RefusedConnection` — a check that still reaches is counted
 where it reached) with `pk_uniqueness_{products,buyers,categories}` stood down
 and no twin (`DUCKDB_OFF_STOOD_DOWN`, OD-S5-5), so its run is a verdict with no
-`error_message`. The copied tables no chain owns — `app.sync_metadata`,
-`app.warehouse_refreshes`, `app.reconciliation_log` — freeze as history
-(`pg_operational.DUCKDB_HISTORY_TABLES`, OD-S5-4), neither copied nor
-compared; a page their stood-down checks delivered before the switch is the
-`off` verdict's `retired_pages_clear` to wait for (PR-2). The sweep runs in
+`error_message`. Those three stay bare calls skipped by name, never lambdas:
+the set is read out of the scan by the rule the `off` verdict reads its
+retired conditions by, so the two cannot part. The copied tables no chain
+owns — `app.sync_metadata`, `app.warehouse_refreshes`, `app.reconciliation_log`
+— freeze as history (`pg_operational.DUCKDB_HISTORY_TABLES`, OD-S5-4),
+neither copied nor compared, so `meta.mirror_state.last_ok_at` of the
+`sync_metadata` copy stops with them: nothing may judge that stamp against
+an owner row a chain first writes under `off`. A page their stood-down
+checks delivered before the switch is the `off` verdict's
+`retired_pages_clear` to wait for (PR-2). The sweep runs in
 the target state (derived from the registries, every chain latched, step 13
 met). It boots web, starts the scheduler and runs every registered job —
 each as the tick that comes once every window an earlier step armed has

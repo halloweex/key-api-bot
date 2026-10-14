@@ -1649,23 +1649,22 @@ def check_internal_integrity(
         would compare a frozen DuckDB, and DN-23's twins stand in alone."""
         return [] if name in stood_down else run()
 
-    def bare(name: str, run) -> List[IntegrityIssue]:
-        """A check that runs bare, by its finding's name, skipped only when it
-        is stood down — today only under `KS_DUCKDB=off`
-        (`DUCKDB_OFF_STOOD_DOWN`). Under `on` it runs as it always has."""
-        return [] if name in stood_down else run()
-
-    # PK uniqueness on critical tables.
+    # PK uniqueness on critical tables. The three no chain's stand-down takes
+    # stay bare calls, skipped by their finding's name only when stood down —
+    # today only under `KS_DUCKDB=off` (`DUCKDB_OFF_STOOD_DOWN`); under `on`
+    # they run as they always have. Bare, not handed on as lambdas: what off
+    # stands down with no twin is read out of these calls (a test), and so is
+    # what `off`'s verdict waits on before the first run that skips them.
     issues += landing("pk_uniqueness_orders",
                       lambda: _pk_uniqueness_check(conn, "orders", "id"))
     issues += landing("pk_uniqueness_order_products",
                       lambda: _pk_uniqueness_check(conn, "order_products", "id"))
-    issues += bare("pk_uniqueness_products",
-                   lambda: _pk_uniqueness_check(conn, "products", "id"))
-    issues += bare("pk_uniqueness_buyers",
-                   lambda: _pk_uniqueness_check(conn, "buyers", "id"))
-    issues += bare("pk_uniqueness_categories",
-                   lambda: _pk_uniqueness_check(conn, "categories", "id"))
+    if "pk_uniqueness_products" not in stood_down:
+        issues += _pk_uniqueness_check(conn, "products", "id")
+    if "pk_uniqueness_buyers" not in stood_down:
+        issues += _pk_uniqueness_check(conn, "buyers", "id")
+    if "pk_uniqueness_categories" not in stood_down:
+        issues += _pk_uniqueness_check(conn, "categories", "id")
 
     # FK orphans (DuckDB doesn't enforce FK; we validate manually).
     issues += landing("fk_orphan_order_products_order_id", lambda: _fk_orphan_check(
@@ -1812,11 +1811,15 @@ ORDER_LANDING_CHECKS: FrozenSet[str] = frozenset({
 # historic upserts predate the constraint. The finding's name is the check's
 # and the condition's, so this set is also what such a page is held under:
 # a page of theirs delivered before the switch has no check left to clear it
-# (the `off` verdict's `retired_pages_clear`, PR-2). Every other check over
-# DuckDB already stands down in the target state — Silver, Gold and UTM with
-# step 13, the order tables with chain 3 — and the freshness check and the
-# snapshot continuity read Postgres; the integrity job hands the scan a
-# connection that refuses (`duckdb_switch.RefusedConnection`), so a check
+# (the `off` verdict's `retired_pages_clear`, PR-2). It is exactly the scan's
+# bare `_pk_uniqueness_check` calls, the ones no chain's stand-down hands on
+# as a lambda — a test reads it out of `check_internal_integrity` by that
+# rule, the one the verdict reads its retired conditions by, so wrapping the
+# three again would empty the verdict's set while this one stood. Every other
+# check over DuckDB already stands down in the target state — Silver, Gold and
+# UTM with step 13, the order tables with chain 3 — and the freshness check
+# and the snapshot continuity read Postgres; the integrity job hands the scan
+# a connection that refuses (`duckdb_switch.RefusedConnection`), so a check
 # that still reaches for the file is counted where it reached.
 DUCKDB_OFF_STOOD_DOWN: FrozenSet[str] = frozenset({
     "pk_uniqueness_products",

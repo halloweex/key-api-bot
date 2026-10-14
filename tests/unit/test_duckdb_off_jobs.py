@@ -26,8 +26,10 @@ names the mutation it catches.
 """
 from __future__ import annotations
 
+import ast
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -44,6 +46,7 @@ from tests.unit.test_duckdb_off_sweep import target_state  # noqa: F401 — fixt
 from tests.unit.test_read_fallback_sites import fresh_read_fallback  # noqa: F401 — fixture
 
 STAMP = "2026-10-01T08:00:00+00:00"
+REPO = Path(__file__).resolve().parents[2]
 
 
 def _owned_by_chains() -> frozenset:
@@ -120,7 +123,54 @@ def _names(issues):
     return sorted(i.check_name for i in issues)
 
 
+def _scan_pk_checks():
+    """The integrity scan's `_pk_uniqueness_check` calls, in source order, as
+    `(table, wrapped, guard)`: `wrapped` when the call sits in a lambda —
+    handed on to a chain's stand-down, `landing(...)` — and `guard` the
+    finding name an enclosing `if "<name>" not in stood_down:` skips it by."""
+    tree = ast.parse((REPO / "core/data_quality.py").read_text(encoding="utf-8"))
+    scan = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == "check_internal_integrity")
+    in_lambda = {id(n) for lam in ast.walk(scan) if isinstance(lam, ast.Lambda)
+                 for n in ast.walk(lam)}
+    guard = {}
+    for node in ast.walk(scan):
+        test = getattr(node, "test", None)
+        if (isinstance(node, ast.If) and isinstance(test, ast.Compare)
+                and isinstance(test.left, ast.Constant)
+                and [type(op) for op in test.ops] == [ast.NotIn]
+                and getattr(test.comparators[0], "id", None) == "stood_down"):
+            guard.update({id(n): test.left.value
+                          for stmt in node.body for n in ast.walk(stmt)})
+    calls = sorted((n for n in ast.walk(scan) if isinstance(n, ast.Call)
+                    and getattr(n.func, "id", None) == "_pk_uniqueness_check"),
+                   key=lambda n: (n.lineno, n.col_offset))
+    return [(n.args[1].value, id(n) in in_lambda, guard.get(id(n))) for n in calls]
+
+
 class TestTheScanUnderOff:
+    def test_the_set_is_read_out_of_the_scan_s_bare_calls(self):
+        """`DUCKDB_OFF_STOOD_DOWN` is exactly the scan's `_pk_uniqueness_check`
+        calls no chain's stand-down takes — those not handed on as a lambda —
+        each skipped by its own finding's name. That is the rule `off`'s
+        verdict (PR-2) reads its retired conditions by, so the two sets
+        cannot part: wrapped in lambdas, the three left this set standing and
+        the verdict's empty. Mutation: wrap them again, add a fourth bare
+        call, or guard one by another table's name."""
+        bare = [(table, name) for table, wrapped, name in _scan_pk_checks()
+                if not wrapped]
+        assert {f"pk_uniqueness_{table}" for table, _ in bare} == dq.DUCKDB_OFF_STOOD_DOWN
+        assert all(name == f"pk_uniqueness_{table}" for table, name in bare), bare
+
+    def test_the_wrapped_ones_are_chain_3_s(self):
+        """The other side of the same rule: every PK check handed on as a
+        lambda is an order table's, stood down with chain 3. Mutation: hand
+        one of the three to `landing(...)`."""
+        wrapped = {f"pk_uniqueness_{table}"
+                   for table, is_wrapped, _ in _scan_pk_checks() if is_wrapped}
+        assert wrapped and wrapped <= dq.ORDER_LANDING_CHECKS
+        assert not wrapped & dq.DUCKDB_OFF_STOOD_DOWN
+
     def test_in_the_target_state_nothing_in_the_scan_reaches_for_the_file(
             self, target_state):  # noqa: F811
         """Every check over DuckDB stands down in the target state — Silver,
