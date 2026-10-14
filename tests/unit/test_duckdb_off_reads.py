@@ -260,17 +260,27 @@ class TestTheWarehouseStatus:
 
     @pytest.mark.skipif(not os.getenv("KS_PG_DSN", "").strip(),
                         reason="needs a live PostgreSQL at KS_PG_DSN")
-    def test_under_off_the_copy_is_read_from_a_real_postgres(self, duckdb_off):
+    def test_under_off_the_copy_is_read_from_a_real_postgres(
+        self, duckdb_off, monkeypatch,
+    ):
         """The two statements against the schema at head, not a fake pool:
         the last row by id, and the last hour counted by `refreshed_at`. The
-        rows are this test's own, taken out again after."""
-        from core.pg import close_pool, get_pool
+        rows are this test's own, taken out again after.
+
+        The pool is the test's own too, handed to the route as `get_pool`'s
+        answer. `core.pg`'s process-wide one may have been opened by an
+        earlier test on an event loop that is closed by now — in the whole
+        suite it was, and this read died "Event loop is closed"."""
+        import asyncpg
+
         from web.routes.api.admin import _duckdb_refresh_status
 
         old, new = 2_000_000_001, 2_000_000_002
 
         async def run():
-            pool = await get_pool()
+            pool = await asyncpg.create_pool(
+                os.environ["KS_PG_DSN"], min_size=1, max_size=2)
+            monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=pool))
             try:
                 async with pool.acquire() as conn:
                     before = await conn.fetchval(
@@ -293,7 +303,7 @@ class TestTheWarehouseStatus:
                             "DELETE FROM app.warehouse_refreshes WHERE id IN ($1, $2)",
                             old, new)
             finally:
-                await close_pool()
+                await pool.close()
 
         before, frozen = asyncio.run(run())
         assert frozen["status"] == "off" and "error" not in frozen, frozen
