@@ -31,7 +31,8 @@ and the list is empty since PR-0 to PR-8 together. PR-9 widened the sweep
 to every door a week exercises — every route that is not a GET and every
 one outside `/api/`, the sockets, the events, the assistant's tools and
 routes, a real viewer's session, web's stop — with Postgres refusing and
-with it answering on a derived history, and walked the code for any way in
+with it answering on a derived history, each with KeyCRM and TurboSMS
+answering and refusing, and walked the code for any way in
 the sweep does not open (`tests/unit/test_duckdb_off_entry_points.py`): the
 list stayed empty. Web's startup contains a refusal rather than dying of it,
 so `/api/health` answers and the page can be seen. That is the code's half

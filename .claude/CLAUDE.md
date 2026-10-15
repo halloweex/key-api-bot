@@ -4418,11 +4418,25 @@ route since PR-8, and none of the doors PR-9 added the first time they were
 opened — and a control reach after the last step proves the tripwire still
 stands. The sweep runs in the target state (derived from the registries,
 every chain latched, step 13 met, off's own verdict holding), in three
-sweeps, each in an interpreter of its own and each **in both flavours** —
-with Postgres refusing, and wherever `KS_PG_DSN` is set (CI fails if it
-skipped) with Postgres live: emptied, seeded with a small history in Bronze
-that Postgres derives into Silver, Gold and the customer profile itself
-(the integration variant), and put back after. **process** boots web,
+sweeps, each in an interpreter of its own and each **in four flavours** —
+Postgres refusing, or, wherever `KS_PG_DSN` is set (CI fails if it skipped),
+live: emptied, seeded with a small history in Bronze that Postgres derives
+into Silver, Gold and the customer profile itself (the integration variant),
+and put back after; crossed with **the world outside**, KeyCRM and TurboSMS
+(`tests/unit/duckdb_off_sweep_world.py`), answering canned payloads through
+`httpx.MockTransport` under the clients' own retries and breaker, or refusing
+(`down-offline`, `live-offline`, the outage branches). Until the review of
+PR-9 the world was refused in every flavour, so no path that runs only once
+data arrives ran — the syncs' writes, the gap backfill, the status refresh,
+the half-written repair, the resync, both buyer syncs, the SMS send and its
+delivery report — and a reach planted behind a payload passed the sweep;
+it now fails it in six process steps. KeyCRM's date filters are applied, so
+each path is served what only it writes. Where both answer the sweep also
+judges that it got there: every step in `FED_BY_KEYCRM` was served orders
+and wrote them to Postgres (`Landed`: row versions newer than the step's
+first transaction), every door that asked the world went through, every
+assistant tool answered without an error, and every DuckDB lever that syncs
+answered 2xx, was served and wrote Bronze. **process** boots web,
 starts the scheduler and runs every registered job — each as the tick that
 comes once every window an earlier step armed has passed, on a fresh sync
 service. **routes** calls every GET route under `/api/` as an admin, with
@@ -4438,8 +4452,9 @@ admin, the two Telegram sign-ins and the TurboSMS webhook signed as their
 senders sign them; both WebSocket routes with the client's frames; every
 event on the bus with a socket open in each room; every assistant tool
 through `execute_tool` and through both `/api/chat` routes under a model
-that asks for all of them; every GET again under a **real viewer session**
-nothing patches; and web's stop. Requests run in-process over ASGI on the
+that asks for all of them; every GET route `NETWORK_ROUTES` keeps out of
+the admin's sweep, as an admin; every GET again under a **real viewer
+session** nothing patches; and web's stop. Requests run in-process over ASGI on the
 sweep's own loop, so a background task a door starts is awaited inside its
 step. Seeding the history found that the live flavour had derived nothing
 until then: emptying the database took `meta.derivation_signal`'s row, so
@@ -4450,7 +4465,11 @@ appears outside the list fails, and so does a row the code no longer earns.
 its reason and refused loudly (503 naming `duckdb`, counted, paged) — and
 only a door under `/api/duckdb/`, the names OD-S5-8 keeps until code
 deletion; the list is empty, since under the chains each of those routes its
-sync to Postgres. **The static half** (`test_duckdb_off_entry_points.py`)
+sync to Postgres. **A door that says success having done nothing** — asked
+the world, was refused, still answered 2xx `"status": "success"` — is listed
+exactly in `KNOWN_FALSE_SUCCESS`: one, the inline status refresh, whose
+`refresh_order_statuses` swallows KeyCRM's errors (9502d9bd). Old and the
+same under `on`, so stage 5 lists it rather than changes it. **The static half** (`test_duckdb_off_entry_points.py`)
 walks `core/`, `web/`, `scripts/` and `deploy/` from every function that
 opens the file up to its entry points, and each must be a door the sweep
 opens, held by one (called, named as a value, nested — the mirror job's
