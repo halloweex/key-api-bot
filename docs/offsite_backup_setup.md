@@ -177,7 +177,10 @@ exit code, not the directory listing.
 Not a drill — the machine is gone and you are rebuilding.
 
 1. Fetch the newest archive from the Storage Box and unpack it.
-2. `gpg --decrypt env.gpg > .env` with the passphrase you kept off-box.
+2. `gpg --decrypt env.gpg > .env` with the passphrase you kept off-box. Since
+   stage 5 the same file also goes off-site beside every Postgres dump, as
+   `key-api-bot/postgres/env-<stamp>.gpg` — and once the week of silence has
+   retired the nightly Parquet archive, that is the newest copy.
 3. Check `export_parquet/_deploy.json` for `deploy_sha` and check out that
    commit. Parquet is not self-describing: `phase2_import` rebuilds the schema
    from the application's own DDL, so restoring an old snapshot against newer

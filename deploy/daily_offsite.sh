@@ -25,11 +25,10 @@
 # would be refused by the switch. So with KS_DUCKDB=off in .env this exits 0
 # with one line before it reads, links or deletes anything, rather than
 # failing every night of the week — the first with a "Daily snapshot FAILED"
-# page for the refused sidecar, each one after on a backup past 30 h; its
-# cron line is removed
-# (deploy/duckdb_silence_check.sh --crontab prints it). The copy of .env that
-# rode in this archive goes off-site with every Postgres shipment instead
-# (deploy/pg_offsite.sh, OD-S5-6), so retiring this loses none.
+# page for the refused sidecar, each one after on a backup past 30 h. Its
+# cron line is removed (deploy/duckdb_silence_check.sh --crontab prints it).
+# The copy of .env this archive carries goes off-site with every Postgres
+# shipment too (deploy/pg_offsite.sh, OD-S5-6), so retiring it loses none.
 set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
