@@ -95,13 +95,18 @@ DSN = os.getenv("KS_PG_DSN")
 
 # ─── What is left ────────────────────────────────────────────────────────────
 #
-# (step, site) → the flavours it shows in. A step is `boot` (web's
-# `startup_event` outside the two below), `boot:init_and_sync`,
-# `boot:scheduler_start` (`BackgroundScheduler.start`), `job:<id>` for every
-# job `_register_jobs()` registers, or `GET <path>` — `GET <path>?<query>`
-# for a request with optional values (`variant_key`). A site is
+# (step, site) → the flavours it shows in. A step is the process sweep's
+# `boot` (web's `startup_event` outside the two below), `boot:init_and_sync`,
+# `boot:scheduler_start` (`BackgroundScheduler.start`) or `job:<id>` for every
+# job `_register_jobs()` registers; the route sweep's `GET <path>` —
+# `GET <path>?<query>` for a request with optional values (`variant_key`) —
+# or `routes:derive`; or one of the doors sweep's (PR-9, `sweep_of` places
+# each): `<METHOD> <path>` for a route under /api/ that is not a GET,
+# `<METHOD> <path> as <who>` outside it, `viewer GET <path>`, `admin GET
+# /api/chat/stream`, `WS <path> as <who>`, `event:<name>`, `tool:<name>`,
+# `setup…`, `events:open|close`, `shutdown`. A site is
 # `duckdb_switch._site()`'s name for who reached for the file, with
-# `[last_sync_<key>]` after it under `get_last_sync_time`. The PR that takes
+# `[last_sync_<key>]` after it under `get_last_sync_time`. The PR that took
 # each row out is the plan's (section 3); it is a note, not a rule.
 
 KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
@@ -118,7 +123,27 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     # None since PR-8: `/api/warehouse/status` reads DuckDB's last refresh
     # out of its Postgres copy, and `/api/summary?source_id=3` — Opencart,
     # no column in Gold — answers DuckDB's zeros without a connection.
+    # ── the doors (PR-9) ──
+    # None, in either flavour, the first time they were opened: every write
+    # under /api/, the pages and sign-ins, the sockets, the events, the
+    # assistant's tools and routes, a real viewer's session and web's stop.
 }
+
+# ─── The DuckDB levers (OD-S5-8) ─────────────────────────────────────────────
+#
+# A door whose subject is the DuckDB file itself may reach it under off, and
+# no other: such a reach is not a debt to pay but the lever doing what it is
+# for — so it is listed here with its reason instead, and **refused loudly**:
+# answered 503 naming `duckdb`, and counted and paged by the tripwire like any
+# reach, because using a DuckDB lever during the week breaks the week. Exact
+# like the residual — a lever that stops reaching leaves the list — and
+# derived where it can be: only a door under `LEVER_PREFIX`, the one OD-S5-8
+# keeps under its old name until the code is deleted, may be listed at all.
+#
+# (step, site) → reason. Empty: under the chains every `/api/duckdb/` door
+# routes its sync to Postgres, and none reaches the file (`TestTheLevers`).
+LEVER_PREFIX = "/api/duckdb/"
+DUCKDB_LEVERS: Dict[Tuple[str, str], str] = {}
 
 
 # ─── The state ───────────────────────────────────────────────────────────────
@@ -495,10 +520,32 @@ def expected(flavor: str, sweep: str) -> set:
             if flavor in flavors and sweep_of(key[0]) == sweep}
 
 
+def levers(sweep: str) -> set:
+    return {key for key in DUCKDB_LEVERS if sweep_of(key[0]) == sweep}
+
+
+def answered(result: dict, step: str) -> Tuple[Optional[int], Optional[str]]:
+    """What an HTTP step answered — its status and the surface it named —
+    from either sweep's record of it."""
+    if step.startswith("GET /api/") and "routes" in result:
+        key = step[len("GET "):]
+        status = {**result["routes"], **result["variants"]}.get(key)
+        return status, result["surfaces"].get(key)
+    return result.get("statuses", {}).get(step), result.get("surfaces", {}).get(step)
+
+
 def _judge(flavor: str, sweep: str, result: dict) -> None:
     seen, known = observed(result), expected(flavor, sweep)
     misplaced = sorted(step for step, _site in seen if sweep_of(step) != sweep)
     assert not misplaced, f"steps {sweep_of.__name__} does not place in {sweep}: {misplaced}"
+    # A lever's reach is its own, and only refused loudly is it allowed.
+    pulled = seen & levers(sweep)
+    quiet = sorted(step for step, _site in pulled
+                   if answered(result, step) != (503, "duckdb"))
+    assert not quiet, f"DuckDB levers that reached the file and were not refused loudly: {quiet}"
+    idle = sorted(levers(sweep) - pulled)
+    assert not idle, f"DuckDB levers listed and no longer reaching (take them out): {idle}"
+    seen = seen - pulled
     new, paid = sorted(seen - known), sorted(known - seen)
     assert not new and not paid, (
         f"{flavor} {sweep} sweep against KNOWN_RESIDUAL —\n"
@@ -798,6 +845,63 @@ class TestTheSweepUnderALivePostgres:
         for who in ("nobody", "viewer", "admin"):
             assert statuses[f"GET /auth/telegram/callback as {who}"] == 302
             assert statuses[f"POST /auth/webapp as {who}"] == 200
+
+
+def door_path(step: str) -> Tuple[Optional[str], Optional[str]]:
+    """(method, path) of an HTTP step, whoever it was sent as: `POST /a?x=1`,
+    `viewer GET /a`, `GET /login as nobody`. (None, None) for any other."""
+    words = step.split(" ")
+    if words[0] in ("viewer", "admin"):
+        words = words[1:]
+    if len(words) < 2 or words[0] not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+        return None, None
+    return words[0], words[1].split("?")[0]
+
+
+class TestTheLevers:
+    """OD-S5-8's doors keep their DuckDB name until the code is deleted. What
+    the sweep says of them, both ways: listed levers are such doors, and
+    every such door was opened and reached exactly what is listed — today
+    nothing."""
+
+    def test_only_a_door_under_the_prefix_may_be_listed(self):
+        from tests.routes_helper import iter_endpoints
+        from web.main import app
+
+        doors = {(m, e.path) for e in iter_endpoints(app) for m in e.methods}
+        for (step, site), reason in DUCKDB_LEVERS.items():
+            method, path = door_path(step)
+            assert (method, path) in doors and path.startswith(LEVER_PREFIX), step
+            assert reason and site, step
+
+    @pytest.mark.parametrize("flavor", [DOWN, LIVE])
+    def test_every_lever_door_was_opened_and_reached_only_what_is_listed(
+        self, flavor, request,
+    ):
+        from tests.routes_helper import iter_endpoints
+        from web.main import app
+
+        result = request.getfixturevalue(flavor)
+        doors = {(m, e.path) for e in iter_endpoints(app)
+                 if e.path.startswith(LEVER_PREFIX) for m in e.methods - {"HEAD"}}
+        assert len(doors) >= 5, doors          # stats, resync, refresh, two syncs
+        reached, opened = set(), set()
+        for sweep in (ROUTES, DOORS):
+            for step, entry in result[sweep]["steps"].items():
+                if door_path(step) in doors:
+                    opened.add(door_path(step))
+                    reached.update((step, site) for site in entry["sites"])
+        assert opened == doors, sorted(doors - opened)
+        assert reached == set(DUCKDB_LEVERS), sorted(reached ^ set(DUCKDB_LEVERS))
+
+    def test_door_path_reads_every_step_shape(self):
+        assert door_path("POST /api/duckdb/resync") == ("POST", "/api/duckdb/resync")
+        assert door_path("POST /api/x?background=false") == ("POST", "/api/x")
+        assert door_path("viewer GET /api/summary") == ("GET", "/api/summary")
+        assert door_path("admin GET /api/chat/stream") == ("GET", "/api/chat/stream")
+        assert door_path("GET /login as nobody") == ("GET", "/login")
+        assert door_path("tool:get_revenue_summary") == (None, None)
+        assert door_path("WS /ws/admin as admin") == (None, None)
 
 
 class TestTheList:
