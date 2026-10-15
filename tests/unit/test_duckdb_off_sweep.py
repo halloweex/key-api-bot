@@ -1309,12 +1309,12 @@ class TestTheInstruments:
             return {o["id"] for o in world.keycrm(request).json()["data"]}
 
         day = datetime_window(days=1.05)     # the minute sync's 25 hours
+        month = datetime_window(days=30, dates=True)
+        year = datetime_window(days=365, dates=True)
         assert ids("order", **{"filter[updated_between]": day}) == {109, 110, 111}
         assert ids("order", **{"filter[created_between]": day}) == {109}
-        assert ids("order", **{"filter[created_between]": datetime_window(days=30, dates=True)}) == {
-            109, 110, 111}
-        assert ids("order", **{"filter[created_between]": datetime_window(days=365, dates=True)}) == {
-            109, 110, 111, 60}
+        assert ids("order", **{"filter[created_between]": month}) == {109, 110, 111}
+        assert ids("order", **{"filter[created_between]": year}) == {109, 110, 111, 60}
         assert ids("buyer") == {1, 2, 3}
         one = world.keycrm(httpx.Request("GET", f"{base}/order/50"))
         assert one.status_code == 200 and one.json()["id"] == 50

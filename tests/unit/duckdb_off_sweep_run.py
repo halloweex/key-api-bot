@@ -765,9 +765,11 @@ class Calls:
 def test_routes(state, sweep_network, sweep_world, production_host, monkeypatch):
     """Every GET route under /api/, read off the app, as an admin — with its
     required parameters, then once per value of each optional parameter that
-    can pick a branch, and with the header's filters together. In both
-    flavours since PR-9: with Postgres refusing, and with it answering — what
-    a route reaches only once Postgres has answered is in the second."""
+    can pick a branch, and with the header's filters together. In every
+    flavour since PR-9: with Postgres refusing, and with it answering — what
+    a route reaches only once Postgres has answered is in the second. The
+    world outside is installed here too, so a route that asks it is answered
+    and recorded as a door is; none did when it was added."""
     from tests.unit.duckdb_off_sweep_doors import hardcoded_admin, session_cookie
     from tests.unit.test_read_fallback_http import _request_for, swept_routes
     from web.main import app
