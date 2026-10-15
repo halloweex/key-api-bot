@@ -418,45 +418,71 @@ class TestTheState:
 
 # ─── The sweep ───────────────────────────────────────────────────────────────
 
-# The sweeps run once per flavour, in a fresh interpreter each, and every
+# The sweeps run once per flavour, each in a fresh interpreter, and every
 # test below reads what they wrote.
 
-PROCESS, ROUTES = "process", "routes"
+PROCESS, ROUTES, DOORS = "process", "routes", "doors"
+SWEEPS = (PROCESS, ROUTES, DOORS)
 # Non-vacuity, so a sweep that silently reached nothing cannot pass: when this
 # was written the scheduler registered 24 jobs and the app 91 GET routes.
 MIN_JOBS, MIN_ROUTES = 20, 90
 # And ~320 requests again with optional values (`optional_variants`).
 MIN_VARIANTS = 250
+# PR-9's doors, when it was written: 40 routes under /api/ that are not GETs,
+# 15 outside it, 2 WebSocket routes, 15 events, 15 tools.
+MIN_WRITES, MIN_OUTSIDE, MIN_SOCKETS, MIN_EVENTS, MIN_TOOLS = 35, 12, 2, 12, 12
+# What a Postgres that answers lets through, when PR-9 was written: 407 of
+# the 415 GET requests answered 200, 30-odd of the 40 doors 2xx, and the
+# viewer ~60 of 92 routes (the rest are admin-only, or another tab's). A
+# floor well under each, so a seeded state that stopped seeding fails here.
+MIN_LIVE_GET_200, MIN_LIVE_WRITES_2XX, MIN_LIVE_VIEWER_200 = 350, 25, 45
 # Steps that are not themselves swept: the moment before the first, and the
 # control at the end, whose one refusal is the tripwire proving it stands.
 NOT_SWEPT = {"before", "control"}
 
 
 def run_sweep(flavor: str, sweeps, out: Path) -> Dict[str, dict]:
+    """Each sweep in an interpreter of its own (`duckdb_off_sweep_run.py` says
+    why), one after the other, and what each wrote."""
     out.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, FLAVOR_ENV: flavor, OUT_ENV: str(out), "TZ": "UTC"}
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-         *[f"{RUNNER}::test_{sweep}" for sweep in sweeps]],
-        cwd=REPO, env=env, capture_output=True, text=True, timeout=1800)
-    written = {sweep: out / f"{sweep}.json" for sweep in sweeps}
-    assert proc.returncode == 0 and all(p.exists() for p in written.values()), (
-        f"the {flavor} sweep did not run (exit {proc.returncode}):\n"
-        f"{proc.stdout[-8000:]}\n{proc.stderr[-3000:]}")
-    return {sweep: json.loads(path.read_text(encoding="utf-8"))
-            for sweep, path in written.items()}
+    found = {}
+    for sweep in sweeps:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+             f"{RUNNER}::test_{sweep}"],
+            cwd=REPO, env=env, capture_output=True, text=True, timeout=1800)
+        written = out / f"{sweep}.json"
+        assert proc.returncode == 0 and written.exists(), (
+            f"the {flavor} {sweep} sweep did not run (exit {proc.returncode}):\n"
+            f"{proc.stdout[-8000:]}\n{proc.stderr[-3000:]}")
+        found[sweep] = json.loads(written.read_text(encoding="utf-8"))
+    return found
 
 
 @pytest.fixture(scope="module")
 def down(tmp_path_factory):
-    return run_sweep(DOWN, (PROCESS, ROUTES), tmp_path_factory.mktemp("down"))
+    return run_sweep(DOWN, SWEEPS, tmp_path_factory.mktemp("down"))
 
 
 @pytest.fixture(scope="module")
 def live(tmp_path_factory):
     if not DSN:
         pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
-    return run_sweep(LIVE, (PROCESS,), tmp_path_factory.mktemp("live"))
+    return run_sweep(LIVE, SWEEPS, tmp_path_factory.mktemp("live"))
+
+
+def sweep_of(step: str) -> str:
+    """Which sweep a step belongs to, by its name alone: the boot and the
+    jobs are the process's; a GET under `/api/`, and the route sweep's own
+    setup (`routes:…`), the admin's route sweep; every other step is one of
+    PR-9's doors, none of whose names starts either way (`viewer GET …`,
+    `admin GET /api/chat/stream`, `setup…`, `WS …`, `tool:…`)."""
+    if step.split(":")[0] in ("boot", "job"):
+        return PROCESS
+    if step.startswith(("GET /api/", "routes:")):
+        return ROUTES
+    return DOORS
 
 
 def observed(result: dict) -> set:
@@ -465,13 +491,14 @@ def observed(result: dict) -> set:
 
 
 def expected(flavor: str, sweep: str) -> set:
-    routes = sweep == ROUTES
     return {key for key, flavors in KNOWN_RESIDUAL.items()
-            if flavor in flavors and key[0].startswith("GET ") == routes}
+            if flavor in flavors and sweep_of(key[0]) == sweep}
 
 
 def _judge(flavor: str, sweep: str, result: dict) -> None:
     seen, known = observed(result), expected(flavor, sweep)
+    misplaced = sorted(step for step, _site in seen if sweep_of(step) != sweep)
+    assert not misplaced, f"steps {sweep_of.__name__} does not place in {sweep}: {misplaced}"
     new, paid = sorted(seen - known), sorted(known - seen)
     assert not new and not paid, (
         f"{flavor} {sweep} sweep against KNOWN_RESIDUAL —\n"
@@ -516,17 +543,70 @@ def _judge_the_run(result: dict) -> None:
     assert result["file"] == {}, (
         f"the frozen file or DuckDB's companions moved: {result['file']}")
     control = result["steps"]["control"]
-    assert control["sites"] == ["tests.unit.duckdb_off_sweep_run:control"], control
+    assert control["sites"] == ["tests.unit.duckdb_off_sweep_run:reach"], control
     assert control["status"] == "DuckDBOpenedWhileOff", control
     assert result["steps"]["before"]["sites"] == []
 
 
-class TestTheSweepUnderARefusingPostgres:
-    def test_the_process_reaches_exactly_the_known_residual(self, down):
-        _judge(DOWN, PROCESS, down[PROCESS])
+def _judge_the_routes(result: dict) -> None:
+    assert len(result["routes"]) >= MIN_ROUTES, len(result["routes"])
+    assert {f"GET {p}" for p in result["routes"]} <= set(result["steps"])
+    variants = result["variants"]
+    assert len(variants) >= MIN_VARIANTS, len(variants)
+    assert {f"GET {key}" for key in variants} <= set(result["steps"])
+    # A 422 is FastAPI refusing the parameters: a variant that swept nothing.
+    assert not [key for key, status in variants.items() if status == 422]
+    assert result["file"] == {}
 
-    def test_the_routes_reach_exactly_the_known_residual(self, down):
-        _judge(DOWN, ROUTES, down[ROUTES])
+
+def _judge_the_doors(result: dict) -> None:
+    """Every door PR-9 added was opened, none of them refused as malformed,
+    and web stopped as it does at a deploy. What each door is made of is
+    `duckdb_off_sweep_doors.py`; what they reach is `_judge`'s."""
+    steps, statuses = result["steps"], result["statuses"]
+    writes, outside = result["writes"], result["outside"]
+    assert len(writes) >= MIN_WRITES and len(outside) >= MIN_OUTSIDE, (writes, outside)
+    assert len(result["socket_routes"]) >= MIN_SOCKETS, result["socket_routes"]
+    assert set(writes) <= set(steps), sorted(set(writes) - set(steps))
+    for door in outside:
+        for who in ("nobody", "viewer", "admin"):
+            assert f"{door} as {who}" in steps, (door, who)
+    for path in result["socket_routes"]:
+        for who in ("nobody", "viewer", "admin"):
+            assert f"WS {path} as {who}" in steps, (path, who)
+    # Malformed: FastAPI's 422 ends a request at its parameters, before
+    # anything the door does — a door that swept nothing.
+    malformed = sorted(step for step, status in statuses.items() if status == 422)
+    assert not malformed, f"doors refused as malformed, swept nothing: {malformed}"
+    # Every event the bus carries, and every tool, each a step.
+    assert len(result["handlers"]) >= MIN_EVENTS, result["handlers"]
+    assert {f"event:{e}" for e in result["handlers"]} <= set(steps)
+    assert len(result["tool_names"]) >= MIN_TOOLS, result["tool_names"]
+    assert {f"tool:{t}" for t in result["tool_names"]} <= set(steps)
+    from tests.unit.duckdb_off_sweep_doors import DOORS_FRAME
+
+    for frame in DOORS_FRAME:
+        assert frame in steps, frame
+    assert steps["shutdown"]["status"] == "ok", steps["shutdown"]
+    _judge_the_run(result)
+
+
+def _judge_the_assistant(result: dict) -> None:
+    """Both chat routes ran every tool: the model was handed a result for
+    each, once per route, and the stream sent one `tool_result` per tool."""
+    tools = sorted(result["tool_names"])
+    chat = result["chat"]
+    assert result["statuses"]["POST /api/chat"] == 200, result["details"].get("POST /api/chat")
+    assert result["statuses"]["admin GET /api/chat/stream"] == 200
+    assert chat["results_seen"] == [tools, tools], chat["results_seen"]
+    assert chat["stream"].count("tool_result") == len(tools), chat["stream"]
+    assert chat["stream"][-1] == "end", chat["stream"]
+
+
+class TestTheSweepUnderARefusingPostgres:
+    @pytest.mark.parametrize("sweep", SWEEPS)
+    def test_each_sweep_reaches_exactly_the_known_residual(self, down, sweep):
+        _judge(DOWN, sweep, down[sweep])
 
     def test_the_boot_survives_a_boot_sync_that_failed(self, down):
         """Postgres refuses, so the boot sync fails — and web's startup goes
@@ -544,20 +624,35 @@ class TestTheSweepUnderARefusingPostgres:
     def test_the_order_tick_ran_rather_than_waited(self, down):
         _judge_the_order_tick(down[PROCESS])
 
-    def test_every_route_was_called(self, down):
-        result = down[ROUTES]
-        assert len(result["routes"]) >= MIN_ROUTES, len(result["routes"])
-        assert {f"GET {p}" for p in result["routes"]} <= set(result["steps"])
-        assert result["file"] == {}
-
-    def test_every_route_was_called_again_with_its_optional_values(self, down):
+    def test_every_route_was_called_with_its_optional_values(self, down):
         """And the variants were requests the routes took: a 422 is FastAPI
         refusing the parameters, a variant that swept nothing."""
-        result = down[ROUTES]
-        variants = result["variants"]
-        assert len(variants) >= MIN_VARIANTS, len(variants)
-        assert {f"GET {key}" for key in variants} <= set(result["steps"])
-        assert not [key for key, status in variants.items() if status == 422]
+        _judge_the_routes(down[ROUTES])
+
+    def test_every_door_was_opened(self, down):
+        _judge_the_doors(down[DOORS])
+
+    def test_the_assistant_ran_every_tool_through_both_routes(self, down):
+        """With Postgres refusing, every tool answers what it can — a named
+        `data_unavailable`, an error — and nothing reaches the file."""
+        _judge_the_assistant(down[DOORS])
+
+    def test_nobody_and_a_viewer_are_refused_before_the_store(self, down):
+        """A viewer's session is read from the user list, in Postgres, and
+        an unreadable list refuses the request (401) rather than guessing a
+        role; the admin sockets are the hardcoded admin's and open."""
+        from web.routes.auth import PUBLIC_API_PATHS
+
+        result = down[DOORS]
+        viewer = {s[len("viewer GET "):]: v for s, v in result["statuses"].items()
+                  if s.startswith("viewer GET ")}
+        gated = {p: v for p, v in viewer.items() if p not in PUBLIC_API_PATHS}
+        assert gated and set(gated.values()) == {401}, sorted(
+            (p, v) for p, v in gated.items() if v != 401)
+        sockets = result["sockets"]
+        for path in result["socket_routes"]:
+            assert sockets[f"WS {path} as admin"]["accepted"], path
+            assert sockets[f"WS {path} as nobody"]["close_code"] == 4001, path
 
     def test_the_routes_pr8_paid_answer_without_the_file(self, down):
         """PR-8, in the week's own state. The two routes that reached the
@@ -565,8 +660,9 @@ class TestTheSweepUnderARefusingPostgres:
         summary for a source with no column in Gold answers DuckDB's zeros,
         and the warehouse status nests DuckDB's last refresh as `off` — from
         its Postgres copy, so here, with Postgres refusing, as the error's
-        class. No route's refusal names `duckdb` any more. Mutation: drop
-        either `off` branch — the route is back in the list, and here."""
+        class. No route's refusal names `duckdb` any more — nor any door's.
+        Mutation: drop either `off` branch — the route is back in the list,
+        and here."""
         from tests.unit.duckdb_off_sweep_run import PAID_BY_PR8
 
         result = down[ROUTES]
@@ -574,6 +670,7 @@ class TestTheSweepUnderARefusingPostgres:
         for key in PAID_BY_PR8:
             assert answered[key] == 200, key
         assert [k for k, s in result["surfaces"].items() if s == "duckdb"] == []
+        assert [k for k, s in down[DOORS]["surfaces"].items() if s == "duckdb"] == []
         summary = result["bodies"]["/api/summary?source_id=3"]
         assert {k: summary[k] for k in ("totalOrders", "totalRevenue", "avgCheck",
                                         "totalReturns", "returnsRevenue")} == {
@@ -598,8 +695,14 @@ class TestTheSweepUnderARefusingPostgres:
 
 
 class TestTheSweepUnderALivePostgres:
-    def test_the_process_reaches_exactly_the_known_residual(self, live):
-        _judge(LIVE, PROCESS, live[PROCESS])
+    """The integration variant the design asked PR-9 for: Postgres answers,
+    holding a small history in Bronze that Postgres derived into Silver, Gold
+    and the customer profile itself — so the routes and the doors read rows,
+    and what only a Postgres that answers reaches is in the run."""
+
+    @pytest.mark.parametrize("sweep", SWEEPS)
+    def test_each_sweep_reaches_exactly_the_known_residual(self, live, sweep):
+        _judge(LIVE, sweep, live[sweep])
 
     def test_the_boot_sync_runs_through(self, live):
         """The PR's proof: under off the boot passes `init_and_sync` on the
@@ -630,25 +733,100 @@ class TestTheSweepUnderALivePostgres:
             result["shadow_stood_down"]), result["shadow_stood_down"]
         assert result["shadow_failures"] == []
 
+    def test_the_seeded_history_was_derived_and_read(self, live):
+        """The derivation ran in each HTTP sweep before its first request,
+        and the routes answered from what it wrote: almost every GET is a
+        200 — the summary among them, with the seeded orders in it."""
+        routes, doors = live[ROUTES], live[DOORS]
+        assert routes["steps"]["routes:derive"]["status"] == "ok"
+        assert doors["steps"]["setup:derive"]["status"] == "ok"
+        _judge_the_routes(routes)
+        answered = {**routes["routes"], **routes["variants"]}
+        assert sum(1 for s in answered.values() if s == 200) >= MIN_LIVE_GET_200, (
+            sorted((k, s) for k, s in answered.items() if s != 200))
+        summary = routes["bodies"]["/api/summary?period=month"]
+        assert summary and summary["totalOrders"] > 0, summary
+
+    def test_every_door_was_opened_and_most_went_through(self, live):
+        result = live[DOORS]
+        _judge_the_doors(result)
+        statuses = result["statuses"]
+        through = sorted(d for d in result["writes"] if 200 <= statuses.get(d, 0) < 300)
+        assert len(through) >= MIN_LIVE_WRITES_2XX, (
+            through, {d: result["details"].get(d) for d in result["writes"]
+                      if d not in through})
+
+    def test_the_assistant_ran_every_tool_through_both_routes(self, live):
+        _judge_the_assistant(live[DOORS])
+
+    def test_a_real_viewer_session_is_a_viewer(self, live):
+        """`_resolve_session` reads the viewer's row — nothing patched it —
+        so no route answered 401: the viewer sees what its tabs open and is
+        refused (403) the rest, the admin pages among them."""
+        statuses = live[DOORS]["statuses"]
+        viewer = {s[len("viewer GET "):]: v for s, v in statuses.items()
+                  if s.startswith("viewer GET ")}
+        assert 401 not in viewer.values(), sorted(p for p, v in viewer.items() if v == 401)
+        assert sum(1 for v in viewer.values() if v == 200) >= MIN_LIVE_VIEWER_200
+        assert viewer["/api/admin/users"] == 403 and viewer["/api/summary"] == 200
+
+    def test_the_sockets_open_for_whom_they_should_and_carry_the_events(self, live):
+        """The handshake reads the session the same way: the admin opens
+        both sockets, the viewer the dashboard's and not the admin's, nobody
+        neither — and with them open, every handler web registered at its
+        start broadcast to its room."""
+        result = live[DOORS]
+        sockets = result["sockets"]
+        assert sockets["WS /ws/dashboard as viewer"]["accepted"]
+        assert sockets["WS /ws/admin as viewer"]["close_code"] == 4003
+        for path in result["socket_routes"]:
+            assert sockets[f"WS {path} as admin"]["accepted"], path
+            assert sockets[f"WS {path} as nobody"]["close_code"] == 4001, path
+            assert "pong" in sockets[f"WS {path} as admin"]["events"], path
+        heard = result["events"]
+        assert "sync_failed" in heard["/ws/admin as admin"], heard
+        for event in ("orders_synced", "products_synced", "inventory_updated",
+                      "goal_progress"):
+            assert event in heard["/ws/dashboard as admin"], (event, heard)
+            assert event in heard["/ws/dashboard as viewer"], (event, heard)
+
+    def test_the_sign_ins_reach_the_bot_store_and_sign_in(self, live):
+        """The bot's store is web's too: the Login Widget's callback and the
+        Mini App's sign-in check the account there, and both set a session
+        for the viewer."""
+        statuses = live[DOORS]["statuses"]
+        for who in ("nobody", "viewer", "admin"):
+            assert statuses[f"GET /auth/telegram/callback as {who}"] == 302
+            assert statuses[f"POST /auth/webapp as {who}"] == 200
+
 
 class TestTheList:
     """The list judges itself where it can without running anything."""
 
-    def test_every_row_names_a_flavour_and_a_step_kind(self):
+    def test_every_row_names_a_flavour_and_a_sweep(self):
         for (step, site), flavors in KNOWN_RESIDUAL.items():
             assert flavors and flavors <= BOTH, (step, site)
-            assert step.split(":")[0] in {"boot", "job"} or step.startswith("GET /api/"), step
-            if step.startswith("GET "):
-                assert flavors == DOWNS, f"routes are swept with Postgres refusing: {step}"
+            assert sweep_of(step) in SWEEPS, step
 
     def test_a_row_names_a_step_the_sweep_ran(self, down):
         """A job renamed or a route removed leaves its row naming nothing —
         said as that, rather than as a debt paid. The steps are what the
-        sweep ran: the jobs `_register_jobs()` registered and the routes read
+        sweep ran: the jobs `_register_jobs()` registered and the doors read
         off the app."""
-        ran = set(down[PROCESS]["steps"]) | set(down[ROUTES]["steps"])
+        ran = set().union(*(set(down[sweep]["steps"]) for sweep in SWEEPS))
         stale = sorted({step for step, _site in KNOWN_RESIDUAL} - ran)
         assert not stale, f"rows naming a step nothing runs any more: {stale}"
+
+    @pytest.mark.parametrize("step,sweep", [
+        ("boot", PROCESS), ("boot:init_and_sync", PROCESS), ("job:dq_digest", PROCESS),
+        ("GET /api/summary", ROUTES), ("GET /api/summary?source_id=3", ROUTES),
+        ("routes:derive", ROUTES), ("setup:derive", DOORS), ("setup", DOORS),
+        ("POST /api/expenses", DOORS), ("viewer GET /api/summary", DOORS),
+        ("admin GET /api/chat/stream", DOORS), ("GET /login as nobody", DOORS),
+        ("WS /ws/admin as admin", DOORS), ("event:orders.synced", DOORS),
+        ("tool:get_revenue_summary", DOORS), ("shutdown", DOORS)])
+    def test_a_step_is_placed_in_its_sweep_by_its_name(self, step, sweep):
+        assert sweep_of(step) == sweep
 
 
 class TestTheInstruments:
@@ -730,3 +908,107 @@ class TestTheInstruments:
         assert {"include_forecast": True} in trend
         assert optional_variants(by_path["/api/me"]) == []
 
+
+
+class TestTheDoors:
+    """PR-9's doors, held in-process where nothing has to run: each is read
+    off the app, so a door added tomorrow is swept the day it is registered,
+    and what a door is sent is checked against what it takes."""
+
+    def test_every_door_is_read_off_the_app_and_none_falls_between(self):
+        """The GET routes under /api/ (the routes sweep), the rest under
+        /api/, the routes outside it and the sockets (the doors sweep) are
+        every endpoint the app has, each in one sweep."""
+        from tests.routes_helper import iter_endpoints
+        from tests.unit import duckdb_off_sweep_doors as doors
+        from tests.unit.test_read_fallback_http import NETWORK_ROUTES, swept_routes
+        from web.main import app
+
+        every = set()
+        for e in iter_endpoints(app):
+            if doors.is_socket(e):
+                every.add(("WS", e.path))
+            every.update((m, e.path) for m in e.methods - {"HEAD"})
+        swept = {("GET", e.path) for e in swept_routes(app)}
+        swept |= {("GET", p) for p in NETWORK_ROUTES}      # the assistant's step
+        swept |= {(m, e.path) for m, e in doors.write_routes(app)}
+        swept |= {(m, e.path) for m, e in doors.outside_routes(app)}
+        swept |= {("WS", e.path) for e in doors.socket_routes(app)}
+        assert swept == every, (sorted(every - swept), sorted(swept - every))
+        assert {e.path for e in doors.get_api_routes(app)} == {
+            p for m, p in every if m == "GET" and p.startswith("/api/")}
+
+    def test_every_door_that_reads_a_body_is_given_one(self):
+        """A door that declares a body, or reads one itself, is sent the
+        example written for it — and every example names a door the app
+        has, so one left behind by a renamed route fails here."""
+        from tests.unit import duckdb_off_sweep_doors as doors
+        from web.main import app
+
+        pairs = doors.write_routes(app) + doors.outside_routes(app)
+        keys = {doors.door_key(m, e) for m, e in pairs}
+        reading = {doors.door_key(m, e) for m, e in pairs if doors.reads_a_body(e)}
+        assert reading <= set(doors.EXAMPLE_BODIES), sorted(reading - set(doors.EXAMPLE_BODIES))
+        assert set(doors.EXAMPLE_BODIES) <= keys, sorted(set(doors.EXAMPLE_BODIES) - keys)
+        assert set(doors.EXAMPLE_QUERIES) <= keys, sorted(set(doors.EXAMPLE_QUERIES) - keys)
+
+    def test_a_body_is_found_declared_or_read(self):
+        """Both kinds: a model in the signature, and `await request.json()`
+        in the body. Mutation: read only the declared ones."""
+        from tests.routes_helper import find_endpoint
+        from tests.unit.duckdb_off_sweep_doors import reads_a_body
+        from web.main import app
+
+        assert reads_a_body(find_endpoint(app, "/api/expenses", "POST"))
+        assert reads_a_body(find_endpoint(app, "/api/me/preferences", "PATCH"))
+        assert reads_a_body(find_endpoint(app, "/auth/webapp", "POST"))
+        assert not reads_a_body(find_endpoint(app, "/api/traffic/reclassify", "POST"))
+
+    def test_the_signed_doors_verify(self):
+        """The sign-ins and the webhook are sent what Telegram and the gateway
+        send, so each is swept past its signature: a door refused at its
+        signature checked nothing behind it."""
+        from core.turbosms import match_webhook_signature
+        from tests.unit import duckdb_off_sweep_doors as doors
+        from web.services.auth_service import verify_telegram_auth, verify_webapp_auth
+
+        assert verify_telegram_auth(doors.telegram_login_query(doors.VIEWER_ID))
+        user = verify_webapp_auth(doors.webapp_body(doors.VIEWER_ID)["initData"])
+        assert user and user["id"] == doors.VIEWER_ID
+        body = doors.webhook_body()
+        assert match_webhook_signature(body["id"], body["signature"], doors.WEBHOOK_SECRET)
+
+    def test_every_tool_is_called_with_every_value_of_its_enums(self):
+        from core.chat_tools import TOOLS
+        from tests.unit.duckdb_off_sweep_doors import tool_inputs, tool_key
+
+        by_name = {t["name"]: t for t in TOOLS}
+        inputs = tool_inputs(by_name["get_top_products"])
+        assert {i["by"] for i in inputs} == {"revenue", "quantity"}
+        assert {i["period"] for i in inputs} == set(
+            by_name["get_top_products"]["input_schema"]["properties"]["period"]["enum"])
+        assert tool_key("get_top_products", inputs[0], inputs[0]) == "tool:get_top_products"
+        dates = tool_inputs(by_name["compare_date_ranges"])[0]
+        assert all(len(dates[k]) == 10 for k in dates), dates
+        expense = tool_inputs(by_name["add_expenses"])[0]["expenses"][0]
+        assert {"category", "type", "amount"} <= set(expense)
+
+    def test_the_model_asks_for_every_tool_and_then_answers(self):
+        """The fake model's two turns, and the results it is handed counted —
+        which is what lets the outer test say a route ran every tool."""
+        from core.chat_tools import TOOLS
+        from tests.unit.duckdb_off_sweep_doors import FakeModel
+
+        model = FakeModel(TOOLS)
+
+        async def turns():
+            first = await model.chat([{"role": "user", "content": "q"}])
+            results = [{"type": "tool_result", "tool_use_id": c["id"], "content": "{}"}
+                       for c in first["tool_calls"]]
+            second = await model.chat([{"role": "user", "content": results}])
+            return first, second
+
+        first, second = asyncio.run(turns())
+        assert [c["name"] for c in first["tool_calls"]] == [t["name"] for t in TOOLS]
+        assert second["content"] == "done" and not second["tool_calls"]
+        assert model.results_seen == [sorted(t["name"] for t in TOOLS)]
