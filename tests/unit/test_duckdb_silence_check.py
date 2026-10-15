@@ -6,11 +6,15 @@ on: it never writes the file it judges; `--peek` and `--status` write nothing
 anywhere and `--status` hashes nothing; a change moves `since` and the count; a
 vanished file is MISSING and keeps the reference; the `.wal` counts; the record
 is parsed, never sourced; and the history it grows is bounded where it grows.
-Each guard names the mutation that breaks it.
+`--crontab` prints the week's change to root's crontab and touches nothing —
+not the file, not the record, not the crontab — and the lines it prints are
+the ones each script's header documents. Each guard names the mutation that
+breaks it.
 """
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -194,7 +198,7 @@ class TestTheRecord:
 
 
 class TestItWritesNothingItShouldNot:
-    @pytest.mark.parametrize("mode", [(), ("--peek",), ("--status",)])
+    @pytest.mark.parametrize("mode", [(), ("--peek",), ("--status",), ("--crontab",)])
     def test_the_duckdb_file_is_never_written(self, box, mode):
         """Bytes, mtime and mode of the file, and nothing new beside it — in
         every mode, twice, around a change."""
@@ -243,6 +247,91 @@ class TestItWritesNothingItShouldNot:
     def test_status_without_a_record_says_so(self, box):
         code, verdict, f, _ = box.run("--status")
         assert (code, verdict) == (2, "NORECORD") and not box.state.exists()
+
+
+def _documented(path: Path, marker: str) -> str:
+    """The cron line a script's header documents: the first comment line at
+    or after `marker` that reads as a crontab entry — five schedule fields
+    and a command — with the comment sign taken off."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for i, line in enumerate(lines):
+        if marker in line:
+            candidates = [line.split(marker, 1)[1], *lines[i + 1:i + 4]]
+            for candidate in candidates:
+                text = candidate.lstrip("#").strip()
+                if re.match(r"^([0-9*/,-]+\s+){5}/", text):
+                    return text
+    raise AssertionError(f"{path.name} documents no cron line after {marker!r}")
+
+
+class TestTheCrontabIsPrinted:
+    """The week of silence changes root's crontab by three lines, and nothing
+    in the repository installs them: `--crontab` prints the change for a
+    person to make (CLAUDE.md, "Starting the week of silence")."""
+
+    def _print(self, box, tmp_path, **extra):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        mark = tmp_path / "touched"
+        for tool in ("crontab", "sha256sum", "shasum", "flock"):
+            fake = bin_dir / tool
+            fake.write_text(f"#!/bin/sh\necho {tool} >> {mark}\n")
+            fake.chmod(0o755)
+        box.env_extra.update(extra)
+        code, _, _, done = box.run("--crontab", path=f"{bin_dir}{os.pathsep}/usr/bin:/bin")
+        return code, done.stdout, mark
+
+    def test_it_prints_and_touches_nothing(self, box, tmp_path):
+        """No crontab call, no hash, no lock, no record — and no file needed:
+        it prints the same with the DuckDB file gone. Mutation: place the
+        mode below the lock, or have it `crontab -l`."""
+        box.db.unlink()
+        code, out, mark = self._print(box, tmp_path)
+        assert code == 0, out
+        assert not mark.exists(), mark.read_text()
+        assert not box.state.exists()
+        assert out.startswith("# The week of silence: root's crontab, as a diff.")
+
+    def _diff(self, out: str):
+        start, back = out.split("# THE WAY BACK", 1)
+        def lines(text, sign):
+            return [ln[2:] for ln in text.splitlines() if ln.startswith(sign + " ")]
+        # retired, added — then, on the way back, re-added and removed
+        return lines(start, "-"), lines(start, "+"), lines(back, "+"), lines(back, "-")
+
+    def test_the_lines_are_the_ones_the_scripts_document(self, box, tmp_path):
+        """Each printed line is its script's own header line, with this
+        checkout's path for /opt/key-api-bot — so the print and the headers
+        cannot drift. Mutation: change a schedule in one place only."""
+        _, out, _ = self._print(box, tmp_path)
+        retire, add, re_add, remove = self._diff(out)
+        root = str(REPO)
+        documented = {
+            "compact": _documented(REPO / "scripts" / "weekly_compact.sh", "# Cron:"),
+            "snapshot": _documented(REPO / "deploy" / "daily_offsite.sh", "# Install:"),
+            "silence": _documented(SCRIPT, "# Install at the start of the week of silence"),
+        }
+        documented = {k: v.replace("/opt/key-api-bot", root) for k, v in documented.items()}
+        assert retire == [documented["compact"], documented["snapshot"]], (retire, documented)
+        assert add == [documented["silence"]], (add, documented)
+        # The way back is the exact reverse.
+        assert (re_add, remove) == (retire, add)
+        # And each names a script that is there to run.
+        for line in retire + add:
+            assert Path(line.split()[5]).is_file(), line
+
+    def test_no_printed_line_can_be_installed_as_it_stands(self, box, tmp_path):
+        """Pasting the whole print into `crontab -e` must fail, not install
+        the two lines the week retires: every line is a comment, blank, or
+        carries a `-`/`+` before its schedule, which cron reads as a bad
+        minute. Mutation: print the retired lines bare."""
+        _, out, _ = self._print(box, tmp_path)
+        for line in out.splitlines():
+            assert line == "" or line.startswith(("#", "- ", "+ ")), line
+
+    def test_usage_names_it(self, box):
+        _, _, _, done = box.run("--force")
+        assert "--crontab" in done.stdout
 
 
 class TestItIsAHostTool:

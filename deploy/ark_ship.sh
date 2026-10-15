@@ -115,7 +115,8 @@
 #
 # NOT HERE: cron, alerts (whoever runs this is reading it), chattr (the
 # operator's, once the run says ARK SHIPPED), deleting the local Ark, and
-# env.gpg — that moves into deploy/pg_offsite.sh, PR-10's half of OD-S5-6.
+# .env — every Postgres shipment carries it since PR-10 (deploy/pg_offsite.sh,
+# env-<stamp>.gpg), PR-10's half of OD-S5-6.
 set -Eeuo pipefail
 umask 077
 

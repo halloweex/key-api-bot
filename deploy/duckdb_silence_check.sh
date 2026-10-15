@@ -16,13 +16,21 @@
 # a file web holds open and is writing (KS_DUCKDB=on) can read a torn copy;
 # that only ever reads as CHANGED, which under `on` the file is anyway.
 #
-# THREE MODES, TWO OF WHICH WRITE NOTHING
+# FOUR MODES, THREE OF WHICH WRITE NOTHING
 #   (default)  hash, compare, and record: the cron run. The only mode that
 #              writes, and only under $STATE_DIR.
 #   --peek     hash and compare; write nothing. For a human.
 #   --status   read the record; hash nothing, write nothing. What
 #              deploy/stage4_soak.sh calls: hashing a multi-GB file is the
 #              cron's job, not the daily report's.
+#   --crontab  print the week's change to root's crontab, as a diff: the two
+#              lines it retires (the Sunday compaction, the nightly DuckDB
+#              snapshot), the one it adds (this check), and the way back.
+#              Reads no file, hashes nothing, writes nothing, and installs
+#              nothing — a crontab is changed by a person, from that print
+#              (CLAUDE.md, "Starting the week of silence"). A `-`/`+` before
+#              each line is what makes pasting the whole print into
+#              `crontab -e` fail instead of installing a retired line.
 #
 # ONE LINE, AND THE EXIT CODE SAYS THE SAME
 #   UNCHANGED file=… since=… age_s=… …    exit 0
@@ -54,7 +62,8 @@
 # its last $HISTORY_MAX lines by the same write that grows it (CLAUDE.md:
 # anything that accumulates declares its bound where it is created).
 #
-# Install at the start of the week of silence (not installed by anything here):
+# Install at the start of the week of silence (not installed by anything here;
+# `--crontab` prints this line with the two the week retires):
 #   17 * * * *  /opt/key-api-bot/deploy/duckdb_silence_check.sh >/dev/null 2>&1
 # Its output is in the record; deploy/stage4_soak.sh reads it (P1, P4).
 set -Eeuo pipefail
@@ -72,8 +81,49 @@ case "${1:-}" in
     "") ;;
     --peek) MODE=peek ;;
     --status) MODE=status ;;
-    *) echo "ERROR usage: $(basename "$0") [--peek|--status]"; exit 4 ;;
+    --crontab) MODE=crontab ;;
+    *) echo "ERROR usage: $(basename "$0") [--peek|--status|--crontab]"; exit 4 ;;
 esac
+
+# ── the crontab, printed ──────────────────────────────────────────────────────
+# Before the lock, the record and the file: this mode touches none of them.
+# Each line is the one its script's own header documents, with the path of
+# the checkout this runs from — tests/unit/test_week_of_silence_host.py holds
+# the two together.
+if [ "$MODE" = crontab ]; then
+    root="$(cd "$HERE/.." && pwd)"
+    retire_compact="0 2 * * 0  $root/scripts/weekly_compact.sh"
+    retire_snapshot="45 2 * * *  $root/deploy/daily_offsite.sh"
+    add_silence="17 * * * *  $root/deploy/duckdb_silence_check.sh >/dev/null 2>&1"
+    cat <<CRONTAB
+# The week of silence: root's crontab, as a diff. Printed, never installed:
+# change it by hand with \`crontab -e\`, one line at a time (CLAUDE.md,
+# "Starting the week of silence"). An installed line may carry a redirect
+# after its command; it is the command that names it.
+#
+# First keep a copy, and find the lines:
+#   crontab -l > /root/crontab.bak-week-of-silence-\$(date -u +%Y%m%d-%H%M%S)
+#   crontab -l | grep -nF -e scripts/weekly_compact.sh -e deploy/daily_offsite.sh -e deploy/duckdb_silence_check.sh
+#
+# STARTING THE WEEK — retire two (step 4, from the Ark run's SOURCE RELEASED),
+# add one (step 7, after KS_DUCKDB=off and up -d):
+- $retire_compact
+- $retire_snapshot
++ $add_silence
+# then run it once by hand, so its record starts now (BASELINE, exit 2):
+#   $root/deploy/duckdb_silence_check.sh
+#
+# Unchanged: offsite_check.sh (09:00; reports the DuckDB copy frozen under
+# off), pg_offsite.sh (07:40; carries .env since OD-S5-6), and every other line.
+#
+# THE WAY BACK (KS_DUCKDB=on again) — the reverse:
++ $retire_compact
++ $retire_snapshot
+- $add_silence
+# The record under $STATE_DIR stays as it is: history, not a lever.
+CRONTAB
+    exit 0
+fi
 
 # The clock, in whole seconds. Overridable for the tests only.
 NOW="${DUCKDB_SILENCE_NOW:-$(date -u +%s)}"

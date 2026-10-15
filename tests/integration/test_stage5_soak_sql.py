@@ -863,6 +863,7 @@ class TestP4WeekOfSilence:
     @pytest.mark.parametrize("env, expected, words", [
         ("0", "FAIL", ".env does not set KS_DUCKDB=off"),
         ("invalid", "FAIL", "an env file passed to docker keeps its quotes"),
+        ("refused", "FAIL", "docker refuses the whole env file over it"),
         ("unknown", "UNKNOWN", ".env could not be read"),
         ("", "UNKNOWN", ".env could not be read"),
     ])
@@ -870,7 +871,11 @@ class TestP4WeekOfSilence:
         """The Sunday compaction and the nightly off-site start their sidecars
         from `.env`, and their phase 1 opens the live file read-only — no hash
         sees that, only the switch inside the sidecar refuses it (review of
-        02.10). Mutation: drop `fail_sidecars` from the verdict."""
+        02.10). `refused` — `export`, or a space before the `=` — starts no
+        sidecar at all, and is a FAIL too, with the line to write: the week
+        would otherwise run on a `.env` no `docker run --env-file` can start
+        from, the restore drill's included (review of PR-10). Mutation: drop
+        `fail_sidecars` from the verdict, or `refused` from it."""
         async with scenario(pool) as conn:
             await clear(conn)
             await self.silent(conn)

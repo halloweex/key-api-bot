@@ -19,19 +19,26 @@ on `/api/health` as `duckdb_switch.opened_while_off` (sites and counts, never
 an exception's text: the endpoint is public), and paged CRITICAL by the canary
 as `duckdb_opened_while_off`.
 
-**`off` does not yet make web work without DuckDB.** That is stage 5's code
-decoupling (`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`). Since its PR-1,
-`get_store()` under `off` hands out the store unconnected, so a caller that
-only hosts a Postgres router on it works, and the tripwire stands at
-`connection()`, where the file is reached. What still reaches it is the
-stage 5 sweep's `KNOWN_RESIDUAL` (`tests/unit/test_duckdb_off_sweep.py`);
-what used to be inherited from DuckDB's `sync_metadata` — the order step's
-window among it — is read from its Postgres copy since PR-5
-(`core/pg_frozen_metadata.py`), and the list is empty since PR-0 to PR-8
-together. Web's startup contains a refusal rather than dying of it, so
-`/api/health` answers and the page can be seen. Never set it in production
-before PR-9's wider sweep — the routes that are not GETs, the assistant's
-tools, the websocket — finds that list still empty.
+**What `off` does is stage 5's code decoupling**
+(`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`). Since its PR-1, `get_store()`
+under `off` hands out the store unconnected, so a caller that only hosts a
+Postgres router on it works, and the tripwire stands at `connection()`,
+where the file is reached. What still reaches it is the stage 5 sweep's
+`KNOWN_RESIDUAL` (`tests/unit/test_duckdb_off_sweep.py`); what used to be
+inherited from DuckDB's `sync_metadata` — the order step's window among it —
+is read from its Postgres copy since PR-5 (`core/pg_frozen_metadata.py`),
+and the list is empty since PR-0 to PR-8 together. PR-9 widened the sweep
+to every door a week exercises — every route that is not a GET and every
+one outside `/api/`, the sockets, the events, the assistant's tools and
+routes, a real viewer's session, web's stop — with Postgres refusing and
+with it answering on a derived history, each with KeyCRM and TurboSMS
+answering and refusing, and walked the code for any way in
+the sweep does not open (`tests/unit/test_duckdb_off_entry_points.py`): the
+list stayed empty. Web's startup contains a refusal rather than dying of it,
+so `/api/health` answers and the page can be seen. That is the code's half
+of the week's licence, not the licence: the host tools (PR-10), the second
+Ark (PR-11), the rehearsal on the production copies and the owner's own yes
+come before anybody sets it in production.
 
 COUNTED WHERE IT IS RAISED
 

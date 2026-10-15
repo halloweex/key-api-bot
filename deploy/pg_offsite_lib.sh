@@ -16,7 +16,9 @@
 # ships the second Ark, pointing $PG_REMOTE_DIR at the Ark's own directory
 # after sourcing this. remote_prepare/put/get/list/rm/names serve it as they
 # are; remote_stamp_of, remote_stamps and remote_debris name the dumps' family
-# alone, and the Ark keeps its own beside its own names.
+# alone — the dump, its roles file, the .env that rides with them since
+# stage 5 (OD-S5-6) and their manifest — and the Ark keeps its own beside its
+# own names.
 #
 # ONE TRANSPORT, WITH ROOM FOR THE SECOND. OD-01 chose the Hetzner Storage Box
 # that already holds the Parquet archive (b) and named a second provider as
@@ -137,6 +139,7 @@ remote_stamp_of() {   # <remote name>
     case "$name" in
         ks-*.dump.gpg)   stamp="${name#ks-}";    stamp="${stamp%.dump.gpg}" ;;
         roles-*.sql.gpg) stamp="${name#roles-}"; stamp="${stamp%.sql.gpg}" ;;
+        env-*.gpg)       stamp="${name#env-}";   stamp="${stamp%.gpg}" ;;
         ks-*.sha256)     stamp="${name#ks-}";    stamp="${stamp%.sha256}" ;;
         *) return 0 ;;
     esac

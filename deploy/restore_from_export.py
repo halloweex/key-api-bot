@@ -17,8 +17,13 @@ Run inside the app image with a scratch directory mounted at /app/data, holding
 `export_parquet/` from an archive. It writes analytics_clean.duckdb next to it
 and leaves the caller to throw the whole directory away:
 
-    docker run --rm -v /tmp/drill:/app/data --env-file .env \\
+    docker run --rm -v /tmp/drill:/app/data --env-file .env -e KS_DUCKDB=on \\
         halloweex/keycrm-web:latest python /app/deploy/restore_from_export.py
+
+`-e KS_DUCKDB=on` because a `.env` from the week of silence — the live one, or
+one restored from `env-<stamp>.gpg` — says `off`, and the switch would refuse
+the rebuild before it imported a row; `-e` outranks `--env-file`. The sidecar
+sees only the scratch directory.
 
 Exits non-zero if the snapshot does not restore, or does not validate.
 """
