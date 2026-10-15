@@ -4308,7 +4308,7 @@ runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
 `.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1, PR-3,
-PR-4 and PR-8).
+PR-4, PR-5, PR-7 and PR-8).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
@@ -4343,21 +4343,44 @@ left at `duckdb` (refused by name in `no_address`) and the expenses' NULL
 `read_fallback_mode.mode` keeps publishing what was configured, so the canary
 reads `duckdb_switch.mode` beside it: such a route is paged as `read_refused`
 alone, never also as `read_routed_to_duckdb`, and the refusal's log line names
-the variable that refused. Under `on` nothing changed. **Web still does not
-run clean under `off`**: what the sweep in `tests/unit/test_duckdb_off_sweep.py`
-finds reaching for the file is
-exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
-scheduler's catch-up, the DuckDB half of the integrity scan and of the
-mirror landing, the hourly copy of what only DuckDB holds, the report
-weeks and the
-order and catalogue watermarks inherited from DuckDB, and `db_backup`; no GET
-route since PR-8.
-The watermarks are not a boot-time reach: with Postgres holding no
-`last_sync_orders`, **every sync tick's order step is refused and order
-intake stops** until PR-5. The sweep runs in the target state (derived from
-the registries, every chain latched, step 13 met). It boots web, starts the
-scheduler and runs every registered job — each as the tick that comes once
-every window an earlier step armed has passed, on a fresh sync service —
+the variable that refused.
+**What was inherited from DuckDB is read from its copy** (PR-5): a sync
+window, freshness stand-in or digest beat Postgres holds no key for comes
+from `app.sync_metadata` — DuckDB's table as the hourly copy last shipped it,
+which stopped moving at the latches (`core/pg_frozen_metadata.py`) — the
+freshness check's bootstrap gate asks Postgres too, and an unreadable copy
+is `sync_watermarks_unwatched`, never "fresh install"; the report ledgers
+adopt nothing under `off`. That finding carries every entity it names
+(`IntegrityIssue.unverified`) and the integrity job holds each one, not only
+the moved keys — an entity no chain moved rests on the copy alone, and a run
+that could not read it must not announce its page resolved. Before it, every
+tick's order step was refused and order intake stopped. **The jobs stand down rather than fail** (PR-7):
+`duckdb_checkpoint` and `db_backup` are not registered, the catch-up asks
+Postgres alone, the mirror landing reads DuckDB only for what survives the
+stand-down, and the integrity scan is handed a connection that refuses
+(`duckdb_switch.RefusedConnection` — a check that still reaches is counted
+where it reached) with `pk_uniqueness_{products,buyers,categories}` stood down
+and no twin (`DUCKDB_OFF_STOOD_DOWN`, OD-S5-5), so its run is a verdict with no
+`error_message`. Those three stay bare calls skipped by name, never lambdas:
+the set is read out of the scan by the rule the `off` verdict reads its
+retired conditions by, so the two cannot part. The copied tables no chain
+owns — `app.sync_metadata`, `app.warehouse_refreshes`, `app.reconciliation_log`
+— freeze as history (`pg_operational.DUCKDB_HISTORY_TABLES`, OD-S5-4),
+neither copied nor compared, so `meta.mirror_state.last_ok_at` of the
+`sync_metadata` copy stops with them: nothing may judge that stamp against
+an owner row a chain first writes under `off`. A page their stood-down
+checks delivered before the switch is the `off` verdict's
+`retired_pages_clear` to wait for (PR-2).
+Under `on` nothing changed. **Web still does not run clean under `off`**:
+what the sweep in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the
+file is exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, read by
+the boot's sync, the scheduler's start and `pg_warehouse_derive` (PR-6); no
+GET route since PR-8, and nothing copied or compared out of DuckDB since PR-4
+and PR-7 together. The sweep runs in
+the target state (derived from the registries, every chain latched, step 13
+met). It boots web, starts the scheduler and runs every registered job —
+each as the tick that comes once every window an earlier step armed has
+passed, on a fresh sync service —
 with Postgres refusing and, wherever `KS_PG_DSN` is set (CI fails if it
 skipped), with Postgres live, emptied first and put back after. It calls
 every GET route **with Postgres refusing only**: with its required
