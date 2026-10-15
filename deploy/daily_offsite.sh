@@ -18,9 +18,35 @@
 #
 # 02:45 UTC is after the 01:30 backup and after the Sunday compact finishes
 # (~02:01), so it never races either.
+#
+# Retired at the start of the week of silence (stage 5), once the second Ark
+# is off-site: under KS_DUCKDB=off web registers no db_backup, so there is no
+# new backup to snapshot, and the sidecar — started with `--env-file .env` —
+# would be refused by the switch. So with KS_DUCKDB=off in .env this exits 0
+# with one line before it reads, links or deletes anything, rather than
+# failing every night of the week — the first with a "Daily snapshot FAILED"
+# page for the refused sidecar, each one after on a backup past 30 h; its
+# cron line is removed
+# (deploy/duckdb_silence_check.sh --crontab prints it). The copy of .env that
+# rode in this archive goes off-site with every Postgres shipment instead
+# (deploy/pg_offsite.sh, OD-S5-6), so retiring this loses none.
 set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
+
+# Stage 5 (PR-10), first, before the scratch directory's cleanup trap exists:
+# under `off` nothing is read, linked, started or deleted. `.env` is read by
+# exact name (deploy/duckdb_env.sh), never listed.
+# shellcheck source=/dev/null
+source deploy/duckdb_env.sh
+ks_duckdb_env_read .env
+if ks_duckdb_stands_down; then
+    echo "KS_DUCKDB=off in .env: no DuckDB snapshot tonight — nothing read, nothing shipped, nothing deleted. The week of silence retires this cron line: remove daily_offsite.sh from root's crontab. .env goes off-site with deploy/pg_offsite.sh. $(ks_duckdb_env_note)"
+    exit 0
+fi
+if [ "$KS_DUCKDB_ENV" = invalid ]; then
+    echo "note: KS_DUCKDB=$KS_DUCKDB_ENV_VALUE in .env is not a value the switch understands: web and the sidecar run on, and so does this snapshot"
+fi
 
 CONFIG="deploy/backup.env"
 # shellcheck source=/dev/null
