@@ -397,8 +397,10 @@ class TestTheOpener:
         with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff) as raised:
             duckdb_switch.open_file(tmp_path / "a.duckdb")
         block = duckdb_switch.health_block()
-        assert set(block) == {"mode", "value", "error", "opened_while_off"}
+        # `held_back` under off only: None here, no verdict reached (PR-2).
+        assert set(block) == {"mode", "value", "error", "opened_while_off", "held_back"}
         assert block["mode"] == "off" and block["value"] == "off"
+        assert block["held_back"] is None
         for entry in block["opened_while_off"].values():
             assert set(entry) == {"count", "last_at"}
         assert str(raised.value) not in json.dumps(block)
@@ -917,7 +919,28 @@ class TestTheCompaction:
         assert first.startswith(
             "🚨 Compact aborted: compact failed (exit 1): KS_DUCKDB=off: the weekly "
             "compaction is refused before it opens the DuckDB file"), first
-        assert "Remove weekly_compact.sh from root's crontab" in first, first
+        assert "remove weekly_compact.sh from root's crontab" in first, first
+
+    def test_the_cron_does_not_say_a_held_back_week_has_started(
+        self, live, monkeypatch, capsys, tmp_path, fake_bin,
+    ):
+        """Review of PR-2: this sidecar reads `KS_DUCKDB` from `.env` and
+        reaches no verdict, so it is refused under a web held back on `on`
+        (core/duckdb_off.py) as under one running off — and its line said the
+        week of silence had started and the cron line should go, while web
+        wrote the file it had just left uncompacted. The removal is now said
+        of a web running off, and the hold is named beside it — whole, inside
+        the 300 characters the wrapper quotes. Mutation: the old line."""
+        from tests.unit.test_weekly_compact_wrapper import _run as wrapper_run
+
+        monkeypatch.setenv("FORCE_COMPACT", "1")
+        _off(monkeypatch)
+        with pytest.raises(SystemExit):
+            live.main()
+        run = wrapper_run(tmp_path / "wrapper", fake_bin, capsys.readouterr().out, 1, "")
+        first = run.notify.splitlines()[0]
+        assert first.endswith(duckdb_switch.HELD_BACK_NOTE), first
+        assert "If web runs off, the week of silence has started" in first, first
 
 
 class TestTheNightlySnapshot:
@@ -971,10 +994,45 @@ class TestTheNightlySnapshot:
         printed = capsys.readouterr().out
         assert ("KS_DUCKDB=off: the nightly DuckDB snapshot is refused before it opens "
                 "the backup") in printed, printed
-        assert "Remove daily_offsite.sh from root's crontab" in printed
+        assert "remove daily_offsite.sh from root's crontab" in printed
         assert reached == []
         assert list(duckdb_switch.opened()) == ["compact_duckdb:phase1_export"]
         assert not compact.EXPORT_DIR.exists() and not module.PREVIOUS_PATH.exists()
+
+    def test_it_does_not_say_a_held_back_week_has_started(
+        self, snapshot, monkeypatch, capsys,
+    ):
+        """Review of PR-2: started from `.env`, this sidecar is refused under
+        a web held back on `on` too, and said the week of silence had started
+        and its cron line should go, while web wrote the file and took the
+        backups it no longer shipped. Mutation: the old line."""
+        module, _ = snapshot
+        _off(monkeypatch)
+        with pytest.raises(SystemExit):
+            module.main()
+        [line] = [ln for ln in capsys.readouterr().out.splitlines()
+                  if "nightly DuckDB snapshot is refused" in ln]
+        assert line.endswith(duckdb_switch.HELD_BACK_NOTE), line
+        assert ("If web runs off and the second Ark is off-site, the week of "
+                "silence has started") in line, line
+
+    def test_an_image_older_than_the_hold_still_refuses_in_a_line(
+        self, snapshot, monkeypatch, capsys,
+    ):
+        """This file is mounted from the host's checkout while `core` comes
+        from the image: an image built before the note has none to add, and
+        importing it by name would turn every nightly refusal into an
+        ImportError. Its web cannot be held back either, so the line without
+        the note is still true. Mutation: import `HELD_BACK_NOTE` by name."""
+        module, _ = snapshot
+        monkeypatch.delattr(duckdb_switch, "HELD_BACK_NOTE")
+        _off(monkeypatch)
+        with pytest.raises(SystemExit) as exit_:
+            module.main()
+        assert exit_.value.code == 1
+        printed = capsys.readouterr().out
+        assert "remove daily_offsite.sh from root's crontab." in printed, printed
+        assert "held_back" not in printed
 
 
 # ─── Web: it starts, and it says so ──────────────────────────────────────────
@@ -994,9 +1052,14 @@ class TestTheStartup:
     def _off_boot(self, monkeypatch, data, init_and_sync):
         """web's real `startup_event` under off (`duckdb_off`, whose directory
         is `data`), around the boot sync it is given; the campaign restore
-        recorded rather than written. Returns (main, restore)."""
+        recorded rather than written. Returns (main, restore).
+
+        Off's coherence verdict (PR-2) is answered as met: its keys are
+        `test_duckdb_off_verdict.py`'s, and what these sweep is the startup
+        of a web that does run off."""
         import core.duckdb_store as store_module
 
+        monkeypatch.setattr("core.duckdb_off.evaluate", lambda env, facts: [])
         main = self._stub(monkeypatch)
         restore = AsyncMock(return_value=False)
         monkeypatch.setattr(store_module.DuckDBStore, "backfill_sms_campaign_record",
@@ -1065,6 +1128,41 @@ class TestTheStartup:
         said = " ".join(str(c.args[0]) for c in main.logger.critical.call_args_list)
         assert "the boot sync reached for the DuckDB file and was refused" in said
         restore.assert_awaited_once()
+
+    def test_off_held_back_starts_as_on_and_opens_the_file(self, monkeypatch, duckdb_off):
+        """Stage 5's PR-2, OD-S5-1 (a): a precondition of off unmet, and web
+        runs `on` — the store is connected before it is handed out, the boot
+        sync runs on it, nothing is refused, and the unmet key is published.
+        Mutation: drop the `settle()` call from `configure_modes(web=True)`."""
+        import core.duckdb_store as store_module
+        from core import duckdb_off as verdict
+
+        main = self._stub(monkeypatch)
+        monkeypatch.setattr(verdict, "evaluate", lambda env, facts: [
+            verdict.Unmet(verdict.USER_STORE, "KS_USER_STORE is 'duckdb'")])
+        monkeypatch.setattr(store_module.DuckDBStore, "backfill_sms_campaign_record",
+                            AsyncMock(return_value=False))
+        connected = []
+
+        async def boot_sync(**_):
+            store = await store_module.get_store()
+            connected.append(store._connection is not None)
+            await store_module.close_store()
+
+        monkeypatch.setattr(main, "init_and_sync", boot_sync)
+        monkeypatch.setattr(main, "logger", MagicMock())
+        try:
+            asyncio.run(main.startup_event())
+        finally:
+            # Under on the startup asks the store for its counts after the
+            # boot sync, and that store is connected.
+            asyncio.run(store_module.close_store())
+        assert connected == [True], "on: connected before it is handed out"
+        assert duckdb_switch.mode() == "on" and duckdb_switch.value() == "off"
+        assert duckdb_switch.held_back() == (verdict.USER_STORE,)
+        assert duckdb_switch.opened() == {}
+        assert (duckdb_off / "analytics.duckdb").exists(), "held back, the file is opened"
+        assert duckdb_switch.health_block()["held_back"] == [verdict.USER_STORE]
 
     def test_on_is_the_path_it_always_was(self, monkeypatch):
         main = self._stub(monkeypatch)

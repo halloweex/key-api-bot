@@ -1028,7 +1028,7 @@ def main():
     log(f"Application code: {APP_ROOT}")
 
     preflight()
-    from core.duckdb_switch import DuckDBOpenedWhileOff
+    from core.duckdb_switch import HELD_BACK_NOTE, DuckDBOpenedWhileOff
 
     try:
         manifest = phase1_export()
@@ -1037,10 +1037,13 @@ def main():
         # "Compact aborted" message, so it says what to do: the compaction is
         # retired at the start of the week of silence, and a cron that still
         # fires is the reminder that its line was left in root's crontab.
+        # Unless web was held back on `on` (core/duckdb_off.py): this sidecar
+        # reads `.env`, not web's verdict, and is refused either way — and
+        # then the week has not started and web writes the file on.
         log("KS_DUCKDB=off: the weekly compaction is refused before it opens "
-            "the DuckDB file (the week of silence, OD-17 (a)). Nothing was "
-            "read or written. Remove weekly_compact.sh from root's crontab: "
-            "it is retired at the start of the week of silence", "ERROR")
+            "the DuckDB file. If web runs off, the week of silence has started: "
+            "remove weekly_compact.sh from root's crontab. " + HELD_BACK_NOTE,
+            "ERROR")
         sys.exit(1)
     phase2_import(manifest)
     phase3_validate(manifest)

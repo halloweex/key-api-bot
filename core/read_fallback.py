@@ -128,6 +128,10 @@ of its target, so a process actually running under `off` meets neither.
 `misconfigured` and `no_engine_routes` do not grow for it — under `off`
 every such read is refused, counted and published under
 `read_fallback_mode.refused`, and the canary pages it as `read_refused`.
+In web, whether `off` holds is decided by that verdict, which comes after this
+module is configured, so the start's line for a switch with no address is
+written after the verdict (`report_misconfigured`): a web held back on `on`
+serves those reads from DuckDB and must not log them as refused.
 Under `KS_DUCKDB=on` every answer here is what it was.
 """
 from __future__ import annotations
@@ -157,6 +161,10 @@ _NEEDS = {
 _mode: Optional[str] = None
 _mode_error: Optional[str] = None
 _misconfigured: List[str] = []
+# Causes `configure_mode(report=False)` found new and nobody has logged yet:
+# `configure_modes()` logs them after stage 5's verdict, which decides what
+# the line says (`report_misconfigured`).
+_unreported: List[str] = []
 
 _lock = threading.Lock()
 _counts: Dict[str, Dict[str, object]] = {}
@@ -207,10 +215,12 @@ def _misconfigured_reads() -> List[str]:
     return found
 
 
-def configure_mode() -> str:
+def configure_mode(*, report: bool = True) -> str:
     """Read `KS_READ_FALLBACK` once, and look for read switches that cannot
-    reach their engine. Never raises. Called by `configure_modes()`."""
-    global _mode, _mode_error, _misconfigured
+    reach their engine. Never raises. Called by `configure_modes()`, with
+    `report=False`: the line a misconfigured switch is logged with is then
+    left to `report_misconfigured`, which that function calls last."""
+    global _mode, _mode_error, _misconfigured, _unreported
     previous = _mode
     value = os.getenv(ENV, DUCKDB).strip().lower() or DUCKDB
     if value in _VALID:
@@ -234,15 +244,40 @@ def configure_mode() -> str:
             ENV)
 
     misconfigured = _misconfigured_reads()
-    for line in misconfigured:
-        if line not in _misconfigured:
-            logger.error(
-                "%s — every read behind it is %s. Set the address or unset "
-                "the flag.", line,
-                f"refused ({_refusal_cause()})" if refusing()
-                else "served from DuckDB")
+    # New since the last configure, as before — or found new by one whose
+    # report has not come yet.
+    _unreported = [line for line in misconfigured
+                   if line not in _misconfigured or line in _unreported]
     _misconfigured = misconfigured
+    if report:
+        report_misconfigured()
     return _mode
+
+
+def report_misconfigured() -> None:
+    """Log each read switch `configure_mode` found new without an address,
+    once per cause, saying what this process does with the reads behind it:
+    refused, or served from DuckDB. Never raises.
+
+    Which of the two is `refusing()`, and in web that answer is not final
+    when this mode is configured. `KS_DUCKDB=off` makes it hold, and stage
+    5's verdict (`core.duckdb_off.settle()`) comes last in
+    `configure_modes()`, after step 13's verdict and chain 3's hold, which
+    it reads. A verdict that holds web back runs it `on`, and those reads
+    are then served from DuckDB. Logged at the configure, the line said
+    "refused (KS_DUCKDB=off)", and nothing corrected it: the scheduler's
+    configure finds the cause already logged. So `configure_modes()`
+    configures this mode with `report=False` and reports after the verdict
+    (integration of PR-8 with PR-2). The mode itself is still cached at
+    its place in that order; only the line waits."""
+    global _unreported
+    for line in _unreported:
+        logger.error(
+            "%s — every read behind it is %s. Set the address or unset "
+            "the flag.", line,
+            f"refused ({_refusal_cause()})" if refusing()
+            else "served from DuckDB")
+    _unreported = []
 
 
 def mode() -> str:

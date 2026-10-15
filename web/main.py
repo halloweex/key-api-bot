@@ -206,8 +206,9 @@ async def startup_event():
     # The cached modes, before the boot sync below writes a single order. The
     # scheduler used to be the only caller, and it starts after that sync — so
     # the boot's orders landed in Postgres unmarked under KS_PG_DERIVE=own.
-    # See `core/runtime_modes.py`.
-    configure_modes()
+    # See `core/runtime_modes.py`. `web=True`: under KS_DUCKDB=off, this is
+    # where off's coherence verdict is reached (stage 5's PR-2).
+    configure_modes(web=True)
 
     # Initialize DuckDB analytics store and sync from API
     logger.info("Initializing DuckDB analytics store...")

@@ -1811,16 +1811,19 @@ ORDER_LANDING_CHECKS: FrozenSet[str] = frozenset({
 # historic upserts predate the constraint. The finding's name is the check's
 # and the condition's, so this set is also what such a page is held under:
 # a page of theirs delivered before the switch has no check left to clear it
-# (the `off` verdict's `retired_pages_clear`, PR-2). It is exactly the scan's
-# bare `_pk_uniqueness_check` calls, the ones no chain's stand-down hands on
-# as a lambda — a test reads it out of `check_internal_integrity` by that
-# rule, the one the verdict reads its retired conditions by, so wrapping the
-# three again would empty the verdict's set while this one stood. Every other
-# check over DuckDB already stands down in the target state — Silver, Gold and
-# UTM with step 13, the order tables with chain 3 — and the freshness check
-# and the snapshot continuity read Postgres; the integrity job hands the scan
-# a connection that refuses (`duckdb_switch.RefusedConnection`), so a check
-# that still reaches for the file is counted where it reached.
+# (the `off` verdict's `retired_pages_clear`, PR-2, read through
+# `core.duckdb_off.retired_conditions`). It is exactly the scan's bare
+# `_pk_uniqueness_check` calls, the ones no chain's stand-down hands on as a
+# lambda — a test reads it out of `check_internal_integrity` by that rule, the
+# one the verdict reads its retired conditions by, so wrapping the three again
+# would empty the verdict's set while this one stood. One list for both, held
+# to the scan by `tests/unit/test_duckdb_off_jobs.py` and
+# `tests/unit/test_duckdb_off_verdict.py`. Every other check over DuckDB
+# already stands down in the target state — Silver, Gold and UTM with step 13,
+# the order tables with chain 3 — and the freshness check and the snapshot
+# continuity read Postgres; the integrity job hands the scan a connection that
+# refuses (`duckdb_switch.RefusedConnection`), so a check that still reaches
+# for the file is counted where it reached.
 DUCKDB_OFF_STOOD_DOWN: FrozenSet[str] = frozenset({
     "pk_uniqueness_products",
     "pk_uniqueness_buyers",
