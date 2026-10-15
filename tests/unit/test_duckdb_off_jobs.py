@@ -330,6 +330,10 @@ class _Pool:
         return self._acquire()
 
     async def fetch(self, sql, *args):
+        # The chain's mirror stamps (#291's `read_mirror_stamps`) join
+        # meta.chain_watermarks too, but to meta.mirror_state: no stamps here.
+        if "meta.mirror_state" in sql:
+            return []
         if "meta.chain_watermarks" in sql:
             return [{"key": f"owner:{t}", "value": v} for t, v in self.owners.items()]
         return []
