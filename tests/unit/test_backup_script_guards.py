@@ -263,6 +263,18 @@ def test_the_plaintext_the_shipper_makes_to_check_is_removed_where_it_is_made():
         "the decrypted dump outlives the check it was made for"
     )
 
+    # The same for the configuration that rides with every shipment since
+    # OD-S5-6: its plaintext is every secret on the host. Each exit from the
+    # comparison — refused, garbled, matched — removes it before going on.
+    decrypt = text.index('-o "$plain_env" -d "$VERIFY/$enc_env"')
+    body = text[decrypt:marker]
+    exits = [m.start() for m in re.finditer(r"return 1|echo \"verified: \$enc_env", body)]
+    assert len(exits) == 3, exits
+    removals = [m.start() for m in re.finditer(r'rm -f "\$plain_env"', body)]
+    assert len(removals) == 3 and all(r < e for r, e in zip(removals, exits)), (
+        "the decrypted .env outlives the check it was made for"
+    )
+
 
 def test_the_pitr_drill_vouches_only_after_every_check():
     """Chain 3's flip reads `data/.pg_pitr_drill_last_ok`

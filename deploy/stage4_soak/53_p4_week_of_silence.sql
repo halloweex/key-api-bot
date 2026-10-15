@@ -22,7 +22,8 @@
 --   environment, and their phase 1 opens the live file read-only — no byte
 --   changes, so the hash cannot see it, and only the switch inside the
 --   sidecar refuses it. So `.env` must say KS_DUCKDB=off too, read as docker
---   reads it (`duckdb_off_env`), and since when: its mtime
+--   reads it (`duckdb_off_env`, deploy/duckdb_env.sh's reading — the one the
+--   host scripts stand down by), and since when: its mtime
 --   (`duckdb_env_changed_at`), because nothing says the sidecars read `off`
 --   before the file's last edit;
 -- - the levers: P2's journal rows and pages, every one of them, since off;
@@ -49,7 +50,9 @@
 -- WHAT EACH VERDICT MEANS
 -- FAIL: KS_DUCKDB set to a value web does not understand (web runs `on`, the
 -- week is not running); web off while `.env` does not say off, or says it in
--- a way the switch does not understand (the sidecars would run on); a breach
+-- a way the switch does not understand (the sidecars would run on), or in a
+-- form docker rejects the whole file over (`refused`: export, or a space
+-- before the `=` — no sidecar starts, the restore drill's included); a breach
 -- inside the day; a tripwire, held-back, lever or fallback page still
 -- standing; the latest probe of either watch inside the day found something;
 -- the file changed, is missing, or was found missing inside the day (it came
@@ -204,9 +207,9 @@ verdicts AS (
            COALESCE(j.sw_clean = 0 AND j.sw_probe > j.starts, false)
                OR COALESCE(j.fw_clean = 0 AND j.fw_probe > j.starts, false) AS fail_probe,
            COALESCE(j.file_last IN ('CHANGED', 'MISSING'), false) AS fail_file,
-           COALESCE(j.duckdb_off_env IN ('0', 'invalid'), false) AS fail_sidecars,
-           j.duckdb_off_env IS NULL OR j.duckdb_off_env NOT IN ('0', '1', 'invalid')
-               AS sidecars_unseen,
+           COALESCE(j.duckdb_off_env IN ('0', 'invalid', 'refused'), false) AS fail_sidecars,
+           j.duckdb_off_env IS NULL
+               OR j.duckdb_off_env NOT IN ('0', '1', 'invalid', 'refused') AS sidecars_unseen,
            j.sw_probe IS NULL OR j.fw_probe IS NULL AS unwatched,
            COALESCE(j.clock_now - j.sw_probe > j.watch_gap
                     OR j.clock_now - j.fw_probe > j.watch_gap, false) AS watch_stale,
@@ -255,13 +258,22 @@ SELECT 'P4 week of silence'::text AS "check",
                        format('the file''s record says %s', file_last)
                    END,
                    CASE WHEN fail_sidecars THEN
-                       CASE duckdb_off_env WHEN 'invalid'
-                            THEN '.env sets KS_DUCKDB to a value the switch does not understand '
-                                 || '(an env file passed to docker keeps its quotes)'
-                            ELSE '.env does not set KS_DUCKDB=off' END
-                       || ': the weekly compaction and the nightly off-site start their '
-                       || 'sidecars from it and would open the file read-only, which neither '
-                       || 'the switch nor the hash sees; put KS_DUCKDB=off in .env'
+                       CASE duckdb_off_env
+                           WHEN 'refused' THEN
+                               '.env writes KS_DUCKDB with export, or with a space before its '
+                               || 'value: compose reads it, but docker refuses the whole env '
+                               || 'file over it, so no sidecar starts from it — the restore '
+                               || 'drill''s included; write KS_DUCKDB=off as a line of its own'
+                           ELSE
+                               CASE duckdb_off_env WHEN 'invalid'
+                                    THEN '.env sets KS_DUCKDB to a value the switch does not '
+                                         || 'understand (an env file passed to docker keeps its '
+                                         || 'quotes and an inline comment)'
+                                    ELSE '.env does not set KS_DUCKDB=off' END
+                               || ': the weekly compaction and the nightly off-site start their '
+                               || 'sidecars from it and would open the file read-only, which '
+                               || 'neither the switch nor the hash sees; put KS_DUCKDB=off in .env'
+                       END
                    END)
                || '; the week starts again (OD-17 (a))', 500)
            WHEN sidecars_unseen THEN

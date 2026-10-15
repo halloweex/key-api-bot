@@ -31,7 +31,7 @@
 -- breach inside the day, a lever or fallback page still standing, the F1
 -- watch's latest probe inside the day found a fallback, or step 13 is on
 -- DuckDB. UNKNOWN: no F1 watch, a watch not written for 35 min, or one clean
--- for less than the day. PASS: otherwise, with how many of the 720 h are
+-- for less than the day. PASS: otherwise, with how many of the 336 h are
 -- behind it and what started the clock; "covered" is the period done.
 -- Undeclared, the check is not applicable.
 --

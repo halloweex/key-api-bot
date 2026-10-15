@@ -4291,7 +4291,10 @@ web that opens the live file, read-only, which no hash can see — and the
 nightly off-site's snapshot, which runs the same phase, open through the
 switch: their sidecars start from `.env`, so under `off` both are refused
 before the driver runs, each with one line saying its cron line is retired
-at the start of the week. Under `off` an open is refused **before the
+at the start of the week. Since PR-10 their wrappers do not get that far:
+each reads `KS_DUCKDB` out of `.env` first and stands down — exit 0, one
+line — before it stops, deletes or starts anything ("Starting the week of
+silence", below). Under `off` an open is refused **before the
 driver runs**, so the file is not even created — and `DuckDBStore.connect()`
 and `backup_database()` ask first, before either touches the disk beside the
 file (`data/`, `duckdb_tmp/`, `backups/` and the temp copies in it); the
@@ -4483,7 +4486,8 @@ anywhere until then.
 
 **The file's hash** — `deploy/duckdb_silence_check.sh`, a host tool, **not
 installed**: hourly from root's crontab at the start of the week (the line is
-in its header). sha256 of the file and its `.wal`, O_RDONLY and no lock, so it
+in its header, and `--crontab` prints it with the two the week retires —
+printed, never installed). sha256 of the file and its `.wal`, O_RDONLY and no lock, so it
 can never be the change it reports; record in `/root/duckdb-silence/state`
 (600, atomic, parsed and never sourced) and one history line per run, cut to
 500 by the run that grows it. `--peek` hashes and writes nothing; `--status`
@@ -4535,7 +4539,8 @@ decision to restart both clocks, said out loud.
   (the operator declares the last flip — nothing in the database knows which
   flip the stage needed), the newest `owner:` row, step 13's switch, every
   breach (P2's and F1's pages), and the `watch:read_fallbacks` clean-since — an
-  unwatched stretch is not a clean one. Covered at **720 h**.
+  unwatched stretch is not a clean one. Covered at **336 h** (14 days, the
+  owner's amendment of 2026-10-08).
 - **P4** the week of silence, under `off` only. Starts at the latest of the
   `watch:duckdb_switch` clean-since (the canary writes it only while web runs
   `off`, on F1's 35-minute rule), the file's unchanged-since, the last edit of
@@ -4544,8 +4549,10 @@ decision to restart both clocks, said out loud.
   and F1's watch. `.env` is asked because the Sunday compaction and the
   nightly off-site start their sidecars from it, not from web's environment,
   and only the switch in the sidecar refuses their read-only open: web `off` with `.env` not saying `off` the way
-  `docker run --env-file` reads it (last line, quotes kept) is a FAIL, and any
-  edit of the file restarts the week. Covered at **168 h** — a full week holds
+  `docker run --env-file` reads it is a FAIL — quotes and an inline comment
+  kept, and `export` or a space before the `=` making it refuse the whole
+  file — read through `deploy/duckdb_env.sh`, the reader the host scripts
+  stand down by, and any edit of the file restarts the week. Covered at **168 h** — a full week holds
   Sunday 05:00 and Monday 09:30 by construction — **and** an
   `app.weekly_report_sends.sent_at` after the start, because a week that never
   delivered a report has not shown the Monday path works without DuckDB.
@@ -4555,6 +4562,190 @@ decision to restart both clocks, said out loud.
 These are the measurements, not the gate: every chain latched, source
 reconciliation clean, `KS_READ_FALLBACK=off`, the second Ark and the rest of
 the plan's stage-5 preconditions are their own checks.
+
+### Starting the week of silence (stage 5, PR-10)
+
+The one runbook for the start of the week and for the way back. Nothing in
+the repository runs any of it: every step is a person's, on the host, as
+root, in `/opt/key-api-bot`. `KS_DUCKDB=off` in production needs the owner's
+own "yes", separate from every merge (decision of 10.10.2026).
+
+**What PR-10 changed on the host**, which is what makes the order below safe:
+
+- `scripts/weekly_compact.sh` and `deploy/daily_offsite.sh` read `KS_DUCKDB`
+  out of `.env` by exact name — `deploy/duckdb_env.sh`, the one reader, the
+  lines naming the key and nothing else of the file, read both the way
+  compose reads them (web's environment) and the way `docker run --env-file`
+  does (a sidecar's) — and when either says `off` they exit 0 with one line
+  **before they stop, delete, link or start anything**. The
+  compaction used to delete the last compaction's backup and the export and
+  stop web, bot and Meilisearch, and only then have its sidecar refused; the
+  snapshot paged "Daily snapshot FAILED" the first night and refused a stale
+  backup every night after. Their cron lines are retired at step 4; the
+  stand-down is the insurance for a line left behind.
+- `deploy/pg_offsite.sh` ships `.env` beside every Postgres dump
+  (`env-<stamp>.gpg`, OD-S5-6): in the manifest, read back, hashed, decrypted
+  and compared like the dump, and a run without a `.env` fails. The only
+  off-site `.env` used to ride in the DuckDB Parquet archive, which the week
+  stops; now the Postgres marker is its age.
+- `deploy/offsite_check.sh` reports the DuckDB copy as frozen, with its age,
+  and never fails on it while `.env` says `off`. The Postgres marker and the
+  watchdog are judged as before, their pages say they carry the only
+  off-site `.env`, and the Monday heartbeat keeps speaking.
+- `deploy/duckdb_silence_check.sh --crontab` prints root's crontab change as
+  a diff, both directions. It installs nothing; nothing here does.
+- `deploy/restore-test.sh` starts its rebuild with `-e KS_DUCKDB=on` beside
+  `--env-file .env` (docker ranks `-e` first), so the drill that proves the
+  Parquet archive rebuilds still runs in the week — its sidecar sees only its
+  scratch directory — and it reports the newest archive as frozen rather
+  than stale. The real restore's command (`restore_from_export.py`'s
+  docstring) carries the same `-e`, for a `.env` decrypted from the week.
+
+**Not done in PR-10, though the plan (2.9) gave it these**, and what each does
+under `off` meanwhile — none of them opens the live file or pages:
+`scripts/check_date.py` and `scripts/force_resync.py` are refused by the
+switch with a traceback rather than one line; `scripts/weekly_report_preview.py`
+still reads a DuckDB copy, not the `KS_READ_*` readers; `deploy/dq_history.py`
+and `deploy/measure_dlr_throughput.py` are not retired (`HOST_TOOLS` still
+lists the first); `deploy/agent/run_agent.sh` still routes `duckdb_*` alerts
+to the `default` runbook, and the runbooks (`_common`, `disk`, `memory`,
+`warehouse`, `health`) still describe DuckDB as the live file; two
+`REMEDIATION` levers in `core/data_quality.py` still name DuckDB
+(`POST /api/duckdb/sync-all-buyers`, and restoring a catalogue row from it),
+as does the scheduler's memory lever.
+
+Write it bare: `KS_DUCKDB=off`, a line of its own, nothing before it and
+nothing after. Compose reads nearly any spelling as off, and web runs `off`
+on all of them; `docker run --env-file` does not. It keeps quotes and an
+inline comment (`KS_DUCKDB=off # …` hands a sidecar `off # …`, and it runs
+`on`), and it refuses the whole file — every sidecar, the restore drill's
+too — over `export KS_DUCKDB=off` or a space before the `=`. Either way the
+soak's P4 FAILs. The host scripts stand down on every one of them anyway,
+the harmless direction, and their line says which line to write.
+
+**Preconditions**, all of them, before step 1:
+
+1. The owner's "yes" for `KS_DUCKDB=off`; outside the freeze window (Sat 22:00
+   – Sun 02:30 UTC); not the day of a chain flip.
+2. This build deployed (stage 5's PR-0 to PR-11): `/api/health` carries
+   `duckdb_switch`, and `/opt/key-api-bot/deploy` holds `duckdb_env.sh` and
+   `ark_ship.sh`.
+3. The parallel period done: `deploy/stage4_soak.sh` P3 covered (336 h from
+   the last flip), no FAIL in P1–P3 or F1.
+4. What web's verdict will check at its start (`core/duckdb_off.py`), read
+   beforehand so the start is not the first time anybody asks: `/api/health`
+   `write_chains` with every chain's `mode` `postgres` — by its latch or by
+   its flag — and no `mismatch` and no `unmet_precondition`; `latched: true`
+   (its marker under `data/write-chain-owners/` and its `owner:` rows) only
+   for the chains that keep a value in DuckDB's `sync_metadata`, which off
+   reads from the copy (`chains_keeping_sync_metadata()`):
+   `pg_inventory_write`, `pg_expense_types_write`, `pg_buyers_write`,
+   `pg_orders_write`, `pg_managers_write`, `pg_catalogue_write`,
+   `pg_dq_journal_write`. The others may stand on
+   their flag with nothing written — chain 8 with no expense typed latches on
+   its first write, mid-week, as the verdict expects; do not write a row to
+   make a marker appear. Then `warehouse_writer_mode` with nothing unmet (step
+   13 in force); `grep -E '^(KS_USER_STORE|KS_SMS_STORE|KS_DQ_PG_WAREHOUSE)='
+   .env` reading `postgres`, `postgres`, `on`; as `ks_readonly`, `SELECT
+   value FROM app.sync_metadata WHERE key = 'warehouse_writer'` saying
+   `postgres` and resolved, and `meta.mirror_state.last_ok_at` of
+   `app.sync_metadata` later than the newest `owner:` row of
+   `meta.chain_watermarks` (the verdict asks it of those chains' first rows;
+   the newest of all is stricter, and an hourly copy away); no
+   delivered page under `pk_uniqueness_{products,buyers,categories}`,
+   `shadow_*` or the three history tables' `mirror_*`.
+5. `.env` off-site through Postgres: `data/logs/pg_offsite.log` has
+   `verified: env-<stamp>.gpg opens with` from this build, **and** somebody
+   has fetched that file to another machine and opened it with the escrowed
+   passphrase (`docs/backup_runbook.md`, "To open a copy"). The host can only
+   prove that its own passphrase file opens it.
+6. `deploy/pg_restore_drill.sh --from-remote` passed this week, and this
+   morning's `offsite_check.sh` was green.
+
+**Starting the week**, in this order (the plan's numbering):
+
+1. The last backup, and the manifest checked on it: the newest
+   `data/backups/analytics-*.duckdb` is last night's (or trigger `db_backup`
+   from `/api/jobs`), and `deploy/duckdb_table_fates_check.py`, run as its
+   header shows, exits 0 — or each UNKNOWN is decided first.
+2. `docker compose stop web bot`. From here the file is static: a clean
+   close checkpoints, and no `.wal` is left beside it.
+3. The second Ark: `deploy/ark_ship.sh --source data/analytics.duckdb`, in a
+   terminal of its own. Web and the bot stay stopped until it prints `SOURCE
+   RELEASED` — the freeze needs the file static — and no longer: nothing
+   after that line reads the file, and under `off` web never opens it, so
+   steps 4–6 begin there while it ships. (A web held back on `on` does open
+   it — the first hour, below — and then the week starts again, with a new
+   Ark, anyway.) The run must still end in `ARK SHIPPED AND VERIFIED`; then
+   `chattr +i -R /root/ark/key-api-bot/<stamp>`. One that fails after
+   `SOURCE RELEASED` is finished with `--ark`, which does not freeze again;
+   one whose local Ark does not verify needs a new freeze, and under `off`
+   the file is still static for it. Its header has the rest.
+4. Root's crontab: `deploy/duckdb_silence_check.sh --crontab`, keep the copy
+   it names, then delete the two `-` lines under STARTING THE WEEK — the
+   compaction and the nightly snapshot — by hand.
+5. `offsite_check.sh` needs nothing: it turns to its frozen branch the moment
+   `.env` says `off`.
+6. `.env`, the CLAUDE.md way: `install -m 600 /opt/key-api-bot/.env
+   /root/env-backups/key-api-bot/.env.bak-week-of-silence-$(date -u
+   +%Y%m%d-%H%M%S)`, then make the one line `KS_DUCKDB=off` — check it with
+   `grep -n '^KS_DUCKDB=' .env`, never by printing the file — keep it 600,
+   and `docker compose up -d web bot`. **Any later edit of `.env` restarts the
+   week** (P4 reads its mtime).
+7. Add the `+` line of `--crontab` — the silence check, hourly at :17 — and
+   run the script once by hand: `BASELINE`, exit 2.
+8. Read `/api/health`, as below.
+
+**The first hour:**
+
+- `curl -fsS https://ksanalytics.duckdns.org/api/health | jq '{status,
+  degraded_by, duckdb: .duckdb.status, switch: .duckdb_switch}'` — `healthy`,
+  `[]`, `off`, and `mode: off`, `value: off`, `error: null`,
+  `opened_while_off: {}`, `held_back: []`.
+- A `held_back` naming any key means web runs **`on`**: it opens and writes
+  the file, the two retired cron lines are gone, and the canary pages
+  `duckdb_off_held_back`. Meet the key within the hour or take the way back
+  now; a hold is a state to leave.
+- `docker compose logs --since 1h web | grep -E 'KS_DUCKDB=off|DuckDB opened
+  while'` — the one CRITICAL saying this process must not open the file, and
+  no "DuckDB opened while KS_DUCKDB=off".
+- Orders land: as `ks_readonly`, `SELECT updated_at FROM
+  meta.chain_watermarks WHERE key = 'last_sync_orders'` moves every minute or
+  two.
+- `/api/jobs` (admin) lists none of `db_backup`, `duckdb_checkpoint`,
+  `warehouse_refresh`.
+- After hh:17, `deploy/duckdb_silence_check.sh --status` — `last=UNCHANGED`.
+- No page among `duckdb_opened_while_off`, `duckdb_off_held_back`,
+  `duckdb_mode_invalid`, `health_status`.
+- Next morning: `offsite_check.sh` prints `off-site frozen (KS_DUCKDB=off)`,
+  and `deploy/stage4_soak.sh` P4 reads UNKNOWN until its watch is a day old,
+  then PASS with its hours. Covered takes 168 h **and** a Monday report
+  delivered after the start.
+
+**The way back**, whenever the week has to end early or a hold cannot be
+cleared:
+
+1. Copy `.env` the same way, make the line `KS_DUCKDB=on` (or delete it), and
+   `docker compose up -d web bot`.
+2. `/api/health`: `duckdb_switch.mode: on`, no `held_back` key, and
+   `duckdb.status` no longer `off`.
+3. Root's crontab: the WAY BACK half of `--crontab` — the compaction and the
+   nightly snapshot re-added, the silence check deleted. Its record under
+   `/root/duckdb-silence` stays, as history.
+4. Expected, not to be chased: the first start under `on` opens the file
+   with its always-run migrations (0027's sequence shift among them) and
+   merges `data/warehouse-utm-reparsed-at` if a UTM re-parse ran under `off`
+   (PR-6); `db_backup` and `duckdb_checkpoint` register again, but until the
+   first new backup (04:30 Kyiv, or trigger `db_backup`) the 02:45 UTC
+   snapshot refuses a backup over 30 h old and
+   `offsite_check` pages the DuckDB copy stale; and `shadow_missing_in_duckdb`
+   WARNs in the digest every morning — the week's shadow rows, accepted until
+   the drop (OD-S5-3 (a)).
+5. Not the way back: `scripts/chain_copy_back.py`. It hands a chain's writes
+   back to DuckDB, a different decision with its own clock.
+
+Starting again later is step 1 again, a new Ark included: the file changed
+the moment web ran `on`.
 
 ### The order write path asks the registry too (DN-22a)
 

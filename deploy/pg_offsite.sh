@@ -21,12 +21,26 @@
 # WHAT ONE RUN SHIPS
 #   ks-<stamp>.dump.gpg     the newest logical dump, encrypted
 #   roles-<stamp>.sql.gpg   the roles file from the same run, encrypted
-#   ks-<stamp>.sha256       sha256 of those two, in the clear
+#   env-<stamp>.gpg         this host's .env as it stood during the run,
+#                           encrypted (stage 5, OD-S5-6)
+#   ks-<stamp>.sha256       sha256 of those three, in the clear
 #
-# The manifest is deliberately NOT encrypted. It names two files and their
+# The manifest is deliberately NOT encrypted. It names the files and their
 # hashes and carries nothing else, and a verification that needs the
 # passphrase is a verification that can only ever run from this host — which
 # is the one machine whose loss the whole exercise is about.
+#
+# WHY .env RIDES HERE. Its one off-site copy used to be the env.gpg inside the
+# DuckDB Parquet archive (deploy/offsite_parquet.sh), which the nightly
+# deploy/daily_offsite.sh ships — and the week of silence retires that branch
+# (stage 5). A cluster restored with no .env is one nothing can start
+# against, and the host's .env and a laptop's have diverged, so the owner's
+# OD-S5-6 moved the copy here before the DuckDB branch goes: same passphrase
+# file, same verification — downloaded, hashed, decrypted and compared with
+# the file on this disk — and the marker is written only when it opened. So
+# deploy/offsite_check.sh's 36 h on the Postgres marker is the age of the
+# newest .env off-site too. A missing or empty .env fails the run: a shipment
+# without it is the one the restore cannot use.
 #
 # VERIFYING THE REMOTE COPY MEANS DOWNLOADING IT. The Storage Box offers no
 # usable remote shell — offsite_parquet.sh learned that and says so — so the
@@ -78,6 +92,9 @@ RETAIN="${BACKUP_PG_RETAIN:-14}"
 # the DuckDB backup for the same reason.
 MAX_DUMP_AGE_HOURS="${BACKUP_PG_MAX_DUMP_AGE_HOURS:-30}"
 LOCK_FILE="${BACKUP_PG_LOCK:-data/.pg_offsite.lock}"
+# The configuration that rides with every shipment, relative to the repository
+# root this script has moved to — the file compose reads.
+SHIP_ENV=".env"
 LOG_FILE="${BACKUP_PG_OFFSITE_LOG:-data/logs/pg_offsite.log}"
 # The bound lives here, in the change that creates the file, rather than in a
 # logrotate stanza somebody has to remember to write: six things on this host
@@ -208,18 +225,34 @@ run_push() {
         return "$EX_UNCONFIGURED"
     fi
 
+    step "check the configuration file"
+    # OD-S5-6: every shipment carries .env (see the header). Not EX_UNCONFIGURED:
+    # backup.env is fine, the file the restore needs most is not there.
+    if [ ! -f "$SHIP_ENV" ] || [ ! -r "$SHIP_ENV" ] || [ ! -s "$SHIP_ENV" ]; then
+        echo "$SHIP_ENV is missing, empty or unreadable — every shipment carries it (OD-S5-6), and a cluster restored without it is one nothing can start against" >&2
+        return 1
+    fi
+
     step "encrypt"
     # --passphrase-file, never --passphrase: an argument is visible in this
     # host's process table to every user on it for as long as gpg runs, and so
     # is an environment variable through /proc. Same call shape as the env.gpg
-    # that already rides in the Parquet archive, same passphrase, so a restore
-    # needs one escrowed secret and not two.
+    # in the Parquet archive, same passphrase, so a restore needs one escrowed
+    # secret and not two.
     local enc_dump="ks-$stamp.dump.gpg" enc_roles="roles-$stamp.sql.gpg" manifest="ks-$stamp.sha256"
+    local enc_env="env-$stamp.gpg" env_sha
     gpg_safe --symmetric --cipher-algo AES256 --batch --yes \
         --passphrase-file "$ENV_PASSFILE" -o "$STAGE/$enc_dump" "$dump"
     gpg_safe --symmetric --cipher-algo AES256 --batch --yes \
         --passphrase-file "$ENV_PASSFILE" -o "$STAGE/$enc_roles" "$roles"
-    [ -s "$STAGE/$enc_dump" ] && [ -s "$STAGE/$enc_roles" ] \
+    # The hash of what is encrypted, taken first and kept in this shell only —
+    # never a second plaintext on disk. The read-back compares against it, so
+    # a .env edited in the seconds between is a failed night, not a copy of a
+    # file that never existed.
+    env_sha="$(_sha256 "$SHIP_ENV")"
+    gpg_safe --symmetric --cipher-algo AES256 --batch --yes \
+        --passphrase-file "$ENV_PASSFILE" -o "$STAGE/$enc_env" "$SHIP_ENV"
+    [ -s "$STAGE/$enc_dump" ] && [ -s "$STAGE/$enc_roles" ] && [ -s "$STAGE/$enc_env" ] \
         || { echo "gpg produced an empty file" >&2; return 1; }
 
     # sha256sum's own format, so an operator can `sha256sum -c` it by hand
@@ -227,6 +260,7 @@ run_push() {
     # therefore what a verification can compare without the passphrase.
     { printf '%s  %s\n' "$(_sha256 "$STAGE/$enc_dump")" "$enc_dump"
       printf '%s  %s\n' "$(_sha256 "$STAGE/$enc_roles")" "$enc_roles"
+      printf '%s  %s\n' "$(_sha256 "$STAGE/$enc_env")" "$enc_env"
     } > "$STAGE/$manifest"
 
     step "check what is already off-site"
@@ -246,8 +280,10 @@ run_push() {
     step "upload"
     remote_put "$STAGE/$enc_dump" "$enc_dump"
     remote_put "$STAGE/$enc_roles" "$enc_roles"
+    remote_put "$STAGE/$enc_env" "$enc_env"
+    # Last, always: a manifest off-site is what says the shipment finished.
     remote_put "$STAGE/$manifest" "$manifest"
-    echo "shipping: $REMOTE:$PG_REMOTE_DIR/{$enc_dump,$enc_roles,$manifest}"
+    echo "shipping: $REMOTE:$PG_REMOTE_DIR/{$enc_dump,$enc_roles,$enc_env,$manifest}"
 
     step "verify the remote copy"
     # Download it back and hash it. See the header: there is no remote shell,
@@ -258,7 +294,7 @@ run_push() {
         echo "the manifest that came back is not the one that went up" >&2
         return 1
     fi
-    for name in "$enc_dump" "$enc_roles"; do
+    for name in "$enc_dump" "$enc_roles" "$enc_env"; do
         remote_get "$name" "$VERIFY/$name"
         want="$(awk -v n="$name" '$2 == n {print $1}' "$STAGE/$manifest")"
         got="$(_sha256 "$VERIFY/$name")"
@@ -298,6 +334,26 @@ run_push() {
     # it has just been served.
     rm -f "$plain"
     echo "verified: $enc_dump opens with $ENV_PASSFILE and matches $(basename "$dump")"
+
+    # The configuration, the same way and for the same reason: a copy that
+    # verifies as ciphertext and opens to nothing is not a copy. Compared with
+    # the hash taken when it was encrypted, and its plaintext — every secret
+    # this host holds — removed the moment the comparison is served.
+    local plain_env
+    plain_env="$VERIFY/plain.env"
+    if ! gpg_safe --batch --yes --quiet --passphrase-file "$ENV_PASSFILE" \
+            -o "$plain_env" -d "$VERIFY/$enc_env"; then
+        rm -f "$plain_env"
+        echo "the .env copy that landed off-site will not decrypt with $ENV_PASSFILE" >&2
+        return 1
+    fi
+    if [ "$(_sha256 "$plain_env")" != "$env_sha" ]; then
+        rm -f "$plain_env"
+        echo "the .env copy off-site decrypts to something other than $SHIP_ENV as it was encrypted (edited during the run?)" >&2
+        return 1
+    fi
+    rm -f "$plain_env"
+    echo "verified: $enc_env opens with $ENV_PASSFILE and matches $SHIP_ENV"
 
     step "write marker"
     # Only here, and only on this path: deploy/offsite_check.sh reads this file
@@ -368,7 +424,7 @@ run_push() {
     fi
     for s in $old; do
         [ -n "$s" ] || continue
-        remote_rm "ks-$s.dump.gpg" "roles-$s.sql.gpg" "ks-$s.sha256"
+        remote_rm "ks-$s.dump.gpg" "roles-$s.sql.gpg" "env-$s.gpg" "ks-$s.sha256"
         echo "pruned: ks-$s"
     done
     echo "held off-site: $(printf '%s\n' "$kept" | grep -c . || true) of $RETAIN"

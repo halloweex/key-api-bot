@@ -20,7 +20,17 @@ Storage Box as the Parquet archive, into its own directory:
 |---|---|
 | `key-api-bot/postgres/ks-<stamp>.dump.gpg` | the `pg_dump -Fc` dump, encrypted |
 | `key-api-bot/postgres/roles-<stamp>.sql.gpg` | the roles file from the same run |
-| `key-api-bot/postgres/ks-<stamp>.sha256` | sha256 of both, **in the clear** |
+| `key-api-bot/postgres/env-<stamp>.gpg` | the host's `.env` as it stood during the run (stage 5, OD-S5-6) |
+| `key-api-bot/postgres/ks-<stamp>.sha256` | sha256 of the three, **in the clear** |
+
+**`.env` rides here since stage 5.** Its one off-site copy used to be the
+`env.gpg` inside the DuckDB Parquet archive, and the week of silence retires
+the nightly branch that ships that archive (`deploy/daily_offsite.sh`). So the
+owner's OD-S5-6 put it beside every dump, before that branch goes: same
+passphrase file, read back, hashed, decrypted and compared with the file on
+the host like the dump, and a run without a `.env` to ship fails. The marker
+`offsite_check.sh` reads is therefore the age of the newest `.env` off-site
+too.
 
 Encryption is mandatory and the shipper refuses without it (OD-01, decided
 17.09.2026): these files carry ~6 000 customer phone numbers and every
@@ -39,6 +49,7 @@ sftp -P 23 -i ~/.ssh/storagebox_ed25519 <sub-account>  # ls key-api-bot/postgres
 sha256sum -c ks-<stamp>.sha256
 gpg --batch --quiet --passphrase-file /root/.backup_pass -o ks.dump -d ks-<stamp>.dump.gpg
 gpg --batch --quiet --passphrase-file /root/.backup_pass -o roles.sql -d roles-<stamp>.sql.gpg
+gpg --batch --quiet --passphrase-file /root/.backup_pass -o .env -d env-<stamp>.gpg   # mode 600 it
 psql -U postgres -d postgres -f roles.sql      # roles first, or nobody can read the tables
 pg_restore -U postgres -d ks --no-owner ks.dump
 ```
@@ -53,7 +64,10 @@ so a copy nobody can open still hashes correctly.
 **The alarm** is `deploy/offsite_check.sh`, which reads
 `data/.pg_offsite_last_ok` — written only after the uploaded bytes have been
 fetched back, hashed and decrypted — and alerts above 36 h. Every run that
-refused says which step refused, in `data/logs/pg_offsite.log`.
+refused says which step refused, in `data/logs/pg_offsite.log`. With
+`KS_DUCKDB=off` in `.env` (the week of silence) it reports the DuckDB copy's
+marker as frozen, with its age, and never fails on it: that copy stops on
+purpose.
 
 ## What is backed up (the warehouse)
 `data/analytics.duckdb` — the warehouse. It holds data that is **NOT recoverable

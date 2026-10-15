@@ -12,7 +12,11 @@ exception is the older image, whose output is quoted from the code it replaced.
 
 Only the four path constants are rewritten, each asserted to occur exactly
 once, and `docker`, `sleep`, `curl` and notify.sh are fakes on a private PATH
-and in a private compose directory. Nothing reaches a server.
+and in a private compose directory. Nothing reaches a server. `rm` is the real
+one behind a recorder, so a run can be asked whether it deleted anything at
+all. The compose directory holds the real deploy/duckdb_env.sh, and a `.env`
+only when a test writes one — which is how the week of silence's stand-down
+(stage 5, PR-10) is driven.
 """
 from __future__ import annotations
 
@@ -57,6 +61,13 @@ case "$1" in
         exit 0 ;;
 esac
 exit 2
+"""
+
+# The real `rm`, recorded: every deletion the wrapper makes goes through it,
+# so an empty record is a run that deleted nothing.
+FAKE_RM = f"""#!/usr/bin/env bash
+[ -n "${{FAKE_RM_CALLS:-}}" ] && printf '%s\\n' "$*" >> "$FAKE_RM_CALLS"
+exec {shutil.which("rm")} "$@"
 """
 
 FAKE_NOTIFY = r"""notify() {
@@ -157,6 +168,7 @@ class Run:
         notified = root / "notify.txt"
         self.notify = notified.read_text() if notified.exists() else ""
         self.calls = (root / "calls.log").read_text().splitlines()
+        self.rm = (root / "rm.log").read_text().splitlines()
 
 
 @pytest.fixture(scope="module")
@@ -166,6 +178,7 @@ def fake_bin(tmp_path_factory):
     of a new file is scanned."""
     bin_dir = tmp_path_factory.mktemp("bin")
     for name, body in (("docker", FAKE_DOCKER),
+                       ("rm", FAKE_RM),
                        ("sleep", "#!/usr/bin/env bash\nexit 0\n"),
                        ("curl", "#!/usr/bin/env bash\nexit 0\n")):
         (bin_dir / name).write_text(body)
@@ -179,16 +192,22 @@ def wrapper(tmp_path, fake_bin):
         tmp_path, fake_bin, sidecar_log, exit_code, ps)
 
 
-def _run(root: Path, bin_dir: Path, sidecar_log: str, exit_code: int, ps: str) -> Run:
+def _run(root: Path, bin_dir: Path, sidecar_log: str, exit_code: int, ps: str,
+         *, env_text: "str | None" = None, env_lib: bool = True) -> Run:
     data = root / "data"
     compose = root / "compose"
     for d in (data, compose / "deploy"):
         d.mkdir(parents=True, exist_ok=True)
     (data / "analytics.duckdb").write_bytes(b"\0" * 4096)
     (compose / "deploy" / "notify.sh").write_text(FAKE_NOTIFY)
+    if env_lib:
+        shutil.copy(REPO / "deploy" / "duckdb_env.sh", compose / "deploy" / "duckdb_env.sh")
+    if env_text is not None:
+        (compose / ".env").write_text(env_text)
     (root / "sidecar.log").write_text(sidecar_log)
     (root / "sidecar.log.started").unlink(missing_ok=True)
     (root / "calls.log").write_text("")
+    (root / "rm.log").write_text("")
 
     text = SCRIPT.read_text()
     for old, new in (
@@ -207,6 +226,7 @@ def _run(root: Path, bin_dir: Path, sidecar_log: str, exit_code: int, ps: str) -
     env.update({
         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         "FAKE_DOCKER_CALLS": str(root / "calls.log"),
+        "FAKE_RM_CALLS": str(root / "rm.log"),
         "FAKE_LOGS": str(root / "sidecar.log"),
         "FAKE_NOTIFY": str(root / "notify.txt"),
         "FAKE_EXIT": str(exit_code),
@@ -408,3 +428,122 @@ class TestATimedOutCompact:
         assert run.notify.splitlines()[0].startswith(
             "🚨 Compact aborted: compact timeout after 1800s: FAIL: sequence "
             "warehouse_refresh_seq: hands out 1 but warehouse_refreshes.id MAX is 75,453")
+
+
+class TestTheWeekOfSilence:
+    """Stage 5, PR-10. With `KS_DUCKDB=off` in `.env` the sidecar is refused by
+    the switch before it opens the file — and the wrapper used to learn that
+    last: the previous compaction's backup and the export deleted, web, bot
+    and Meilisearch stopped, then the refusal, a minute of downtime and a
+    "Compact aborted" page for a compaction the week had retired. Now it
+    stands down first, and the proof is the run itself: no `docker` call, no
+    `rm`, nothing on disk moved, no page."""
+
+    LEFTOVERS = ("analytics.duckdb.old", "analytics_clean.duckdb",
+                 "analytics_clean.duckdb.wal", "export_parquet/orders.parquet")
+
+    @pytest.fixture
+    def run_with_env(self, tmp_path, fake_bin, healthy_log):
+        def run(env_text, **kw):
+            data = tmp_path / "data"
+            for rel in self.LEFTOVERS:
+                (data / rel).parent.mkdir(parents=True, exist_ok=True)
+                (data / rel).write_text(rel)
+            result = _run(tmp_path, fake_bin, healthy_log, 0, "", env_text=env_text, **kw)
+            return result, data
+        return run
+
+    def _untouched(self, run, data):
+        assert run.calls == [], f"docker was called: {run.calls}"
+        assert run.rm == [], f"something was deleted: {run.rm}"
+        for rel in self.LEFTOVERS:
+            assert (data / rel).read_text() == rel, rel
+        assert (data / "analytics.duckdb").read_bytes() == b"\0" * 4096
+
+    @pytest.mark.parametrize("env_text", [
+        "KS_DUCKDB=off\n",
+        "ADMIN_USER_IDS=1\nKS_DUCKDB=OFF \r\n",
+        "KS_DUCKDB=on\nKS_DUCKDB=off\n",
+    ], ids=["off", "upper-crlf", "last-line-wins"])
+    def test_off_stops_nothing_deletes_nothing_and_pages_nobody(self, run_with_env, env_text):
+        """Mutation: move the stand-down below `rm -f …analytics.duckdb.old`
+        or below `docker compose stop` — the record is no longer empty."""
+        run, data = run_with_env(env_text)
+        assert run.code == 0, run.out
+        self._untouched(run, data)
+        assert run.notify == ""
+        assert "KS_DUCKDB=off in .env: no compaction" in run.log
+        assert "remove weekly_compact.sh from root's crontab" in run.log
+        # The hold is named beside it: a web held back on `on` writes the file
+        # this leaves uncompacted.
+        assert "duckdb_switch.held_back" in run.log
+        assert "WEEKLY COMPACT START" not in run.log
+
+    def test_off_written_with_quotes_stands_down_too_and_says_so(self, run_with_env):
+        """`docker run --env-file` keeps the quotes, so the sidecar would read
+        a value the switch does not understand and run on — a compaction in
+        the week the file must not change, while compose, which strips them,
+        runs web off. Standing down is the harmless direction. Mutation: stand
+        down on `KS_DUCKDB_ENV = off` (the docker reading) alone."""
+        run, data = run_with_env('KS_DUCKDB="off"\n')
+        assert run.code == 0, run.out
+        self._untouched(run, data)
+        assert "written with quotes" in run.log and "write KS_DUCKDB=off" in run.log
+
+    @pytest.mark.parametrize("env_text, says", [
+        ("KS_DUCKDB=off  # week of silence, started 2026-10-27\n", "written with quotes or a comment"),
+        ("  KS_DUCKDB=off\n", None),
+        ("export KS_DUCKDB=off\n", "refuses the whole file"),
+        ("KS_DUCKDB = off\n", "refuses the whole file"),
+    ], ids=["inline-comment", "leading-space", "export", "spaces-around-equals"])
+    def test_every_off_compose_reads_stands_it_down(self, run_with_env, env_text, says):
+        """Compose reads each of these as off, so web runs off — and the
+        review of PR-10 ran the wrapper on each: the comment line got a full
+        compaction in the week (the sidecar, handed `off # …`, runs on) with
+        a log line saying web ran on; the other three stopped web, bot and
+        Meilisearch, deleted analytics.duckdb.old, and then had their sidecar
+        refused — by the switch, or by docker refusing the file — for a
+        "Compact aborted" page and the downtime. Mutation: read the line the
+        way the first reader did, `^KS_DUCKDB=` and nothing else."""
+        run, data = run_with_env(env_text)
+        assert run.code == 0, run.out
+        self._untouched(run, data)
+        assert run.notify == ""
+        assert "KS_DUCKDB=off in .env: no compaction" in run.log
+        assert "not a value the switch understands" not in run.log
+        if says:
+            assert says in run.log and "write KS_DUCKDB=off" in run.log, run.log
+
+    @pytest.mark.parametrize("env_text", [None, "", "KS_DUCKDB=on\n", "KS_DUCKDB=\n",
+                                          "KS_DUCKDB=off\nKS_DUCKDB=on\n",
+                                          "# KS_DUCKDB=off\n"],
+                             ids=["no-env", "empty", "on", "blank", "on-last", "comment"])
+    def test_on_compacts_as_it_always_did(self, run_with_env, env_text):
+        """Nothing changes under `on`: the same calls in the same order as the
+        healthy run without a `.env`, which every other test here drives."""
+        run, _ = run_with_env(env_text)
+        assert run.code == 0, run.out
+        assert run.calls[:2] == ["rm -f -v duckdb-compact",
+                                 "compose stop --timeout 30 web bot meilisearch"], run.calls
+        assert any(c.startswith("run -d --name duckdb-compact") for c in run.calls)
+        # And the recorder sees deletions, so its silence under `off` is one.
+        assert any(c.endswith("analytics.duckdb.old") for c in run.rm), run.rm
+        assert run.notify.startswith("✅ Weekly compact:")
+        assert "KS_DUCKDB" not in run.log
+
+    def test_a_value_the_switch_does_not_understand_runs_on_and_says_so(self, run_with_env):
+        """Web and the sidecar both run `on` over a typo (OD-09), so the
+        compaction does too — with one line, because whoever typed `of`
+        believes the week has started."""
+        run, _ = run_with_env("KS_DUCKDB=of\n")
+        assert run.code == 0, run.out
+        assert run.notify.startswith("✅ Weekly compact:")
+        assert "KS_DUCKDB=of in .env is not a value the switch understands" in run.log
+
+    def test_without_the_reader_it_stops_before_anything(self, run_with_env):
+        """A checkout without deploy/duckdb_env.sh cannot say whether `.env`
+        is off, so it neither stops nor deletes on the chance that it is."""
+        run, data = run_with_env("KS_DUCKDB=off\n", env_lib=False)
+        assert run.code == 1, run.out
+        self._untouched(run, data)
+        assert run.notify.startswith("🚨 Compact aborted: deploy/duckdb_env.sh is missing")
