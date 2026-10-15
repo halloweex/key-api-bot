@@ -299,3 +299,42 @@ class TestTheNightlySnapshotStandsDown:
         assert code == 1, out
         assert "db_backup has stopped" in out
         assert not any(c.startswith("docker") for c in calls), calls
+
+
+# ── the runbook ───────────────────────────────────────────────────────────────
+
+def _runbook() -> str:
+    text = (REPO / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+    start = text.index("### Starting the week of silence")
+    return text[start:text.index("\n### ", start + 1)]
+
+
+class TestTheRunbook:
+    """CLAUDE.md, "Starting the week of silence": the one runbook, read by a
+    person on the host. What it names has to be there to run."""
+
+    def test_every_tool_it_names_exists(self):
+        """Mutation: rename a script without the runbook."""
+        named = set(re.findall(r"(?:deploy|scripts)/[\w./-]+\.(?:sh|py)", _runbook()))
+        assert {"deploy/duckdb_silence_check.sh", "deploy/ark_ship.sh",
+                "deploy/pg_offsite.sh", "deploy/offsite_check.sh",
+                "scripts/weekly_compact.sh", "deploy/daily_offsite.sh",
+                "deploy/duckdb_env.sh", "deploy/stage4_soak.sh",
+                "deploy/duckdb_table_fates_check.py"} <= named, named
+        for path in named:
+            assert (REPO / path).is_file(), path
+
+    def test_it_changes_the_crontab_from_the_print_only(self):
+        """The runbook never spells a crontab line of its own: the lines are
+        the ones `--crontab` prints, which a test holds to the scripts'
+        headers. Mutation: write `0 2 * * 0` into the runbook."""
+        text = _runbook()
+        assert "--crontab" in text
+        assert not re.search(r"[0-9*]+ [0-9*]+ \* \* [0-9*]", text)
+
+    def test_the_env_copy_is_the_documented_one(self):
+        """`.env` is copied before it is edited, mode 600, to the directory
+        CLAUDE.md names for every copy of it — never the repository root."""
+        text = _runbook()
+        assert "install -m 600 /opt/key-api-bot/.env\n   /root/env-backups/key-api-bot/" in text
+        assert "never by printing the file" in text
