@@ -443,3 +443,34 @@ class TestTheRunbook:
         text = _runbook()
         assert "install -m 600 /opt/key-api-bot/.env\n   /root/env-backups/key-api-bot/" in text
         assert "never by printing the file" in text
+
+    @staticmethod
+    def _item(heading: str, number: int) -> str:
+        """Item `number` of the numbered list under the bold `heading`, its
+        lines joined, so a phrase the text wraps is still one phrase."""
+        text = _runbook()
+        block = text[text.index(f"**{heading}**"):]
+        start = block.index(f"\n{number}. ") + 1
+        end = re.search(r"\n(\d+\. |\*\*|\n)", block[start:])
+        item = block[start:start + end.start()] if end else block[start:]
+        return " ".join(item.split())
+
+    def test_precondition_four_asks_what_the_verdict_asks(self):
+        """It is read so the start is not the first time anybody asks
+        core/duckdb_off.py's questions, so it asks those and no others. The
+        verdict wants every chain writing Postgres, by latch or by flag, and
+        a latch — marker and owner rows — only of the chains that keep a value
+        in DuckDB's `sync_metadata`: a flagged chain with nothing written
+        latches on its first write, mid-week, and counting it once held a
+        start back. The first runbook asked for a marker per chain, which six
+        chains can rightly lack. Mutation: name another chain as needing a
+        latch, or go back to "a marker per chain"."""
+        from core.duckdb_off import chains_keeping_sync_metadata
+        from core.write_chains import WRITE_CHAINS, chain_name
+
+        item = self._item("Preconditions", 4)
+        assert "a marker per chain" not in item
+        assert "`mode` `postgres`" in item and "by its latch or by its flag" in item
+        latched = set(re.findall(r"`(pg_\w+_write)`", item))
+        assert latched == {chain_name(c) for c in chains_keeping_sync_metadata()}, latched
+        assert latched < {chain_name(c) for c in WRITE_CHAINS}

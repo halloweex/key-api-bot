@@ -4567,17 +4567,27 @@ the harmless direction, and their line says which line to write.
 3. The parallel period done: `deploy/stage4_soak.sh` P3 covered (336 h from
    the last flip), no FAIL in P1–P3 or F1.
 4. What web's verdict will check at its start (`core/duckdb_off.py`), read
-   beforehand so the start is not the first time anybody asks: a marker per
-   chain under `data/write-chain-owners/`, and `/api/health` `write_chains`
-   with no `mismatch` and no `unmet_precondition`; `warehouse_writer_mode`
-   with nothing unmet (step 13 in force); `grep -E
-   '^(KS_USER_STORE|KS_SMS_STORE|KS_DQ_PG_WAREHOUSE)=' .env` reading
-   `postgres`, `postgres`, `on`; as `ks_readonly`, `SELECT value FROM
-   app.sync_metadata WHERE key = 'warehouse_writer'` saying `postgres` and
-   resolved, and `meta.mirror_state.last_ok_at` of `app.sync_metadata` later
-   than the newest `owner:` row of `meta.chain_watermarks`; no delivered page
-   under `pk_uniqueness_{products,buyers,categories}`, `shadow_*` or the three
-   history tables' `mirror_*`.
+   beforehand so the start is not the first time anybody asks: `/api/health`
+   `write_chains` with every chain's `mode` `postgres` — by its latch or by
+   its flag — and no `mismatch` and no `unmet_precondition`; `latched: true`
+   (its marker under `data/write-chain-owners/` and its `owner:` rows) only
+   for the chains that keep a value in DuckDB's `sync_metadata`, which off
+   reads from the copy (`chains_keeping_sync_metadata()`):
+   `pg_inventory_write`, `pg_expense_types_write`, `pg_buyers_write`,
+   `pg_orders_write`, `pg_managers_write`, `pg_catalogue_write`,
+   `pg_dq_journal_write`. The others may stand on
+   their flag with nothing written — chain 8 with no expense typed latches on
+   its first write, mid-week, as the verdict expects; do not write a row to
+   make a marker appear. Then `warehouse_writer_mode` with nothing unmet (step
+   13 in force); `grep -E '^(KS_USER_STORE|KS_SMS_STORE|KS_DQ_PG_WAREHOUSE)='
+   .env` reading `postgres`, `postgres`, `on`; as `ks_readonly`, `SELECT
+   value FROM app.sync_metadata WHERE key = 'warehouse_writer'` saying
+   `postgres` and resolved, and `meta.mirror_state.last_ok_at` of
+   `app.sync_metadata` later than the newest `owner:` row of
+   `meta.chain_watermarks` (the verdict asks it of those chains' first rows;
+   the newest of all is stricter, and an hourly copy away); no
+   delivered page under `pk_uniqueness_{products,buyers,categories}`,
+   `shadow_*` or the three history tables' `mirror_*`.
 5. `.env` off-site through Postgres: `data/logs/pg_offsite.log` has
    `verified: env-<stamp>.gpg opens with` from this build, **and** somebody
    has fetched that file to another machine and opened it with the escrowed
