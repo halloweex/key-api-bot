@@ -810,11 +810,13 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
             for name, value in made.items():
                 monkeypatch.setitem(doors.EXAMPLE_VALUES, name, value)
 
-        # The assistant's stream, which the GET sweep leaves out for the
-        # network it would reach: here the model is the sweep's own.
-        await calls.call("admin GET /api/chat/stream", "GET", "/api/chat/stream",
-                         cookie=admin, params={"message": "How are sales this week?"},
-                         keep_body=True)
+        # The GET routes the admin's sweep leaves out for the network they
+        # would reach (`NETWORK_ROUTES`) — the assistant's stream, where the
+        # model is the sweep's own — each as an admin.
+        for endpoint in doors.network_routes(app):
+            path, params, _body = doors.example_request("GET", endpoint)
+            await calls.call(f"admin GET {endpoint.path}", "GET", path, cookie=admin,
+                             params=params, keep_body=True)
 
         # Every route outside /api/, as nobody, a viewer and an admin; the two
         # Telegram sign-ins signed as Telegram signs them, for the viewer.
@@ -836,11 +838,11 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
 
         # Every event the bus carries, with a socket open in each room, so
         # the handlers web registered at its start broadcast to somebody.
-        # The viewer listens too: a broadcast scoped to a tab reaches only the
-        # sockets whose viewer may open it.
-        listeners = {f"{e.path} as admin": doors.Socket(app, e.path, admin)
-                     for e in doors.socket_routes(app)}
-        listeners["/ws/dashboard as viewer"] = doors.Socket(app, "/ws/dashboard", viewer)
+        # The viewer listens too, wherever it is let in: a broadcast scoped to
+        # a tab reaches only the sockets whose viewer may open it.
+        listeners = {f"{e.path} as {name}": doors.Socket(app, e.path, cookie)
+                     for e in doors.socket_routes(app)
+                     for name, cookie in (("admin", admin), ("viewer", viewer))}
         for listener in listeners.values():
             await listener.open()
         record.collect("events:open", "ok")
@@ -888,6 +890,7 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
         writes=[doors.door_key(m, e) for m, e in doors.write_routes(app)],
         outside=[doors.door_key(m, e) for m, e in doors.outside_routes(app)],
         socket_routes=[e.path for e in doors.socket_routes(app)],
+        network=[e.path for e in doors.network_routes(app)],
         tool_names=[t["name"] for t in TOOLS],
         chat={"answer": chat if isinstance(chat, dict) else None,
               "stream": doors.stream_events(stream) if isinstance(stream, str) else None,

@@ -16,6 +16,8 @@ the rest of what a week of silence exercises, read off the app the same way:
   handlers web registers at its start broadcast to somebody;
 - every tool the assistant offers, through `execute_tool` and through both
   `/api/chat` routes, under a model that asks for every tool;
+- every GET route the admin's sweep leaves out for the network it would
+  reach (`test_read_fallback_http.NETWORK_ROUTES`), as an admin;
 - every GET route again under a real viewer's session, which nothing patches.
 
 A request a route refuses as malformed — FastAPI's 422 — swept nothing past
@@ -134,6 +136,19 @@ def get_api_routes(app) -> List[Any]:
                   key=lambda e: e.path)
 
 
+def network_routes(app) -> List[Any]:
+    """The GET routes under `/api/` the admin's GET sweep leaves out for the
+    network they would reach (`test_read_fallback_http.NETWORK_ROUTES`), read
+    off the app: this sweep calls each as an admin, so a route named there
+    tomorrow is opened past its permission check the day it is named, not
+    only by the viewer the permission refuses."""
+    from tests.unit.test_read_fallback_http import NETWORK_ROUTES
+
+    return sorted((e for e in _endpoints(app)
+                   if "GET" in e.methods and e.path in NETWORK_ROUTES),
+                  key=lambda e: e.path)
+
+
 # ─── What a request carries ──────────────────────────────────────────────────
 
 # Values by parameter name, where a value of the parameter's type alone would
@@ -176,6 +191,8 @@ EXAMPLE_BODIES: Dict[str, Any] = {
 # refused before its roster is read.
 EXAMPLE_QUERIES: Dict[str, Dict[str, Any]] = {
     "POST /api/customers/sms-campaigns": {"campaign": "sweep-campaign"},
+    # A question, so the model the sweep stands in is asked one.
+    "GET /api/chat/stream": {"message": "How are sales this week?"},
 }
 
 

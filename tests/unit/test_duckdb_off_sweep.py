@@ -621,6 +621,13 @@ def _judge_the_doors(result: dict) -> None:
     for path in result["socket_routes"]:
         for who in ("nobody", "viewer", "admin"):
             assert f"WS {path} as {who}" in steps, (path, who)
+    # The GET routes the admin's GET sweep leaves out for their network, each
+    # called here as an admin — every one `NETWORK_ROUTES` names.
+    from tests.unit.test_read_fallback_http import NETWORK_ROUTES
+
+    assert sorted(result["network"]) == sorted(NETWORK_ROUTES), result["network"]
+    for path in result["network"]:
+        assert f"admin GET {path}" in steps, path
     # Malformed: FastAPI's 422 ends a request at its parameters, before
     # anything the door does — a door that swept nothing.
     malformed = sorted(step for step, status in statuses.items() if status == 422)
@@ -1025,7 +1032,7 @@ class TestTheDoors:
         every endpoint the app has, each in one sweep."""
         from tests.routes_helper import iter_endpoints
         from tests.unit import duckdb_off_sweep_doors as doors
-        from tests.unit.test_read_fallback_http import NETWORK_ROUTES, swept_routes
+        from tests.unit.test_read_fallback_http import swept_routes
         from web.main import app
 
         every = set()
@@ -1034,13 +1041,33 @@ class TestTheDoors:
                 every.add(("WS", e.path))
             every.update((m, e.path) for m in e.methods - {"HEAD"})
         swept = {("GET", e.path) for e in swept_routes(app)}
-        swept |= {("GET", p) for p in NETWORK_ROUTES}      # the assistant's step
+        # What the doors sweep calls as an admin, not what is named for it.
+        swept |= {("GET", e.path) for e in doors.network_routes(app)}
         swept |= {(m, e.path) for m, e in doors.write_routes(app)}
         swept |= {(m, e.path) for m, e in doors.outside_routes(app)}
         swept |= {("WS", e.path) for e in doors.socket_routes(app)}
         assert swept == every, (sorted(every - swept), sorted(swept - every))
         assert {e.path for e in doors.get_api_routes(app)} == {
             p for m, p in every if m == "GET" and p.startswith("/api/")}
+
+    def test_a_route_named_for_its_network_is_called_as_an_admin(self, monkeypatch):
+        """A route `NETWORK_ROUTES` names leaves the admin's GET sweep; the
+        doors sweep calls each one it names as an admin, read off the app.
+        The call used to be one literal path, the stream's, so a second
+        route named there was opened only by the viewer its permission
+        refuses, and the partition above still passed (review of PR-9).
+        Mutation: return only `/api/chat/stream` from `network_routes`."""
+        from tests.unit import duckdb_off_sweep_doors as doors
+        from tests.unit import test_read_fallback_http as fallback_http
+        from web.main import app
+
+        monkeypatch.setitem(fallback_http.NETWORK_ROUTES, "/api/admin/users", "a sweep's own")
+        named = {e.path for e in doors.network_routes(app)}
+        assert named == set(fallback_http.NETWORK_ROUTES), named
+        assert "/api/admin/users" not in {e.path for e in fallback_http.swept_routes(app)}
+        path, params, _ = doors.example_request(
+            "GET", next(e for e in doors.network_routes(app) if e.path == "/api/chat/stream"))
+        assert params == {"message": "How are sales this week?"}, params
 
     def test_every_door_that_reads_a_body_is_given_one(self):
         """A door that declares a body, or reads one itself, is sent the
@@ -1051,6 +1078,7 @@ class TestTheDoors:
 
         pairs = doors.write_routes(app) + doors.outside_routes(app)
         keys = {doors.door_key(m, e) for m, e in pairs}
+        keys |= {doors.door_key("GET", e) for e in doors.network_routes(app)}
         reading = {doors.door_key(m, e) for m, e in pairs if doors.reads_a_body(e)}
         assert reading <= set(doors.EXAMPLE_BODIES), sorted(reading - set(doors.EXAMPLE_BODIES))
         assert set(doors.EXAMPLE_BODIES) <= keys, sorted(set(doors.EXAMPLE_BODIES) - keys)
