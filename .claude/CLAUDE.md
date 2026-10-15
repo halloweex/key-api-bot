@@ -4502,8 +4502,10 @@ decision to restart both clocks, said out loud.
   and F1's watch. `.env` is asked because the Sunday compaction and the
   nightly off-site start their sidecars from it, not from web's environment,
   and only the switch in the sidecar refuses their read-only open: web `off` with `.env` not saying `off` the way
-  `docker run --env-file` reads it (last line, quotes kept) is a FAIL, and any
-  edit of the file restarts the week. Covered at **168 h** — a full week holds
+  `docker run --env-file` reads it is a FAIL — quotes and an inline comment
+  kept, and `export` or a space before the `=` making it refuse the whole
+  file — read through `deploy/duckdb_env.sh`, the reader the host scripts
+  stand down by, and any edit of the file restarts the week. Covered at **168 h** — a full week holds
   Sunday 05:00 and Monday 09:30 by construction — **and** an
   `app.weekly_report_sends.sent_at` after the start, because a week that never
   delivered a report has not shown the Monday path works without DuckDB.

@@ -258,21 +258,29 @@ PARALLEL_FROM="${SOAK_PARALLEL_FROM:-}"
 # `docker run --env-file .env`, and their phase 1 opens the live file
 # read-only — no byte changes, so only the switch in the sidecar can stop it.
 # So P4 asks the file too, by exact name and as `docker run --env-file` reads
-# it: the last line naming the key, everything after the first `=`, quotes
-# kept (docker does not strip them, and the switch reads `"off"` as a value
-# it does not understand, and runs on). And since when: the file's mtime,
-# because nothing says the sidecars read `off` before the last edit of it.
+# it — through deploy/duckdb_env.sh, the reader the host scripts stand down
+# by, never a parse of its own, so the soak and the scripts cannot judge one
+# line two ways. Its docker answer: off (1), on (0), `invalid` (quotes or an
+# inline comment kept, which the switch does not understand, and runs on
+# over), or `refused` (export, or a space before the `=`: docker rejects the
+# whole file and starts no sidecar at all). No reader, or no file, is
+# `unknown`. And since when: the file's mtime, because nothing says the
+# sidecars read `off` before the last edit of it.
 ENV_FOR_SIDECARS="${SOAK_ENV_FILE:-.env}"
 DUCKDB_OFF_ENV=unknown
 DUCKDB_ENV_CHANGED_AT=""
-if [ -f "$ENV_FOR_SIDECARS" ] && [ -r "$ENV_FOR_SIDECARS" ]; then
-    duckdb_env_value="$(grep -E '^KS_DUCKDB=' "$ENV_FOR_SIDECARS" 2>/dev/null | tail -n 1 || true)"
-    duckdb_env_value="$(printf '%s' "${duckdb_env_value#KS_DUCKDB=}" | tr -d '\r' \
-        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
-    case "$duckdb_env_value" in
+KS_DUCKDB_ENV_READ=0
+# shellcheck source=deploy/duckdb_env.sh
+if [ -f deploy/duckdb_env.sh ] && source deploy/duckdb_env.sh; then
+    ks_duckdb_env_read "$ENV_FOR_SIDECARS"
+else
+    echo "deploy/duckdb_env.sh is missing: whether .env says KS_DUCKDB=off is unknown" >&2
+fi
+if [ "$KS_DUCKDB_ENV_READ" = 1 ]; then
+    case "$KS_DUCKDB_ENV" in
         off) DUCKDB_OFF_ENV=1 ;;
-        ""|on) DUCKDB_OFF_ENV=0 ;;
-        *) DUCKDB_OFF_ENV=invalid ;;
+        on) DUCKDB_OFF_ENV=0 ;;
+        invalid|refused) DUCKDB_OFF_ENV="$KS_DUCKDB_ENV" ;;
     esac
     env_mtime="$(stat -c %Y "$ENV_FOR_SIDECARS" 2>/dev/null || stat -f %m "$ENV_FOR_SIDECARS" 2>/dev/null || true)"
     case "$env_mtime" in

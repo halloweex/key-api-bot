@@ -3,9 +3,10 @@
 #
 # Sourced by scripts/weekly_compact.sh, deploy/daily_offsite.sh and
 # deploy/offsite_check.sh — the three host-cron scripts the week of silence
-# changes (stage 5, PR-10). It defines and does not act, and it sets no shell
-# options: errexit is the caller's. Bash 3.2 and up, because a laptop runs
-# the tests.
+# changes (stage 5, PR-10) — and by deploy/stage4_soak.sh, whose P4 judges the
+# week on the same reading rather than a parse of its own. It defines and
+# does not act, and it sets no shell options: errexit is the caller's. Bash
+# 3.2 and up, because a laptop runs the tests.
 #
 # WHY .env AND NOT WEB
 # The compaction and the nightly snapshot start their sidecars with

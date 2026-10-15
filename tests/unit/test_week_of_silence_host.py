@@ -159,6 +159,10 @@ def box(tmp_path, fake_bin):
 # printing `os.environ.get("KS_DUCKDB")` from python:3.14-slim), 2026-10-15.
 # Re-measure before editing a row: the review that added half of them found
 # the reader's guesses wrong for four forms compose reads as off.
+#
+# deploy/stage4_soak.sh's P4 reads the file through the same reader; its
+# test (test_stage4_soak_script.TestStage5.test_env_reads_as_the_host_scripts_
+# read_it) feeds the soak rows of this table and holds it to this reading.
 ENV_FORMS = [
     # (id, text, docker, web)
     ("off", "KS_DUCKDB=off\n", "off", "off"),
