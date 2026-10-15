@@ -4604,10 +4604,17 @@ the harmless direction, and their line says which line to write.
    header shows, exits 0 — or each UNKNOWN is decided first.
 2. `docker compose stop web bot`. From here the file is static: a clean
    close checkpoints, and no `.wal` is left beside it.
-3. The second Ark: `deploy/ark_ship.sh --source data/analytics.duckdb` until
-   `ARK SHIPPED AND VERIFIED`, then `chattr +i -R /root/ark/key-api-bot/<stamp>`
-   (its header has the rest, and how to finish a run that failed after the
-   freeze).
+3. The second Ark: `deploy/ark_ship.sh --source data/analytics.duckdb`, in a
+   terminal of its own. Web and the bot stay stopped until it prints `SOURCE
+   RELEASED` — the freeze needs the file static — and no longer: nothing
+   after that line reads the file, and under `off` web never opens it, so
+   steps 4–6 begin there while it ships. (A web held back on `on` does open
+   it — the first hour, below — and then the week starts again, with a new
+   Ark, anyway.) The run must still end in `ARK SHIPPED AND VERIFIED`; then
+   `chattr +i -R /root/ark/key-api-bot/<stamp>`. One that fails after
+   `SOURCE RELEASED` is finished with `--ark`, which does not freeze again;
+   one whose local Ark does not verify needs a new freeze, and under `off`
+   the file is still static for it. Its header has the rest.
 4. Root's crontab: `deploy/duckdb_silence_check.sh --crontab`, keep the copy
    it names, then delete the two `-` lines under STARTING THE WEEK — the
    compaction and the nightly snapshot — by hand.

@@ -474,3 +474,31 @@ class TestTheRunbook:
         latched = set(re.findall(r"`(pg_\w+_write)`", item))
         assert latched == {chain_name(c) for c in chains_keeping_sync_metadata()}, latched
         assert latched < {chain_name(c) for c in WRITE_CHAINS}
+
+    def test_web_waits_for_the_freeze_not_the_upload(self):
+        """deploy/ark_ship.sh prints SOURCE RELEASED once nothing after it
+        reads the file — test_ark_ship_script holds that line before anything
+        leaves the host — and under off web never opens the file, so steps
+        4-6 may begin there. The first runbook kept web and the bot stopped
+        until ARK SHIPPED AND VERIFIED: the dashboard down and orders waiting
+        through the upload, the download, the decrypt and L0-L2 of the
+        downloaded copy, the longest outage of the procedure, for nothing —
+        while the script said the opposite. The crontab print and the
+        snapshot's header said step 4 waited for the Ark off-site. Mutation:
+        put "until `ARK SHIPPED AND VERIFIED`" back into step 3."""
+        step3 = self._item("Starting the week", 3)
+        assert "SOURCE RELEASED" in step3 and "ARK SHIPPED AND VERIFIED" in step3
+        assert "until `ARK SHIPPED AND VERIFIED`" not in step3
+        assert "steps 4-6" in step3.replace("–", "-")
+        for n in (4, 5, 6):
+            assert "ARK SHIPPED" not in self._item("Starting the week", n), n
+        header = " ".join(re.sub(r"^\s*#[\s#]*", "", ln)
+                          for ln in (DEPLOY / "ark_ship.sh").read_text().splitlines())
+        assert "the week's later steps need not wait for the upload" in header
+        printed = subprocess.run(["bash", str(DEPLOY / "duckdb_silence_check.sh"), "--crontab"],
+                                 capture_output=True, text=True, timeout=30)
+        assert printed.returncode == 0, printed.stderr
+        assert "once the second Ark is off-site" not in printed.stdout
+        assert "SOURCE RELEASED" in printed.stdout
+        snapshot = " ".join((DEPLOY / "daily_offsite.sh").read_text().split())
+        assert "once the second Ark is off-site" not in snapshot

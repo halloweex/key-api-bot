@@ -105,7 +105,7 @@ if [ "$MODE" = crontab ]; then
 #   crontab -l > /root/crontab.bak-week-of-silence-\$(date -u +%Y%m%d-%H%M%S)
 #   crontab -l | grep -nF -e scripts/weekly_compact.sh -e deploy/daily_offsite.sh -e deploy/duckdb_silence_check.sh
 #
-# STARTING THE WEEK — retire two (step 4, once the second Ark is off-site),
+# STARTING THE WEEK — retire two (step 4, from the Ark run's SOURCE RELEASED),
 # add one (step 7, after KS_DUCKDB=off and up -d):
 - $retire_compact
 - $retire_snapshot

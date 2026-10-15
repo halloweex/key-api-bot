@@ -19,8 +19,8 @@
 # 02:45 UTC is after the 01:30 backup and after the Sunday compact finishes
 # (~02:01), so it never races either.
 #
-# Retired at the start of the week of silence (stage 5), once the second Ark
-# is off-site: under KS_DUCKDB=off web registers no db_backup, so there is no
+# Retired at the start of the week of silence (stage 5), with the second Ark
+# under way: under KS_DUCKDB=off web registers no db_backup, so there is no
 # new backup to snapshot, and the sidecar — started with `--env-file .env` —
 # would be refused by the switch. So with KS_DUCKDB=off in .env this exits 0
 # with one line before it reads, links or deletes anything, rather than
