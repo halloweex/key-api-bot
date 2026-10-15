@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.283
+
+- Stage 5 PR-7 x #291: the jobs test's fake answers the mirror stamps empty
+- Stage 5 integration: a held-back web logs its unaddressed reads as served
+- Stage 5 PR-2 review: a held-back week has not started, and the host is told
+- Stage 5 PR-2 review: a held chain's line names its flag's value
+- Stage 5 PR-8: the canary and the log name what refused under KS_DUCKDB=off
+- Stage 5 PR-8: the real-Postgres status test owns its pool
+- Stage 5 PR-8: the frozen warehouse status is read from a real Postgres too
+- Stage 5 PR-8: the read path's last reaches for the file under off
+- Stage 5 PR-4: the accepted shadow gap says what it is (OD-S5-3 (a))
+- Stage 5 PR-7 review: the three PK checks off stands down stay bare calls
+- Stage 5 PR-7: drop an unused import from the jobs test
+- Stage 5 PR-7: under KS_DUCKDB=off the scheduler's jobs and the checks stand down rather than fail
+- Stage 5 PR-5 review: an unreadable copy holds every entity it leaves unjudged
+- Stage 5 PR-2 review: in force, keyed latches, derived stores, one pk list
+- Stage 5 PR-2: off is a claim, checked at web's start
+- Stage 5 PR-6 review: a marker the removal left is spent, not merged again
+- Stage 5 PR-4: the shadow chains stand their DuckDB half down under off
+- Stage 5 PR-6: the warehouse writer's record under KS_DUCKDB=off
+- Stage 5 PR-3: /api/health under KS_DUCKDB=off reaches for nothing
+- Stage 5 PR-5: under KS_DUCKDB=off, what was inherited from DuckDB is read from its copy
+
+
 ## 3.0.282
 
 - E1 review: the finding names the writer it cannot see, and three tests bite
