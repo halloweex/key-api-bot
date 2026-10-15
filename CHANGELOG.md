@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.284
+
+
+
 ## 3.0.283
 
 - Stage 5 PR-7 x #291: the jobs test's fake answers the mirror stamps empty
