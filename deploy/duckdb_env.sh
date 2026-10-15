@@ -187,7 +187,7 @@ ks_duckdb_env_note() {
         else
             case "$KS_DUCKDB_ENV" in
                 invalid) note="KS_DUCKDB is written with quotes or a comment ($KS_DUCKDB_ENV_VALUE): compose drops them and web runs off, but docker run --env-file keeps them, so a sidecar would read a value the switch does not understand and run on, and the soak's P4 fails on it; $bare. " ;;
-                refused) note="KS_DUCKDB is written with export, or with a space or a colon before its value: compose reads it and web runs off, but docker run --env-file refuses the whole file, so no sidecar starts from it — not this one, not the restore drill — and the soak's P4 fails on it; $bare. " ;;
+                refused) note="KS_DUCKDB is written with export, or with a space around its = (or after a colon): compose reads it and web runs off, but docker run --env-file refuses the whole file, so no sidecar starts from it — not this one, not the restore drill — and the soak's P4 fails on it; $bare. " ;;
                 on) note="KS_DUCKDB is written KS_DUCKDB:off, which compose reads and docker run --env-file skips: web runs off, but a sidecar would run on, and the soak's P4 fails on it; $bare. " ;;
             esac
         fi

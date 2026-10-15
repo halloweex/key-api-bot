@@ -34,7 +34,7 @@ CONFIG="deploy/backup.env"
 source deploy/duckdb_env.sh
 ks_duckdb_env_read .env
 if [ "$KS_DUCKDB_ENV" = refused ]; then
-  echo "FAIL: .env writes KS_DUCKDB with export, or with a space or a colon before its value, and docker run --env-file refuses the whole file over it: the rebuild cannot start from it, whatever -e says. Write KS_DUCKDB=off (or on) as a line of its own." >&2
+  echo "FAIL: .env writes KS_DUCKDB with export, or with a space around its = (or after a colon), and docker run --env-file refuses the whole file over it: the rebuild cannot start from it, whatever -e says. Write KS_DUCKDB=off (or on) as a line of its own." >&2
   exit 1
 fi
 
