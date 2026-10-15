@@ -17,9 +17,12 @@ process sweep's opened circuit breaker failed its sync on it.
 Three sweeps, each one JSON file in the directory `KS_SWEEP_OUT` names:
 `process.json` (the boot and every job), `routes.json` (every GET route under
 `/api/` as an admin) and `doors.json` (everything else a week exercises —
-`tests/unit/duckdb_off_sweep_doors.py`). Per step, its outcome and the sites
-that were refused under `KS_DUCKDB=off` while it ran. Judging that against
-`KNOWN_RESIDUAL` is the outer test's business; this file only observes.
+`tests/unit/duckdb_off_sweep_doors.py`). Per step, its outcome, the sites
+that were refused under `KS_DUCKDB=off` while it ran, what it asked of the
+world outside and what that served or refused
+(`tests/unit/duckdb_off_sweep_world.py`) — and, where Postgres answers, what
+it wrote there. Judging that against `KNOWN_RESIDUAL` is the outer test's
+business; this file only observes.
 """
 from __future__ import annotations
 
@@ -36,13 +39,17 @@ import pytest
 
 from core import duckdb_switch
 from tests.unit.test_duckdb_off_sweep import (
-    FLAVOR_ENV, LIVE, NOT_SCHEDULED, OUT_ENV, STEP_TIMEOUT_S, FrozenFile,
+    FLAVOR_ENV, LIVES, NOT_SCHEDULED, OFFLINES, OUT_ENV, STEP_TIMEOUT_S, FrozenFile,
     apply_target_state, name_the_key, optional_variants, variant_key,
 )
 from tests.unit.test_read_fallback_sites import fresh_read_fallback  # noqa: F401 — fixture
 
 FLAVOR = os.environ.get(FLAVOR_ENV, "")
 OUT = os.environ.get(OUT_ENV, "")
+# The flavour's two halves: whether Postgres answers, and whether KeyCRM and
+# TurboSMS do.
+PG_LIVE = FLAVOR in LIVES
+WORLD_ANSWERS = FLAVOR not in OFFLINES
 
 pytestmark = pytest.mark.skipif(
     not OUT, reason="run by tests/unit/test_duckdb_off_sweep.py, never on its own")
@@ -53,18 +60,23 @@ pytestmark = pytest.mark.skipif(
 class Recorder:
     """Which sites were refused during which step. A site is counted where it
     was raised (`duckdb_switch.guard`), so swallowing callers cannot hide it;
-    between steps the counts are emptied and the mode kept."""
+    between steps the counts are emptied and the mode kept. What the step
+    asked of the world outside is filed beside them, the same way."""
 
-    def __init__(self, sweep: str) -> None:
-        self.sweep = sweep
+    def __init__(self, sweep: str, world=None) -> None:
+        self.sweep, self.world = sweep, world
         self.steps: Dict[str, Dict[str, object]] = {}
         self._last = time.monotonic()
 
     def collect(self, step: str, status: Optional[str] = None,
                 skipped: Optional[str] = None) -> None:
-        entry = self.steps.setdefault(step, {"status": None, "sites": []})
+        entry = self.steps.setdefault(step, {"status": None, "sites": [], "world": {}})
         sites = set(entry["sites"]) | set(duckdb_switch.opened())
         entry["sites"] = sorted(sites)
+        for what, counts in (self.world.drain() if self.world else {}).items():
+            held = entry["world"].setdefault(what, dict.fromkeys(counts, 0))
+            for name, n in counts.items():
+                held[name] += n
         # Since the last collect: what a slow sweep is slow on.
         now = time.monotonic()
         entry["seconds"] = round(float(entry.get("seconds", 0)) + now - self._last, 2)
@@ -151,16 +163,17 @@ def refused(message: str):
 
 @pytest.fixture
 def sweep_network(monkeypatch):
-    """Nothing leaves the process but, in the live flavor, Postgres itself:
-    KeyCRM, ClickHouse, Meilisearch and Telegram are refused at the socket,
-    at once, rather than waited on."""
+    """Nothing leaves the process but, where Postgres answers, Postgres
+    itself: ClickHouse, Meilisearch, Telegram — and anything else — are
+    refused at the socket, at once, rather than waited on. KeyCRM and
+    TurboSMS never reach a socket: they are the world's (`sweep_world`)."""
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
     real_getaddrinfo = socket.getaddrinfo
     # (host, port) as the DSN names it, and every address it resolves to —
     # what a socket is finally connected to is the address.
     allowed, addresses = set(), set()
-    if FLAVOR == LIVE:
+    if PG_LIVE:
         from urllib.parse import urlsplit
 
         parts = urlsplit(os.environ["KS_PG_DSN"])
@@ -190,10 +203,74 @@ def sweep_network(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
-    if FLAVOR != LIVE:
+    if not PG_LIVE:
         # The pool refuses at once rather than through a DSN nothing answers.
         monkeypatch.setattr("core.pg.get_pool",
                             AsyncMock(side_effect=refused("connection refused")))
+
+
+@pytest.fixture
+def sweep_world(monkeypatch):
+    """KeyCRM and TurboSMS for the whole process, answering or refusing as
+    the flavour says (`duckdb_off_sweep_world.py`), and recording either."""
+    from tests.unit.duckdb_off_sweep_world import World, install
+
+    world = World(answers=WORLD_ANSWERS)
+    install(monkeypatch, world)
+    return world
+
+
+class Landed:
+    """What Postgres wrote while a step ran, where it answers: per table, the
+    row versions written by a transaction that began after the step did. A
+    row's `xmin` is the transaction that wrote its current version, inserted
+    or updated, so an order a fetch served again and the sync rewrote counts
+    as much as a new one — "the write half ran", which is the question.
+
+    Read on a connection of its own, one statement over every table the
+    application's role can write (`_tables_sql`). Transaction ids are compared
+    within one epoch, which a throwaway database never leaves."""
+
+    def __init__(self, dsn: str) -> None:
+        self.dsn = dsn
+        self.conn = None
+        self._sql = ""
+
+    async def _connection(self):
+        if self.conn is None:
+            import asyncpg
+
+            self.conn = await asyncpg.connect(self.dsn)
+            parts = []
+            for schema, name in await self.conn.fetch(_tables_sql()):
+                label = f"{schema}.{name}".replace("'", "''")
+                parts.append(
+                    f"SELECT '{label}' AS t, count(*) AS n FROM "
+                    f"{_quoted(schema)}.{_quoted(name)} WHERE xmin::text::bigint > $1")
+            self._sql = " UNION ALL ".join(parts)
+        return self.conn
+
+    async def mark(self) -> int:
+        conn = await self._connection()
+        xid = await conn.fetchval("SELECT pg_current_xact_id()::text::bigint")
+        return int(xid) % (1 << 32)
+
+    async def since(self, mark: int) -> Dict[str, int]:
+        conn = await self._connection()
+        return {r["t"]: r["n"] for r in await conn.fetch(self._sql, mark) if r["n"]}
+
+    async def close(self) -> None:
+        if self.conn is not None:
+            await self.conn.close()
+            self.conn = None
+
+
+def _quoted(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def landed_where_postgres_answers() -> Optional[Landed]:
+    return Landed(os.environ["KS_PG_DSN"]) if PG_LIVE else None
 
 
 @pytest.fixture
@@ -291,7 +368,7 @@ def canonical_postgres():
     every machine whatever ran before it; afterwards every table is put back
     row for row and checked by hash, and a table that does not match fails
     here rather than in whichever test runs next."""
-    if FLAVOR != LIVE:
+    if not PG_LIVE:
         yield None
         return
     import asyncpg
@@ -467,12 +544,12 @@ def state(canonical_postgres, monkeypatch, tmp_path, fresh_read_fallback):  # no
     from core import chain_latch
     from core.write_chains import WRITE_CHAINS, chain_name
 
-    if FLAVOR == LIVE:
+    if PG_LIVE:
         # The local half of the latch first: the owner rows carry its stamp.
         for chain in WRITE_CHAINS:
             chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
         asyncio.run(_seed_live_facts(os.environ["KS_PG_DSN"]))
-    apply_target_state(monkeypatch, tmp_path, live=FLAVOR == LIVE)
+    apply_target_state(monkeypatch, tmp_path, live=PG_LIVE)
     # A refusal under `get_last_sync_time` is recorded with its key.
     name_the_key(monkeypatch)
     import core.duckdb_store as store_module
@@ -482,13 +559,15 @@ def state(canonical_postgres, monkeypatch, tmp_path, fresh_read_fallback):  # no
 
 # ─── Web's start, as the sweeps run it ───────────────────────────────────────
 
-def boot_patches(monkeypatch, record: "Recorder", prefix: str = "boot") -> None:
+def boot_patches(monkeypatch, record: "Recorder", prefix: str = "boot",
+                 landed: Optional[Landed] = None) -> None:
     """Web's `startup_event` as production runs it, instrumented: the boot's
     sync and the scheduler's start each recorded as a step of their own
     (`<prefix>:init_and_sync`, `<prefix>:scheduler_start`), and what is left
     of the start as `<prefix>`. The scheduler starts paused — a sweep runs
     what it registered itself, and a trigger firing in the background would
-    put its sites under somebody else's step.
+    put its sites under somebody else's step. With `landed`, what the boot's
+    sync wrote to Postgres is kept on its step.
 
     The bot's store is web's too: `init_database`, the access requests and
     the sign-ins reach it (PR-9). It runs for real where Postgres answers,
@@ -505,7 +584,7 @@ def boot_patches(monkeypatch, record: "Recorder", prefix: str = "boot") -> None:
     monkeypatch.setattr(main, "validate_config", MagicMock())
     monkeypatch.setattr(bot_store, "_store", None)
     monkeypatch.setattr(bot_sqlite, "DB_PATH", Path(OUT) / f"bot-{record.sweep}.db")
-    if FLAVOR != LIVE:
+    if not PG_LIVE:
         monkeypatch.setattr(main, "init_database", MagicMock())
     # Training is swept as its own job; the boot's ten-second delayed copy of
     # it would land inside whichever step happened to be running by then.
@@ -521,12 +600,18 @@ def boot_patches(monkeypatch, record: "Recorder", prefix: str = "boot") -> None:
         # The boot sync's own exception goes back to `startup_event`, whose
         # handling of it — the refusal's branch, or the generic one — is swept.
         record.collect(prefix)
+        step = f"{prefix}:init_and_sync"
+        mark = await landed.mark() if landed else None
         try:
             await run_step(real_sync(**kwargs), reraise=True)
         except Exception as exc:
-            record.collect(f"{prefix}:init_and_sync", type(exc).__name__)
+            record.collect(step, type(exc).__name__)
             raise
-        record.collect(f"{prefix}:init_and_sync", "ok")
+        finally:
+            if landed:
+                record.steps.setdefault(step, {"status": None, "sites": [], "world": {}})
+                record.steps[step]["landed"] = await landed.since(mark)
+        record.collect(step, "ok")
 
     async def start_scheduler():
         record.collect(prefix)
@@ -550,15 +635,16 @@ async def control(record: "Recorder") -> None:
 
 # ─── The three sweeps ────────────────────────────────────────────────────────
 
-def test_process(state, sweep_network, production_host, monkeypatch):
+def test_process(state, sweep_network, sweep_world, production_host, monkeypatch):
     """Web's real startup, then every job the scheduler registered, one at a
     time and in the order it registered them."""
     import core.scheduler as scheduler_module
     import core.sync_service as sync_module
     import web.main as main
 
-    record = Recorder("process")
-    boot_patches(monkeypatch, record)
+    record = Recorder("process", sweep_world)
+    landed = landed_where_postgres_answers()
+    boot_patches(monkeypatch, record, landed=landed)
 
     async def sweep():
         record.collect("before")
@@ -586,11 +672,16 @@ def test_process(state, sweep_network, production_host, monkeypatch):
             async def run(job=job):
                 ran["result"] = await job.func(*job.args, **job.kwargs)
 
+            mark = await landed.mark() if landed else None
             status = await run_step(run())
             record.collect(f"job:{job_id}", status, skipped_by(ran.get("result")))
+            if landed:
+                record.steps[f"job:{job_id}"]["landed"] = await landed.since(mark)
         await control(record)
         if scheduler._scheduler.running:
             scheduler._scheduler.shutdown(wait=False)
+        if landed:
+            await landed.close()
         from core.pg import close_pool
         await close_pool()
         return jobs
@@ -611,7 +702,7 @@ def answer_the_cohorts(monkeypatch) -> None:
     one, so the cohort routes are swept past their engine where they can be."""
     from core import ch_cohorts
 
-    fetch = (AsyncMock(return_value=[]) if FLAVOR == LIVE
+    fetch = (AsyncMock(return_value=[]) if PG_LIVE
              else AsyncMock(side_effect=refused("down")))
     monkeypatch.setattr(ch_cohorts, "fetch", fetch)
 
@@ -619,12 +710,14 @@ def answer_the_cohorts(monkeypatch) -> None:
 class Calls:
     """The HTTP half of a sweep: each request one step, on the sweep's loop
     (`duckdb_off_sweep_doors.Http`), with what it answered kept — the status
-    per step, the surface a 503 names, and the bodies the outer test reads."""
+    per step, the surface a 503 names, and the bodies the outer test reads.
+    With `landed`, a call asked to `measure` keeps what it wrote to Postgres
+    on its step."""
 
-    def __init__(self, record: "Recorder", app) -> None:
+    def __init__(self, record: "Recorder", app, landed: Optional[Landed] = None) -> None:
         from tests.unit.duckdb_off_sweep_doors import Http
 
-        self.record, self.http = record, Http(app)
+        self.record, self.http, self.landed = record, Http(app), landed
         self.statuses: Dict[str, int] = {}
         self.surfaces: Dict[str, Optional[str]] = {}
         self.bodies: Dict[str, object] = {}
@@ -633,34 +726,40 @@ class Calls:
         self.details: Dict[str, str] = {}
 
     async def call(self, step: str, method: str, path: str, *, cookie=None,
-                   params=None, body=None, keep_body: bool = False):
+                   params=None, body=None, keep_body: bool = False,
+                   measure: bool = False):
         box = {}
+        landed = self.landed if measure else None
 
         async def go():
             box["response"] = await self.http.request(
                 method, path, cookie=cookie, params=params, body=body)
 
+        mark = await landed.mark() if landed else None
         status = await run_step(go())
         response = box.get("response")
         if response is None:  # the request itself raised or timed out
             self.statuses[step] = 0
             self.record.collect(step, status)
-            return None
-        self.statuses[step] = response.status_code
-        try:
-            payload = response.json()
-        except Exception:  # noqa: BLE001 — a CSV, an HTML page, an event stream
-            payload = None
-        self.surfaces[step] = payload.get("surface") if isinstance(payload, dict) else None
-        if keep_body:
-            self.bodies[step] = payload if payload is not None else response.text
-        if response.status_code >= 400:
-            self.details[step] = response.text[:300]
-        self.record.collect(step, str(response.status_code))
+        else:
+            self.statuses[step] = response.status_code
+            try:
+                payload = response.json()
+            except Exception:  # noqa: BLE001 — a CSV, an HTML page, an event stream
+                payload = None
+            self.surfaces[step] = (payload.get("surface") if isinstance(payload, dict)
+                                   else None)
+            if keep_body:
+                self.bodies[step] = payload if payload is not None else response.text
+            if response.status_code >= 400:
+                self.details[step] = response.text[:300]
+            self.record.collect(step, str(response.status_code))
+        if landed:
+            self.record.steps[step]["landed"] = await landed.since(mark)
         return response
 
 
-def test_routes(state, sweep_network, production_host, monkeypatch):
+def test_routes(state, sweep_network, sweep_world, production_host, monkeypatch):
     """Every GET route under /api/, read off the app, as an admin — with its
     required parameters, then once per value of each optional parameter that
     can pick a branch, and with the header's filters together. In both
@@ -672,12 +771,12 @@ def test_routes(state, sweep_network, production_host, monkeypatch):
 
     answer_the_cohorts(monkeypatch)
     admin = session_cookie(hardcoded_admin(), "admin")
-    record = Recorder("routes")
+    record = Recorder("routes", sweep_world)
     record.collect("before")
     routes, variants, health = {}, {}, {}
 
     async def sweep():
-        if FLAVOR == LIVE:
+        if PG_LIVE:
             await derive_in_postgres(record, "routes:derive")
         calls = Calls(record, app)
         for endpoint in swept_routes(app):
@@ -726,7 +825,7 @@ PAID_BY_PR8 = ("/api/warehouse/status", "/api/summary?source_id=3")
 PROBES = (("/api/summary", {"period": "month"}),)
 
 
-def test_doors(state, sweep_network, production_host, monkeypatch):
+def test_doors(state, sweep_network, sweep_world, production_host, monkeypatch):
     """PR-9: what a week of silence exercises beyond the GET routes and the
     jobs — every other door, after web's real start and before its stop.
     `tests/unit/duckdb_off_sweep_doors.py` says what each door is made of."""
@@ -750,8 +849,9 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
     monkeypatch.setattr(bus, "_handlers", {})
     monkeypatch.setattr(bus, "_wildcard_handlers", [])
 
-    record = Recorder("doors")
-    boot_patches(monkeypatch, record, prefix="setup")
+    record = Recorder("doors", sweep_world)
+    landed = landed_where_postgres_answers()
+    boot_patches(monkeypatch, record, prefix="setup", landed=landed)
     admin = doors.session_cookie(doors.hardcoded_admin(), "admin")
     viewer = doors.session_cookie(doors.VIEWER_ID, "viewer")
     who = (("nobody", None), ("viewer", viewer), ("admin", admin))
@@ -776,9 +876,9 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
 
         record.collect("before")
         record.collect("setup", await run_step(main.startup_event()))
-        if FLAVOR == LIVE:
+        if PG_LIVE:
             await derive_in_postgres(record, "setup:derive")
-        calls = Calls(record, app)
+        calls = Calls(record, app, landed)
         # The trigger door is given a job the scheduler registered; any one,
         # since a paused scheduler only notes the request.
         jobs = list(scheduler_module.get_scheduler()._job_info)
@@ -791,20 +891,23 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
             await calls.call(f"viewer GET {endpoint.path}", "GET", path,
                              cookie=viewer, params=params)
 
-        # Every route under /api/ that is not a GET, as an admin.
+        # Every route under /api/ that is not a GET, as an admin, with what
+        # each wrote to Postgres kept on its step.
         for method, endpoint in doors.write_routes(app):
             key = doors.door_key(method, endpoint)
             path, params, body = doors.example_request(method, endpoint)
             if key == "POST /api/webhooks/turbosms":
-                body = doors.webhook_body()
+                # A report on a message the send recorded, where one was sent.
+                body = doors.webhook_body(*sweep_world.message_ids[:1])
             response = await calls.call(key, method, path, cookie=admin, params=params,
-                                        body=body, keep_body=key == "POST /api/chat")
+                                        body=body, keep_body=key == "POST /api/chat",
+                                        measure=True)
             # Again with the optional values that can pick a branch — the
             # inline run behind `background=false`, a dry run, a sales type.
             for variant in optional_variants(endpoint):
                 await calls.call(f"{method} {variant_key(endpoint.path, variant)}",
                                  method, path, cookie=admin,
-                                 params={**params, **variant}, body=body)
+                                 params={**params, **variant}, body=body, measure=True)
             # What a door made, the next door at its path is given.
             made = doors.made_by(key, response)
             for name, value in made.items():
@@ -857,9 +960,19 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
         events.update({label: listener.events() for label, listener in listeners.items()})
 
         # Every tool, straight through `execute_tool`, with every value of
-        # each enum that picks a branch.
+        # each enum that picks a branch. A tool that acts on something by id
+        # is given one an earlier tool made (`doors.made_by_tool`), a tool of
+        # its own, in the order they come — the delete one, the update the
+        # next — so it acts on a row rather than answering "not found".
+        made: Dict[str, List[int]] = {}
+        taken: Dict[str, int] = {}
         for tool in TOOLS:
             inputs = doors.tool_inputs(tool)
+            for name in set(inputs[0]) & set(made):
+                if taken.get(name, 0) < len(made[name]):
+                    inputs = [{**data, name: made[name][taken.get(name, 0)]}
+                              for data in inputs]
+                    taken[name] = taken.get(name, 0) + 1
             for data in inputs:
                 step = doors.tool_key(tool["name"], data, inputs[0])
                 box = {}
@@ -871,11 +984,15 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
                 record.collect(step, status)
                 result = box.get("result")
                 tools[step] = (result.get("error") if isinstance(result, dict) else None)
+                for name, ids in doors.made_by_tool(result).items():
+                    made.setdefault(name, []).extend(ids)
 
         # Web's stop: the scheduler, the prediction service, KeyCRM, the store.
         record.collect("shutdown", await run_step(main.shutdown_event()))
         await control(record)
         await calls.http.close()
+        if landed:
+            await landed.close()
         from core.pg import close_pool
         await close_pool()
         return calls
@@ -891,6 +1008,7 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
         outside=[doors.door_key(m, e) for m, e in doors.outside_routes(app)],
         socket_routes=[e.path for e in doors.socket_routes(app)],
         network=[e.path for e in doors.network_routes(app)],
+        message_ids=sweep_world.message_ids,
         tool_names=[t["name"] for t in TOOLS],
         chat={"answer": chat if isinstance(chat, dict) else None,
               "stream": doors.stream_events(stream) if isinstance(stream, str) else None,

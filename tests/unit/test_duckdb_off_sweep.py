@@ -29,7 +29,9 @@ the sweep would be measuring a web that opens the file on purpose. A registry
 that grows a precondition this state does not meet fails here, naming it,
 rather than sweeping a different state in silence.
 
-TWO FLAVOURS OF POSTGRES
+FOUR FLAVOURS: POSTGRES, AND THE WORLD OUTSIDE
+
+Postgres refuses or answers:
 
 - `down`: Postgres refuses every connection. It runs everywhere, and it asks
   the question an outage asks: does a failed Postgres send anything back to
@@ -43,11 +45,21 @@ TWO FLAVOURS OF POSTGRES
   checked by hash. Skipped without `KS_PG_DSN`; CI fails a run in which it
   skipped.
 
-Each row of `KNOWN_RESIDUAL` names the flavours it shows in. The GET routes
-are swept in `down` only, so what a route reaches only once Postgres has
-answered is not here: that is PR-9's integration variant, on a seeded
-Postgres. Each is called with its required parameters, and again per value of
-every optional parameter that can pick a branch and with the header's filters
+Crossed with the world outside, KeyCRM and TurboSMS
+(`duckdb_off_sweep_world.py`). In `down` and `live` it answers with canned
+payloads, so what runs only once data has arrived runs: the syncs' writes,
+the gap backfill, the status refresh, the half-written repair, the resync,
+both buyer syncs, the SMS send and the delivery report on its message. In
+`down-offline` and `live-offline` it refuses, and the outage branches run
+instead. Until the review of PR-9 both were refused at the socket in every
+flavour, so a reach for the file that only a payload took would have passed.
+Where both answer, every step that writes what KeyCRM serves must have been
+served it and have written it to Postgres (`FED_BY_KEYCRM`, and every DuckDB
+lever that syncs), so the sweep cannot stop reaching those paths in silence.
+
+Each row of `KNOWN_RESIDUAL` names the flavours it shows in. Each GET route
+is called with its required parameters, and again per value of every
+optional parameter that can pick a branch and with the header's filters
 together (`optional_variants`): `/api/summary?source_id=3` reached the file
 where `/api/summary` did not, until PR-8.
 
@@ -71,6 +83,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import types
 import typing
 from pathlib import Path
@@ -87,8 +100,14 @@ RUNNER = Path(__file__).with_name("duckdb_off_sweep_run.py")
 
 FLAVOR_ENV = "KS_SWEEP_FLAVOR"
 OUT_ENV = "KS_SWEEP_OUT"
+# Postgres refusing or answering, crossed with the world outside — KeyCRM and
+# TurboSMS — answering or refusing (`duckdb_off_sweep_world.py`).
 DOWN, LIVE = "down", "live"
-DOWNS, LIVES, BOTH = frozenset({DOWN}), frozenset({LIVE}), frozenset({DOWN, LIVE})
+DOWN_OFFLINE, LIVE_OFFLINE = "down-offline", "live-offline"
+FLAVORS = (DOWN, LIVE, DOWN_OFFLINE, LIVE_OFFLINE)
+DOWNS, LIVES = frozenset({DOWN, DOWN_OFFLINE}), frozenset({LIVE, LIVE_OFFLINE})
+OFFLINES = frozenset({DOWN_OFFLINE, LIVE_OFFLINE})
+EVERY_FLAVOR = frozenset(FLAVORS)
 STEP_TIMEOUT_S = 60
 
 DSN = os.getenv("KS_PG_DSN")
@@ -127,6 +146,8 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
     # None, in either flavour, the first time they were opened: every write
     # under /api/, the pages and sign-ins, the sockets, the events, the
     # assistant's tools and routes, a real viewer's session and web's stop.
+    # Nor in any of the four once the world outside answered (review of
+    # PR-9): every path that runs only on a payload was clean given one.
 }
 
 # ─── The DuckDB levers (OD-S5-8) ─────────────────────────────────────────────
@@ -145,6 +166,19 @@ KNOWN_RESIDUAL: Dict[Tuple[str, str], FrozenSet[str]] = {
 LEVER_PREFIX = "/api/duckdb/"
 DUCKDB_LEVERS: Dict[Tuple[str, str], str] = {}
 
+# ─── What the world outside feeds ────────────────────────────────────────────
+#
+# A list being empty proves nothing about a path the sweep never took, and
+# until the review of PR-9 none that runs only on a payload was taken. Where
+# Postgres and the world both answer, each of these process steps, which
+# write the orders KeyCRM serves, must have been served orders and have
+# written orders to Postgres; each DuckDB lever that syncs — every one under
+# `LEVER_PREFIX` but its read, `GET /api/duckdb/stats` — the same of whatever
+# it fetches (`TestTheLevers`). Steps, not jobs read off the scheduler: which
+# of them writes what KeyCRM serves is a fact about its body.
+FED_BY_KEYCRM = ("boot:init_and_sync", "job:incremental_sync", "job:full_sync_weekly",
+                 "job:order_gap_backfill", "job:order_status_refresh",
+                 "job:halfwritten_repair")
 
 # ─── The state ───────────────────────────────────────────────────────────────
 
@@ -444,7 +478,9 @@ class TestTheState:
 # ─── The sweep ───────────────────────────────────────────────────────────────
 
 # The sweeps run once per flavour, each in a fresh interpreter, and every
-# test below reads what they wrote.
+# test below reads what they wrote. Four flavours of three sweeps took ~2 min
+# on a laptop when the world was added, and a world that answers made each
+# faster than the refusals' retries had.
 
 PROCESS, ROUTES, DOORS = "process", "routes", "doors"
 SWEEPS = (PROCESS, ROUTES, DOORS)
@@ -487,14 +523,37 @@ def run_sweep(flavor: str, sweeps, out: Path) -> Dict[str, dict]:
 
 @pytest.fixture(scope="module")
 def down(tmp_path_factory):
-    return run_sweep(DOWN, SWEEPS, tmp_path_factory.mktemp("down"))
+    return run_sweep(DOWN, SWEEPS, tmp_path_factory.mktemp(DOWN))
+
+
+@pytest.fixture(scope="module")
+def down_offline(tmp_path_factory):
+    return run_sweep(DOWN_OFFLINE, SWEEPS, tmp_path_factory.mktemp(DOWN_OFFLINE))
+
+
+def _live(flavor: str, tmp_path_factory) -> Dict[str, dict]:
+    if not DSN:
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+    return run_sweep(flavor, SWEEPS, tmp_path_factory.mktemp(flavor))
 
 
 @pytest.fixture(scope="module")
 def live(tmp_path_factory):
-    if not DSN:
-        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
-    return run_sweep(LIVE, SWEEPS, tmp_path_factory.mktemp("live"))
+    return _live(LIVE, tmp_path_factory)
+
+
+@pytest.fixture(scope="module")
+def live_offline(tmp_path_factory):
+    return _live(LIVE_OFFLINE, tmp_path_factory)
+
+
+FIXTURE_OF = {DOWN: "down", LIVE: "live", DOWN_OFFLINE: "down_offline",
+              LIVE_OFFLINE: "live_offline"}
+
+
+def swept(request, flavor: str) -> Dict[str, dict]:
+    """The sweeps of one flavour, by its name."""
+    return request.getfixturevalue(FIXTURE_OF[flavor])
 
 
 def sweep_of(step: str) -> str:
@@ -657,47 +716,114 @@ def _judge_the_assistant(result: dict) -> None:
     assert chat["stream"][-1] == "end", chat["stream"]
 
 
-class TestTheSweepUnderARefusingPostgres:
-    @pytest.mark.parametrize("sweep", SWEEPS)
-    def test_each_sweep_reaches_exactly_the_known_residual(self, down, sweep):
-        _judge(DOWN, sweep, down[sweep])
+def _judge_the_feeding(result: dict) -> None:
+    """Where Postgres and the world answer: each step of `FED_BY_KEYCRM` was
+    served orders and wrote orders to Postgres. What makes a reach behind a
+    payload visible — the review's, planted in `_upsert_orders_with_expenses`
+    for a batch of one or more, showed in all six of them. And the measure
+    discriminates: some job that writes nothing wrote nothing."""
+    from tests.unit.duckdb_off_sweep_world import orders_served
 
-    def test_the_boot_survives_a_boot_sync_that_failed(self, down):
+    steps = result["steps"]
+    starved = {s: steps[s]["world"] for s in FED_BY_KEYCRM if not orders_served(steps[s]["world"])}
+    assert not starved, f"not served orders by KeyCRM: {starved}"
+    unwritten = {s: steps[s].get("landed") for s in FED_BY_KEYCRM
+                 if not (steps[s].get("landed") or {}).get("bronze.orders")}
+    assert not unwritten, f"served orders and wrote none to Postgres: {unwritten}"
+    measured = [s for s, entry in steps.items() if "landed" in entry]
+    assert any(not steps[s]["landed"] for s in measured), measured
+
+
+def _judge_the_doors_that_asked(result: dict) -> None:
+    """Where Postgres and the world answer: every door that asked the world
+    was served what it asked for and answered 2xx — the SMS send and the
+    test send among them, past the gateway — and the delivery report, signed
+    for a message the send recorded, was a known one (200, where an unknown
+    message is a 404 asking the gateway to retry)."""
+    from tests.unit.duckdb_off_sweep_world import refused
+
+    statuses = result["statuses"]
+    asked = {step: entry["world"] for step, entry in result["steps"].items()
+             if entry.get("world") and step in statuses}
+    stopped = {step: (statuses.get(step), result["details"].get(step), world)
+               for step, world in asked.items()
+               if refused(world) or not 200 <= (statuses.get(step) or 0) < 300}
+    assert not stopped, stopped
+    for door in ("POST /api/customers/sms-campaigns/{campaign}/send",
+                 "POST /api/customers/sms/test-send"):
+        assert door in asked, (door, sorted(asked))
+    assert result["message_ids"], "the send recorded no message"
+    assert statuses["POST /api/webhooks/turbosms"] == 200, result["details"].get(
+        "POST /api/webhooks/turbosms")
+
+
+class TestTheSweepUnderARefusingPostgres:
+    """Postgres refusing, with the world answering and with it offline."""
+
+    @pytest.fixture(params=[DOWN, DOWN_OFFLINE])
+    def flavor(self, request):
+        return request.param
+
+    @pytest.fixture
+    def run(self, flavor, request):
+        return swept(request, flavor)
+
+    @pytest.mark.parametrize("sweep", SWEEPS)
+    def test_each_sweep_reaches_exactly_the_known_residual(self, flavor, run, sweep):
+        _judge(flavor, sweep, run[sweep])
+
+    def test_the_boot_survives_a_boot_sync_that_failed(self, run):
         """Postgres refuses, so the boot sync fails — and web's startup goes
         on: under off, nothing in the handler asks DuckDB (PR-1)."""
-        steps = down[PROCESS]["steps"]
+        steps = run[PROCESS]["steps"]
         assert steps["boot:init_and_sync"]["status"] != "ok"
         assert steps["boot"]["status"] == "ok"
         assert steps["boot:scheduler_start"]["status"] == "ok"
 
-    def test_every_job_was_run(self, down):
-        result = down[PROCESS]
+    def test_every_job_was_run(self, run):
+        result = run[PROCESS]
         _judge_the_jobs(result)
         _judge_the_run(result)
 
-    def test_the_order_tick_ran_rather_than_waited(self, down):
-        _judge_the_order_tick(down[PROCESS])
+    def test_the_order_tick_ran_rather_than_waited(self, run):
+        _judge_the_order_tick(run[PROCESS])
 
-    def test_every_route_was_called_with_its_optional_values(self, down):
+    def test_every_route_was_called_with_its_optional_values(self, run):
         """And the variants were requests the routes took: a 422 is FastAPI
         refusing the parameters, a variant that swept nothing."""
-        _judge_the_routes(down[ROUTES])
+        _judge_the_routes(run[ROUTES])
 
-    def test_every_door_was_opened(self, down):
-        _judge_the_doors(down[DOORS])
+    def test_every_door_was_opened(self, run):
+        _judge_the_doors(run[DOORS])
 
-    def test_the_assistant_ran_every_tool_through_both_routes(self, down):
+    def test_the_assistant_ran_every_tool_through_both_routes(self, run):
         """With Postgres refusing, every tool answers what it can — a named
         `data_unavailable`, an error — and nothing reaches the file."""
-        _judge_the_assistant(down[DOORS])
+        _judge_the_assistant(run[DOORS])
 
-    def test_nobody_and_a_viewer_are_refused_before_the_store(self, down):
+    def test_payloads_arrived_and_met_the_refusing_postgres(self, down):
+        """With the world answering, what KeyCRM served reached the paths
+        that write it, and those paths met the refusing Postgres — where a
+        fallback to the file would show: the weekly full sync and the status
+        refresh are served orders before their first Postgres write, and the
+        inline status refresh, a door, answers 500 rather than success."""
+        from tests.unit.duckdb_off_sweep_world import orders_served
+
+        steps = down[PROCESS]["steps"]
+        for step in ("job:full_sync_weekly", "job:order_status_refresh"):
+            assert orders_served(steps[step]["world"]), (step, steps[step])
+            assert steps[step]["status"] != "ok", (step, steps[step])
+        door = "POST /api/duckdb/refresh-statuses?background=false"
+        assert orders_served(down[DOORS]["steps"][door]["world"])
+        assert down[DOORS]["statuses"][door] == 500
+
+    def test_nobody_and_a_viewer_are_refused_before_the_store(self, run):
         """A viewer's session is read from the user list, in Postgres, and
         an unreadable list refuses the request (401) rather than guessing a
         role; the admin sockets are the hardcoded admin's and open."""
         from web.routes.auth import PUBLIC_API_PATHS
 
-        result = down[DOORS]
+        result = run[DOORS]
         viewer = {s[len("viewer GET "):]: v for s, v in result["statuses"].items()
                   if s.startswith("viewer GET ")}
         gated = {p: v for p, v in viewer.items() if p not in PUBLIC_API_PATHS}
@@ -708,7 +834,7 @@ class TestTheSweepUnderARefusingPostgres:
             assert sockets[f"WS {path} as admin"]["accepted"], path
             assert sockets[f"WS {path} as nobody"]["close_code"] == 4001, path
 
-    def test_the_routes_pr8_paid_answer_without_the_file(self, down):
+    def test_the_routes_pr8_paid_answer_without_the_file(self, run):
         """PR-8, in the week's own state. The two routes that reached the
         file answered 503 naming `duckdb` until it (PR-1's handler); now the
         summary for a source with no column in Gold answers DuckDB's zeros,
@@ -719,12 +845,12 @@ class TestTheSweepUnderARefusingPostgres:
         and here."""
         from tests.unit.duckdb_off_sweep_run import PAID_BY_PR8
 
-        result = down[ROUTES]
+        result = run[ROUTES]
         answered = {**result["routes"], **result["variants"]}
         for key in PAID_BY_PR8:
             assert answered[key] == 200, key
         assert [k for k, s in result["surfaces"].items() if s == "duckdb"] == []
-        assert [k for k, s in down[DOORS]["surfaces"].items() if s == "duckdb"] == []
+        assert [k for k, s in run[DOORS]["surfaces"].items() if s == "duckdb"] == []
         summary = result["bodies"]["/api/summary?source_id=3"]
         assert {k: summary[k] for k in ("totalOrders", "totalRevenue", "avgCheck",
                                         "totalReturns", "returnsRevenue")} == {
@@ -733,14 +859,14 @@ class TestTheSweepUnderARefusingPostgres:
         frozen = result["bodies"]["/api/warehouse/status"]["duckdb_frozen"]
         assert frozen["status"] == "off" and frozen["error"], frozen
 
-    def test_health_says_off_and_is_healthy(self, down):
+    def test_health_says_off_and_is_healthy(self, run):
         """PR-3, in the week's own state: the three health routes reach
         nothing (none is in the list), `/api/health` reads healthy with no
         cause, and DuckDB's block and ledger say `off` — with Postgres
         refusing, so nothing else degrades it either. Mutation: drop the
         `off` branch of `health_check`'s stats block — `degraded_by` would
         read `["duckdb"]` here, beside its site in the list."""
-        result = down[ROUTES]
+        result = run[ROUTES]
         for path in ("/api/health", "/api/health/detailed", "/api/duckdb/stats"):
             assert result["routes"][path] == 200, path
         assert result["health"] == {
@@ -752,46 +878,56 @@ class TestTheSweepUnderALivePostgres:
     """The integration variant the design asked PR-9 for: Postgres answers,
     holding a small history in Bronze that Postgres derived into Silver, Gold
     and the customer profile itself — so the routes and the doors read rows,
-    and what only a Postgres that answers reaches is in the run."""
+    and what only a Postgres that answers reaches is in the run. With the
+    world answering, and with it offline."""
+
+    @pytest.fixture(params=[LIVE, LIVE_OFFLINE])
+    def flavor(self, request):
+        return request.param
+
+    @pytest.fixture
+    def run(self, flavor, request):
+        return swept(request, flavor)
 
     @pytest.mark.parametrize("sweep", SWEEPS)
-    def test_each_sweep_reaches_exactly_the_known_residual(self, live, sweep):
-        _judge(LIVE, sweep, live[sweep])
+    def test_each_sweep_reaches_exactly_the_known_residual(self, flavor, run, sweep):
+        _judge(flavor, sweep, run[sweep])
 
-    def test_the_boot_sync_runs_through(self, live):
+    def test_the_boot_sync_runs_through(self, run):
         """The PR's proof: under off the boot passes `init_and_sync` on the
-        unconnected store, with history in Postgres and KeyCRM unreachable."""
-        steps = live[PROCESS]["steps"]
+        unconnected store, with history in Postgres, whether KeyCRM answers
+        or not."""
+        steps = run[PROCESS]["steps"]
         assert steps["boot:init_and_sync"]["status"] == "ok", steps["boot:init_and_sync"]
         assert steps["boot"]["status"] == "ok"
 
-    def test_every_job_was_run(self, live):
-        result = live[PROCESS]
+    def test_every_job_was_run(self, run):
+        result = run[PROCESS]
         _judge_the_jobs(result)
         _judge_the_run(result)
 
-    def test_the_order_tick_ran_rather_than_waited(self, live):
+    def test_the_order_tick_ran_rather_than_waited(self, run):
         """The review's case: the boot's tick armed the backoff, and the job
         a few seconds later skipped and read nothing (review of PR-1).
         Mutation: drop the fresh sync service in the runner's job loop."""
-        _judge_the_order_tick(live[PROCESS])
+        _judge_the_order_tick(run[PROCESS])
 
-    def test_the_shadow_writes_were_reached_and_stood_down(self, live):
+    def test_the_shadow_writes_were_reached_and_stood_down(self, run):
         """PR-4's rows left the list because the DuckDB half stands down,
         not because nothing reached it: with Postgres answering, the journal
         (chain 9) and the samples (chain 10) wrote Postgres and stood their
         shadow down, and no shadow failed. Mutation: drop the `off` return in
         `into_duckdb` — the four rows come back, and the failures with them."""
-        result = live[PROCESS]
+        result = run[PROCESS]
         assert {"pg_dq_journal_write", "pg_watchdog_write"} <= set(
             result["shadow_stood_down"]), result["shadow_stood_down"]
         assert result["shadow_failures"] == []
 
-    def test_the_seeded_history_was_derived_and_read(self, live):
+    def test_the_seeded_history_was_derived_and_read(self, run):
         """The derivation ran in each HTTP sweep before its first request,
         and the routes answered from what it wrote: almost every GET is a
         200 — the summary among them, with the seeded orders in it."""
-        routes, doors = live[ROUTES], live[DOORS]
+        routes, doors = run[ROUTES], run[DOORS]
         assert routes["steps"]["routes:derive"]["status"] == "ok"
         assert doors["steps"]["setup:derive"]["status"] == "ok"
         _judge_the_routes(routes)
@@ -801,8 +937,8 @@ class TestTheSweepUnderALivePostgres:
         summary = routes["bodies"]["/api/summary?period=month"]
         assert summary and summary["totalOrders"] > 0, summary
 
-    def test_every_door_was_opened_and_most_went_through(self, live):
-        result = live[DOORS]
+    def test_every_door_was_opened_and_most_went_through(self, run):
+        result = run[DOORS]
         _judge_the_doors(result)
         statuses = result["statuses"]
         through = sorted(d for d in result["writes"] if 200 <= statuses.get(d, 0) < 300)
@@ -810,26 +946,26 @@ class TestTheSweepUnderALivePostgres:
             through, {d: result["details"].get(d) for d in result["writes"]
                       if d not in through})
 
-    def test_the_assistant_ran_every_tool_through_both_routes(self, live):
-        _judge_the_assistant(live[DOORS])
+    def test_the_assistant_ran_every_tool_through_both_routes(self, run):
+        _judge_the_assistant(run[DOORS])
 
-    def test_a_real_viewer_session_is_a_viewer(self, live):
+    def test_a_real_viewer_session_is_a_viewer(self, run):
         """`_resolve_session` reads the viewer's row — nothing patched it —
         so no route answered 401: the viewer sees what its tabs open and is
         refused (403) the rest, the admin pages among them."""
-        statuses = live[DOORS]["statuses"]
+        statuses = run[DOORS]["statuses"]
         viewer = {s[len("viewer GET "):]: v for s, v in statuses.items()
                   if s.startswith("viewer GET ")}
         assert 401 not in viewer.values(), sorted(p for p, v in viewer.items() if v == 401)
         assert sum(1 for v in viewer.values() if v == 200) >= MIN_LIVE_VIEWER_200
         assert viewer["/api/admin/users"] == 403 and viewer["/api/summary"] == 200
 
-    def test_the_sockets_open_for_whom_they_should_and_carry_the_events(self, live):
+    def test_the_sockets_open_for_whom_they_should_and_carry_the_events(self, run):
         """The handshake reads the session the same way: the admin opens
         both sockets, the viewer the dashboard's and not the admin's, nobody
         neither — and with them open, every handler web registered at its
         start broadcast to its room."""
-        result = live[DOORS]
+        result = run[DOORS]
         sockets = result["sockets"]
         assert sockets["WS /ws/dashboard as viewer"]["accepted"]
         assert sockets["WS /ws/admin as viewer"]["close_code"] == 4003
@@ -844,14 +980,63 @@ class TestTheSweepUnderALivePostgres:
             assert event in heard["/ws/dashboard as admin"], (event, heard)
             assert event in heard["/ws/dashboard as viewer"], (event, heard)
 
-    def test_the_sign_ins_reach_the_bot_store_and_sign_in(self, live):
+    def test_the_sign_ins_reach_the_bot_store_and_sign_in(self, run):
         """The bot's store is web's too: the Login Widget's callback and the
         Mini App's sign-in check the account there, and both set a session
         for the viewer."""
-        statuses = live[DOORS]["statuses"]
+        statuses = run[DOORS]["statuses"]
         for who in ("nobody", "viewer", "admin"):
             assert statuses[f"GET /auth/telegram/callback as {who}"] == 302
             assert statuses[f"POST /auth/webapp as {who}"] == 200
+
+    def test_every_step_fed_by_keycrm_was_served_and_wrote(self, live):
+        """The review of PR-9: no job and no boot ran the half of its body
+        that comes after a payload, so a reach there passed the sweep. With
+        the world answering, each one in `FED_BY_KEYCRM` was served orders
+        and wrote them. Mutation: plant a reach in
+        `SyncService._upsert_orders_with_expenses` for a batch of one or
+        more — it shows in all six steps, and the residual judgement fails;
+        or answer KeyCRM with nothing — this fails."""
+        _judge_the_feeding(live[PROCESS])
+
+    def test_every_door_that_asked_the_world_went_through(self, live):
+        """The SMS send and the test send answered 502 at the gateway, and
+        the delivery report named a message nobody had sent (404), until the
+        world answered (review of PR-9). Now every door that asks it is
+        served and goes through — the levers included, which
+        `TestTheLevers` holds to more."""
+        _judge_the_doors_that_asked(live[DOORS])
+
+    def test_every_tool_answered_without_an_error(self, live):
+        """Every tool, every enum value, answered without an error — the
+        update and the delete among them, given the expenses `add_expenses`
+        made, where they used to answer "Expense 1 not found"."""
+        tools = live[DOORS]["tools"]
+        assert tools and not {step: e for step, e in tools.items() if e}, tools
+
+
+class TestTheWorldOffline:
+    """KeyCRM and TurboSMS refusing, with Postgres refusing and answering:
+    the outage branches, which the sweep took in every flavour until the
+    world could answer."""
+
+    @pytest.fixture(params=sorted(OFFLINES))
+    def flavor(self, request):
+        return request.param
+
+    @pytest.fixture
+    def run(self, flavor, request):
+        return swept(request, flavor)
+
+    def test_the_world_was_asked_and_refused_and_served_nothing(self, run):
+        """Not vacuous: steps asked, every one was refused or turned away by
+        the open circuit breaker, and nothing was served."""
+        from tests.unit.duckdb_off_sweep_world import KEYCRM, TURBOSMS, refused, served
+
+        for sweep in (PROCESS, DOORS):
+            worlds = [e["world"] for e in run[sweep]["steps"].values() if e.get("world")]
+            assert worlds and all(refused(w) for w in worlds), (sweep, worlds)
+            assert not any(served(w, KEYCRM) or served(w, TURBOSMS) for w in worlds)
 
 
 def door_path(step: str) -> Tuple[Optional[str], Optional[str]]:
@@ -869,7 +1054,8 @@ class TestTheLevers:
     """OD-S5-8's doors keep their DuckDB name until the code is deleted. What
     the sweep says of them, both ways: listed levers are such doors, and
     every such door was opened and reached exactly what is listed — today
-    nothing."""
+    nothing — and, where Postgres and the world answer, every one that syncs
+    went past its fetch, so "reached nothing" is said of its write half."""
 
     def test_only_a_door_under_the_prefix_may_be_listed(self):
         from tests.routes_helper import iter_endpoints
@@ -881,14 +1067,14 @@ class TestTheLevers:
             assert (method, path) in doors and path.startswith(LEVER_PREFIX), step
             assert reason and site, step
 
-    @pytest.mark.parametrize("flavor", [DOWN, LIVE])
+    @pytest.mark.parametrize("flavor", FLAVORS)
     def test_every_lever_door_was_opened_and_reached_only_what_is_listed(
         self, flavor, request,
     ):
         from tests.routes_helper import iter_endpoints
         from web.main import app
 
-        result = request.getfixturevalue(flavor)
+        result = swept(request, flavor)
         doors = {(m, e.path) for e in iter_endpoints(app)
                  if e.path.startswith(LEVER_PREFIX) for m in e.methods - {"HEAD"}}
         assert len(doors) >= 5, doors          # stats, resync, refresh, two syncs
@@ -900,6 +1086,35 @@ class TestTheLevers:
                     reached.update((step, site) for site in entry["sites"])
         assert opened == doors, sorted(doors - opened)
         assert reached == set(DUCKDB_LEVERS), sorted(reached ^ set(DUCKDB_LEVERS))
+
+    def test_every_lever_that_syncs_went_past_its_fetch(self, live):
+        """Every lever but the read (`GET /api/duckdb/stats`) syncs from
+        KeyCRM, and each step of each — its variants too, the inline run
+        behind `background=false` — answered 2xx, was served by KeyCRM and
+        wrote to Bronze in Postgres. Until the world answered, the resync
+        answered 500 at its first request, the background runs failed at
+        their first fetch and the missing-buyers sync found nobody missing,
+        and the sweep still counted each as a door that reached nothing
+        (review of PR-9). Mutation: answer KeyCRM with nothing, or leave
+        buyer 4 in the world's listing — `sync-buyers` has nobody to fetch."""
+        from tests.routes_helper import iter_endpoints
+        from tests.unit.duckdb_off_sweep_world import KEYCRM, served
+        from web.main import app
+
+        syncs = {(m, e.path) for e in iter_endpoints(app)
+                 if e.path.startswith(LEVER_PREFIX) for m in e.methods - {"HEAD", "GET"}}
+        assert len(syncs) >= 4, syncs          # resync, refresh, the two buyer syncs
+        result = live[DOORS]
+        steps = {step: entry for step, entry in result["steps"].items()
+                 if door_path(step) in syncs}
+        assert {door_path(step) for step in steps} == syncs
+        short = {step: (result["statuses"].get(step), result["details"].get(step),
+                        entry["world"], entry.get("landed"))
+                 for step, entry in steps.items()
+                 if not 200 <= (result["statuses"].get(step) or 0) < 300
+                 or not served(entry["world"], KEYCRM)
+                 or not any(t.startswith("bronze.") for t in entry.get("landed") or {})}
+        assert not short, short
 
     def test_door_path_reads_every_step_shape(self):
         assert door_path("POST /api/duckdb/resync") == ("POST", "/api/duckdb/resync")
@@ -916,7 +1131,7 @@ class TestTheList:
 
     def test_every_row_names_a_flavour_and_a_sweep(self):
         for (step, site), flavors in KNOWN_RESIDUAL.items():
-            assert flavors and flavors <= BOTH, (step, site)
+            assert flavors and flavors <= EVERY_FLAVOR, (step, site)
             assert sweep_of(step) in SWEEPS, step
 
     def test_a_row_names_a_step_the_sweep_ran(self, down):
@@ -938,6 +1153,18 @@ class TestTheList:
         ("tool:get_revenue_summary", DOORS), ("shutdown", DOORS)])
     def test_a_step_is_placed_in_its_sweep_by_its_name(self, step, sweep):
         assert sweep_of(step) == sweep
+
+
+def datetime_window(days: float, dates: bool = False) -> str:
+    """A KeyCRM `*_between` value for the last `days` up to a few minutes
+    ahead, in the local forms the syncs send: a moment, or whole dates."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now(ZoneInfo("Europe/Kyiv"))
+    form = "%Y-%m-%d" if dates else "%Y-%m-%d %H:%M:%S"
+    return (f"{(now - timedelta(days=days)).strftime(form)}, "
+            f"{(now + timedelta(minutes=5)).strftime(form)}")
 
 
 class TestTheInstruments:
@@ -1000,6 +1227,96 @@ class TestTheInstruments:
             f"{__name__}:tick",
         ]
         assert not duckdb_off.exists()
+
+    def test_the_world_serves_each_window_what_it_holds(self):
+        """KeyCRM's filters are applied, so a window decides what a path is
+        given: the minute sync's day, the status refresh's 30 days and the
+        full sync's 365 each get their own, the hole in the ids only by id,
+        and an id KeyCRM never had is a 404. The buyers' listing leaves out
+        the buyer only the missing-buyers sync fetches."""
+        import httpx
+
+        from tests.unit.duckdb_off_sweep_world import World
+
+        world = World(answers=True)
+        base = "https://openapi.keycrm.app/v1"
+
+        def ids(endpoint: str, **params) -> set:
+            request = httpx.Request("GET", f"{base}/{endpoint}", params=params)
+            return {o["id"] for o in world.keycrm(request).json()["data"]}
+
+        day = datetime_window(days=1.05)     # the minute sync's 25 hours
+        assert ids("order", **{"filter[updated_between]": day}) == {109, 110, 111}
+        assert ids("order", **{"filter[created_between]": day}) == {109}
+        assert ids("order", **{"filter[created_between]": datetime_window(days=30, dates=True)}) == {
+            109, 110, 111}
+        assert ids("order", **{"filter[created_between]": datetime_window(days=365, dates=True)}) == {
+            109, 110, 111, 60}
+        assert ids("buyer") == {1, 2, 3}
+        one = world.keycrm(httpx.Request("GET", f"{base}/order/50"))
+        assert one.status_code == 200 and one.json()["id"] == 50
+        assert world.keycrm(httpx.Request("GET", f"{base}/order/51")).status_code == 404
+        assert world.keycrm(httpx.Request("GET", f"{base}/buyer/4")).json()["id"] == 4
+        assert world.drain()["keycrm order/{id}"] == {"requests": 2, "rows": 1, "refused": 0}
+
+    def test_the_world_reaches_the_clients_and_refuses_as_an_outage_does(
+        self, monkeypatch,
+    ):
+        """Installed, it is what the clients' own transports talk to: KeyCRM's
+        status codes and the breaker, TurboSMS's configuration and its
+        message ids. Offline it raises a refused connection — and a request
+        the open breaker turns away, which never reaches a transport, is
+        recorded as refused too."""
+        from core import keycrm
+        from core.resilience import CircuitBreaker, CircuitState
+        from core.turbosms import TurboSmsClient, TurboSmsConfig, TurboSmsError
+        from tests.unit import duckdb_off_sweep_world as world_module
+
+        for name, value in (("TURBOSMS_API_TOKEN", "t"), ("TURBOSMS_SENDER", "Sweep")):
+            monkeypatch.setenv(name, value)
+        monkeypatch.setattr(keycrm, "_circuit_breaker", CircuitBreaker(
+            config=keycrm.CIRCUIT_BREAKER_CONFIG))
+
+        async def ask(world):
+            world_module.install(monkeypatch, world)
+            client = keycrm.KeyCRMClient(api_key="sweep")
+            try:
+                order = await client.get_order(109)
+                with pytest.raises(keycrm.KeyCRMAPIError):
+                    await client.get_order(51)
+            finally:
+                await client.close()
+            async with TurboSmsClient(TurboSmsConfig()) as sms:
+                sent = await sms.send(["+380501111111"], "hi")
+            return order, sent
+
+        world = world_module.World(answers=True)
+        order, sent = asyncio.run(ask(world))
+        assert order["id"] == 109 and [r.message_id for r in sent] == world.message_ids
+        assert world.message_ids == ["sweep-message-1"]
+
+        offline = world_module.World(answers=False)
+        world_module.install(monkeypatch, offline)
+
+        async def refused():
+            client = keycrm.KeyCRMClient(api_key="sweep")
+            try:
+                with pytest.raises(keycrm.KeyCRMConnectionError):
+                    await client._do_request("GET", "order/109")
+                keycrm._circuit_breaker.state = CircuitState.OPEN
+                keycrm._circuit_breaker.last_failure_time = time.time()
+                with pytest.raises(keycrm.CircuitOpenError):
+                    await client.get_order(109)
+            finally:
+                await client.close()
+            with pytest.raises(TurboSmsError):
+                async with TurboSmsClient(TurboSmsConfig()) as sms:
+                    await sms.send(["+380501111111"], "hi")
+
+        asyncio.run(refused())
+        record = offline.drain()
+        assert record["keycrm order/{id}"]["refused"] == 2, record
+        assert world_module.refused(record) == 3 and not world_module.served(record, "keycrm")
 
     def test_a_route_is_also_called_with_the_optional_values_that_pick_a_branch(self):
         """`_request_for` sends the required parameters only, and

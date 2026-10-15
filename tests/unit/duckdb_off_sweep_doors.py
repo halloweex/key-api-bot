@@ -20,6 +20,9 @@ the rest of what a week of silence exercises, read off the app the same way:
   reach (`test_read_fallback_http.NETWORK_ROUTES`), as an admin;
 - every GET route again under a real viewer's session, which nothing patches.
 
+KeyCRM and TurboSMS are the world's (`duckdb_off_sweep_world.py`): where it
+answers, a door that fetches is handed data and writes it.
+
 A request a route refuses as malformed — FastAPI's 422 — swept nothing past
 its validation, so the outer test fails on one rather than counting it.
 
@@ -193,11 +196,24 @@ EXAMPLE_QUERIES: Dict[str, Dict[str, Any]] = {
     "POST /api/customers/sms-campaigns": {"campaign": "sweep-campaign"},
     # A question, so the model the sweep stands in is asked one.
     "GET /api/chat/stream": {"message": "How are sales this week?"},
+    # The shortest walk the backfill takes. Each 30-day chunk it fetches is
+    # followed by a three-second pause, and the default 730 days outlast a
+    # step's timeout once KeyCRM answers: the walk was cut off mid-way.
+    "POST /api/traffic/backfill-utm": {"days": 30},
 }
 
 
 def door_key(method: str, endpoint) -> str:
     return f"{method} {endpoint.path}"
+
+
+def made_by_tool(result: Any) -> Dict[str, List[int]]:
+    """What an assistant tool made that a later tool acts on, by the input
+    that names it: the expenses `add_expenses` added, as `expense_id`s."""
+    added = result.get("added") if isinstance(result, dict) else None
+    ids = [row["id"] for row in added or () if isinstance(row, dict)
+           and isinstance(row.get("id"), int)]
+    return {"expense_id": ids} if ids else {}
 
 
 def made_by(key: str, response) -> Dict[str, Any]:
@@ -296,11 +312,12 @@ def example_request(method: str, endpoint) -> Tuple[str, Dict[str, Any], Any]:
 
 
 def webhook_body(message_id: str = "sweep-message-1") -> Dict[str, Any]:
-    """A delivery report signed the way the gateway signs it."""
+    """A delivery report signed the way the gateway signs it, saying the
+    message was delivered (`core.turbosms.DELIVERED_STATUSES`)."""
     event_id = f"sweep-event-{message_id}"
     signature = hashlib.sha1(f"{WEBHOOK_SECRET}{event_id}".encode()).hexdigest()
     return {"id": event_id, "signature": signature, "type": "message_status",
-            "try": 1, "data": {"message_id": message_id, "status": "DELIVERED"}}
+            "try": 1, "data": {"message_id": message_id, "status": "Delivered"}}
 
 
 def _bot_token() -> str:
@@ -505,7 +522,9 @@ def _schema_value(name: str, schema: dict) -> Any:
     if kind == "boolean":
         return True
     if kind == "array":
-        return [_schema_value(name, schema.get("items") or {})]
+        # Two: what a tool adds, the tools after it act on — one each.
+        item = schema.get("items") or {}
+        return [_schema_value(name, item), _schema_value(name, item)]
     if kind == "object":
         return {key: _schema_value(key, sub)
                 for key, sub in (schema.get("properties") or {}).items()}
