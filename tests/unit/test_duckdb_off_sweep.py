@@ -180,6 +180,26 @@ FED_BY_KEYCRM = ("boot:init_and_sync", "job:incremental_sync", "job:full_sync_we
                  "job:order_gap_backfill", "job:order_status_refresh",
                  "job:halfwritten_repair")
 
+# ─── A door that says success having done nothing ────────────────────────────
+#
+# With the world offline, a door that asked KeyCRM or TurboSMS, was refused
+# and served nothing, and still answered 2xx saying `"status": "success"`
+# reports work that was not done (review of PR-9). Exact, in the offline
+# flavours, like the residual: a new one fails, and so does one listed that
+# stops. The one there is predates stage 5 and is not off's:
+# `SyncService.refresh_order_statuses` swallows KeyCRM's errors and returns
+# its zero stats (9502d9bd, 2026-02-03), so the inline status refresh answers
+# success through an outage — under `on` exactly as under `off`. Stage 5
+# changes nothing under `on` (the design's first rule), so it is listed with
+# its reason rather than changed here; changing it is a change of its own.
+KNOWN_FALSE_SUCCESS: Dict[str, str] = {
+    "POST /api/duckdb/refresh-statuses?background=false": (
+        "core/sync_service.py refresh_order_statuses catches KeyCRMConnectionError "
+        "and KeyCRMError, logs, and returns stats {orders: 0}; old (9502d9bd), "
+        "the same under on"),
+}
+
+
 # ─── The state ───────────────────────────────────────────────────────────────
 
 def apply_target_state(monkeypatch, tmp_path, *, live: bool,
@@ -716,6 +736,22 @@ def _judge_the_assistant(result: dict) -> None:
     assert chat["stream"][-1] == "end", chat["stream"]
 
 
+def false_successes(result: dict) -> set:
+    """The doors that asked the world outside, were refused and served
+    nothing, and answered 2xx saying `success` (`KNOWN_FALSE_SUCCESS`)."""
+    from tests.unit.duckdb_off_sweep_world import KEYCRM, TURBOSMS, refused, served
+
+    found = set()
+    for step, entry in result["steps"].items():
+        world = entry.get("world") or {}
+        if not refused(world) or served(world, KEYCRM) or served(world, TURBOSMS):
+            continue
+        status = result.get("statuses", {}).get(step) or 0
+        if 200 <= status < 300 and result.get("said", {}).get(step) == "success":
+            found.add(step)
+    return found
+
+
 def _judge_the_feeding(result: dict) -> None:
     """Where Postgres and the world answer: each step of `FED_BY_KEYCRM` was
     served orders and wrote orders to Postgres. What makes a reach behind a
@@ -1037,6 +1073,33 @@ class TestTheWorldOffline:
             worlds = [e["world"] for e in run[sweep]["steps"].values() if e.get("world")]
             assert worlds and all(refused(w) for w in worlds), (sweep, worlds)
             assert not any(served(w, KEYCRM) or served(w, TURBOSMS) for w in worlds)
+
+
+class TestTheFalseSuccess:
+    """A door that says it succeeded having done nothing (`KNOWN_FALSE_SUCCESS`)."""
+
+    @pytest.mark.parametrize("flavor", FLAVORS)
+    def test_no_door_says_success_having_done_nothing_but_the_listed(self, flavor, request):
+        """In the offline flavours the list, exactly; where the world
+        answers, none — nothing is refused there. Mutation: make
+        `refresh_order_statuses` re-raise KeyCRM's errors — the door answers
+        500 and its row must leave the list."""
+        result = swept(request, flavor)[DOORS]
+        listed = set(KNOWN_FALSE_SUCCESS) if flavor in OFFLINES else set()
+        found = false_successes(result)
+        assert found == listed, (
+            f"saying success having done nothing, and not listed: {sorted(found - listed)}; "
+            f"listed and no longer doing so (take it out): {sorted(listed - found)}")
+
+    def test_a_refused_door_saying_success_is_found_and_an_answered_one_is_not(self):
+        """The judgement itself, on records of the shape the runner writes."""
+        refused_world = {"keycrm order": {"requests": 3, "rows": 0, "refused": 3}}
+        served_world = {"keycrm order": {"requests": 1, "rows": 3, "refused": 0}}
+        result = {"steps": {"A": {"world": refused_world}, "B": {"world": served_world},
+                            "C": {"world": refused_world}, "D": {"world": refused_world}},
+                  "statuses": {"A": 200, "B": 200, "C": 500, "D": 200},
+                  "said": {"A": "success", "B": "success", "C": None, "D": "started"}}
+        assert false_successes(result) == {"A"}
 
 
 def door_path(step: str) -> Tuple[Optional[str], Optional[str]]:

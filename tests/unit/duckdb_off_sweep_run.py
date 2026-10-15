@@ -710,9 +710,9 @@ def answer_the_cohorts(monkeypatch) -> None:
 class Calls:
     """The HTTP half of a sweep: each request one step, on the sweep's loop
     (`duckdb_off_sweep_doors.Http`), with what it answered kept — the status
-    per step, the surface a 503 names, and the bodies the outer test reads.
-    With `landed`, a call asked to `measure` keeps what it wrote to Postgres
-    on its step."""
+    per step, the surface a 503 names, the `status` word a JSON answer gives
+    for itself, and the bodies the outer test reads. With `landed`, a call
+    asked to `measure` keeps what it wrote to Postgres on its step."""
 
     def __init__(self, record: "Recorder", app, landed: Optional[Landed] = None) -> None:
         from tests.unit.duckdb_off_sweep_doors import Http
@@ -720,6 +720,7 @@ class Calls:
         self.record, self.http, self.landed = record, Http(app), landed
         self.statuses: Dict[str, int] = {}
         self.surfaces: Dict[str, Optional[str]] = {}
+        self.said: Dict[str, Optional[str]] = {}
         self.bodies: Dict[str, object] = {}
         # What a refusal said, cut short — the reason a door stopped where it
         # did, for whoever reads the run's JSON.
@@ -747,8 +748,10 @@ class Calls:
                 payload = response.json()
             except Exception:  # noqa: BLE001 — a CSV, an HTML page, an event stream
                 payload = None
-            self.surfaces[step] = (payload.get("surface") if isinstance(payload, dict)
-                                   else None)
+            answer = payload if isinstance(payload, dict) else {}
+            self.surfaces[step] = answer.get("surface")
+            self.said[step] = answer.get("status") if isinstance(
+                answer.get("status"), str) else None
             if keep_body:
                 self.bodies[step] = payload if payload is not None else response.text
             if response.status_code >= 400:
@@ -1002,7 +1005,7 @@ def test_doors(state, sweep_network, sweep_world, production_host, monkeypatch):
     stream = calls.bodies.get("admin GET /api/chat/stream")
     record.write(
         statuses=calls.statuses, surfaces=calls.surfaces, details=calls.details,
-        sockets=sockets,
+        said=calls.said, sockets=sockets,
         events=events, handlers=handlers, tools=tools,
         writes=[doors.door_key(m, e) for m, e in doors.write_routes(app)],
         outside=[doors.door_key(m, e) for m, e in doors.outside_routes(app)],
