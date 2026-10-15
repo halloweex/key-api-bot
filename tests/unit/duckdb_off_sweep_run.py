@@ -443,7 +443,13 @@ def test_process(state, sweep_network, production_host, monkeypatch):
         return jobs
 
     jobs = asyncio.run(sweep())
-    record.write(jobs=jobs, file=state.unchanged())
+    from core import shadow_writes
+
+    # Which shadow chains reached their DuckDB half and stood it down (PR-4),
+    # and which counted a failure there instead.
+    record.write(jobs=jobs, file=state.unchanged(),
+                 shadow_stood_down=sorted(shadow_writes.stood_down()),
+                 shadow_failures=sorted(shadow_writes.failures()))
 
 
 def test_routes(state, sweep_network, production_host, admin_client,  # noqa: F811
@@ -464,7 +470,7 @@ def test_routes(state, sweep_network, production_host, admin_client,  # noqa: F8
 
     record = Recorder("routes")
     record.collect("before")
-    statuses, variants, surfaces = {}, {}, {}
+    statuses, variants, surfaces, health, bodies = {}, {}, {}, {}, {}
 
     def call(key: str, path: str, params: dict) -> int:
         limiter.reset()
@@ -473,9 +479,19 @@ def test_routes(state, sweep_network, production_host, admin_client,  # noqa: F8
         health_routes._stats_cache.update(data=None, expires_at=0)
         response = client.get(path, params=params)
         try:
-            surfaces[key] = response.json().get("surface")
+            body = response.json()
+            surfaces[key] = body.get("surface")
         except Exception:  # noqa: BLE001 — a CSV, an HTML page, a list
-            surfaces[key] = None
+            body, surfaces[key] = None, None
+        if key == "/api/health" and isinstance(body, dict):
+            # What the canary judges the week's probe by (PR-3).
+            health.update(status=body.get("status"),
+                          degraded_by=body.get("degraded_by"),
+                          duckdb=(body.get("duckdb") or {}).get("status"),
+                          migrations=body.get("migrations"))
+        if key in PAID_BY_PR8:
+            # What the two routes PR-8 took off the list answer instead.
+            bodies[key] = body
         record.collect(f"GET {key}", str(response.status_code))
         return response.status_code
 
@@ -488,4 +504,8 @@ def test_routes(state, sweep_network, production_host, admin_client,  # noqa: F8
             key = variant_key(endpoint.path, variant)
             variants[key] = call(key, path, {**params, **variant})
     record.write(routes=statuses, variants=variants, surfaces=surfaces,
-                 file=state.unchanged())
+                 health=health, bodies=bodies, file=state.unchanged())
+
+
+# The routes stage 5's PR-8 decoupled, whose answers the sweep keeps.
+PAID_BY_PR8 = ("/api/warehouse/status", "/api/summary?source_id=3")

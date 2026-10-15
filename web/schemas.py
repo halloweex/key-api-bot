@@ -24,7 +24,13 @@ class BrandResponse(BaseModel):
 
 class DuckDBStats(BaseModel):
     """DuckDB statistics."""
-    status: str
+    status: str = Field(
+        description=(
+            "connected, error, or off: under KS_DUCKDB=off this process does "
+            "not open the DuckDB file, so nothing is counted, `fatal` is null "
+            "and `off` is not a cause of degradation (stage 5)."
+        ),
+    )
     latency_ms: Optional[float] = None
     orders: Optional[int] = None
     products: Optional[int] = None
@@ -105,7 +111,9 @@ class HealthResponse(BaseModel):
         description=(
             "Why `status` is degraded, one word per cause: `duckdb` (the store "
             "did not answer), `migrations` (a step failed), `duckdb_fatal` "
-            "(`duckdb.fatal` is set). Empty when healthy."
+            "(`duckdb.fatal` is set). Empty when healthy. Never `duckdb` "
+            "under KS_DUCKDB=off, where the store is switched off and "
+            "`duckdb.status` says so."
         ),
     )
     version: str = Field(description="Application version")
@@ -121,7 +129,8 @@ class HealthResponse(BaseModel):
         description=(
             "Schema ledger as of connect: how many steps are applied, which are "
             "pending, and which failed. Named `migrations` rather than `schema` "
-            "because Pydantic already owns that word."
+            "because Pydantic already owns that word. `{\"status\": \"off\"}` "
+            "under KS_DUCKDB=off, where no DuckDB migration runs."
         ),
     )
     alerting: Optional[Dict[str, Any]] = Field(
@@ -174,7 +183,10 @@ class HealthResponse(BaseModel):
             "commit, so the hourly copy stands down while the daily comparison "
             "keeps comparing); such an entry carries `shadow_failures`, the "
             "DuckDB halves that failed since start (count, last_at, error "
-            "class), and a report ledger's carries `pending`, the delivered "
+            "class) — and under KS_DUCKDB=off `shadow_stood_down` (count, "
+            "last_at), the halves not attempted because the file is switched "
+            "off, which is not a failure — and a report ledger's carries "
+            "`pending`, the delivered "
             "weeks whose ledger row is still spooled (`unreadable`: the files "
             "no drain will land, whose row a human writes). Chain 1's entry also "
             "carries `preflight` (DN-24): `ok` and the `reasons` it may not "

@@ -4307,20 +4307,51 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 and PR-1).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0, PR-1, PR-3,
+PR-4 and PR-8).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
 `orders_held()` instead of `get_stats()`, a failed boot sync no longer ends
 the startup (the handler used to ask DuckDB first), and a route refused the
-file answers 503 `surface: duckdb` beside `ReadUnavailable`. Under `on`
-nothing changed. **Web still does not run clean under `off`**: what the sweep
-in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
+file answers 503 `surface: duckdb` beside `ReadUnavailable`. `/api/health`,
+`/health/detailed` and `/api/duckdb/stats` reach for nothing (PR-3):
+`duckdb.status` and `migrations.status` read `off`, `fatal` is null, and
+`duckdb` is never in `degraded_by` — so the canary's probe and the Docker
+healthcheck are neither a tripwire site nor an outage, and a healthy probe
+writes `duckdb_silent: true`. The shadow chains (9, 10, 11a, 11b) stand
+their DuckDB half down before `store.connection()` (PR-4): counted apart as
+`shadow_stood_down` under `off`, never as a failure or at ERROR;
+`compared_in_shadow()` is empty, so the daily comparison does not read those
+tables, and `duckdb_written()` reads every table False. Under `on`, in the
+target state, DuckDB still writes exactly ten tables — the shadow chains'
+eight, `sync_metadata` and `schema_migrations` — pinned in
+`test_duckdb_table_fates.py`. After a week under `off` a way back reads the
+week's rows as `shadow_missing_in_duckdb` (WARN, OD-S5-3 (a)), accepted
+until the drop: the finding dates its rows on Postgres's clock, its lever says
+rows of a week under `off` are expected and never names
+`scripts/chain_copy_back.py` as the cure (it releases the latch and hands the
+chain back to DuckDB), and the soak's H2 lists it as accepted, not failed, once
+the canary's `watch:duckdb_switch` row exists. On the read
+path (PR-8) DuckDB answers nothing even by routing: `/api/summary?source_id=3`
+(Opencart, no column in Gold) answers DuckDB's zeros without a connection;
+`/api/warehouse/status` reads DuckDB's last refresh out of its copy,
+`app.warehouse_refreshes`, as `status: off`; and `read_fallback.refusing()`
+holds whatever `KS_READ_FALLBACK` says, so a failed engine, a read switch
+left at `duckdb` (refused by name in `no_address`) and the expenses' NULL
+`backfilled_at` are each a 503 naming the surface, not the tripwire's.
+`read_fallback_mode.mode` keeps publishing what was configured, so the canary
+reads `duckdb_switch.mode` beside it: such a route is paged as `read_refused`
+alone, never also as `read_routed_to_duckdb`, and the refusal's log line names
+the variable that refused. Under `on` nothing changed. **Web still does not
+run clean under `off`**: what the sweep in `tests/unit/test_duckdb_off_sweep.py`
+finds reaching for the file is
 exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
 scheduler's catch-up, the DuckDB half of the integrity scan and of the
-mirror landing, the shadow chains' DuckDB copies, the report weeks and the
-order and catalogue watermarks inherited from DuckDB, `db_backup`,
-`/api/health` still counting DuckDB's tables, and `/api/summary?source_id=3`.
+mirror landing, the hourly copy of what only DuckDB holds, the report
+weeks and the
+order and catalogue watermarks inherited from DuckDB, and `db_backup`; no GET
+route since PR-8.
 The watermarks are not a boot-time reach: with Postgres holding no
 `last_sync_orders`, **every sync tick's order step is refused and order
 intake stops** until PR-5. The sweep runs in the target state (derived from
@@ -4774,11 +4805,12 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
 
 **Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
 since its owner rows, a failure counting for the day it was stamped; H2
-(`29_h2`) — the 07:30 run filed no `shadow_*` above INFO. D8, 20, 21 and 22
-stop gating on the journal's copy once chain 9 writes it directly (the flag,
-the latch, or its owner row); chain 1's preflight does the same on the flag
-or the latch (chain 7b's goals dry run did, until 7b-4 retired it). Every
-guard names its mutation; a run over all of them found five that did not
+(`29_h2`) — the 07:30 run filed no `shadow_*` above INFO (bar
+`shadow_missing_in_duckdb` once web has run `KS_DUCKDB=off`, OD-S5-3 (a)). D8,
+20, 21 and 22 stop gating on the journal's copy once chain 9 writes it directly
+(the flag, the latch, or its owner row); chain 1's preflight does the same on
+the flag or the latch (chain 7b's goals dry run did, until 7b-4 retired it).
+Every guard names its mutation; a run over all of them found five that did not
 catch theirs, now closed in the tests.
 
 ### Chain 7b: the goals read Silver, and a GET never writes (OD-14)

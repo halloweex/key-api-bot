@@ -156,10 +156,15 @@ async def backfilled() -> bool:
     _check_failed = None
     _backfilled = bool(done)
     if not _backfilled:
+        from core import duckdb_switch
+
         logger.warning(
             "expenses: %s has no completed backfill, so history is missing — "
-            "serving from DuckDB. The hourly ids-diff sets this on its own.",
+            "%s. The hourly ids-diff sets this on its own.",
             EXPENSES_TABLE,
+            # Under KS_DUCKDB=off the caller refuses instead (stage 5, PR-8).
+            "refused, KS_DUCKDB=off" if duckdb_switch.is_off()
+            else "serving from DuckDB",
         )
     return _backfilled
 

@@ -2167,8 +2167,12 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
     # handed each row after the commit. Never a re-ship from DuckDB.
     ("shadow_duckdb_only_rows",
      "Something wrote DuckDB round the chain: find it in the web log; never re-ship these tables from DuckDB"),
+    # OD-S5-3 (a)'s explicit line: after a week under KS_DUCKDB=off that went
+    # back to on, that week's rows stand here until the drop, accepted. The
+    # finding dates the rows, which is what tells them from a failed shadow
+    # write; the copy-back is never the cure — it releases the latch.
     ("shadow_missing_in_duckdb",
-     "Read write_chains.<chain>.shadow_failures and the ERROR log; Postgres holds the rows"),
+     "Rows dated while web ran KS_DUCKDB=off are expected until the drop (OD-S5-3); others: the ERROR log at their dates. Never chain_copy_back.py"),
     ("shadow_row_values",
      "Compare the named columns in both stores; Postgres is the writer of record, so suspect DuckDB's statement"),
     ("shadow_pruned_rows",

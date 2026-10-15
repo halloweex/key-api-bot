@@ -1013,7 +1013,13 @@ def compare_shadow(
     - **A row only Postgres holds is a shadow write that failed** — WARN
       (`shadow_missing_in_duckdb`), past the grace on Postgres's clock.
       Postgres is the writer of record, so nothing is lost; DuckDB is only
-      the way back's input, and the copy-back carries the row.
+      the way back's input. Or it is a row written while web ran
+      `KS_DUCKDB=off`, where the shadow stands down by design: after a week
+      of silence that went back to `on`, that week's rows are reported here
+      every morning until DuckDB is dropped, which OD-S5-3 (a) accepts. The
+      finding cannot tell the two apart, so it dates the rows on Postgres's
+      clock and says both — and never names the copy-back as the cure: it
+      releases the chain's latch and hands its writes back to DuckDB.
     - **A differing row is CRITICAL** (`shadow_row_values`) unless either
       side's clock is inside the grace: the window is between the Postgres
       commit and the shadow's, and between the two reads.
@@ -1078,6 +1084,14 @@ def compare_shadow(
     pg_only = sorted(pg_rows.keys() - dk_rows.keys())
     missing = [k for k in pg_only if not recent(pg_synced.get(k))]
     if missing:
+        # Dated, because the date is what tells the two causes apart: the
+        # per-process counters that would say "when" are gone after the
+        # restart that is the way back from KS_DUCKDB=off.
+        stamps = sorted(s for s in (_as_utc(pg_synced.get(k)) for k in missing)
+                        if s is not None)
+        dated = (f"written by Postgres from {stamps[0].isoformat(timespec='seconds')} "
+                 f"to {stamps[-1].isoformat(timespec='seconds')}"
+                 if stamps else "with no Postgres stamp to date them by")
         issues.append(IntegrityIssue(
             check_name="shadow_missing_in_duckdb",
             table_name=table,
@@ -1086,11 +1100,18 @@ def compare_shadow(
             sample_ids=_sample(spec, missing, max_samples),
             description=(
                 f"{len(missing)} row(s) in {table} never reached DuckDB's "
-                f"{spec.dk_table}: the shadow write after the Postgres commit "
-                "failed, or the process stopped between the two. Postgres "
-                "holds them, so nothing is lost; DuckDB is the way back's "
-                "input, and scripts/chain_copy_back.py carries them. The "
-                "chain's shadow_failures in /api/health says when."
+                f"{spec.dk_table}, {dated}. Postgres holds them, so nothing "
+                "is lost. Rows written while web ran KS_DUCKDB=off are "
+                "expected: the shadow stands down there, and after a week of "
+                "silence that went back to on they are reported every morning "
+                "until DuckDB is dropped (OD-S5-3 (a)) — nothing to do. Any "
+                "other is a shadow write that failed after the Postgres "
+                "commit, or a process that stopped between the two: the web "
+                "ERROR log at those times says which "
+                "(write_chains.<chain>.shadow_failures counts it only until "
+                "web restarts). Never run scripts/chain_copy_back.py to clear "
+                "this: it releases the chain's latch and hands its writes "
+                "back to DuckDB."
             ),
         ))
 

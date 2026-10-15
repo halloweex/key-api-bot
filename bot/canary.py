@@ -900,10 +900,16 @@ def _routed_to_duckdb(payload: Optional[dict]) -> "list[str]":
 
     Under `duckdb` only. Under `off` those reads are refused, not served —
     each refusal is counted and paged as `read_refused` — so they are not
-    reads from DuckDB. An absent or malformed list is none; an older web
-    publishes no `no_engine`."""
+    reads from DuckDB. So under `KS_DUCKDB=off` (`duckdb_switch.mode`),
+    which refuses them whatever `KS_READ_FALLBACK` says (stage 5, PR-8),
+    while `read_fallback_mode.mode` keeps publishing what was configured.
+    An absent or malformed list is none; an older web publishes no
+    `no_engine`, and no `duckdb_switch`."""
     block = (payload or {}).get("read_fallback_mode")
     if not isinstance(block, dict) or block.get("mode") == "off":
+        return []
+    switch = (payload or {}).get("duckdb_switch")
+    if isinstance(switch, dict) and switch.get("mode") == "off":
         return []
     lines = []
     for field in ("misconfigured", "no_engine"):

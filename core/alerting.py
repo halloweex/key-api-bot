@@ -257,12 +257,17 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # The shadow chains' comparison (OD-02 (c)): Postgres writes, DuckDB is
     # handed each row after the commit. Nothing re-ships these tables, so
     # none clears by a job running again — each clears when the rows on the
-    # two sides agree, which for a failed shadow is the copy-back.
+    # two sides agree. A row DuckDB never received is never carried there:
+    # the copy-back would, but it releases the latch and hands the chain's
+    # writes back to DuckDB, so it is a rollback and not a cure — and after
+    # a week under KS_DUCKDB=off these rows stand until the drop, accepted
+    # (OD-S5-3 (a)).
     "shadow_duckdb_only_rows": _c(
         "the writer that went round the chain is found and its rows decided "
         "— a human, not a job"),
     "shadow_missing_in_duckdb": _c(
-        "scripts/chain_copy_back.py carries the rows, or they age out"),
+        "the rows age out of Postgres, or DuckDB is dropped — never a "
+        "copy-back, which hands the chain back to DuckDB"),
     "shadow_row_values": _c("the two stores agree on the row again"),
     "shadow_pruned_rows": _c("the next shadow prune removes them"),
     # Not a data defect: the writer moved and its watchdog did not. It
