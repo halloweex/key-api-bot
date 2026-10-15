@@ -836,9 +836,12 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
 
         # Every event the bus carries, with a socket open in each room, so
         # the handlers web registered at its start broadcast to somebody.
-        listeners = [doors.Socket(app, e.path, admin) for e in doors.socket_routes(app)]
-        listeners.append(doors.Socket(app, "/ws/dashboard", viewer))
-        for listener in listeners:
+        # The viewer listens too: a broadcast scoped to a tab reaches only the
+        # sockets whose viewer may open it.
+        listeners = {f"{e.path} as admin": doors.Socket(app, e.path, admin)
+                     for e in doors.socket_routes(app)}
+        listeners["/ws/dashboard as viewer"] = doors.Socket(app, "/ws/dashboard", viewer)
+        for listener in listeners.values():
             await listener.open()
         record.collect("events:open", "ok")
         for event in doors.events():
@@ -846,11 +849,10 @@ def test_doors(state, sweep_network, production_host, monkeypatch):
                 bus._wildcard_handlers)
             step = f"event:{event.value}"
             record.collect(step, await run_step(bus.emit(event, dict(doors.EVENT_PAYLOAD))))
-        for listener in listeners:
+        for listener in listeners.values():
             await listener.close()
         record.collect("events:close", "ok")
-        events.update({listener.path + (" as viewer" if i == len(listeners) - 1 else " as admin"):
-                       listener.events() for i, listener in enumerate(listeners)})
+        events.update({label: listener.events() for label, listener in listeners.items()})
 
         # Every tool, straight through `execute_tool`, with every value of
         # each enum that picks a branch.

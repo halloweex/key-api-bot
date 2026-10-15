@@ -70,10 +70,10 @@ FAKE_ENV = {
 DAY = date.today() - timedelta(days=3)
 
 
-# The steps the doors sweep records besides one per door: web's start (as
-# `setup`, so it is not the process sweep's `boot`) and Postgres' derivation
-# where it answers, the sockets held open while the events are emitted, and
-# web's stop.
+# The steps the doors sweep records besides one per door, in either flavour:
+# web's start (as `setup`, so it is not the process sweep's `boot`), the
+# sockets held open while the events are emitted, and web's stop. Where
+# Postgres answers, `setup:derive` too, between the start and the doors.
 DOORS_FRAME = ("setup", "setup:init_and_sync", "setup:scheduler_start",
                "events:open", "events:close", "shutdown")
 
