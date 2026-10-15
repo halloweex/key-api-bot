@@ -254,7 +254,7 @@ def reads_a_body(endpoint) -> bool:
     if endpoint.route.dependant.body_params:
         return True
     try:
-        source = textwrap.dedent(inspect.getsource(endpoint.route.endpoint))
+        source = textwrap.dedent(inspect.getsource(inspect.unwrap(endpoint.route.endpoint)))
     except (OSError, TypeError):
         return False
     for node in ast.walk(ast.parse(source)):
