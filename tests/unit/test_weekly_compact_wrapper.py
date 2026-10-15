@@ -490,6 +490,30 @@ class TestTheWeekOfSilence:
         self._untouched(run, data)
         assert "written with quotes" in run.log and "write KS_DUCKDB=off" in run.log
 
+    @pytest.mark.parametrize("env_text, says", [
+        ("KS_DUCKDB=off  # week of silence, started 2026-10-27\n", "written with quotes or a comment"),
+        ("  KS_DUCKDB=off\n", None),
+        ("export KS_DUCKDB=off\n", "refuses the whole file"),
+        ("KS_DUCKDB = off\n", "refuses the whole file"),
+    ], ids=["inline-comment", "leading-space", "export", "spaces-around-equals"])
+    def test_every_off_compose_reads_stands_it_down(self, run_with_env, env_text, says):
+        """Compose reads each of these as off, so web runs off — and the
+        review of PR-10 ran the wrapper on each: the comment line got a full
+        compaction in the week (the sidecar, handed `off # …`, runs on) with
+        a log line saying web ran on; the other three stopped web, bot and
+        Meilisearch, deleted analytics.duckdb.old, and then had their sidecar
+        refused — by the switch, or by docker refusing the file — for a
+        "Compact aborted" page and the downtime. Mutation: read the line the
+        way the first reader did, `^KS_DUCKDB=` and nothing else."""
+        run, data = run_with_env(env_text)
+        assert run.code == 0, run.out
+        self._untouched(run, data)
+        assert run.notify == ""
+        assert "KS_DUCKDB=off in .env: no compaction" in run.log
+        assert "not a value the switch understands" not in run.log
+        if says:
+            assert says in run.log and "write KS_DUCKDB=off" in run.log, run.log
+
     @pytest.mark.parametrize("env_text", [None, "", "KS_DUCKDB=on\n", "KS_DUCKDB=\n",
                                           "KS_DUCKDB=off\nKS_DUCKDB=on\n",
                                           "# KS_DUCKDB=off\n"],

@@ -5,9 +5,11 @@ root's crontab with nobody watching it:
 
 * `deploy/duckdb_env.sh` — the one reader of `KS_DUCKDB` in `.env` for the
   host-cron scripts. Every stand-down below rests on it, so its readings are
-  pinned here line by line: the last line wins, quotes are kept the way
-  `docker run --env-file` keeps them, and a quoted `off` still stands a
-  script down.
+  pinned here form by form, against what compose (web's environment) and
+  `docker run --env-file` (a sidecar's) were measured to make of each: a
+  script stands down when either reads off, so a quoted `off`, one with an
+  inline comment, an indented one, `export KS_DUCKDB=off` and
+  `KS_DUCKDB = off` all stand it down.
 * `deploy/daily_offsite.sh` — under `off` its sidecar is refused (a "Daily
   snapshot FAILED" page the first night) and web registers no db_backup, so
   every later night refuses a backup past 30 h. It now stands down before its
@@ -140,12 +142,81 @@ def box(tmp_path, fake_bin):
 
 # ── the reader ────────────────────────────────────────────────────────────────
 
+# Every way of writing the line this module knows, and what each of the two
+# parsers that read `.env` makes of it, then read by the switch's own rule
+# (`strip().lower()`; empty is `on`, anything but on/off is `invalid`):
+#
+#   docker — `docker run --env-file .env`, which starts the compaction's and
+#            the nightly snapshot's sidecars (and the restore drill's).
+#            `refused`: it rejects the whole file ("poorly formatted
+#            environment") and starts nothing.
+#   web    — compose's `env_file:`, which is web's environment, so what web
+#            runs.
+#
+# MEASURED, not reasoned: each row was written to an env file and read by
+# docker compose v2.23.3 (`config --format json`, the service's
+# `environment.KS_DUCKDB`) and by engine 24.0.7 (`docker run --rm --env-file`
+# printing `os.environ.get("KS_DUCKDB")` from python:3.14-slim), 2026-10-15.
+# Re-measure before editing a row: the review that added half of them found
+# the reader's guesses wrong for four forms compose reads as off.
+ENV_FORMS = [
+    # (id, text, docker, web)
+    ("off", "KS_DUCKDB=off\n", "off", "off"),
+    ("upper-crlf", "KS_DUCKDB=OFF \r\n", "off", "off"),
+    ("double-quoted", 'KS_DUCKDB="off"\n', "invalid", "off"),
+    ("single-quoted", "KS_DUCKDB='Off'\n", "invalid", "off"),
+    ("on", "KS_DUCKDB=on\n", "on", "on"),
+    ("blank", "KS_DUCKDB=\n", "on", "on"),
+    ("absent", "ADMIN_USER_IDS=1,2\n", "on", "on"),
+    ("typo", "KS_DUCKDB=of\n", "invalid", "invalid"),
+    ("on-last", "KS_DUCKDB=off\nKS_DUCKDB=on\n", "on", "on"),
+    ("off-last", "KS_DUCKDB=on\nKS_DUCKDB=off\n", "off", "off"),
+    ("comment", "# KS_DUCKDB=off\n", "on", "on"),
+    ("indented-comment", "  # KS_DUCKDB=off\n", "on", "on"),
+    ("other-key", "KS_DUCKDB_X=off\n", "on", "on"),
+    ("other-key-2", "KS_DUCKDBX=off\n", "on", "on"),
+    ("prefixed-key", "XKS_DUCKDB=off\n", "on", "on"),
+    ("inline-comment", "KS_DUCKDB=off # week of silence\n", "invalid", "off"),
+    ("inline-comment-crlf", "KS_DUCKDB=off # c\r\n", "invalid", "off"),
+    ("inline-comment-padded", "KS_DUCKDB=  OFF  # c\n", "invalid", "off"),
+    ("inline-comment-on", "KS_DUCKDB=on # c\n", "invalid", "on"),
+    ("hash-no-space", "KS_DUCKDB=off#x\n", "invalid", "invalid"),
+    ("tab-hash", "KS_DUCKDB=off\t# tab\n", "invalid", "invalid"),
+    ("quoted-then-comment", 'KS_DUCKDB="off" # c\n', "invalid", "off"),
+    ("single-quoted-then-comment", "KS_DUCKDB='off' # c\n", "invalid", "off"),
+    ("comment-inside-quotes", 'KS_DUCKDB="off # c"\n', "invalid", "invalid"),
+    ("quoted-padded", 'KS_DUCKDB=" off "\n', "invalid", "off"),
+    ("quoted-empty", 'KS_DUCKDB=""\n', "invalid", "on"),
+    ("quoted-on", 'KS_DUCKDB="on"\n', "invalid", "on"),
+    ("leading-spaces", "  KS_DUCKDB=off\n", "off", "off"),
+    ("leading-tab", "\tKS_DUCKDB=off\n", "off", "off"),
+    ("space-after-equals", "KS_DUCKDB= off\n", "off", "off"),
+    ("trailing-spaces", "KS_DUCKDB=off   \n", "off", "off"),
+    ("indented-last", "KS_DUCKDB=on\n  KS_DUCKDB=off # c\n", "invalid", "off"),
+    ("export", "export KS_DUCKDB=off\n", "refused", "off"),
+    ("export-crlf", "export KS_DUCKDB=off\r\n", "refused", "off"),
+    ("export-two-spaces", "export  KS_DUCKDB=off\n", "refused", "off"),
+    ("export-indented", "  export KS_DUCKDB=off\n", "refused", "off"),
+    ("export-quoted", 'export KS_DUCKDB="off"\n', "refused", "off"),
+    ("export-typo", "export KS_DUCKDB=of\n", "refused", "invalid"),
+    ("spaces-around-equals", "KS_DUCKDB = off\n", "refused", "off"),
+    ("space-before-equals", "KS_DUCKDB =off\n", "refused", "off"),
+    ("colon-space", "KS_DUCKDB: off\n", "refused", "off"),
+    ("colon", "KS_DUCKDB:off\n", "on", "off"),
+    ("export-first", "export KS_DUCKDB=on\nKS_DUCKDB=off\n", "refused", "off"),
+    ("export-last-on", "KS_DUCKDB=off\nexport KS_DUCKDB=on\n", "refused", "on"),
+    ("colon-last-off", "KS_DUCKDB=on\nKS_DUCKDB:off\n", "on", "off"),
+    ("colon-last-on", "KS_DUCKDB=off\nKS_DUCKDB:on\n", "off", "on"),
+    ("commented-last", "KS_DUCKDB=off\n# KS_DUCKDB=on\n", "off", "off"),
+    ("blank-last", "KS_DUCKDB=off\nKS_DUCKDB=\n", "on", "on"),
+]
+
 READ = r"""
 set -Eeuo pipefail
 source "$1"
 ks_duckdb_env_read "$2"
-printf '%s|%s|%s|%s\n' "$KS_DUCKDB_ENV" "$KS_DUCKDB_ENV_MEANT_OFF" \
-    "$KS_DUCKDB_ENV_READ" "$KS_DUCKDB_ENV_VALUE"
+printf '%s|%s|%s|%s|%s\n' "$KS_DUCKDB_ENV" "$KS_DUCKDB_ENV_WEB" \
+    "$KS_DUCKDB_ENV_MEANT_OFF" "$KS_DUCKDB_ENV_READ" "$KS_DUCKDB_ENV_VALUE"
 if ks_duckdb_stands_down; then echo DOWN; else echo RUNS; fi
 ks_duckdb_env_note
 """
@@ -154,7 +225,7 @@ ks_duckdb_env_note
 def _read(tmp_path: Path, text: "str | None"):
     env_file = tmp_path / "env"
     if text is not None:
-        env_file.write_text(text)
+        env_file.write_bytes(text.encode())
     done = subprocess.run(["bash", "-c", READ, "_", str(DEPLOY / "duckdb_env.sh"),
                            str(env_file)], capture_output=True, text=True, timeout=30)
     assert done.returncode == 0, done.stderr
@@ -163,65 +234,77 @@ def _read(tmp_path: Path, text: "str | None"):
 
 
 class TestTheReader:
-    @pytest.mark.parametrize("text, docker_reads, meant_off", [
-        ("KS_DUCKDB=off\n", "off", "1"),
-        ("KS_DUCKDB=OFF \r\n", "off", "1"),
-        ('KS_DUCKDB="off"\n', "invalid", "1"),
-        ("KS_DUCKDB='Off'\n", "invalid", "1"),
-        ("KS_DUCKDB=on\n", "on", "0"),
-        ("KS_DUCKDB=\n", "on", "0"),
-        ("ADMIN_USER_IDS=1,2\n", "on", "0"),
-        ("KS_DUCKDB=of\n", "invalid", "0"),
-        ("KS_DUCKDB=off\nKS_DUCKDB=on\n", "on", "0"),
-        ("KS_DUCKDB=on\nKS_DUCKDB=off\n", "off", "1"),
-        ("# KS_DUCKDB=off\n", "on", "0"),
-        ("KS_DUCKDB_X=off\n", "on", "0"),
-    ], ids=["off", "upper-crlf", "double-quoted", "single-quoted", "on", "blank",
-            "absent", "typo", "on-last", "off-last", "comment", "other-key"])
-    def test_it_reads_the_file_the_way_the_sidecars_do(self, tmp_path, text,
-                                                       docker_reads, meant_off):
-        """`KS_DUCKDB_ENV` is deploy/stage4_soak.sh's reading — the last line,
-        quotes kept, as `docker run --env-file` hands the value to a sidecar
-        — and `KS_DUCKDB_ENV_MEANT_OFF` is what its writer meant, which is what
-        a host script stands down on. Mutation: `head -n 1` for `tail -n 1`,
-        or strip the quotes before the docker reading."""
-        (env, meant, read, _), verdict, _ = _read(tmp_path, text)
-        assert (env, meant, read) == (docker_reads, meant_off, "1")
-        assert verdict == ("DOWN" if meant_off == "1" else "RUNS")
+    @pytest.mark.parametrize("text, docker, web", [row[1:] for row in ENV_FORMS],
+                             ids=[row[0] for row in ENV_FORMS])
+    def test_it_reads_the_file_the_way_docker_and_compose_do(self, tmp_path, text,
+                                                             docker, web):
+        """`KS_DUCKDB_ENV` is what `docker run --env-file` hands a sidecar,
+        `KS_DUCKDB_ENV_WEB` what compose hands web, and a host script stands
+        down when either says off: web runs off, or the sidecar would be
+        refused after the script had stopped and deleted what it stops and
+        deletes. The review of PR-10 drove the old reader — `^KS_DUCKDB=`,
+        the last line, trim, unquote — through four forms compose reads as
+        off (an inline comment, leading whitespace, `export`, spaces around
+        `=`), and on each it ran: the compaction stopped web, bot and
+        Meilisearch and deleted the last compaction's backup during the week.
+        Mutation: drop the comment cut, the `export` strip or the leading
+        trim from the web reading, or take the first line."""
+        (env, web_reads, meant, read, _), verdict, _ = _read(tmp_path, text)
+        assert (env, web_reads, read) == (docker, web, "1")
+        down = "off" in (docker, web)
+        assert (meant, verdict) == (("1", "DOWN") if down else ("0", "RUNS"))
 
     def test_an_unreadable_file_is_today(self, tmp_path):
         """No `.env` to read is not a claim that the week has started: the
         script does what it did before stage 5, and fails where it always
         failed."""
-        (env, meant, read, _), verdict, _ = _read(tmp_path, None)
-        assert (env, meant, read, verdict) == ("on", "0", "0", "RUNS")
+        (env, web, meant, read, _), verdict, _ = _read(tmp_path, None)
+        assert (env, web, meant, read, verdict) == ("on", "on", "0", "0", "RUNS")
 
-    def test_the_note_names_the_hold_and_the_quotes(self, tmp_path):
+    def test_the_note_names_the_hold_and_what_the_line_costs(self, tmp_path):
         """A host script reads `.env`, never web's verdict, so its stand-down
         says what a web held back on `on` means (HELD_BACK_NOTE's sentence),
-        and a quoted value what the quotes cost."""
+        and a line docker reads otherwise than compose what that costs —
+        each with the one line to write instead."""
         _, _, note = _read(tmp_path, "KS_DUCKDB=off\n")
         assert "duckdb_switch.held_back" in note and "KS_DUCKDB=on" in note
-        assert "quotes" not in note
-        _, _, note = _read(tmp_path, 'KS_DUCKDB="off"\n')
-        assert "written with quotes" in note and "write KS_DUCKDB=off" in note
+        assert "quotes" not in note and "refuses" not in note
+        _, _, note = _read(tmp_path, "  KS_DUCKDB=off\n")
+        assert "quotes" not in note and "refuses" not in note
+        for text in ('KS_DUCKDB="off"\n', "KS_DUCKDB=off # week of silence\n"):
+            _, _, note = _read(tmp_path, text)
+            assert "written with quotes or a comment" in note, note
+            assert "a sidecar would" in note and "run on" in note, note
+            assert "write KS_DUCKDB=off as a line of its own" in note, note
+        for text in ("export KS_DUCKDB=off\n", "KS_DUCKDB = off\n"):
+            _, _, note = _read(tmp_path, text)
+            assert "docker run --env-file refuses" in note, note
+            assert "the restore drill" in note, note
+            assert "write KS_DUCKDB=off as a line of its own" in note, note
+        _, _, note = _read(tmp_path, "KS_DUCKDB:off\n")
+        assert "docker run --env-file skips" in note and "run on" in note, note
+        _, _, note = _read(tmp_path, "KS_DUCKDB=off\nKS_DUCKDB:on\n")
+        assert "web runs on" in note and "would be refused" in note, note
 
     def test_a_value_is_quoted_back_bounded_and_printable(self, tmp_path):
         """The value is quoted in log lines; `.env` is not a file to echo.
         Mutation: drop the `cut -c1-40`."""
-        (_, _, _, value), _, _ = _read(tmp_path, "KS_DUCKDB=" + "x" * 300 + "\x1b[31m\n")
+        (_, _, _, _, value), _, _ = _read(tmp_path, "KS_DUCKDB=" + "x" * 300 + "\x1b[31m\n")
         assert len(value) <= 40 and "\x1b" not in value
 
     def test_it_reads_one_key_and_prints_nothing_else(self, tmp_path):
         """By exact name, never a listing: the other lines of `.env` are the
-        host's secrets. Mutation: `grep KS_` for `grep '^KS_DUCKDB='`."""
+        host's secrets. Mutation: `grep KS_` for the anchored name."""
         secret = "BOT_TOKEN=123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawQ\n"
-        fields, verdict, note = _read(tmp_path, secret + "KS_DUCKDB_FAKE=off\n")
-        assert "AAHdq" not in "|".join(fields) + verdict + note
+        for other in ("KS_DUCKDB_FAKE=off\n", "export BOT_TOKEN=x\n"):
+            fields, verdict, note = _read(tmp_path, secret + other)
+            assert "AAHdq" not in "|".join(fields) + verdict + note
         text = (DEPLOY / "duckdb_env.sh").read_text()
         code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
-        greps = [ln for ln in code if "grep" in ln]
-        assert greps == ["""    line="$(grep -E '^KS_DUCKDB=' "$file" 2>/dev/null | tail -n 1 || true)\""""], greps
+        greps = [ln.strip() for ln in code if "grep" in ln]
+        assert greps == [
+            """lines="$(grep -E '^[[:space:]]*(export[[:space:]]+)?KS_DUCKDB[[:space:]]*[=:]' \\"""
+        ], greps
         assert not any(re.search(r"\b(printenv|env|export|set)\b\s*($|\|)", ln) for ln in code)
 
 
@@ -264,6 +347,24 @@ class TestTheNightlySnapshotStandsDown:
         code, out, calls = box.run("KS_DUCKDB=\"off\"\n")
         assert code == 0, out
         assert calls == [] and "written with quotes" in out
+
+    @pytest.mark.parametrize("env_text", [
+        "KS_DUCKDB=off  # week of silence\n", "  KS_DUCKDB=off\n",
+        "export KS_DUCKDB=off\n", "KS_DUCKDB = off\n",
+    ], ids=["inline-comment", "leading-space", "export", "spaces-around-equals"])
+    def test_every_off_compose_reads_stands_it_down(self, box, env_text):
+        """Each of these is off to compose, so web runs off. The review of
+        PR-10 ran the snapshot with the leading-space line and the sidecar
+        refusing, and it paged "Daily snapshot FAILED"; the comment line
+        would have shipped the file the week keeps still, its sidecar handed
+        `off # …` and running on. Mutation: read the line the way the first
+        reader did, `^KS_DUCKDB=` and nothing else."""
+        box.backup()
+        code, out, calls = box.run(env_text, FAKE_SIDECAR_REFUSES="1")
+        assert code == 0, out
+        assert calls == [], calls
+        assert "KS_DUCKDB=off in .env: no DuckDB snapshot tonight" in out
+        assert "Daily snapshot FAILED" not in out and "notify suppressed" not in out
 
     @pytest.mark.parametrize("env_text", ["", "KS_DUCKDB=on\n", "KS_DUCKDB=off\nKS_DUCKDB=on\n"],
                              ids=["unset", "on", "on-last"])

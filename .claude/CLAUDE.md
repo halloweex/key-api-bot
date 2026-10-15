@@ -4525,8 +4525,10 @@ own "yes", separate from every merge (decision of 10.10.2026).
 
 - `scripts/weekly_compact.sh` and `deploy/daily_offsite.sh` read `KS_DUCKDB`
   out of `.env` by exact name — `deploy/duckdb_env.sh`, the one reader, the
-  last line and nothing else of the file — and when it says `off` they exit 0
-  with one line **before they stop, delete, link or start anything**. The
+  lines naming the key and nothing else of the file, read both the way
+  compose reads them (web's environment) and the way `docker run --env-file`
+  does (a sidecar's) — and when either says `off` they exit 0 with one line
+  **before they stop, delete, link or start anything**. The
   compaction used to delete the last compaction's backup and the export and
   stop web, bot and Meilisearch, and only then have its sidecar refused; the
   snapshot paged "Daily snapshot FAILED" the first night and refused a stale
@@ -4544,10 +4546,14 @@ own "yes", separate from every merge (decision of 10.10.2026).
 - `deploy/duckdb_silence_check.sh --crontab` prints root's crontab change as
   a diff, both directions. It installs nothing; nothing here does.
 
-Write it bare: `KS_DUCKDB=off`. With quotes compose strips them and web runs
-`off`, while `docker run --env-file` keeps them and a sidecar would run `on`
-— and the soak's P4 FAILs. The host scripts stand down on a quoted `off`
-anyway, the harmless direction, and their line says to remove the quotes.
+Write it bare: `KS_DUCKDB=off`, a line of its own, nothing before it and
+nothing after. Compose reads nearly any spelling as off, and web runs `off`
+on all of them; `docker run --env-file` does not. It keeps quotes and an
+inline comment (`KS_DUCKDB=off # …` hands a sidecar `off # …`, and it runs
+`on`), and it refuses the whole file — every sidecar, the restore drill's
+too — over `export KS_DUCKDB=off` or a space before the `=`. Either way the
+soak's P4 FAILs. The host scripts stand down on every one of them anyway,
+the harmless direction, and their line says which line to write.
 
 **Preconditions**, all of them, before step 1:
 

@@ -785,11 +785,17 @@ class TestOffsiteCheckInTheWeekOfSilence:
         assert "instruments ok: off-site frozen" in run.out
         assert "postgres and .env 1h ago" in run.out
 
-    def test_a_quoted_off_is_frozen_too(self, world):
-        """The same reading as the two scripts whose copy this judges: a
-        quoted off stands them down, so their marker stops for the same
-        reason."""
-        self._off(world, 'KS_DUCKDB="off"')
+    @pytest.mark.parametrize("line", [
+        'KS_DUCKDB="off"', "KS_DUCKDB=off  # week of silence", "  KS_DUCKDB=off",
+        "export KS_DUCKDB=off", "KS_DUCKDB = off",
+    ], ids=["quoted", "inline-comment", "leading-space", "export", "spaces-around-equals"])
+    def test_every_off_the_two_scripts_stand_down_on_is_frozen_too(self, world, line):
+        """The same reading as the two scripts whose copy this judges: every
+        line compose reads as off stands them down, so their marker stops for
+        the same reason. Mutation: read the line the way the first reader
+        did, `^KS_DUCKDB=` and nothing else — four of these page the copy
+        stale every morning of the week."""
+        self._off(world, line)
         self._instruments(world, offsite_h=200, pg_h=1)
         run = world.run("offsite_check.sh", FAKE_DOW="3")
         assert run.code == 0, run.out
