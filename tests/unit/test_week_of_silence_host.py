@@ -38,6 +38,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.repo_tree import needs_checkout
+
 REPO = Path(__file__).resolve().parents[2]
 DEPLOY = REPO / "deploy"
 
@@ -415,6 +417,7 @@ def _runbook() -> str:
     return text[start:text.index("\n### ", start + 1)]
 
 
+@needs_checkout
 class TestTheRunbook:
     """CLAUDE.md, "Starting the week of silence": the one runbook, read by a
     person on the host. What it names has to be there to run."""
@@ -621,6 +624,7 @@ class TestTheRestoreDrill:
         assert calls == [], calls
         assert "docker run --env-file refuses" in out and "KS_DUCKDB=off" in out
 
+    @needs_checkout
     def test_the_real_restore_carries_it_too(self):
         """The disaster restore starts the same rebuild with a `.env`
         decrypted from `env-<stamp>.gpg`, which during the week says off.
