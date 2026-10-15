@@ -187,8 +187,12 @@ Not a drill — the machine is gone and you are rebuilding.
    code can silently drop columns the export has and the target does not. The
    column-coverage report inside phase 2 prints exactly which.
 4. Run `deploy/restore_from_export.py` against a data directory containing
-   `export_parquet/`, then move `analytics_clean.duckdb` into place as
-   `analytics.duckdb` and start the stack.
+   `export_parquet/` — the command is in its docstring, and it carries
+   `-e KS_DUCKDB=on`, because a `.env` taken during the week of silence says
+   `KS_DUCKDB=off` and the switch refuses the rebuild under it — then move
+   `analytics_clean.duckdb` into place as `analytics.duckdb` and start the
+   stack. The line in `.env` then decides what the stack runs as: under
+   `off` web leaves this file unopened and reads Postgres, restored next.
 5. Bronze is now current as of the archive. The incremental sync closes the gap
    from KeyCRM on its own; a full rebuild from the API instead costs thousands
    of requests, dominated by one call per buyer, and is the third line of

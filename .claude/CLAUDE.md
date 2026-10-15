@@ -4547,6 +4547,25 @@ own "yes", separate from every merge (decision of 10.10.2026).
   off-site `.env`, and the Monday heartbeat keeps speaking.
 - `deploy/duckdb_silence_check.sh --crontab` prints root's crontab change as
   a diff, both directions. It installs nothing; nothing here does.
+- `deploy/restore-test.sh` starts its rebuild with `-e KS_DUCKDB=on` beside
+  `--env-file .env` (docker ranks `-e` first), so the drill that proves the
+  Parquet archive rebuilds still runs in the week — its sidecar sees only its
+  scratch directory — and it reports the newest archive as frozen rather
+  than stale. The real restore's command (`restore_from_export.py`'s
+  docstring) carries the same `-e`, for a `.env` decrypted from the week.
+
+**Not done in PR-10, though the plan (2.9) gave it these**, and what each does
+under `off` meanwhile — none of them opens the live file or pages:
+`scripts/check_date.py` and `scripts/force_resync.py` are refused by the
+switch with a traceback rather than one line; `scripts/weekly_report_preview.py`
+still reads a DuckDB copy, not the `KS_READ_*` readers; `deploy/dq_history.py`
+and `deploy/measure_dlr_throughput.py` are not retired (`HOST_TOOLS` still
+lists the first); `deploy/agent/run_agent.sh` still routes `duckdb_*` alerts
+to the `default` runbook, and the runbooks (`_common`, `disk`, `memory`,
+`warehouse`, `health`) still describe DuckDB as the live file; two
+`REMEDIATION` levers in `core/data_quality.py` still name DuckDB
+(`POST /api/duckdb/sync-all-buyers`, and restoring a catalogue row from it),
+as does the scheduler's memory lever.
 
 Write it bare: `KS_DUCKDB=off`, a line of its own, nothing before it and
 nothing after. Compose reads nearly any spelling as off, and web runs `off`

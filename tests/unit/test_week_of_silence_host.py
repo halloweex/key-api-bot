@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -502,3 +503,132 @@ class TestTheRunbook:
         assert "SOURCE RELEASED" in printed.stdout
         snapshot = " ".join((DEPLOY / "daily_offsite.sh").read_text().split())
         assert "once the second Ark is off-site" not in snapshot
+
+
+# ── the restore drill ─────────────────────────────────────────────────────────
+
+FAKE_SFTP = r"""#!/usr/bin/env bash
+printf 'sftp %s\n' "$*" >> "$FAKE_CALLS"
+batch="$(cat)"
+case "$batch" in
+    *"ls -1"*) printf '%s\n' "${FAKE_ARCHIVE##*/}" ;;
+    *"get "*) set -- $(printf '%s\n' "$batch" | grep '^get '); cp "$FAKE_ARCHIVE" "$3" ;;
+esac
+exit 0
+"""
+
+FAKE_RECORDING_DOCKER = """#!/usr/bin/env bash
+printf 'docker %s\\n' "$*" >> "$FAKE_CALLS"
+exit 0
+"""
+
+# GNU `date -u -d "<when>" +%s` on a laptop whose date is BSD's: the drill
+# runs on Linux, and its archive-age line is half of what is asserted here.
+FAKE_GNU_DATE = f"""#!/usr/bin/env bash
+if [ "$1" = "-u" ] && [ "$2" = "-d" ]; then
+    exec {sys.executable} -c 'import calendar, datetime, sys
+print(calendar.timegm(datetime.datetime.strptime(sys.argv[1], "%Y-%m-%d %H:%M:%S").timetuple()))' "$3"
+fi
+exec {shutil.which("date")} "$@"
+"""
+
+
+class TestTheRestoreDrill:
+    """deploy/restore-test.sh, the drill that proves the off-site Parquet
+    archive rebuilds the warehouse, run in a scratch repository root: a fake
+    `sftp` serves one archive, a fake `docker` records the rebuild it would
+    start. Its sidecar is started with `--env-file .env`, which says off for
+    the whole week of silence — and a restored `.env` says what the system
+    ran as when it was taken — so under off the switch refused the drill
+    before it imported a row, and the one command proving the archive
+    rebuilds stopped working for the week (review of PR-10)."""
+
+    @pytest.fixture
+    def drill(self, tmp_path):
+        root = tmp_path / "repo"
+        (root / "deploy").mkdir(parents=True)
+        for name in ("restore-test.sh", "duckdb_env.sh", "restore_from_export.py"):
+            shutil.copy(DEPLOY / name, root / "deploy" / name)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for name, body in (("sftp", FAKE_SFTP), ("docker", FAKE_RECORDING_DOCKER),
+                           ("date", FAKE_GNU_DATE)):
+            (bin_dir / name).write_text(body)
+            (bin_dir / name).chmod(0o755)
+        calls = tmp_path / "calls.log"
+
+        def run(env_text: str, age_h: int = 2):
+            import datetime
+            import tarfile
+
+            taken = (datetime.datetime.now(datetime.timezone.utc)
+                     - datetime.timedelta(hours=age_h)).strftime("%Y%m%d-%H%M%S")
+            remote = tmp_path / "remote"
+            remote.mkdir(exist_ok=True)
+            archive = remote / f"ks-warehouse-{taken}.tar"
+            src = tmp_path / "src" / "export_parquet"
+            src.mkdir(parents=True, exist_ok=True)
+            (src / "_manifest.json").write_text("{}")
+            (src / "orders.parquet").write_bytes(b"PAR1")
+            with tarfile.open(archive, "w") as tar:
+                tar.add(src, arcname="export_parquet")
+            (root / ".env").write_text("KS_ALERTS_DISABLED=1\n" + env_text)
+            calls.write_text("")
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith(("FAKE_", "BACKUP_", "KS_"))}
+            env.update({"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                        "FAKE_CALLS": str(calls), "FAKE_ARCHIVE": str(archive),
+                        "BACKUP_REMOTE": "u1@storage.invalid"})
+            done = subprocess.run(["bash", str(root / "deploy" / "restore-test.sh")],
+                                  env=env, capture_output=True, text=True, timeout=60)
+            return done.returncode, done.stdout + done.stderr, calls.read_text().splitlines()
+
+        return run
+
+    @pytest.mark.parametrize("env_text", ["KS_DUCKDB=off\n", "", "KS_DUCKDB=on\n"],
+                             ids=["off", "unset", "on"])
+    def test_the_rebuild_runs_on_whatever_env_says(self, drill, env_text):
+        """`-e KS_DUCKDB=on` beside `--env-file .env`: docker gives `-e` the
+        last word (measured, engine 24.0.7), and the sidecar sees only its
+        scratch directory, never the live file. Under on it changes nothing.
+        Mutation: drop the `-e KS_DUCKDB=on`."""
+        code, out, calls = drill(env_text)
+        assert code == 0, out
+        [rebuild] = [c for c in calls if c.startswith("docker run")]
+        assert "--env-file .env" in rebuild and "-e KS_DUCKDB=on" in rebuild, rebuild
+        assert "python /app/deploy/restore_from_export.py" in rebuild
+        assert "/opt/key-api-bot/data" not in rebuild and ":/app/data " in rebuild
+        assert "PASS — the off-site archive rebuilt a validated warehouse." in out
+
+    def test_under_off_an_old_archive_is_frozen_not_stale(self, drill):
+        """The week stops the nightly archive, so its newest copy ages from
+        the start: the plan's "frozen since the week began", not a warning
+        asking whether the compaction still runs. Mutation: judge the age
+        under off as under on."""
+        code, out, _ = drill("KS_DUCKDB=off\n", age_h=200)
+        assert code == 0, out
+        assert "WARNING: newest off-site archive" not in out
+        assert "frozen since the week of silence began" in out, out
+        code, out, _ = drill("KS_DUCKDB=on\n", age_h=200)
+        assert "WARNING: newest off-site archive is over" in out, out
+
+    def test_a_file_docker_refuses_stops_before_the_download(self, drill):
+        """`export KS_DUCKDB=off` or a space before the `=`: docker refuses
+        the whole file and no `-e` can start the rebuild from it. Say so
+        before fetching an archive the drill cannot use."""
+        code, out, calls = drill("export KS_DUCKDB=off\n")
+        assert code == 1, out
+        assert calls == [], calls
+        assert "docker run --env-file refuses" in out and "KS_DUCKDB=off" in out
+
+    def test_the_real_restore_carries_it_too(self):
+        """The disaster restore starts the same rebuild with a `.env`
+        decrypted from `env-<stamp>.gpg`, which during the week says off.
+        Its command lives in restore_from_export.py's docstring, which the
+        runbook for a real restore points at. Mutation: drop the `-e` there."""
+        doc = (DEPLOY / "restore_from_export.py").read_text()
+        command = re.search(r"docker run [^\n]*\\\n[^\n]*", doc).group(0)
+        assert "--env-file .env" in command and "-e KS_DUCKDB=on" in command, command
+        setup = (REPO / "docs" / "offsite_backup_setup.md").read_text(encoding="utf-8")
+        real = setup[setup.index("## Restoring for real"):]
+        assert "-e KS_DUCKDB=on" in real and "restore_from_export.py" in real
