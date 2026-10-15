@@ -5,6 +5,10 @@
 # the DB file atomically, restarts everything. On failure, source DB stays
 # intact and services are restarted on the old DB.
 #
+# Retired at the start of the week of silence (stage 5): with KS_DUCKDB=off in
+# .env it exits 0 with one log line before it stops or deletes anything, and
+# its cron line is removed (deploy/duckdb_silence_check.sh --crontab prints it).
+#
 # Install: copy to /opt/key-api-bot/scripts/weekly_compact.sh on the host.
 # Cron: 0 2 * * 0  /opt/key-api-bot/scripts/weekly_compact.sh
 # Logs: /var/log/keycrm-compact.log
@@ -27,6 +31,29 @@ log() {
 # what the cron said.
 ENV_FILE="$COMPOSE_DIR/.env"
 source "$COMPOSE_DIR/deploy/notify.sh"
+
+# Stage 5 (PR-10): under KS_DUCKDB=off in .env this stands down here, before
+# the first `rm` and the first `docker compose stop`. It used to find out at
+# the very end: the backup of the last compaction and the export deleted, web,
+# bot and Meilisearch stopped, and only then the sidecar — started with
+# `--env-file .env` — refused by the switch, a minute of downtime and a
+# "Compact aborted" for a compaction the week of silence had already retired.
+# The cron line is removed at the start of the week (CLAUDE.md, "Starting the
+# week of silence"); this is the insurance for a line left behind. `.env` is
+# read by exact name (deploy/duckdb_env.sh), never listed.
+if ! source "$COMPOSE_DIR/deploy/duckdb_env.sh"; then
+    log "ABORT: $COMPOSE_DIR/deploy/duckdb_env.sh is missing, so whether .env says KS_DUCKDB=off cannot be read; nothing stopped, nothing deleted"
+    notify "🚨 Compact aborted: deploy/duckdb_env.sh is missing; nothing was stopped or deleted"
+    exit 1
+fi
+ks_duckdb_env_read "$ENV_FILE"
+if ks_duckdb_stands_down; then
+    log "KS_DUCKDB=off in .env: no compaction — nothing stopped, nothing deleted, no sidecar started. The week of silence retires this cron line: remove weekly_compact.sh from root's crontab. $(ks_duckdb_env_note)"
+    exit 0
+fi
+if [ "$KS_DUCKDB_ENV" = invalid ]; then
+    log "KS_DUCKDB=$KS_DUCKDB_ENV_VALUE in .env is not a value the switch understands: web and the sidecar run on, and so does this compaction"
+fi
 
 cleanup_artifacts() {
     rm -f "$DATA_DIR/analytics_clean.duckdb" "$DATA_DIR/analytics_clean.duckdb.wal" 2>/dev/null
