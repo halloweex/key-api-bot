@@ -4307,7 +4307,7 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 to PR-8).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 to PR-9).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
@@ -4414,25 +4414,53 @@ log names the value it found (a chain's flag, not its name). Otherwise, under
 `on` nothing changed. **Nothing the sweep runs reaches for the file
 any more**: `KNOWN_RESIDUAL` in `tests/unit/test_duckdb_off_sweep.py` is
 empty — no boot step since PR-6, no job since PR-4 to PR-7 together, no GET
-route since PR-8 — and a control reach after the last step proves the
-tripwire still stands. That is not yet the week's licence: PR-9 widens the
-sweep (the non-GET routes, the assistant's tools, the websocket, a real
-non-admin session, a seeded Postgres) and walks every entry point that can
-reach the store statically. The sweep runs in the target state (derived from
-the registries, every chain latched, step 13 met, off's own verdict holding).
-It boots web, starts the scheduler and runs every registered job — each as
-the tick that comes once every window an earlier step armed has passed, on a
-fresh sync service —
-with Postgres refusing and, wherever `KS_PG_DSN` is set (CI fails if it
-skipped), with Postgres live, emptied first and put back after. It calls
-every GET route **with Postgres refusing only**: with its required
-parameters, then again per value of each optional parameter that can pick a
-branch (source, sales type, every boolean) and once with the header's
-filters together; what a route reaches only past a live Postgres is PR-9's
-integration variant. A refused watermark read carries its key, so one row
-is one reach. A site that appears outside the list fails, and so does a row
-the code no longer earns. Each PR took its own rows out; the week waits for
-the empty set to survive PR-9's wider sweep. Not set anywhere until then.
+route since PR-8, and none of the doors PR-9 added the first time they were
+opened — and a control reach after the last step proves the tripwire still
+stands. The sweep runs in the target state (derived from the registries,
+every chain latched, step 13 met, off's own verdict holding), in three
+sweeps, each in an interpreter of its own and each **in both flavours** —
+with Postgres refusing, and wherever `KS_PG_DSN` is set (CI fails if it
+skipped) with Postgres live: emptied, seeded with a small history in Bronze
+that Postgres derives into Silver, Gold and the customer profile itself
+(the integration variant), and put back after. **process** boots web,
+starts the scheduler and runs every registered job — each as the tick that
+comes once every window an earlier step armed has passed, on a fresh sync
+service. **routes** calls every GET route under `/api/` as an admin, with
+its required parameters, then again per value of each optional parameter
+that can pick a branch (source, sales type, every boolean) and once with
+the header's filters together. **doors** (PR-9) boots web again and opens
+the rest of what a week exercises, every door read off the app rather than
+listed (`tests/unit/duckdb_off_sweep_doors.py`): every route under `/api/`
+that is not a GET, with its optional values and a body derived from what
+the route declares or reads itself (a 422 fails the run — a door refused as
+malformed swept nothing); every route outside it as nobody, a viewer and an
+admin, the two Telegram sign-ins and the TurboSMS webhook signed as their
+senders sign them; both WebSocket routes with the client's frames; every
+event on the bus with a socket open in each room; every assistant tool
+through `execute_tool` and through both `/api/chat` routes under a model
+that asks for all of them; every GET again under a **real viewer session**
+nothing patches; and web's stop. Requests run in-process over ASGI on the
+sweep's own loop, so a background task a door starts is awaited inside its
+step. Seeding the history found that the live flavour had derived nothing
+until then: emptying the database took `meta.derivation_signal`'s row, so
+`pg_warehouse_derive` ran "signal unreadable" every time. A refused
+watermark read carries its key, so one row is one reach. A site that
+appears outside the list fails, and so does a row the code no longer earns.
+**A DuckDB lever may reach the file only if listed** in `DUCKDB_LEVERS` with
+its reason and refused loudly (503 naming `duckdb`, counted, paged) — and
+only a door under `/api/duckdb/`, the names OD-S5-8 keeps until code
+deletion; the list is empty, since under the chains each of those routes its
+sync to Postgres. **The static half** (`test_duckdb_off_entry_points.py`)
+walks `core/`, `web/`, `scripts/` and `deploy/` from every function that
+opens the file up to its entry points, and each must be a door the sweep
+opens, held by one (called, named as a value, nested — the mirror job's
+lambdas, a route's background `run()`), or pinned exactly as a host tool or
+dead code. **The bot's process never loads DuckDB**
+(`test_bot_imports_no_duckdb.py`): what it imports, lazily included, in a
+fresh interpreter, and what it calls. That is the code's half of the week's
+licence; the host tools (PR-10), the second Ark (PR-11), the rehearsal on
+the production copies and the owner's own yes are the rest. Not set
+anywhere until then.
 
 **The file's hash** — `deploy/duckdb_silence_check.sh`, a host tool, **not
 installed**: hourly from root's crontab at the start of the week (the line is
