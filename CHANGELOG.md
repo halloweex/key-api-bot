@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.285
+
+- Stage 5 PR-10: the runbook's tests read the checkout, so the gate skips them
+- Stage 5 PR-9 review: say "every flavour" where the sweep said "both"
+- Stage 5 PR-9 review: say what the sweep's world outside now lets it prove
+- Stage 5 PR-9 review: a door that says success having done nothing is named
+- Stage 5 PR-9 review: the sweep's world outside answers, and what it feeds is judged
+- Stage 5 PR-9 review: every route named for its network is called as an admin
+- Stage 5 PR-10 x review: the reader's header names restore-test.sh and the refused forms exactly
+- Stage 5 PR-10 x review: name the refused spellings exactly
+- Stage 5 PR-10 x review: the restore drill runs in the week, with -e KS_DUCKDB=on
+- Stage 5 PR-10 x review: web waits for the Ark's freeze, not its upload
+- Stage 5 PR-10 x review: precondition 4 asks what web's off verdict asks
+- Stage 5 PR-10 x review: the soak's P4 reads .env through the host scripts' reader
+- Stage 5 PR-10 x review: the host scripts stand down on every off compose reads
+- Stage 5 PR-9: the event listeners say whose socket each is
+- Stage 5 PR-9: read a door's own source, not its rate limiter's
+- Stage 5 PR-9: say what the wider sweep now proves
+- Stage 5 PR-9: every way into the code that can reach the file is a door the sweep opens
+- Stage 5 PR-9: the bot's process never loads DuckDB, pinned two ways
+- Stage 5 PR-9: a DuckDB lever may reach the file only if listed and refused loudly
+- Stage 5 PR-9: the off sweep opens every door a week exercises
+- Stage 5 PR-10: say where .env goes off-site now, in the Ark and the backup config
+- Stage 5 PR-10: one runbook for starting the week of silence, and for the way back
+- Stage 5 PR-10: the silence check prints the week's crontab change and installs nothing
+- Stage 5 PR-10: .env rides with every Postgres shipment, and offsite_check reports the DuckDB copy frozen under off
+- Stage 5 PR-10: the nightly DuckDB snapshot stands down under KS_DUCKDB=off instead of failing every night
+- Stage 5 PR-10: the Sunday compaction stands down under KS_DUCKDB=off before it stops or deletes anything
+
+
 ## 3.0.284
 
 
