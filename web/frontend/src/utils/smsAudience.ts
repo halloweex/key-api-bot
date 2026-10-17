@@ -1,6 +1,9 @@
 /**
- * The audience of an SMS campaign: how it is held on screen, and how it
- * travels to the server.
+ * The audience of an SMS campaign in the server's terms, and how it travels.
+ *
+ * The page builds an audience out of conditions (`smsConditions.ts`) and
+ * converts it to this shape — a window and filters per group — only to ask a
+ * question. This module is that last step and nothing else.
  *
  * One function builds the query string for all three uses — the live preview,
  * the CSV download and freezing the campaign — because they have to agree.
@@ -31,11 +34,15 @@ import type {
 export const DEFAULT_HOLDOUT_PCT = 10
 
 // A group's window, in days: the outermost rule of that group, applied before
-// its filters. It has a floor and a ceiling on the server (30..730); the form
-// clamps to the same range so a typo is a narrower audience rather than a 422.
+// its filters. It has a floor and a ceiling on the server (30..3650). The page
+// no longer shows it: it is derived from the "last order" condition, and a
+// group without one sends the ceiling, which is all time — ten years covers
+// the whole history with room. 270 is what a preset from before conditions
+// meant when it said nothing.
 export const DEFAULT_WINDOW_DAYS = 270
 export const MIN_WINDOW_DAYS = 30
-export const MAX_WINDOW_DAYS = 730
+export const MAX_WINDOW_DAYS = 3650
+export const ALL_TIME_DAYS = MAX_WINDOW_DAYS
 
 // How many groups one audience may OR together — the server's
 // MAX_AUDIENCE_GROUPS, refused there with a 400 past it.
@@ -61,20 +68,6 @@ export function emptyAudience(): SmsAudienceCriteria {
   }
 }
 
-/** Is anything actually filtered, or is this the plain tier cohort? */
-export function hasFilters(filters: SmsAudienceFilters): boolean {
-  return Object.values(filters).some((v) =>
-    Array.isArray(v) ? v.length > 0 : v !== null && v !== undefined && v !== '',
-  )
-}
-
-/** How many filter fields are set — the badge on the collapsed filter panel. */
-export function countFilters(filters: SmsAudienceFilters): number {
-  return Object.values(filters).filter((v) =>
-    Array.isArray(v) ? v.length > 0 : v !== null && v !== undefined && v !== '',
-  ).length
-}
-
 const NUMERIC_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
   ['recencyMin', 'recency_min'],
   ['recencyMax', 'recency_max'],
@@ -86,6 +79,7 @@ const NUMERIC_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
   ['aovMax', 'aov_max'],
   ['boughtWithinDays', 'bought_within_days'],
   ['periodOrdersMin', 'period_orders_min'],
+  ['periodOrdersMax', 'period_orders_max'],
   ['periodDays', 'period_days'],
 ]
 
@@ -95,6 +89,7 @@ const TEXT_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
   ['promocodeUsed', 'promocode_used'],
   ['genderMinConfidence', 'gender_min_confidence'],
   ['periodFrom', 'period_from'],
+  ['periodTo', 'period_to'],
 ]
 
 const LIST_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
@@ -229,19 +224,22 @@ function groupFromRaw(raw: unknown): SmsAudienceGroup {
   const numericKeys: Array<keyof SmsAudienceFilters> = [
     'recencyMin', 'recencyMax', 'ordersMin', 'ordersMax',
     'ltvMin', 'ltvMax', 'aovMin', 'aovMax', 'boughtWithinDays',
-    'periodOrdersMin', 'periodDays',
+    'periodOrdersMin', 'periodOrdersMax', 'periodDays',
   ]
   for (const key of numericKeys) {
     const v = num(filtersSrc[key])
     if (v !== undefined) (filters[key] as number) = v
   }
-  for (const key of ['firstOrderFrom', 'firstOrderTo', 'promocodeUsed', 'periodFrom'] as const) {
+  for (const key of
+    ['firstOrderFrom', 'firstOrderTo', 'promocodeUsed', 'periodFrom', 'periodTo'] as const) {
     const v = filtersSrc[key]
     if (typeof v === 'string' && v.trim()) filters[key] = v.trim()
   }
-  // A period is since a date or within N days, never both — the server
-  // refuses the pair. A preset holding both keeps the date, the more specific.
-  if (filters.periodFrom && filters.periodDays != null) delete filters.periodDays
+  // A period is dates or the last N days, never both — the server refuses
+  // the pair. A preset holding both keeps the dates, the more specific.
+  if ((filters.periodFrom || filters.periodTo) && filters.periodDays != null) {
+    delete filters.periodDays
+  }
   const cities = strings(filtersSrc.cities)
   if (cities) filters.cities = cities
   // Unknown values are dropped rather than carried: a preset is form state
@@ -313,236 +311,4 @@ export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
     tierRules,
     groups,
   }
-}
-
-/** Filters set across every group — the badge on the filter panel. */
-export function countAudienceFilters(audience: SmsAudienceCriteria): number {
-  return audience.groups.reduce((n, g) => n + countFilters(g.filters), 0)
-}
-
-/**
- * The audience in one line: how it is split, how it ranks, what is withheld,
- * how far back it looks, and how many filters narrow it — or, with several
- * groups, how many groups it is.
- *
- * It exists because picking a saved audience with no filters changes nothing
- * visible, which reads as a broken control rather than as an audience that
- * genuinely has no filters. Two of the audiences that ship with the page are
- * exactly that.
- */
-export function describeAudience(
-  audience: SmsAudienceCriteria,
-  t: (key: string, opts?: Record<string, unknown>) => string,
-): string {
-  const head = [
-    t(`sms.grouping.${audience.grouping}`),
-    t(audience.ltvBasis === 'margin' ? 'sms.basisMargin' : 'sms.basisRevenue'),
-    t('sms.summaryHoldout', { pct: audience.holdoutPct }),
-  ]
-  if (audience.groups.length > 1) {
-    return [...head, t('sms.summaryGroups', { count: audience.groups.length })].join(' · ')
-  }
-  const only = audience.groups[0] ?? emptyGroup()
-  const n = countFilters(only.filters)
-  return [
-    ...head,
-    t('sms.summaryWindow', { days: only.maxRecencyDays }),
-    n === 0 ? t('sms.summaryNoFilters') : t('sms.summaryFilters', { count: n }),
-  ].join(' · ')
-}
-
-/**
- * Ranges whose edges are the wrong way round.
- *
- * Typing "90" into the lower box and starting on the upper one puts the filter
- * through `90..2` on the way to `90..237`. The server refuses that — rightly,
- * it selects nobody — but refusing it mid-keystroke turns typing a number into
- * an error message. So the page holds the request instead, and says which pair
- * is inverted.
- */
-export function invertedRanges(filters: SmsAudienceFilters): string[] {
-  const pairs: Array<[string, unknown, unknown]> = [
-    ['recency', filters.recencyMin, filters.recencyMax],
-    ['orders', filters.ordersMin, filters.ordersMax],
-    ['ltv', filters.ltvMin, filters.ltvMax],
-    ['aov', filters.aovMin, filters.aovMax],
-    ['firstOrder', filters.firstOrderFrom, filters.firstOrderTo],
-  ]
-  return pairs
-    .filter(([, lo, hi]) =>
-      lo != null && hi != null && lo !== '' && hi !== '' && (lo as never) > (hi as never))
-    .map(([name]) => name)
-}
-
-/** Every group holding an inverted range, 1-based, with its fields. */
-export function invertedInGroups(
-  groups: SmsAudienceGroup[],
-): Array<{ group: number; fields: string[] }> {
-  return groups
-    .map((g, i) => ({ group: i + 1, fields: invertedRanges(g.filters) }))
-    .filter((g) => g.fields.length > 0)
-}
-
-/**
- * Groups whose "orders in a period" has a count and no period.
- *
- * The server refuses that — a count of orders since when? — so, like an
- * inverted range, the page holds the request instead of earning a 400 while
- * somebody is still choosing the date.
- */
-export function incompletePeriods(groups: SmsAudienceGroup[]): number[] {
-  return groups
-    .map((g, i) => ({ n: i + 1, f: g.filters }))
-    .filter(({ f }) => f.periodOrdersMin != null && !f.periodFrom && f.periodDays == null)
-    .map(({ n }) => n)
-}
-
-/**
- * How many days back a group's period reaches, or undefined without one.
- *
- * A period that reaches further than the group's window is cut by it: "two
- * orders since 1 January" inside a 270-day window leaves out everybody whose
- * last order was in January. The page says so rather than letting the window
- * quietly redefine the year.
- */
-export function periodReachDays(filters: SmsAudienceFilters): number | undefined {
-  if (typeof filters.periodDays === 'number') return filters.periodDays
-  if (filters.periodFrom) return dateToDaysAgo(filters.periodFrom)
-  return undefined
-}
-
-/**
- * The recency window, said in dates instead of days.
- *
- * A manager plans a campaign in dates — "bought this year, quiet since May" —
- * and had to convert that into "90 to 237 days", where 237 is the number of
- * days since 1 January and is wrong again tomorrow.
- *
- * Days stay the stored form on purpose: a saved audience of "quiet 90+ days"
- * still means that next month, while a saved date freezes into an ever
- * narrower group. So the dates are a view over the days, not a second filter.
- *
- * Recency runs backwards — the *earliest* last order is the *largest* number
- * of days — so `lastOrderFrom` pairs with `recencyMax` and `lastOrderTo` with
- * `recencyMin`.
- */
-function startOfDay(d: Date): number {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
-}
-
-export function daysAgoToDate(days: number | null | undefined): string {
-  if (typeof days !== 'number' || !Number.isFinite(days)) return ''
-  const d = new Date()
-  d.setDate(d.getDate() - Math.round(days))
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-}
-
-export function dateToDaysAgo(iso: string): number | undefined {
-  if (!iso) return undefined
-  const [y, m, d] = iso.split('-').map(Number)
-  if (!y || !m || !d) return undefined
-  const days = Math.round(
-    (startOfDay(new Date()) - startOfDay(new Date(y, m - 1, d))) / 86_400_000,
-  )
-  // A date in the future is not a recency; treat it as today.
-  return Math.max(0, days)
-}
-
-/** One group's filters, as phrases, in the store's field names. */
-function frozenFilterPhrases(
-  f: Record<string, unknown>,
-  t: (key: string, opts?: Record<string, unknown>) => string,
-): string[] {
-  const out: string[] = []
-  const val = (k: string) => f[k]
-  const has = (k: string) => val(k) !== undefined && val(k) !== null && val(k) !== ''
-
-  const pairs: Array<[string, string, string]> = [
-    ['recency_min_days', 'recency_max_days', 'sms.filterRecency'],
-    ['orders_min', 'orders_max', 'sms.filterOrders'],
-    ['ltv_min', 'ltv_max', 'sms.filterLtv'],
-    ['aov_min', 'aov_max', 'sms.filterAov'],
-    ['first_order_from', 'first_order_to', 'sms.filterFirstOrder'],
-  ]
-  for (const [lo, hi, label] of pairs) {
-    if (!has(lo) && !has(hi)) continue
-    out.push(`${t(label)}: ${has(lo) ? val(lo) : '…'} — ${has(hi) ? val(hi) : '…'}`)
-  }
-
-  const lists: Array<[string, string]> = [
-    ['brands', 'sms.filterBrand'],
-    ['cities', 'sms.filterCity'],
-    ['category_ids', 'sms.filterCategory'],
-    ['source_ids', 'sms.filterSource'],
-  ]
-  for (const [key, label] of lists) {
-    const v = val(key)
-    if (Array.isArray(v) && v.length) out.push(`${t(label)}: ${v.join(', ')}`)
-  }
-  const genders = val('genders')
-  if (Array.isArray(genders) && genders.length) {
-    out.push(`${t('sms.filterGender')}: ${genders
-      .map((g) => t(g === 'f' ? 'sms.genderFemale' : 'sms.genderMale'))
-      .join(', ')}`)
-  }
-  if (has('gender_min_confidence')) {
-    out.push(`${t('sms.filterGenderConfidence')}: ${val('gender_min_confidence')}`)
-  }
-  if (has('promocode')) out.push(`${t('sms.filterPromocode')}: ${val('promocode')}`)
-  if (has('bought_within_days')) {
-    out.push(`${t('sms.filterBoughtWithin')}: ${val('bought_within_days')}`)
-  }
-  const count = has('period_orders_min') ? val('period_orders_min') : 1
-  if (has('period_from')) {
-    out.push(t('sms.frozenPeriodSince', { count, date: val('period_from') }))
-  } else if (has('period_days')) {
-    out.push(t('sms.frozenPeriodWithin', { count, days: val('period_days') }))
-  }
-  return out
-}
-
-/**
- * The frozen audience, said in phrases.
- *
- * The stored snapshot uses the store's own field names, not the form's, and it
- * is deliberately read loosely: a campaign frozen by an older version of the
- * page must still describe itself rather than render blank. One with several
- * groups says each group on a line of its own, its window first.
- */
-export function describeFrozenCriteria(
-  criteria: Record<string, unknown> | undefined,
-  t: (key: string, opts?: Record<string, unknown>) => string,
-): string[] {
-  if (!criteria) return []
-  const out: string[] = []
-
-  const grouping = criteria.grouping === 'rfm' ? 'rfm' : 'single'
-  out.push(t(`sms.grouping.${grouping}`))
-  if (criteria.ltvBasis) {
-    out.push(t(criteria.ltvBasis === 'margin' ? 'sms.basisMargin' : 'sms.basisRevenue'))
-  }
-  if (typeof criteria.holdoutPct === 'number') {
-    out.push(t('sms.summaryHoldout', { pct: criteria.holdoutPct }))
-  }
-
-  const groups = Array.isArray(criteria.groups) ? criteria.groups : []
-  if (groups.length > 1) {
-    groups.forEach((raw, i) => {
-      const g = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
-      const phrases = [
-        ...(typeof g.maxRecencyDays === 'number'
-          ? [t('sms.summaryWindow', { days: g.maxRecencyDays })] : []),
-        ...frozenFilterPhrases((g.filters ?? {}) as Record<string, unknown>, t),
-      ]
-      out.push(`${t('sms.groupTitle', { n: i + 1 })}: ${phrases.join('; ')}`)
-    })
-    return out
-  }
-
-  if (typeof criteria.maxRecencyDays === 'number') {
-    out.push(t('sms.summaryWindow', { days: criteria.maxRecencyDays }))
-  }
-  out.push(...frozenFilterPhrases((criteria.filters ?? {}) as Record<string, unknown>, t))
-  return out
 }

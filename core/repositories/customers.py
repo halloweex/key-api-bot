@@ -290,15 +290,25 @@ class SmsAudienceFilters:
     source_ids: Sequence[int] = ()
     promocode: Optional[str] = None
     bought_within_days: Optional[int] = None
-    # Orders in a period: at least `period_orders_min` orders dated on or after
-    # `period_from`, or within the last `period_days` days. Not `orders_min`,
-    # which counts the whole history — "two purchases this year" cannot be said
-    # with a lifetime count at all. Counted by the order's Kyiv date over the
-    # same lines as everything else here (no returns, no retired sources, the
-    # campaign's sales type), so a period covering the whole history counts
-    # exactly what `orders` counts. A period with no count means at least one.
+    # Orders in a period: between `period_orders_min` and `period_orders_max`
+    # orders dated inside it. The period is a date range — `period_from`,
+    # `period_to`, or both, each edge inclusive — or the last `period_days`
+    # days. Not `orders_min`, which counts the whole history — "two purchases
+    # this year" cannot be said with a lifetime count at all. Counted by the
+    # order's Kyiv date over the same lines as everything else here (no
+    # returns, no retired sources, the campaign's sales type), so a period
+    # covering the whole history counts exactly what `orders` counts. A
+    # period with no count means at least one; "exactly N" is both bounds N.
     period_orders_min: Optional[int] = None
+    # An upper bound alone has no floor, so `0` is "bought, but not in the
+    # period" — a lapsed customer, said directly rather than as a recency
+    # floor that cannot name a calendar range.
+    period_orders_max: Optional[int] = None
     period_from: Optional[date] = None
+    # The last day of the period. With `period_from` it is "from … to …";
+    # alone it is "every order up to that date". Never beside `period_days`,
+    # which already ends the period today.
+    period_to: Optional[date] = None
     period_days: Optional[int] = None
 
     def __post_init__(self):
@@ -307,17 +317,30 @@ class SmsAudienceFilters:
         # condition.
         if self.period_from is not None and self.period_days is not None:
             raise ValueError("a period is since a date or within N days, not both")
+        if self.period_to is not None and self.period_days is not None:
+            raise ValueError("a period ends on a date or today (within N days), not both")
+        if self.period_from is not None and self.period_to is not None \
+                and self.period_from > self.period_to:
+            raise ValueError("period_from must not exceed period_to")
         if self.period_orders_min is not None and not self.has_period:
-            raise ValueError("period_orders_min needs period_from or period_days")
+            raise ValueError("period_orders_min needs period_from, period_to or period_days")
+        if self.period_orders_max is not None and not self.has_period:
+            raise ValueError("period_orders_max needs period_from, period_to or period_days")
         if self.period_orders_min is not None and self.period_orders_min < 1:
             raise ValueError("period_orders_min must be at least 1")
+        if self.period_orders_max is not None and self.period_orders_max < 0:
+            raise ValueError("period_orders_max must not be negative")
+        if self.period_orders_min is not None and self.period_orders_max is not None \
+                and self.period_orders_min > self.period_orders_max:
+            raise ValueError("period_orders_min must not exceed period_orders_max")
         if self.period_days is not None and self.period_days < 1:
             raise ValueError("period_days must be at least 1")
 
     @property
     def has_period(self) -> bool:
         """Is there an orders-in-a-period condition to count for?"""
-        return self.period_from is not None or self.period_days is not None
+        return (self.period_from is not None or self.period_to is not None
+                or self.period_days is not None)
 
     def period_count(self, column: str) -> tuple:
         """The aggregate over `allocated` that counts this group's orders.
@@ -328,7 +351,19 @@ class SmsAudienceFilters:
         it is how `recency` is computed, so "within the last 92 days" and
         "last order at most 92 days ago" are one rule and cannot disagree at
         the edge.
+
+        "Since a date" and "within N days" render exactly the text they
+        rendered before `period_to` existed — a one-group audience is held to
+        the query as it stood then, and a reworded FILTER is a different
+        query to hold.
         """
+        if self.period_from is not None and self.period_to is not None:
+            return (f"COUNT(DISTINCT order_id) FILTER "
+                    f"(WHERE order_date >= ? AND order_date <= ?) AS {column}",
+                    [self.period_from, self.period_to])
+        if self.period_to is not None:
+            return (f"COUNT(DISTINCT order_id) FILTER (WHERE order_date <= ?) AS {column}",
+                    [self.period_to])
         if self.period_from is not None:
             return (f"COUNT(DISTINCT order_id) FILTER (WHERE order_date >= ?) AS {column}",
                     [self.period_from])
@@ -354,7 +389,8 @@ class SmsAudienceFilters:
                 tuple(self.cities), tuple(self.genders), self.gender_min_confidence,
                 tuple(self.brands), tuple(self.category_ids),
                 tuple(self.source_ids), self.promocode,
-                self.period_orders_min, self.period_from, self.period_days,
+                self.period_orders_min, self.period_orders_max,
+                self.period_from, self.period_to, self.period_days,
             )
         )
 
@@ -366,6 +402,9 @@ class SmsAudienceFilters:
         """
         out: Dict[str, Any] = {}
         for key, value in asdict(self).items():
+            # Unset is None or empty, never zero: `period_orders_max=0` is
+            # "no order in the period", and dropping it would record the
+            # audience as "at least one".
             if value in (None, (), [], ""):
                 continue
             if isinstance(value, (list, tuple)):
@@ -445,8 +484,17 @@ class SmsAudienceFilters:
             params += list(levels)
 
         if self.has_period:
-            parts.append(f"{period_column} >= ?")
-            params.append(self.period_orders_min or 1)
+            # No bound at all is "at least one", as it always was, and renders
+            # what it rendered before `period_orders_max` existed. An upper
+            # bound alone takes the floor away, so `<= 0` selects customers
+            # with no order in the period. Only customers who ordered at all
+            # are rows of `cust`, so that is never somebody who never bought.
+            if self.period_orders_min is not None or self.period_orders_max is None:
+                parts.append(f"{period_column} >= ?")
+                params.append(self.period_orders_min or 1)
+            if self.period_orders_max is not None:
+                parts.append(f"{period_column} <= ?")
+                params.append(self.period_orders_max)
 
         content: List[str] = []
         content_params: List[Any] = []
@@ -2996,8 +3044,8 @@ class CustomersMixin:
                 the result is measured — it applies under either grouping.
             filters: Extra audience predicates (recency, order count, LTV,
                 average order, first purchase, city, brand, category, source,
-                promocode). None or an empty set selects what the tier rules
-                alone select.
+                promocode, orders in a period). None or an empty set selects
+                what the tier rules alone select.
             grouping: "rfm" for the three value tiers, "single" for one arm
                 holding everyone the filters kept. A filtered audience usually
                 wants "single": under "rfm" anyone outside all three tiers is
@@ -3052,6 +3100,8 @@ class CustomersMixin:
         if isinstance(tier, str):
             tier = [tier]
         tiers = [t.upper() for t in tier] if tier else None
+        # Kept under its own name: `tiers` is reused below for the per-arm sums.
+        picked_levels = list(tiers or [])
 
         # Which store answers. Decided out here on purpose: the Postgres path
         # must not take DuckDB's connection at all — §34's invariant, because a
@@ -3193,6 +3243,11 @@ class CustomersMixin:
                 # groups; `groups` is the whole audience.
                 "filters": groups[0].filters.as_dict(),
                 "groups": [g.as_dict() for g in groups],
+                # The value level, which narrows the audience like a filter.
+                # Not frozen before 2026-10-17, so a VIP-only campaign read
+                # back as "everyone" — in its own description and when the
+                # next campaign was built "like that one". Empty is every level.
+                "tiers": picked_levels,
             },
             # Each group's share of the audience, counted in phones, because a
             # phone is what receives the SMS. `recipients` is the audience's

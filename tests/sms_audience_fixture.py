@@ -42,6 +42,10 @@ BUYERS = [
     (12, "B, exactly 92 days", "Львів", "380500000012"),
     (13, "Not B, 93 days", "Київ", "380500000013"),
     (14, "A, last order 185 days ago", "Львів", "380500000014"),
+    # Older than any window up to two years: only an "all time" window
+    # (3 650 days) reaches it. Outside every group above, so no answer below
+    # moves for it.
+    (15, "Lapsed, one order 1000 days ago", "Київ", "380500000015"),
 ]
 
 # (order, buyer, days ago, total, sales_type, is_return, is_active, source, promo)
@@ -70,6 +74,7 @@ ORDERS = [
     (1301, 13, 93, 1000, "retail", False, True, 1, None),
     (1401, 14, 190, 1000, "retail", False, True, 1, None),
     (1402, 14, 185, 1000, "retail", False, True, 1, "AUG"),
+    (1501, 15, 1000, 1000, "retail", False, True, 1, None),
 ]
 
 # Every order has one line. Even orders are product 101 (another brand and a
@@ -102,6 +107,116 @@ A_RECIPIENTS = len(A_ALONE)        # 1, 3, 14 and the shared number
 B_RECIPIENTS = len(B_ALONE)        # 2, 3, 12 and the shared number
 A_ONLY = 2                         # 1, 14
 B_ONLY = 2                         # 2, 12
+
+
+# ─── An oracle for the rest ─────────────────────────────────────────────────
+#
+# The sets above are written by hand. The period's shapes and bounds have too
+# many combinations for that, so these answer them from the rows themselves,
+# in Python, with nothing of the query in them: the orders the audience counts,
+# a group's own conditions, and the rules common to the campaign. Each case
+# that uses them also states its answer by hand, so a mistake here and the
+# same mistake in the SQL cannot pass together.
+
+def counted_orders(sales_type: str = "retail") -> dict:
+    """buyer → [(order_id, order_date, total)] of the orders the audience
+    counts: not returns, not a retired source, the campaign's sales type."""
+    out: dict = {}
+    for oid, buyer, days, total, stype, ret, active, _src, _promo in ORDERS:
+        if ret or not active or (sales_type != "all" and stype != sales_type):
+            continue
+        out.setdefault(buyer, []).append((oid, ago(days), total))
+    return out
+
+
+def matched(window: int, *, in_period=None, at_least=None, at_most=None,
+            sales_type: str = "retail") -> set:
+    """The buyers one group's own conditions select: last order inside
+    `window` days and, when `in_period` (a predicate over a date) is given,
+    between `at_least` and `at_most` of their orders dated in it — at least
+    one when neither bound is set, no floor when only `at_most` is."""
+    if in_period is not None and at_least is None and at_most is None:
+        at_least = 1
+    out = set()
+    for buyer, orders in counted_orders(sales_type).items():
+        if (KYIV_TODAY - max(d for _, d, _ in orders)).days > window:
+            continue
+        if in_period is not None:
+            n = sum(1 for _, d, _ in orders if in_period(d))
+            if at_least is not None and n < at_least:
+                continue
+            if at_most is not None and n > at_most:
+                continue
+        out.add(buyer)
+    return out
+
+
+def recipients(buyers, sales_type: str = "retail") -> set:
+    """What the rules common to the campaign leave of `buyers`: a full
+    Ukrainian number, not opted out (by buyer or by number), and one buyer per
+    number — the one worth more, then the lower id. Revenue basis: every
+    order here has one line, so a buyer's value is the sum of their totals."""
+    phones = {b: "".join(ch for ch in phone if ch.isdigit())
+              for b, _name, _city, phone in BUYERS}
+    opted_buyers = {b for b, _channel, _phone in OPTOUTS}
+    opted_phones = {p for _b, _channel, p in OPTOUTS}
+    value = {b: sum(t for _, _, t in orders)
+             for b, orders in counted_orders(sales_type).items()}
+    usable = [b for b in buyers
+              if len(phones[b]) == 12 and phones[b].startswith("380")
+              and b not in opted_buyers and phones[b] not in opted_phones]
+    winners: dict = {}
+    for b in sorted(usable, key=lambda b: (-value[b], b)):
+        winners.setdefault(phones[b], b)
+    return set(winners.values())
+
+
+# The period's shapes, its bounds and the widest window, one group each:
+# (label, window, the group's filter fields, the oracle's terms, the answer by
+# hand). Shared by the DuckDB tests and the two-engine ones so both ask the
+# same questions. Dates are the oracle's own, so a case cannot drift from it.
+RANGE_FROM, RANGE_TO = ago(200), ago(100)    # "from 200 to 100 days ago"
+
+PERIOD_CASES = [
+    # 3 and 10 have two orders since 200 days ago but one of them after the
+    # range ends — `period_to` is what takes them out. 8 keeps its number,
+    # because 9, who shares it, is not in this audience.
+    ("from and to, at least two", 365,
+     dict(period_orders_min=2, period_from=RANGE_FROM, period_to=RANGE_TO),
+     dict(in_period=lambda d: RANGE_FROM <= d <= RANGE_TO, at_least=2),
+     {1, 8, 14}),
+    # Every order up to a date: 2 (400 days), 4 (300 and 250) and 15 (1000),
+    # which only an all-time window holds.
+    ("up to a date", 3650,
+     dict(period_to=PERIOD_FROM),
+     dict(in_period=lambda d: d <= PERIOD_FROM),
+     {2, 4, 15}),
+    # Exactly one order in 200 days: min = max. 11 has one too and no usable
+    # phone; 1, 3, 8, 10 and 14 have two.
+    ("exactly one in 200 days", 365,
+     dict(period_orders_min=1, period_orders_max=1, period_days=200),
+     dict(in_period=lambda d: (KYIV_TODAY - d).days <= 200, at_least=1, at_most=1),
+     {2, 5, 6, 7, 9, 12, 13}),
+    # Bought, but nothing since the date: 4 and 15 bought only before it;
+    # 2 and 14 bought before it and in it, so they are out.
+    ("none since a date, all time", 3650,
+     dict(period_orders_max=0, period_from=PERIOD_FROM),
+     dict(in_period=lambda d: d >= PERIOD_FROM, at_most=0),
+     {4, 15}),
+    # The same within two years: the window still cuts a group, so 15 goes.
+    ("none since a date, two years", 730,
+     dict(period_orders_max=0, period_from=PERIOD_FROM),
+     dict(in_period=lambda d: d >= PERIOD_FROM, at_most=0),
+     {4}),
+    # Nothing in the last 92 days — 12, at exactly 92, is in the period and
+    # so out; 13 at 93 is in. 8 keeps the shared number: 9 bought 20 days ago.
+    ("none in 92 days", 3650,
+     dict(period_orders_max=0, period_days=92),
+     dict(in_period=lambda d: (KYIV_TODAY - d).days <= 92, at_most=0),
+     {1, 4, 5, 6, 7, 8, 13, 14, 15}),
+    # All time and no condition: everyone reachable, 15 included.
+    ("all time", 3650, {}, {}, {1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14, 15}),
+]
 
 
 def seed_duckdb_conn(conn) -> None:

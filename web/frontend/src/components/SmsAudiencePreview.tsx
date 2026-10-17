@@ -5,6 +5,7 @@ import { Card, CardContent } from './Card'
 import { SkeletonCard } from './Skeleton'
 import { SmsSelectionCriteria } from './SmsSelectionCriteria'
 import { formatCurrency, formatNumber } from '../utils/formatters'
+import { ALL_TIME_DAYS } from '../utils/smsAudience'
 import type { SmsSegment, SmsSegmentsResponse, SmsTier } from '../types/api'
 
 // ─── SmsAudiencePreview ──────────────────────────────────────────────────────
@@ -46,7 +47,9 @@ function tierRule(
       // them describes none: say what the arm is instead.
       return (criteria.groups?.length ?? 0) > 1
         ? t('sms.ruleAnyGroup', { count: criteria.groups!.length })
-        : t('sms.ruleSingleGroup', { days: criteria.maxRecencyDays })
+        : criteria.maxRecencyDays >= ALL_TIME_DAYS
+          ? t('sms.ruleEveryone')
+          : t('sms.ruleSingleGroup', { days: criteria.maxRecencyDays })
     default:
       return t('sms.ruleReactivationValue', { days: criteria.reactivationMaxRecency })
   }

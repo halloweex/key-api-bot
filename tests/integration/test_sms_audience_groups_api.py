@@ -104,7 +104,8 @@ class TestTheGroupsReachTheStore:
             "gender": ["F"], "gender_min_confidence": "HIGH",
             "brand": ["Anua", "anua"], "category_id": [10, 10, 11],
             "source_id": [1, 4], "promocode_used": " KS-AUG ",
-            "bought_within_days": 180, "period_orders_min": 3, "period_days": 60,
+            "bought_within_days": 180, "period_orders_min": 3,
+            "period_orders_max": 5, "period_days": 60,
         }
         r = _get(client, {"or_groups": json.dumps([group])})
         assert r.status_code == 200, r.text
@@ -120,7 +121,8 @@ class TestTheGroupsReachTheStore:
         assert f.brands == ("Anua",)
         assert f.category_ids == (10, 11) and f.source_ids == (1, 4)
         assert f.promocode == "KS-AUG" and f.bought_within_days == 180
-        assert (f.period_orders_min, f.period_days, f.period_from) == (3, 60, None)
+        assert (f.period_orders_min, f.period_orders_max, f.period_days,
+                f.period_from, f.period_to) == (3, 5, 60, None, None)
 
     def test_an_empty_group_is_its_window(self, client, store):
         """`{}` is "everyone whose last order is inside 270 days" — the
@@ -169,7 +171,11 @@ class TestMalformedIsRefused:
         ('[{"orders_min": true}]', "group 2: orders_min"),
         ('[{"orders_min": 2.5}]', "group 2: orders_min"),
         ('[{"max_recency_days": 10}]', "group 2: max_recency_days"),
-        ('[{"max_recency_days": 900}]', "group 2: max_recency_days"),
+        # The cap was 730 until "all time" needed a window; it is 3650 now.
+        ('[{"max_recency_days": 3651}]', "group 2: max_recency_days"),
+        ('[{"period_orders_max": -1, "period_days": 30}]', "group 2: period_orders_max"),
+        ('[{"period_orders_max": 1001, "period_days": 30}]', "group 2: period_orders_max"),
+        ('[{"period_to": "end of march"}]', "group 2: period_to"),
         ('[{"period_from": "yesterday"}]', "group 2: period_from"),
         ('[{"brand": "Anua"}]', "group 2: brand"),             # lists are lists
         ('[{}, {"city": ["' + "x" * 201 + '"]}]', "group 3: city"),
@@ -186,6 +192,13 @@ class TestMalformedIsRefused:
         ({"gender_min_confidence": "sure"}, "group 2: gender_min_confidence"),
         ({"period_days": 30, "period_from": "2026-01-01"}, "group 2: period_from and"),
         ({"period_orders_min": 2}, "group 2: period_orders_min needs a period"),
+        ({"period_days": 30, "period_to": "2026-01-01"},
+         "group 2: period_to and period_days"),
+        ({"period_from": "2026-03-01", "period_to": "2026-01-01"},
+         "group 2: period_from must not exceed period_to"),
+        ({"period_orders_max": 0}, "group 2: period_orders_max needs a period"),
+        ({"period_orders_min": 3, "period_orders_max": 2, "period_days": 30},
+         "group 2: period_orders_min must not exceed period_orders_max"),
     ])
     def test_the_rules_of_a_group_hold_inside_or_groups(self, client, store, group,
                                                         needle):
@@ -219,19 +232,94 @@ class TestMalformedIsRefused:
     @pytest.mark.parametrize("params,needle", [
         ({"period_orders_min": 2}, "period_orders_min needs a period"),
         ({"period_days": 30, "period_from": "2026-01-01"}, "period_from and"),
+        ({"period_days": 30, "period_to": "2026-01-01"}, "period_to and period_days"),
+        ({"period_from": "2026-03-01", "period_to": "2026-01-01"},
+         "period_from must not exceed period_to"),
+        ({"period_orders_max": 0}, "period_orders_max needs a period"),
+        ({"period_orders_min": 3, "period_orders_max": 2, "period_days": 30},
+         "period_orders_min must not exceed period_orders_max"),
     ])
     def test_the_flat_period_is_refused_the_same_way(self, client, store, params,
                                                      needle):
         r = _get(client, params)
         assert r.status_code == 400 and needle in r.json()["detail"]
+        assert store.calls == []
+
+    @pytest.mark.parametrize("params", [
+        {"period_orders_max": -1, "period_days": 30},
+        {"period_orders_max": 1001, "period_days": 30},
+        {"max_recency_days": 3651},
+    ])
+    def test_a_flat_bound_is_the_frameworks_422(self, client, store, params):
+        """A flat parameter outside its declared bounds is refused by FastAPI
+        before the handler runs — a 422, as every flat bound here always was
+        (`max_recency_days=5000` in `test_sms_segments_api.py`). The same value
+        inside `or_groups` is the 400 above, because that JSON is parsed by
+        the handler."""
+        r = _get(client, params)
+        assert r.status_code == 422, r.text
+        assert store.calls == []
+
+
+class TestTheNewPeriodReachesTheStore:
+    def test_a_range_with_both_bounds_flat(self, client, store):
+        r = _get(client, {"period_from": "2026-01-01", "period_to": "2026-03-31",
+                          "period_orders_min": 2, "period_orders_max": 2})
+        assert r.status_code == 200, r.text
+        assert store.calls[-1]["filters"] == SmsAudienceFilters(
+            period_orders_min=2, period_orders_max=2,
+            period_from=date(2026, 1, 1), period_to=date(2026, 3, 31))
+
+    def test_up_to_a_date_with_none_in_it_inside_or_groups(self, client, store):
+        group = {"max_recency_days": 3650, "period_to": "2024-12-31",
+                 "period_orders_max": 0}
+        r = _get(client, {"or_groups": json.dumps([group])})
+        assert r.status_code == 200, r.text
+        assert store.calls[-1]["groups"][1] == SmsAudienceGroup(
+            3650, SmsAudienceFilters(period_orders_max=0, period_to=date(2024, 12, 31)))
+
+    def test_zero_is_not_unset(self, client, store):
+        """`period_orders_max=0` is a value; read as falsy anywhere on the way
+        it would become "at least one order in the period"."""
+        r = _get(client, {"period_days": 92, "period_orders_max": 0})
+        assert r.status_code == 200, r.text
+        assert store.calls[-1]["filters"].period_orders_max == 0
+
+
+class TestTheWindowReachesAllTime:
+    """3650 days is how the page says "all time" for a group with no time
+    condition; the cap was 730."""
+
+    def test_flat(self, client, store):
+        r = _get(client, {"max_recency_days": 3650})
+        assert r.status_code == 200, r.text
+        assert store.calls[-1]["max_recency_days"] == 3650
+
+    def test_inside_or_groups(self, client, store):
+        r = _get(client, {"or_groups": json.dumps([{"max_recency_days": 3650}])})
+        assert r.status_code == 200, r.text
+        assert store.calls[-1]["groups"][1].max_recency_days == 3650
+
+    def test_reactivation_keeps_its_default_and_its_cap(self, client, store):
+        """The reactivation level stays one-order buyers of the last 120 days
+        by default, however wide the window; a typed one may go to 730 and no
+        further."""
+        r = _get(client, {"max_recency_days": 3650})
+        assert store.calls[-1]["reactivation_max_recency"] == 120
+        r = _get(client, {"max_recency_days": 3650, "reactivation_max_recency": 730})
+        assert r.status_code == 200, r.text
+        r = _get(client, {"max_recency_days": 3650, "reactivation_max_recency": 731})
+        assert r.status_code == 422
 
 
 class TestAFollowUpRefusesGroupsToo:
     @pytest.mark.parametrize("params", [
         {"or_groups": "[{}]"},
         {"period_from": "2026-01-01"},
+        {"period_to": "2026-01-01"},
         {"period_days": 30},
         {"period_orders_min": 2},
+        {"period_orders_max": 0},
     ])
     def test_every_new_audience_parameter_is_audience_shaping(self, client, store,
                                                               params):

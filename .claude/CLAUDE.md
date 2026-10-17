@@ -595,6 +595,40 @@ A, two or more orders since 2026-01-01, 2 626 phones; B, last order within 92
 days, 3 103; A ∪ B 4 138, of which 1 035 only through A. The store's query and
 plain SQL agree on all three. Inside the default 270-day window A would be
 2 610.
+
+**The screen holds conditions, not parameters** (2026-10-17, after the owner's
+first real campaign through the form typed 92 days into an order count, put a
+period's end into its only date field, and lost January to a 270-day window
+nobody had set). `utils/smsConditions.ts` is the model: a group is sentences —
+«Сделал(а) [2+ заказа] [с 1 янв по 14 окт 2026]» — and `definitionToCriteria`
+turns it into the window-and-filters shape above only to ask, so the
+transport, `or_groups` and the freeze are unchanged.
+
+- **Lifetime and in-period orders are one condition with a period** («за всё
+  время | последние N дней | с … по …»). The server took two parameters for
+  that: `period_to` (inclusive end; alone it is "up to a date", never beside
+  `period_days`) and `period_orders_max` (≥ 0; alone it has no floor, so `0` is
+  "bought, but not in the period"). "Since a date" and "within N days" render
+  the SQL they rendered before, byte for byte.
+- **The window is derived, never shown**: a group's "last order" upper bound,
+  else 3650 days, which is all time — the server cap went 730 → 3650 for
+  exactly this. Under 30 days it is the floor plus `recency_max`. "Last order
+  in the last 270 days" sends exactly `max_recency_days=270`, which is how the
+  built-in presets still reproduce.
+- **Relative stays relative, dates stay dates**: presets and the draft
+  (`sms.campaignDraft.v2`, reading v1 once) store `groups[].conditions` beside
+  the old shape, which an older page still reads. Old presets, v1 drafts and
+  past campaigns' frozen `criteria` (store field names) map onto conditions.
+- **An unfinished condition is left out of the preview and holds the step** —
+  never frozen with a condition the person believes is applied.
+- **The preview carries the campaign name** once it is valid, because the
+  holdout is drawn per (buyer, name): it previewed under "default" and showed
+  375 for a campaign frozen with 429.
+- Grouping rfm/single, the level thresholds and the ranking basis are step 2's;
+  the value level as a filter stays in step 1, for the whole campaign.
+
+On production on 2026-10-17, the new code's own SQL beside plain SQL: «2+ с
+01.01 по 14.10» OR «1+ с 16.07 по 14.10» is 4 101 (2 612 / 3 076) both ways.
 ### Two axes: a level and an area
 
 Access is a **pair**, and conflating the two halves is the mistake this section

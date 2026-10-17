@@ -11,14 +11,22 @@
  * remembers starting. It is cleared the moment the roster is frozen, because
  * from then on the campaign exists on the server and the draft would be a
  * stale copy of it.
+ *
+ * v2 holds the audience as conditions (`smsConditions.ts`), in the same shape
+ * a preset stores — the server's terms beside the conditions — so dates stay
+ * dates across a reload. A v1 draft, written before conditions, is read once
+ * through the same mapping a preset from then goes through.
  */
-import { audienceFromPreset, emptyAudience } from './smsAudience'
-import type { SmsAudienceCriteria } from '../types/api'
+import {
+  definitionFromPreset, definitionToPreset, emptyDefinition,
+  type AudienceDefinition,
+} from './smsConditions'
 
-const KEY = 'sms.campaignDraft.v1'
+const KEY = 'sms.campaignDraft.v2'
+const LEGACY_KEY = 'sms.campaignDraft.v1'
 
 export interface SmsCampaignDraft {
-  audience: SmsAudienceCriteria
+  audience: AudienceDefinition
   campaign: string
   promocode: string
   text: string
@@ -32,7 +40,7 @@ export interface SmsCampaignDraft {
 
 export function emptyDraft(): SmsCampaignDraft {
   return {
-    audience: emptyAudience(),
+    audience: emptyDefinition(),
     campaign: '',
     promocode: '',
     text: '',
@@ -42,22 +50,30 @@ export function emptyDraft(): SmsCampaignDraft {
   }
 }
 
+function read(key: string): Partial<Record<keyof SmsCampaignDraft, unknown>> | null {
+  const raw = sessionStorage.getItem(key)
+  if (!raw) return null
+  const parsed = JSON.parse(raw)
+  return parsed && typeof parsed === 'object' ? parsed : null
+}
+
 export function loadDraft(): SmsCampaignDraft {
   const blank = emptyDraft()
   try {
-    const raw = sessionStorage.getItem(KEY)
-    if (!raw) return blank
-    const stored = JSON.parse(raw) as Partial<SmsCampaignDraft>
+    const stored = read(KEY) ?? read(LEGACY_KEY)
+    if (!stored) return blank
+    const str = (v: unknown) => (typeof v === 'string' ? v : '')
     return {
       // Through the same forgiving reader a preset goes through: a draft
-      // written by an older version of this page must still open.
-      audience: audienceFromPreset(stored.audience),
-      campaign: typeof stored.campaign === 'string' ? stored.campaign : '',
-      promocode: typeof stored.promocode === 'string' ? stored.promocode : '',
-      text: typeof stored.text === 'string' ? stored.text : '',
-      presetName: typeof stored.presetName === 'string' ? stored.presetName : '',
+      // written by an older version of this page must still open, and a v1
+      // draft's audience is the server shape a v1 preset had.
+      audience: definitionFromPreset(stored.audience),
+      campaign: str(stored.campaign),
+      promocode: str(stored.promocode),
+      text: str(stored.text),
+      presetName: str(stored.presetName),
       followUp: stored.followUp === true,
-      followUpOf: typeof stored.followUpOf === 'string' ? stored.followUpOf : '',
+      followUpOf: str(stored.followUpOf),
     }
   } catch {
     // A corrupt or unavailable store must cost a draft, never the page.
@@ -67,7 +83,12 @@ export function loadDraft(): SmsCampaignDraft {
 
 export function saveDraft(draft: SmsCampaignDraft): void {
   try {
-    sessionStorage.setItem(KEY, JSON.stringify(draft))
+    sessionStorage.setItem(KEY, JSON.stringify({
+      ...draft, audience: definitionToPreset(draft.audience),
+    }))
+    // Once a v2 draft exists the v1 one is history; leaving it would bring
+    // the old audience back the moment the v2 one was cleared.
+    sessionStorage.removeItem(LEGACY_KEY)
   } catch {
     /* Private mode, quota, whatever — the wizard still works without it. */
   }
@@ -76,6 +97,7 @@ export function saveDraft(draft: SmsCampaignDraft): void {
 export function clearDraft(): void {
   try {
     sessionStorage.removeItem(KEY)
+    sessionStorage.removeItem(LEGACY_KEY)
   } catch {
     /* as above */
   }

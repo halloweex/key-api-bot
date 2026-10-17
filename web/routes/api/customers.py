@@ -218,8 +218,8 @@ _AUDIENCE_SHAPING_PARAMS = frozenset({
     "recency_min", "recency_max", "orders_min", "orders_max", "ltv_min", "ltv_max",
     "aov_min", "aov_max", "first_order_from", "first_order_to", "city", "gender",
     "gender_min_confidence", "brand", "category_id", "source_id", "promocode_used",
-    "bought_within_days", "period_orders_min", "period_from", "period_days",
-    "or_groups",
+    "bought_within_days", "period_orders_min", "period_orders_max", "period_from",
+    "period_to", "period_days", "or_groups",
 })
 
 
@@ -240,11 +240,20 @@ _AUDIENCE_SHAPING_PARAMS = frozenset({
 # condition somebody thinks is applied.
 _Text = Annotated[str, Field(max_length=200)]
 
+# The widest base window a group may ask for. Ten years reaches past the first
+# order the warehouse holds, so it is how the page says "all time" for a group
+# with no time condition of its own: every group has a window, and one wider
+# than the whole history is the honest spelling of none. It was 730, which
+# made "everybody who ever bought" unsayable once the history passed two
+# years — and a group whose only condition is a period ("nothing since
+# January") needs every customer in reach to count over.
+_MAX_WINDOW_DAYS = 3650
+
 
 class _AudienceGroupParams(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    max_recency_days: int = Field(DEFAULT_WINDOW_DAYS, ge=30, le=730)
+    max_recency_days: int = Field(DEFAULT_WINDOW_DAYS, ge=30, le=_MAX_WINDOW_DAYS)
     recency_min: Optional[int] = Field(None, ge=0, le=3650)
     recency_max: Optional[int] = Field(None, ge=0, le=3650)
     orders_min: Optional[int] = Field(None, ge=0, le=1000)
@@ -264,7 +273,9 @@ class _AudienceGroupParams(BaseModel):
     promocode_used: Optional[str] = Field(None, max_length=40)
     bought_within_days: Optional[int] = Field(None, ge=1, le=3650)
     period_orders_min: Optional[int] = Field(None, ge=1, le=1000)
+    period_orders_max: Optional[int] = Field(None, ge=0, le=1000)
     period_from: Optional[_date] = None
+    period_to: Optional[_date] = None
     period_days: Optional[int] = Field(None, ge=1, le=3650)
 
 
@@ -323,19 +334,29 @@ def _audience_group(values: dict, label: str) -> SmsAudienceGroup:
         ("ltv_min", "ltv_max", "ltv"),
         ("aov_min", "aov_max", "aov"),
         ("first_order_from", "first_order_to", "first_order"),
+        ("period_orders_min", "period_orders_max", "period_orders"),
     ):
         if values.get(lo) is not None and values.get(hi) is not None \
                 and values[lo] > values[hi]:
             refuse(f"{name}_min must not exceed {name}_max")
 
-    # Orders in a period: since a date, or within N days — one of them, and a
-    # count without either says nothing about when.
-    period_from, period_days = values.get("period_from"), values.get("period_days")
+    # Orders in a period: a date range (from, to, or both), or within N days —
+    # one of the two shapes, and a count without either says nothing about
+    # when. `period_days` ends the period today, so a `period_to` beside it
+    # would be a second end.
+    period_from, period_to = values.get("period_from"), values.get("period_to")
+    period_days = values.get("period_days")
     if period_from is not None and period_days is not None:
         refuse("period_from and period_days are two ways to say one period — pick one")
-    if values.get("period_orders_min") is not None \
-            and period_from is None and period_days is None:
-        refuse("period_orders_min needs a period: period_from or period_days")
+    if period_to is not None and period_days is not None:
+        refuse("period_to and period_days are two ways to end one period — pick one")
+    if period_from is not None and period_to is not None and period_from > period_to:
+        refuse("period_from must not exceed period_to")
+    has_period = period_from is not None or period_to is not None \
+        or period_days is not None
+    for bound in ("period_orders_min", "period_orders_max"):
+        if values.get(bound) is not None and not has_period:
+            refuse(f"{bound} needs a period: period_from, period_to or period_days")
 
     filters = SmsAudienceFilters(
         recency_min_days=values.get("recency_min"),
@@ -357,7 +378,9 @@ def _audience_group(values: dict, label: str) -> SmsAudienceGroup:
         promocode=(values.get("promocode_used") or "").strip() or None,
         bought_within_days=values.get("bought_within_days"),
         period_orders_min=values.get("period_orders_min"),
+        period_orders_max=values.get("period_orders_max"),
         period_from=period_from,
+        period_to=period_to,
         period_days=period_days,
     )
     return SmsAudienceGroup(
@@ -405,7 +428,7 @@ def _extra_audience_groups(raw: Optional[str]) -> List[SmsAudienceGroup]:
 
 def _sms_segment_params(
     request: Request,
-    max_recency_days: int = Query(270, ge=30, le=730),
+    max_recency_days: int = Query(270, ge=30, le=_MAX_WINDOW_DAYS),
     ltv_basis: str = Query(
         "revenue",
         description="revenue or margin — which lifetime value drives tier assignment",
@@ -421,6 +444,12 @@ def _sms_segment_params(
     core_min_orders: int = Query(2, ge=2, le=50),
     # Optional so a window narrower than the default does not become an error:
     # only a value somebody actually typed can contradict the window.
+    #
+    # Still capped at two years when the window goes to ten: the level is
+    # one-order buyers recent enough to win back, and a single order three
+    # years ago is not that. Unset it stays 120 whatever the window, so an
+    # "all time" group does not put every one-order buyer of years past into
+    # the reactivation level.
     reactivation_max_recency: Optional[int] = Query(None, ge=7, le=730),
     sales_type: Optional[str] = Query("retail"),
     holdout_pct: int = Query(10, ge=0, le=50),
@@ -453,11 +482,14 @@ def _sms_segment_params(
     source_id: Optional[str] = Query(None, max_length=200),
     promocode_used: Optional[str] = Query(None, max_length=40),
     bought_within_days: Optional[int] = Query(None, ge=1, le=3650),
-    # Orders in a period — at least N orders since a date, or within the last
-    # N days. `orders_min` counts the whole history and cannot say "two
-    # purchases this year".
+    # Orders in a period — between N and M orders from a date, up to a date,
+    # between two dates (both edges inclusive), or within the last N days.
+    # `orders_min` counts the whole history and cannot say "two purchases this
+    # year". `period_orders_max=0` alone is "bought, but not in the period".
     period_orders_min: Optional[int] = Query(None, ge=1, le=1000),
+    period_orders_max: Optional[int] = Query(None, ge=0, le=1000),
     period_from: Optional[_date] = Query(None),
+    period_to: Optional[_date] = Query(None),
     period_days: Optional[int] = Query(None, ge=1, le=3650),
     # ─── More groups, ORed with the one above ────────────────────────────
     or_groups: Optional[str] = Query(
@@ -568,7 +600,9 @@ def _sms_segment_params(
         "promocode_used": promocode_used,
         "bought_within_days": bought_within_days,
         "period_orders_min": period_orders_min,
-        "period_from": period_from, "period_days": period_days,
+        "period_orders_max": period_orders_max,
+        "period_from": period_from, "period_to": period_to,
+        "period_days": period_days,
     }, "group 1" if or_groups is not None else "")
     groups = [first] + _extra_audience_groups(or_groups)
     widest = max(g.max_recency_days for g in groups)

@@ -17,7 +17,9 @@ cannot do:
    its edges — a shared phone across groups, a group narrower than another,
    the period counting only what the audience counts — answer what
    `tests/sms_audience_fixture.py` says by hand, through the real
-   `get_sms_segments`, on PostgreSQL as on DuckDB.
+   `get_sms_segments`, on PostgreSQL as on DuckDB. So do the period's shapes
+   and bounds — a closed range, up to a date, exactly N, none in the period —
+   and the all-time window, against the fixture's oracle.
 
 Skipped without `KS_PG_DSN`, which CI always sets and fails on skipping.
 """
@@ -57,6 +59,9 @@ LEGACY_CASES = [
     ("defaults", {}),
     ("narrow window", dict(window=92)),
     ("widest window", dict(window=730)),
+    # Wider than the API allowed before groups, so no past campaign used it;
+    # the query must still be the old one's at the new cap.
+    ("all-time window", dict(window=3650)),
     ("shortest window", dict(window=30)),
     ("rfm on revenue", dict(grouping="rfm")),
     ("rfm on margin", dict(grouping="rfm", ltv_basis="margin")),
@@ -245,6 +250,35 @@ class TestGroupsOnPostgres:
         assert a["customers"] == b["customers"]
 
 
+class TestThePeriodsShapesOnBothEngines:
+    """From-and-to, up-to, exactly N, none in the period and the all-time
+    window: each engine selects the oracle's answer
+    (`tests/sms_audience_fixture.py`, which also writes it by hand), and the
+    two engines return one result, funnel and frozen criteria included."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("label,window,fields,terms,answer", fx.PERIOD_CASES,
+                             ids=[c[0] for c in fx.PERIOD_CASES])
+    async def test_both_engines_select_the_oracles_answer(
+        self, engines, monkeypatch, label, window, fields, terms, answer,
+    ):
+        store, conn = engines
+        mine = fx.matched(window, **terms)
+        assert fx.recipients(mine) == answer, f"{label}: the oracle disagrees with the hand"
+        kwargs = dict(groups=[SmsAudienceGroup(window, SmsAudienceFilters(**fields))],
+                      grouping="single", holdout_pct=20, campaign="period-shapes",
+                      include_customers=True)
+        duck = await _on_duckdb(store, monkeypatch, **kwargs)
+        postgres = await _on_postgres(store, conn, monkeypatch, **kwargs)
+        for name, result in (("duckdb", duck), ("postgres", postgres)):
+            assert {c["buyerId"] for c in result["customers"]} == answer, (
+                f"{name}: {label}")
+            assert result["groups"][0]["matched"] == len(mine), f"{name}: {label}"
+        for key in ("funnel", "groups", "segments", "totals", "customers",
+                    "criteria"):
+            assert duck[key] == postgres[key], f"{label}: {key} differs"
+
+
 class TestTheEnginesAgree:
     CASES = [
         ("the owner's campaign", dict(groups=[GROUP_A, GROUP_B])),
@@ -263,6 +297,21 @@ class TestTheEnginesAgree:
                                 ltv_basis="margin")),
         ("one level of the union", dict(groups=[GROUP_A, GROUP_B], grouping="rfm",
                                         tier=["REACTIVATION"])),
+        # The range, its bounds and the all-time window beside other groups:
+        # "two in the range" OR "lapsed since the date, all time" OR B.
+        ("ranges and bounds, ORed", dict(groups=[
+            SmsAudienceGroup(365, SmsAudienceFilters(
+                period_orders_min=2, period_orders_max=2,
+                period_from=fx.RANGE_FROM, period_to=fx.RANGE_TO)),
+            SmsAudienceGroup(3650, SmsAudienceFilters(
+                period_orders_max=0, period_from=fx.PERIOD_FROM)),
+            GROUP_B,
+        ])),
+        ("up to a date, margin levels", dict(groups=[
+            SmsAudienceGroup(3650, SmsAudienceFilters(period_to=fx.PERIOD_FROM)),
+            SmsAudienceGroup(92, SmsAudienceFilters(period_orders_max=0,
+                                                    period_days=30)),
+        ], grouping="rfm", ltv_basis="margin")),
     ]
 
     @pytest.mark.asyncio

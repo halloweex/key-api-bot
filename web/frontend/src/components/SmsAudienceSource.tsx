@@ -1,5 +1,7 @@
 import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
+import { SegmentedControl } from './SegmentedControl'
+import { useIsPhone } from '../hooks/useMediaQuery'
 
 // ─── SmsAudienceSource ───────────────────────────────────────────────────────
 //
@@ -19,29 +21,19 @@ export const SmsAudienceSource = memo(function SmsAudienceSource({
   onChange: (followUp: boolean) => void
 }) {
   const { t } = useTranslation()
-  const options = [
-    { value: false, label: t('sms.sourceAudience') },
-    { value: true, label: t('sms.sourceFollowUp') },
-  ]
+  const phone = useIsPhone()
 
   return (
-    <div role="radiogroup" aria-label={t('sms.sourceLabel')} className="flex flex-wrap gap-2">
-      {options.map((o) => (
-        <button
-          key={String(o.value)}
-          type="button"
-          role="radio"
-          aria-checked={followUp === o.value}
-          onClick={() => onChange(o.value)}
-          className={`px-3 py-1.5 text-xs rounded-md border transition-colors ${
-            followUp === o.value
-              ? 'border-purple-400 bg-purple-50 text-purple-800 font-medium'
-              : 'border-slate-200 text-slate-600 hover:border-slate-300'
-          }`}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
+    <SegmentedControl
+      ariaLabel={t('sms.sourceLabel')}
+      size="sm"
+      fullWidth={phone}
+      value={followUp ? 'followUp' : 'audience'}
+      onChange={(v) => onChange(v === 'followUp')}
+      options={[
+        { value: 'audience', label: t('sms.sourceAudience') },
+        { value: 'followUp', label: t('sms.sourceFollowUp') },
+      ]}
+    />
   )
 })
