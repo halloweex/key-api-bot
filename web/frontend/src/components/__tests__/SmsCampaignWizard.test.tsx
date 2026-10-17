@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SmsCampaignWizard } from '../SmsCampaignWizard'
+import { suggestCampaignName } from '../../utils/smsCampaignName'
 import type { SmsSegmentsResponse } from '../../types/api'
 
 // src/lib/i18n.ts reads localStorage while the module is being imported, and
@@ -225,10 +226,15 @@ async function pickAudience(name: string) {
 }
 
 /** The campaign name lives at the top of step one and gates leaving it. */
+/** Replace whatever the field holds — it opens with a suggested name. */
 async function nameCampaign(name = 'sep-brand') {
-  await userEvent.type(
-    screen.getByRole('textbox', { name: /sms\.campaignName/ }), name,
-  )
+  const field = screen.getByRole('textbox', { name: /sms\.campaignName/ })
+  await userEvent.clear(field)
+  await userEvent.type(field, name)
+}
+
+function nameField(): HTMLInputElement {
+  return screen.getByRole('textbox', { name: /sms\.campaignName/ }) as HTMLInputElement
 }
 
 describe('SmsCampaignWizard', () => {
@@ -300,6 +306,8 @@ describe('SmsCampaignWizard', () => {
   it('will not leave the first step without a usable name', async () => {
     render(<SmsCampaignWizard onClose={vi.fn()} />)
 
+    // It opens with a suggested name; take it away to see the guard.
+    await userEvent.clear(nameField())
     expect(
       screen.getByRole('button', { name: 'sms.wizardNext' }).hasAttribute('disabled'),
     ).toBe(true)
@@ -637,6 +645,43 @@ describe('SmsCampaignWizard, in the page it belongs to', () => {
     const nav = container.querySelector('nav')!
     // The four stage chips carry names and a state dot, never an ordinal.
     expect(nav.textContent).not.toMatch(/[1-4]/)
+  })
+})
+
+describe('the suggested name', () => {
+  it('opens filled with a name nobody has used, and says it was suggested', () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    const expected = suggestCampaignName(campaignList.map((c) => c.campaign))
+    expect(expected).toMatch(/^sms-\d{4}-\d{2}-\d{2}$/)
+    expect(nameField().value).toBe(expected)
+    expect(screen.getByText('sms.campaignNameSuggested')).toBeTruthy()
+    // A usable name, so the first step can be left at once.
+    expect(
+      screen.getByRole('button', { name: 'sms.wizardNext' }).hasAttribute('disabled'),
+    ).toBe(false)
+  })
+
+  it('is the followed campaign plus -push for a follow-up', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await userEvent.click(screen.getByRole('radio', { name: 'sms.sourceFollowUp' }))
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: /sms\.followUpPick/ }), 'oct-promo',
+    )
+    expect(nameField().value).toBe('oct-promo-push')
+  })
+
+  it('never replaces a name somebody typed', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await nameCampaign('oct-mine')
+    expect(screen.queryByText('sms.campaignNameSuggested')).toBeNull()
+    await userEvent.click(screen.getByRole('radio', { name: 'sms.sourceFollowUp' }))
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: /sms\.followUpPick/ }), 'oct-promo',
+    )
+    expect(nameField().value).toBe('oct-mine')
   })
 })
 

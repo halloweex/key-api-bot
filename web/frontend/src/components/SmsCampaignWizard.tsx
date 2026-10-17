@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Bookmark, Check, Plus, X } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from './Card'
@@ -29,6 +29,7 @@ import {
 } from '../utils/smsAudience'
 import { clearDraft, loadDraft, saveDraft } from '../utils/smsDraft'
 import { followUpCandidates, followUpParams } from '../utils/smsFollowUp'
+import { suggestCampaignName } from '../utils/smsCampaignName'
 import { smsCost } from '../utils/smsCost'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import type { SmsAudienceCriteria, SmsCampaignSummary } from '../types/api'
@@ -176,6 +177,33 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
     [campaignList],
   )
   const steps = followUp ? STEPS.filter((s) => s !== 'control') : STEPS
+
+  // The name the field was last filled with by the wizard rather than typed.
+  // Only an empty field or that very value is replaced: once somebody types,
+  // the name is theirs. Waits for the campaign list, so the suggestion is
+  // never a name already taken; follows a change of the campaign followed up.
+  //
+  // Keyed on the names as one string, not on the list object: a refetch that
+  // hands back a new object with the same names must not refill a field
+  // somebody has just emptied to type their own.
+  const suggested = useRef<string | null>(null)
+  const [suggestion, setSuggestion] = useState<string | null>(null)
+  const takenNames = campaignList
+    ? campaignList.campaigns.map((c) => c.campaign).join('\n')
+    : null
+  useEffect(() => {
+    if (takenNames == null) return
+    const next = suggestCampaignName(
+      takenNames ? takenNames.split('\n') : [],
+      { followUpOf: followUp ? followUpOf || null : null },
+    )
+    setCampaign((current) => {
+      if (current !== '' && current !== suggested.current) return current
+      suggested.current = next
+      setSuggestion(next)
+      return next
+    })
+  }, [takenNames, followUp, followUpOf])
 
   // One query, and it carries everything the campaign carries — including the
   // value level, which is a filter and so decides who is in the audience at
@@ -412,6 +440,11 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                       onChange={(e) => setCampaign(e.target.value)}
                     />
                   </label>
+                  {suggestion != null && campaign === suggestion && (
+                    <p className="mt-1 text-[11px] text-slate-500">
+                      {t('sms.campaignNameSuggested')}
+                    </p>
+                  )}
                   {campaign.length > 0 && !campaignValid && (
                     <p className="mt-1 text-xs text-amber-700 bg-amber-50 rounded-md px-2 py-1.5">
                       {t('sms.campaignRequired')}
