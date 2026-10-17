@@ -952,16 +952,26 @@ export function useSendSmsCampaign() {
 
   return useMutation<
     SmsSendResult, Error,
-    { campaign: string; text: string; channel: SmsChannel; viber?: SmsViberOptions }
+    {
+      campaign: string
+      text: string
+      /** The campaign name as typed back; the server refuses a send without it. */
+      confirmCampaign: string
+      channel: SmsChannel
+      viber?: SmsViberOptions
+    }
   >({
-    mutationFn: ({ campaign, text, channel, viber }) =>
-      api.sendSmsCampaign(campaign, text, channel, viber),
+    mutationFn: ({ campaign, text, confirmCampaign, channel, viber }) =>
+      api.sendSmsCampaign(campaign, text, confirmCampaign, channel, viber),
     onSuccess: () => {
       // The send stamps sent_at and creates opt-outs, so both the campaign list
       // and the next segmentation are stale.
       queryClient.invalidateQueries({ queryKey: ['smsCampaigns'] })
       queryClient.invalidateQueries({ queryKey: ['smsSegments'] })
     },
+    // Spent or not — a refusal may be the balance itself — the figure on
+    // screen is no longer the one to trust.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['smsBalance'] }),
   })
 }
 
@@ -1022,5 +1032,18 @@ export function useSmsChannels() {
     queryKey: ['smsChannels'] as const,
     queryFn: () => api.getSmsChannels(),
     staleTime: CACHE_TTL.STATIC,
+  })
+}
+
+/** The channels with the gateway's balance, read afresh each time the send
+ *  dialog opens: the figure has to be today's, not the one cached when the
+ *  page loaded. The server checks it again before sending. */
+export function useSmsBalance() {
+  return useQuery<SmsChannelsResponse>({
+    queryKey: ['smsBalance'] as const,
+    queryFn: () => api.getSmsChannels(true),
+    staleTime: 0,
+    refetchOnMount: 'always',
+    retry: false,
   })
 }

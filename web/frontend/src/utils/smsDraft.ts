@@ -23,6 +23,11 @@ export interface SmsCampaignDraft {
   promocode: string
   text: string
   presetName: string
+  /** Building a follow-up rather than a new audience. Kept with the draft so
+   *  a reload cannot quietly turn a follow-up back into a fresh campaign. */
+  followUp: boolean
+  /** The campaign being followed up; '' until one is picked. */
+  followUpOf: string
 }
 
 export function emptyDraft(): SmsCampaignDraft {
@@ -32,6 +37,8 @@ export function emptyDraft(): SmsCampaignDraft {
     promocode: '',
     text: '',
     presetName: '',
+    followUp: false,
+    followUpOf: '',
   }
 }
 
@@ -49,6 +56,8 @@ export function loadDraft(): SmsCampaignDraft {
       promocode: typeof stored.promocode === 'string' ? stored.promocode : '',
       text: typeof stored.text === 'string' ? stored.text : '',
       presetName: typeof stored.presetName === 'string' ? stored.presetName : '',
+      followUp: stored.followUp === true,
+      followUpOf: typeof stored.followUpOf === 'string' ? stored.followUpOf : '',
     }
   } catch {
     // A corrupt or unavailable store must cost a draft, never the page.

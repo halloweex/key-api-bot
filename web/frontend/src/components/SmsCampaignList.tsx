@@ -117,6 +117,13 @@ export const SmsCampaignList = memo(function SmsCampaignList({
                         {t(`sms.basis${c.ltvBasis === 'margin' ? 'Margin' : 'Revenue'}`)}
                         {c.promocode ? ` · ${c.promocode}` : ''}
                       </div>
+                      {/* No control of its own is not a missing number: it
+                          is read on the campaign named here. */}
+                      {c.followUpOf && (
+                        <div className="text-[11px] text-sky-700">
+                          {t('sms.followUpTag', { root: c.followUpOf })}
+                        </div>
+                      )}
                     </Td>
                     <Td align="right" tabular>{formatNumber(c.target)}</Td>
                     <Td align="right" tabular>{formatNumber(c.holdout)}</Td>

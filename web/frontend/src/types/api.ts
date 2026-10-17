@@ -1469,6 +1469,10 @@ export type SmsFunnelStage =
   | 'phone'
   | 'subscribed'
   | 'uniquePhone'
+  // A follow-up's roster: the first campaign's target arm, and those of them
+  // the gateway accepted. Its last stage is `subscribed`, as above.
+  | 'rootTarget'
+  | 'accepted'
 
 export interface SmsFunnelStep {
   stage: SmsFunnelStage
@@ -1492,6 +1496,9 @@ export interface SmsSegmentsResponse {
     filters?: Record<string, unknown>
   }
   grouping?: SmsGrouping
+  /** Set when this is a follow-up's roster — the campaign it follows. Its
+   *  `criteria` then carry no thresholds: the people are that campaign's. */
+  followUpOf?: string | null
   funnel: SmsFunnelStep[]
   segments: SmsSegment[]
   totals: { customers: number; target: number; holdout: number }
@@ -1521,6 +1528,9 @@ export interface SmsCampaignSummary {
   costTotal?: number | null
   delivered?: number | null
   undelivered?: number | null
+  /** The campaign this one follows up — the same people, a second message,
+   *  measured on that campaign's control. Null for a campaign of its own. */
+  followUpOf?: string | null
 }
 
 export interface SmsCampaignsResponse {
@@ -1594,6 +1604,19 @@ export interface SmsCampaignResultsResponse {
     holdout: SmsGroupStats
     comparison: SmsComparison | null
   }
+  /** Set on a follow-up: it has no control, and is read on this campaign. */
+  followUpOf?: string | null
+  /** Follow-ups sent to this campaign's people, whose second message is
+   *  inside this campaign's lift. */
+  followUps?: SmsFollowUpRef[]
+}
+
+/** A follow-up, as the campaign it follows lists it. */
+export interface SmsFollowUpRef {
+  campaign: string
+  sentAt: string | null
+  /** Accepted by the gateway once sent; the roster before that. */
+  recipients: number
 }
 
 export interface SmsSendResult {
@@ -1616,6 +1639,9 @@ export interface SmsChannelsResponse {
   viberSender: string | null
   /** Gateway tariff per message part, in ₴. Absent on older deployments. */
   pricePerPart?: number
+  /** The account balance in ₴ — only when asked for (`include_balance`), and
+   *  null when the gateway could not say. The send checks it again itself. */
+  balance?: number | null
 }
 
 export type SmsChannel = 'sms' | 'viber_sms'

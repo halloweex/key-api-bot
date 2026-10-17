@@ -7,13 +7,13 @@ import re
 from datetime import date as _date, datetime as _datetime
 
 from fastapi import APIRouter, Path, Query, Request, HTTPException, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from typing import Optional
 
 from core.gender import CONFIDENCE_LADDER, GENDERS
 from core.repositories.customers import (
-    BUILTIN_AUDIENCE_PRESETS, SMS_GROUPINGS, SMS_LTV_BASES, SMS_TIER_DEFAULTS,
-    SmsAudienceFilters,
+    BUILTIN_AUDIENCE_PRESETS, SMS_GROUPINGS, SMS_LTV_BASES,
+    SMS_RECENT_CAMPAIGN_HOURS, SMS_TIER_DEFAULTS, SmsAudienceFilters,
 )
 from core.turbosms import (
     PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
@@ -205,7 +205,22 @@ def _text_list(raw: Optional[str]) -> list:
     return out
 
 
+# Every parameter that decides who is in an audience. A follow-up's audience is
+# decided by the campaign it follows and nothing else, so any of these beside
+# `follow_up_of` is refused rather than ignored: a filter that was silently
+# dropped reads, to whoever typed it, as a filter that worked.
+_AUDIENCE_SHAPING_PARAMS = frozenset({
+    "max_recency_days", "ltv_basis", "vip_ltv", "core_ltv", "core_min_orders",
+    "reactivation_max_recency", "tier", "grouping",
+    "recency_min", "recency_max", "orders_min", "orders_max", "ltv_min", "ltv_max",
+    "aov_min", "aov_max", "first_order_from", "first_order_to", "city", "gender",
+    "gender_min_confidence", "brand", "category_id", "source_id", "promocode_used",
+    "bought_within_days",
+})
+
+
 def _sms_segment_params(
+    request: Request,
     max_recency_days: int = Query(270, ge=30, le=730),
     ltv_basis: str = Query(
         "revenue",
@@ -254,12 +269,44 @@ def _sms_segment_params(
     source_id: Optional[str] = Query(None, max_length=200),
     promocode_used: Optional[str] = Query(None, max_length=40),
     bought_within_days: Optional[int] = Query(None, ge=1, le=3650),
+    # ─── A follow-up ─────────────────────────────────────────────────────
+    follow_up_of: Optional[str] = Query(
+        None, pattern=_CAMPAIGN_PATTERN,
+        description="A sent campaign to follow up: the audience becomes exactly its "
+                    "accepted target arm, with no control of its own",
+    ),
 ) -> dict:
     """Validate and normalise the segmentation criteria shared by both endpoints."""
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    if follow_up_of is not None:
+        shaping = sorted(k for k in request.query_params if k in _AUDIENCE_SHAPING_PARAMS)
+        if shaping:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"a follow-up goes to exactly the people {follow_up_of!r} reached; "
+                    f"{', '.join(shaping)} cannot narrow it — leave them out, or "
+                    f"build a new audience instead"
+                ),
+            )
+        # Forced, and refused when asked for: a follow-up withholding people of
+        # its own would draw a second control out of the first one's targets,
+        # and the first one's control is the only baseline either has.
+        if "holdout_pct" in request.query_params and holdout_pct != 0:
+            raise HTTPException(
+                status_code=400,
+                detail="a follow-up has no control group of its own — it is measured "
+                       f"on {follow_up_of!r}'s control, so holdout_pct must be 0",
+            )
+        if follow_up_of == campaign:
+            raise HTTPException(
+                status_code=400, detail="a campaign cannot follow itself up",
+            )
+        holdout_pct = 0
 
     if ltv_basis not in SMS_LTV_BASES:
         raise HTTPException(
@@ -385,7 +432,45 @@ def _sms_segment_params(
         "tier": tiers,
         "grouping": grouping,
         "filters": filters,
+        "follow_up_of": follow_up_of,
     }
+
+
+async def _sms_audience(store, criteria: dict, *, include_customers: bool, limit: int) -> dict:
+    """The audience `criteria` names — the one call the preview and the freeze share.
+
+    A follow-up is read off the campaign it follows; everything else is
+    segmented. Both answers have one shape, and both routes go through here,
+    so the roster frozen is the roster that was on screen.
+    """
+    root = criteria["follow_up_of"]
+    if root is None:
+        segment_args = {k: v for k, v in criteria.items() if k != "follow_up_of"}
+        return await store.get_sms_segments(
+            include_customers=include_customers, limit=limit, **segment_args,
+        )
+
+    try:
+        data = await store.get_sms_follow_up_audience(
+            root, campaign=criteria["campaign"],
+            include_customers=include_customers, limit=limit,
+        )
+    except ValueError as e:
+        status = 404 if "not frozen" in str(e) else 409
+        raise HTTPException(status_code=status, detail=str(e))
+
+    # `api_gate` checked the sales type in this request's query string, and only
+    # that one. Inheriting a different one from the root would let a follow-up
+    # reach a roster the caller was never cleared to see.
+    if data["salesType"] != criteria["sales_type"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"campaign {root!r} was built for sales_type={data['salesType']}; "
+                f"a follow-up inherits it — pass sales_type={data['salesType']}"
+            ),
+        )
+    return data
 
 
 @router.get("/customers/sms-segments")
@@ -415,6 +500,10 @@ async def get_sms_segments(
 
     `view` covers the sizes; the rows themselves need `edit`, the same
     permission the CSV download needs, because they are the same data.
+
+    `follow_up_of=X` previews a follow-up instead: X's accepted target arm,
+    less anyone opted out since, in the same shape — the same function the
+    freeze calls, so what is frozen is what this showed.
     """
     if include_customers and not await has_permission(user, "sms", "edit"):
         raise HTTPException(
@@ -422,8 +511,8 @@ async def get_sms_segments(
             detail="Customer rows require edit access to SMS campaigns",
         )
     store = await get_store()
-    return await store.get_sms_segments(
-        include_customers=include_customers, limit=limit, **criteria,
+    return await _sms_audience(
+        store, criteria, include_customers=include_customers, limit=limit,
     )
 
 
@@ -457,8 +546,17 @@ async def export_sms_segments_csv(
     shifts daily, so a roster that is not recorded now cannot be reconstructed
     later — and without it there is no control group to measure against.
     """
+    if criteria["follow_up_of"] is not None:
+        # The file and its freeze describe a segmented audience: tiers, LTV,
+        # city. A follow-up is somebody else's roster sent twice, and it is
+        # created where nothing leaves as a file.
+        raise HTTPException(
+            status_code=400,
+            detail="a follow-up is created with POST /customers/sms-campaigns, "
+                   "not exported",
+        )
     store = await get_store()
-    data = await store.get_sms_segments(include_customers=True, limit=limit, **criteria)
+    data = await _sms_audience(store, criteria, include_customers=True, limit=limit)
 
     # Freezing must happen before the file leaves — the roster recorded here is
     # the only control group that will exist when results are measured.
@@ -727,6 +825,12 @@ async def create_sms_campaign(
     the send goes through the gateway, and the file was pure ceremony. The
     roster still has to be recorded at this instant for the campaign to be
     measurable at all; that is what this endpoint is for.
+
+    `follow_up_of=X` freezes a follow-up: exactly X's target members whose
+    message the gateway accepted, less anyone opted out since, with no
+    control of its own. X must be sent and must not itself be a follow-up.
+    The link is kept in the campaign's criteria, where the send's overlap
+    check and the results read it.
     """
     if criteria["campaign"] == "default":
         raise HTTPException(
@@ -735,7 +839,7 @@ async def create_sms_campaign(
         )
 
     store = await get_store()
-    data = await store.get_sms_segments(include_customers=True, limit=limit, **criteria)
+    data = await _sms_audience(store, criteria, include_customers=True, limit=limit)
 
     if data["truncated"]:
         raise HTTPException(
@@ -749,12 +853,16 @@ async def create_sms_campaign(
             detail="this audience is empty — nothing to freeze",
         )
 
+    # A follow-up carries its root's basis; the query's own default would
+    # misdescribe the figures frozen with every member.
+    ltv_basis = (data["ltvBasis"] if criteria["follow_up_of"]
+                 else criteria["ltv_basis"])
     try:
         frozen = await store.freeze_sms_campaign(
             campaign=criteria["campaign"],
             customers=data["customers"],
             criteria=data["criteria"],
-            ltv_basis=criteria["ltv_basis"],
+            ltv_basis=ltv_basis,
             sales_type=criteria["sales_type"],
             holdout_pct=criteria["holdout_pct"],
             promocode=promocode,
@@ -764,9 +872,10 @@ async def create_sms_campaign(
         raise HTTPException(status_code=409, detail=str(e))
 
     logger.info(
-        "SMS campaign created: user=%s campaign=%s grouping=%s target=%d holdout=%d",
+        "SMS campaign created: user=%s campaign=%s grouping=%s follow_up_of=%s "
+        "target=%d holdout=%d",
         user.get("user_id"), criteria["campaign"], criteria["grouping"],
-        data["totals"]["target"], data["totals"]["holdout"],
+        criteria["follow_up_of"], data["totals"]["target"], data["totals"]["holdout"],
     )
     return {
         "campaign": criteria["campaign"],
@@ -817,6 +926,92 @@ async def mark_sms_campaign_sent(
     return result
 
 
+# What the balance has to cover, over the configured tariff.
+#
+# The contract rate in config (1.28 ₴) holds for top-ups of 10 000 ₴ and more;
+# a smaller top-up bills 1.29. Two percent over the configured figure covers
+# that and rounding, so a send this guard lets through is not then cut short
+# at the gateway — which bills batches it then fails to dispatch, and took the
+# balance to −675 ₴ the one time it ran dry mid-roster.
+SMS_BALANCE_MARGIN = 1.02
+
+# How long the page waits for the balance before showing none. The send reads
+# it on the client's own timeout: there, an answer is worth waiting for.
+_BALANCE_READ_TIMEOUT_S = 5.0
+
+
+def _refusal(detail: str, reason: str, **extra) -> JSONResponse:
+    """A 409 that says why in `detail`, as every refusal here does, and carries
+    the figures behind it beside the sentence for a page that wants them."""
+    return JSONResponse(
+        status_code=409, content={"detail": detail, "reason": reason, **extra},
+    )
+
+
+async def _refuse_before_sending(
+    store, campaign: str, recipients: int, text: str,
+) -> Optional[JSONResponse]:
+    """Why this claimed campaign must not go to the gateway, or None.
+
+    Asked after the claim and before a single message leaves, so a refusal
+    hands the campaign back intact. Both questions are about money and about
+    the measurement, in that order of cheapness: the database first, the
+    gateway second.
+    """
+    conflicts = await store.find_sms_send_conflicts(campaign)
+    if conflicts:
+        named = "; ".join(
+            f"{c['people']} in the {c['arm']} arm of {c['campaign']!r} "
+            f"(sent {c['sentAt']})"
+            for c in conflicts
+        )
+        why = [f"refused: this roster overlaps campaigns sent in the last "
+               f"{SMS_RECENT_CAMPAIGN_HOURS} h — {named}."]
+        if any(c["arm"] == "control" for c in conflicts):
+            why.append("Messaging another campaign's control group destroys its "
+                       "measurement, and nothing overrides that.")
+        if any(c["arm"] == "target" for c in conflicts):
+            why.append("A second message to another campaign's recipients has to "
+                       "be a declared follow-up of it (follow_up_of).")
+        why.append("Nothing was sent; the campaign is unsent.")
+        return _refusal(" ".join(why), "recent_campaign", conflicts=conflicts)
+
+    parts = count_segments(text).parts
+    price = TurboSmsConfig().price_per_part
+    # Priced as SMS for everyone, Viber included: the hybrid falls back to SMS
+    # for whoever Viber cannot reach, and that is not known until after.
+    cost = round(recipients * parts * price * SMS_BALANCE_MARGIN, 2)
+    figures = {"recipients": recipients, "parts": parts, "pricePerPart": price,
+               "margin": SMS_BALANCE_MARGIN, "cost": cost}
+
+    balance, why = None, None
+    try:
+        async with TurboSmsClient() as client:
+            balance = await client.balance()
+    except TurboSmsError as e:
+        why = str(e)
+
+    if balance is None:
+        return _refusal(
+            f"could not read the TurboSMS balance ({why or 'the gateway gave no figure'}) "
+            f"— this send costs up to {cost:.2f} ₴ and is not started without "
+            f"knowing it is covered. Nothing was sent; the campaign is unsent.",
+            "balance_unreadable",
+            balance=None, shortfall=None, **figures,
+        )
+    if balance < cost:
+        shortfall = round(cost - balance, 2)
+        return _refusal(
+            f"the TurboSMS balance is {balance:.2f} ₴ and this send costs up to "
+            f"{cost:.2f} ₴ ({recipients} recipients × {parts} part(s) × {price} ₴, "
+            f"+{round((SMS_BALANCE_MARGIN - 1) * 100)}%) — {shortfall:.2f} ₴ short. "
+            f"Top up and send again; nothing was sent and the campaign is unsent.",
+            "balance_short",
+            balance=balance, shortfall=shortfall, **figures,
+        )
+    return None
+
+
 @router.post("/customers/sms-campaigns/{campaign}/send")
 @limiter.limit("3/minute")
 async def send_sms_campaign(
@@ -827,6 +1022,12 @@ async def send_sms_campaign(
     viber_text: Optional[str] = Query(None, max_length=1000),
     button_caption: Optional[str] = Query(None, max_length=30),
     button_url: Optional[str] = Query(None, max_length=300),
+    # Optional in the signature only so that leaving it out is a 409 with the
+    # reason, like a wrong one, rather than FastAPI's 422 about a field.
+    confirm_campaign: Optional[str] = Query(
+        None, max_length=200,
+        description="The campaign name, typed back by whoever is sending",
+    ),
     user: dict = Depends(require_permission("sms", "edit")),
 ):
     """
@@ -844,7 +1045,23 @@ async def send_sms_campaign(
     to stand on its own with the link spelled out.
 
     Sending twice is refused: the campaign is stamped sent on the first pass.
+
+    Refused before the claim when `confirm_campaign` is missing or is not the
+    campaign's name. Refused after it — handed back, nothing sent — when the
+    roster overlaps a campaign sent in the last day (another's control at
+    all, another's targets unless this is its declared follow-up), when the
+    TurboSMS balance cannot be read, or when it does not cover the send.
     """
+    # The name typed back is checked here and not only in the dialog: a
+    # replayed request, a script or a second tab would otherwise skip the one
+    # deliberate act this send asks for. Before the claim, so it costs nothing.
+    if (confirm_campaign or "").strip() != campaign:
+        raise HTTPException(
+            status_code=409,
+            detail=f"type the campaign name {campaign!r} to confirm the send — "
+                   f"confirm_campaign is missing or does not match",
+        )
+
     # Assembled before the claim, because it is built from query parameters
     # alone and can be rejected. Taking the claim first meant a caption with no
     # URL answered 400 with the campaign stamped sent — and nothing clears that
@@ -865,6 +1082,25 @@ async def send_sms_campaign(
         raise HTTPException(status_code=409, detail="campaign has no target recipients")
 
     by_phone = {t["phone"]: t["buyerId"] for t in targets}
+
+    try:
+        refusal = await _refuse_before_sending(store, campaign, len(by_phone), text)
+    except Exception:
+        # Nothing has left yet. A guard that could not answer must not leave
+        # the campaign claimed, or it is stuck unsendable with its roster unsent.
+        try:
+            await store.release_sms_campaign(campaign)
+        except Exception:  # noqa: BLE001 — the original failure is the one to raise
+            logger.exception("SMS claim could not be released: campaign=%s", campaign)
+        raise
+    if refusal is not None:
+        await store.release_sms_campaign(campaign)
+        logger.warning(
+            "SMS campaign send refused before the gateway: user=%s campaign=%s "
+            "reason=%s",
+            user.get("user_id"), campaign, json.loads(refusal.body)["reason"],
+        )
+        return refusal
 
     # A roster past the gateway's per-request limit is split, so a later batch
     # can fail with earlier ones already delivered. Those have to be recorded
@@ -977,16 +1213,37 @@ def _build_viber(
 
 @router.get("/customers/sms/channels")
 @limiter.limit("30/minute")
-async def get_sms_channels(request: Request, user: dict = Depends(require_permission("sms", "view"))):
+async def get_sms_channels(
+    request: Request,
+    include_balance: bool = Query(
+        False, description="Also ask the gateway for the account balance",
+    ),
+    user: dict = Depends(require_permission("sms", "view")),
+):
     """
     Which channels this deployment can actually send on.
 
     Viber sender names are registered separately from SMS alpha names, so a
     working SMS setup says nothing about Viber. The dashboard needs to know
     before it offers the choice, rather than finding out from a 502.
+
+    `balance` is the TurboSMS account balance in ₴, asked of the gateway only
+    with `include_balance=true` — the send dialog asks, every other reader of
+    this configuration does not, and a configuration read should not depend on
+    the gateway answering. Null when not asked, not configured, or unreadable.
+    The send checks the balance again itself; this figure is for the page.
     """
     config = TurboSmsConfig()
+    balance = None
+    if include_balance and config.configured:
+        config.timeout = _BALANCE_READ_TIMEOUT_S
+        try:
+            async with TurboSmsClient(config) as client:
+                balance = await client.balance()
+        except TurboSmsError as e:
+            logger.warning("TurboSMS balance unreadable: %s", e)
     return {
+        "balance": balance,
         "sms": config.configured,
         "viber": config.viber_configured,
         "smsSender": config.sender or None,

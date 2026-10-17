@@ -145,9 +145,11 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/brands` | All brands list |
 | `/api/brands/analytics` | Top brands by revenue and quantity |
 | `/api/customers/insights` | New vs returning, AOV trend, repeat rate |
-| `/api/customers/sms-segments` | Campaign audience — one arm or one per value level (needs `sms` view; customer rows need `sms` edit) |
+| `/api/customers/sms-segments` | Campaign audience — one arm or one per value level (needs `sms` view; customer rows need `sms` edit); `follow_up_of=X` previews a follow-up |
 | `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (needs `sms` edit) |
-| `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, needs `sms` edit) |
+| `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, needs `sms` edit); `follow_up_of=X` freezes a follow-up |
+| `/api/customers/sms-campaigns/{c}/send` | Send through TurboSMS (POST, needs `sms` edit); requires `confirm_campaign`, refuses on balance or a recent overlap — see "What stops an SMS send" |
+| `/api/customers/sms/channels` | Configured channels and tariff; `include_balance=true` adds the gateway's balance |
 | `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (needs `sms` view/edit) |
 | `/api/admin/users/{id}/features` | Which tabs one account may open (PATCH, admin) |
 | `/api/managers` | Managers with sales_type and 365d revenue (admin only) |
@@ -818,6 +820,45 @@ call, from `ROLE_PERMISSIONS`. It used to return the moment the table held a
 row, which meant any feature added after the first deploy was denied to every
 DB-backed role. Turning a permission off writes `false` rather than deleting
 the row, so re-seeding cannot resurrect a decision.
+
+### What stops an SMS send, and the one deliberate second message
+
+In August 2026 a roster of 5 550 was partly sent twice: the stamp came after
+the gateway call and a 10 s client timeout invited a second press. The claim
+(`get_sms_campaign_targets`, one conditional UPDATE taken before anything
+leaves) closed that. Four more things now stand between a press and the
+gateway, and each refusal hands the claim back with nothing sent:
+
+- **The name typed back is checked by the server** — `confirm_campaign` on
+  `POST …/{campaign}/send`, compared after strip, a 409 before the claim. The
+  dialog's disabled button was the only check and a replay skipped it.
+- **Another campaign sent in the last day** (`SMS_RECENT_CAMPAIGN_HOURS`, a
+  constant, not an env var) is asked after the claim, so two operators sending
+  overlapping rosters at once each see the other's `sent_at` and both are
+  refused. Matched on the phone. Another campaign's **control** is never
+  messaged — the holdout is drawn per (buyer, campaign name), so a second
+  campaign over the same audience reached ~10% of the first one's control and
+  destroyed its measurement. Its **targets** only by a declared follow-up of it
+  (or of the root they share).
+- **The balance** (`TurboSmsClient.balance()`) must cover recipients × parts ×
+  tariff × `SMS_BALANCE_MARGIN` (1.02): config says 1.28 ₴ and a top-up under
+  10 000 ₴ bills 1.29, and the gateway bills batches it then fails to dispatch
+  (−675 ₴ once). Viber is priced as SMS for everyone. An unreadable balance is
+  a refusal, not a pass. Every refusal is a 409 whose JSON carries `reason`
+  (`recent_campaign`, `balance_short`, `balance_unreadable`) and the figures.
+- **A guard that raises** releases the claim before the error goes out.
+
+**A follow-up** (owner's decision 2026-10-17) is the same people a second time
+the same day — a "last day" push. As an ordinary campaign it would re-draw a
+control and message part of the first one's. So `follow_up_of=X` on the
+preview and the freeze makes the roster exactly X's target members whose
+message was accepted, less current opt-outs, `holdout_pct` forced to 0. X must
+be sent and not itself a follow-up (followers point at the root). Any audience
+parameter beside it is a 400, not ignored. The link is `"followUpOf"` inside
+the stored `criteria` JSON — no column, so no revision — read in Python, not
+with a JSON operator, because the two engines spell those differently. Its
+results say it has no control and point at X; X's results list its follow-ups,
+because X's lift then includes the second message.
 
 ### Order statuses
 Revenue excludes KeyCRM's lost/cancel group (`status_group_id = 6`), verified

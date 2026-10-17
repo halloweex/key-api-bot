@@ -324,3 +324,40 @@ describe('SmsCampaignResults, read by someone who is not a statistician', () => 
     expect(screen.getByText(/sms\.headlineApparent/)).toBeInTheDocument()
   })
 })
+
+describe('SmsCampaignResults, for a follow-up and the campaign it followed', () => {
+  it('says a follow-up has no control and where its effect is read', () => {
+    const onCampaignChange = vi.fn()
+    results.current = response({
+      campaign: 'aug-last-day', followUpOf: 'aug-promo', followUps: [],
+      overall: { target: stats(), holdout: stats({ contacts: 0, converted: 0 }),
+                 comparison: null },
+      segments: [{ tier: 'ALL', target: stats(),
+                   holdout: stats({ contacts: 0, converted: 0 }), comparison: null }],
+    })
+    render(<SmsCampaignResults campaign="aug-last-day" onCampaignChange={onCampaignChange} />)
+
+    expect(screen.getByText(/sms\.followUpResultsNote/)).toBeTruthy()
+    // The way to the reading that means something is one click.
+    screen.getByRole('button', { name: /sms\.followUpOpenRoot/ }).click()
+    expect(onCampaignChange).toHaveBeenCalledWith('aug-promo')
+  })
+
+  it('lists the follow-ups on the campaign whose lift now includes them', () => {
+    renderWith(response({
+      followUps: [{ campaign: 'aug-last-day', sentAt: '2026-08-05T18:00:00Z',
+                    recipients: 4900 }],
+    }))
+
+    expect(screen.getByText('sms.followUpsTitle')).toBeTruthy()
+    expect(screen.getByText(/sms\.followUpsItem.*aug-last-day/)).toBeTruthy()
+    expect(screen.getByText('sms.followUpsNote')).toBeTruthy()
+  })
+
+  it('says neither for a campaign that was never followed up', () => {
+    renderWith(response({ followUps: [] }))
+
+    expect(screen.queryByText('sms.followUpsTitle')).toBeNull()
+    expect(screen.queryByText(/sms\.followUpResultsNote/)).toBeNull()
+  })
+})

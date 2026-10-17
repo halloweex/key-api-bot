@@ -10,6 +10,7 @@ import { SkeletonCard } from './Skeleton'
 import { DataTable, Th, Td, Tr } from './DataTable'
 import { SmsResultsGuide } from './SmsResultsGuide'
 import { SmsLiftForest, type ForestRow } from './SmsLiftForest'
+import { SmsFollowUpNotice, SmsFollowUpsLine } from './SmsFollowUpNotice'
 import { useSmsCampaigns, useSmsCampaignResults } from '../hooks/useApi'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import type { SmsComparison, SmsGroupStats } from '../types/api'
@@ -331,6 +332,27 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
 
         {data && !isLoading && (
           <>
+            {/* ── A follow-up compares nothing on its own ─────────────────
+                It has no control; its effect is in the campaign it follows,
+                as two messages against none. Said before the table, which
+                would otherwise read as a campaign with no result. */}
+            {data.followUpOf && (
+              <div className="mb-4">
+                <SmsFollowUpNotice
+                  root={data.followUpOf}
+                  context="results"
+                  onOpenRoot={() => setCampaign(data.followUpOf ?? null)}
+                />
+              </div>
+            )}
+
+            {/* ── …and a campaign that was followed up says by what ────── */}
+            {(data.followUps?.length ?? 0) > 0 && (
+              <div className="mb-4">
+                <SmsFollowUpsLine followUps={data.followUps ?? []} />
+              </div>
+            )}
+
             {/* ── How much of the arm was actually treated ────────────── */}
             {notSent > 0 && (
               <div className="mb-4 text-xs text-amber-800 bg-amber-50 rounded-md px-3 py-2 leading-snug">

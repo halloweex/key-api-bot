@@ -8,6 +8,8 @@ import { Select } from './Select'
 import { ApiErrorState } from './ApiErrorState'
 import { SmsAudienceForm } from './SmsAudienceForm'
 import { SmsAudiencePreview } from './SmsAudiencePreview'
+import { SmsAudienceSource } from './SmsAudienceSource'
+import { SmsFollowUpPicker } from './SmsFollowUpPicker'
 import { SmsCostLine } from './SmsCostLine'
 import { SmsSendDialog } from './SmsSendDialog'
 import { SmsTestSendDialog } from './SmsTestSendDialog'
@@ -17,6 +19,7 @@ import {
   useDeleteSmsAudiencePreset,
   useSaveSmsAudiencePreset,
   useSmsAudiencePresets,
+  useSmsCampaigns,
   useSmsChannels,
   useSmsSegments,
 } from '../hooks/useApi'
@@ -24,6 +27,7 @@ import {
   audienceFromPreset, audienceToParams, describeAudience, invertedRanges,
 } from '../utils/smsAudience'
 import { clearDraft, loadDraft, saveDraft } from '../utils/smsDraft'
+import { followUpCandidates, followUpParams } from '../utils/smsFollowUp'
 import { smsCost } from '../utils/smsCost'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import type { SmsAudienceCriteria, SmsCampaignSummary } from '../types/api'
@@ -43,6 +47,11 @@ import type { SmsAudienceCriteria, SmsCampaignSummary } from '../types/api'
 // The audience is a live preview all the way through: the counter under the
 // filters is the same query that will be frozen, so what is on screen at the
 // moment of pressing "create" is what gets recorded.
+//
+// A follow-up is the other way to start: the people a sent campaign reached,
+// messaged a second time. It has no audience to build and no control of its
+// own — it is read on the first campaign's control — so it skips those steps
+// and its preview and freeze are one `follow_up_of` query.
 
 const CAMPAIGN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/
 const SMS_LIMIT = 600
@@ -144,17 +153,28 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   const [testing, setTesting] = useState(false)
   const [created, setCreated] = useState<SmsCampaignSummary | null>(null)
   const [sending, setSending] = useState(false)
+  const [followUp, setFollowUp] = useState(restored.followUp)
+  const [followUpOf, setFollowUpOf] = useState(restored.followUpOf)
 
   // Every keystroke, because the point is surviving the misclick nobody plans.
   useEffect(() => {
-    saveDraft({ audience, campaign, promocode, text, presetName: selectedPreset })
-  }, [audience, campaign, promocode, text, selectedPreset])
+    saveDraft({
+      audience, campaign, promocode, text, presetName: selectedPreset,
+      followUp, followUpOf,
+    })
+  }, [audience, campaign, promocode, text, selectedPreset, followUp, followUpOf])
 
   const { data: presetData } = useSmsAudiencePresets()
   const { data: channels } = useSmsChannels()
   const savePreset = useSaveSmsAudiencePreset()
   const deletePreset = useDeleteSmsAudiencePreset()
   const create = useCreateSmsCampaign()
+  const { data: campaignList } = useSmsCampaigns()
+  const candidates = useMemo(
+    () => followUpCandidates(campaignList?.campaigns ?? []),
+    [campaignList],
+  )
+  const steps = followUp ? STEPS.filter((s) => s !== 'control') : STEPS
 
   // One query, and it carries everything the campaign carries — including the
   // value level, which is a filter and so decides who is in the audience at
@@ -179,8 +199,12 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   // middle of writing a number.
   const inverted = useMemo(() => invertedRanges(audience.filters), [audience.filters])
 
+  // A follow-up's query changes only when a campaign is picked, so it is not
+  // debounced; and it asks for nothing but the campaign it follows.
+  const followUpQuery = followUpOf ? followUpParams(followUpOf) : ''
   const { data, isLoading, error, refetch } = useSmsSegments(
-    settledParams, inverted.length === 0,
+    followUp ? followUpQuery : settledParams,
+    followUp ? Boolean(followUpOf) : inverted.length === 0,
   )
 
   const selectedSaved = (presetData?.presets ?? []).some(
@@ -248,17 +272,23 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   }
 
   function handleCreate() {
-    const params = audienceToParams(audience, {
-      campaign,
-      promocode: promocode.trim() || undefined,
-    })
+    // The same query the preview ran, plus the name and the code: the roster
+    // frozen is the one that was on screen.
+    const params = followUp
+      ? followUpParams(followUpOf, {
+          campaign, promocode: promocode.trim() || undefined,
+        })
+      : audienceToParams(audience, {
+          campaign,
+          promocode: promocode.trim() || undefined,
+        })
     create.mutate(params, {
       onSuccess: (result) => {
         setCreated({
           campaign: result.campaign,
-          ltvBasis: audience.ltvBasis,
+          ltvBasis: data?.ltvBasis ?? audience.ltvBasis,
           salesType: 'retail',
-          holdoutPct: audience.holdoutPct,
+          holdoutPct: followUp ? 0 : audience.holdoutPct,
           promocode: promocode.trim() || null,
           exportedAt: new Date().toISOString(),
           sentAt: null,
@@ -266,6 +296,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
           members: result.totals.customers,
           target: result.totals.target,
           holdout: result.totals.holdout,
+          followUpOf: followUp ? followUpOf : null,
         })
         // From here the campaign exists on the server; a draft of it would be
         // a stale copy that reopens as a half-built duplicate.
@@ -308,7 +339,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
           </Button>
         </div>
         <nav className="mt-2 flex flex-wrap gap-1" aria-label={t('sms.wizardTitle')}>
-          {STEPS.map((s) => (
+          {steps.map((s) => (
             <StepHeader
               key={s} step={s} current={step}
               done={doneUpTo[s] && step !== s}
@@ -331,7 +362,11 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
               {campaign || t('sms.summaryUnnamed')}
             </div>
             <div className="text-xs text-slate-500 mt-0.5">
-              {describeAudience(audience, t)}
+              {!followUp
+                ? describeAudience(audience, t)
+                : followUpOf
+                  ? t('sms.followUpSummary', { root: followUpOf })
+                  : t('sms.followUpPickFirst')}
             </div>
           </div>
           <div>
@@ -380,6 +415,17 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   )}
                 </div>
 
+                <SmsAudienceSource followUp={followUp} onChange={setFollowUp} />
+
+                {followUp ? (
+                  <SmsFollowUpPicker
+                    candidates={candidates}
+                    value={followUpOf || null}
+                    onChange={(c) => setFollowUpOf(c ?? '')}
+                    recipients={followUpOf ? data?.totals.target : undefined}
+                  />
+                ) : (
+                <>
                 <SmsAudienceForm
                   audience={audience}
                   onChange={editAudience}
@@ -458,13 +504,15 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                     </div>
                   )}
                 </div>
+                </>
+                )}
 
 
                 <StepActions
                   primary={
                     <Button
                       size="sm"
-                      onClick={() => setStep('control')}
+                      onClick={() => setStep(followUp ? 'message' : 'control')}
                       disabled={target === 0 || !campaignValid}
                     >
                       {t('sms.wizardNext')}
@@ -541,7 +589,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                 <SmsCostLine cost={cost} limit={SMS_LIMIT} recipients={target} />
 
                 <StepActions
-                  onBack={() => setStep('control')}
+                  onBack={() => setStep(followUp ? 'audience' : 'control')}
                   secondary={
                     <Button variant="secondary" size="sm" onClick={() => setTesting(true)}>
                       {t('sms.testSend')}
@@ -590,9 +638,11 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   <StepActions
                     secondary={
                       <>
-                        <Button variant="secondary" size="sm" onClick={handleCsv}>
-                          {t('sms.downloadCsv')}
-                        </Button>
+                        {!followUp && (
+                          <Button variant="secondary" size="sm" onClick={handleCsv}>
+                            {t('sms.downloadCsv')}
+                          </Button>
+                        )}
                         <Button variant="secondary" size="sm" onClick={onClose}>
                           {t('sms.wizardDone')}
                         </Button>

@@ -61,6 +61,38 @@ const data: SmsSegmentsResponse = {
 }
 
 const segmentParams: string[] = []
+
+// Sent campaigns the follow-up list chooses from. Built against the real
+// clock, because the wizard offers the last seven days of it.
+const hoursAgo = (h: number) => new Date(Date.now() - h * 3600 * 1000).toISOString()
+const listed = (
+  campaign: string, sentAt: string | null, followUpOf: string | null = null,
+) => ({
+  campaign, ltvBasis: 'margin' as const, salesType: 'retail', holdoutPct: 10,
+  promocode: null, exportedAt: sentAt, sentAt, notes: null,
+  members: 1000, target: 900, holdout: 100, recipientsSent: 880, followUpOf,
+})
+const campaignList = [
+  listed('oct-promo', hoursAgo(3)),
+  listed('oct-promo-noon', hoursAgo(1), 'oct-promo'),   // a follow-up itself
+  listed('sep-promo', hoursAgo(24 * 10)),               // too old
+  listed('nov-draft', null),                            // never sent
+]
+
+/** What the server answers for `follow_up_of`: the root's accepted targets,
+ *  no control. */
+const followUpData: SmsSegmentsResponse = {
+  ...data,
+  campaign: 'default',
+  followUpOf: 'oct-promo',
+  funnel: [
+    { stage: 'rootTarget', remaining: 900 },
+    { stage: 'accepted', remaining: 880 },
+    { stage: 'subscribed', remaining: 871 },
+  ],
+  segments: [{ ...data.segments[0], tier: 'ALL', total: 871, target: 871, holdout: 0 }],
+  totals: { customers: 871, target: 871, holdout: 0 },
+}
 // Calls back like the real mutation does, so the steps that only happen after
 // a roster is frozen — the draft being cleared, the send button appearing —
 // are actually exercised.
@@ -80,6 +112,9 @@ const savePresetMutate = vi.fn()
 vi.mock('../../hooks/useApi', () => ({
   useSmsSegments: (params: string) => {
     segmentParams.push(params)
+    if (new URLSearchParams(params).has('follow_up_of')) {
+      return { data: followUpData, isLoading: false, error: null, refetch: vi.fn() }
+    }
     // The server applies the level filter and the split, so the fake does too
     // — a stub that ignores them would let the page display numbers the API
     // would never have returned.
@@ -109,6 +144,7 @@ vi.mock('../../hooks/useApi', () => ({
       isLoading: false, error: null, refetch: vi.fn(),
     }
   },
+  useSmsCampaigns: () => ({ data: { campaigns: campaignList } }),
   useSmsAudiencePresets: () => ({
     data: {
       presets: [
@@ -132,6 +168,11 @@ vi.mock('../../hooks/useApi', () => ({
   }),
   useSendTestSms: () => ({ mutate: vi.fn(), isPending: false }),
   useSendSmsCampaign: () => ({ mutate: vi.fn(), isPending: false }),
+  useSmsBalance: () => ({
+    data: { sms: true, viber: false, smsSender: 'KoreanStory', viberSender: null,
+            pricePerPart: 1.28, balance: 50_000 },
+    isLoading: false,
+  }),
 }))
 
 vi.mock('../Toast', () => ({ useToast: () => ({ addToast: vi.fn() }) }))
@@ -587,5 +628,72 @@ describe('SmsCampaignWizard, in the page it belongs to', () => {
     const nav = container.querySelector('nav')!
     // The four stage chips carry names and a state dot, never an ordinal.
     expect(nav.textContent).not.toMatch(/[1-4]/)
+  })
+})
+
+describe('a follow-up', () => {
+  /** Choose the follow-up source and the campaign it follows. */
+  async function followUp(root = 'oct-promo') {
+    await userEvent.click(screen.getByRole('radio', { name: 'sms.sourceFollowUp' }))
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: /sms\.followUpPick/ }), root,
+    )
+  }
+
+  it('offers only sent campaigns of their own from the last week', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await userEvent.click(screen.getByRole('radio', { name: 'sms.sourceFollowUp' }))
+
+    const options = Array.from(
+      (screen.getByRole('combobox', { name: /sms\.followUpPick/ }) as HTMLSelectElement)
+        .options,
+    ).map((o) => o.value).filter(Boolean)
+    expect(options).toEqual(['oct-promo'])
+  })
+
+  it('previews nothing but the campaign it follows', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await followUp()
+
+    // Any audience parameter beside it is refused by the server; none is sent.
+    expect([...lastPreview().keys()]).toEqual(['follow_up_of'])
+    expect(lastPreview().get('follow_up_of')).toBe('oct-promo')
+    // The audience form is gone: there is nothing of it to narrow.
+    expect(screen.queryByLabelText('sms.filterWindow')).toBeNull()
+    expect(screen.getByText(/sms\.followUpRecipients/)).toBeTruthy()
+  })
+
+  it('skips the control step and freezes exactly the previewed follow-up', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await nameCampaign('oct-last-day')
+    await followUp()
+    // No control step in the header, and Next goes straight to the message.
+    expect(screen.queryByRole('button', { name: 'sms.wizard.control' })).toBeNull()
+    await step('sms.wizardNext')
+    expect(screen.queryByText('sms.holdoutExplain')).toBeNull()
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /sms\.messageText/ }), 'Останній день',
+    )
+    await step('sms.wizardNext')          // → launch
+    await step('sms.createCampaign')
+
+    const sent = new URLSearchParams(createMutate.mock.calls[0][0])
+    expect(Object.fromEntries(sent)).toEqual({
+      follow_up_of: 'oct-promo', campaign: 'oct-last-day',
+    })
+  })
+
+  it('goes back from the message to the follow-up, not to a control step', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await nameCampaign('oct-last-day')
+    await followUp()
+    await step('sms.wizardNext')
+    await step('sms.wizardBack')
+
+    expect(screen.getByRole('combobox', { name: /sms\.followUpPick/ })).toBeTruthy()
   })
 })

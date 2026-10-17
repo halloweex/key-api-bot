@@ -3,10 +3,12 @@ import { useTranslation } from 'react-i18next'
 import { Button } from './Button'
 import { SmsCostLine } from './SmsCostLine'
 import { SmsChannelFields, composeSmsText } from './SmsChannelFields'
-import { useSendSmsCampaign } from '../hooks/useApi'
+import { SmsFollowUpNotice } from './SmsFollowUpNotice'
+import { SmsSendBudget } from './SmsSendBudget'
+import { useSendSmsCampaign, useSmsBalance } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { formatNumber } from '../utils/formatters'
-import { smsCost } from '../utils/smsCost'
+import { balanceIsShort, smsCost, type SmsBalanceReading } from '../utils/smsCost'
 import type { SmsCampaignSummary, SmsChannel } from '../types/api'
 
 // ─── SmsSendDialog ───────────────────────────────────────────────────────────
@@ -19,6 +21,11 @@ import type { SmsCampaignSummary, SmsChannel } from '../types/api'
 // The count shown is the target arm only. The control group is named
 // explicitly beside it, because "why did 618 people not get it" is the
 // question this screen has to answer before it is asked.
+//
+// The name typed back travels with the send and the server checks it too, so
+// it is not a browser-only gate. Beside it: recipients, cost and the gateway's
+// balance, read afresh when the dialog opens — a send the balance does not
+// cover is refused by the server, so the button says so first.
 
 const SMS_LIMIT = 600
 
@@ -50,6 +57,7 @@ export const SmsSendDialog = memo(function SmsSendDialog({
   const [attempted, setAttempted] = useState(false)
   const send = useSendSmsCampaign()
   const { addToast } = useToast()
+  const { data: gateway, isLoading: balanceLoading } = useSmsBalance()
 
   const trimmed = text.trim()
   const hybrid = channel === 'viber_sms'
@@ -62,8 +70,18 @@ export const SmsSendDialog = memo(function SmsSendDialog({
   const cost = useMemo(() => smsCost(smsText), [smsText])
   const buttonComplete = Boolean(buttonCaption.trim()) === Boolean(buttonUrl.trim())
   const nameMatches = confirmName.trim() === campaign.campaign
+  const balance: SmsBalanceReading = balanceLoading
+    ? { state: 'loading' }
+    : gateway?.balance != null
+      ? { state: 'known', amount: gateway.balance }
+      : { state: 'unknown' }
+  const price = gateway?.pricePerPart ?? null
+  // Only a balance known to be short holds the button. An unknown one is left
+  // to the server, which reads it again and refuses if it still cannot —
+  // a blip when the dialog opened must not block a send that is covered.
+  const short = balanceIsShort(balance, campaign.target, cost.parts, price)
   const canSend = trimmed.length > 0 && smsText.length <= SMS_LIMIT && nameMatches
-    && (!hybrid || buttonComplete) && !send.isPending && !attempted
+    && (!hybrid || buttonComplete) && !short && !send.isPending && !attempted
 
   function handleSend() {
     setAttempted(true)
@@ -71,6 +89,7 @@ export const SmsSendDialog = memo(function SmsSendDialog({
       {
         campaign: campaign.campaign,
         text: smsText,
+        confirmCampaign: confirmName.trim(),
         channel,
         viber: hybrid
           ? {
@@ -173,6 +192,12 @@ export const SmsSendDialog = memo(function SmsSendDialog({
             {t('sms.sendIrreversible')}
           </p>
 
+          {campaign.followUpOf && (
+            <SmsFollowUpNotice
+              root={campaign.followUpOf} context="send" recipients={campaign.target}
+            />
+          )}
+
           <label className="block">
             <span className="text-xs font-medium text-slate-700">
               {t('sms.typeNameToConfirm', { campaign: campaign.campaign })}
@@ -186,6 +211,13 @@ export const SmsSendDialog = memo(function SmsSendDialog({
                          focus:ring-purple-500/30 focus:border-purple-400"
             />
           </label>
+
+          <SmsSendBudget
+            recipients={campaign.target}
+            parts={cost.parts}
+            pricePerPart={price}
+            balance={balance}
+          />
         </div>
 
         <div className="px-5 py-4 border-t border-slate-100 flex justify-end gap-2">
