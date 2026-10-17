@@ -3,14 +3,9 @@ import {
   audienceFromPreset,
   audienceToParams,
   audienceToPreset,
-  describeAudience,
-  describeFrozenCriteria,
   emptyAudience,
   emptyGroup,
-  incompletePeriods,
-  invertedInGroups,
   MAX_AUDIENCE_GROUPS,
-  periodReachDays,
 } from '../smsAudience'
 import type { SmsAudienceCriteria } from '../../types/api'
 
@@ -23,9 +18,6 @@ const OWNER: SmsAudienceCriteria = {
     { maxRecencyDays: 92, filters: {} },
   ],
 }
-
-const t = (key: string, opts?: Record<string, unknown>) =>
-  opts ? `${key}(${JSON.stringify(opts)})` : key
 
 describe('groups on the wire', () => {
   it('sends one group exactly as before groups existed', () => {
@@ -130,67 +122,5 @@ describe('groups in a preset and a draft', () => {
                  filters: { periodFrom: '2026-01-01', periodDays: 30, periodOrdersMin: 2 } }],
     })
     expect(loaded.groups[0].filters).toEqual({ periodFrom: '2026-01-01', periodOrdersMin: 2 })
-  })
-})
-
-describe('what holds the preview back', () => {
-  it('names the group with a backwards range', () => {
-    expect(invertedInGroups([
-      emptyGroup(),
-      { maxRecencyDays: 270, filters: { ordersMin: 5, ordersMax: 2 } },
-    ])).toEqual([{ group: 2, fields: ['orders'] }])
-  })
-
-  it('names a group counting orders in a period it has not chosen', () => {
-    expect(incompletePeriods([
-      { maxRecencyDays: 270, filters: { periodOrdersMin: 2 } },
-      { maxRecencyDays: 270, filters: { periodOrdersMin: 2, periodDays: 30 } },
-      { maxRecencyDays: 270, filters: { periodFrom: '2026-01-01' } },
-    ])).toEqual([1])
-  })
-
-  it('knows how far back a period reaches', () => {
-    expect(periodReachDays({ periodDays: 92 })).toBe(92)
-    expect(periodReachDays({})).toBeUndefined()
-    const d = new Date()
-    d.setDate(d.getDate() - 300)
-    const pad = (n: number) => String(n).padStart(2, '0')
-    const iso = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-    expect(periodReachDays({ periodFrom: iso })).toBe(300)
-  })
-})
-
-describe('saying the audience', () => {
-  it('counts the groups rather than one window', () => {
-    const line = describeAudience(OWNER, t)
-    expect(line).toContain('sms.summaryGroups({"count":2})')
-    expect(line).not.toContain('sms.summaryWindow')
-  })
-
-  it('describes a frozen campaign group by group', () => {
-    const lines = describeFrozenCriteria({
-      grouping: 'single', ltvBasis: 'margin', holdoutPct: 10, maxRecencyDays: 365,
-      filters: { period_orders_min: 2, period_from: '2026-01-01' },
-      groups: [
-        { maxRecencyDays: 365, filters: { period_orders_min: 2, period_from: '2026-01-01' } },
-        { maxRecencyDays: 92, filters: {} },
-      ],
-    }, t)
-    expect(lines).toContain(
-      'sms.groupTitle({"n":1}): sms.summaryWindow({"days":365}); '
-      + 'sms.frozenPeriodSince({"count":2,"date":"2026-01-01"})',
-    )
-    expect(lines).toContain('sms.groupTitle({"n":2}): sms.summaryWindow({"days":92})')
-  })
-
-  it('describes a one-group campaign as it always did, its period included', () => {
-    const lines = describeFrozenCriteria({
-      grouping: 'single', maxRecencyDays: 270,
-      filters: { period_days: 92 },
-      groups: [{ maxRecencyDays: 270, filters: { period_days: 92 } }],
-    }, t)
-    expect(lines).toContain('sms.summaryWindow({"days":270})')
-    expect(lines).toContain('sms.frozenPeriodWithin({"count":1,"days":92})')
-    expect(lines.some((l) => l.startsWith('sms.groupTitle'))).toBe(false)
   })
 })

@@ -68,13 +68,90 @@ class TestTheCondition:
 
     @pytest.mark.parametrize("kwargs,message", [
         (dict(period_from=date(2026, 1, 1), period_days=30), "not both"),
-        (dict(period_orders_min=2), "needs period_from or period_days"),
+        # The message names period_to since it exists; deliberately changed.
+        (dict(period_orders_min=2), "needs period_from, period_to or period_days"),
         (dict(period_orders_min=0, period_days=30), "at least 1"),
         (dict(period_days=0), "at least 1"),
+        (dict(period_to=date(2026, 1, 1), period_days=30), "not both"),
+        (dict(period_from=date(2026, 3, 1), period_to=date(2026, 1, 1)),
+         "period_from must not exceed period_to"),
+        (dict(period_orders_max=0), "period_orders_max needs period_from, period_to"),
+        (dict(period_orders_max=-1, period_days=30), "must not be negative"),
+        (dict(period_orders_min=3, period_orders_max=2, period_days=30),
+         "period_orders_min must not exceed period_orders_max"),
     ])
     def test_a_half_said_condition_cannot_be_built(self, kwargs, message):
         with pytest.raises(ValueError, match=message):
             SmsAudienceFilters(**kwargs)
+
+    def test_since_a_date_and_within_n_days_render_what_they_rendered(self):
+        """Byte for byte the text before `period_to` and `period_orders_max`
+        existed — the from-alone and days-alone shapes, with and without a
+        count. `TODAY_IN_KYIV` is the one shared spelling of today, pinned
+        where it is defined."""
+        since = SmsAudienceFilters(period_orders_min=2, period_from=date(2026, 1, 1))
+        within = SmsAudienceFilters(period_days=92)
+        assert since.period_count("period_orders_1") == (
+            "COUNT(DISTINCT order_id) FILTER (WHERE order_date >= ?) AS period_orders_1",
+            [date(2026, 1, 1)])
+        assert within.period_count("period_orders_1") == (
+            "COUNT(DISTINCT order_id) FILTER "
+            f"(WHERE ({TODAY_IN_KYIV} - order_date) <= ?) AS period_orders_1",
+            [92])
+        assert since.predicate("revenue_ltv", "retail",
+                               period_column="period_orders_1") == (
+            "(period_orders_1 >= ?)", [2])
+        assert within.predicate("revenue_ltv", "retail",
+                                period_column="period_orders_1") == (
+            "(period_orders_1 >= ?)", [1])
+
+    def test_from_and_to_is_a_closed_range(self):
+        sql, params = SmsAudienceFilters(
+            period_from=date(2026, 1, 1), period_to=date(2026, 3, 31),
+        ).period_count("p")
+        assert sql == ("COUNT(DISTINCT order_id) FILTER "
+                       "(WHERE order_date >= ? AND order_date <= ?) AS p")
+        assert params == [date(2026, 1, 1), date(2026, 3, 31)]
+
+    def test_to_alone_is_every_order_up_to_that_date(self):
+        sql, params = SmsAudienceFilters(period_to=date(2026, 3, 31)).period_count("p")
+        assert sql == "COUNT(DISTINCT order_id) FILTER (WHERE order_date <= ?) AS p"
+        assert params == [date(2026, 3, 31)]
+
+    def test_one_day_is_a_range(self):
+        day = date(2026, 3, 8)
+        f = SmsAudienceFilters(period_from=day, period_to=day)
+        assert f.period_count("p")[1] == [day, day]
+
+    def test_to_alone_is_a_period(self):
+        f = SmsAudienceFilters(period_to=date(2026, 3, 31))
+        assert f.has_period and not f.is_empty()
+        assert f.predicate("revenue_ltv", "retail", period_column="p") == (
+            "(p >= ?)", [1])
+
+    @pytest.mark.parametrize("bounds,sql,params", [
+        (dict(), "(p >= ?)", [1]),
+        (dict(period_orders_min=2), "(p >= ?)", [2]),
+        (dict(period_orders_max=3), "(p <= ?)", [3]),
+        (dict(period_orders_max=0), "(p <= ?)", [0]),
+        (dict(period_orders_min=2, period_orders_max=5), "(p >= ? AND p <= ?)", [2, 5]),
+        (dict(period_orders_min=2, period_orders_max=2), "(p >= ? AND p <= ?)", [2, 2]),
+    ], ids=["neither", "min", "max", "none-in-period", "both", "exactly"])
+    def test_the_count_has_two_bounds(self, bounds, sql, params):
+        """No bound is "at least one", as it always was; an upper bound alone
+        takes the floor away, which is how `0` means "nothing in the period"."""
+        f = SmsAudienceFilters(period_days=30, **bounds)
+        assert f.predicate("revenue_ltv", "retail", period_column="p") == (sql, params)
+
+    def test_the_new_fields_are_frozen_with_the_rest(self):
+        f = SmsAudienceFilters(period_orders_max=0, period_from=date(2026, 1, 1),
+                               period_to=date(2026, 3, 31))
+        assert not f.is_empty()
+        # Zero is a value, not "unset": dropping it would freeze the audience
+        # as "at least one order in the period", its opposite.
+        assert f.as_dict() == {"period_orders_max": 0, "period_from": "2026-01-01",
+                               "period_to": "2026-03-31"}
+        assert not SmsAudienceFilters(period_orders_max=0, period_days=30).is_empty()
 
     def test_it_needs_the_column_it_was_counted_in(self):
         with pytest.raises(ValueError, match="column"):
@@ -138,6 +215,27 @@ class TestTheFragments:
         ]
         assert [c.split(" AS ")[-1] for c in frag["period_columns"]] == [
             "period_orders_1", "period_orders_2"]
+
+    def test_a_range_binds_both_its_dates_in_order(self):
+        """A closed range is two dates in `cust`, the start first; bounds on
+        the count are the floor then the ceiling in `flagged`."""
+        groups = [
+            SmsAudienceGroup(3650, SmsAudienceFilters(
+                period_orders_min=1, period_orders_max=2,
+                period_from=date(2026, 1, 1), period_to=date(2026, 3, 31))),
+            SmsAudienceGroup(365, SmsAudienceFilters(
+                period_orders_max=0, period_to=date(2025, 6, 30))),
+        ]
+        frag = audience_group_fragments(groups, "revenue_ltv", "retail",
+                                        "silver_order_lines")
+        assert frag["window"] == 3650
+        assert frag["period_params"] == [date(2026, 1, 1), date(2026, 3, 31),
+                                         date(2025, 6, 30)]
+        assert frag["group_params"] == [1, 2, 365, 0]
+        assert frag["group_predicates"] == [
+            "(period_orders_1 >= ? AND period_orders_1 <= ?)",
+            "(recency <= ? AND (period_orders_2 <= ?))",
+        ]
 
     def test_the_count_of_groups_is_bounded(self):
         with pytest.raises(ValueError, match="at least one"):
@@ -316,6 +414,50 @@ class TestOrdersInAPeriod:
         b = await _audience(store, [GROUP_B])
         assert a["customers"] == b["customers"]
         assert 12 in _ids(a) and 13 not in _ids(a)
+
+
+class TestThePeriodsShapesAndBounds:
+    """From-and-to, up-to, exactly N, none in the period and the all-time
+    window, each against `tests/sms_audience_fixture.py`'s oracle and its
+    hand-written answer. The same cases run on PostgreSQL in
+    `tests/integration/test_sms_audience_groups_two_engines.py`."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("label,window,fields,terms,answer", fx.PERIOD_CASES,
+                             ids=[c[0] for c in fx.PERIOD_CASES])
+    async def test_the_audience_is_the_oracles(self, store, label, window, fields,
+                                               terms, answer):
+        mine = fx.matched(window, **terms)
+        assert fx.recipients(mine) == answer, f"{label}: the oracle disagrees with the hand"
+        result = await _audience(
+            store, [SmsAudienceGroup(window, SmsAudienceFilters(**fields))])
+        assert _ids(result) == answer
+        assert result["groups"][0]["matched"] == len(mine)
+
+    @pytest.mark.asyncio
+    async def test_none_in_the_period_is_a_recency_floor_said_by_date(self, store):
+        """"Nothing in the last 92 days" and "last order at least 93 days ago"
+        are one audience: the two spellings of a lapsed customer agree."""
+        by_period = await _audience(store, [SmsAudienceGroup(3650, SmsAudienceFilters(
+            period_orders_max=0, period_days=92))])
+        by_recency = await _audience(store, [SmsAudienceGroup(3650, SmsAudienceFilters(
+            recency_min_days=93))])
+        assert by_period["customers"] == by_recency["customers"]
+
+    @pytest.mark.asyncio
+    async def test_an_all_time_window_is_wider_than_two_years(self, store):
+        two_years = _ids(await _audience(store, [SmsAudienceGroup(730)]))
+        all_time = _ids(await _audience(store, [SmsAudienceGroup(3650)]))
+        assert all_time - two_years == {15}
+
+    @pytest.mark.asyncio
+    async def test_the_new_bounds_are_frozen(self, store):
+        result = await _audience(store, [SmsAudienceGroup(3650, SmsAudienceFilters(
+            period_orders_max=0, period_from=fx.PERIOD_FROM, period_to=fx.ago(10)))])
+        assert result["criteria"]["maxRecencyDays"] == 3650
+        assert result["criteria"]["filters"] == {
+            "period_orders_max": 0, "period_from": fx.PERIOD_FROM.isoformat(),
+            "period_to": fx.ago(10).isoformat()}
 
 
 class TestWhatIsFrozen:

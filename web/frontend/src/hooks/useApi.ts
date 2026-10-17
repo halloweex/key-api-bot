@@ -903,11 +903,20 @@ export function useMarginAlerts() {
 // ─── SMS Campaigns ──────────────────────────────────────────────────────────
 
 export function useSmsSegments(params: string, enabled = true) {
+  const followUp = (p: unknown) => typeof p === 'string' && p.includes('follow_up_of=')
   return useQuery<SmsSegmentsResponse>({
     queryKey: ['smsSegments', params] as const,
     queryFn: () => api.getSmsSegments(params),
     staleTime: CACHE_TTL.STANDARD,
     enabled,
+    // Every edit of a condition is a new query. Without this the counts, the
+    // sentence's total and "Next" blank out for the length of each request —
+    // a flicker under the thumb on every tap. The previous answer stays until
+    // the next one lands; never across a switch between a new audience and a
+    // follow-up, whose numbers mean different people.
+    placeholderData: (previous, previousQuery) =>
+      previousQuery && followUp(previousQuery.queryKey[1]) === followUp(params)
+        ? previous : undefined,
   })
 }
 

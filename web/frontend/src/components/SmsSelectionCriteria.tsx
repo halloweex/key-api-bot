@@ -2,6 +2,7 @@ import { memo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import { formatCurrency, formatNumber } from '../utils/formatters'
+import { ALL_TIME_DAYS } from '../utils/smsAudience'
 import type { SmsFunnelStep, SmsSegmentsResponse } from '../types/api'
 
 // ─── SmsSelectionCriteria ────────────────────────────────────────────────────
@@ -103,9 +104,13 @@ export const SmsSelectionCriteria = memo(function SmsSelectionCriteria({
                   days: criteria.reactivationMaxRecency,
                 })}
               />
+              {/* No "window" any more: it is the last-order condition, and
+                  without one the base is all time — said so, not as 3650. */}
               <Rule
                 label={t('sms.ruleWindow')}
-                value={t('sms.ruleWindowValue', { days: criteria.maxRecencyDays })}
+                value={criteria.maxRecencyDays >= ALL_TIME_DAYS
+                  ? t('sms.ruleWindowAll')
+                  : t('sms.ruleWindowValue', { days: criteria.maxRecencyDays })}
               />
               <Rule
                 label={t('sms.ruleHoldout')}

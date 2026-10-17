@@ -730,6 +730,12 @@ async def test_several_tiers_come_back_in_one_roster(tmp_path):
 
     assert set(_by_id(result)) == {2, 3, 4}
     assert [s["tier"] for s in result["segments"]] == ["CORE", "REACTIVATION"]
+    # Frozen with the campaign, so it can describe itself — and be rebuilt —
+    # as the levels it went to, not as everyone.
+    assert result["criteria"]["tiers"] == ["CORE", "REACTIVATION"]
+
+    everyone = await store.get_sms_segments(holdout_pct=0)
+    assert everyone["criteria"]["tiers"] == []
 
     await store.close()
 

@@ -1418,13 +1418,17 @@ export interface SmsAudienceFilters {
   promocodeUsed?: string | null
   boughtWithinDays?: number | null
   /**
-   * Orders in a period: at least `periodOrdersMin` orders (1 when unset)
-   * since `periodFrom`, or within the last `periodDays` days — one of the two.
-   * `ordersMin` counts the whole history; this counts only the period, which
-   * is the only way to say "two purchases this year".
+   * Orders in a period: between `periodOrdersMin` and `periodOrdersMax`
+   * orders (at least 1 when neither is set) dated `periodFrom`..`periodTo`
+   * (both inclusive, either may be open), or within the last `periodDays`
+   * days — dates or days, never both. `ordersMin` counts the whole history;
+   * this counts only the period, which is the only way to say "two purchases
+   * this year". `periodOrdersMax: 0` is "bought, but not in the period".
    */
   periodOrdersMin?: number | null
+  periodOrdersMax?: number | null
   periodFrom?: string | null
+  periodTo?: string | null
   periodDays?: number | null
 }
 

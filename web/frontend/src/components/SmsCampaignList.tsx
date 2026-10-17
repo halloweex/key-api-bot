@@ -11,7 +11,7 @@ import { useToast } from './Toast'
 import { SmsSendDialog } from './SmsSendDialog'
 import { BarChart3, ChevronDown, ChevronRight } from 'lucide-react'
 import { formatCurrency, formatNumber } from '../utils/formatters'
-import { describeFrozenCriteria } from '../utils/smsAudience'
+import { describeFrozenCriteria } from '../utils/smsConditionText'
 import type { SmsCampaignSummary } from '../types/api'
 
 // ─── SmsCampaignList ─────────────────────────────────────────────────────────

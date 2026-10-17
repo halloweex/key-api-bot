@@ -24,15 +24,22 @@ from core.repositories.customers import (
 )
 from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
 
-# Rendered with two OR-groups, one counting orders in a period and narrower
-# than the other: every construct the groups add — the period count in `cust`,
-# a group's own window, the flags, the mask, the per-group funnel — is in the
-# text these tests read. The group predicates name DuckDB's line table; that
-# fragment's own dialect test is `TestTheFilterPredicateTravelsToo` below.
+# Rendered with four OR-groups, counting orders in a period every way it can
+# be said — since a date, within N days, a closed range with both bounds on
+# the count, and up to a date with none in it — and narrower than one another:
+# every construct the groups add — the period count in `cust`, a group's own
+# window, the flags, the mask, the per-group funnel — is in the text these
+# tests read. The group predicates name DuckDB's line table; that fragment's
+# own dialect test is `TestTheFilterPredicateTravelsToo` below.
 _GROUPS = audience_group_fragments(
     [SmsAudienceGroup(365, SmsAudienceFilters(period_orders_min=2,
                                               period_from=date(2026, 1, 1))),
-     SmsAudienceGroup(92, SmsAudienceFilters(period_orders_min=1, period_days=92))],
+     SmsAudienceGroup(92, SmsAudienceFilters(period_orders_min=1, period_days=92)),
+     SmsAudienceGroup(3650, SmsAudienceFilters(
+         period_orders_min=1, period_orders_max=3,
+         period_from=date(2025, 1, 1), period_to=date(2025, 12, 31))),
+     SmsAudienceGroup(730, SmsAudienceFilters(period_orders_max=0,
+                                              period_to=date(2024, 12, 31)))],
     "revenue_ltv", "retail", "silver_order_lines",
 )
 
