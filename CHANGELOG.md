@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.290
+
+- feat(sms): step 1 of the campaign wizard holds conditions, not parameters
+
+
 ## 3.0.289
 
 - SMS wizard opens with a campaign name already filled in
