@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.289
+
+- SMS wizard opens with a campaign name already filled in
+
+
 ## 3.0.288
 
 - SMS audience: groups of conditions, ORed, and orders in a period
