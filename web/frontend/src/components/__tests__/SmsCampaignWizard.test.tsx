@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SmsCampaignWizard } from '../SmsCampaignWizard'
 import type { SmsSegmentsResponse } from '../../types/api'
@@ -131,10 +131,19 @@ vi.mock('../../hooks/useApi', () => ({
           holdout: arms.reduce((n, s) => n + s.holdout, 0),
         }]
       : arms
+    // With further groups the server says what each one brings; the fake
+    // answers one share per group it was sent.
+    const extra = q.has('or_groups') ? JSON.parse(q.get('or_groups')!).length : 0
+    const groups = extra
+      ? Array.from({ length: extra + 1 }, (_, i) => ({
+          group: i + 1, matched: 3000 + i, recipients: 2000 + i, onlyHere: 500 + i,
+        }))
+      : undefined
     return {
       data: {
         ...data,
         segments: merged,
+        groups,
         totals: {
           customers: merged.reduce((n, s) => n + s.total, 0),
           target: merged.reduce((n, s) => n + s.target, 0),
@@ -695,5 +704,152 @@ describe('a follow-up', () => {
     await step('sms.wizardBack')
 
     expect(screen.getByRole('combobox', { name: /sms\.followUpPick/ })).toBeTruthy()
+  })
+})
+
+describe('audience groups', () => {
+  /** The `or_groups` of the most recent preview, parsed, or null. */
+  function orGroups(): Array<Record<string, unknown>> | null {
+    const raw = lastPreview().get('or_groups')
+    return raw ? JSON.parse(raw) : null
+  }
+
+  it('starts as one group, which can never be removed', () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    expect(screen.getByRole('region', { name: /sms\.groupTitle\(\{"n":1\}\)/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /sms\.groupRemove/ })).toBeNull()
+  })
+
+  it('adds a group ORed with the first, sent as one parameter', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await step('sms.groupAdd')
+    const windows = screen.getAllByLabelText('sms.filterWindow')
+    expect(windows).toHaveLength(2)
+    await userEvent.clear(windows[1])
+    await userEvent.type(windows[1], '92')
+
+    await waitFor(() => expect(orGroups()).toEqual([{ max_recency_days: 92 }]),
+                  { timeout: 2000 })
+    // The first group is still the flat parameters, untouched by the second.
+    expect(lastPreview().get('max_recency_days')).toBe('270')
+  })
+
+  it('removes an extra group, and the audience is one group again', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await step('sms.groupAdd')
+    await waitFor(() => expect(orGroups()).not.toBeNull(), { timeout: 2000 })
+    await userEvent.click(screen.getByRole('button', { name: /sms\.groupRemove/ }))
+    await waitFor(() => expect(orGroups()).toBeNull(), { timeout: 2000 })
+    expect(screen.getAllByLabelText('sms.filterWindow')).toHaveLength(1)
+  })
+
+  it("says the owner's campaign: two orders since a date, or a recent one", async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    // A count without a period says nothing about when; the page holds the
+    // request and says why instead of earning a 400.
+    await userEvent.type(
+      screen.getByLabelText('sms.filterPeriod sms.periodAtLeast'), '2',
+    )
+    expect(screen.getByText(/sms\.periodIncomplete/)).toBeTruthy()
+
+    fireEvent.change(screen.getByLabelText('sms.periodModeSince'),
+                     { target: { value: '2026-01-01' } })
+    await step('sms.groupAdd')
+    const windows = screen.getAllByLabelText('sms.filterWindow')
+    await userEvent.clear(windows[1])
+    await userEvent.type(windows[1], '92')
+
+    await waitFor(() => expect(orGroups()).toEqual([{ max_recency_days: 92 }]),
+                  { timeout: 2000 })
+    const p = lastPreview()
+    expect(p.get('period_orders_min')).toBe('2')
+    expect(p.get('period_from')).toBe('2026-01-01')
+  })
+
+  it('warns when a period reaches further back than its window', () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    // A year back, inside the default 270 days: the window would quietly cut
+    // everybody last seen in the first months of it.
+    const d = new Date()
+    d.setDate(d.getDate() - 365)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    fireEvent.change(screen.getByLabelText('sms.periodModeSince'), {
+      target: { value: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` },
+    })
+    expect(screen.getByText(/sms\.periodWindowConflict/)).toBeTruthy()
+  })
+
+  it('shows what each group brings and what they add up to', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await step('sms.groupAdd')
+    await waitFor(() => expect(screen.getByText(/sms\.groupsTotal/)).toBeTruthy(),
+                  { timeout: 2000 })
+    // Whatever separator the reader's locale groups thousands with.
+    expect(screen.getByText(/sms\.groupShare\(\{"recipients":"2\D?000","only":"500"\}\)/))
+      .toBeTruthy()
+  })
+
+  it('names the group a backwards range is in', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await step('sms.groupAdd')
+    const mins = screen.getAllByLabelText('sms.filterOrders min')
+    const maxes = screen.getAllByLabelText('sms.filterOrders max')
+    await userEvent.type(mins[1], '5')
+    await userEvent.type(maxes[1], '2')
+    expect(screen.getByText(/sms\.rangeInvertedInGroup\(\{"group":2/)).toBeTruthy()
+  })
+
+  it('freezes exactly the groups that were previewed', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await nameCampaign()
+    await step('sms.groupAdd')
+    const windows = screen.getAllByLabelText('sms.filterWindow')
+    await userEvent.clear(windows[1])
+    await userEvent.type(windows[1], '92')
+    await waitFor(() => expect(orGroups()).toEqual([{ max_recency_days: 92 }]),
+                  { timeout: 2000 })
+    await step('sms.wizardNext')
+    await step('sms.wizardNext')
+    await userEvent.type(screen.getByRole('textbox', { name: /sms\.messageText/ }), 'Знижка')
+    await step('sms.wizardNext')
+    await step('sms.createCampaign')
+
+    const sent = new URLSearchParams(createMutate.mock.calls[0][0])
+    expect(sent.get('or_groups')).toBe(lastPreview().get('or_groups'))
+    expect(sent.get('max_recency_days')).toBe(lastPreview().get('max_recency_days'))
+  })
+
+  it('saves the groups in a preset, the first one also where older pages read it',
+     async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await step('sms.groupAdd')
+    await step('sms.presetSaveToggle')
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /sms\.presetSaveAs/ }), 'Two groups',
+    )
+    await step('sms.presetSave')
+
+    const { criteria } = savePresetMutate.mock.calls[0][0]
+    expect(criteria.groups).toHaveLength(2)
+    expect(criteria.maxRecencyDays).toBe(criteria.groups[0].maxRecencyDays)
+    expect(criteria.filters).toEqual(criteria.groups[0].filters)
+  })
+
+  it('keeps the groups in the draft', () => {
+    const { unmount } = render(<SmsCampaignWizard onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'sms.groupAdd' }))
+    unmount()
+
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+    expect(screen.getAllByLabelText('sms.filterWindow')).toHaveLength(2)
   })
 })

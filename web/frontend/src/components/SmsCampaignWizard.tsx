@@ -24,7 +24,8 @@ import {
   useSmsSegments,
 } from '../hooks/useApi'
 import {
-  audienceFromPreset, audienceToParams, describeAudience, invertedRanges,
+  audienceFromPreset, audienceToParams, audienceToPreset, describeAudience,
+  incompletePeriods, invertedInGroups,
 } from '../utils/smsAudience'
 import { clearDraft, loadDraft, saveDraft } from '../utils/smsDraft'
 import { followUpCandidates, followUpParams } from '../utils/smsFollowUp'
@@ -196,15 +197,18 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
   }, [previewParams])
 
   // A half-typed range selects nobody, and asking anyway earns a 400 in the
-  // middle of writing a number.
-  const inverted = useMemo(() => invertedRanges(audience.filters), [audience.filters])
+  // middle of writing a number. So does a count of orders "in a period" whose
+  // period has not been chosen yet. Either, in any group, holds the request.
+  const inverted = useMemo(() => invertedInGroups(audience.groups), [audience.groups])
+  const incomplete = useMemo(() => incompletePeriods(audience.groups), [audience.groups])
+  const held = inverted.length > 0 || incomplete.length > 0
 
   // A follow-up's query changes only when a campaign is picked, so it is not
   // debounced; and it asks for nothing but the campaign it follows.
   const followUpQuery = followUpOf ? followUpParams(followUpOf) : ''
   const { data, isLoading, error, refetch } = useSmsSegments(
     followUp ? followUpQuery : settledParams,
-    followUp ? Boolean(followUpOf) : inverted.length === 0,
+    followUp ? Boolean(followUpOf) : !held,
   )
 
   const selectedSaved = (presetData?.presets ?? []).some(
@@ -257,7 +261,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
     const name = presetName.trim()
     if (!name) return
     savePreset.mutate(
-      { name, criteria: audience },
+      { name, criteria: audienceToPreset(audience) },
       {
         onSuccess: () => {
           setPresetName('')
@@ -430,16 +434,33 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   audience={audience}
                   onChange={editAudience}
                   segments={data?.segments}
+                  shares={data?.groups}
+                  recipients={data?.totals.customers}
                 />
 
                 <div className="pt-3 border-t border-slate-100">
-                  {inverted.length > 0 ? (
-                    <p className="text-sm text-amber-800 bg-amber-50 border border-amber-100
-                                  rounded-lg px-3 py-2">
-                      {t('sms.rangeInverted', {
-                        fields: inverted.map((f) => t(`sms.range.${f}`)).join(', '),
-                      })}
-                    </p>
+                  {held ? (
+                    <div className="space-y-2">
+                      {inverted.map(({ group, fields }) => (
+                        <p key={group} className="text-sm text-amber-800 bg-amber-50 border
+                                                  border-amber-100 rounded-lg px-3 py-2">
+                          {audience.groups.length > 1
+                            ? t('sms.rangeInvertedInGroup', {
+                                group,
+                                fields: fields.map((f) => t(`sms.range.${f}`)).join(', '),
+                              })
+                            : t('sms.rangeInverted', {
+                                fields: fields.map((f) => t(`sms.range.${f}`)).join(', '),
+                              })}
+                        </p>
+                      ))}
+                      {incomplete.length > 0 && (
+                        <p className="text-sm text-amber-800 bg-amber-50 border border-amber-100
+                                      rounded-lg px-3 py-2">
+                          {t('sms.periodIncomplete', { groups: incomplete.join(', ') })}
+                        </p>
+                      )}
+                    </div>
                   ) : (
                     <SmsAudiencePreview data={data} isLoading={isLoading} />
                   )}

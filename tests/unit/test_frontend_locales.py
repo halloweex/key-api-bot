@@ -14,6 +14,7 @@ every key the frontend uses.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -77,3 +78,19 @@ def test_no_label_is_left_as_its_own_key():
     for language, dictionary in DICTIONARIES.items():
         echoes = [k for k, v in dictionary.items() if k == v]
         assert not echoes, f"{language}.json: {echoes}"
+
+
+def test_every_translation_fills_the_same_holes():
+    """`{{count}}` in English and `{{кількість}}` in Ukrainian renders the
+    second one as literal braces. i18next fills only the names the code
+    passes, so every language must name exactly the same ones — the frontend's
+    half of the rule `tests/unit/test_i18n.py` holds for `core/i18n.py`."""
+    hole = re.compile(r"\{\{\s*([^}\s]+)\s*\}\}")
+    mismatched = {}
+    for key, english in DICTIONARIES["en"].items():
+        expected = set(hole.findall(english))
+        for language in ("uk", "ru"):
+            got = set(hole.findall(DICTIONARIES[language].get(key, "")))
+            if got != expected:
+                mismatched[f"{language}:{key}"] = (sorted(expected), sorted(got))
+    assert not mismatched, mismatched

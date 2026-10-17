@@ -1417,6 +1417,42 @@ export interface SmsAudienceFilters {
   sourceIds?: number[]
   promocodeUsed?: string | null
   boughtWithinDays?: number | null
+  /**
+   * Orders in a period: at least `periodOrdersMin` orders (1 when unset)
+   * since `periodFrom`, or within the last `periodDays` days — one of the two.
+   * `ordersMin` counts the whole history; this counts only the period, which
+   * is the only way to say "two purchases this year".
+   */
+  periodOrdersMin?: number | null
+  periodFrom?: string | null
+  periodDays?: number | null
+}
+
+/**
+ * One group of an audience: its own window and its own filters, ANDed.
+ *
+ * A customer is in the audience if they match ANY group. A group's window is
+ * its own — the base window everyone is read in is the widest of them — so a
+ * narrow group never cuts a wide one short.
+ */
+export interface SmsAudienceGroup {
+  /** Nobody whose last order is older than this is in this group. */
+  maxRecencyDays: number
+  filters: SmsAudienceFilters
+}
+
+/** What one group contributes to the audience, as the server counted it. */
+export interface SmsAudienceGroupShare {
+  /** 1-based, in the order the groups were sent. */
+  group: number
+  /** Customers its own conditions matched, before phone, opt-out, level and
+   *  one-SMS-per-phone. Zero says this group is the one that selects nobody. */
+  matched: number
+  /** People in the audience who are in this group. Overlaps: someone in two
+   *  groups counts in both, so these add up to more than the total. */
+  recipients: number
+  /** In this group and in no other — what this group alone adds. */
+  onlyHere: number
 }
 
 /**
@@ -1434,16 +1470,21 @@ export interface SmsTierRules {
   reactivationMaxRecency?: number | null
 }
 
-/** The whole audience definition: how it is split, ranked, and narrowed. */
+/**
+ * The whole audience definition: how it is split, ranked, and narrowed.
+ *
+ * `groups` is who it is for — one or more groups, ORed. Everything else is
+ * common to the campaign and applies to the union: the value level, the
+ * basis, the split and the control group.
+ */
 export interface SmsAudienceCriteria {
   grouping: SmsGrouping
   ltvBasis: SmsLtvBasis
   holdoutPct: number
-  /** The base window: nobody whose last order is older than this is considered. */
-  maxRecencyDays: number
   tiers: SmsTier[]
   tierRules: SmsTierRules
-  filters: SmsAudienceFilters
+  /** 1..MAX_AUDIENCE_GROUPS. The first is what the audience was before groups. */
+  groups: SmsAudienceGroup[]
 }
 
 /** A saved audience. Built-ins ship with the page and cannot be edited. */
@@ -1507,9 +1548,14 @@ export interface SmsSegmentsResponse {
     holdoutPct: number
     /** Absent on responses from before audience filters shipped. */
     grouping?: SmsGrouping
+    /** The first group's filters, kept for readers from before groups. */
     filters?: Record<string, unknown>
+    /** Every group, in the store's field names. Absent before groups shipped. */
+    groups?: Array<{ maxRecencyDays: number; filters: Record<string, unknown> }>
   }
   grouping?: SmsGrouping
+  /** Each group's share of the audience. Absent on a follow-up's roster. */
+  groups?: SmsAudienceGroupShare[]
   /** Set when this is a follow-up's roster — the campaign it follows. Its
    *  `criteria` then carry no thresholds: the people are that campaign's. */
   followUpOf?: string | null

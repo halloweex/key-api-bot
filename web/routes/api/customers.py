@@ -8,12 +8,15 @@ from datetime import date as _date, datetime as _datetime
 
 from fastapi import APIRouter, Path, Query, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
-from typing import Optional
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import ValidationError as PydanticValidationError
+from typing import Annotated, List, Optional
 
 from core.gender import CONFIDENCE_LADDER, GENDERS
 from core.repositories.customers import (
-    BUILTIN_AUDIENCE_PRESETS, SMS_GROUPINGS, SMS_LTV_BASES,
-    SMS_RECENT_CAMPAIGN_HOURS, SMS_TIER_DEFAULTS, SmsAudienceFilters,
+    BUILTIN_AUDIENCE_PRESETS, DEFAULT_WINDOW_DAYS, MAX_AUDIENCE_GROUPS,
+    SMS_GROUPINGS, SMS_LTV_BASES, SMS_RECENT_CAMPAIGN_HOURS, SMS_TIER_DEFAULTS,
+    SmsAudienceFilters, SmsAudienceGroup,
 )
 from core.turbosms import (
     PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
@@ -215,8 +218,189 @@ _AUDIENCE_SHAPING_PARAMS = frozenset({
     "recency_min", "recency_max", "orders_min", "orders_max", "ltv_min", "ltv_max",
     "aov_min", "aov_max", "first_order_from", "first_order_to", "city", "gender",
     "gender_min_confidence", "brand", "category_id", "source_id", "promocode_used",
-    "bought_within_days",
+    "bought_within_days", "period_orders_min", "period_from", "period_days",
+    "or_groups",
 })
+
+
+# ─── Audience groups ──────────────────────────────────────────────────────
+# An audience is one or more groups, a customer being in it if they match ANY
+# of them. The first group is the flat parameters below, exactly as before
+# groups existed — so every saved link, preset and past campaign still names
+# one group and selects what it selected. Any further group travels in ONE
+# query parameter, `or_groups`, as a JSON array of objects whose keys are the
+# flat parameters' names. Still the query string, because the CSV is a link
+# the browser follows and `api_gate` reads `sales_type` from it — which is why
+# `sales_type` and everything else common to the campaign stays flat and is
+# not a group's to set.
+
+# A group's filters in the shape `or_groups` carries them. Every bound is the
+# flat parameter's own (`tests/integration/test_sms_audience_groups_api.py`
+# compares the two), and `extra="forbid"` because a key nobody reads is a
+# condition somebody thinks is applied.
+_Text = Annotated[str, Field(max_length=200)]
+
+
+class _AudienceGroupParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    max_recency_days: int = Field(DEFAULT_WINDOW_DAYS, ge=30, le=730)
+    recency_min: Optional[int] = Field(None, ge=0, le=3650)
+    recency_max: Optional[int] = Field(None, ge=0, le=3650)
+    orders_min: Optional[int] = Field(None, ge=0, le=1000)
+    orders_max: Optional[int] = Field(None, ge=0, le=1000)
+    ltv_min: Optional[float] = Field(None, ge=-1_000_000, le=100_000_000)
+    ltv_max: Optional[float] = Field(None, ge=-1_000_000, le=100_000_000)
+    aov_min: Optional[float] = Field(None, ge=0, le=100_000_000)
+    aov_max: Optional[float] = Field(None, ge=0, le=100_000_000)
+    first_order_from: Optional[_date] = None
+    first_order_to: Optional[_date] = None
+    city: Optional[List[_Text]] = Field(None, max_length=50)
+    gender: Optional[List[_Text]] = Field(None, max_length=2)
+    gender_min_confidence: Optional[str] = Field(None, max_length=10)
+    brand: Optional[List[_Text]] = Field(None, max_length=100)
+    category_id: Optional[List[int]] = Field(None, max_length=100)
+    source_id: Optional[List[int]] = Field(None, max_length=20)
+    promocode_used: Optional[str] = Field(None, max_length=40)
+    bought_within_days: Optional[int] = Field(None, ge=1, le=3650)
+    period_orders_min: Optional[int] = Field(None, ge=1, le=1000)
+    period_from: Optional[_date] = None
+    period_days: Optional[int] = Field(None, ge=1, le=3650)
+
+
+_EXTRA_GROUPS = TypeAdapter(List[_AudienceGroupParams])
+
+# The longest `or_groups` accepted. Four groups of every filter at its widest
+# would not reach it; it exists so a URL cannot carry a megabyte of JSON into
+# a parser.
+_OR_GROUPS_MAX_CHARS = 8_000
+
+
+def _clean_texts(values) -> list:
+    """Strip, drop blanks and case-insensitive duplicates, keep the order."""
+    seen, out = set(), []
+    for value in values or ():
+        piece = value.strip()
+        if piece and piece.lower() not in seen:
+            seen.add(piece.lower())
+            out.append(piece)
+    return out
+
+
+def _audience_group(values: dict, label: str) -> SmsAudienceGroup:
+    """One group's validated conditions, from either transport.
+
+    `values` holds the flat parameters' names, typed and with lists already
+    split, so the first group and every `or_groups` entry pass the same rules
+    and refuse in the same words — with the group named when there are
+    several, because "orders_min must not exceed orders_max" is no help when
+    four groups each have one. A lone group (`label=""`) refuses exactly as
+    the audience did before groups existed.
+    """
+    def refuse(detail: str):
+        raise HTTPException(
+            status_code=400, detail=f"{label}: {detail}" if label else detail,
+        )
+
+    genders = tuple(g.lower() for g in _clean_texts(values.get("gender")))
+    for g in genders:
+        if g not in GENDERS:
+            refuse(f"gender must be one of {', '.join(GENDERS)}")
+    # Refused rows carry NULL, and NULL never satisfies `IN`. So there is no
+    # spelling of this parameter that selects them, and offering one would be a
+    # campaign addressed by gender to people whose gender nobody could decide.
+    confidence = values.get("gender_min_confidence")
+    if confidence is not None:
+        confidence = confidence.strip().lower()
+        if confidence not in CONFIDENCE_LADDER:
+            refuse(f"gender_min_confidence must be one of {', '.join(CONFIDENCE_LADDER)}")
+
+    # A window whose edges are the wrong way round returns nothing and looks
+    # like a data problem, so it is refused with the reason instead.
+    for lo, hi, name in (
+        ("recency_min", "recency_max", "recency"),
+        ("orders_min", "orders_max", "orders"),
+        ("ltv_min", "ltv_max", "ltv"),
+        ("aov_min", "aov_max", "aov"),
+        ("first_order_from", "first_order_to", "first_order"),
+    ):
+        if values.get(lo) is not None and values.get(hi) is not None \
+                and values[lo] > values[hi]:
+            refuse(f"{name}_min must not exceed {name}_max")
+
+    # Orders in a period: since a date, or within N days — one of them, and a
+    # count without either says nothing about when.
+    period_from, period_days = values.get("period_from"), values.get("period_days")
+    if period_from is not None and period_days is not None:
+        refuse("period_from and period_days are two ways to say one period — pick one")
+    if values.get("period_orders_min") is not None \
+            and period_from is None and period_days is None:
+        refuse("period_orders_min needs a period: period_from or period_days")
+
+    filters = SmsAudienceFilters(
+        recency_min_days=values.get("recency_min"),
+        recency_max_days=values.get("recency_max"),
+        orders_min=values.get("orders_min"),
+        orders_max=values.get("orders_max"),
+        ltv_min=values.get("ltv_min"),
+        ltv_max=values.get("ltv_max"),
+        aov_min=values.get("aov_min"),
+        aov_max=values.get("aov_max"),
+        first_order_from=values.get("first_order_from"),
+        first_order_to=values.get("first_order_to"),
+        cities=tuple(_clean_texts(values.get("city"))),
+        genders=genders,
+        gender_min_confidence=confidence,
+        brands=tuple(_clean_texts(values.get("brand"))),
+        category_ids=tuple(dict.fromkeys(values.get("category_id") or ())),
+        source_ids=tuple(dict.fromkeys(values.get("source_id") or ())),
+        promocode=(values.get("promocode_used") or "").strip() or None,
+        bought_within_days=values.get("bought_within_days"),
+        period_orders_min=values.get("period_orders_min"),
+        period_from=period_from,
+        period_days=period_days,
+    )
+    return SmsAudienceGroup(
+        max_recency_days=values.get("max_recency_days", DEFAULT_WINDOW_DAYS),
+        filters=filters,
+    )
+
+
+def _extra_audience_groups(raw: Optional[str]) -> List[SmsAudienceGroup]:
+    """Groups 2..N out of `or_groups`, or a 400 saying what is wrong with it."""
+    if raw is None:
+        return []
+    if len(raw) > _OR_GROUPS_MAX_CHARS:
+        raise HTTPException(status_code=400, detail="or_groups is too long")
+    try:
+        parsed = _EXTRA_GROUPS.validate_json(raw)
+    except PydanticValidationError as e:
+        first = e.errors()[0]
+        loc = list(first.get("loc", ()))
+        where = "or_groups"
+        if loc and isinstance(loc[0], int):
+            where = f"group {loc[0] + 2}"
+            loc = loc[1:]
+        field_name = ".".join(str(part) for part in loc)
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{where}: {field_name + ': ' if field_name else ''}"
+                    f"{first.get('msg', 'invalid')}"),
+        )
+    if not parsed:
+        raise HTTPException(
+            status_code=400,
+            detail="or_groups must hold at least one group — leave it out for one group",
+        )
+    if len(parsed) + 1 > MAX_AUDIENCE_GROUPS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"an audience holds at most {MAX_AUDIENCE_GROUPS} groups",
+        )
+    return [
+        _audience_group(group.model_dump(), f"group {n}")
+        for n, group in enumerate(parsed, start=2)
+    ]
 
 
 def _sms_segment_params(
@@ -269,6 +453,20 @@ def _sms_segment_params(
     source_id: Optional[str] = Query(None, max_length=200),
     promocode_used: Optional[str] = Query(None, max_length=40),
     bought_within_days: Optional[int] = Query(None, ge=1, le=3650),
+    # Orders in a period — at least N orders since a date, or within the last
+    # N days. `orders_min` counts the whole history and cannot say "two
+    # purchases this year".
+    period_orders_min: Optional[int] = Query(None, ge=1, le=1000),
+    period_from: Optional[_date] = Query(None),
+    period_days: Optional[int] = Query(None, ge=1, le=3650),
+    # ─── More groups, ORed with the one above ────────────────────────────
+    or_groups: Optional[str] = Query(
+        None,
+        description="JSON array of further audience groups, each an object with "
+                    "the per-group parameters above (max_recency_days and the "
+                    "filters); a customer is in the audience if they match any "
+                    "group",
+    ),
     # ─── A follow-up ─────────────────────────────────────────────────────
     follow_up_of: Optional[str] = Query(
         None, pattern=_CAMPAIGN_PATTERN,
@@ -345,38 +543,6 @@ def _sms_segment_params(
         raise HTTPException(
             status_code=400, detail="core_ltv must not exceed vip_ltv",
         )
-    if reactivation_max_recency is None:
-        # The reactivation window cannot outlast the base window it lives in.
-        # Pinning it at 120 made "last 60 days" a 400 rather than a narrower
-        # audience, which is the opposite of what the control is for.
-        reactivation_max_recency = min(120, max_recency_days)
-
-    if reactivation_max_recency > max_recency_days:
-        raise HTTPException(
-            status_code=400,
-            detail="reactivation_max_recency must not exceed max_recency_days",
-        )
-
-    genders = tuple(g.strip().lower() for g in _text_list(gender))
-    for g in genders:
-        if g not in GENDERS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"gender must be one of {', '.join(GENDERS)}",
-            )
-    # Refused rows carry NULL, and NULL never satisfies `IN`. So there is no
-    # spelling of this parameter that selects them, and offering one would be a
-    # campaign addressed by gender to people whose gender nobody could decide.
-    if gender_min_confidence is not None:
-        gender_min_confidence = gender_min_confidence.strip().lower()
-        if gender_min_confidence not in CONFIDENCE_LADDER:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "gender_min_confidence must be one of "
-                    f"{', '.join(CONFIDENCE_LADDER)}"
-                ),
-            )
 
     if grouping not in SMS_GROUPINGS:
         raise HTTPException(
@@ -384,43 +550,44 @@ def _sms_segment_params(
             detail=f"grouping must be one of {', '.join(SMS_GROUPINGS)}",
         )
 
-    # A window whose edges are the wrong way round returns nothing and looks
-    # like a data problem, so it is refused with the reason instead.
-    for lo, hi, label in (
-        (recency_min, recency_max, "recency"),
-        (orders_min, orders_max, "orders"),
-        (ltv_min, ltv_max, "ltv"),
-        (aov_min, aov_max, "aov"),
-        (first_order_from, first_order_to, "first_order"),
-    ):
-        if lo is not None and hi is not None and lo > hi:
-            raise HTTPException(
-                status_code=400, detail=f"{label}_min must not exceed {label}_max",
-            )
+    # The first group is the flat parameters — the audience as it was before
+    # groups, refused in the words it was refused in then.
+    first = _audience_group({
+        "max_recency_days": max_recency_days,
+        "recency_min": recency_min, "recency_max": recency_max,
+        "orders_min": orders_min, "orders_max": orders_max,
+        "ltv_min": ltv_min, "ltv_max": ltv_max,
+        "aov_min": aov_min, "aov_max": aov_max,
+        "first_order_from": first_order_from, "first_order_to": first_order_to,
+        "city": _text_list(city),
+        "gender": _text_list(gender),
+        "gender_min_confidence": gender_min_confidence,
+        "brand": _text_list(brand),
+        "category_id": _int_list(category_id, "category_id"),
+        "source_id": _int_list(source_id, "source_id"),
+        "promocode_used": promocode_used,
+        "bought_within_days": bought_within_days,
+        "period_orders_min": period_orders_min,
+        "period_from": period_from, "period_days": period_days,
+    }, "group 1" if or_groups is not None else "")
+    groups = [first] + _extra_audience_groups(or_groups)
+    widest = max(g.max_recency_days for g in groups)
 
-    filters = SmsAudienceFilters(
-        recency_min_days=recency_min,
-        recency_max_days=recency_max,
-        orders_min=orders_min,
-        orders_max=orders_max,
-        ltv_min=ltv_min,
-        ltv_max=ltv_max,
-        aov_min=aov_min,
-        aov_max=aov_max,
-        first_order_from=first_order_from,
-        first_order_to=first_order_to,
-        cities=tuple(_text_list(city)),
-        genders=genders,
-        gender_min_confidence=gender_min_confidence,
-        brands=tuple(_text_list(brand)),
-        category_ids=tuple(_int_list(category_id, "category_id")),
-        source_ids=tuple(_int_list(source_id, "source_id")),
-        promocode=(promocode_used or "").strip() or None,
-        bought_within_days=bought_within_days,
-    )
+    if reactivation_max_recency is None:
+        # The reactivation window cannot outlast the base window it lives in.
+        # Pinning it at 120 made "last 60 days" a 400 rather than a narrower
+        # audience, which is the opposite of what the control is for. With
+        # groups the base window is the widest of theirs.
+        reactivation_max_recency = min(120, widest)
+
+    if reactivation_max_recency > widest:
+        raise HTTPException(
+            status_code=400,
+            detail="reactivation_max_recency must not exceed max_recency_days",
+        )
 
     return {
-        "max_recency_days": max_recency_days,
+        "groups": groups,
         "ltv_basis": ltv_basis,
         "vip_ltv": vip_ltv,
         "core_ltv": core_ltv,
@@ -431,7 +598,6 @@ def _sms_segment_params(
         "campaign": campaign,
         "tier": tiers,
         "grouping": grouping,
-        "filters": filters,
         "follow_up_of": follow_up_of,
     }
 
@@ -445,7 +611,16 @@ async def _sms_audience(store, criteria: dict, *, include_customers: bool, limit
     """
     root = criteria["follow_up_of"]
     if root is None:
-        segment_args = {k: v for k, v in criteria.items() if k != "follow_up_of"}
+        segment_args = {k: v for k, v in criteria.items()
+                        if k not in ("follow_up_of", "groups")}
+        groups = criteria["groups"]
+        if len(groups) == 1:
+            # One group is the audience as it was before groups existed, and
+            # it is asked for the way it was asked for then.
+            segment_args.update(max_recency_days=groups[0].max_recency_days,
+                                filters=groups[0].filters)
+        else:
+            segment_args["groups"] = groups
         return await store.get_sms_segments(
             include_customers=include_customers, limit=limit, **segment_args,
         )
@@ -588,9 +763,9 @@ async def export_sms_segments_csv(
 
     # Exports carry customer PII — record who pulled which list.
     logger.info(
-        "SMS segment export: user=%s campaign=%s tier=%s rows=%d holdout=%s",
+        "SMS segment export: user=%s campaign=%s tier=%s groups=%d rows=%d holdout=%s",
         user.get("user_id"), criteria["campaign"], criteria["tier"] or "all",
-        len(rows), include_holdout,
+        len(criteria["groups"]), len(rows), include_holdout,
     )
 
     output = io.StringIO()
@@ -872,10 +1047,11 @@ async def create_sms_campaign(
         raise HTTPException(status_code=409, detail=str(e))
 
     logger.info(
-        "SMS campaign created: user=%s campaign=%s grouping=%s follow_up_of=%s "
-        "target=%d holdout=%d",
+        "SMS campaign created: user=%s campaign=%s grouping=%s groups=%d "
+        "follow_up_of=%s target=%d holdout=%d",
         user.get("user_id"), criteria["campaign"], criteria["grouping"],
-        criteria["follow_up_of"], data["totals"]["target"], data["totals"]["holdout"],
+        len(criteria["groups"]), criteria["follow_up_of"],
+        data["totals"]["target"], data["totals"]["holdout"],
     )
     return {
         "campaign": criteria["campaign"],

@@ -7,13 +7,21 @@
  * When the preview and the export were assembled separately, the roster that
  * got frozen was not always the one the manager had been looking at.
  *
- * Everything is optional. An empty audience is not "no customers": it is the
- * tier rules on their own, which is exactly what the page selected before
- * filters existed, so a campaign built the old way is still reproducible.
+ * An audience is one or more GROUPS, ORed: a customer gets the message if
+ * they match any of them. The first group travels as the flat parameters it
+ * always travelled as, so an audience of one group sends exactly the query
+ * string it sent before groups existed. Any further group rides in one
+ * parameter, `or_groups`, as JSON keyed by those same parameter names.
+ *
+ * Everything is optional. An empty group is not "no customers": it is the
+ * tier rules on their own inside its window, which is exactly what the page
+ * selected before filters existed, so a campaign built the old way is still
+ * reproducible.
  */
 import type {
   SmsAudienceCriteria,
   SmsAudienceFilters,
+  SmsAudienceGroup,
   SmsGrouping,
   SmsLtvBasis,
   SmsTier,
@@ -22,12 +30,21 @@ import type {
 
 export const DEFAULT_HOLDOUT_PCT = 10
 
-// The base window, in days: the outermost rule, applied before every filter.
-// It has a floor and a ceiling on the server (30..730); the form clamps to the
-// same range so a typo is a narrower audience rather than a 422.
+// A group's window, in days: the outermost rule of that group, applied before
+// its filters. It has a floor and a ceiling on the server (30..730); the form
+// clamps to the same range so a typo is a narrower audience rather than a 422.
 export const DEFAULT_WINDOW_DAYS = 270
 export const MIN_WINDOW_DAYS = 30
 export const MAX_WINDOW_DAYS = 730
+
+// How many groups one audience may OR together — the server's
+// MAX_AUDIENCE_GROUPS, refused there with a 400 past it.
+export const MAX_AUDIENCE_GROUPS = 5
+
+/** A group with nothing set: everyone inside the default window. */
+export function emptyGroup(): SmsAudienceGroup {
+  return { maxRecencyDays: DEFAULT_WINDOW_DAYS, filters: {} }
+}
 
 export function emptyAudience(): SmsAudienceCriteria {
   return {
@@ -38,10 +55,9 @@ export function emptyAudience(): SmsAudienceCriteria {
     grouping: 'single',
     ltvBasis: 'margin',
     holdoutPct: DEFAULT_HOLDOUT_PCT,
-    maxRecencyDays: DEFAULT_WINDOW_DAYS,
     tiers: [],
     tierRules: {},
-    filters: {},
+    groups: [emptyGroup()],
   }
 }
 
@@ -69,6 +85,8 @@ const NUMERIC_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
   ['aovMin', 'aov_min'],
   ['aovMax', 'aov_max'],
   ['boughtWithinDays', 'bought_within_days'],
+  ['periodOrdersMin', 'period_orders_min'],
+  ['periodDays', 'period_days'],
 ]
 
 const TEXT_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
@@ -76,6 +94,7 @@ const TEXT_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
   ['firstOrderTo', 'first_order_to'],
   ['promocodeUsed', 'promocode_used'],
   ['genderMinConfidence', 'gender_min_confidence'],
+  ['periodFrom', 'period_from'],
 ]
 
 const LIST_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
@@ -86,27 +105,51 @@ const LIST_PARAMS: Array<[keyof SmsAudienceFilters, string]> = [
   ['sourceIds', 'source_id'],
 ]
 
+/** Every filter in a group that is set, under its API name, as JSON values. */
+function groupValues(group: SmsAudienceGroup): Record<string, number | string | Array<number | string>> {
+  const out: Record<string, number | string | Array<number | string>> = {
+    max_recency_days: group.maxRecencyDays,
+  }
+  const f = group.filters
+  for (const [key, param] of NUMERIC_PARAMS) {
+    const value = f[key]
+    if (typeof value === 'number' && Number.isFinite(value)) out[param] = value
+  }
+  for (const [key, param] of TEXT_PARAMS) {
+    const value = f[key]
+    if (typeof value === 'string' && value.trim()) out[param] = value.trim()
+  }
+  for (const [key, param] of LIST_PARAMS) {
+    const value = f[key]
+    if (Array.isArray(value) && value.length > 0) out[param] = [...value]
+  }
+  return out
+}
+
 /**
  * Serialise the audience as query parameters.
  *
  * Flat parameters rather than a JSON body on purpose: the CSV download is a
  * link the browser follows, and the API's session gate reads `sales_type`
- * from the query string.
+ * from the query string. The first group is flat, as it always was; the rest
+ * are one JSON array in `or_groups`, whose keys are the flat names.
  */
 export function audienceToParams(
   audience: SmsAudienceCriteria,
   extra: Record<string, string | undefined> = {},
 ): string {
+  const [first, ...rest] = audience.groups.length ? audience.groups : [emptyGroup()]
   const p = new URLSearchParams({
     ltv_basis: audience.ltvBasis,
     holdout_pct: String(audience.holdoutPct),
     grouping: audience.grouping,
-    max_recency_days: String(audience.maxRecencyDays),
+    max_recency_days: String(first.maxRecencyDays),
   })
 
   // The value level is a filter — "send to VIP only" — and it applies whether
   // or not the result is measured in arms. Its cut-offs travel with it, since
-  // they are what defines the levels being filtered on.
+  // they are what defines the levels being filtered on. Common to the whole
+  // campaign, not to a group.
   if (audience.tiers.length > 0) p.set('tier', audience.tiers.join(','))
   {
     const rules: Array<[keyof SmsTierRules, string]> = [
@@ -123,26 +166,36 @@ export function audienceToParams(
     }
   }
 
-  const f = audience.filters
-  for (const [key, param] of NUMERIC_PARAMS) {
-    const value = f[key]
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      p.set(param, String(value))
-    }
+  const values = groupValues(first)
+  for (const [param, value] of Object.entries(values)) {
+    if (param === 'max_recency_days') continue
+    p.set(param, Array.isArray(value) ? value.join(',') : String(value))
   }
-  for (const [key, param] of TEXT_PARAMS) {
-    const value = f[key]
-    if (typeof value === 'string' && value.trim()) p.set(param, value.trim())
-  }
-  for (const [key, param] of LIST_PARAMS) {
-    const value = f[key]
-    if (Array.isArray(value) && value.length > 0) p.set(param, value.join(','))
+  if (rest.length > 0) {
+    p.set('or_groups', JSON.stringify(rest.map(groupValues)))
   }
 
   for (const [key, value] of Object.entries(extra)) {
     if (value !== undefined && value !== '') p.set(key, value)
   }
   return p.toString()
+}
+
+/**
+ * The audience as a preset stores it.
+ *
+ * `groups` holds the whole audience. The first group is ALSO written where a
+ * preset kept it before groups existed — `maxRecencyDays` and `filters` at the
+ * top — so a page still running the previous version, which reads only those,
+ * opens it as its first group rather than as an empty audience of everyone.
+ */
+export function audienceToPreset(audience: SmsAudienceCriteria): Record<string, unknown> {
+  const first = audience.groups[0] ?? emptyGroup()
+  return {
+    ...audience,
+    maxRecencyDays: first.maxRecencyDays,
+    filters: first.filters,
+  }
 }
 
 const GROUPINGS: SmsGrouping[] = ['rfm', 'single']
@@ -165,19 +218,9 @@ function numbers(value: unknown): number[] | undefined {
   return out.length ? out : undefined
 }
 
-/**
- * Read a saved preset back into the form.
- *
- * Deliberately forgiving: a preset is stored as whatever the page put in it,
- * and one written by an older version of this page must still open. Anything
- * unrecognised is dropped rather than throwing — a preset that cannot be
- * opened is worse than one that opens with a field missing.
- */
-export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
-  const base = emptyAudience()
-  if (!raw || typeof raw !== 'object') return base
-
-  const src = raw as Record<string, unknown>
+/** One group out of whatever a preset or draft stored for it. */
+function groupFromRaw(raw: unknown): SmsAudienceGroup {
+  const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const filtersSrc = (src.filters && typeof src.filters === 'object'
     ? src.filters
     : {}) as Record<string, unknown>
@@ -186,15 +229,19 @@ export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
   const numericKeys: Array<keyof SmsAudienceFilters> = [
     'recencyMin', 'recencyMax', 'ordersMin', 'ordersMax',
     'ltvMin', 'ltvMax', 'aovMin', 'aovMax', 'boughtWithinDays',
+    'periodOrdersMin', 'periodDays',
   ]
   for (const key of numericKeys) {
     const v = num(filtersSrc[key])
     if (v !== undefined) (filters[key] as number) = v
   }
-  for (const key of ['firstOrderFrom', 'firstOrderTo', 'promocodeUsed'] as const) {
+  for (const key of ['firstOrderFrom', 'firstOrderTo', 'promocodeUsed', 'periodFrom'] as const) {
     const v = filtersSrc[key]
     if (typeof v === 'string' && v.trim()) filters[key] = v.trim()
   }
+  // A period is since a date or within N days, never both — the server
+  // refuses the pair. A preset holding both keeps the date, the more specific.
+  if (filters.periodFrom && filters.periodDays != null) delete filters.periodDays
   const cities = strings(filtersSrc.cities)
   if (cities) filters.cities = cities
   // Unknown values are dropped rather than carried: a preset is form state
@@ -213,6 +260,33 @@ export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
   if (categoryIds) filters.categoryIds = categoryIds
   const sourceIds = numbers(filtersSrc.sourceIds)
   if (sourceIds) filters.sourceIds = sourceIds
+
+  return {
+    maxRecencyDays: num(src.maxRecencyDays) ?? DEFAULT_WINDOW_DAYS,
+    filters,
+  }
+}
+
+/**
+ * Read a saved preset back into the form.
+ *
+ * Deliberately forgiving: a preset is stored as whatever the page put in it,
+ * and one written by an older version of this page must still open. Anything
+ * unrecognised is dropped rather than throwing — a preset that cannot be
+ * opened is worse than one that opens with a field missing.
+ *
+ * A preset from before groups has its one group at the top level
+ * (`maxRecencyDays`, `filters`); one from after has `groups`.
+ */
+export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
+  const base = emptyAudience()
+  if (!raw || typeof raw !== 'object') return base
+
+  const src = raw as Record<string, unknown>
+
+  const groups = Array.isArray(src.groups) && src.groups.length > 0
+    ? src.groups.slice(0, MAX_AUDIENCE_GROUPS).map(groupFromRaw)
+    : [groupFromRaw({ maxRecencyDays: src.maxRecencyDays, filters: src.filters })]
 
   const tiers = strings(src.tiers)?.filter((t): t is SmsTier =>
     (TIERS as string[]).includes(t)) ?? []
@@ -235,16 +309,21 @@ export function audienceFromPreset(raw: unknown): SmsAudienceCriteria {
       ? (src.ltvBasis as SmsLtvBasis)
       : base.ltvBasis,
     holdoutPct: num(src.holdoutPct) ?? base.holdoutPct,
-    maxRecencyDays: num(src.maxRecencyDays) ?? base.maxRecencyDays,
     tiers,
     tierRules,
-    filters,
+    groups,
   }
+}
+
+/** Filters set across every group — the badge on the filter panel. */
+export function countAudienceFilters(audience: SmsAudienceCriteria): number {
+  return audience.groups.reduce((n, g) => n + countFilters(g.filters), 0)
 }
 
 /**
  * The audience in one line: how it is split, how it ranks, what is withheld,
- * how far back it looks, and how many filters narrow it.
+ * how far back it looks, and how many filters narrow it — or, with several
+ * groups, how many groups it is.
  *
  * It exists because picking a saved audience with no filters changes nothing
  * visible, which reads as a broken control rather than as an audience that
@@ -255,12 +334,19 @@ export function describeAudience(
   audience: SmsAudienceCriteria,
   t: (key: string, opts?: Record<string, unknown>) => string,
 ): string {
-  const n = countFilters(audience.filters)
-  return [
+  const head = [
     t(`sms.grouping.${audience.grouping}`),
     t(audience.ltvBasis === 'margin' ? 'sms.basisMargin' : 'sms.basisRevenue'),
     t('sms.summaryHoldout', { pct: audience.holdoutPct }),
-    t('sms.summaryWindow', { days: audience.maxRecencyDays }),
+  ]
+  if (audience.groups.length > 1) {
+    return [...head, t('sms.summaryGroups', { count: audience.groups.length })].join(' · ')
+  }
+  const only = audience.groups[0] ?? emptyGroup()
+  const n = countFilters(only.filters)
+  return [
+    ...head,
+    t('sms.summaryWindow', { days: only.maxRecencyDays }),
     n === 0 ? t('sms.summaryNoFilters') : t('sms.summaryFilters', { count: n }),
   ].join(' · ')
 }
@@ -286,6 +372,43 @@ export function invertedRanges(filters: SmsAudienceFilters): string[] {
     .filter(([, lo, hi]) =>
       lo != null && hi != null && lo !== '' && hi !== '' && (lo as never) > (hi as never))
     .map(([name]) => name)
+}
+
+/** Every group holding an inverted range, 1-based, with its fields. */
+export function invertedInGroups(
+  groups: SmsAudienceGroup[],
+): Array<{ group: number; fields: string[] }> {
+  return groups
+    .map((g, i) => ({ group: i + 1, fields: invertedRanges(g.filters) }))
+    .filter((g) => g.fields.length > 0)
+}
+
+/**
+ * Groups whose "orders in a period" has a count and no period.
+ *
+ * The server refuses that — a count of orders since when? — so, like an
+ * inverted range, the page holds the request instead of earning a 400 while
+ * somebody is still choosing the date.
+ */
+export function incompletePeriods(groups: SmsAudienceGroup[]): number[] {
+  return groups
+    .map((g, i) => ({ n: i + 1, f: g.filters }))
+    .filter(({ f }) => f.periodOrdersMin != null && !f.periodFrom && f.periodDays == null)
+    .map(({ n }) => n)
+}
+
+/**
+ * How many days back a group's period reaches, or undefined without one.
+ *
+ * A period that reaches further than the group's window is cut by it: "two
+ * orders since 1 January" inside a 270-day window leaves out everybody whose
+ * last order was in January. The page says so rather than letting the window
+ * quietly redefine the year.
+ */
+export function periodReachDays(filters: SmsAudienceFilters): number | undefined {
+  if (typeof filters.periodDays === 'number') return filters.periodDays
+  if (filters.periodFrom) return dateToDaysAgo(filters.periodFrom)
+  return undefined
 }
 
 /**
@@ -326,34 +449,14 @@ export function dateToDaysAgo(iso: string): number | undefined {
   return Math.max(0, days)
 }
 
-/**
- * The frozen audience, said in phrases.
- *
- * The stored snapshot uses the store's own field names, not the form's, and it
- * is deliberately read loosely: a campaign frozen by an older version of the
- * page must still describe itself rather than render blank.
- */
-export function describeFrozenCriteria(
-  criteria: Record<string, unknown> | undefined,
+/** One group's filters, as phrases, in the store's field names. */
+function frozenFilterPhrases(
+  f: Record<string, unknown>,
   t: (key: string, opts?: Record<string, unknown>) => string,
 ): string[] {
-  if (!criteria) return []
   const out: string[] = []
-  const f = (criteria.filters ?? {}) as Record<string, unknown>
   const val = (k: string) => f[k]
   const has = (k: string) => val(k) !== undefined && val(k) !== null && val(k) !== ''
-
-  const grouping = criteria.grouping === 'rfm' ? 'rfm' : 'single'
-  out.push(t(`sms.grouping.${grouping}`))
-  if (criteria.ltvBasis) {
-    out.push(t(criteria.ltvBasis === 'margin' ? 'sms.basisMargin' : 'sms.basisRevenue'))
-  }
-  if (typeof criteria.holdoutPct === 'number') {
-    out.push(t('sms.summaryHoldout', { pct: criteria.holdoutPct }))
-  }
-  if (typeof criteria.maxRecencyDays === 'number') {
-    out.push(t('sms.summaryWindow', { days: criteria.maxRecencyDays }))
-  }
 
   const pairs: Array<[string, string, string]> = [
     ['recency_min_days', 'recency_max_days', 'sms.filterRecency'],
@@ -390,5 +493,56 @@ export function describeFrozenCriteria(
   if (has('bought_within_days')) {
     out.push(`${t('sms.filterBoughtWithin')}: ${val('bought_within_days')}`)
   }
+  const count = has('period_orders_min') ? val('period_orders_min') : 1
+  if (has('period_from')) {
+    out.push(t('sms.frozenPeriodSince', { count, date: val('period_from') }))
+  } else if (has('period_days')) {
+    out.push(t('sms.frozenPeriodWithin', { count, days: val('period_days') }))
+  }
+  return out
+}
+
+/**
+ * The frozen audience, said in phrases.
+ *
+ * The stored snapshot uses the store's own field names, not the form's, and it
+ * is deliberately read loosely: a campaign frozen by an older version of the
+ * page must still describe itself rather than render blank. One with several
+ * groups says each group on a line of its own, its window first.
+ */
+export function describeFrozenCriteria(
+  criteria: Record<string, unknown> | undefined,
+  t: (key: string, opts?: Record<string, unknown>) => string,
+): string[] {
+  if (!criteria) return []
+  const out: string[] = []
+
+  const grouping = criteria.grouping === 'rfm' ? 'rfm' : 'single'
+  out.push(t(`sms.grouping.${grouping}`))
+  if (criteria.ltvBasis) {
+    out.push(t(criteria.ltvBasis === 'margin' ? 'sms.basisMargin' : 'sms.basisRevenue'))
+  }
+  if (typeof criteria.holdoutPct === 'number') {
+    out.push(t('sms.summaryHoldout', { pct: criteria.holdoutPct }))
+  }
+
+  const groups = Array.isArray(criteria.groups) ? criteria.groups : []
+  if (groups.length > 1) {
+    groups.forEach((raw, i) => {
+      const g = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
+      const phrases = [
+        ...(typeof g.maxRecencyDays === 'number'
+          ? [t('sms.summaryWindow', { days: g.maxRecencyDays })] : []),
+        ...frozenFilterPhrases((g.filters ?? {}) as Record<string, unknown>, t),
+      ]
+      out.push(`${t('sms.groupTitle', { n: i + 1 })}: ${phrases.join('; ')}`)
+    })
+    return out
+  }
+
+  if (typeof criteria.maxRecencyDays === 'number') {
+    out.push(t('sms.summaryWindow', { days: criteria.maxRecencyDays }))
+  }
+  out.push(...frozenFilterPhrases((criteria.filters ?? {}) as Record<string, unknown>, t))
   return out
 }
