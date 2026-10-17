@@ -688,6 +688,7 @@
   "sms.campaignCreateFailed": "Could not create the campaign",
   "sms.campaignCreated": "Campaign “{{campaign}}” created",
   "sms.campaignName": "Campaign name",
+  "sms.campaignNameSuggested": "Suggested automatically — change it if you like.",
   "sms.campaignRequired": "A campaign name is required to record the roster. Letters, digits, hyphens and underscores.",
   "sms.campaignsDesc": "Rosters frozen at export. Mark a campaign sent once the file has gone to the provider — results are measured from that date.",
   "sms.campaignsTitle": "Recorded campaigns",
