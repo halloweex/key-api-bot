@@ -4,14 +4,19 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { SmsAudienceForm } from './SmsAudienceForm'
 import { emptyAudience } from '../utils/smsAudience'
 import type {
-  Brand, Category, SmsAudienceCriteria, SmsSegment,
+  Brand, Category, SmsAudienceCriteria, SmsAudienceGroupShare, SmsSegment,
 } from '../types/api'
 
 /**
  * The wizard's first screen: who the campaign is for.
  *
- * Two things about it are worth seeing in isolation, because both were
- * decisions rather than defaults.
+ * An audience is one or more GROUPS — each a set of filters that must all
+ * hold, with its own window — and a customer gets the message if they match
+ * any group. Below the groups sits what is common to the whole campaign: the
+ * value level and the ranking basis apply to the union, not to a group.
+ *
+ * Two more things are worth seeing in isolation, because both were decisions
+ * rather than defaults.
  *
  * The filter panel opens EXPANDED. Behind a chevron it read as an advanced
  * corner, and the first person to use the wizard reported there were no date
@@ -77,8 +82,13 @@ function client() {
  * rather than the component.
  */
 function Live({
-  initial, segments,
-}: { initial: SmsAudienceCriteria; segments?: SmsSegment[] }) {
+  initial, segments, shares, recipients,
+}: {
+  initial: SmsAudienceCriteria
+  segments?: SmsSegment[]
+  shares?: SmsAudienceGroupShare[]
+  recipients?: number
+}) {
   const [audience, setAudience] = useState(initial)
   return (
     <QueryClientProvider client={client()}>
@@ -86,6 +96,8 @@ function Live({
         audience={audience}
         onChange={setAudience}
         segments={segments}
+        shares={shares}
+        recipients={recipients}
       />
     </QueryClientProvider>
   )
@@ -150,7 +162,8 @@ export const FilteredByGender: Story = {
     <Live
       initial={{
         ...emptyAudience(),
-        filters: { genders: ['m'], genderMinConfidence: 'high' },
+        groups: [{ maxRecencyDays: 270,
+                   filters: { genders: ['m'], genderMinConfidence: 'high' } }],
       }}
       segments={SEGMENTS}
     />
@@ -168,14 +181,17 @@ export const HeavilyFiltered: Story = {
     <Live
       initial={{
         ...emptyAudience(),
-        filters: {
-          recencyMax: 90,
-          ordersMin: 2,
-          ltvMin: 1_500,
-          brands: ['COSRX', 'Anua'],
-          genders: ['f'],
-          boughtWithinDays: 180,
-        },
+        groups: [{
+          maxRecencyDays: 270,
+          filters: {
+            recencyMax: 90,
+            ordersMin: 2,
+            ltvMin: 1_500,
+            brands: ['COSRX', 'Anua'],
+            genders: ['f'],
+            boughtWithinDays: 180,
+          },
+        }],
       }}
       segments={SEGMENTS}
     />
@@ -197,6 +213,57 @@ export const SplitIntoTiers: Story = {
         tierRules: { vipLtv: 5_500, coreLtv: 2_750, coreMinOrders: 2 },
       }}
       segments={SEGMENTS}
+    />
+  ),
+}
+
+/**
+ * The owner's campaign, and the reason groups exist: two or more purchases
+ * since 1 January, OR anybody who bought in the last 92 days. Each group keeps
+ * its own window, so the second group's 92 days do not cut the first one
+ * down. Each card says what its group brings, and the line under them says
+ * what they add up to once a number in both is counted once. Every figure is
+ * the retail base as measured on production on 2026-10-17.
+ */
+export const TwoGroupsORed: Story = {
+  render: () => (
+    <Live
+      initial={{
+        ...emptyAudience(),
+        groups: [
+          { maxRecencyDays: 365,
+            filters: { periodOrdersMin: 2, periodFrom: '2026-01-01' } },
+          { maxRecencyDays: 92, filters: {} },
+        ],
+      }}
+      shares={[
+        { group: 1, matched: 2_739, recipients: 2_626, onlyHere: 1_035 },
+        { group: 2, matched: 3_237, recipients: 3_103, onlyHere: 1_512 },
+      ]}
+      recipients={4_138}
+    />
+  ),
+}
+
+/**
+ * A second group that selects nobody says so on its own card — an empty
+ * audience must still be able to say which rule emptied it.
+ */
+export const AGroupMatchingNobody: Story = {
+  render: () => (
+    <Live
+      initial={{
+        ...emptyAudience(),
+        groups: [
+          { maxRecencyDays: 92, filters: {} },
+          { maxRecencyDays: 270, filters: { ordersMin: 40 } },
+        ],
+      }}
+      shares={[
+        { group: 1, matched: 3_237, recipients: 3_103, onlyHere: 3_103 },
+        { group: 2, matched: 0, recipients: 0, onlyHere: 0 },
+      ]}
+      recipients={3_103}
     />
   ),
 }

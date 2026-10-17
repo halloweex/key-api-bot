@@ -490,7 +490,7 @@ class TestGenderFilter:
         """The reason the table NAME lives in `Dialect` and not in here.
 
         Everything this fragment emits means the same in both engines, so the
-        byte-equality guard over the body — which passes a constant `filter_sql`
+        byte-equality guard over the body — which passes constant group predicates
         and therefore cannot see this — is not being relied on to catch a
         divergence that could exist. If that ever stops being true, the
         construct belongs in the body, not in a predicate string.
@@ -518,7 +518,7 @@ class TestTheGenderTableIsReachableFromBothEngines:
             tier_case="CASE WHEN c.revenue_ltv >= ? THEN 'VIP' END",
             arm_expr="tier_level",
             ok_tier_expr="tier_level IS NOT NULL",
-            filter_sql="TRUE",
+            group_predicates=["TRUE"],
             tier_subset="",
         )
         assert "LEFT JOIN buyer_gender g" in sms_segments_select(DUCKDB, **fragments)
@@ -534,7 +534,7 @@ class TestTheGenderTableIsReachableFromBothEngines:
         sql = sms_segments_select(
             DUCKDB, ltv_column="revenue_ltv", sales_type_filter="",
             tier_case="NULL", arm_expr="tier_level",
-            ok_tier_expr="TRUE", filter_sql="TRUE", tier_subset="",
+            ok_tier_expr="TRUE", group_predicates=["TRUE"], tier_subset="",
         )
         assert "LEFT JOIN buyer_gender" in sql
         assert "\n                JOIN buyer_gender" not in sql

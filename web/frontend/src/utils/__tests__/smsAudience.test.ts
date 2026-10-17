@@ -10,6 +10,14 @@ import {
   hasFilters,
   invertedRanges,
 } from '../smsAudience'
+import type { SmsAudienceCriteria, SmsAudienceFilters } from '../../types/api'
+
+/** An audience of one group — what every audience was before groups. */
+function oneGroup(
+  filters: SmsAudienceFilters, rest: Partial<SmsAudienceCriteria> = {}, days = 270,
+): SmsAudienceCriteria {
+  return { ...emptyAudience(), ...rest, groups: [{ maxRecencyDays: days, filters }] }
+}
 
 describe('audienceToParams', () => {
   it('sends one arm and no rules when nothing is chosen', () => {
@@ -28,21 +36,17 @@ describe('audienceToParams', () => {
   })
 
   it('carries every filter family under its API name', () => {
-    const p = new URLSearchParams(audienceToParams({
-      ...emptyAudience(),
-      grouping: 'single',
-      filters: {
-        recencyMin: 30, recencyMax: 90,
-        ordersMin: 2, ltvMin: 1000, aovMax: 5000,
-        firstOrderFrom: '2026-01-01',
-        cities: ['Kyiv', 'Lviv'],
-        brands: ['Medi-Peel', 'Anua'],
-        categoryIds: [10, 11],
-        sourceIds: [1],
-        promocodeUsed: 'KS-AUG',
-        boughtWithinDays: 90,
-      },
-    }))
+    const p = new URLSearchParams(audienceToParams(oneGroup({
+      recencyMin: 30, recencyMax: 90,
+      ordersMin: 2, ltvMin: 1000, aovMax: 5000,
+      firstOrderFrom: '2026-01-01',
+      cities: ['Kyiv', 'Lviv'],
+      brands: ['Medi-Peel', 'Anua'],
+      categoryIds: [10, 11],
+      sourceIds: [1],
+      promocodeUsed: 'KS-AUG',
+      boughtWithinDays: 90,
+    }, { grouping: 'single' })))
 
     expect(p.get('recency_min')).toBe('30')
     expect(p.get('recency_max')).toBe('90')
@@ -59,9 +63,7 @@ describe('audienceToParams', () => {
   })
 
   it('keeps a zero, which is a real bound', () => {
-    const p = new URLSearchParams(audienceToParams({
-      ...emptyAudience(), filters: { recencyMin: 0, ltvMin: 0 },
-    }))
+    const p = new URLSearchParams(audienceToParams(oneGroup({ recencyMin: 0, ltvMin: 0 })))
 
     expect(p.get('recency_min')).toBe('0')
     expect(p.get('ltv_min')).toBe('0')
@@ -127,14 +129,10 @@ describe('counting filters', () => {
 
 describe('audienceFromPreset', () => {
   it('round-trips what the form produced', () => {
-    const audience = {
-      ...emptyAudience(),
-      grouping: 'single' as const,
-      ltvBasis: 'revenue' as const,
-      holdoutPct: 30,
-      tiers: [],
-      filters: { brands: ['Anua'], categoryIds: [10], recencyMax: 90 },
-    }
+    const audience = oneGroup(
+      { brands: ['Anua'], categoryIds: [10], recencyMax: 90 },
+      { grouping: 'single', ltvBasis: 'revenue', holdoutPct: 30, tiers: [] },
+    )
 
     expect(audienceFromPreset(JSON.parse(JSON.stringify(audience)))).toEqual(audience)
   })
@@ -154,7 +152,7 @@ describe('audienceFromPreset', () => {
     expect(loaded.grouping).toBe('single')
     expect(loaded.holdoutPct).toBe(10)
     expect(loaded.tiers).toEqual(['VIP'])
-    expect(loaded.filters).toEqual({ brands: ['Anua'] })
+    expect(loaded.groups).toEqual([{ maxRecencyDays: 270, filters: { brands: ['Anua'] } }])
   })
 
   it('treats a non-object as no preset at all', () => {
@@ -170,15 +168,13 @@ describe('the base window', () => {
   })
 
   it('carries a widened window', () => {
-    const p = new URLSearchParams(audienceToParams({
-      ...emptyAudience(), maxRecencyDays: 730,
-    }))
+    const p = new URLSearchParams(audienceToParams(oneGroup({}, {}, 730)))
     expect(p.get('max_recency_days')).toBe('730')
   })
 
   it('comes back from a preset, and falls back when one predates it', () => {
-    expect(audienceFromPreset({ maxRecencyDays: 540 }).maxRecencyDays).toBe(540)
-    expect(audienceFromPreset({ grouping: 'single' }).maxRecencyDays).toBe(270)
+    expect(audienceFromPreset({ maxRecencyDays: 540 }).groups[0].maxRecencyDays).toBe(540)
+    expect(audienceFromPreset({ grouping: 'single' }).groups[0].maxRecencyDays).toBe(270)
   })
 })
 
@@ -193,18 +189,17 @@ describe('describeAudience', () => {
   })
 
   it('counts the filters that are set', () => {
-    const described = describeAudience({
-      ...emptyAudience(),
-      filters: { brands: ['Anua'], recencyMin: 90, firstOrderFrom: '2026-01-01' },
-    }, t)
+    const described = describeAudience(
+      oneGroup({ brands: ['Anua'], recencyMin: 90, firstOrderFrom: '2026-01-01' }), t,
+    )
 
     expect(described).toContain('sms.summaryFilters({"count":3})')
   })
 
   it('states the split, the basis, the holdout and the window', () => {
-    const described = describeAudience({
-      ...emptyAudience(), grouping: 'single', holdoutPct: 30, maxRecencyDays: 540,
-    }, t)
+    const described = describeAudience(
+      oneGroup({}, { grouping: 'single', holdoutPct: 30 }, 540), t,
+    )
 
     expect(described).toContain('sms.grouping.single')
     expect(described).toContain('sms.basisMargin')
@@ -262,10 +257,9 @@ describe('the gender filter', () => {
   it('travels as flat query parameters, like every other filter', () => {
     // Flat rather than a JSON body because the CSV download is a link the
     // browser follows, and the session gate reads the query string.
-    const p = new URLSearchParams(audienceToParams({
-      ...emptyAudience(),
-      filters: { genders: ['m'], genderMinConfidence: 'high' },
-    }))
+    const p = new URLSearchParams(audienceToParams(
+      oneGroup({ genders: ['m'], genderMinConfidence: 'high' }),
+    ))
     expect(p.get('gender')).toBe('m')
     expect(p.get('gender_min_confidence')).toBe('high')
   })
@@ -274,10 +268,7 @@ describe('the gender filter', () => {
     // `city` and `brand` travel the same way and the server splits all three
     // with the same `_text_list`. A repeated parameter would need a second
     // parsing rule for no gain.
-    const p = new URLSearchParams(audienceToParams({
-      ...emptyAudience(),
-      filters: { genders: ['f', 'm'] },
-    }))
+    const p = new URLSearchParams(audienceToParams(oneGroup({ genders: ['f', 'm'] })))
     expect(p.get('gender')).toBe('f,m')
   })
 
@@ -299,8 +290,8 @@ describe('the gender filter', () => {
     const restored = audienceFromPreset({
       filters: { genders: ['m'], genderMinConfidence: 'certain' },
     })
-    expect(restored.filters.genders).toEqual(['m'])
-    expect(restored.filters.genderMinConfidence).toBe('certain')
+    expect(restored.groups[0].filters.genders).toEqual(['m'])
+    expect(restored.groups[0].filters.genderMinConfidence).toBe('certain')
   })
 
   it('drops a value the API would refuse', () => {
@@ -309,7 +300,7 @@ describe('the gender filter', () => {
     const restored = audienceFromPreset({
       filters: { genders: ['f', 'x', ''], genderMinConfidence: 'nonsense' },
     })
-    expect(restored.filters.genders).toEqual(['f'])
-    expect(restored.filters.genderMinConfidence).toBeUndefined()
+    expect(restored.groups[0].filters.genders).toEqual(['f'])
+    expect(restored.groups[0].filters.genderMinConfidence).toBeUndefined()
   })
 })

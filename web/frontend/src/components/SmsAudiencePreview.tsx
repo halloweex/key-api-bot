@@ -42,7 +42,11 @@ function tierRule(
         value: formatCurrency(criteria.coreLtv),
       })
     case 'ALL':
-      return t('sms.ruleSingleGroup', { days: criteria.maxRecencyDays })
+      // With several groups the window is each group's own, and the widest of
+      // them describes none: say what the arm is instead.
+      return (criteria.groups?.length ?? 0) > 1
+        ? t('sms.ruleAnyGroup', { count: criteria.groups!.length })
+        : t('sms.ruleSingleGroup', { days: criteria.maxRecencyDays })
     default:
       return t('sms.ruleReactivationValue', { days: criteria.reactivationMaxRecency })
   }

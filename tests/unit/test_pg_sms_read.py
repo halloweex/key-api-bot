@@ -33,7 +33,7 @@ FRAGMENTS = dict(
                "WHEN c.recency <= ? THEN 'REACTIVATION' END"),
     arm_expr="tier_level",
     ok_tier_expr="tier_level IS NOT NULL",
-    filter_sql="TRUE",
+    group_predicates=["TRUE"],
     tier_subset="",
 )
 
@@ -93,7 +93,7 @@ class TestPlaceholders:
         filter_sql, filter_params = filters.predicate(
             "revenue_ltv", "retail", POSTGRES.order_lines,
         )
-        sql = render(**{**FRAGMENTS, "filter_sql": filter_sql})
+        sql = render(**{**FRAGMENTS, "group_predicates": [filter_sql]})
         assert "?" not in sql
         # Cities are lower-cased on the way in, because KeyCRM's are free text.
         assert filter_params == ["київ", "retail", "Cosrx"]
@@ -118,8 +118,10 @@ class TestItDoesNotTakeTheDuckDbLock:
             )
 
         # One funnel row, no customers — the shape a RIGHT JOIN returns when
-        # nothing survives, which is enough to prove the path ran.
-        funnel_only = [(None,) * 19 + (0, 0, 0, 0, 0, 0, 0)]
+        # nothing survives, which is enough to prove the path ran: the
+        # customer columns empty, the funnel, the group mask and one group's
+        # count.
+        funnel_only = [(None,) * 19 + (0, 0, 0, 0, 0, 0, 0) + (0,) + (0,)]
         try:
             monkeypatch.setattr(type(store), "connection", _explode)
             with patch("core.pg_sms_read.fetch_segments",

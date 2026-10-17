@@ -6,7 +6,7 @@ import logging
 import math
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Optional, Dict, Any, List, Sequence, Union
 
 from core import read_fallback
@@ -233,6 +233,15 @@ BUILTIN_AUDIENCE_PRESETS: Dict[str, Dict[str, Any]] = {
 
 SINGLE_GROUP_NAME = "ALL"
 
+# How many groups one audience may OR together. Each group adds a flag to the
+# query and a count to the preview; five is more than any campaign so far has
+# needed, and a bound written down is cheaper than a slow query found later.
+MAX_AUDIENCE_GROUPS = 5
+
+# The base window a group gets when nobody set one: the cohort every campaign
+# before 2026-08 was sent to.
+DEFAULT_WINDOW_DAYS = 270
+
 
 @dataclass(frozen=True)
 class SmsAudienceFilters:
@@ -281,6 +290,53 @@ class SmsAudienceFilters:
     source_ids: Sequence[int] = ()
     promocode: Optional[str] = None
     bought_within_days: Optional[int] = None
+    # Orders in a period: at least `period_orders_min` orders dated on or after
+    # `period_from`, or within the last `period_days` days. Not `orders_min`,
+    # which counts the whole history — "two purchases this year" cannot be said
+    # with a lifetime count at all. Counted by the order's Kyiv date over the
+    # same lines as everything else here (no returns, no retired sources, the
+    # campaign's sales type), so a period covering the whole history counts
+    # exactly what `orders` counts. A period with no count means at least one.
+    period_orders_min: Optional[int] = None
+    period_from: Optional[date] = None
+    period_days: Optional[int] = None
+
+    def __post_init__(self):
+        # The API refuses these with a 400 first; this is the same rule held
+        # where the SQL is built, so no other caller can render a half-said
+        # condition.
+        if self.period_from is not None and self.period_days is not None:
+            raise ValueError("a period is since a date or within N days, not both")
+        if self.period_orders_min is not None and not self.has_period:
+            raise ValueError("period_orders_min needs period_from or period_days")
+        if self.period_orders_min is not None and self.period_orders_min < 1:
+            raise ValueError("period_orders_min must be at least 1")
+        if self.period_days is not None and self.period_days < 1:
+            raise ValueError("period_days must be at least 1")
+
+    @property
+    def has_period(self) -> bool:
+        """Is there an orders-in-a-period condition to count for?"""
+        return self.period_from is not None or self.period_days is not None
+
+    def period_count(self, column: str) -> tuple:
+        """The aggregate over `allocated` that counts this group's orders.
+
+        Returns ``(expr AS column, params)``. It sits in `cust` beside
+        `orders`, over the same rows, which is what keeps its exclusions the
+        audience's own. `({today} - order_date) <= N` rather than an interval:
+        it is how `recency` is computed, so "within the last 92 days" and
+        "last order at most 92 days ago" are one rule and cannot disagree at
+        the edge.
+        """
+        if self.period_from is not None:
+            return (f"COUNT(DISTINCT order_id) FILTER (WHERE order_date >= ?) AS {column}",
+                    [self.period_from])
+        if self.period_days is not None:
+            return (f"COUNT(DISTINCT order_id) FILTER "
+                    f"(WHERE ({TODAY_IN_KYIV} - order_date) <= ?) AS {column}",
+                    [int(self.period_days)])
+        raise ValueError("no period to count")
 
     @property
     def content_only(self) -> tuple:
@@ -298,6 +354,7 @@ class SmsAudienceFilters:
                 tuple(self.cities), tuple(self.genders), self.gender_min_confidence,
                 tuple(self.brands), tuple(self.category_ids),
                 tuple(self.source_ids), self.promocode,
+                self.period_orders_min, self.period_from, self.period_days,
             )
         )
 
@@ -321,6 +378,7 @@ class SmsAudienceFilters:
 
     def predicate(
         self, ltv_column: str, sales_type: str, order_lines: str = "silver_order_lines",
+        period_column: Optional[str] = None,
     ) -> tuple:
         """SQL boolean over one row of `scored`, plus its bound parameters.
 
@@ -332,7 +390,12 @@ class SmsAudienceFilters:
         operator used below means the same in both. It comes from the dialect
         rather than being hardcoded, because this fragment is spliced into a
         query that may be running against either store.
+
+        `period_column` names the `cust` column :meth:`period_count` was
+        rendered under; it is required exactly when there is a period.
         """
+        if self.has_period and not period_column:
+            raise ValueError("a period condition needs the column it was counted in")
         parts: List[str] = []
         params: List[Any] = []
 
@@ -380,6 +443,10 @@ class SmsAudienceFilters:
             # "everybody I am sure about" is sayable on its own.
             parts.append(f"gender_confidence IN ({placeholders})")
             params += list(levels)
+
+        if self.has_period:
+            parts.append(f"{period_column} >= ?")
+            params.append(self.period_orders_min or 1)
 
         content: List[str] = []
         content_params: List[Any] = []
@@ -438,6 +505,81 @@ class SmsAudienceFilters:
         if not parts:
             return "TRUE", []
         return "(" + " AND ".join(parts) + ")", params
+
+
+@dataclass(frozen=True)
+class SmsAudienceGroup:
+    """One group of an audience: its own window and its own filters, ANDed.
+
+    An audience is one or more of these, and a customer is in it if they match
+    ANY group. What a group means never depends on the others: its window is
+    its own, and everything common to the campaign — sales type, the value
+    level, phone validity, opt-outs, one SMS per phone, the control group —
+    applies to the union afterwards, not inside a group.
+
+    One group is the audience as it was before groups existed, and selects the
+    same people.
+    """
+
+    max_recency_days: int = DEFAULT_WINDOW_DAYS
+    filters: SmsAudienceFilters = field(default_factory=SmsAudienceFilters)
+
+    def as_dict(self) -> Dict[str, Any]:
+        """JSON-safe, in the shape frozen with a campaign."""
+        return {"maxRecencyDays": self.max_recency_days,
+                "filters": self.filters.as_dict()}
+
+
+def audience_group_fragments(
+    groups: Sequence[SmsAudienceGroup], ltv_column: str, sales_type: str,
+    order_lines: str,
+) -> Dict[str, Any]:
+    """The SQL each group adds to the audience query, and its parameters.
+
+    Returns the widest window (the base window `scored` applies to everyone),
+    the period counts for `cust` with their parameters, and one predicate per
+    group with its parameters. The two parameter lists bind at different
+    places in the query — the counts in `cust`, the predicates in `flagged` —
+    so they are kept apart for the caller to splice in textual order.
+
+    A group narrower than the widest window carries its own `recency <= ?`;
+    the widest one does not need it, so a single group renders the predicate
+    it rendered before groups existed.
+    """
+    if not groups:
+        raise ValueError("an audience needs at least one group")
+    if len(groups) > MAX_AUDIENCE_GROUPS:
+        raise ValueError(f"an audience holds at most {MAX_AUDIENCE_GROUPS} groups")
+
+    widest = max(g.max_recency_days for g in groups)
+    period_columns: List[str] = []
+    period_params: List[Any] = []
+    predicates: List[str] = []
+    predicate_params: List[Any] = []
+    for n, group in enumerate(groups, start=1):
+        column = None
+        if group.filters.has_period:
+            column = f"period_orders_{n}"
+            expr, params = group.filters.period_count(column)
+            period_columns.append(expr)
+            period_params += params
+
+        sql, params = group.filters.predicate(
+            ltv_column, sales_type, order_lines, period_column=column,
+        )
+        if group.max_recency_days < widest:
+            sql = f"(recency <= ? AND {sql})"
+            params = [group.max_recency_days] + params
+        predicates.append(sql)
+        predicate_params += params
+
+    return {
+        "window": widest,
+        "period_columns": period_columns,
+        "period_params": period_params,
+        "group_predicates": predicates,
+        "group_params": predicate_params,
+    }
 
 
 def _load_json(raw: Any) -> Dict[str, Any]:
@@ -634,6 +776,92 @@ _INSIGHTS_ALLTIME_SQL = """
            AVG(order_count)
     FROM customer_orders
 """
+
+
+def sms_segments_fragments(
+    groups: Sequence[SmsAudienceGroup], *, order_lines: str, ltv_basis: str,
+    sales_type: str, tiers: Optional[Sequence[str]], grouping: str,
+    vip_ltv: float, core_ltv: float, core_min_orders: int,
+    reactivation_max_recency: int,
+) -> tuple:
+    """What `get_sms_segments` hands `sms_segments_select`, and its parameters.
+
+    Returns ``(fragments, params, window)``. Pure — no store, no engine but the
+    name of its line table — so a test can render exactly what the store
+    executes on either engine and run it beside something else, which is how
+    one group is held to the query as it stood before groups existed.
+    """
+    # Silver already classifies each order, so filter on the column
+    # rather than re-deriving retail/b2b from manager_id here.
+    sales_type_filter = "" if sales_type == "all" else "AND l.sales_type = ?"
+
+    # Phones are stored as free text; normalise to digits and keep only
+    # full Ukrainian MSISDNs (380 + 9 digits). Everything shorter is a
+    # partial record that no SMS gateway will accept.
+    # Which lifetime value drives tiering. Both are always computed.
+    ltv_column = "revenue_ltv" if ltv_basis == "revenue" else "margin_ltv"
+
+    # The value level is always computed, because it does two separate
+    # jobs and only one of them is splitting. As a *filter* — "send to
+    # VIP only" — it applies whether or not the campaign is measured in
+    # arms; tying it to the split is what made three tier cards read as
+    # three audiences.
+    tier_case = f"""CASE
+                    WHEN c.{ltv_column} >= ? THEN 'VIP'
+                    WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
+                    WHEN c.recency <= ? THEN 'REACTIVATION'
+                END"""
+
+    # The arm is what the result is measured on. Under "single" there
+    # is one, and nobody is dropped for belonging to no level; under
+    # "rfm" the arm is the level, and whoever has none falls out.
+    if grouping == "single":
+        arm_expr = f"'{SINGLE_GROUP_NAME}'"
+        ok_tier_expr = "TRUE"
+    else:
+        arm_expr = "tier_level"
+        ok_tier_expr = "tier_level IS NOT NULL"
+
+    audience = audience_group_fragments(
+        groups, ltv_column, sales_type, order_lines,
+    )
+    fragments = dict(
+        ltv_column=ltv_column,
+        sales_type_filter=sales_type_filter,
+        tier_case=tier_case,
+        arm_expr=arm_expr,
+        ok_tier_expr=ok_tier_expr,
+        group_predicates=audience["group_predicates"],
+        period_columns=audience["period_columns"],
+        tier_subset=(
+            f"WHERE tier_level IN ({', '.join('?' * len(tiers))})"
+            if tiers else ""
+        ),
+    )
+
+    # Bound in textual order of the `?` placeholders: the line-items
+    # filter, the period counts in `cust`, the level CASE, the widest
+    # window, each group's predicate in turn, then the level subset. The
+    # holdout split is not among them — it is `core.sms_holdout`, in
+    # Python, so that this store and Postgres cannot disagree about who
+    # was withheld.
+    params: list = []
+    if sales_type != "all":
+        params.append(sales_type)
+    params += audience["period_params"]
+    params += [vip_ltv, core_min_orders, core_ltv, reactivation_max_recency]
+    params.append(audience["window"])
+    params += audience["group_params"]
+    if tiers:
+        params += tiers
+
+    return fragments, params, audience["window"]
+
+
+# The audience query's fixed projection: the customer, the funnel, and the
+# group mask. One `f_group_N` per group follows, which is why the row is
+# sliced rather than unpacked whole.
+_SEGMENT_FIXED_COLUMNS = 27
 
 
 class CustomersMixin:
@@ -2699,7 +2927,7 @@ class CustomersMixin:
 
     async def get_sms_segments(
         self,
-        max_recency_days: int = 270,
+        max_recency_days: Optional[int] = None,
         vip_ltv: Optional[float] = None,
         core_ltv: Optional[float] = None,
         core_min_orders: int = 2,
@@ -2713,6 +2941,7 @@ class CustomersMixin:
         grouping: str = "rfm",
         include_customers: bool = False,
         limit: int = 20000,
+        groups: Optional[Sequence["SmsAudienceGroup"]] = None,
     ) -> Dict[str, Any]:
         """
         Build RFM-based SMS campaign segments with a deterministic holdout group.
@@ -2750,7 +2979,10 @@ class CustomersMixin:
         withheld.
 
         Args:
-            max_recency_days: Drop customers whose last order is older than this.
+            max_recency_days: Drop customers whose last order is older than
+                this (270 when unset). The window of a single-group audience;
+                with ``groups`` it is each group's own, so pass neither this
+                nor ``filters`` beside them.
             vip_ltv: VIP cut-off; defaults per basis (see SMS_TIER_DEFAULTS).
             core_ltv: CORE cut-off without repeat orders; defaults per basis.
             core_min_orders: Order count that qualifies for CORE.
@@ -2772,13 +3004,20 @@ class CustomersMixin:
                 dropped, which quietly removes most one-order buyers.
             include_customers: Include the customer rows, not just the summary.
             limit: Max customer rows returned when include_customers is set.
+            groups: The audience as 1..MAX_AUDIENCE_GROUPS groups, a customer
+                being in it if they match any of them. Each group has its own
+                window and filters; everything else above applies to the
+                union. Unset means one group of ``max_recency_days`` and
+                ``filters``.
 
         Returns:
             Dict with per-tier summary, totals, the selection funnel (how many
-            customers each rule left standing) and (optionally) customer rows.
+            customers each rule left standing), each group's share of the
+            audience and (optionally) customer rows.
 
         Raises:
-            ValueError: If ltv_basis is not one of SMS_LTV_BASES.
+            ValueError: If ltv_basis is not one of SMS_LTV_BASES, or groups
+                are given beside ``max_recency_days`` or ``filters``.
         """
         if ltv_basis not in SMS_LTV_BASES:
             raise ValueError(
@@ -2788,7 +3027,18 @@ class CustomersMixin:
             raise ValueError(
                 f"grouping must be one of {', '.join(SMS_GROUPINGS)}, got {grouping!r}"
             )
-        filters = filters or SmsAudienceFilters()
+        if groups is None:
+            groups = [SmsAudienceGroup(
+                max_recency_days=(DEFAULT_WINDOW_DAYS if max_recency_days is None
+                                  else max_recency_days),
+                filters=filters or SmsAudienceFilters(),
+            )]
+        elif max_recency_days is not None or filters is not None:
+            # Both would be a second definition of the first group, and
+            # quietly preferring either is a campaign sent to an audience
+            # nobody saw.
+            raise ValueError("pass groups, or max_recency_days and filters — not both")
+        groups = list(groups)
 
         defaults = SMS_TIER_DEFAULTS[ltv_basis]
         if vip_ltv is None:
@@ -2803,37 +3053,6 @@ class CustomersMixin:
             tier = [tier]
         tiers = [t.upper() for t in tier] if tier else None
 
-        # Silver already classifies each order, so filter on the column
-        # rather than re-deriving retail/b2b from manager_id here.
-        sales_type_filter = "" if sales_type == "all" else "AND l.sales_type = ?"
-
-        # Phones are stored as free text; normalise to digits and keep only
-        # full Ukrainian MSISDNs (380 + 9 digits). Everything shorter is a
-        # partial record that no SMS gateway will accept.
-        # Which lifetime value drives tiering. Both are always computed.
-        ltv_column = "revenue_ltv" if ltv_basis == "revenue" else "margin_ltv"
-
-        # The value level is always computed, because it does two separate
-        # jobs and only one of them is splitting. As a *filter* — "send to
-        # VIP only" — it applies whether or not the campaign is measured in
-        # arms; tying it to the split is what made three tier cards read as
-        # three audiences.
-        tier_case = f"""CASE
-                    WHEN c.{ltv_column} >= ? THEN 'VIP'
-                    WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
-                    WHEN c.recency <= ? THEN 'REACTIVATION'
-                END"""
-
-        # The arm is what the result is measured on. Under "single" there
-        # is one, and nobody is dropped for belonging to no level; under
-        # "rfm" the arm is the level, and whoever has none falls out.
-        if grouping == "single":
-            arm_expr = f"'{SINGLE_GROUP_NAME}'"
-            ok_tier_expr = "TRUE"
-        else:
-            arm_expr = "tier_level"
-            ok_tier_expr = "tier_level IS NOT NULL"
-
         # Which store answers. Decided out here on purpose: the Postgres path
         # must not take DuckDB's connection at all — §34's invariant, because a
         # read that queues behind the warehouse rebuild has moved the
@@ -2841,35 +3060,12 @@ class CustomersMixin:
         use_postgres = sms_store_is_postgres()
         dialect = POSTGRES if use_postgres else DUCKDB
 
-        filter_sql, filter_params = filters.predicate(
-            ltv_column, sales_type, dialect.order_lines,
+        fragments, params, window = sms_segments_fragments(
+            groups, order_lines=dialect.order_lines, ltv_basis=ltv_basis,
+            sales_type=sales_type, tiers=tiers, grouping=grouping,
+            vip_ltv=vip_ltv, core_ltv=core_ltv, core_min_orders=core_min_orders,
+            reactivation_max_recency=reactivation_max_recency,
         )
-        fragments = dict(
-            ltv_column=ltv_column,
-            sales_type_filter=sales_type_filter,
-            tier_case=tier_case,
-            arm_expr=arm_expr,
-            ok_tier_expr=ok_tier_expr,
-            filter_sql=filter_sql,
-            tier_subset=(
-                f"WHERE tier_level IN ({', '.join('?' * len(tiers))})"
-                if tiers else ""
-            ),
-        )
-
-        # Bound in textual order of the `?` placeholders: the line-items
-        # filter, the level CASE, the recency window, the audience predicate,
-        # then the level subset. The holdout split is not among them — it is
-        # `core.sms_holdout`, in Python, so that this store and Postgres cannot
-        # disagree about who was withheld.
-        params: list = []
-        if sales_type != "all":
-            params.append(sales_type)
-        params += [vip_ltv, core_min_orders, core_ltv, reactivation_max_recency]
-        params.append(max_recency_days)
-        params += filter_params
-        if tiers:
-            params += tiers
 
         if use_postgres:
             from core.pg_sms_read import fetch_segments, render
@@ -2883,17 +3079,36 @@ class CustomersMixin:
         tiers: Dict[str, Dict[str, Any]] = {}
         customers = []
         funnel_counts = (0, 0, 0, 0, 0, 0, 0)
-        for (buyer_id, full_name, phone, city, row_tier, orders, ltv, aov,
+        # Per group: how many customers its own conditions matched (the
+        # funnel's `filtered` stage, one group at a time), how many of the
+        # audience are in it, and how many are in it and in no other.
+        matched = [0] * len(groups)
+        in_group = [0] * len(groups)
+        only_here = [0] * len(groups)
+        for row in rows:
+            (buyer_id, full_name, phone, city, row_tier, orders, ltv, aov,
              revenue_ltv, margin_ltv, margin_pct, cost_coverage,
              recency, last_order, first_order,
              last_order_id, last_order_total, last_order_item_count, last_order_items,
              f_customers, f_in_window, f_filtered, f_tiered, f_phone, f_subscribed,
-             f_eligible) in rows:
+             f_eligible, group_mask) = row[:_SEGMENT_FIXED_COLUMNS]
             funnel_counts = (f_customers, f_in_window, f_filtered, f_tiered,
                              f_phone, f_subscribed, f_eligible)
+            matched = [int(v or 0) for v in row[_SEGMENT_FIXED_COLUMNS:]]
             # The funnel row survives the RIGHT JOIN even when no customer does.
             if buyer_id is None:
                 continue
+
+            # The mask is the phone's: every group that reaches this number
+            # through any of the buyers sharing it, not only the buyer the
+            # number went to. So a group's count is the phones it would reach
+            # alone, and `onlyHere` the ones no other group reaches at all.
+            mask = int(group_mask or 0)
+            members = [i for i in range(len(groups)) if mask & (1 << i)]
+            for i in members:
+                in_group[i] += 1
+            if len(members) == 1:
+                only_here[members[0]] += 1
 
             assignment = assign_arm(buyer_id, campaign, holdout_pct)
 
@@ -2962,7 +3177,9 @@ class CustomersMixin:
             "ltvBasis": ltv_basis,
             "grouping": grouping,
             "criteria": {
-                "maxRecencyDays": max_recency_days,
+                # The base window everyone is read in: the widest group's.
+                # With one group it is that group's window, as it always was.
+                "maxRecencyDays": window,
                 "ltvBasis": ltv_basis,
                 "vipLtv": vip_ltv,
                 "coreLtv": core_ltv,
@@ -2972,8 +3189,25 @@ class CustomersMixin:
                 "grouping": grouping,
                 # Frozen with the campaign. Without it a filtered roster is a
                 # list of phone numbers nobody can explain a month later.
-                "filters": filters.as_dict(),
+                # `filters` is the first group's, for readers from before
+                # groups; `groups` is the whole audience.
+                "filters": groups[0].filters.as_dict(),
+                "groups": [g.as_dict() for g in groups],
             },
+            # Each group's share of the audience, counted in phones, because a
+            # phone is what receives the SMS. `recipients` is the audience's
+            # numbers this group reaches — what the group would send to on its
+            # own — so the figures overlap and add up to more than the total
+            # when a number is in two groups; `onlyHere` is the part no other
+            # group reaches. `matched` is the group's own conditions before the
+            # common rules — phone, opt-out, level, one SMS per phone — so a
+            # group that empties the audience can be told from one whose people
+            # simply cannot be messaged.
+            "groups": [
+                {"group": n, "matched": matched[n - 1],
+                 "recipients": in_group[n - 1], "onlyHere": only_here[n - 1]}
+                for n in range(1, len(groups) + 1)
+            ],
             # How the base narrowed, rule by rule, in the order the query
             # applies them. Published because the tier sizes on their own look
             # arbitrary: the drop from every customer to a sendable list is

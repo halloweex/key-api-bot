@@ -113,7 +113,7 @@ def _render(dialect, filters, ltv_column, sales_type, tiers, grouping):
         tier_case=tier_case,
         arm_expr="'ALL'" if grouping == "single" else "tier_level",
         ok_tier_expr="TRUE" if grouping == "single" else "tier_level IS NOT NULL",
-        filter_sql=filter_sql,
+        group_predicates=[filter_sql],
         tier_subset=(f"WHERE tier_level IN ({', '.join('?' * len(tiers))})"
                      if tiers else ""),
     )

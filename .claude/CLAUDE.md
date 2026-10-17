@@ -145,7 +145,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/brands` | All brands list |
 | `/api/brands/analytics` | Top brands by revenue and quantity |
 | `/api/customers/insights` | New vs returning, AOV trend, repeat rate |
-| `/api/customers/sms-segments` | Campaign audience — one arm or one per value level (needs `sms` view; customer rows need `sms` edit); `follow_up_of=X` previews a follow-up |
+| `/api/customers/sms-segments` | Campaign audience — one arm or one per value level, one or more groups ORed (`or_groups`) (needs `sms` view; customer rows need `sms` edit); `follow_up_of=X` previews a follow-up |
 | `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (needs `sms` edit) |
 | `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, needs `sms` edit); `follow_up_of=X` freezes a follow-up |
 | `/api/customers/sms-campaigns/{c}/send` | Send through TurboSMS (POST, needs `sms` edit); requires `confirm_campaign`, refuses on balance or a recent overlap — see "What stops an SMS send" |
@@ -549,6 +549,52 @@ something that no longer means what past campaigns meant.
 refuses the placeholder name `default`, an empty audience, and a truncated one.
 The wizard builds the preview and the freeze from the same query string, so
 what is recorded is what was on screen.
+
+**An audience is groups, ORed** (owner's decision, 2026-10-17). "Two purchases
+in 2026, or anybody who bought in the last three months" could not be said:
+filters were ANDed, `orders_min` counts the whole history, and the window was
+one number for the whole audience. Now each group is a window plus a filter
+set, ANDed inside the group, and a customer is in the audience if they match
+any group (`SmsAudienceGroup`, at most `MAX_AUDIENCE_GROUPS` = 5).
+
+- **Group 1 is the flat parameters, exactly as before**; groups 2..N travel in
+  one query parameter, `or_groups`, a JSON array keyed by the flat names,
+  refused strictly (`extra="forbid"`, strict types, a 400 that names the
+  group). A test holds the JSON form to the flat one: same keys, same bounds.
+- **One group selects what the audience selected before groups.**
+  `tests/sms_segments_legacy.py` freezes the query as it was on main at
+  5b4d1c61, and `test_sms_audience_groups_two_engines.py` runs it beside the
+  current one for every filter: the same rows on DuckDB and on PostgreSQL. On
+  production on 2026-10-17, group B alone through both: zero rows different.
+- **A group's window is its own.** `scored` reads everyone inside the widest
+  window and a narrower group carries `recency <= ?` in its own flag, so a
+  92-day group never cuts a 365-day one. The frozen `maxRecencyDays` is the
+  widest window.
+- **Orders in a period** (`period_orders_min` with `period_from` or
+  `period_days`) is counted by Kyiv `order_date` in the same `cust` pass as
+  `orders`, so returns, retired sources and other sales types never count.
+  "Within N days" is spelled as `recency` is (`today - order_date <= N`), so it
+  equals an N-day window, edge included. A period reaching past its group's
+  window is cut by it, and the page says so.
+- **Common to the campaign, applied to the union**: the sales type, the level
+  and its cut-offs, phone validity, opt-outs, one SMS per phone, the grouping
+  and one control drawn over the union (`core/sms_holdout.py`, unchanged).
+- **What each group brings**: the response's `groups[]` — `matched` (its own
+  conditions before the common rules, so a group that empties the audience
+  says so), `recipients` (the audience's phones it reaches, which is what it
+  would send to alone) and `onlyHere`. Counted per phone: `group_mask` is the
+  number's, so a number shared by buyers in two groups counts for both. The
+  funnel's `filtered` stage is "in any group".
+- The frozen `criteria` keep `filters` (group 1, for readers from before
+  groups) and add `groups`. A preset stores `groups` and mirrors group 1 at
+  the top level, where an older page reads it. A follow-up refuses
+  `or_groups` and the period parameters like every other audience parameter.
+
+Measured on production on 2026-10-17 (retail, valid 380 numbers, no opt-outs):
+A, two or more orders since 2026-01-01, 2 626 phones; B, last order within 92
+days, 3 103; A ∪ B 4 138, of which 1 035 only through A. The store's query and
+plain SQL agree on all three. Inside the default 270-day window A would be
+2 610.
 ### Two axes: a level and an area
 
 Access is a **pair**, and conflating the two halves is the mistake this section

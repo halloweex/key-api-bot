@@ -742,7 +742,7 @@ _SMS_SEGMENTS_BODY = """
                         / NULLIF(SUM(revenue), 0) AS cost_coverage,
                     MAX(order_date) AS last_order_date,
                     MIN(order_date) AS first_order_date,
-                    ({today} - MAX(order_date)) AS recency
+                    ({today} - MAX(order_date)) AS recency{period_columns}
                 FROM allocated
                 GROUP BY buyer_id
             ),
@@ -767,17 +767,21 @@ _SMS_SEGMENTS_BODY = """
                 -- every audience — including the ones that do not filter on
                 -- gender at all.
                 LEFT JOIN {buyer_gender} g ON g.buyer_id = c.buyer_id
+                -- The widest window of any group. A narrower group carries
+                -- its own window inside its flag below, so no group is cut
+                -- short by another's.
                 WHERE c.recency <= ?
             ),
             flagged AS (
                 -- Each eligibility rule as its own column rather than a WHERE
                 -- clause, so the same pass can both filter and report how many
-                -- customers each rule removed.
+                -- customers each rule removed. One `in_group_N` per audience
+                -- group: the group's own conditions, ANDed.
                 SELECT
                     *,
                     {arm_expr} AS tier,
                     {ok_tier_expr} AS ok_tier,
-                    {filter_sql} AS ok_filters,
+                    {group_flags},
                     length(phone) = 12 AND phone LIKE '380%' AS ok_phone,
                     -- Opted out stays out. Matched on buyer AND on phone, because
                     -- the same number can reach us under a second buyer record.
@@ -788,15 +792,26 @@ _SMS_SEGMENTS_BODY = """
                     ) AS ok_subscribed
                 FROM scored
             ),
+            matched AS (
+                -- In the audience if in ANY group. Every rule after this one —
+                -- level, phone, opt-out, one SMS per phone — runs on the union,
+                -- so somebody in two groups is still one recipient.
+                SELECT *, {any_group} AS ok_filters
+                FROM flagged
+            ),
             eligible AS (
                 -- One SMS per phone number: shared numbers across buyer records
-                -- would otherwise be messaged twice.
+                -- would otherwise be messaged twice. `group_mask` is the
+                -- number's, not the winning buyer's: one bit per group that
+                -- reaches it through any of its buyers, so each group counts
+                -- the phones it would reach on its own.
                 SELECT * FROM (
                     SELECT f.*,
                            ROW_NUMBER() OVER (
                                PARTITION BY phone ORDER BY {ltv_column} DESC, buyer_id
-                           ) AS phone_rn
-                    FROM flagged f
+                           ) AS phone_rn,
+                           {group_mask} AS group_mask
+                    FROM matched f
                     WHERE ok_filters AND ok_tier AND ok_phone AND ok_subscribed
                 ) deduped
                 WHERE phone_rn = 1
@@ -818,8 +833,8 @@ _SMS_SEGMENTS_BODY = """
                     COUNT(*) FILTER (WHERE ok_filters AND ok_tier AND ok_phone) AS f_phone,
                     COUNT(*) FILTER (WHERE ok_filters AND ok_tier AND ok_phone AND ok_subscribed)
                         AS f_subscribed,
-                    (SELECT COUNT(*) FROM eligible) AS f_eligible
-                FROM flagged
+                    (SELECT COUNT(*) FROM eligible) AS f_eligible{group_funnel}
+                FROM matched
             )
             SELECT
                 buyer_id, full_name, phone, city, tier, orders,
@@ -837,7 +852,10 @@ _SMS_SEGMENTS_BODY = """
                      THEN last_order_items || ' +' || (last_order_item_count - 3) || ' ещё'
                      ELSE last_order_items END AS last_order_items,
                 f_customers, f_in_window, f_filtered, f_tiered, f_phone,
-                f_subscribed, f_eligible
+                f_subscribed, f_eligible,
+                -- Which groups reach this recipient's number, one bit each,
+                -- so the caller can count each group's share of the union.
+                group_mask{group_funnel_columns}
             -- RIGHT JOIN, not CROSS: when nothing survives the filters the
             -- funnel is the only thing left to explain why, so its single row
             -- has to come back regardless.
@@ -854,16 +872,32 @@ def sms_segments_select(
     tier_case: str,
     arm_expr: str,
     ok_tier_expr: str,
-    filter_sql: str,
+    group_predicates: Sequence[str],
     tier_subset: str,
+    period_columns: Sequence[str] = (),
 ) -> str:
     """The SMS audience query, rendered for one engine.
 
     Everything but `dialect` is a fragment the caller built from validated
-    input — the level thresholds, the arm expression, the audience predicate.
+    input — the level thresholds, the arm expression, the audience predicates.
     None of them carries user text: values travel as bound parameters, which is
     why the placeholders stay `?` here and are renumbered per driver.
+
+    `group_predicates` is one boolean per audience group, over a row of
+    `scored`; a customer is in the audience if any of them holds. One group
+    is what the audience was before groups existed, and renders to the same
+    selection. `period_columns` are extra aggregates for `cust` — each a full
+    `expr AS name` — that a group's predicate can read, such as the number of
+    orders inside a period.
+
+    The names derived from the groups — `in_group_N`, the funnel's
+    `f_group_N`, the bit each group sets in a phone's `group_mask` — are made
+    here and nowhere else, so the caller cannot render a flag the projection
+    does not read.
     """
+    if not group_predicates:
+        raise ValueError("an audience needs at least one group")
+    flags = [f"in_group_{n}" for n in range(1, len(group_predicates) + 1)]
     return _SMS_SEGMENTS_BODY.format(
         today=TODAY_IN_KYIV,
         order_lines=dialect.order_lines,
@@ -876,8 +910,23 @@ def sms_segments_select(
         tier_case=tier_case,
         arm_expr=arm_expr,
         ok_tier_expr=ok_tier_expr,
-        filter_sql=filter_sql,
         tier_subset=tier_subset,
+        period_columns="".join(f",\n                    {c}" for c in period_columns),
+        group_flags=",\n                    ".join(
+            f"{predicate} AS {flag}" for predicate, flag in zip(group_predicates, flags)
+        ),
+        any_group="(" + " OR ".join(flags) + ")",
+        group_mask=" + ".join(
+            f"MAX(CASE WHEN {flag} THEN {1 << i} ELSE 0 END) OVER (PARTITION BY phone)"
+            for i, flag in enumerate(flags)
+        ),
+        group_funnel="".join(
+            f",\n                    COUNT(*) FILTER (WHERE {flag}) AS f_group_{n}"
+            for n, flag in enumerate(flags, start=1)
+        ),
+        group_funnel_columns="".join(
+            f", f_group_{n}" for n in range(1, len(flags) + 1)
+        ),
     )
 
 

@@ -52,8 +52,9 @@ def render(
     tier_case: str,
     arm_expr: str,
     ok_tier_expr: str,
-    filter_sql: str,
+    group_predicates: Sequence[str],
     tier_subset: str,
+    period_columns: Sequence[str] = (),
 ) -> str:
     """The Postgres rendering, placeholders already renumbered."""
     return numbered(sms_segments_select(
@@ -63,8 +64,9 @@ def render(
         tier_case=tier_case,
         arm_expr=arm_expr,
         ok_tier_expr=ok_tier_expr,
-        filter_sql=filter_sql,
+        group_predicates=group_predicates,
         tier_subset=tier_subset,
+        period_columns=period_columns,
     ))
 
 

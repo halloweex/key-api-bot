@@ -17,8 +17,24 @@ from __future__ import annotations
 
 import pytest
 
-from core.repositories.customers import SmsAudienceFilters
+from datetime import date
+
+from core.repositories.customers import (
+    SmsAudienceFilters, SmsAudienceGroup, audience_group_fragments,
+)
 from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
+
+# Rendered with two OR-groups, one counting orders in a period and narrower
+# than the other: every construct the groups add — the period count in `cust`,
+# a group's own window, the flags, the mask, the per-group funnel — is in the
+# text these tests read. The group predicates name DuckDB's line table; that
+# fragment's own dialect test is `TestTheFilterPredicateTravelsToo` below.
+_GROUPS = audience_group_fragments(
+    [SmsAudienceGroup(365, SmsAudienceFilters(period_orders_min=2,
+                                              period_from=date(2026, 1, 1))),
+     SmsAudienceGroup(92, SmsAudienceFilters(period_orders_min=1, period_days=92))],
+    "revenue_ltv", "retail", "silver_order_lines",
+)
 
 FRAGMENTS = dict(
     ltv_column="revenue_ltv",
@@ -26,7 +42,8 @@ FRAGMENTS = dict(
     tier_case="CASE WHEN c.revenue_ltv >= ? THEN 'VIP' END",
     arm_expr="tier_level",
     ok_tier_expr="tier_level IS NOT NULL",
-    filter_sql="TRUE",
+    group_predicates=_GROUPS["group_predicates"],
+    period_columns=_GROUPS["period_columns"],
     tier_subset="",
 )
 
