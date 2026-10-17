@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.286
+
+- Traffic tab shows new customers by kind of traffic
+
+
 ## 3.0.285
 
 - Stage 5 PR-10: the runbook's tests read the checkout, so the gate skips them
