@@ -22,10 +22,19 @@ vi.hoisted(() => {
 
 const mutate = vi.fn()
 const addToast = vi.fn()
+// What the gateway said when the dialog opened. Mutable per test.
+const gateway: { balance: number | null; isLoading: boolean } = {
+  balance: 1_000_000, isLoading: false,
+}
 
 vi.mock('../../hooks/useApi', () => ({
   useSendSmsCampaign: () => ({ mutate, isPending: false }),
   useSmsChannels: () => ({ data: { sms: true, viber: true } }),
+  useSmsBalance: () => ({
+    data: { sms: true, viber: true, smsSender: 'KoreanStory', viberSender: null,
+            pricePerPart: 1.28, balance: gateway.balance },
+    isLoading: gateway.isLoading,
+  }),
 }))
 
 vi.mock('../Toast', () => ({ useToast: () => ({ addToast }) }))
@@ -51,6 +60,8 @@ function sendButton() {
 beforeEach(() => {
   mutate.mockClear()
   addToast.mockClear()
+  gateway.balance = 1_000_000
+  gateway.isLoading = false
 })
 
 describe('SmsSendDialog', () => {
@@ -95,6 +106,7 @@ describe('SmsSendDialog', () => {
     expect(mutate.mock.calls[0][0]).toEqual({
       campaign: 'aug-promo',
       text: 'Знижка 20%',
+      confirmCampaign: 'aug-promo',
       channel: 'sms',
       viber: undefined,
     })
@@ -122,6 +134,7 @@ describe('SmsSendDialog', () => {
     expect(mutate.mock.calls[0][0]).toEqual({
       campaign: 'aug-promo',
       text: 'День народження\nhttps://example.com',
+      confirmCampaign: 'aug-promo',
       channel: 'viber_sms',
       viber: {
         viberText: 'День народження',
@@ -174,5 +187,87 @@ describe('SmsSendDialog', () => {
 
     fireEvent.change(message, { target: { value: 'x'.repeat(600) } })
     expect(sendButton()).not.toBeDisabled()
+  })
+
+  it('sends the name as typed, so the server checks it too', async () => {
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+    const [message, confirm] = screen.getAllByRole('textbox')
+
+    await userEvent.type(message, 'Знижка 20%')
+    await userEvent.type(confirm, '  aug-promo ')
+    await userEvent.click(sendButton())
+
+    // Trimmed, as the gate above compared it; the server trims and compares too.
+    expect(mutate.mock.calls[0][0].confirmCampaign).toBe('aug-promo')
+  })
+})
+
+describe('the balance beside the name field', () => {
+  it('shows who gets it, what it costs and what the balance is', () => {
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+
+    expect(screen.getByText('sms.budgetCostFrom')).toBeTruthy()
+    expect(screen.getByText(/sms\.budgetBalance/)).toBeTruthy()
+    expect(screen.getByText(/sms\.budgetCovered/)).toBeTruthy()
+  })
+
+  it('holds the send when the balance is known to fall short', async () => {
+    // 886 ₴ against 5 560 recipients — the morning of 17 October.
+    gateway.balance = 886
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+    const [message, confirm] = screen.getAllByRole('textbox')
+
+    await userEvent.type(message, 'Знижка 20%')
+    await userEvent.type(confirm, 'aug-promo')
+
+    expect(screen.getByText(/sms\.budgetShort/)).toBeTruthy()
+    expect(sendButton()).toBeDisabled()
+  })
+
+  it('counts both parts of a two-part message against the balance', async () => {
+    // One part for 5 560 is 7 117 ₴ (+2% = 7 259); two parts is twice that.
+    gateway.balance = 10_000
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+    const [message, confirm] = screen.getAllByRole('textbox')
+
+    await userEvent.type(confirm, 'aug-promo')
+    fireEvent.change(message, { target: { value: 'я'.repeat(70) } })
+    expect(sendButton()).not.toBeDisabled()
+
+    fireEvent.change(message, { target: { value: 'я'.repeat(71) } })
+    expect(sendButton()).toBeDisabled()
+  })
+
+  it('leaves an unreadable balance to the server, which reads it again', async () => {
+    gateway.balance = null
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+    const [message, confirm] = screen.getAllByRole('textbox')
+
+    await userEvent.type(message, 'Знижка 20%')
+    await userEvent.type(confirm, 'aug-promo')
+
+    expect(screen.getByText('sms.budgetUnknown')).toBeTruthy()
+    expect(sendButton()).not.toBeDisabled()
+  })
+})
+
+describe('a follow-up', () => {
+  it('says whose people get a second message, above the name field', () => {
+    render(
+      <SmsSendDialog
+        campaign={{ ...campaign, campaign: 'aug-last-day', holdout: 0,
+                    holdoutPct: 0, followUpOf: 'aug-promo' }}
+        onClose={() => {}}
+      />,
+    )
+
+    expect(screen.getByText('sms.followUpRecipients')).toBeTruthy()
+    expect(screen.getByText('sms.followUpNoControl')).toBeTruthy()
+  })
+
+  it('says nothing of the kind for a campaign of its own', () => {
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+
+    expect(screen.queryByText('sms.followUpNoControl')).toBeNull()
   })
 })

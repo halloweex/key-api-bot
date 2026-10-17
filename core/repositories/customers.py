@@ -176,6 +176,33 @@ SMS_TIER_DEFAULTS = {
 # nothing at all.
 SMS_GROUPINGS = ("rfm", "single")
 
+# How long a sent campaign keeps its people away from another one.
+#
+# A second campaign under another name used to be free to reach the same
+# phones an hour after the first — and worse, to reach the first one's control
+# group, which is the only baseline that campaign will ever have. The holdout
+# is drawn per (buyer, campaign name), so two campaigns over the same audience
+# withhold different people: every second campaign messaged about a tenth of
+# the first one's control. A day covers the window in which one campaign's
+# effect is still being read off the next morning's orders. A constant, not an
+# environment variable, because it is a rule about measurement and not about a
+# deployment.
+SMS_RECENT_CAMPAIGN_HOURS = 24
+
+# Where a follow-up names the campaign it follows, inside the stored criteria.
+#
+# A key in the JSON snapshot rather than a column: `criteria` is already the
+# record of how a roster was chosen, and "the people campaign X reached" is
+# exactly that. A column would cost a revision — which locks every older image
+# out of the database — and a DuckDB twin, for one string read by two queries.
+FOLLOW_UP_KEY = "followUpOf"
+
+
+def follow_up_root(criteria: Dict[str, Any]) -> Optional[str]:
+    """The campaign a frozen campaign follows up, or None for a campaign of its own."""
+    value = criteria.get(FOLLOW_UP_KEY) if isinstance(criteria, dict) else None
+    return value if isinstance(value, str) and value else None
+
 # Audiences that ship with the page.
 #
 # The first one is the cohort every campaign before 2026-08 was sent to,
@@ -1816,6 +1843,222 @@ class CustomersMixin:
             [campaign], mode="none",
         )
 
+    async def find_sms_send_conflicts(
+        self, campaign: str, now: Optional[datetime] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Other campaigns sent recently to people this one is about to message.
+
+        Asked after the claim, with this campaign's own ``sent_at`` already
+        stamped. That order is what makes two operators safe: each claim is
+        committed before either looks, so two overlapping campaigns sent at the
+        same moment each see the other and both are refused, where a check
+        taken before the claim would let both through.
+
+        Two kinds of overlap, and they are not equally negotiable:
+
+        * a phone in the other campaign's **control** arm is always a conflict.
+          Messaging it destroys that campaign's only baseline, and no
+          declaration here can give it back;
+        * a phone in the other campaign's **target** arm is a conflict unless
+          this campaign is a declared follow-up of that one, or both follow up
+          the same campaign. A follow-up to the same people is the point of a
+          follow-up; a second campaign under another name is a double charge
+          and a double message nobody decided on.
+
+        Matched on the phone, because the phone is what receives the message —
+        one person can sit under two buyer records, and a buyer id would let
+        the second record through. Any other campaign whose ``sent_at`` falls
+        inside :data:`SMS_RECENT_CAMPAIGN_HOURS` counts, including one claimed
+        and still at the gateway: ``sent_at`` is stamped by the claim, before a
+        message id exists.
+
+        Returns one entry per (campaign, arm) that conflicts, newest first:
+        ``{"campaign", "sentAt", "arm": "target" | "control", "people"}``.
+        """
+        since = (now or datetime.now()) - timedelta(hours=SMS_RECENT_CAMPAIGN_HOURS)
+
+        own = await self._sms_run(
+            "SELECT criteria FROM {campaigns} WHERE campaign = ?", [campaign],
+            mode="one",
+        )
+        root = follow_up_root(_load_json(own[0])) if own else None
+
+        # The other campaign's criteria come back as text and are read here,
+        # not with a JSON operator: DuckDB and PostgreSQL spell those
+        # differently, and a handful of rows does not need the database's help.
+        rows = await self._sms_run(
+            """
+            SELECT o.campaign, o.sent_at, o.criteria, om.assignment,
+                   COUNT(DISTINCT me.phone) AS people
+            FROM {members} me
+            JOIN {members} om
+              ON om.phone = me.phone AND om.campaign <> me.campaign
+            JOIN {campaigns} o ON o.campaign = om.campaign
+            WHERE me.campaign = ? AND me.assignment = 'target'
+              AND o.sent_at IS NOT NULL AND o.sent_at >= ?
+            GROUP BY o.campaign, o.sent_at, o.criteria, om.assignment
+            ORDER BY o.sent_at DESC, o.campaign, om.assignment
+            """,
+            [campaign, since],
+        )
+
+        conflicts = []
+        for other, sent_at, criteria, assignment, people in rows:
+            if assignment == "target" and root is not None and (
+                other == root or follow_up_root(_load_json(criteria)) == root
+            ):
+                continue
+            conflicts.append({
+                "campaign": other,
+                "sentAt": sent_at.isoformat() if sent_at else None,
+                "arm": "control" if assignment == "holdout" else "target",
+                "people": int(people),
+            })
+        return conflicts
+
+    async def get_sms_follow_up_audience(
+        self,
+        root: str,
+        campaign: str = "default",
+        include_customers: bool = False,
+        limit: int = 20000,
+    ) -> Dict[str, Any]:
+        """
+        The people a follow-up to ``root`` would message, in the segments' shape.
+
+        Exactly ``root``'s target arm, restricted to the members whose message
+        the gateway accepted, minus anyone who has opted out since — matched on
+        buyer and on phone, the same rule the segmentation applies. Nothing
+        else: no window, no tiers, no filters, and no holdout of its own. A
+        follow-up is the same campaign sent twice on purpose, so it is measured
+        on ``root``'s control, which is why that control is never in this
+        roster and why ``holdoutPct`` is 0.
+
+        Shaped like :meth:`get_sms_segments` so the preview and the freeze go
+        through one function and cannot disagree about who is in it. The
+        figures per member are the ones frozen with ``root``: what those people
+        looked like when they were chosen, which is what a follow-up is.
+
+        Raises:
+            ValueError: ``root`` is unknown ("not frozen"), has not been sent,
+                or is itself a follow-up — followers always point at the root,
+                so "which campaign is this measured on" has one answer.
+        """
+        camp = await self._sms_run(
+            "SELECT sent_at, criteria, ltv_basis, sales_type"
+            " FROM {campaigns} WHERE campaign = ?",
+            [root], mode="one",
+        )
+        if camp is None:
+            raise ValueError(f"campaign {root!r} is not frozen")
+        sent_at, criteria, ltv_basis, sales_type = camp
+        if sent_at is None:
+            raise ValueError(
+                f"campaign {root!r} has not been sent — a follow-up goes to the "
+                f"people the first message reached"
+            )
+        parent = follow_up_root(_load_json(criteria))
+        if parent is not None:
+            raise ValueError(
+                f"campaign {root!r} is itself a follow-up of {parent!r} — point "
+                f"this one at {parent!r}, the campaign both are measured on"
+            )
+
+        rows = await self._sms_run(
+            """
+            SELECT m.buyer_id, m.phone, m.tier, m.orders_at_export,
+                   m.revenue_ltv_at_export, m.margin_ltv_at_export,
+                   m.recency_at_export,
+                   m.message_id IS NOT NULL AS accepted,
+                   NOT EXISTS (
+                       SELECT 1 FROM {optouts} o
+                       WHERE o.channel = 'sms'
+                         AND (o.buyer_id = m.buyer_id OR o.phone = m.phone)
+                   ) AS subscribed
+            FROM {members} m
+            WHERE m.campaign = ? AND m.assignment = 'target'
+            ORDER BY m.buyer_id
+            """,
+            [root],
+        )
+
+        root_targets = len(rows)
+        accepted = [r for r in rows if r[7]]
+        kept = [r for r in accepted if r[8]]
+
+        tiers: Dict[str, Dict[str, Any]] = {}
+        customers = []
+        for (buyer_id, phone, tier, orders, revenue_ltv, margin_ltv, recency,
+             _accepted, _subscribed) in kept:
+            ltv = revenue_ltv if ltv_basis == "revenue" else margin_ltv
+            stats = tiers.setdefault(tier, {
+                "tier": tier, "total": 0, "target": 0, "holdout": 0,
+                "ltv": 0.0, "revenue": 0.0, "margin": 0.0,
+                "_recency_sum": 0, "_orders_sum": 0,
+            })
+            stats["total"] += 1
+            stats["target"] += 1
+            stats["ltv"] += float(ltv or 0)
+            stats["revenue"] += float(revenue_ltv or 0)
+            stats["margin"] += float(margin_ltv or 0)
+            stats["_recency_sum"] += recency or 0
+            stats["_orders_sum"] += orders or 0
+
+            if include_customers and len(customers) < limit:
+                customers.append({
+                    "buyerId": buyer_id,
+                    "phone": phone,
+                    "tier": tier,
+                    "assignment": "target",
+                    "orders": orders,
+                    "ltv": float(ltv or 0),
+                    "revenueLtv": float(revenue_ltv or 0),
+                    "marginLtv": float(margin_ltv or 0),
+                    "recencyDays": recency,
+                })
+
+        tier_order = {SINGLE_GROUP_NAME: 0, "VIP": 0, "CORE": 1, "REACTIVATION": 2}
+        segments = []
+        for stats in sorted(tiers.values(), key=lambda s: tier_order.get(s["tier"], 9)):
+            total = stats["total"]
+            segments.append({
+                "tier": stats["tier"],
+                "total": total,
+                "target": stats["target"],
+                "holdout": 0,
+                "totalLtv": round(stats["ltv"], 2),
+                "avgLtv": round(stats["ltv"] / total, 2) if total else 0,
+                "totalRevenue": round(stats["revenue"], 2),
+                "totalMargin": round(stats["margin"], 2),
+                "marginPct": round(100.0 * stats["margin"] / stats["revenue"], 1)
+                             if stats["revenue"] else None,
+                "avgOrders": round(stats["_orders_sum"] / total, 2) if total else 0,
+                "avgRecencyDays": round(stats["_recency_sum"] / total) if total else 0,
+            })
+
+        return {
+            "campaign": campaign,
+            "salesType": sales_type,
+            "ltvBasis": ltv_basis,
+            "followUpOf": root,
+            "criteria": {
+                FOLLOW_UP_KEY: root,
+                "rootSentAt": sent_at.isoformat(),
+                "ltvBasis": ltv_basis,
+                "holdoutPct": 0,
+            },
+            "funnel": [
+                {"stage": "rootTarget", "remaining": root_targets},
+                {"stage": "accepted", "remaining": len(accepted)},
+                {"stage": "subscribed", "remaining": len(kept)},
+            ],
+            "segments": segments,
+            "totals": {"customers": len(kept), "target": len(kept), "holdout": 0},
+            "customers": customers if include_customers else [],
+            "truncated": include_customers and len(kept) > limit,
+        }
+
     async def record_sms_send(
         self,
         campaign: str,
@@ -2127,12 +2370,12 @@ class CustomersMixin:
                 unsent campaign has no window to measure over.
         """
         camp = await self._sms_run(
-            "SELECT sent_at, promocode, ltv_basis, holdout_pct, cost_total"
+            "SELECT sent_at, promocode, ltv_basis, holdout_pct, cost_total, criteria"
             " FROM {campaigns} WHERE campaign = ?", [campaign], mode="one",
         )
         if camp is None:
             raise ValueError(f"campaign {campaign!r} is not frozen")
-        sent_at, promocode, ltv_basis, holdout_pct, cost_total = camp
+        sent_at, promocode, ltv_basis, holdout_pct, cost_total, criteria = camp
         if sent_at is None:
             raise ValueError(
                 f"campaign {campaign!r} has no send date — mark it sent before "
@@ -2306,6 +2549,12 @@ class CustomersMixin:
 
         return {
             "campaign": campaign,
+            # A follow-up has no control of its own; its effect is read on the
+            # campaign it follows, as two messages against none. And a campaign
+            # that was followed up says so, because its lift then includes the
+            # second message to some of its target arm.
+            "followUpOf": follow_up_root(_load_json(criteria)),
+            "followUps": await self._sms_follow_ups(campaign),
             "sentAt": sent_at.isoformat(),
             "windowDays": window_days,
             "deliveredOnly": delivered_only,
@@ -2324,6 +2573,36 @@ class CustomersMixin:
                 "comparison": _compare_groups(overall_t, overall_h),
             },
         }
+
+    async def _sms_follow_ups(self, campaign: str) -> List[Dict[str, Any]]:
+        """The follow-ups frozen against ``campaign``, oldest first.
+
+        Read through every campaign's criteria in Python rather than with a
+        JSON operator: the two engines spell those differently, and the table
+        holds dozens of rows, not thousands.
+        """
+        rows = await self._sms_run(
+            """
+            SELECT c.campaign, c.exported_at, c.sent_at, c.recipients_sent,
+                   c.criteria,
+                   COUNT(m.buyer_id) FILTER (WHERE m.assignment = 'target') AS target
+            FROM {campaigns} c
+            LEFT JOIN {members} m ON m.campaign = c.campaign
+            GROUP BY c.campaign, c.exported_at, c.sent_at, c.recipients_sent,
+                     c.criteria
+            ORDER BY c.exported_at, c.campaign
+            """
+        )
+        return [
+            {
+                "campaign": name,
+                "sentAt": sent_at.isoformat() if sent_at else None,
+                # What the gateway took once it has gone; the roster before.
+                "recipients": recipients if recipients is not None else target,
+            }
+            for name, _exported, sent_at, recipients, criteria, target in rows
+            if follow_up_root(_load_json(criteria)) == campaign
+        ]
 
     async def backfill_sms_campaign_record(
         self,
@@ -2404,6 +2683,9 @@ class CustomersMixin:
                 # form, not a schema; handed back as an object so the page can
                 # say it in words.
                 "criteria": _load_json(r[11]),
+                # Named apart from the criteria it is read from, so the page
+                # does not have to know where a follow-up keeps its root.
+                "followUpOf": follow_up_root(_load_json(r[11])),
                 "messageText": r[12],
                 "messageParts": r[13],
                 "recipientsSent": r[14],

@@ -194,6 +194,10 @@ EXAMPLE_BODIES: Dict[str, Any] = {
 # refused before its roster is read.
 EXAMPLE_QUERIES: Dict[str, Dict[str, Any]] = {
     "POST /api/customers/sms-campaigns": {"campaign": "sweep-campaign"},
+    # The name typed back: without it the send is refused before its claim,
+    # and the door would sweep nothing past its own confirmation.
+    "POST /api/customers/sms-campaigns/{campaign}/send": {
+        "confirm_campaign": "sweep-campaign"},
     # A question, so the model the sweep stands in is asked one.
     "GET /api/chat/stream": {"message": "How are sales this week?"},
     # The shortest walk the backfill takes. Each 30-day chunk it fetches is
