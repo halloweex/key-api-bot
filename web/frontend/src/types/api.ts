@@ -1030,12 +1030,26 @@ export interface TrafficSummary {
   unknown: TrafficMetric
 }
 
+/**
+ * Buyers whose first order ever falls in the period, by the traffic that
+ * order came from. People, not orders: a buyer whose first day carried orders
+ * through two kinds of traffic is new in both, so these do not add up to
+ * `total` the way the order buckets add up to `totals`.
+ */
+export interface TrafficNewCustomers {
+  total: number
+  summary: Record<keyof TrafficSummary, number>
+  by_platform: Record<string, number>
+  by_traffic_type: Record<string, number>
+}
+
 export interface TrafficAnalyticsResponse {
   period: { start: string; end: string }
   totals: TrafficMetric
   summary: TrafficSummary
   by_platform: Record<string, TrafficMetric>
   by_traffic_type: Record<string, TrafficMetric>
+  new_customers: TrafficNewCustomers
 }
 
 export interface TrafficTrendDay {

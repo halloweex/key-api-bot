@@ -42,6 +42,17 @@ export const WithTrend: Story = {
   },
 }
 
+/** Two figures under the value, each on its own line: a narrow tile wraps
+ *  a joined line between a number and its noun. */
+export const WithDetail: Story = {
+  args: {
+    variant: 'blue',
+    icon: ShoppingCart,
+    subtitle: '612 orders',
+    detail: '214 new customers',
+  },
+}
+
 export const Clickable: Story = {
   args: { variant: 'orange', clickable: true, onClick: () => {} },
 }

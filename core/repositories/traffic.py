@@ -264,6 +264,33 @@ class TrafficMixin:
 
         rows = await self._traffic_run(query, params)
 
+        # New buyers are people, and people do not add up across channels the
+        # way orders do: `is_new_customer` marks every order on a buyer's first
+        # day, so a buyer whose first day carried two orders through two
+        # channels is new in both and once in the total. Summing per-group
+        # distinct counts would book that buyer twice, so the buyers come back
+        # one row per (verdict, buyer) and are counted as sets below — the
+        # same reason Gold keeps a roll-up row instead of folding its sources.
+        new_rows = await self._traffic_run(f"""
+            SELECT DISTINCT
+                {self._PLATFORM_EXPR} AS platform,
+                {self._TRAFFIC_TYPE_EXPR} AS traffic_type,
+                s.buyer_id
+            FROM {{silver_orders}} s
+            LEFT JOIN {{order_utm}} u ON s.id = u.order_id
+            WHERE {where_clause} AND s.is_new_customer
+        """, params)
+
+        new_by_platform: Dict[str, set] = {}
+        new_by_type: Dict[str, set] = {}
+        for platform, traffic_type, buyer_id in new_rows:
+            new_by_platform.setdefault(
+                tab_platform(platform, traffic_type), set()).add(buyer_id)
+            new_by_type.setdefault(traffic_type, set()).add(buyer_id)
+
+        def _new_buyers(*types: str) -> int:
+            return len(set().union(*(new_by_type.get(t, ()) for t in types)))
+
         # Aggregate by platform
         platforms = {}
         traffic_types = {}
@@ -327,6 +354,20 @@ class TrafficMixin:
             'by_traffic_type': {
                 k: {'orders': v['orders'], 'revenue': round(v['revenue'], 2)}
                 for k, v in traffic_types.items()
+            },
+            # Buyers whose first order ever falls in the window, by where that
+            # order came from. Its own block, not a third field in the buckets
+            # above: those add up to `totals` and these do not — see the query.
+            'new_customers': {
+                'total': _new_buyers(*new_by_type),
+                'summary': {
+                    'paid': _new_buyers('paid_confirmed', 'paid_likely'),
+                    **{t: _new_buyers(t) for t in (
+                        'paid_confirmed', 'paid_likely', 'organic',
+                        'manager', 'pixel_only', 'unknown')},
+                },
+                'by_platform': {k: len(v) for k, v in new_by_platform.items()},
+                'by_traffic_type': {k: len(v) for k, v in new_by_type.items()},
             },
         }
 
