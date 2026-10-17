@@ -5,6 +5,8 @@ import { VirtualList } from './VirtualList'
 import { Input } from './Input'
 import { Checkbox } from './Checkbox'
 import { useSkuRotation } from '../hooks'
+import { saveCsv } from '../utils/deliverFile'
+import { useFileExport } from './useFileExport'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import type {
   SkuRotationItem,
@@ -149,7 +151,7 @@ function suggestedReorderQty(it: SkuRotationItem): { qty: number; daysCover: num
 
 // ─── CSV export ──────────────────────────────────────────────────────────────
 
-function exportCsv(rows: SkuRotationItem[], preset: PresetKey, filename: string) {
+function buildCsv(rows: SkuRotationItem[], preset: PresetKey): string {
   const baseHeaders = [
     'SKU', 'Name', 'Brand', 'Category', 'ABC', 'Velocity', 'Units',
     'Retail ₴', 'Excess retail ₴', 'DOS',
@@ -204,14 +206,7 @@ function exportCsv(rows: SkuRotationItem[], preset: PresetKey, filename: string)
     lines.push([...base, ...extras].map(escape).join(','))
   }
 
-  // UTF-8 BOM for Excel Cyrillic compatibility
-  const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  a.click()
-  URL.revokeObjectURL(url)
+  return lines.join('\n')
 }
 
 // ─── Props ───────────────────────────────────────────────────────────────────
@@ -241,6 +236,7 @@ function SkuRotationTableComponent({
   const [brandFilterInternal, setBrandFilterInternal] = useState<Set<string>>(new Set())
   const [categoryFilter, setCategoryFilter] = useState<Set<string>>(new Set())
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  const { run: runExport, busy: exporting } = useFileExport()
 
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -403,6 +399,11 @@ function SkuRotationTableComponent({
   const hasAnyFilter =
     !!search || abcFilter.size > 0 || tierFilter.size > 0 ||
     decisionFilter.size > 0 || brandFilterInternal.size > 0 || categoryFilter.size > 0
+
+  const onExport = () => {
+    const filename = `sku-${preset}-${new Date().toISOString().slice(0, 10)}.csv`
+    void runExport(() => saveCsv(buildCsv(filtered, preset), filename))
+  }
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
@@ -682,11 +683,11 @@ function SkuRotationTableComponent({
             <div className="ml-auto flex items-center gap-2">
               <span className="text-slate-500">{filtered.length} / {skus.length}</span>
               <button
-                onClick={() => exportCsv(filtered, preset, `sku-${preset}-${new Date().toISOString().slice(0, 10)}.csv`)}
-                disabled={filtered.length === 0}
+                onClick={onExport}
+                disabled={filtered.length === 0 || exporting}
                 className="px-2 py-1 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-700 disabled:bg-slate-300"
               >
-                ⬇ CSV
+                {exporting ? '…' : '⬇ CSV'}
               </button>
             </div>
           </div>

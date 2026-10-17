@@ -30,6 +30,11 @@ SESSION_ONLY = {
     "POST /api/webhooks/turbosms": "public; signs itself with a shared secret",
     "GET /api/me": "who am I — the answer is about the caller only",
     "PATCH /api/me/preferences": "the caller's own language",
+    "POST /api/me/send-file": (
+        "reads nothing on the server; sends the caller a CSV the caller "
+        "posted, to the caller's own chat — the tab gate already applied "
+        "where the page fetched it"
+    ),
 
     # The header's filter dropdowns, on every page. Gating them per tab would
     # break the chrome of the one page a narrowed account can open, and they

@@ -628,11 +628,18 @@ export const api = {
   getSkus: (options?: FetchOptions) =>
     fetchApi<SkuRotationItem[]>('/stocks/skus', undefined, options),
 
+
   getStockActions: (options?: FetchOptions) =>
     fetchApi<StockAction[]>('/stocks/actions', undefined, options),
 
   getRestockAlerts: (options?: FetchOptions) =>
     fetchApi<RestockAlert[]>('/stocks/alerts', undefined, options),
+
+  // Inside Telegram a page cannot save a file, so the bot sends it to the
+  // user's own chat instead (utils/deliverFile.ts).
+  sendFileToMyChat: (filename: string, content: string) =>
+    fetchApiMutationWithBody<{ sent: boolean }>(
+      '/me/send-file', 'POST', { filename, content }, { timeout: 30000 }),
 
   // Auth
   getCurrentUser: (options?: FetchOptions) =>
