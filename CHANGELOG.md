@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.287
+
+- SMS send: server-checked name, balance and overlap guards; follow-up push
+
+
 ## 3.0.286
 
 - Traffic tab shows new customers by kind of traffic
