@@ -316,6 +316,22 @@ async def test_the_return_and_the_inactive_source_are_both_absent(
 
 
 @pytest.mark.asyncio
+async def test_the_new_buyers_are_not_an_empty_block(both_engines, monkeypatch):
+    """Every order here has a buyer of its own (`buyer_id = id`), so every
+    counted order is a new buyer. That is what keeps the whole-payload
+    comparison above from passing on two empty `new_customers` blocks — and
+    it puts the return and Opencart's order, whose buyers are never new, on
+    the wrong side of the predicate in either engine that loses it."""
+    duck, pg = await _both(both_engines, monkeypatch, "get_traffic_analytics", {})
+    paid = {u[0] for u in UTM if u[4] in ("paid_confirmed", "paid_likely")}
+    for out in (duck, pg):
+        new = out["new_customers"]
+        assert new["total"] == len(COUNTED)
+        assert new["summary"]["paid"] == len(paid & {o[0] for o in COUNTED})
+        assert new["by_platform"]["telegram"] == 1
+
+
+@pytest.mark.asyncio
 async def test_the_blended_roas_is_not_doubled(both_engines, monkeypatch):
     """The trap the port nearly shipped: Postgres' revenue Gold holds a
     per-source row *and* a roll-up row, so `SUM(revenue)` without the

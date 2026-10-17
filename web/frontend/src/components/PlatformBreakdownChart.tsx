@@ -66,6 +66,7 @@ interface TooltipPayload {
   platform: string
   orders: number
   revenue: number
+  newCustomers: number
   pct?: number
 }
 
@@ -103,6 +104,10 @@ function CustomTooltip({
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
         <span style={{ color: CHART_THEME.muted }}>{t('summary.totalOrders')}:</span>
         <span style={{ fontWeight: 500 }}>{formatNumber(data.orders)}</span>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+        <span style={{ color: CHART_THEME.muted }}>{t('traffic.newCustomers')}:</span>
+        <span style={{ fontWeight: 500 }}>{formatNumber(data.newCustomers)}</span>
       </div>
       {showRevenue && (
         <div style={{ display: 'flex', justifyContent: 'space-between' }}>
@@ -146,6 +151,7 @@ export const PlatformBreakdownChart = memo(function PlatformBreakdownChart() {
           : formatPlatformName(platform, t),
         orders: p.orders,
         revenue: p.revenue,
+        newCustomers: data.new_customers?.by_platform?.[platform] ?? 0,
         color: getPlatformColor(platform),
         pct: totalRevenue > 0 ? (p.revenue / totalRevenue) * 100 : 0,
       }))

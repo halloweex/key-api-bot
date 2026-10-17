@@ -5,6 +5,7 @@ import { StatCard, StatCardSkeleton } from './StatCard'
 import { TileGrid } from './TileGrid'
 import { useTrafficAnalytics } from '../hooks/useApi'
 import { formatCurrency, formatNumber } from '../utils/formatters'
+import type { TrafficSummary } from '../types/api'
 
 // ─── Traffic Type Descriptions ────────────────────────────────────────────────
 
@@ -79,6 +80,14 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
   }
 
   const summary = data?.summary
+  const newCustomers = data?.new_customers?.summary
+
+  // Orders, then the new customers among them: how much each kind of
+  // traffic sold, and how many people it brought for the first time.
+  const ordersOf = (key: keyof TrafficSummary) =>
+    `${formatNumber(summary?.[key]?.orders ?? 0)} ${t('common.orders')}`
+  const newOf = (key: keyof TrafficSummary) =>
+    t('traffic.newCustomersCount', { value: formatNumber(newCustomers?.[key] ?? 0) })
 
   return (
     <div className="space-y-3">
@@ -117,6 +126,9 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
               </div>
             ))}
           </div>
+          <p className="text-xs text-slate-500 mt-4 pt-3 border-t border-slate-200">
+            {t('traffic.newCustomersNote')}
+          </p>
         </div>
       )}
 
@@ -128,7 +140,8 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         formatter={formatCurrency}
         icon={Megaphone}
         variant="blue"
-        subtitle={`${formatNumber(summary?.paid?.orders ?? 0)} ${t('common.orders')}`}
+        subtitle={ordersOf('paid')}
+        detail={newOf('paid')}
         ariaLabel={`${t('traffic.paidAds')}: ${formatCurrency(summary?.paid?.revenue ?? 0)}`}
         // Always clickable: the card stays interactive while the breakdown is
         // open (clicking it closes it again), so removing the affordance left
@@ -142,7 +155,8 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         formatter={formatCurrency}
         icon={Sparkles}
         variant="green"
-        subtitle={`${formatNumber(summary?.organic?.orders ?? 0)} ${t('common.orders')}`}
+        subtitle={ordersOf('organic')}
+        detail={newOf('organic')}
         ariaLabel={`${t('traffic.organic')}: ${formatCurrency(summary?.organic?.revenue ?? 0)}`}
       />
       <StatCard
@@ -151,7 +165,8 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         formatter={formatCurrency}
         icon={User}
         variant="cyan"
-        subtitle={`${formatNumber(summary?.manager?.orders ?? 0)} ${t('common.orders')}`}
+        subtitle={ordersOf('manager')}
+        detail={newOf('manager')}
         ariaLabel={`${t('traffic.salesManager')}: ${formatCurrency(summary?.manager?.revenue ?? 0)}`}
       />
       <StatCard
@@ -160,7 +175,8 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         formatter={formatCurrency}
         icon={Monitor}
         variant="orange"
-        subtitle={`${formatNumber(summary?.pixel_only?.orders ?? 0)} ${t('common.orders')}`}
+        subtitle={ordersOf('pixel_only')}
+        detail={newOf('pixel_only')}
         ariaLabel={`${t('traffic.pixelOnly')}: ${formatCurrency(summary?.pixel_only?.revenue ?? 0)}`}
       />
       <StatCard
@@ -169,7 +185,8 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
         formatter={formatCurrency}
         icon={CircleHelp}
         variant="purple"
-        subtitle={`${formatNumber(summary?.unknown?.orders ?? 0)} ${t('common.orders')}`}
+        subtitle={ordersOf('unknown')}
+        detail={newOf('unknown')}
         ariaLabel={`${t('traffic.unknown')}: ${formatCurrency(summary?.unknown?.revenue ?? 0)}`}
       />
       </TileGrid>
@@ -193,7 +210,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
                 {formatCurrency(summary?.paid_confirmed?.revenue ?? 0)}
               </p>
               <p className="text-xs text-slate-500">
-                {formatNumber(summary?.paid_confirmed?.orders ?? 0)} {t('common.orders')}
+                {ordersOf('paid_confirmed')} · {newOf('paid_confirmed')}
               </p>
               <p className="text-xs text-blue-400 mt-1">{t('traffic.confirmedDesc')}</p>
             </div>
@@ -203,7 +220,7 @@ export const TrafficSummaryCards = memo(function TrafficSummaryCards() {
                 {formatCurrency(summary?.paid_likely?.revenue ?? 0)}
               </p>
               <p className="text-xs text-slate-500">
-                {formatNumber(summary?.paid_likely?.orders ?? 0)} {t('common.orders')}
+                {ordersOf('paid_likely')} · {newOf('paid_likely')}
               </p>
               <p className="text-xs text-blue-400 mt-1">{t('traffic.likelyDesc')}</p>
             </div>
