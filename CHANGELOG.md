@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.288
+
+- SMS audience: groups of conditions, ORed, and orders in a period
+
+
 ## 3.0.287
 
 - SMS send: server-checked name, balance and overlap guards; follow-up push
