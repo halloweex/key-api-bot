@@ -145,3 +145,37 @@ def test_every_file_handover_goes_through_deliver_file():
             if _BROKEN_HANDOVER.search(line) or _JS_DIALOG.search(line):
                 offenders.append(f"{rel}:{n}: {line.strip()}")
     assert offenders == [], "\n".join(offenders)
+
+
+# Telegram is detected, and its SDK loaded, in one module. The exports and the
+# wizard's native buttons each had a test of their own once, and they differed
+# on a same-origin frame: Storybook was Telegram for the exports alone.
+_DETECTS_TELEGRAM = re.compile(
+    r"TelegramWebviewProxy|telegram-web-app\.js|function\s+insideTelegram\b")
+_DETECTOR = "utils/telegramMiniApp.ts"
+
+
+def _code_lines(path: Path):
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.lstrip().startswith(("//", "*", "/*")):
+            yield n, line
+
+
+def test_telegram_is_detected_in_one_module():
+    offenders = []
+    for path in FRONTEND.rglob("*.ts*"):
+        rel = path.relative_to(FRONTEND).as_posix()
+        if rel == _DETECTOR or ".stories." in rel or "__tests__" in rel:
+            continue
+        offenders += [f"{rel}:{n}: {line.strip()}" for n, line in _code_lines(path)
+                      if _DETECTS_TELEGRAM.search(line)]
+    assert offenders == [], "\n".join(offenders)
+    assert any(_DETECTS_TELEGRAM.search(line)
+               for _, line in _code_lines(FRONTEND / _DETECTOR)), "the detector moved"
+
+
+def test_the_exports_ask_the_same_detector():
+    imports = [line for _, line in _code_lines(FRONTEND / "utils/deliverFile.ts")
+               if line.startswith("import ")]
+    assert any(re.search(r"\{[^}]*\binsideTelegram\b[^}]*\}\s*from\s*'\./telegramMiniApp'", line)
+               for line in imports), imports

@@ -640,7 +640,6 @@ export const api = {
   getSkus: (options?: FetchOptions) =>
     fetchApi<SkuRotationItem[]>('/stocks/skus', undefined, options),
 
-
   getStockActions: (options?: FetchOptions) =>
     fetchApi<StockAction[]>('/stocks/actions', undefined, options),
 

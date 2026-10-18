@@ -49,13 +49,15 @@ const SDK_TIMEOUT_MS = 5000
  * True inside a Telegram client. Desktop and mobile inject
  * `TelegramWebviewProxy`; Telegram Web hosts the page in an iframe.
  *
- * The file exports' test (`utils/deliverFile.ts`, PR #289) with one narrowing:
- * a frame counts only when its parent is another origin. A same-origin parent
- * is Storybook or a preview, never Telegram, and loading Telegram's script
- * into it would be a request to telegram.org for nothing. (Production cannot
- * be framed by anyone else at all — `frame-ancestors 'self'` — so the frame
- * branch is for completeness; the proxy is what a phone and a desktop have.)
- * When both are on main, one of the two should import the other.
+ * The one test of it: the file exports (`utils/deliverFile.ts`) import this
+ * too, so the native buttons and the exports never disagree about where the
+ * page is. A frame counts only when its parent is another origin. A
+ * same-origin parent is Storybook or a preview, never Telegram: loading
+ * Telegram's script into it would be a request to telegram.org for nothing,
+ * and an export there would post the file to a chat instead of downloading
+ * it. (Production cannot be framed by anyone else at all —
+ * `frame-ancestors 'self'` — so the frame branch is for completeness; the
+ * proxy is what a phone and a desktop have.)
  */
 export function insideTelegram(): boolean {
   if (typeof window === 'undefined') return false

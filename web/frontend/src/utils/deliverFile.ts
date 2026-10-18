@@ -9,20 +9,15 @@
 // So inside Telegram the page fetches the file itself (same origin, the
 // session cookie rides along) and the bot sends it to the user's own chat
 // (`POST /api/me/send-file`). In an ordinary browser nothing changes.
+//
+// "Inside Telegram" is `utils/telegramMiniApp.insideTelegram`, the one test
+// the wizard's native buttons use too, so a page is never Telegram for one
+// and a browser for the other. Its same-origin frame counts as a browser:
+// Storybook downloads, it does not post a CSV to somebody's chat. Nothing
+// here needs Telegram's SDK, so exporting never loads it.
 
 import { api } from '../api/client'
-
-/** True inside a Telegram client. Desktop and mobile inject
- * `TelegramWebviewProxy`; Telegram Web hosts the page in an iframe. */
-export function insideTelegram(): boolean {
-  if (typeof window === 'undefined') return false
-  if ('TelegramWebviewProxy' in window) return true
-  try {
-    return window.self !== window.top
-  } catch {
-    return true // a cross-origin parent: framed, so Telegram Web
-  }
-}
+import { insideTelegram } from './telegramMiniApp'
 
 export type Delivery = 'downloaded' | 'sent'
 
