@@ -4,7 +4,7 @@ import { NumberWithUnit } from './NumberWithUnit'
 import { DateRangeField } from './DateRangeField'
 import { FilterChip } from './FilterChip'
 import { Wrapper } from './Wrapper'
-import { addDays, daysBetween, formatDay, isIsoDate, kyivToday } from '../utils/smsDates'
+import { addDays, daysBetween, isIsoDate, kyivToday, lastDays, rangeEnds } from '../utils/smsDates'
 import { DAY_CHIPS, MAX_DAYS, type PeriodValue } from '../utils/smsConditions'
 import { plural } from '../utils/smsConditionText'
 
@@ -20,8 +20,10 @@ import { plural } from '../utils/smsConditionText'
 //
 // "The last N days" says which dates it is, under the number: the server
 // counts an order N days old as inside the period (`today − date <= N`), so
-// the first day shown is today − N, both ends included. A relative period is
-// kept as N and resolved each time it is used; a range is kept as dates.
+// the first day shown is today − N, both ends included — N + 1 calendar days
+// (`lastDays`, the same arithmetic the query is built with). A relative
+// period is kept as N and resolved each time it is used; a range is kept as
+// dates.
 //
 // Moving between the modes carries the same days over, so switching from
 // "last 90 days" to dates shows those 90 days as dates rather than starting
@@ -102,9 +104,10 @@ export function PeriodControl({
           </Wrapper>
           {typeof value.days === 'number' && value.days >= 1 && value.days <= MAX_DAYS && (
             <p className="text-xs text-slate-500 tabular-nums">
-              {t('periodControl.resolved', {
-                from: formatDay(addDays(today, -value.days)), to: formatDay(today),
-              })}
+              {t('periodControl.resolved', (() => {
+                const { from, to } = lastDays(value.days, today)
+                return rangeEnds(from, to)
+              })())}
             </p>
           )}
         </Wrapper>

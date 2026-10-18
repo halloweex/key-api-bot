@@ -13,6 +13,7 @@ from pydantic import ValidationError as PydanticValidationError
 from typing import Annotated, List, Optional
 
 from core.gender import CONFIDENCE_LADDER, GENDERS
+from core.sms_refusals import REFUSAL_REASONS
 from core.repositories.customers import (
     BUILTIN_AUDIENCE_PRESETS, DEFAULT_WINDOW_DAYS, MAX_AUDIENCE_GROUPS,
     SMS_GROUPINGS, SMS_LTV_BASES, SMS_RECENT_CAMPAIGN_HOURS, SMS_TIER_DEFAULTS,
@@ -33,6 +34,35 @@ from ._deps import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+class SmsRefusal(HTTPException):
+    """A refusal whose JSON carries `reason` and its figures beside `detail`.
+
+    `detail` is the English sentence every caller has always read; `reason`
+    is one of `core.sms_refusals.REFUSAL_REASONS`, which the page turns into
+    its reader's language. Raised rather than returned, so a dependency can
+    refuse too; `web/main.py` answers it. Without that handler it degrades to
+    an ordinary HTTPException — the same status and `detail`, no `reason`.
+    """
+
+    def __init__(self, status_code: int, detail: str, reason: str, **figures):
+        if reason not in REFUSAL_REASONS:
+            raise KeyError(f"unknown SMS refusal reason {reason!r}")
+        super().__init__(status_code=status_code, detail=detail)
+        self.reason = reason
+        self.figures = figures
+
+    def content(self) -> dict:
+        return {"detail": self.detail, "reason": self.reason, **self.figures}
+
+
+def _refused(status_code: int, e: Exception) -> HTTPException:
+    """The store's refusal as an answer: with its reason when it names one."""
+    reason = getattr(e, "reason", None)
+    if reason is None:
+        return HTTPException(status_code=status_code, detail=str(e))
+    return SmsRefusal(status_code, str(e), reason, **getattr(e, "figures", {}))
 
 
 @router.get("/customers/insights")
@@ -515,26 +545,27 @@ def _sms_segment_params(
     if follow_up_of is not None:
         shaping = sorted(k for k in request.query_params if k in _AUDIENCE_SHAPING_PARAMS)
         if shaping:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"a follow-up goes to exactly the people {follow_up_of!r} reached; "
-                    f"{', '.join(shaping)} cannot narrow it — leave them out, or "
-                    f"build a new audience instead"
-                ),
+            raise SmsRefusal(
+                400,
+                f"a follow-up goes to exactly the people {follow_up_of!r} reached; "
+                f"{', '.join(shaping)} cannot narrow it — leave them out, or "
+                f"build a new audience instead",
+                "follow_up_narrowed", root=follow_up_of, params=shaping,
             )
         # Forced, and refused when asked for: a follow-up withholding people of
         # its own would draw a second control out of the first one's targets,
         # and the first one's control is the only baseline either has.
         if "holdout_pct" in request.query_params and holdout_pct != 0:
-            raise HTTPException(
-                status_code=400,
-                detail="a follow-up has no control group of its own — it is measured "
-                       f"on {follow_up_of!r}'s control, so holdout_pct must be 0",
+            raise SmsRefusal(
+                400,
+                "a follow-up has no control group of its own — it is measured "
+                f"on {follow_up_of!r}'s control, so holdout_pct must be 0",
+                "follow_up_holdout", root=follow_up_of,
             )
         if follow_up_of == campaign:
-            raise HTTPException(
-                status_code=400, detail="a campaign cannot follow itself up",
+            raise SmsRefusal(
+                400, "a campaign cannot follow itself up", "follow_up_self",
+                root=follow_up_of,
             )
         holdout_pct = 0
 
@@ -666,18 +697,17 @@ async def _sms_audience(store, criteria: dict, *, include_customers: bool, limit
         )
     except ValueError as e:
         status = 404 if "not frozen" in str(e) else 409
-        raise HTTPException(status_code=status, detail=str(e))
+        raise _refused(status, e)
 
     # `api_gate` checked the sales type in this request's query string, and only
     # that one. Inheriting a different one from the root would let a follow-up
     # reach a roster the caller was never cleared to see.
     if data["salesType"] != criteria["sales_type"]:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"campaign {root!r} was built for sales_type={data['salesType']}; "
-                f"a follow-up inherits it — pass sales_type={data['salesType']}"
-            ),
+        raise SmsRefusal(
+            409,
+            f"campaign {root!r} was built for sales_type={data['salesType']}; "
+            f"a follow-up inherits it — pass sales_type={data['salesType']}",
+            "follow_up_sales_type", root=root, salesType=data["salesType"],
         )
     return data
 
@@ -789,7 +819,7 @@ async def export_sms_segments_csv(
                 overwrite=overwrite,
             )
         except ValueError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+            raise _refused(409, e)
 
     rows = data["customers"]
     if not include_holdout:
@@ -1042,24 +1072,24 @@ async def create_sms_campaign(
     check and the results read it.
     """
     if criteria["campaign"] == "default":
-        raise HTTPException(
-            status_code=400,
-            detail="name the campaign — 'default' is the placeholder the preview uses",
+        raise SmsRefusal(
+            400, "name the campaign — 'default' is the placeholder the preview uses",
+            "name_placeholder",
         )
 
     store = await get_store()
     data = await _sms_audience(store, criteria, include_customers=True, limit=limit)
 
     if data["truncated"]:
-        raise HTTPException(
-            status_code=400,
-            detail="refusing to freeze a truncated roster — raise `limit` so the "
-                   "whole audience is recorded",
+        raise SmsRefusal(
+            400,
+            "refusing to freeze a truncated roster — raise `limit` so the "
+            "whole audience is recorded",
+            "roster_truncated", limit=limit,
         )
     if not data["customers"]:
-        raise HTTPException(
-            status_code=400,
-            detail="this audience is empty — nothing to freeze",
+        raise SmsRefusal(
+            400, "this audience is empty — nothing to freeze", "audience_empty",
         )
 
     # A follow-up carries its root's basis; the query's own default would
@@ -1078,7 +1108,7 @@ async def create_sms_campaign(
             overwrite=overwrite,
         )
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise _refused(409, e)
 
     logger.info(
         "SMS campaign created: user=%s campaign=%s grouping=%s groups=%d "
@@ -1153,6 +1183,8 @@ _BALANCE_READ_TIMEOUT_S = 5.0
 def _refusal(detail: str, reason: str, **extra) -> JSONResponse:
     """A 409 that says why in `detail`, as every refusal here does, and carries
     the figures behind it beside the sentence for a page that wants them."""
+    if reason not in REFUSAL_REASONS:
+        raise KeyError(f"unknown SMS refusal reason {reason!r}")
     return JSONResponse(
         status_code=409, content={"detail": detail, "reason": reason, **extra},
     )
@@ -1184,7 +1216,8 @@ async def _refuse_before_sending(
             why.append("A second message to another campaign's recipients has to "
                        "be a declared follow-up of it (follow_up_of).")
         why.append("Nothing was sent; the campaign is unsent.")
-        return _refusal(" ".join(why), "recent_campaign", conflicts=conflicts)
+        return _refusal(" ".join(why), "recent_campaign", conflicts=conflicts,
+                        hours=SMS_RECENT_CAMPAIGN_HOURS)
 
     parts = count_segments(text).parts
     price = TurboSmsConfig().price_per_part
@@ -1266,10 +1299,11 @@ async def send_sms_campaign(
     # replayed request, a script or a second tab would otherwise skip the one
     # deliberate act this send asks for. Before the claim, so it costs nothing.
     if (confirm_campaign or "").strip() != campaign:
-        raise HTTPException(
-            status_code=409,
-            detail=f"type the campaign name {campaign!r} to confirm the send — "
-                   f"confirm_campaign is missing or does not match",
+        raise SmsRefusal(
+            409,
+            f"type the campaign name {campaign!r} to confirm the send — "
+            f"confirm_campaign is missing or does not match",
+            "confirm_mismatch", campaign=campaign,
         )
 
     # Assembled before the claim, because it is built from query parameters
@@ -1284,12 +1318,13 @@ async def send_sms_campaign(
         targets = await store.get_sms_campaign_targets(campaign)
     except ValueError as e:
         status = 404 if "not frozen" in str(e) else 409
-        raise HTTPException(status_code=status, detail=str(e))
+        raise _refused(status, e)
 
     if not targets:
         # Only knowable after the claim, so it has to be handed back here.
         await store.release_sms_campaign(campaign)
-        raise HTTPException(status_code=409, detail="campaign has no target recipients")
+        raise SmsRefusal(409, "campaign has no target recipients", "no_targets",
+                         campaign=campaign)
 
     by_phone = {t["phone"]: t["buyerId"] for t in targets}
 
@@ -1336,7 +1371,7 @@ async def send_sms_campaign(
             # above keeps the claim, because messages did leave.
             await store.release_sms_campaign(campaign)
             logger.error("TurboSMS send failed: campaign=%s error=%s", campaign, e)
-            raise HTTPException(status_code=502, detail=str(e))
+            raise SmsRefusal(502, str(e), "gateway_refused", error=str(e))
         # A read timeout, a 5xx or an unreadable body is an unknown answer, not
         # a negative one: the whole batch was uploaded and the gateway may be
         # delivering it right now. Releasing here is how the roster gets sent
@@ -1347,12 +1382,11 @@ async def send_sms_campaign(
             "TurboSMS send outcome unknown, claim kept: campaign=%s error=%s",
             campaign, e,
         )
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"{e}. The gateway may have accepted the batch, so the campaign "
-                f"stays claimed — check the TurboSMS panel before releasing it."
-            ),
+        raise SmsRefusal(
+            502,
+            f"{e}. The gateway may have accepted the batch, so the campaign "
+            f"stays claimed — check the TurboSMS panel before releasing it.",
+            "gateway_outcome_unknown", error=str(e),
         )
 
     accepted, failed, stoplisted = {}, {}, []

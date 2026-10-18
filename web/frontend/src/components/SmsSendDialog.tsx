@@ -9,6 +9,8 @@ import { useSendSmsCampaign, useSmsBalance } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { formatNumber } from '../utils/formatters'
 import { balanceIsShort, smsCost, type SmsBalanceReading } from '../utils/smsCost'
+import { describeSmsError, refusalReason } from '../utils/smsRefusal'
+import { useLayer } from '../utils/layerStack'
 import type { SmsCampaignSummary, SmsChannel } from '../types/api'
 
 // ─── SmsSendDialog ───────────────────────────────────────────────────────────
@@ -58,6 +60,9 @@ export const SmsSendDialog = memo(function SmsSendDialog({
   const send = useSendSmsCampaign()
   const { addToast } = useToast()
   const { data: gateway, isLoading: balanceLoading } = useSmsBalance()
+  // On the stack of what "back" closes first — Telegram's BackButton — except
+  // mid-send, where the dialog's own Cancel is disabled too.
+  useLayer(true, () => { if (!send.isPending) onClose() })
 
   const trimmed = text.trim()
   const hybrid = channel === 'viber_sms'
@@ -118,10 +123,15 @@ export const SmsSendDialog = memo(function SmsSendDialog({
           onClose()
         },
         onError: (error) => {
+          // A refusal the server named — the balance, today's other campaign,
+          // the name typed back — is said in the reader's language and is not
+          // "the gateway refused": it never reached the gateway.
+          const named = refusalReason(error) != null
           addToast({
             type: 'error',
-            title: t('sms.sendFailed'),
-            message: error instanceof Error ? error.message : undefined,
+            title: named ? t('sms.sendRefused') : t('sms.sendFailed'),
+            message: describeSmsError(error, t),
+            duration: named ? 20000 : undefined,
           })
         },
       },

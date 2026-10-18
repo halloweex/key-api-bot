@@ -67,6 +67,16 @@ export const Counting: Story = {
 }
 
 /**
+ * Inside the Telegram Mini App the action is Telegram's MainButton, under the
+ * page — «Next · 3,691 recipients», enabled and pressed exactly like the bar's
+ * — so the bar keeps the sentence and the counts and draws no button of its own.
+ */
+export const InTelegram: Story = {
+  globals: { viewport: { value: 'mobile2', isRotated: false } },
+  args: { actionPlacement: 'native' },
+}
+
+/**
  * On a phone the bar sticks to the bottom of the screen, under the thumb, and
  * the button takes the full width. Scroll the filler to see it stay.
  */

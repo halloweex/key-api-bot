@@ -47,6 +47,15 @@ describe('ApiError.from', () => {
     expect(error.message).toBe('API error: ')
   })
 
+  it('keeps the body, so a refusal can be said in the reader\'s language', async () => {
+    const error = await ApiError.from(response(409, {
+      detail: 'the TurboSMS balance is 12.00 ₴ …', reason: 'balance_short', shortfall: 3.4,
+    }))
+
+    expect(error.message).toBe('the TurboSMS balance is 12.00 ₴ …')
+    expect(error.body).toMatchObject({ reason: 'balance_short', shortfall: 3.4 })
+  })
+
   it('keeps the severity code the status implies', async () => {
     const server = await ApiError.from(response(502, { detail: 'gateway said no' }))
     const client = await ApiError.from(response(400, { detail: 'bad phone' }))

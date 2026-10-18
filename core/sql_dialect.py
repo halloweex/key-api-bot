@@ -259,6 +259,21 @@ POSTGRES = Dialect(
 # depending on an environment variable in a container.
 TODAY_IN_KYIV = f"(now() AT TIME ZONE '{DISPLAY_TIMEZONE}')::date"
 
+# ─── A number the gateway keeps rejecting ───────────────────────────────────
+#
+# TurboSMS reports REJECTD (or, from its older delivery reports, Rejected) for
+# a number the operator refused. One rejection can be a temporary block, and
+# an opt-out is a promise to a person that is never taken back — so neither
+# of those is the answer. What the delivery reports say is: of 38 numbers
+# rejected in a campaign up to 2026-10-17, 15 were messaged again later and
+# all 15 were rejected again, none delivered. So a number rejected in two
+# DIFFERENT campaigns is left out of every audience, read from the reports at
+# each preview (`ok_reachable`), never written anywhere: no opt-out row, so
+# `app.marketing_optouts` stays a list of people's own requests, and a change
+# of this rule changes the next audience without a migration or a clean-up.
+SMS_REJECTED_STATUSES = ("REJECTD", "Rejected")
+SMS_UNREACHABLE_AFTER_CAMPAIGNS = 2
+
 # ─── How each driver spells a bound parameter ───────────────────────────────
 #
 # The shared bodies keep DuckDB's `?` and are renumbered on their way to
@@ -772,6 +787,19 @@ _SMS_SEGMENTS_BODY = """
                 -- short by another's.
                 WHERE c.recency <= ?
             ),
+            rejected_numbers AS (
+                -- Numbers the gateway rejected in {rejected_after} or more
+                -- campaigns (SMS_REJECTED_STATUSES), one row a number. Joined
+                -- below, not asked with NOT EXISTS: PostgreSQL cannot turn an
+                -- EXISTS over a GROUP BY into an anti-join, and ran the count
+                -- once per customer — 4.2 s for every buyer on production
+                -- against 1.6 s without the rule; the join hashes it once.
+                SELECT phone AS rejected_phone
+                FROM {sms_campaign_members}
+                WHERE delivery_status IN ({rejected_statuses})
+                GROUP BY phone
+                HAVING COUNT(DISTINCT campaign) >= {rejected_after}
+            ),
             flagged AS (
                 -- Each eligibility rule as its own column rather than a WHERE
                 -- clause, so the same pass can both filter and report how many
@@ -789,8 +817,12 @@ _SMS_SEGMENTS_BODY = """
                         SELECT 1 FROM {marketing_optouts} o
                         WHERE o.channel = 'sms'
                           AND (o.buyer_id = scored.buyer_id OR o.phone = scored.phone)
-                    ) AS ok_subscribed
+                    ) AS ok_subscribed,
+                    -- A number the gateway refused in two campaigns: not a
+                    -- person's opt-out, so not counted as one.
+                    rejected_numbers.rejected_phone IS NULL AS ok_reachable
                 FROM scored
+                LEFT JOIN rejected_numbers ON rejected_numbers.rejected_phone = scored.phone
             ),
             matched AS (
                 -- In the audience if in ANY group. Every rule after this one —
@@ -813,6 +845,7 @@ _SMS_SEGMENTS_BODY = """
                            {group_mask} AS group_mask
                     FROM matched f
                     WHERE ok_filters AND ok_tier AND ok_phone AND ok_subscribed
+                      AND ok_reachable
                 ) deduped
                 WHERE phone_rn = 1
             ),
@@ -833,6 +866,8 @@ _SMS_SEGMENTS_BODY = """
                     COUNT(*) FILTER (WHERE ok_filters AND ok_tier AND ok_phone) AS f_phone,
                     COUNT(*) FILTER (WHERE ok_filters AND ok_tier AND ok_phone AND ok_subscribed)
                         AS f_subscribed,
+                    COUNT(*) FILTER (WHERE ok_filters AND ok_tier AND ok_phone AND ok_subscribed
+                                       AND ok_reachable) AS f_reachable,
                     (SELECT COUNT(*) FROM eligible) AS f_eligible{group_funnel}
                 FROM matched
             )
@@ -855,13 +890,24 @@ _SMS_SEGMENTS_BODY = """
                 f_subscribed, f_eligible,
                 -- Which groups reach this recipient's number, one bit each,
                 -- so the caller can count each group's share of the union.
-                group_mask{group_funnel_columns}
+                group_mask,
+                -- After the pre-groups projection, which a test holds by
+                -- position: the numbers the gateway keeps rejecting.
+                f_reachable{group_funnel_columns}
             -- RIGHT JOIN, not CROSS: when nothing survives the filters the
             -- funnel is the only thing left to explain why, so its single row
             -- has to come back regardless.
             FROM selected RIGHT JOIN funnel ON TRUE
             ORDER BY tier, ltv DESC, buyer_id
             """
+
+
+def _sql_literals(values: Sequence[str]) -> str:
+    """Constants of this module as SQL string literals — never user text."""
+    for v in values:
+        if not v.isalnum():
+            raise ValueError(f"not a plain constant: {v!r}")
+    return ", ".join(f"'{v}'" for v in values)
 
 
 def sms_segments_select(
@@ -904,6 +950,9 @@ def sms_segments_select(
         offer_stocks=dialect.offer_stocks,
         buyers=dialect.buyers,
         marketing_optouts=dialect.marketing_optouts,
+        sms_campaign_members=dialect.sms_campaign_members,
+        rejected_statuses=_sql_literals(SMS_REJECTED_STATUSES),
+        rejected_after=int(SMS_UNREACHABLE_AFTER_CAMPAIGNS),
         buyer_gender=dialect.buyer_gender,
         ltv_column=ltv_column,
         sales_type_filter=sales_type_filter,

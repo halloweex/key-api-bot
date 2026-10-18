@@ -108,12 +108,20 @@ function dedupKey(endpoint: string, queryParams?: string): string {
 export class ApiError extends Error {
   status: number
   code: string
+  /**
+   * The JSON the server answered with, when it was an object. A refusal names
+   * itself there — `reason` beside `detail`, with its figures — so a page can
+   * say it in its reader's language instead of showing the English `detail`
+   * (`utils/smsRefusal.ts`).
+   */
+  body?: Record<string, unknown>
 
-  constructor(status: number, message: string, code = 'API_ERROR') {
+  constructor(status: number, message: string, code = 'API_ERROR', body?: Record<string, unknown>) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.body = body
   }
 
   /**
@@ -129,7 +137,11 @@ export class ApiError extends Error {
     try {
       const body = await response.json()
       const detail = typeof body?.detail === 'string' ? body.detail : null
-      return detail ? new ApiError(response.status, detail, fallback.code) : fallback
+      const object = body && typeof body === 'object' && !Array.isArray(body)
+        ? body as Record<string, unknown> : undefined
+      return detail
+        ? new ApiError(response.status, detail, fallback.code, object)
+        : fallback
     } catch {
       return fallback
     }

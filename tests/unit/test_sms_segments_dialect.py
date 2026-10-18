@@ -69,6 +69,7 @@ def _statements(sql: str) -> str:
 # a substitution meant for something else. `app.buyer_gender` sits above it for
 # the same reason: both bare forms begin with "buyer".
 _NAMES = (
+    ("app.sms_campaign_members", "sms_campaign_members"),
     ("app.marketing_optouts", "marketing_optouts"),
     ("bronze.offer_stocks", "offer_stocks"),
     ("silver.order_lines", "silver_order_lines"),
@@ -95,7 +96,8 @@ class TestOneBody:
     def test_each_rendering_names_its_own_tables(self, dialect):
         sql = sms_segments_select(dialect, **FRAGMENTS)
         for name in (dialect.order_lines, dialect.offer_stocks,
-                     dialect.buyers, dialect.marketing_optouts):
+                     dialect.buyers, dialect.marketing_optouts,
+                     dialect.sms_campaign_members):
             assert name in sql
 
     def test_no_placeholder_hole_was_left_unfilled(self):

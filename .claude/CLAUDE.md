@@ -629,6 +629,39 @@ transport, `or_groups` and the freeze are unchanged.
 
 On production on 2026-10-17, the new code's own SQL beside plain SQL: «2+ с
 01.01 по 14.10» OR «1+ с 16.07 по 14.10» is 4 101 (2 612 / 3 076) both ways.
+
+**What the step says about itself** (2026-10-18, the redesign's follow-ups):
+
+- **"The last N days" is N + 1 calendar days**, and the line under the number
+  says so: every relative time here is `today − date <= N` in Kyiv dates, so
+  on 18 Oct the last 91 days are «= с 19 июля по 18 октября 2026,
+  включительно». The label follows the query, never the other way round — the
+  built-in presets were written against it. `utils/smsDates.lastDays` is the
+  one place the page does that arithmetic; `tests/unit/test_sms_last_n_days_edge.py`
+  runs the server's own fragment for the same literals the vitest states.
+- **Each template chip carries its count**, and **an empty group names the
+  condition that emptied it** («Никого: условие «Сделал(а) 92+ заказа за всё
+  время» не подходит ни одному клиенту»). Both are previews of other
+  audiences, asked by `useSmsAudienceCounts`: one query per distinct question,
+  one at a time, cached 30 minutes under their own key (a send does not refetch
+  nine chips at once), templates only once their row is on screen, a group's
+  only once its count has settled and is zero — at most one preview per
+  condition. Named on the page, not counted by the server: a per-condition
+  count would split the predicate every campaign is frozen from.
+- **Inside the Telegram Mini App** «Далее · N получателей» is Telegram's
+  MainButton and the bar draws none; the BackButton closes the sheet or
+  dialog on top (`utils/layerStack`), else steps back. Telegram's SDK is
+  loaded only inside Telegram, and only drives buttons in a real client of
+  Bot API 6.1+; outside it nothing changes.
+- **A number the gateway rejected in two campaigns is left out** of every
+  audience and of a follow-up (`ok_reachable`, funnel stage `reachable`).
+  Measured before it was built: of 38 numbers ever rejected (REJECTD/Rejected),
+  15 were messaged again later and all 15 were rejected again; none was ever
+  delivered after a rejection. Read from the delivery reports at each preview,
+  **never written as an opt-out** — `app.marketing_optouts` stays a list of
+  people's own requests, one rejection can be a temporary block, and the rule
+  can change without a clean-up. On production on 2026-10-18 it removed 17 of
+  18 104 people from "all buyers".
 ### Two axes: a level and an area
 
 Access is a **pair**, and conflating the two halves is the mistake this section
@@ -927,6 +960,19 @@ gateway, and each refusal hands the claim back with nothing sent:
   a refusal, not a pass. Every refusal is a 409 whose JSON carries `reason`
   (`recent_campaign`, `balance_short`, `balance_unreadable`) and the figures.
 - **A guard that raises** releases the claim before the error goes out.
+
+**Every refusal on the campaign routes is named**, not only the three above:
+the name typed back, the claim (`not_frozen`, `already_sent`), the gateway's
+own answers, the freeze and every follow-up refusal. `detail` stays the English
+sentence API callers read; beside it `reason` (one of
+`core/sms_refusals.REFUSAL_REASONS`) and its figures, which the page says in
+the reader's language from `sms.refusal.<reason>` (`utils/smsRefusal.ts`) — a
+reason with no sentence falls back to `detail`, never to a key. Raised as
+`SmsRefusal` (answered by a handler in `web/main.py`) or, from the store, as
+`SmsCampaignRefused`, still a `ValueError`. `tests/unit/test_sms_refusal_reasons.py`
+walks both modules: every reason raised is in the list and every name in the
+list is raised; the locale test requires a sentence for each in three
+languages.
 
 **A follow-up** (owner's decision 2026-10-17) is the same people a second time
 the same day — a "last day" push. As an ordinary campaign it would re-draw a

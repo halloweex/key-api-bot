@@ -1527,9 +1527,12 @@ export type SmsFunnelStage =
   | 'tiered'
   | 'phone'
   | 'subscribed'
+  // Numbers the gateway rejected in two campaigns are left out — not an
+  // opt-out, nobody asked; the operator keeps refusing the number.
+  | 'reachable'
   | 'uniquePhone'
   // A follow-up's roster: the first campaign's target arm, and those of them
-  // the gateway accepted. Its last stage is `subscribed`, as above.
+  // the gateway accepted. Its last stage is `reachable`, as above.
   | 'rootTarget'
   | 'accepted'
 

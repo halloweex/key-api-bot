@@ -17,7 +17,9 @@ import {
   newCondition, suspiciousCount, type Condition, type ConditionGroup, type ConditionType,
 } from '../utils/smsConditions'
 import { conditionSentence, plural } from '../utils/smsConditionText'
+import type { GroupDiagnosis } from '../utils/smsGroupDiagnosis'
 import { formatNumber } from '../utils/formatters'
+import i18n, { LANGUAGE_LOCALES, type SupportedLanguage } from '../lib/i18n'
 import type { SmsAudienceGroupShare } from '../types/api'
 
 // ─── AudienceGroupCard ───────────────────────────────────────────────────────
@@ -29,7 +31,10 @@ import type { SmsAudienceGroupShare } from '../types/api'
 //
 // The card says what it brings — «2 612 человек · 1 035 только здесь» — once
 // a preview has counted it, and says so when it brings nobody, because a
-// group that empties itself is the one place a slip shows as a number.
+// group that empties itself is the one place a slip shows as a number. And
+// it says WHICH condition did it, once the caller has asked
+// (`utils/smsGroupDiagnosis.ts`): «Никого: условие «Сделал(а) 92+ заказа за
+// всё время» не подходит ни одному клиенту».
 //
 // One condition is edited at a time, across the whole audience (the caller
 // holds which). On desktop its inputs open under its sentence and every
@@ -62,6 +67,7 @@ export function AudienceGroupCard({
   phone,
   brandOptions,
   categoryOptions,
+  diagnosis,
 }: {
   /** 0-based; the card is titled with it, counted from one. */
   index: number
@@ -80,6 +86,9 @@ export function AudienceGroupCard({
   phone: boolean
   brandOptions: PickOption[]
   categoryOptions: PickOption[]
+  /** Which condition brings the group to nobody, when it does: being asked,
+   *  answered, or null when no one condition explains it. */
+  diagnosis?: GroupDiagnosis | 'pending' | null
 }) {
   const { t } = useTranslation()
   // On a phone the sheet edits a copy; it becomes the condition when the
@@ -128,6 +137,44 @@ export function AudienceGroupCard({
 
   const title = t('sms.groupTitle', { n: index + 1 })
 
+  // A condition named in a sentence of its own: «Сделал(а) 92+ заказа за всё время».
+  const named = (id: string) => {
+    const c = group.conditions.find((x) => x.id === id)
+    if (!c) return '…'
+    const { label, blanks } = conditionSentence(c, t, { categoryName })
+    return [label, ...blanks].join(' ')
+  }
+  const listOf = (ids: string[]) => new Intl.ListFormat(
+    LANGUAGE_LOCALES[i18n.language as SupportedLanguage] || 'en-US', { type: 'conjunction' },
+  ).format(ids.map((id) => t('sms.groupWhy.quoted', { condition: named(id) })))
+  const people = (n: number) => ({ n: formatNumber(n), word: plural(t, 'word.people', n) })
+  const why = (() => {
+    if (!share || !diagnosis) return null
+    if (diagnosis === 'pending') return t('sms.groupWhy.checking')
+    switch (diagnosis.kind) {
+      case 'alone': return t('sms.groupWhy.alone', { condition: named(diagnosis.conditionId) })
+      case 'cuts':
+        return t('sms.groupWhy.cuts', {
+          condition: named(diagnosis.conditionId), ...people(diagnosis.without),
+        })
+      case 'clash': return t('sms.groupWhy.clash', { conditions: listOf(diagnosis.conditionIds) })
+      case 'neither':
+        return t('sms.groupWhy.neither', {
+          a: named(diagnosis.conditionIds[0]), b: named(diagnosis.conditionIds[1]),
+        })
+      case 'together': return t('sms.groupWhy.together')
+      case 'level':
+        return t('sms.groupWhy.level', {
+          matched: formatNumber(share.matched), ...people(diagnosis.without),
+        })
+      case 'reach':
+        return t('sms.groupWhy.reach', {
+          matched: formatNumber(share.matched), condition: named(diagnosis.conditionId),
+          ...people(diagnosis.without),
+        })
+    }
+  })()
+
   // What is wrong with a condition, said the same way under its row and inside
   // its sheet — a phone edits in the sheet and must not lose the warning there.
   const problemFor = (c: Condition) => {
@@ -171,12 +218,18 @@ export function AudienceGroupCard({
               {title}
               <span className="font-normal text-slate-500"> · {t('sms.group.allMustHold')}</span>
             </h3>
-            {share && share.matched === 0 && (
+            {share && share.matched === 0 && (!why || diagnosis === 'pending') && (
               <p className="mt-0.5 text-xs font-medium text-amber-700">{t('sms.groupMatchesNobody')}</p>
             )}
-            {share && share.matched > 0 && share.recipients === 0 && (
+            {share && share.matched > 0 && share.recipients === 0 && (!why || diagnosis === 'pending') && (
               <p className="mt-0.5 text-xs text-amber-700">
                 {t('sms.groupUnreachable', { matched: formatNumber(share.matched) })}
+              </p>
+            )}
+            {why && (
+              <p className={`mt-0.5 text-xs text-amber-700 ${diagnosis === 'pending' ? '' : 'font-medium'}`}
+                 aria-live="polite">
+                {why}
               </p>
             )}
             {share && share.recipients > 0 && (

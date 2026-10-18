@@ -20,11 +20,12 @@ import type { PeriodValue } from '../utils/smsConditions'
 const TODAY = '2026-10-17'
 
 function Live({
-  initial, kinds, unavailable,
+  initial, kinds, unavailable, today = TODAY,
 }: {
   initial: PeriodValue
   kinds?: Array<PeriodValue['kind']>
   unavailable?: 'disable' | 'hide'
+  today?: string
 }) {
   const [value, setValue] = useState<PeriodValue>(initial)
   return (
@@ -34,7 +35,7 @@ function Live({
       kinds={kinds}
       unavailable={unavailable}
       ariaLabel="When"
-      today={TODAY}
+      today={today}
     />
   )
 }
@@ -60,6 +61,17 @@ export const AllTime: Story = {
  */
 export const LastNDays: Story = {
   render: () => <Live initial={{ kind: 'last', days: 90 }} />,
+}
+
+/**
+ * Exactly what the server counts: an order is in "the last N days" when
+ * today − its date ≤ N, so on 18 Oct 2026 the last 91 days are 19 Jul to
+ * 18 Oct, both included — 92 calendar days. The line under the number says
+ * the dates in full, the year once; `tests/unit/test_sms_last_n_days_edge.py`
+ * runs the server's predicate for these very dates.
+ */
+export const LastNDaysIsNPlusOneCalendarDays: Story = {
+  render: () => <Live initial={{ kind: 'last', days: 91 }} today="2026-10-18" />,
 }
 
 /**

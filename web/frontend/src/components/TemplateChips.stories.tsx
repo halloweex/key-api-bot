@@ -14,6 +14,11 @@ import { Wrapper } from './Wrapper'
  * A row that scrolls sideways on a phone — nine chips wrapping would push the
  * groups below the fold — and wraps on desktop. `extra` holds the other two
  * ways in: like a past campaign, and a saved audience.
+ *
+ * Each chip says how many people it would select today, beside its name. The
+ * counts are asked one at a time once the row is on screen; «…» while one is
+ * on its way, nothing when it could not be had. The figures below are
+ * production's on 2026-10-17 (retail).
  */
 
 const TEMPLATES: TemplateChip[] = [
@@ -28,13 +33,20 @@ const TEMPLATES: TemplateChip[] = [
   { key: 'brand', label: 'Bought a brand…', hint: 'pick the brand' },
 ]
 
-function Live({ withExtra = false }: { withExtra?: boolean }) {
+const COUNTS: Record<string, string> = {
+  all: '17,891', recent: '1,185', new: '507', repeat: '6,729', oneAndGone: '10,369',
+  churning: '2,662', lost: '10,728', vip: '2,041',
+}
+
+function Live({
+  withExtra = false, counts,
+}: { withExtra?: boolean; counts?: Record<string, string> }) {
   const [picked, setPicked] = useState<string | null>(null)
   return (
     <Wrapper dir="column" gap="sm">
       <TemplateChips
         title="Where to start?"
-        items={TEMPLATES}
+        items={TEMPLATES.map((t) => ({ ...t, count: counts?.[t.key] }))}
         onPick={setPicked}
         extra={withExtra ? (
           <Wrapper dir="row" gap="sm" wrap>
@@ -74,8 +86,23 @@ export const WithLibrary: Story = {
   render: () => <Live withExtra />,
 }
 
+/** Each chip with how many it would select today; "a brand…" has no count
+ *  until the brand is picked. */
+export const WithCounts: Story = {
+  render: () => <Live withExtra counts={COUNTS} />,
+}
+
+/** The counts arrive one at a time: the first two in, the rest on their way,
+ *  one that failed showing nothing. */
+export const CountsArriving: Story = {
+  render: () => (
+    <Live counts={{ all: '17,891', recent: '1,185', new: '…', repeat: '…', churning: '…',
+                    lost: '…', vip: '…' }} />
+  ),
+}
+
 /** A phone: one row that scrolls sideways, each chip a 44px target. */
 export const ScrollingOnAPhone: Story = {
   globals: { viewport: { value: 'mobile2', isRotated: false } },
-  render: () => <Live withExtra />,
+  render: () => <Live withExtra counts={COUNTS} />,
 }

@@ -18,7 +18,9 @@ import type { SmsSegmentsResponse } from '../types/api'
  *
  * `fetch` is answered from fixtures: the preview returns a share per group it
  * was sent (so the cards and the overlap fill in), and a count of 21+ orders
- * matches nobody, as it does on production.
+ * matches nobody, as it does on production. A template's own query answers
+ * with what production counted for it on 2026-10-17, so the chips read as
+ * they do there.
  */
 
 const BASE: SmsSegmentsResponse = {
@@ -34,6 +36,7 @@ const BASE: SmsSegmentsResponse = {
     { stage: 'tiered', remaining: 4_380 },
     { stage: 'phone', remaining: 4_190 },
     { stage: 'subscribed', remaining: 4_166 },
+    { stage: 'reachable', remaining: 4_163 },
     { stage: 'uniquePhone', remaining: 4_101 },
   ],
   segments: [{
@@ -44,7 +47,32 @@ const BASE: SmsSegmentsResponse = {
   truncated: false,
 }
 
+/** What production counted for each template's own query (no campaign name,
+ *  one group), 2026-10-17, retail. */
+function templateCount(p: URLSearchParams): number | null {
+  if (p.has('campaign') || p.has('or_groups')) return null
+  const has = (k: string) => p.has(k)
+  if (p.get('tier') === 'VIP') return 2_041
+  if (p.get('period_days') === '30') return 1_185
+  if (has('first_order_from')) return 507
+  if (p.get('orders_min') === '1' && p.get('orders_max') === '1') return 10_369
+  if (p.get('recency_min') === '90') return 2_662
+  if (p.get('recency_min') === '240') return 10_728
+  if (p.get('orders_min') === '2' && !has('recency_min')) return 6_729
+  if (p.get('orders_min') === '1' && p.get('max_recency_days') === '3650') return 17_891
+  return null
+}
+
 function segments(params: URLSearchParams): SmsSegmentsResponse {
+  const counted = templateCount(params)
+  if (counted != null) {
+    const target = Math.round(counted * 0.9)
+    return {
+      ...BASE,
+      groups: [{ group: 1, matched: counted, recipients: counted, onlyHere: counted }],
+      totals: { customers: counted, target, holdout: counted - target },
+    }
+  }
   const extra = params.has('or_groups') ? JSON.parse(params.get('or_groups')!).length : 0
   const nobody = Number(params.get('orders_min')) > 20
   const shares = [
@@ -172,6 +200,31 @@ export const OwnersAudience: Story = {
 /** The same on a phone: horizontal templates, icon actions, the bar under the thumb. */
 export const OwnersAudienceOnAPhone: Story = {
   ...OwnersAudience,
+  globals: { viewport: { value: 'mobile2', isRotated: false } },
+}
+
+/**
+ * Two conditions and nobody: the card asks what the group matches without
+ * each one, finds that without «92+ orders» 2,800 would, and that 92+ orders
+ * alone matches nobody — so it names that condition.
+ */
+export const NinetyTwoOrdersBesideAnother: Story = {
+  render: (args) => (
+    <Harness audience={{
+      ...emptyDefinition(),
+      groups: [{ id: 'a', conditions: [
+        { id: 'a1', type: 'orders', op: 'atLeast', count: 92, countMax: null, period: { kind: 'all' } },
+        { id: 'a2', type: 'lastOrder', when: { kind: 'within', days: 365 } },
+      ] }],
+    }}>
+      <SmsCampaignWizard {...args} />
+    </Harness>
+  ),
+}
+
+/** The same on a phone. */
+export const NinetyTwoOrdersBesideAnotherOnAPhone: Story = {
+  ...NinetyTwoOrdersBesideAnother,
   globals: { viewport: { value: 'mobile2', isRotated: false } },
 }
 

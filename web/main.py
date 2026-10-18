@@ -106,6 +106,18 @@ async def read_unavailable_handler(request: Request, exc: ReadUnavailable):
     )
 
 
+from web.routes.api.customers import SmsRefusal
+
+
+@app.exception_handler(SmsRefusal)
+async def sms_refusal_handler(request: Request, exc: SmsRefusal):
+    """An SMS campaign refusal: the English `detail` every caller reads, and
+    beside it the `reason` and figures the page says in its reader's language
+    (`core/sms_refusals.py`). The status is the refusal's own."""
+    return JSONResponse(status_code=exc.status_code, content=exc.content(),
+                        headers=exc.headers)
+
+
 @app.exception_handler(duckdb_switch.DuckDBOpenedWhileOff)
 async def duckdb_opened_while_off_handler(request: Request,
                                           exc: duckdb_switch.DuckDBOpenedWhileOff):

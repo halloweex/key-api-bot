@@ -6,13 +6,16 @@ import { Button } from './Button'
 import { FilterChip } from './FilterChip'
 import { TemplateChips } from './TemplateChips'
 import { Wrapper } from './Wrapper'
-import { useBrands, useCategories } from '../hooks/useApi'
+import { useBrands, useCategories, useSmsAudienceCounts } from '../hooks/useApi'
 import { useIsPhone } from '../hooks/useMediaQuery'
 import {
-  applyTemplate, emptyConditionGroup, newId, TEMPLATE_KEYS,
+  applyTemplate, definitionToCriteria, emptyConditionGroup, newId, TEMPLATE_KEYS,
   type AudienceDefinition, type ConditionGroup, type TemplateKey,
 } from '../utils/smsConditions'
-import { MAX_AUDIENCE_GROUPS } from '../utils/smsAudience'
+import { audienceToParams, MAX_AUDIENCE_GROUPS } from '../utils/smsAudience'
+import {
+  diagnoseGroup, diagnosisProbes, emptyKind, probeCount, type EmptyKind,
+} from '../utils/smsGroupDiagnosis'
 import { formatNumber } from '../utils/formatters'
 import type { SmsAudienceGroupShare, SmsSegment, SmsTier } from '../types/api'
 
@@ -33,6 +36,15 @@ import type { SmsAudienceGroupShare, SmsSegment, SmsTier } from '../types/api'
 //
 // How the result is measured — the split by value level, its thresholds, the
 // ranking basis — is step 2's, beside the control group.
+//
+// Two kinds of preview besides the audience's own, both asked in turn through
+// one queue (`useSmsAudienceCounts`): which condition emptied a group, for a
+// group that brings nobody, and how many each template would select, once the
+// templates are on screen. The groups' questions go first — they are about the
+// audience being built.
+
+// A template that opens with a blank to fill selects nothing in particular yet.
+const UNCOUNTED_TEMPLATES: TemplateKey[] = ['brand']
 
 const LEVELS: SmsTier[] = ['VIP', 'CORE', 'REACTIVATION']
 
@@ -49,6 +61,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
   shares,
   segments,
   library,
+  settled = true,
 }: {
   audience: AudienceDefinition
   onChange: (next: AudienceDefinition) => void
@@ -58,6 +71,8 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
   segments?: SmsSegment[]
   /** "Like a past campaign" and the saved audiences, after the templates. */
   library?: ReactNode
+  /** The shares are this audience's, not a previous one's still on screen. */
+  settled?: boolean
 }) {
   const { t } = useTranslation()
   const phone = useIsPhone()
@@ -79,6 +94,49 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
   // on its way after a group was added or removed they would be pinned to the
   // wrong cards, so they are shown only when the counts line up.
   const shown = shares?.length === groups.length ? shares : undefined
+
+  // ── Which condition emptied a group ─────────────────────────────────────
+  const empties = useMemo(() => (settled && shown ? groups.map((_, i) => emptyKind(shown[i])) : []),
+    [settled, shown, groups])
+  const probes = useMemo(() => empties.flatMap((kind, i) => (kind
+    ? diagnosisProbes(audience, i, kind).map((p) => ({ ...p, group: i, kind }))
+    : [])), [empties, audience])
+
+  // ── How many each template would select ─────────────────────────────────
+  // Keyed on what a template keeps of the audience — how it is measured —
+  // since it replaces the rest.
+  const [templatesSeen, setTemplatesSeen] = useState(false)
+  const { grouping, ltvBasis, holdoutPct, tierRules } = audience
+  const templateParams = useMemo(() => TEMPLATE_KEYS.map((key) => ({
+    key: `template:${key}`,
+    params: !templatesSeen || UNCOUNTED_TEMPLATES.includes(key) ? null
+      : audienceToParams(definitionToCriteria(applyTemplate(key, {
+          grouping, ltvBasis, holdoutPct, tierRules, tiers: [], groups: [],
+        }).definition)),
+  })), [templatesSeen, grouping, ltvBasis, holdoutPct, tierRules])
+
+  const counts = useSmsAudienceCounts([
+    ...probes.map((p) => ({ key: p.key, params: p.params })),
+    ...templateParams,
+  ])
+
+  const diagnoses = groups.map((_, i) => {
+    const kind = empties[i] as EmptyKind | null | undefined
+    if (!kind) return undefined
+    const byCondition: Record<string, number | null | undefined> = {}
+    for (const p of probes.filter((x) => x.group === i)) {
+      const c = counts[p.key]
+      byCondition[p.without] = c?.status === 'done' ? probeCount(kind, c.data)
+        : c?.status === 'error' ? null : undefined
+    }
+    return diagnoseGroup(audience, i, kind, byCondition)
+  })
+
+  const templateCount = (key: TemplateKey) => {
+    const c = counts[`template:${key}`]
+    if (!c || c.status === 'error') return undefined
+    return c.status === 'loading' ? '…' : formatNumber(c.data.totals.customers)
+  }
 
   function setGroup(index: number, next: ConditionGroup) {
     onChange({ ...audience, groups: groups.map((g, i) => (i === index ? next : g)) })
@@ -105,8 +163,10 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
         title={t('sms.tpl.title')}
         items={TEMPLATE_KEYS.map((key) => ({
           key, label: t(`sms.tpl.${key}`), hint: t(`sms.tpl.${key}Hint`),
+          count: templateCount(key),
         }))}
         onPick={pickTemplate}
+        onVisible={() => setTemplatesSeen(true)}
         extra={(
           <Wrapper dir="column" gap="sm">
             {library}
@@ -160,6 +220,7 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
               phone={phone}
               brandOptions={brandOptions}
               categoryOptions={categoryOptions}
+              diagnosis={diagnoses[i]}
             />
           </Wrapper>
         ))}

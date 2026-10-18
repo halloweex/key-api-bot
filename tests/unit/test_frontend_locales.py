@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from core.permissions import ACCESS_PRESETS, Role, TAB_FEATURE_KEYS
+from core.sms_refusals import REFUSAL_REASONS
 
 LOCALES = Path(__file__).resolve().parents[2] / "web" / "frontend" / "src" / "locales"
 LANGUAGES = ("en", "uk", "ru")
@@ -44,6 +45,10 @@ VOCABULARIES = {
     "access.preset.": sorted(ACCESS_PRESETS),
     # `t(`profile.${user.role}`)` names the level beside the chips.
     "profile.": [role.value for role in Role],
+    # `t(`sms.refusal.${reason}`)` says an SMS campaign refusal in the
+    # reader's language (`utils/smsRefusal.ts`); a reason with no sentence
+    # falls back to the server's English `detail`.
+    "sms.refusal.": sorted(REFUSAL_REASONS),
 }
 
 

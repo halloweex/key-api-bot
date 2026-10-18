@@ -35,7 +35,7 @@ import {
   ALL_TIME_DAYS, audienceFromPreset, audienceToPreset, DEFAULT_HOLDOUT_PCT,
   MAX_AUDIENCE_GROUPS, MIN_WINDOW_DAYS,
 } from './smsAudience'
-import { addDays, daysAgo, daysBetween, isIsoDate, kyivToday } from './smsDates'
+import { addDays, daysAgo, daysAgoRange, daysBetween, isIsoDate, kyivToday, lastDays } from './smsDates'
 
 // ─── Shapes ──────────────────────────────────────────────────────────────────
 
@@ -367,16 +367,16 @@ function recencyBounds(w: WhenValue, today: string): [number | undefined, number
   }
 }
 
-/** [from, to] dates of the first order, resolved against `today`. */
+/** [from, to] dates of the first order, resolved against `today` — with
+ *  `lastDays`/`daysAgoRange`, the arithmetic the page's labels say. */
 function firstOrderDates(w: WhenValue, today: string): [string | undefined, string | undefined] {
   switch (w.kind) {
-    case 'within': return [addDays(today, -w.days!), undefined]
-    case 'before': return [undefined, addDays(today, -w.days!)]
-    case 'ago':
-      return [
-        w.max != null ? addDays(today, -w.max) : undefined,
-        w.min != null ? addDays(today, -w.min) : undefined,
-      ]
+    case 'within': return [lastDays(w.days!, today).from, undefined]
+    case 'before': return [undefined, daysAgoRange(w.days, null, today).to]
+    case 'ago': {
+      const { from, to } = daysAgoRange(w.min, w.max, today)
+      return [from, to]
+    }
     case 'dates':
       return [isIsoDate(w.from) ? w.from : undefined, isIsoDate(w.to) ? w.to : undefined]
   }

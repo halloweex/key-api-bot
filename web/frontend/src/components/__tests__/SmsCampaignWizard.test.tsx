@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SmsCampaignWizard } from '../SmsCampaignWizard'
 import { suggestCampaignName } from '../../utils/smsCampaignName'
@@ -116,12 +116,9 @@ const createMutate = vi.fn((params: string, opts?: {
 })
 const savePresetMutate = vi.fn()
 
-vi.mock('../../hooks/useApi', () => ({
-  useSmsSegments: (params: string) => {
-    segmentParams.push(params)
-    if (new URLSearchParams(params).has('follow_up_of')) {
-      return { data: followUpData, isLoading: false, error: null, refetch: vi.fn() }
-    }
+/** What the fake server answers for one preview query. */
+function answer(params: string): SmsSegmentsResponse {
+    if (new URLSearchParams(params).has('follow_up_of')) return followUpData
     // The server applies the level filter and the split, so the fake does too
     // — a stub that ignores them would let the page display numbers the API
     // would never have returned.
@@ -147,19 +144,32 @@ vi.mock('../../hooks/useApi', () => ({
       recipients: nobody && i === 0 ? 0 : 2000 + i, onlyHere: 500 + i,
     }))
     return {
-      data: {
-        ...data,
-        segments: merged,
-        groups,
-        totals: {
-          customers: merged.reduce((n, s) => n + s.total, 0),
-          target: merged.reduce((n, s) => n + s.target, 0),
-          holdout: merged.reduce((n, s) => n + s.holdout, 0),
-        },
+      ...data,
+      segments: merged,
+      groups,
+      totals: {
+        customers: merged.reduce((n, s) => n + s.total, 0),
+        target: merged.reduce((n, s) => n + s.target, 0),
+        holdout: merged.reduce((n, s) => n + s.holdout, 0),
       },
-      isLoading: false, error: null, refetch: vi.fn(),
     }
+}
+
+// The previews the page asks besides the audience's own — template counts,
+// which condition emptied a group — answered by the same fake server, and not
+// recorded in `segmentParams`, which is the audience's own query.
+const countParams: string[] = []
+
+vi.mock('../../hooks/useApi', () => ({
+  useSmsSegments: (params: string) => {
+    segmentParams.push(params)
+    return { data: answer(params), isLoading: false, error: null, refetch: vi.fn() }
   },
+  useSmsAudienceCounts: (items: Array<{ key: string; params: string | null }>) =>
+    Object.fromEntries(items.filter((i) => i.params != null).map((i) => {
+      countParams.push(i.params!)
+      return [i.key, { status: 'done', data: answer(i.params!) }]
+    })),
   useSmsCampaigns: () => ({ data: { campaigns: campaignList } }),
   useSmsAudiencePresets: () => ({
     data: {
@@ -520,7 +530,11 @@ describe('building an audience from conditions', () => {
     // The fake, like prod, matches nobody with 92 orders.
     await waitFor(() => expect(screen.getByText(/sms\.cond\.manyOrdersNobody/)).toBeTruthy(),
                   { timeout: 2000 })
-    expect(screen.getByText('sms.groupMatchesNobody')).toBeTruthy()
+    // The card names the condition that did it — the group's only one, so
+    // without asking anything more — in place of "nobody matches".
+    expect(screen.getByText(/sms\.groupWhy\.alone\(\{"condition":"sms\.cond\.label\.orders /))
+      .toBeTruthy()
+    expect(screen.queryByText('sms.groupMatchesNobody')).toBeNull()
 
     await step(/sms\.cond\.makeItDays/)
     await waitFor(() => expect(lastPreview().get('period_days')).toBe('92'), { timeout: 2000 })
@@ -1092,5 +1106,117 @@ describe('on a phone', () => {
     await userEvent.click(within(sheet).getByRole('button', { name: 'sms.cond.done' }))
     expect(screen.queryByRole('dialog')).toBeNull()
     await waitFor(() => expect(lastPreview().get('orders_min')).toBe('5'), { timeout: 2000 })
+  })
+})
+
+describe('inside the Telegram Mini App', () => {
+  // Telegram's SDK as the wizard sees it: two native buttons that record what
+  // the page asked of them, and hand back the listener the page registered.
+  function fakeWebApp() {
+    const button = () => {
+      const listeners: Array<() => void> = []
+      return {
+        listeners,
+        setParams: vi.fn(),
+        show: vi.fn(),
+        hide: vi.fn(),
+        onClick: vi.fn((cb: () => void) => { listeners.push(cb) }),
+        offClick: vi.fn((cb: () => void) => {
+          const i = listeners.indexOf(cb)
+          if (i >= 0) listeners.splice(i, 1)
+        }),
+        press: () => listeners.forEach((cb) => cb()),
+      }
+    }
+    return {
+      platform: 'ios',
+      isVersionAtLeast: () => true,
+      MainButton: button(),
+      BackButton: button(),
+    }
+  }
+  type Fake = ReturnType<typeof fakeWebApp>
+  let tg: Fake
+  const original = window.matchMedia
+
+  beforeEach(() => {
+    tg = fakeWebApp()
+    ;(window as unknown as { TelegramWebviewProxy: object }).TelegramWebviewProxy = {}
+    ;(window as unknown as { Telegram: object }).Telegram = { WebApp: tg }
+  })
+  afterEach(() => {
+    delete (window as unknown as { TelegramWebviewProxy?: object }).TelegramWebviewProxy
+    delete (window as unknown as { Telegram?: object }).Telegram
+    window.matchMedia = original
+  })
+
+  const lastMain = () => tg.MainButton.setParams.mock.calls.at(-1)?.[0]
+
+  it("is the bar's Next — same words, same state, same step — and the bar draws none", async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await waitFor(() => expect(lastMain()).toMatchObject({ is_active: true, is_visible: true }),
+                  { timeout: 2000 })
+    expect(lastMain().text).toMatch(/^sms\.wizardNextCount\(.*"n":"7,560"/)
+    expect(screen.queryByRole('button', { name: /^sms\.wizardNext/ })).toBeNull()
+    expect(tg.BackButton.show).not.toHaveBeenCalled()
+
+    await act(async () => tg.MainButton.press())
+    expect(screen.getByRole('button', { name: 'sms.wizardBack' })).toBeTruthy()
+    expect(tg.MainButton.hide).toHaveBeenCalled()
+    expect(tg.BackButton.show).toHaveBeenCalled()
+
+    await act(async () => tg.BackButton.press())
+    await waitFor(() => expect(lastMain()).toMatchObject({ is_visible: true }))
+  })
+
+  it('stays greyed while Next is held, and a press then does nothing', async () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+    await waitFor(() => expect(lastMain()).toMatchObject({ is_active: true }), { timeout: 2000 })
+
+    await userEvent.clear(screen.getByRole('textbox', { name: /sms\.campaignName/ }))
+    await waitFor(() => expect(lastMain()).toMatchObject({ is_active: false }))
+    await act(async () => tg.MainButton.press())
+    expect(screen.queryByRole('button', { name: 'sms.wizardBack' })).toBeNull()
+  })
+
+  it('closes the sheet on top before it steps back, and hides itself for the sheet', async () => {
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes('max-width'), media: query, onchange: null,
+      addEventListener: () => {}, removeEventListener: () => {},
+      addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+
+    await userEvent.click(within(groupCard(1)).getByRole('button', { name: 'sms.cond.add' }))
+    expect(screen.getByRole('dialog', { name: 'sms.cond.addTitle' })).toBeTruthy()
+    await waitFor(() => expect(tg.BackButton.show).toHaveBeenCalled())
+    expect(tg.MainButton.hide).toHaveBeenCalled()
+
+    await act(async () => tg.BackButton.press())
+    expect(screen.queryByRole('dialog')).toBeNull()
+    // Still on the audience: the press closed the sheet and nothing else.
+    expect(screen.getByRole('region', { name: /sms\.groupTitle/ })).toBeTruthy()
+  })
+
+  it('hides both buttons and lets go of them when the wizard closes', async () => {
+    const { unmount } = render(<SmsCampaignWizard onClose={vi.fn()} />)
+    await waitFor(() => expect(lastMain()).toBeTruthy(), { timeout: 2000 })
+    tg.MainButton.hide.mockClear()
+    tg.BackButton.hide.mockClear()
+
+    unmount()
+    expect(tg.MainButton.hide).toHaveBeenCalled()
+    expect(tg.BackButton.hide).toHaveBeenCalled()
+    expect(tg.MainButton.listeners).toEqual([])
+    expect(tg.BackButton.listeners).toEqual([])
+  })
+})
+
+describe('outside Telegram', () => {
+  it('draws its own Next and touches no SDK', () => {
+    render(<SmsCampaignWizard onClose={vi.fn()} />)
+    expect(screen.getByRole('button', { name: /^sms\.wizardNext/ })).toBeTruthy()
+    expect(document.querySelector('script[src*="telegram"]')).toBeNull()
   })
 })
