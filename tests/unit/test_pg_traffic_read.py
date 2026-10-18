@@ -90,7 +90,7 @@ class TestTheRoutedBodies:
 
         Not the routed call's argument: four of the five methods build their
         statement into a local first and pass the name, so reading arguments
-        finds three of the nine. Reading the method bodies finds all of them —
+        finds four of the ten. Reading the method bodies finds all of them —
         and it is the stricter scan anyway, because a query that stopped being
         routed would still be caught here.
 
@@ -124,11 +124,12 @@ class TestTheRoutedBodies:
                 if "SELECT" in text.upper():
                     yield node.lineno, text
 
-    def test_the_scan_finds_all_nine(self):
-        """Five methods, nine statements: transactions and campaigns each run
-        a count beside their page of rows, and ROAS runs three — total
-        revenue, paid revenue per platform, and the ad spend."""
-        assert len(list(self._statements())) == 9
+    def test_the_scan_finds_all_ten(self):
+        """Five methods, ten statements: analytics runs its new buyers beside
+        its orders, transactions and campaigns each run a count beside their
+        page of rows, and ROAS runs three — total revenue, paid revenue per
+        platform, and the ad spend."""
+        assert len(list(self._statements())) == 10
 
     def test_every_hole_survived_the_f_string(self):
         """`{silver_orders}` inside an f-string is an expression Python

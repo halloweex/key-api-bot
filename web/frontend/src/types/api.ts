@@ -1030,12 +1030,26 @@ export interface TrafficSummary {
   unknown: TrafficMetric
 }
 
+/**
+ * Buyers whose first order ever falls in the period, by the traffic that
+ * order came from. People, not orders: a buyer whose first day carried orders
+ * through two kinds of traffic is new in both, so these do not add up to
+ * `total` the way the order buckets add up to `totals`.
+ */
+export interface TrafficNewCustomers {
+  total: number
+  summary: Record<keyof TrafficSummary, number>
+  by_platform: Record<string, number>
+  by_traffic_type: Record<string, number>
+}
+
 export interface TrafficAnalyticsResponse {
   period: { start: string; end: string }
   totals: TrafficMetric
   summary: TrafficSummary
   by_platform: Record<string, TrafficMetric>
   by_traffic_type: Record<string, TrafficMetric>
+  new_customers: TrafficNewCustomers
 }
 
 export interface TrafficTrendDay {
@@ -1403,6 +1417,46 @@ export interface SmsAudienceFilters {
   sourceIds?: number[]
   promocodeUsed?: string | null
   boughtWithinDays?: number | null
+  /**
+   * Orders in a period: between `periodOrdersMin` and `periodOrdersMax`
+   * orders (at least 1 when neither is set) dated `periodFrom`..`periodTo`
+   * (both inclusive, either may be open), or within the last `periodDays`
+   * days — dates or days, never both. `ordersMin` counts the whole history;
+   * this counts only the period, which is the only way to say "two purchases
+   * this year". `periodOrdersMax: 0` is "bought, but not in the period".
+   */
+  periodOrdersMin?: number | null
+  periodOrdersMax?: number | null
+  periodFrom?: string | null
+  periodTo?: string | null
+  periodDays?: number | null
+}
+
+/**
+ * One group of an audience: its own window and its own filters, ANDed.
+ *
+ * A customer is in the audience if they match ANY group. A group's window is
+ * its own — the base window everyone is read in is the widest of them — so a
+ * narrow group never cuts a wide one short.
+ */
+export interface SmsAudienceGroup {
+  /** Nobody whose last order is older than this is in this group. */
+  maxRecencyDays: number
+  filters: SmsAudienceFilters
+}
+
+/** What one group contributes to the audience, as the server counted it. */
+export interface SmsAudienceGroupShare {
+  /** 1-based, in the order the groups were sent. */
+  group: number
+  /** Customers its own conditions matched, before phone, opt-out, level and
+   *  one-SMS-per-phone. Zero says this group is the one that selects nobody. */
+  matched: number
+  /** People in the audience who are in this group. Overlaps: someone in two
+   *  groups counts in both, so these add up to more than the total. */
+  recipients: number
+  /** In this group and in no other — what this group alone adds. */
+  onlyHere: number
 }
 
 /**
@@ -1420,16 +1474,21 @@ export interface SmsTierRules {
   reactivationMaxRecency?: number | null
 }
 
-/** The whole audience definition: how it is split, ranked, and narrowed. */
+/**
+ * The whole audience definition: how it is split, ranked, and narrowed.
+ *
+ * `groups` is who it is for — one or more groups, ORed. Everything else is
+ * common to the campaign and applies to the union: the value level, the
+ * basis, the split and the control group.
+ */
 export interface SmsAudienceCriteria {
   grouping: SmsGrouping
   ltvBasis: SmsLtvBasis
   holdoutPct: number
-  /** The base window: nobody whose last order is older than this is considered. */
-  maxRecencyDays: number
   tiers: SmsTier[]
   tierRules: SmsTierRules
-  filters: SmsAudienceFilters
+  /** 1..MAX_AUDIENCE_GROUPS. The first is what the audience was before groups. */
+  groups: SmsAudienceGroup[]
 }
 
 /** A saved audience. Built-ins ship with the page and cannot be edited. */
@@ -1468,7 +1527,14 @@ export type SmsFunnelStage =
   | 'tiered'
   | 'phone'
   | 'subscribed'
+  // Numbers the gateway rejected in two campaigns are left out — not an
+  // opt-out, nobody asked; the operator keeps refusing the number.
+  | 'reachable'
   | 'uniquePhone'
+  // A follow-up's roster: the first campaign's target arm, and those of them
+  // the gateway accepted. Its last stage is `reachable`, as above.
+  | 'rootTarget'
+  | 'accepted'
 
 export interface SmsFunnelStep {
   stage: SmsFunnelStage
@@ -1489,9 +1555,17 @@ export interface SmsSegmentsResponse {
     holdoutPct: number
     /** Absent on responses from before audience filters shipped. */
     grouping?: SmsGrouping
+    /** The first group's filters, kept for readers from before groups. */
     filters?: Record<string, unknown>
+    /** Every group, in the store's field names. Absent before groups shipped. */
+    groups?: Array<{ maxRecencyDays: number; filters: Record<string, unknown> }>
   }
   grouping?: SmsGrouping
+  /** Each group's share of the audience. Absent on a follow-up's roster. */
+  groups?: SmsAudienceGroupShare[]
+  /** Set when this is a follow-up's roster — the campaign it follows. Its
+   *  `criteria` then carry no thresholds: the people are that campaign's. */
+  followUpOf?: string | null
   funnel: SmsFunnelStep[]
   segments: SmsSegment[]
   totals: { customers: number; target: number; holdout: number }
@@ -1521,6 +1595,9 @@ export interface SmsCampaignSummary {
   costTotal?: number | null
   delivered?: number | null
   undelivered?: number | null
+  /** The campaign this one follows up — the same people, a second message,
+   *  measured on that campaign's control. Null for a campaign of its own. */
+  followUpOf?: string | null
 }
 
 export interface SmsCampaignsResponse {
@@ -1594,6 +1671,19 @@ export interface SmsCampaignResultsResponse {
     holdout: SmsGroupStats
     comparison: SmsComparison | null
   }
+  /** Set on a follow-up: it has no control, and is read on this campaign. */
+  followUpOf?: string | null
+  /** Follow-ups sent to this campaign's people, whose second message is
+   *  inside this campaign's lift. */
+  followUps?: SmsFollowUpRef[]
+}
+
+/** A follow-up, as the campaign it follows lists it. */
+export interface SmsFollowUpRef {
+  campaign: string
+  sentAt: string | null
+  /** Accepted by the gateway once sent; the roster before that. */
+  recipients: number
 }
 
 export interface SmsSendResult {
@@ -1616,6 +1706,9 @@ export interface SmsChannelsResponse {
   viberSender: string | null
   /** Gateway tariff per message part, in ₴. Absent on older deployments. */
   pricePerPart?: number
+  /** The account balance in ₴ — only when asked for (`include_balance`), and
+   *  null when the gateway could not say. The send checks it again itself. */
+  balance?: number | null
 }
 
 export type SmsChannel = 'sms' | 'viber_sms'

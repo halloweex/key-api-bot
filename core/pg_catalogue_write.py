@@ -64,6 +64,20 @@ full writes pass; the copy-back counts only recorded rows as the chain's work
 row again (the next full write re-stamps it) or when a human deletes it or
 restores it, `mirrored_at` included, from DuckDB's frozen copy.
 
+The watermark is read the same way. The daily comparison takes a
+`last_ok_at` after the owner row for a shipment over the chain's rows
+(`chain_shipper_overwrote`), and every write here stamps one; at a recorded
+instant it is this chain's own write, at any other it is not
+(`read_mirror_stamps`, one statement for both). Until that was asked, every
+write after the latch was paged CRITICAL as a shipment over itself, every
+morning from 2026-10-10. It sees a stamp that is not the chain's only until
+the next write moves the watermark again — within the hour for the products,
+the week for the categories — and it is not the only thing that would: the
+sync's mirror (`pg_landing._mirror`), the one other writer that stamps this
+watermark, ships only while the chain is routed to DuckDB, and with owner rows
+in Postgres that is the marker lost, which `chain_latch_disagrees` and
+`owner_row_without_marker` say for as long as it lasts.
+
 What it cannot see, named rather than claimed: a write that leaves
 `mirrored_at` alone, or copies an instant the chain did write. On a row KeyCRM
 serves the next full write overwrites it within the hour; on a retired one
@@ -215,12 +229,34 @@ STATEMENT_TIMEOUT = "30s"
 # The record of the chain's own write instants (module docstring). The key
 # lives beside the owner rows in `meta.chain_watermarks`; nothing reads that
 # table except by an exact key or the `owner:` prefix, so a third family of
-# keys is seen by nobody but the two readers here.
+# keys is seen by nobody but its readers: the watch, the copy-back and the
+# daily comparison (`read_mirror_stamps`).
 RECORD_PREFIX = "writes:"
 
 # A row's `mirrored_at` as the record keeps it: whole microseconds since the
 # epoch. `extract(epoch …)` is exact to the microsecond from PostgreSQL 14 on.
 STAMP_SQL = "(extract(epoch FROM mirrored_at) * 1000000)::bigint"
+
+# The tables whose `meta.mirror_state.last_ok_at` this chain's own writer
+# stamps (`_land`, OD-15 (a)) — all of them. Declared for the daily
+# comparison, which otherwise reads every write here after the latch as a
+# shipment over the chain's rows (`core.chain_latch.MirrorStamp`), and which
+# tells the two apart through `read_mirror_stamps` below.
+CHAIN_STAMPS_MIRROR_STATE: Tuple[str, ...] = CHAIN_TABLES
+
+# The watermark and the record of each table, in ONE statement: a write
+# committing between two reads would leave a `last_ok_at` the record no longer
+# carries (it keeps only the stamps some row still carries). `last_ok_us` is
+# `STAMP_SQL`'s arithmetic on the watermark, so the instant is the integer the
+# record holds and no rendering of a timestamp is compared. A table with no
+# watermark or no record still answers, with NULLs.
+_MIRROR_STAMPS_SQL = (
+    "SELECT t.table_name, m.last_ok_at, "
+    "(extract(epoch FROM m.last_ok_at) * 1000000)::bigint AS last_ok_us, "
+    "w.value AS record "
+    "FROM unnest($1::text[]) AS t(table_name) "
+    "LEFT JOIN meta.mirror_state m ON m.table_name = t.table_name "
+    "LEFT JOIN meta.chain_watermarks w ON w.key = $2::text || t.table_name")
 
 # Released with the owner rows by `scripts/chain_copy_back.py catalogue`: the
 # record describes writes DuckDB owns again, and a later flip starts a new one.
@@ -302,6 +338,34 @@ def parse_record(value: str) -> WriteRecord:
     if previous is not None and not whole(previous):
         raise WriteRecordUnreadable("'previous' is not an integer")
     return WriteRecord(stamps=frozenset(stamps), previous=previous)
+
+
+async def read_mirror_stamps(conn) -> Dict[str, chain_latch.MirrorStamp]:
+    """`{table: MirrorStamp}` for every table in `CHAIN_STAMPS_MIRROR_STATE`:
+    its watermark and this chain's record, read by one statement on the
+    connection the caller hands in. For the daily comparison's
+    `chain_shipper_overwrote` (`core.chain_latch.MirrorStamp`).
+
+    Reads only. A record nobody can parse is answered as `unreadable`, never
+    raised and never as an empty record: the comparison must say it could not
+    tell, and the rest of its run must still compare. No record at all is an
+    empty one — the copy-back's and the watch's rule — so a table the chain has
+    not written yet (latched through the other one) has no instant of its own.
+    Only `stamps` is handed on, never `previous`."""
+    out: Dict[str, chain_latch.MirrorStamp] = {}
+    for row in await conn.fetch(_MIRROR_STAMPS_SQL,
+                                list(CHAIN_STAMPS_MIRROR_STATE), RECORD_PREFIX):
+        stamps: FrozenSet[int] = frozenset()
+        unreadable: Optional[str] = None
+        if row["record"] is not None:
+            try:
+                stamps = parse_record(row["record"]).stamps
+            except WriteRecordUnreadable as exc:
+                unreadable = str(exc)
+        out[row["table_name"]] = chain_latch.MirrorStamp(
+            last_ok_at=row["last_ok_at"], last_ok_us=row["last_ok_us"],
+            stamps=stamps, unreadable=unreadable)
+    return out
 
 
 def env_writes_postgres() -> bool:

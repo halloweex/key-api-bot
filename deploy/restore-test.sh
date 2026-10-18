@@ -15,6 +15,12 @@
 # Run it after setting backups up, and quarterly after that. docs/backup_runbook.md
 # has said "test a restore quarterly" since the backup job was written, and the
 # reason it never happened is that nobody had a command to run. This is it.
+#
+# In the week of silence (stage 5, KS_DUCKDB=off in .env) it still runs: its
+# sidecar is started with `-e KS_DUCKDB=on`, which docker ranks above
+# `--env-file`, because the only DuckDB file it can open is the one it builds
+# in its scratch directory. And the newest archive is then frozen, not stale:
+# the nightly snapshot stands down for the week, so its age is the week's.
 set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
@@ -22,6 +28,15 @@ cd "$(dirname "$0")/.."
 CONFIG="deploy/backup.env"
 # shellcheck source=/dev/null
 [ -f "$CONFIG" ] && . "$CONFIG"
+
+# KS_DUCKDB out of .env by exact name (deploy/duckdb_env.sh), never listed.
+# shellcheck source=/dev/null
+source deploy/duckdb_env.sh
+ks_duckdb_env_read .env
+if [ "$KS_DUCKDB_ENV" = refused ]; then
+  echo "FAIL: .env writes KS_DUCKDB with export, or with a space around its = (or after a colon), and docker run --env-file refuses the whole file over it: the rebuild cannot start from it, whatever -e says. Write KS_DUCKDB=off (or on) as a line of its own." >&2
+  exit 1
+fi
 
 SSH_PORT="${BACKUP_SSH_PORT:-23}"
 SSH_KEY="${BACKUP_SSH_KEY:-$HOME/.ssh/storagebox_ed25519}"
@@ -67,8 +82,11 @@ HUMAN="$(echo "$LATEST" | sed -E 's/ks-warehouse-(....)(..)(..)-(..)(..)(..).*/\
 if TAKEN_AT="$(date -u -d "$HUMAN" +%s 2>/dev/null)"; then
   AGE_HOURS=$(( ( $(date +%s) - TAKEN_AT ) / 3600 ))
   echo "archive age: ${AGE_HOURS}h"
-  [ "$AGE_HOURS" -le "$MAX_AGE_HOURS" ] \
-    || echo "WARNING: newest off-site archive is over $(( MAX_AGE_HOURS / 24 ))d old — is the weekly compact still running it?" >&2
+  if ks_duckdb_stands_down; then
+    echo "archive frozen since the week of silence began: .env says KS_DUCKDB=off, so the nightly snapshot stands down and this is the last archive it shipped"
+  elif [ "$AGE_HOURS" -gt "$MAX_AGE_HOURS" ]; then
+    echo "WARNING: newest off-site archive is over $(( MAX_AGE_HOURS / 24 ))d old — is the weekly compact still running it?" >&2
+  fi
 fi
 
 # --- unpack into a scratch data dir -----------------------------------------
@@ -134,12 +152,20 @@ echo "rebuilding in $IMAGE ..."
 # drill in step with the checkout without an image rebuild, and a real restore
 # has the repo anyway — the archive records the deploy SHA precisely so you can
 # check out the commit that wrote it.
+#
+# `-e KS_DUCKDB=on`: under KS_DUCKDB=off in .env the switch would refuse the
+# rebuild before it imported a row, and the drill that proves the archive
+# rebuilds would stop working for the week. `-e` outranks `--env-file`
+# whichever comes first (measured, engine 24.0.7), and the sidecar sees only
+# $TMP/data — never the live file, which the week keeps still. Under `on` it
+# changes nothing.
 docker run --rm \
   --memory=6500m \
   -e DUCKDB_MEMORY_LIMIT=4GB \
   -v "$TMP/data:/app/data" \
   -v "$PWD/deploy/restore_from_export.py:/app/deploy/restore_from_export.py:ro" \
   --env-file .env \
+  -e KS_DUCKDB=on \
   "$IMAGE" \
   python /app/deploy/restore_from_export.py
 

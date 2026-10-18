@@ -66,6 +66,13 @@ BACKUP_SHELL = [
 BACKUP_SCRIPTS = [p for p in BACKUP_SHELL if p.name not in _SOURCED]
 
 
+def _calls(text: str) -> str:
+    """The code lines with every backslash continuation joined, so a command
+    whose arguments start on the next line reads as one command: `gpg \\` then
+    `--symmetric ...` is a gpg call like any other."""
+    return re.sub(r"\\\n\s*", " ", "\n".join(_code_lines(text)))
+
+
 def _code_lines(text: str):
     """Lines that run, not lines that explain.
 
@@ -144,8 +151,10 @@ def test_a_passphrase_is_never_on_a_command_line():
         text = path.read_text()
         code = list(_code_lines(text))
         # `gpg\s+-`, not `gpg\b`: deploy/restore-test.sh mentions the filename
-        # env.gpg and invokes nothing.
-        if not re.search(r"(?<![\w./-])gpg\s+-", "\n".join(code)):
+        # env.gpg and invokes nothing. `gpg_safe` is gpg (deploy/gpg_safe.sh),
+        # and every invocation goes through it — which is what
+        # test_gpg_runs_only_through_gpg_safe holds.
+        if not re.search(r"(?<![\w./-])gpg(?:_safe)?\s+-", _calls(text)):
             continue
         users.append(path.name)
         for line in code:
@@ -162,6 +171,59 @@ def test_a_passphrase_is_never_on_a_command_line():
         )
 
     assert {"offsite_parquet.sh", "pg_offsite.sh", "pg_restore_drill.sh"} <= set(users), users
+
+
+def test_gpg_runs_only_through_gpg_safe():
+    """Every gpg in deploy/ and scripts/ runs in a home of its own.
+
+    On 2026-10-10 the Postgres off-site copy stopped at `encrypt` because a
+    root SSH login had started systemd's user manager, which holds the
+    sockets of root's *default* gpg home, eleven seconds before cron's gpg
+    went looking for an agent. deploy/gpg_safe.sh gives each call a fresh
+    home and asks a call that found no agent again. A script that called gpg
+    directly would be back on root's default sockets, so the rule is that
+    none does — derived from what each file runs, not from a list of the
+    scripts that happened to use gpg the day this was written."""
+    shell = sorted(
+        p for d in ("deploy", "scripts") for p in (REPO / d).rglob("*.sh")
+        if "runbooks" not in p.parts
+    )
+    definers = [p for p in shell
+                if re.search(r"(?m)^gpg_safe\(\)\s*\{", p.read_text())]
+    assert [p.relative_to(REPO).as_posix() for p in definers] == ["deploy/gpg_safe.sh"]
+
+    callers = []
+    for path in shell:
+        if path in definers:
+            continue
+        code = _calls(path.read_text())
+        direct = re.findall(r"(?<![\w./-])gpg\s+-\S*", code)
+        assert not direct, (
+            f"{path.relative_to(REPO)} runs gpg directly ({direct[0]}); use "
+            f"gpg_safe from deploy/gpg_safe.sh"
+        )
+        if re.search(r"(?<![\w./-])gpg_safe\s+-", code):
+            callers.append(path.name)
+            assert "source deploy/gpg_safe.sh" in code, (
+                f"{path.relative_to(REPO)} calls gpg_safe without sourcing "
+                f"deploy/gpg_safe.sh"
+            )
+    assert {"offsite_parquet.sh", "pg_offsite.sh", "pg_restore_drill.sh",
+            "ark_ship.sh"} <= set(callers), callers
+
+    # The walk itself, on the shape a review found it missing: a call whose
+    # options start on the continuation line.
+    probe = "f() {\n    gpg \\\n        --symmetric --batch -o out in\n}\n"
+    assert re.findall(r"(?<![\w./-])gpg\s+-\S*", _calls(probe)), "continuation not joined"
+
+    lib = "\n".join(_code_lines(definers[0].read_text()))
+    assert 'home="$(mktemp -d ' in lib, "gpg_safe's home must be made fresh per call"
+    assert re.search(r'GNUPGHOME="\$home" gpg --no-keyring "\$@"', lib), (
+        "gpg_safe must run gpg in its own home"
+    )
+    assert not re.search(r"(?m)^\s*set\s+-", lib), (
+        "a sourced library sets no shell options; errexit is the caller's"
+    )
 
 
 def test_the_shipper_holds_a_lock_it_does_not_wait_for():
@@ -199,6 +261,18 @@ def test_the_plaintext_the_shipper_makes_to_check_is_removed_where_it_is_made():
     marker = text.index('step "write marker"')
     assert decrypt < removed < marker, (
         "the decrypted dump outlives the check it was made for"
+    )
+
+    # The same for the configuration that rides with every shipment since
+    # OD-S5-6: its plaintext is every secret on the host. Each exit from the
+    # comparison — refused, garbled, matched — removes it before going on.
+    decrypt = text.index('-o "$plain_env" -d "$VERIFY/$enc_env"')
+    body = text[decrypt:marker]
+    exits = [m.start() for m in re.finditer(r"return 1|echo \"verified: \$enc_env", body)]
+    assert len(exits) == 3, exits
+    removals = [m.start() for m in re.finditer(r'rm -f "\$plain_env"', body)]
+    assert len(removals) == 3 and all(r < e for r, e in zip(removals, exits)), (
+        "the decrypted .env outlives the check it was made for"
     )
 
 

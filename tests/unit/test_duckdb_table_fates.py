@@ -1764,15 +1764,22 @@ class TestDuckdbWritten:
         assert {"silver_orders", "gold_daily_revenue", "warehouse_refreshes"} <= moved
         assert {written[n] for n in moved} == {False}
 
-    def test_a_latched_chain_moves_its_tables(self, monkeypatch):
+    @pytest.mark.parametrize("duckdb", ["on", "off"])
+    def test_a_latched_chain_moves_its_tables(self, duckdb, monkeypatch):
         """A frozen chain's tables leave DuckDB with its latch. A shadow
         chain's do not (OD-02 (c)): Postgres writes first and DuckDB is still
         handed every row (`core/shadow_writes.py`), so the file is written as
-        long as the shadow stands. Mutations: answer `mode == "duckdb"` for
-        every chain (the shadow tables read False), or True for every one."""
-        from core import chain_latch
+        long as the shadow stands — under `KS_DUCKDB=on`. Under `off` the
+        shadow stands down before the file is opened (stage 5, PR-4), so they
+        leave too, and so does every other table: this process writes none.
+        Mutations: answer `mode == "duckdb"` for every chain (the shadow
+        tables read False under on), or True for every one; or drop the `off`
+        answer in `duckdb_written` (the shadow tables read True under off)."""
+        from core import chain_latch, duckdb_switch
         from core.write_chains import chain_name, is_shadow
 
+        monkeypatch.setenv(duckdb_switch.ENV, duckdb)
+        duckdb_switch.configure_mode()
         shapes = set()
         for env, chain in _chain_switches().items():
             chain_latch.latch(chain_name(chain), env)
@@ -1780,8 +1787,48 @@ class TestDuckdbWritten:
             shadow = is_shadow(chain)
             shapes.add(shadow)
             for name in fates_mod.tables_by_switch(env):
-                assert written[name] is shadow, (env, name, shadow)
+                assert written[name] is (shadow and duckdb == "on"), (
+                    env, name, shadow, duckdb)
         assert shapes == {True, False}, "the family: both shapes are registered"
+        if duckdb == "off":
+            assert set(fates_mod.duckdb_written().values()) == {False}
+
+    # What DuckDB still writes once everything that can move has moved: the
+    # shadow chains' eight tables (9: the journal, 10: the samples, 11a/11b:
+    # the ledgers), the watermarks' `sync_metadata`, and the migration ledger.
+    # Exactly what the week of silence takes away (stage 5, PR-4).
+    TARGET_ON_REMAINDER = frozenset({
+        "data_quality_runs", "data_quality_issues", "data_quality_diffs",
+        "disk_samples", "data_dir_samples", "memory_samples",
+        "weekly_report_sends", "traffic_report_sends",
+        "sync_metadata", "schema_migrations",
+    })
+
+    @pytest.mark.parametrize("duckdb", ["on", "off"])
+    def test_in_the_target_state_what_is_left_is_pinned(self, duckdb, monkeypatch):
+        """Every chain latched, every store switch at postgres, step 13
+        switched — the state the week of silence starts from. Under on DuckDB
+        still writes exactly `TARGET_ON_REMAINDER`, and nothing is unknown;
+        under off, nothing at all. A chain added later that leaves a table
+        behind, or a shadow retired, moves this set and says so here.
+        Mutation: drop the `off` answer in `duckdb_written`."""
+        from core import chain_latch, duckdb_switch, warehouse_cutover as wc
+        from core.write_chains import chain_name
+
+        monkeypatch.setenv(duckdb_switch.ENV, duckdb)
+        duckdb_switch.configure_mode()
+        for env, chain in _chain_switches().items():
+            chain_latch.latch(chain_name(chain), env)
+        for switch in (fates_mod.SMS_STORE, fates_mod.USER_STORE):
+            monkeypatch.setenv(switch, "postgres")
+        monkeypatch.setattr(wc, "_value", wc.POSTGRES)
+        monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
+        written = fates_mod.duckdb_written()
+        assert None not in written.values(), {
+            n for n, w in written.items() if w is None}
+        assert {n for n, w in written.items() if w} == (
+            self.TARGET_ON_REMAINDER if duckdb == "on" else frozenset())
+        assert self.TARGET_ON_REMAINDER <= set(FATES)
 
     def test_a_shadow_chains_tables_are_written_by_its_shadow(self, writes):
         """What makes True the honest answer for a latched shadow chain: the

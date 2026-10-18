@@ -145,9 +145,11 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/brands` | All brands list |
 | `/api/brands/analytics` | Top brands by revenue and quantity |
 | `/api/customers/insights` | New vs returning, AOV trend, repeat rate |
-| `/api/customers/sms-segments` | Campaign audience — one arm or one per value level (needs `sms` view; customer rows need `sms` edit) |
+| `/api/customers/sms-segments` | Campaign audience — one arm or one per value level, one or more groups ORed (`or_groups`) (needs `sms` view; customer rows need `sms` edit); `follow_up_of=X` previews a follow-up |
 | `/api/customers/sms-segments/export/csv` | Campaign list as CSV, holdout excluded (needs `sms` edit) |
-| `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, needs `sms` edit) |
+| `/api/customers/sms-campaigns` | Freeze the audience as a campaign, no CSV needed (POST, needs `sms` edit); `follow_up_of=X` freezes a follow-up |
+| `/api/customers/sms-campaigns/{c}/send` | Send through TurboSMS (POST, needs `sms` edit); requires `confirm_campaign`, refuses on balance or a recent overlap — see "What stops an SMS send" |
+| `/api/customers/sms/channels` | Configured channels and tariff; `include_balance=true` adds the gateway's balance |
 | `/api/customers/sms-audience-presets` | Saved audiences; PUT/DELETE by name (needs `sms` view/edit) |
 | `/api/me/send-file` | A CSV the page already holds, sent by the bot to the requester's own chat — how every export works inside the Telegram Mini App, whose WebView saves no download (POST, any session; `utils/deliverFile.ts`) |
 | `/api/admin/users/{id}/features` | Which tabs one account may open (PATCH, admin) |
@@ -548,6 +550,119 @@ something that no longer means what past campaigns meant.
 refuses the placeholder name `default`, an empty audience, and a truncated one.
 The wizard builds the preview and the freeze from the same query string, so
 what is recorded is what was on screen.
+
+**An audience is groups, ORed** (owner's decision, 2026-10-17). "Two purchases
+in 2026, or anybody who bought in the last three months" could not be said:
+filters were ANDed, `orders_min` counts the whole history, and the window was
+one number for the whole audience. Now each group is a window plus a filter
+set, ANDed inside the group, and a customer is in the audience if they match
+any group (`SmsAudienceGroup`, at most `MAX_AUDIENCE_GROUPS` = 5).
+
+- **Group 1 is the flat parameters, exactly as before**; groups 2..N travel in
+  one query parameter, `or_groups`, a JSON array keyed by the flat names,
+  refused strictly (`extra="forbid"`, strict types, a 400 that names the
+  group). A test holds the JSON form to the flat one: same keys, same bounds.
+- **One group selects what the audience selected before groups.**
+  `tests/sms_segments_legacy.py` freezes the query as it was on main at
+  5b4d1c61, and `test_sms_audience_groups_two_engines.py` runs it beside the
+  current one for every filter: the same rows on DuckDB and on PostgreSQL. On
+  production on 2026-10-17, group B alone through both: zero rows different.
+- **A group's window is its own.** `scored` reads everyone inside the widest
+  window and a narrower group carries `recency <= ?` in its own flag, so a
+  92-day group never cuts a 365-day one. The frozen `maxRecencyDays` is the
+  widest window.
+- **Orders in a period** (`period_orders_min` with `period_from` or
+  `period_days`) is counted by Kyiv `order_date` in the same `cust` pass as
+  `orders`, so returns, retired sources and other sales types never count.
+  "Within N days" is spelled as `recency` is (`today - order_date <= N`), so it
+  equals an N-day window, edge included. A period reaching past its group's
+  window is cut by it, and the page says so.
+- **Common to the campaign, applied to the union**: the sales type, the level
+  and its cut-offs, phone validity, opt-outs, one SMS per phone, the grouping
+  and one control drawn over the union (`core/sms_holdout.py`, unchanged).
+- **What each group brings**: the response's `groups[]` — `matched` (its own
+  conditions before the common rules, so a group that empties the audience
+  says so), `recipients` (the audience's phones it reaches, which is what it
+  would send to alone) and `onlyHere`. Counted per phone: `group_mask` is the
+  number's, so a number shared by buyers in two groups counts for both. The
+  funnel's `filtered` stage is "in any group".
+- The frozen `criteria` keep `filters` (group 1, for readers from before
+  groups) and add `groups`. A preset stores `groups` and mirrors group 1 at
+  the top level, where an older page reads it. A follow-up refuses
+  `or_groups` and the period parameters like every other audience parameter.
+
+Measured on production on 2026-10-17 (retail, valid 380 numbers, no opt-outs):
+A, two or more orders since 2026-01-01, 2 626 phones; B, last order within 92
+days, 3 103; A ∪ B 4 138, of which 1 035 only through A. The store's query and
+plain SQL agree on all three. Inside the default 270-day window A would be
+2 610.
+
+**The screen holds conditions, not parameters** (2026-10-17, after the owner's
+first real campaign through the form typed 92 days into an order count, put a
+period's end into its only date field, and lost January to a 270-day window
+nobody had set). `utils/smsConditions.ts` is the model: a group is sentences —
+«Сделал(а) [2+ заказа] [с 1 янв по 14 окт 2026]» — and `definitionToCriteria`
+turns it into the window-and-filters shape above only to ask, so the
+transport, `or_groups` and the freeze are unchanged.
+
+- **Lifetime and in-period orders are one condition with a period** («за всё
+  время | последние N дней | с … по …»). The server took two parameters for
+  that: `period_to` (inclusive end; alone it is "up to a date", never beside
+  `period_days`) and `period_orders_max` (≥ 0; alone it has no floor, so `0` is
+  "bought, but not in the period"). "Since a date" and "within N days" render
+  the SQL they rendered before, byte for byte.
+- **The window is derived, never shown**: a group's "last order" upper bound,
+  else 3650 days, which is all time — the server cap went 730 → 3650 for
+  exactly this. Under 30 days it is the floor plus `recency_max`. "Last order
+  in the last 270 days" sends exactly `max_recency_days=270`, which is how the
+  built-in presets still reproduce.
+- **Relative stays relative, dates stay dates**: presets and the draft
+  (`sms.campaignDraft.v2`, reading v1 once) store `groups[].conditions` beside
+  the old shape, which an older page still reads. Old presets, v1 drafts and
+  past campaigns' frozen `criteria` (store field names) map onto conditions.
+- **An unfinished condition is left out of the preview and holds the step** —
+  never frozen with a condition the person believes is applied.
+- **The preview carries the campaign name** once it is valid, because the
+  holdout is drawn per (buyer, name): it previewed under "default" and showed
+  375 for a campaign frozen with 429.
+- Grouping rfm/single, the level thresholds and the ranking basis are step 2's;
+  the value level as a filter stays in step 1, for the whole campaign.
+
+On production on 2026-10-17, the new code's own SQL beside plain SQL: «2+ с
+01.01 по 14.10» OR «1+ с 16.07 по 14.10» is 4 101 (2 612 / 3 076) both ways.
+
+**What the step says about itself** (2026-10-18, the redesign's follow-ups):
+
+- **"The last N days" is N + 1 calendar days**, and the line under the number
+  says so: every relative time here is `today − date <= N` in Kyiv dates, so
+  on 18 Oct the last 91 days are «= с 19 июля по 18 октября 2026,
+  включительно». The label follows the query, never the other way round — the
+  built-in presets were written against it. `utils/smsDates.lastDays` is the
+  one place the page does that arithmetic; `tests/unit/test_sms_last_n_days_edge.py`
+  runs the server's own fragment for the same literals the vitest states.
+- **Each template chip carries its count**, and **an empty group names the
+  condition that emptied it** («Никого: условие «Сделал(а) 92+ заказа за всё
+  время» не подходит ни одному клиенту»). Both are previews of other
+  audiences, asked by `useSmsAudienceCounts`: one query per distinct question,
+  one at a time, cached 30 minutes under their own key (a send does not refetch
+  nine chips at once), templates only once their row is on screen, a group's
+  only once its count has settled and is zero — at most one preview per
+  condition. Named on the page, not counted by the server: a per-condition
+  count would split the predicate every campaign is frozen from.
+- **Inside the Telegram Mini App** «Далее · N получателей» is Telegram's
+  MainButton and the bar draws none; the BackButton closes the sheet or
+  dialog on top (`utils/layerStack`), else steps back. Telegram's SDK is
+  loaded only inside Telegram, and only drives buttons in a real client of
+  Bot API 6.1+; outside it nothing changes.
+- **A number the gateway rejected in two campaigns is left out** of every
+  audience and of a follow-up (`ok_reachable`, funnel stage `reachable`).
+  Measured before it was built: of 38 numbers ever rejected (REJECTD/Rejected),
+  15 were messaged again later and all 15 were rejected again; none was ever
+  delivered after a rejection. Read from the delivery reports at each preview,
+  **never written as an opt-out** — `app.marketing_optouts` stays a list of
+  people's own requests, one rejection can be a temporary block, and the rule
+  can change without a clean-up. On production on 2026-10-18 it removed 17 of
+  18 104 people from "all buyers".
 ### Two axes: a level and an area
 
 Access is a **pair**, and conflating the two halves is the mistake this section
@@ -819,6 +934,58 @@ call, from `ROLE_PERMISSIONS`. It used to return the moment the table held a
 row, which meant any feature added after the first deploy was denied to every
 DB-backed role. Turning a permission off writes `false` rather than deleting
 the row, so re-seeding cannot resurrect a decision.
+
+### What stops an SMS send, and the one deliberate second message
+
+In August 2026 a roster of 5 550 was partly sent twice: the stamp came after
+the gateway call and a 10 s client timeout invited a second press. The claim
+(`get_sms_campaign_targets`, one conditional UPDATE taken before anything
+leaves) closed that. Four more things now stand between a press and the
+gateway, and each refusal hands the claim back with nothing sent:
+
+- **The name typed back is checked by the server** — `confirm_campaign` on
+  `POST …/{campaign}/send`, compared after strip, a 409 before the claim. The
+  dialog's disabled button was the only check and a replay skipped it.
+- **Another campaign sent in the last day** (`SMS_RECENT_CAMPAIGN_HOURS`, a
+  constant, not an env var) is asked after the claim, so two operators sending
+  overlapping rosters at once each see the other's `sent_at` and both are
+  refused. Matched on the phone. Another campaign's **control** is never
+  messaged — the holdout is drawn per (buyer, campaign name), so a second
+  campaign over the same audience reached ~10% of the first one's control and
+  destroyed its measurement. Its **targets** only by a declared follow-up of it
+  (or of the root they share).
+- **The balance** (`TurboSmsClient.balance()`) must cover recipients × parts ×
+  tariff × `SMS_BALANCE_MARGIN` (1.02): config says 1.28 ₴ and a top-up under
+  10 000 ₴ bills 1.29, and the gateway bills batches it then fails to dispatch
+  (−675 ₴ once). Viber is priced as SMS for everyone. An unreadable balance is
+  a refusal, not a pass. Every refusal is a 409 whose JSON carries `reason`
+  (`recent_campaign`, `balance_short`, `balance_unreadable`) and the figures.
+- **A guard that raises** releases the claim before the error goes out.
+
+**Every refusal on the campaign routes is named**, not only the three above:
+the name typed back, the claim (`not_frozen`, `already_sent`), the gateway's
+own answers, the freeze and every follow-up refusal. `detail` stays the English
+sentence API callers read; beside it `reason` (one of
+`core/sms_refusals.REFUSAL_REASONS`) and its figures, which the page says in
+the reader's language from `sms.refusal.<reason>` (`utils/smsRefusal.ts`) — a
+reason with no sentence falls back to `detail`, never to a key. Raised as
+`SmsRefusal` (answered by a handler in `web/main.py`) or, from the store, as
+`SmsCampaignRefused`, still a `ValueError`. `tests/unit/test_sms_refusal_reasons.py`
+walks both modules: every reason raised is in the list and every name in the
+list is raised; the locale test requires a sentence for each in three
+languages.
+
+**A follow-up** (owner's decision 2026-10-17) is the same people a second time
+the same day — a "last day" push. As an ordinary campaign it would re-draw a
+control and message part of the first one's. So `follow_up_of=X` on the
+preview and the freeze makes the roster exactly X's target members whose
+message was accepted, less current opt-outs, `holdout_pct` forced to 0. X must
+be sent and not itself a follow-up (followers point at the root). Any audience
+parameter beside it is a 400, not ignored. The link is `"followUpOf"` inside
+the stored `criteria` JSON — no column, so no revision — read in Python, not
+with a JSON operator, because the two engines spell those differently. Its
+results say it has no control and point at X; X's results list its follow-ups,
+because X's lift then includes the second message.
 
 ### Order statuses
 Revenue excludes KeyCRM's lost/cancel group (`status_group_id = 6`), verified
@@ -3122,6 +3289,21 @@ DuckDB не останавливается нигде, поэтому откат
 нигде. `pg_stat_user_indexes` показывал 3 скана — это `count(*)` брал самый
 маленький индекс для index-only scan, а не предикат.
 
+**Новые клиенты по видам трафика — люди, а не заказы.** `/api/traffic/analytics`
+отдаёт блок `new_customers` (`total`, `summary` по пяти карточкам,
+`by_platform`, `by_traffic_type`): покупатели, чей первый заказ вообще попал в
+период, на карточке того трафика, откуда пришёл этот заказ. «Новый» — это
+`silver_orders.is_new_customer`, тот же флаг, что считает `new_customers` в
+Gold, так что вкладка и карточки дашборда не спорят о том, кто новый. **Отдельный
+блок, а не третье поле в бакетах**, потому что люди не складываются:
+`is_new_customer` стоит на каждом заказе первого дня, и покупатель с двумя
+заказами первого дня через два канала новый на обеих карточках и один в
+`total`. Поэтому второй запрос отдаёт `DISTINCT (platform, traffic_type,
+buyer_id)` и считается множествами в Python — свёртка счётчиков по группам, как
+у заказов, посчитала бы такого человека дважды (та же причина, по которой Gold
+держит строку-свёртку). Бакеты `{orders, revenue}` не тронуты: их целиком
+сравнивают недельный отчёт по трафику и dry run реклассификации.
+
 ### Вкладка /expenses: половина уже стояла, и один веер ценой ₴314K
 
 `KS_READ_EXPENSES=postgres` переводит шесть читающих методов, и они делятся
@@ -4292,7 +4474,10 @@ web that opens the live file, read-only, which no hash can see — and the
 nightly off-site's snapshot, which runs the same phase, open through the
 switch: their sidecars start from `.env`, so under `off` both are refused
 before the driver runs, each with one line saying its cron line is retired
-at the start of the week. Under `off` an open is refused **before the
+at the start of the week. Since PR-10 their wrappers do not get that far:
+each reads `KS_DUCKDB` out of `.env` first and stands down — exit 0, one
+line — before it stops, deletes or starts anything ("Starting the week of
+silence", below). Under `off` an open is refused **before the
 driver runs**, so the file is not even created — and `DuckDBStore.connect()`
 and `backup_database()` ask first, before either touches the disk beside the
 file (`data/`, `duckdb_tmp/`, `backups/` and the temp copies in it); the
@@ -4308,40 +4493,184 @@ goes first because under `off` the outage beside it is its symptom. A typo
 runs as `on` and warns `duckdb_mode_invalid` (OD-09: web is the only syncer).
 
 **What `off` does, and what it does not yet** (stage 5's decoupling,
-`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 and PR-1).
+`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, as of its PR-0 to PR-9).
 `get_store()` publishes the store **unconnected**: about 150 callers hold it
 only as the host of a router that goes to Postgres, and the tripwire stands
 at `connection()`, where the file is actually reached. The boot asks
 `orders_held()` instead of `get_stats()`, a failed boot sync no longer ends
 the startup (the handler used to ask DuckDB first), and a route refused the
-file answers 503 `surface: duckdb` beside `ReadUnavailable`. Under `on`
-nothing changed. **Web still does not run clean under `off`**: what the sweep
-in `tests/unit/test_duckdb_off_sweep.py` finds reaching for the file is
-exactly its `KNOWN_RESIDUAL` — the warehouse writer's record, the
-scheduler's catch-up, the DuckDB half of the integrity scan and of the
-mirror landing, the shadow chains' DuckDB copies, the report weeks and the
-order and catalogue watermarks inherited from DuckDB, `db_backup`,
-`/api/health` still counting DuckDB's tables, and `/api/summary?source_id=3`.
-The watermarks are not a boot-time reach: with Postgres holding no
-`last_sync_orders`, **every sync tick's order step is refused and order
-intake stops** until PR-5. The sweep runs in the target state (derived from
-the registries, every chain latched, step 13 met). It boots web, starts the
-scheduler and runs every registered job — each as the tick that comes once
-every window an earlier step armed has passed, on a fresh sync service —
-with Postgres refusing and, wherever `KS_PG_DSN` is set (CI fails if it
-skipped), with Postgres live, emptied first and put back after. It calls
-every GET route **with Postgres refusing only**: with its required
-parameters, then again per value of each optional parameter that can pick a
-branch (source, sales type, every boolean) and once with the header's
-filters together; what a route reaches only past a live Postgres is PR-9's
-integration variant. A refused watermark read carries its key, so one row
-is one reach. A site that appears outside the list fails, and so does a row
-the code no longer earns. Each later PR takes its rows out; the week waits
-for the empty set. Not set anywhere until then.
+file answers 503 `surface: duckdb` beside `ReadUnavailable`. `/api/health`,
+`/health/detailed` and `/api/duckdb/stats` reach for nothing (PR-3):
+`duckdb.status` and `migrations.status` read `off`, `fatal` is null, and
+`duckdb` is never in `degraded_by` — so the canary's probe and the Docker
+healthcheck are neither a tripwire site nor an outage, and a healthy probe
+writes `duckdb_silent: true`. The shadow chains (9, 10, 11a, 11b) stand
+their DuckDB half down before `store.connection()` (PR-4): counted apart as
+`shadow_stood_down` under `off`, never as a failure or at ERROR;
+`compared_in_shadow()` is empty, so the daily comparison does not read those
+tables, and `duckdb_written()` reads every table False. Under `on`, in the
+target state, DuckDB still writes exactly ten tables — the shadow chains'
+eight, `sync_metadata` and `schema_migrations` — pinned in
+`test_duckdb_table_fates.py`. After a week under `off` a way back reads the
+week's rows as `shadow_missing_in_duckdb` (WARN, OD-S5-3 (a)), accepted
+until the drop: the finding dates its rows on Postgres's clock, its lever says
+rows of a week under `off` are expected and never names
+`scripts/chain_copy_back.py` as the cure (it releases the latch and hands the
+chain back to DuckDB), and the soak's H2 lists it as accepted, not failed, once
+the canary's `watch:duckdb_switch` row exists. On the read
+path (PR-8) DuckDB answers nothing even by routing: `/api/summary?source_id=3`
+(Opencart, no column in Gold) answers DuckDB's zeros without a connection;
+`/api/warehouse/status` reads DuckDB's last refresh out of its copy,
+`app.warehouse_refreshes`, as `status: off`; and `read_fallback.refusing()`
+holds whatever `KS_READ_FALLBACK` says, so a failed engine, a read switch
+left at `duckdb` (refused by name in `no_address`) and the expenses' NULL
+`backfilled_at` are each a 503 naming the surface, not the tripwire's.
+`read_fallback_mode.mode` keeps publishing what was configured, so the canary
+reads `duckdb_switch.mode` beside it: such a route is paged as `read_refused`
+alone, never also as `read_routed_to_duckdb`, and the refusal's log line names
+the variable that refused.
+**What was inherited from DuckDB is read from its copy** (PR-5): a sync
+window, freshness stand-in or digest beat Postgres holds no key for comes
+from `app.sync_metadata` — DuckDB's table as the hourly copy last shipped it,
+which stopped moving at the latches (`core/pg_frozen_metadata.py`) — the
+freshness check's bootstrap gate asks Postgres too, and an unreadable copy
+is `sync_watermarks_unwatched`, never "fresh install"; the report ledgers
+adopt nothing under `off`. That finding carries every entity it names
+(`IntegrityIssue.unverified`) and the integrity job holds each one, not only
+the moved keys — an entity no chain moved rests on the copy alone, and a run
+that could not read it must not announce its page resolved. Before it, every
+tick's order step was refused and order intake stopped. **The jobs stand down
+rather than fail** (PR-7): `duckdb_checkpoint` and `db_backup` are not registered, the catch-up asks
+Postgres alone, the mirror landing reads DuckDB only for what survives the
+stand-down, and the integrity scan is handed a connection that refuses
+(`duckdb_switch.RefusedConnection` — a check that still reaches is counted
+where it reached) with `pk_uniqueness_{products,buyers,categories}` stood down
+and no twin (`DUCKDB_OFF_STOOD_DOWN`, OD-S5-5), so its run is a verdict with no
+`error_message`. Those three stay bare calls skipped by name, never lambdas:
+the set is read out of the scan by the rule the `off` verdict reads its
+retired conditions by, so the two cannot part. The copied tables no chain
+owns — `app.sync_metadata`, `app.warehouse_refreshes`, `app.reconciliation_log`
+— freeze as history (`pg_operational.DUCKDB_HISTORY_TABLES`, OD-S5-4),
+neither copied nor compared, so `meta.mirror_state.last_ok_at` of the
+`sync_metadata` copy stops with them: nothing may judge that stamp against
+an owner row a chain first writes under `off`. A page their stood-down
+checks delivered before the switch is the `off` verdict's
+`retired_pages_clear` to wait for (PR-2). The warehouse writer's record is
+read from its frozen copy in Postgres, `app.sync_metadata`, and never
+written (PR-6, OD-S5-2 (a)); a door that re-parses every UTM
+verdict in Postgres alone notes it in `data/warehouse-utm-reparsed-at`
+instead, and the first start back under `on` merges that into DuckDB's record,
+so a later way back from step 13 still re-parses DuckDB's verdicts — the one
+thing `on` does differently, and only when the marker is there. A marker its
+removal left behind is found spent by the next start — its note already in
+the record, or the record `duckdb` since after it, the way back it fed done —
+and is only removed again: merging it once more used to start a second full
+DuckDB rebuild on every restart.
+
+**Off is a claim checked at web's start** (PR-2, `core/duckdb_off.py`,
+OD-S5-1 (a)): step 13 **in force** — `postgres` with every precondition met,
+not a way back that latched chains 3 and 5 refused, which stays `postgres`
+over whatever was unmet (a reader left on DuckDB would be a refusal per
+request); every chain on Postgres (`chain:<name>`, read off `WRITE_CHAINS`,
+never listed); every store switch of `duckdb_table_fates.STORE_SWITCHES`
+step 13 does not already hold at postgres, read off it too (today
+`KS_USER_STORE`, key `user_store`); step 13's record resolved in the frozen
+copy; every chain that keeps a value in DuckDB's `sync_metadata`
+(`CHAIN_SYNC_KEYS`/`CHAIN_MARKER_KEYS`) latched, and the copy shipped after
+the first latch of each — only those, since nothing moves the copy under
+`off` and chain 8's first typed expense mid-week used to hold the next
+deploy back and lose the week; and no page open that a check off stands down
+would announce resolved unseen — `data_quality.DUCKDB_OFF_STOOD_DOWN` (the
+`pk_uniqueness_` of the three tables no chain judges; one list, which PR-7
+stands down by), `shadow_*`, and the `mirror_*` pages of the three history
+tables, which the mirror job marks under `on` (the one other addition `on`
+sees: a mark on a delivered gate entry that only this verdict reads). One
+unmet and web runs **`on`** —
+the file opened, orders taken, the week not started — publishing the keys as
+`duckdb_switch.held_back` and paging CRITICAL `duckdb_off_held_back`, P4's
+breach and not P3's (OD-S5-7). Web's verdict alone (`configure_modes(web=True)`,
+kept for the process); a script under `off` stays `off`. So do the Sunday
+compaction's and the nightly snapshot's sidecars, which read `.env` and not
+the verdict: while web is held back both are refused and the file web goes on
+writing is neither compacted nor shipped. Their refusals say the week has
+started only of a web running off and name the hold beside it
+(`duckdb_switch.HELD_BACK_NOTE`), and the page's lever offers `KS_DUCKDB=on`
+as the other way out — a hold is a state to leave. Each key's detail in web's
+log names the value it found (a chain's flag, not its name). Otherwise, under
+`on` nothing changed. **Nothing the sweep runs reaches for the file
+any more**: `KNOWN_RESIDUAL` in `tests/unit/test_duckdb_off_sweep.py` is
+empty — no boot step since PR-6, no job since PR-4 to PR-7 together, no GET
+route since PR-8, and none of the doors PR-9 added the first time they were
+opened — and a control reach after the last step proves the tripwire still
+stands. The sweep runs in the target state (derived from the registries,
+every chain latched, step 13 met, off's own verdict holding), in three
+sweeps, each in an interpreter of its own and each **in four flavours** —
+Postgres refusing, or, wherever `KS_PG_DSN` is set (CI fails if it skipped),
+live: emptied, seeded with a small history in Bronze that Postgres derives
+into Silver, Gold and the customer profile itself (the integration variant),
+and put back after; crossed with **the world outside**, KeyCRM and TurboSMS
+(`tests/unit/duckdb_off_sweep_world.py`), answering canned payloads through
+`httpx.MockTransport` under the clients' own retries and breaker, or refusing
+(`down-offline`, `live-offline`, the outage branches). Until the review of
+PR-9 the world was refused in every flavour, so no path that runs only once
+data arrives ran — the syncs' writes, the gap backfill, the status refresh,
+the half-written repair, the resync, both buyer syncs, the SMS send and its
+delivery report — and a reach planted behind a payload passed the sweep;
+it now fails it in six process steps. KeyCRM's date filters are applied, so
+each path is served what only it writes. Where both answer the sweep also
+judges that it got there: every step in `FED_BY_KEYCRM` was served orders
+and wrote them to Postgres (`Landed`: row versions newer than the step's
+first transaction), every door that asked the world went through, every
+assistant tool answered without an error, and every DuckDB lever that syncs
+answered 2xx, was served and wrote Bronze. **process** boots web,
+starts the scheduler and runs every registered job — each as the tick that
+comes once every window an earlier step armed has passed, on a fresh sync
+service. **routes** calls every GET route under `/api/` as an admin, with
+its required parameters, then again per value of each optional parameter
+that can pick a branch (source, sales type, every boolean) and once with
+the header's filters together. **doors** (PR-9) boots web again and opens
+the rest of what a week exercises, every door read off the app rather than
+listed (`tests/unit/duckdb_off_sweep_doors.py`): every route under `/api/`
+that is not a GET, with its optional values and a body derived from what
+the route declares or reads itself (a 422 fails the run — a door refused as
+malformed swept nothing); every route outside it as nobody, a viewer and an
+admin, the two Telegram sign-ins and the TurboSMS webhook signed as their
+senders sign them; both WebSocket routes with the client's frames; every
+event on the bus with a socket open in each room; every assistant tool
+through `execute_tool` and through both `/api/chat` routes under a model
+that asks for all of them; every GET route `NETWORK_ROUTES` keeps out of
+the admin's sweep, as an admin; every GET again under a **real viewer
+session** nothing patches; and web's stop. Requests run in-process over ASGI on the
+sweep's own loop, so a background task a door starts is awaited inside its
+step. Seeding the history found that the live flavour had derived nothing
+until then: emptying the database took `meta.derivation_signal`'s row, so
+`pg_warehouse_derive` ran "signal unreadable" every time. A refused
+watermark read carries its key, so one row is one reach. A site that
+appears outside the list fails, and so does a row the code no longer earns.
+**A DuckDB lever may reach the file only if listed** in `DUCKDB_LEVERS` with
+its reason and refused loudly (503 naming `duckdb`, counted, paged) — and
+only a door under `/api/duckdb/`, the names OD-S5-8 keeps until code
+deletion; the list is empty, since under the chains each of those routes its
+sync to Postgres. **A door that says success having done nothing** — asked
+the world, was refused, still answered 2xx `"status": "success"` — is listed
+exactly in `KNOWN_FALSE_SUCCESS`: one, the inline status refresh, whose
+`refresh_order_statuses` swallows KeyCRM's errors (9502d9bd). Old and the
+same under `on`, so stage 5 lists it rather than changes it. **The static half** (`test_duckdb_off_entry_points.py`)
+walks `core/`, `web/`, `scripts/` and `deploy/` from every function that
+opens the file up to its entry points, and each must be a door the sweep
+opens, held by one (called, named as a value, nested — the mirror job's
+lambdas, a route's background `run()`), or pinned exactly as a host tool or
+dead code. **The bot's process never loads DuckDB**
+(`test_bot_imports_no_duckdb.py`): what it imports, lazily included, in a
+fresh interpreter, and what it calls. That is the code's half of the week's
+licence; the host tools (PR-10), the second Ark (PR-11), the rehearsal on
+the production copies and the owner's own yes are the rest. Not set
+anywhere until then.
 
 **The file's hash** — `deploy/duckdb_silence_check.sh`, a host tool, **not
 installed**: hourly from root's crontab at the start of the week (the line is
-in its header). sha256 of the file and its `.wal`, O_RDONLY and no lock, so it
+in its header, and `--crontab` prints it with the two the week retires —
+printed, never installed). sha256 of the file and its `.wal`, O_RDONLY and no lock, so it
 can never be the change it reports; record in `/root/duckdb-silence/state`
 (600, atomic, parsed and never sourced) and one history line per run, cut to
 500 by the run that grows it. `--peek` hashes and writes nothing; `--status`
@@ -4393,16 +4722,20 @@ decision to restart both clocks, said out loud.
   (the operator declares the last flip — nothing in the database knows which
   flip the stage needed), the newest `owner:` row, step 13's switch, every
   breach (P2's and F1's pages), and the `watch:read_fallbacks` clean-since — an
-  unwatched stretch is not a clean one. Covered at **720 h**.
+  unwatched stretch is not a clean one. Covered at **336 h** (14 days, the
+  owner's amendment of 2026-10-08).
 - **P4** the week of silence, under `off` only. Starts at the latest of the
   `watch:duckdb_switch` clean-since (the canary writes it only while web runs
   `off`, on F1's 35-minute rule), the file's unchanged-since, the last edit of
-  `.env`, every breach of all four kinds — the file's `missing_at` among them —
+  `.env`, every breach of all four kinds — the file's `missing_at` among them,
+  and a `duckdb_off_held_back` page, since a held web opens the file —
   and F1's watch. `.env` is asked because the Sunday compaction and the
   nightly off-site start their sidecars from it, not from web's environment,
   and only the switch in the sidecar refuses their read-only open: web `off` with `.env` not saying `off` the way
-  `docker run --env-file` reads it (last line, quotes kept) is a FAIL, and any
-  edit of the file restarts the week. Covered at **168 h** — a full week holds
+  `docker run --env-file` reads it is a FAIL — quotes and an inline comment
+  kept, and `export` or a space before the `=` making it refuse the whole
+  file — read through `deploy/duckdb_env.sh`, the reader the host scripts
+  stand down by, and any edit of the file restarts the week. Covered at **168 h** — a full week holds
   Sunday 05:00 and Monday 09:30 by construction — **and** an
   `app.weekly_report_sends.sent_at` after the start, because a week that never
   delivered a report has not shown the Monday path works without DuckDB.
@@ -4412,6 +4745,190 @@ decision to restart both clocks, said out loud.
 These are the measurements, not the gate: every chain latched, source
 reconciliation clean, `KS_READ_FALLBACK=off`, the second Ark and the rest of
 the plan's stage-5 preconditions are their own checks.
+
+### Starting the week of silence (stage 5, PR-10)
+
+The one runbook for the start of the week and for the way back. Nothing in
+the repository runs any of it: every step is a person's, on the host, as
+root, in `/opt/key-api-bot`. `KS_DUCKDB=off` in production needs the owner's
+own "yes", separate from every merge (decision of 10.10.2026).
+
+**What PR-10 changed on the host**, which is what makes the order below safe:
+
+- `scripts/weekly_compact.sh` and `deploy/daily_offsite.sh` read `KS_DUCKDB`
+  out of `.env` by exact name — `deploy/duckdb_env.sh`, the one reader, the
+  lines naming the key and nothing else of the file, read both the way
+  compose reads them (web's environment) and the way `docker run --env-file`
+  does (a sidecar's) — and when either says `off` they exit 0 with one line
+  **before they stop, delete, link or start anything**. The
+  compaction used to delete the last compaction's backup and the export and
+  stop web, bot and Meilisearch, and only then have its sidecar refused; the
+  snapshot paged "Daily snapshot FAILED" the first night and refused a stale
+  backup every night after. Their cron lines are retired at step 4; the
+  stand-down is the insurance for a line left behind.
+- `deploy/pg_offsite.sh` ships `.env` beside every Postgres dump
+  (`env-<stamp>.gpg`, OD-S5-6): in the manifest, read back, hashed, decrypted
+  and compared like the dump, and a run without a `.env` fails. The only
+  off-site `.env` used to ride in the DuckDB Parquet archive, which the week
+  stops; now the Postgres marker is its age.
+- `deploy/offsite_check.sh` reports the DuckDB copy as frozen, with its age,
+  and never fails on it while `.env` says `off`. The Postgres marker and the
+  watchdog are judged as before, their pages say they carry the only
+  off-site `.env`, and the Monday heartbeat keeps speaking.
+- `deploy/duckdb_silence_check.sh --crontab` prints root's crontab change as
+  a diff, both directions. It installs nothing; nothing here does.
+- `deploy/restore-test.sh` starts its rebuild with `-e KS_DUCKDB=on` beside
+  `--env-file .env` (docker ranks `-e` first), so the drill that proves the
+  Parquet archive rebuilds still runs in the week — its sidecar sees only its
+  scratch directory — and it reports the newest archive as frozen rather
+  than stale. The real restore's command (`restore_from_export.py`'s
+  docstring) carries the same `-e`, for a `.env` decrypted from the week.
+
+**Not done in PR-10, though the plan (2.9) gave it these**, and what each does
+under `off` meanwhile — none of them opens the live file or pages:
+`scripts/check_date.py` and `scripts/force_resync.py` are refused by the
+switch with a traceback rather than one line; `scripts/weekly_report_preview.py`
+still reads a DuckDB copy, not the `KS_READ_*` readers; `deploy/dq_history.py`
+and `deploy/measure_dlr_throughput.py` are not retired (`HOST_TOOLS` still
+lists the first); `deploy/agent/run_agent.sh` still routes `duckdb_*` alerts
+to the `default` runbook, and the runbooks (`_common`, `disk`, `memory`,
+`warehouse`, `health`) still describe DuckDB as the live file; two
+`REMEDIATION` levers in `core/data_quality.py` still name DuckDB
+(`POST /api/duckdb/sync-all-buyers`, and restoring a catalogue row from it),
+as does the scheduler's memory lever.
+
+Write it bare: `KS_DUCKDB=off`, a line of its own, nothing before it and
+nothing after. Compose reads nearly any spelling as off, and web runs `off`
+on all of them; `docker run --env-file` does not. It keeps quotes and an
+inline comment (`KS_DUCKDB=off # …` hands a sidecar `off # …`, and it runs
+`on`), and it refuses the whole file — every sidecar, the restore drill's
+too — over `export KS_DUCKDB=off` or a space before the `=`. Either way the
+soak's P4 FAILs. The host scripts stand down on every one of them anyway,
+the harmless direction, and their line says which line to write.
+
+**Preconditions**, all of them, before step 1:
+
+1. The owner's "yes" for `KS_DUCKDB=off`; outside the freeze window (Sat 22:00
+   – Sun 02:30 UTC); not the day of a chain flip.
+2. This build deployed (stage 5's PR-0 to PR-11): `/api/health` carries
+   `duckdb_switch`, and `/opt/key-api-bot/deploy` holds `duckdb_env.sh` and
+   `ark_ship.sh`.
+3. The parallel period done: `deploy/stage4_soak.sh` P3 covered (336 h from
+   the last flip), no FAIL in P1–P3 or F1.
+4. What web's verdict will check at its start (`core/duckdb_off.py`), read
+   beforehand so the start is not the first time anybody asks: `/api/health`
+   `write_chains` with every chain's `mode` `postgres` — by its latch or by
+   its flag — and no `mismatch` and no `unmet_precondition`; `latched: true`
+   (its marker under `data/write-chain-owners/` and its `owner:` rows) only
+   for the chains that keep a value in DuckDB's `sync_metadata`, which off
+   reads from the copy (`chains_keeping_sync_metadata()`):
+   `pg_inventory_write`, `pg_expense_types_write`, `pg_buyers_write`,
+   `pg_orders_write`, `pg_managers_write`, `pg_catalogue_write`,
+   `pg_dq_journal_write`. The others may stand on
+   their flag with nothing written — chain 8 with no expense typed latches on
+   its first write, mid-week, as the verdict expects; do not write a row to
+   make a marker appear. Then `warehouse_writer_mode` with nothing unmet (step
+   13 in force); `grep -E '^(KS_USER_STORE|KS_SMS_STORE|KS_DQ_PG_WAREHOUSE)='
+   .env` reading `postgres`, `postgres`, `on`; as `ks_readonly`, `SELECT
+   value FROM app.sync_metadata WHERE key = 'warehouse_writer'` saying
+   `postgres` and resolved, and `meta.mirror_state.last_ok_at` of
+   `app.sync_metadata` later than the newest `owner:` row of
+   `meta.chain_watermarks` (the verdict asks it of those chains' first rows;
+   the newest of all is stricter, and an hourly copy away); no
+   delivered page under `pk_uniqueness_{products,buyers,categories}`,
+   `shadow_*` or the three history tables' `mirror_*`.
+5. `.env` off-site through Postgres: `data/logs/pg_offsite.log` has
+   `verified: env-<stamp>.gpg opens with` from this build, **and** somebody
+   has fetched that file to another machine and opened it with the escrowed
+   passphrase (`docs/backup_runbook.md`, "To open a copy"). The host can only
+   prove that its own passphrase file opens it.
+6. `deploy/pg_restore_drill.sh --from-remote` passed this week, and this
+   morning's `offsite_check.sh` was green.
+
+**Starting the week**, in this order (the plan's numbering):
+
+1. The last backup, and the manifest checked on it: the newest
+   `data/backups/analytics-*.duckdb` is last night's (or trigger `db_backup`
+   from `/api/jobs`), and `deploy/duckdb_table_fates_check.py`, run as its
+   header shows, exits 0 — or each UNKNOWN is decided first.
+2. `docker compose stop web bot`. From here the file is static: a clean
+   close checkpoints, and no `.wal` is left beside it.
+3. The second Ark: `deploy/ark_ship.sh --source data/analytics.duckdb`, in a
+   terminal of its own. Web and the bot stay stopped until it prints `SOURCE
+   RELEASED` — the freeze needs the file static — and no longer: nothing
+   after that line reads the file, and under `off` web never opens it, so
+   steps 4–6 begin there while it ships. (A web held back on `on` does open
+   it — the first hour, below — and then the week starts again, with a new
+   Ark, anyway.) The run must still end in `ARK SHIPPED AND VERIFIED`; then
+   `chattr +i -R /root/ark/key-api-bot/<stamp>`. One that fails after
+   `SOURCE RELEASED` is finished with `--ark`, which does not freeze again;
+   one whose local Ark does not verify needs a new freeze, and under `off`
+   the file is still static for it. Its header has the rest.
+4. Root's crontab: `deploy/duckdb_silence_check.sh --crontab`, keep the copy
+   it names, then delete the two `-` lines under STARTING THE WEEK — the
+   compaction and the nightly snapshot — by hand.
+5. `offsite_check.sh` needs nothing: it turns to its frozen branch the moment
+   `.env` says `off`.
+6. `.env`, the CLAUDE.md way: `install -m 600 /opt/key-api-bot/.env
+   /root/env-backups/key-api-bot/.env.bak-week-of-silence-$(date -u
+   +%Y%m%d-%H%M%S)`, then make the one line `KS_DUCKDB=off` — check it with
+   `grep -n '^KS_DUCKDB=' .env`, never by printing the file — keep it 600,
+   and `docker compose up -d web bot`. **Any later edit of `.env` restarts the
+   week** (P4 reads its mtime).
+7. Add the `+` line of `--crontab` — the silence check, hourly at :17 — and
+   run the script once by hand: `BASELINE`, exit 2.
+8. Read `/api/health`, as below.
+
+**The first hour:**
+
+- `curl -fsS https://ksanalytics.duckdns.org/api/health | jq '{status,
+  degraded_by, duckdb: .duckdb.status, switch: .duckdb_switch}'` — `healthy`,
+  `[]`, `off`, and `mode: off`, `value: off`, `error: null`,
+  `opened_while_off: {}`, `held_back: []`.
+- A `held_back` naming any key means web runs **`on`**: it opens and writes
+  the file, the two retired cron lines are gone, and the canary pages
+  `duckdb_off_held_back`. Meet the key within the hour or take the way back
+  now; a hold is a state to leave.
+- `docker compose logs --since 1h web | grep -E 'KS_DUCKDB=off|DuckDB opened
+  while'` — the one CRITICAL saying this process must not open the file, and
+  no "DuckDB opened while KS_DUCKDB=off".
+- Orders land: as `ks_readonly`, `SELECT updated_at FROM
+  meta.chain_watermarks WHERE key = 'last_sync_orders'` moves every minute or
+  two.
+- `/api/jobs` (admin) lists none of `db_backup`, `duckdb_checkpoint`,
+  `warehouse_refresh`.
+- After hh:17, `deploy/duckdb_silence_check.sh --status` — `last=UNCHANGED`.
+- No page among `duckdb_opened_while_off`, `duckdb_off_held_back`,
+  `duckdb_mode_invalid`, `health_status`.
+- Next morning: `offsite_check.sh` prints `off-site frozen (KS_DUCKDB=off)`,
+  and `deploy/stage4_soak.sh` P4 reads UNKNOWN until its watch is a day old,
+  then PASS with its hours. Covered takes 168 h **and** a Monday report
+  delivered after the start.
+
+**The way back**, whenever the week has to end early or a hold cannot be
+cleared:
+
+1. Copy `.env` the same way, make the line `KS_DUCKDB=on` (or delete it), and
+   `docker compose up -d web bot`.
+2. `/api/health`: `duckdb_switch.mode: on`, no `held_back` key, and
+   `duckdb.status` no longer `off`.
+3. Root's crontab: the WAY BACK half of `--crontab` — the compaction and the
+   nightly snapshot re-added, the silence check deleted. Its record under
+   `/root/duckdb-silence` stays, as history.
+4. Expected, not to be chased: the first start under `on` opens the file
+   with its always-run migrations (0027's sequence shift among them) and
+   merges `data/warehouse-utm-reparsed-at` if a UTM re-parse ran under `off`
+   (PR-6); `db_backup` and `duckdb_checkpoint` register again, but until the
+   first new backup (04:30 Kyiv, or trigger `db_backup`) the 02:45 UTC
+   snapshot refuses a backup over 30 h old and
+   `offsite_check` pages the DuckDB copy stale; and `shadow_missing_in_duckdb`
+   WARNs in the digest every morning — the week's shadow rows, accepted until
+   the drop (OD-S5-3 (a)).
+5. Not the way back: `scripts/chain_copy_back.py`. It hands a chain's writes
+   back to DuckDB, a different decision with its own clock.
+
+Starting again later is step 1 again, a new Ark included: the file changed
+the moment web ran `on`.
 
 ### The order write path asks the registry too (DN-22a)
 
@@ -4579,6 +5096,28 @@ human deletes or restores it. What it cannot see, and says so: an edit that
 leaves `mirrored_at` alone, or copies a recorded instant — on a retired row
 only a trigger or a migration would date that. The copy-back releases the
 record with the latch.
+
+**E1 reads the record too** (2026-10-14). The daily comparison's
+`chain_shipper_overwrote` took any `last_ok_at` after the owner row for a
+shipment out of DuckDB — true of every chain flipped before this one (chain 3's
+writer stamps it too, but has never been flipped), false here,
+where the writer stamps it on every write. From 2026-10-10 each morning paged
+the chain's own hourly writes CRITICAL, with "restore from the nightly dump" as
+the lever; production's two watermarks were each a stamp in the chain's
+record, and nothing else had written either table since the latch. A chain
+whose writer stamps the watermark now declares the tables
+(`CHAIN_STAMPS_MIRROR_STATE`, held to the code by a walk in
+`tests/unit/test_chain_mirror_stamps.py`), and this one hands E1 the watermark
+and the record in one statement (`read_mirror_stamps`; two reads would let a
+write land between them and look foreign): a recorded instant is the chain's,
+any other after the latch is CRITICAL, and a record nobody can parse is
+CRITICAL saying it could not tell. It sees a foreign stamp only until the
+chain's next write moves the watermark again — the mirror, the one other
+writer that stamps it, ships only with the marker lost, which
+`chain_latch_disagrees` and `owner_row_without_marker` page for as long as it
+lasts. Chain 3 stamps its three bronze watermarks the same way and keeps no
+record, so E1 does not judge those three — a decision written beside its
+declaration, and the only chain the walk lets stamp without one.
 
 **The standing watch** reads both tables four times a day: empty and written
 round (CRITICAL), rows lost (`last_rows − current − around`, CRITICAL, judged
@@ -4753,11 +5292,12 @@ flag nobody can read keeps the readers on DuckDB, where the whole journal is.
 
 **Soak:** H1 (`28_h1`) — the hourly copy stood down on each on-chain's tables
 since its owner rows, a failure counting for the day it was stamped; H2
-(`29_h2`) — the 07:30 run filed no `shadow_*` above INFO. D8, 20, 21 and 22
-stop gating on the journal's copy once chain 9 writes it directly (the flag,
-the latch, or its owner row); chain 1's preflight does the same on the flag
-or the latch (chain 7b's goals dry run did, until 7b-4 retired it). Every
-guard names its mutation; a run over all of them found five that did not
+(`29_h2`) — the 07:30 run filed no `shadow_*` above INFO (bar
+`shadow_missing_in_duckdb` once web has run `KS_DUCKDB=off`, OD-S5-3 (a)). D8,
+20, 21 and 22 stop gating on the journal's copy once chain 9 writes it directly
+(the flag, the latch, or its owner row); chain 1's preflight does the same on
+the flag or the latch (chain 7b's goals dry run did, until 7b-4 retired it).
+Every guard names its mutation; a run over all of them found five that did not
 catch theirs, now closed in the tests.
 
 ### Chain 7b: the goals read Silver, and a GET never writes (OD-14)

@@ -615,22 +615,58 @@ class TestStage5:
         run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state))
         assert all("duckdb_file_last=error " in c for c in run.psql)
 
+    # The forms of tests/unit/test_week_of_silence_host.ENV_FORMS fed to P4:
+    # every reading docker can give (off, on, invalid, refused) at least
+    # once, the four the review of PR-10 found the first reader wrong on, and
+    # the last-line and other-key cases. The reader itself is run on all of
+    # them there; here it is the soak's mapping of its answer that is new.
+    SOAK_FORMS = ("off", "upper-crlf", "off-last", "on-last", "on", "absent",
+                  "comment", "typo", "double-quoted", "inline-comment",
+                  "leading-spaces", "export", "spaces-around-equals", "colon")
+
+    @pytest.mark.parametrize("name", SOAK_FORMS)
+    def test_env_reads_as_the_host_scripts_read_it(self, tmp_path, name):
+        """P4 judges the week by what a sidecar started from `.env` would run
+        (`docker run --env-file`), and the host scripts stand down by
+        deploy/duckdb_env.sh — so the soak reads the file through that reader
+        and maps its docker answer, never a parse of its own, and the two
+        cannot judge one line two ways. Fed the same input, the soak's
+        `duckdb_off_env` is the reader's `KS_DUCKDB_ENV`: 1 for off, 0 for
+        on, `invalid` and `refused` as they are. Mutation: put a `grep` of
+        `^KS_DUCKDB=` back in the soak — the indented and the `export` lines
+        read 0 there and off or refused here."""
+        from tests.unit.test_week_of_silence_host import ENV_FORMS, _read
+
+        text, docker = next((t, d) for n, t, d, _ in ENV_FORMS if n == name)
+        (reader, *_), _, _ = _read(tmp_path, text)
+        assert reader == docker
+        env_file = tmp_path / "dot-env"
+        env_file.write_bytes(text.encode())
+        os.utime(env_file, (1900000000, 1900000000))
+        run = _run(tmp_path, SOAK_ENV_FILE=str(env_file))
+        expected = {"off": "1", "on": "0"}.get(reader, reader)
+        assert all(f"duckdb_off_env={expected} " in c
+                   and "duckdb_env_changed_at=2030-03-17T17:46:40Z" in c
+                   for c in run.psql), run.psql
+
+    def test_the_soak_has_no_parse_of_its_own(self):
+        """One reader for the week, sourced: the soak names no `KS_DUCKDB=`
+        line itself. Mutation: copy the reader's grep into the soak."""
+        code = [ln for ln in SCRIPT.read_text().splitlines()
+                if not ln.lstrip().startswith("#")]
+        assert any(re.search(r"(^|[\s;&|])(source|\.)\s+deploy/duckdb_env\.sh\b", ln)
+                   for ln in code), "the soak does not source deploy/duckdb_env.sh"
+        assert any("ks_duckdb_env_read" in ln for ln in code)
+        assert not [ln for ln in code if "grep" in ln and "KS_DUCKDB" in ln]
+
     @pytest.mark.parametrize("lines, expected", [
         ("KS_DUCKDB=off\n", "1"),
         ("KS_DUCKDB= OFF \r\n", "1"),
-        ("KS_DUCKDB=on\nKS_DUCKDB=off\n", "1"),
-        ("KS_DUCKDB=off\nKS_DUCKDB=on\n", "0"),
-        ("KS_DUCKDB=on\n", "0"),
-        ("BOT_TOKEN=x\n", "0"),
-        ("# KS_DUCKDB=off\n", "0"),
-        ('KS_DUCKDB="off"\n', "invalid"),
-        ("KS_DUCKDB=of\n", "invalid"),
     ])
     def test_env_is_read_the_way_the_sidecars_read_it(self, tmp_path, lines, expected):
         """The weekly compaction and the nightly off-site start their sidecars
         with `docker run --env-file .env`, so what refuses them is `.env`, not
-        web's environment: the last line naming the key, quotes kept.
-        Mutation: strip the quotes, or take the first line."""
+        web's environment — and since when: the file's mtime."""
         env_file = tmp_path / "dot-env"
         env_file.write_text(lines)
         os.utime(env_file, (1900000000, 1900000000))

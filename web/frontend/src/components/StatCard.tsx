@@ -18,6 +18,9 @@ export interface StatCardProps {
   icon?: IconComponent
   /** Optional subtitle below the value */
   subtitle?: string
+  /** Optional second line under the subtitle, for a figure that should not
+   *  wrap into the first one mid-phrase */
+  detail?: string
   /** Color variant for the value */
   variant?: StatCardVariant
   /** Optional trend indicator (-1 = down, 0 = neutral, 1 = up) */
@@ -88,6 +91,7 @@ export const StatCard = memo(function StatCard({
   formatter,
   icon: Icon,
   subtitle,
+  detail,
   variant = 'blue',
   trend,
   trendValue,
@@ -157,6 +161,9 @@ export const StatCard = memo(function StatCard({
             {/* Subtitle */}
             {subtitle && (
               <p className="text-xs text-slate-500 mt-1">{subtitle}</p>
+            )}
+            {detail && (
+              <p className={`text-xs text-slate-500 ${subtitle ? '' : 'mt-1'}`}>{detail}</p>
             )}
 
           </div>

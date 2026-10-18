@@ -86,10 +86,12 @@ def store(monkeypatch):
 
 # Each entry: (http method, url template with {c}, the *other* required params).
 # `send` needs a valid `text`, otherwise a missing-text 422 would mask whether
-# the campaign name itself was rejected.
+# the campaign name itself was rejected — and the valid name typed back, or the
+# 409 that refuses an unconfirmed send would stop it before the store.
 _ROUTES = [
     ("post", "/api/customers/sms-campaigns/{c}/sent", {}),
-    ("post", "/api/customers/sms-campaigns/{c}/send", {"text": "hello"}),
+    ("post", "/api/customers/sms-campaigns/{c}/send",
+     {"text": "hello", "confirm_campaign": "sep-brand_2026"}),
     ("get", "/api/customers/sms-campaigns/{c}/results", {}),
 ]
 

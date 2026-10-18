@@ -16,6 +16,18 @@
 #
 # Install:
 #   0 9 * * *  /opt/key-api-bot/deploy/offsite_check.sh
+#
+# THE WEEK OF SILENCE (stage 5). With KS_DUCKDB=off in .env the DuckDB copy is
+# frozen on purpose: deploy/daily_offsite.sh stands down and its cron line is
+# retired once the second Ark is off-site, so its marker only ages. Judging it
+# would page "off-site copy is stale" every morning from the second day on,
+# and a check that cries wolf every morning is one nobody reads by Monday —
+# so under `off` that marker is reported, "frozen" with its age, and never
+# fails the run. The Postgres marker and the watchdog are judged exactly as
+# before, and the Postgres marker now answers for .env too: since OD-S5-6
+# every Postgres shipment carries it and deploy/pg_offsite.sh writes its
+# marker only once that copy has been read back and opened. The Monday
+# heartbeat keeps speaking, and says the DuckDB copy is frozen.
 set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
@@ -74,6 +86,15 @@ alert_chat_ids() {
 # the kill switch, the instance signature, and a best-effort row in the
 # alert archive. deploy/notify.sh owns the implementation.
 source deploy/notify.sh
+# KS_DUCKDB out of .env by exact name, the same reading as the two scripts
+# whose copy this judges (deploy/duckdb_env.sh).
+# shellcheck source=/dev/null
+source deploy/duckdb_env.sh
+ks_duckdb_env_read .env
+DUCKDB_FROZEN=0
+if ks_duckdb_stands_down; then
+    DUCKDB_FROZEN=1
+fi
 
 _where() { printf '%s · %s' "$(hostname)" "$(date '+%F %H:%M')"; }
 
@@ -87,7 +108,19 @@ _where() { printf '%s · %s' "$(hostname)" "$(date '+%F %H:%M')"; }
 # must not hide another.
 RC=0
 
-if [ ! -f "$MARKER" ]; then
+if [ "$DUCKDB_FROZEN" = 1 ]; then
+    # The week of silence: reported, never judged (see the header).
+    if [ -f "$MARKER" ]; then
+        AGE_HOURS=$(( ( $(date +%s) - $(_mtime "$MARKER") ) / 3600 ))
+        FROZEN_LINE="frozen (KS_DUCKDB=off), last copy ${AGE_HOURS}h ago"
+        FROZEN_LINE_RU="заморожена (KS_DUCKDB=off), последняя ${AGE_HOURS}ч назад"
+    else
+        AGE_HOURS=never
+        FROZEN_LINE="frozen (KS_DUCKDB=off), no copy ever left"
+        FROZEN_LINE_RU="заморожена (KS_DUCKDB=off), ни одной не уходило"
+    fi
+    echo "warehouse off-site copy: $FROZEN_LINE — not judged while .env says KS_DUCKDB=off"
+elif [ ! -f "$MARKER" ]; then
     echo "CRITICAL: no off-site copy has ever succeeded (no $MARKER)"
     notify "$(printf '%s\n\n%s\n\n%s\n\n%s' \
         "🚨 Warehouse: off-site copy age = never" \
@@ -116,12 +149,21 @@ fi
 # app.stock_movements cannot be rebuilt from anything. Until deploy/pg_offsite.sh
 # ships, this says "never" every morning — which is correct and is the same
 # deliberate red first reading the header describes for the marker above.
+# Under `off` the Postgres shipment carries the only off-site .env as well, and
+# its alerts say so; under `on` they read as they always did.
+PG_ENV_NOTE="" PG_ENV_SUFFIX=""
+if [ "$DUCKDB_FROZEN" = 1 ]; then
+    PG_ENV_NOTE=$'\n'"With KS_DUCKDB=off it is also the only off-site copy of .env."
+    PG_ENV_SUFFIX=", and with it the only off-site .env"
+fi
+
 if [ ! -f "$PG_MARKER" ]; then
-    echo "CRITICAL: no Postgres copy has ever left this host (no $PG_MARKER)"
-    notify "$(printf '%s\n\n%s\n%s\n\n%s' \
+    echo "CRITICAL: no Postgres copy has ever left this host (no $PG_MARKER)${PG_ENV_SUFFIX}"
+    notify "$(printf '%s\n\n%s\n%s%s\n\n%s' \
         "🚨 Postgres: off-site copy age = never" \
         "order_versions, stock_movements, the access list and the SMS roster exist on this one disk." \
         "The dumps and the cluster share a volume." \
+        "$PG_ENV_NOTE" \
         "→ install the 07:40 cron and run deploy/pg_offsite.sh once by hand")" \
         "backup:pg_offsite_never"
     RC=1
@@ -130,11 +172,12 @@ else
     PG_AGE=$(( ( $(date +%s) - $(_mtime "$PG_MARKER") ) / 3600 ))
     PG_LINE="${PG_AGE}h ago"
     if [ "$PG_AGE" -gt "$PG_MAX_AGE_HOURS" ]; then
-        echo "CRITICAL: newest Postgres copy off-site is ${PG_AGE}h old (max ${PG_MAX_AGE_HOURS}h)"
-        notify "$(printf '%s\n\n%s\n%s\n\n%s' \
+        echo "CRITICAL: newest Postgres copy off-site is ${PG_AGE}h old (max ${PG_MAX_AGE_HOURS}h)${PG_ENV_SUFFIX}"
+        notify "$(printf '%s\n\n%s\n%s%s\n\n%s' \
             "🚨 Postgres: off-site copy is stale" \
             "Newest verified copy: ${PG_AGE}h old (allowed ${PG_MAX_AGE_HOURS}h)" \
             "Every run that fails writes why into data/logs/pg_offsite.log." \
+            "$PG_ENV_NOTE" \
             "→ deploy/pg_offsite.sh by hand; it says which step refused")" \
             "backup:pg_offsite_stale"
         RC=1
@@ -183,14 +226,24 @@ fi
 # Speak on a good day too. A check that only ever appears when something is
 # wrong teaches nobody what its silence means, and its own absence becomes
 # invisible — which is the failure it is here to prevent, applied to itself.
-echo "instruments ok: off-site ${AGE_HOURS}h, postgres ${PG_LINE}, watchdog ${WD_LINE}"
+if [ "$DUCKDB_FROZEN" = 1 ]; then
+    echo "instruments ok: off-site $FROZEN_LINE, postgres and .env ${PG_LINE}, watchdog ${WD_LINE}"
+else
+    echo "instruments ok: off-site ${AGE_HOURS}h, postgres ${PG_LINE}, watchdog ${WD_LINE}"
+fi
 # Weekly, not daily (owner's no-noise pass, 30.08): a daily "all fine" is
 # noise the reader learns to swipe, but this heartbeat is also the only
 # dead-man's switch on the off-site path itself — so it survives, on
 # Mondays. Failures above still alert every day. (Historical note: until
 # 29.08 this message reached nobody at all — the delivery bug in the old
 # notify(); the first heartbeat anyone actually receives is a weekly one.)
-if [ "$(date +%u)" = "1" ]; then
+if [ "$(date +%u)" = "1" ] && [ "$DUCKDB_FROZEN" = 1 ]; then
+    notify "$(printf '%s\n%s\n%s\n%s' \
+        "🫀 Приборы в порядке (недельный)" \
+        "внешняя копия DuckDB: ${FROZEN_LINE_RU}" \
+        "копия Postgres и .env: ${PG_LINE} (порог ${PG_MAX_AGE_HOURS}ч)" \
+        "сторож диска: ${WD_LINE} (порог ${WATCHDOG_MAX_AGE_HOURS}ч)")"
+elif [ "$(date +%u)" = "1" ]; then
     notify "$(printf '%s\n%s\n%s\n%s' \
         "🫀 Приборы в порядке (недельный)" \
         "внешняя копия: ${AGE_HOURS}ч назад (порог ${MAX_AGE_HOURS}ч)" \

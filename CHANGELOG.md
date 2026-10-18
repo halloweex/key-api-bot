@@ -2,6 +2,116 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.291
+
+- SMS results: one row for a one-arm campaign, and rows named as segments
+- SMS wizard follow-ups: refusals in the reader's language, counts, the emptying condition, Telegram buttons, a truthful period label, twice-rejected numbers
+
+
+## 3.0.290
+
+- feat(sms): step 1 of the campaign wizard holds conditions, not parameters
+
+
+## 3.0.289
+
+- SMS wizard opens with a campaign name already filled in
+
+
+## 3.0.288
+
+- SMS audience: groups of conditions, ORed, and orders in a period
+
+
+## 3.0.287
+
+- SMS send: server-checked name, balance and overlap guards; follow-up push
+
+
+## 3.0.286
+
+- Traffic tab shows new customers by kind of traffic
+
+
+## 3.0.285
+
+- Stage 5 PR-10: the runbook's tests read the checkout, so the gate skips them
+- Stage 5 PR-9 review: say "every flavour" where the sweep said "both"
+- Stage 5 PR-9 review: say what the sweep's world outside now lets it prove
+- Stage 5 PR-9 review: a door that says success having done nothing is named
+- Stage 5 PR-9 review: the sweep's world outside answers, and what it feeds is judged
+- Stage 5 PR-9 review: every route named for its network is called as an admin
+- Stage 5 PR-10 x review: the reader's header names restore-test.sh and the refused forms exactly
+- Stage 5 PR-10 x review: name the refused spellings exactly
+- Stage 5 PR-10 x review: the restore drill runs in the week, with -e KS_DUCKDB=on
+- Stage 5 PR-10 x review: web waits for the Ark's freeze, not its upload
+- Stage 5 PR-10 x review: precondition 4 asks what web's off verdict asks
+- Stage 5 PR-10 x review: the soak's P4 reads .env through the host scripts' reader
+- Stage 5 PR-10 x review: the host scripts stand down on every off compose reads
+- Stage 5 PR-9: the event listeners say whose socket each is
+- Stage 5 PR-9: read a door's own source, not its rate limiter's
+- Stage 5 PR-9: say what the wider sweep now proves
+- Stage 5 PR-9: every way into the code that can reach the file is a door the sweep opens
+- Stage 5 PR-9: the bot's process never loads DuckDB, pinned two ways
+- Stage 5 PR-9: a DuckDB lever may reach the file only if listed and refused loudly
+- Stage 5 PR-9: the off sweep opens every door a week exercises
+- Stage 5 PR-10: say where .env goes off-site now, in the Ark and the backup config
+- Stage 5 PR-10: one runbook for starting the week of silence, and for the way back
+- Stage 5 PR-10: the silence check prints the week's crontab change and installs nothing
+- Stage 5 PR-10: .env rides with every Postgres shipment, and offsite_check reports the DuckDB copy frozen under off
+- Stage 5 PR-10: the nightly DuckDB snapshot stands down under KS_DUCKDB=off instead of failing every night
+- Stage 5 PR-10: the Sunday compaction stands down under KS_DUCKDB=off before it stops or deletes anything
+
+
+## 3.0.284
+
+
+
+## 3.0.283
+
+- Stage 5 PR-7 x #291: the jobs test's fake answers the mirror stamps empty
+- Stage 5 integration: a held-back web logs its unaddressed reads as served
+- Stage 5 PR-2 review: a held-back week has not started, and the host is told
+- Stage 5 PR-2 review: a held chain's line names its flag's value
+- Stage 5 PR-8: the canary and the log name what refused under KS_DUCKDB=off
+- Stage 5 PR-8: the real-Postgres status test owns its pool
+- Stage 5 PR-8: the frozen warehouse status is read from a real Postgres too
+- Stage 5 PR-8: the read path's last reaches for the file under off
+- Stage 5 PR-4: the accepted shadow gap says what it is (OD-S5-3 (a))
+- Stage 5 PR-7 review: the three PK checks off stands down stay bare calls
+- Stage 5 PR-7: drop an unused import from the jobs test
+- Stage 5 PR-7: under KS_DUCKDB=off the scheduler's jobs and the checks stand down rather than fail
+- Stage 5 PR-5 review: an unreadable copy holds every entity it leaves unjudged
+- Stage 5 PR-2 review: in force, keyed latches, derived stores, one pk list
+- Stage 5 PR-2: off is a claim, checked at web's start
+- Stage 5 PR-6 review: a marker the removal left is spent, not merged again
+- Stage 5 PR-4: the shadow chains stand their DuckDB half down under off
+- Stage 5 PR-6: the warehouse writer's record under KS_DUCKDB=off
+- Stage 5 PR-3: /api/health under KS_DUCKDB=off reaches for nothing
+- Stage 5 PR-5: under KS_DUCKDB=off, what was inherited from DuckDB is read from its copy
+
+
+## 3.0.282
+
+- E1 review: the finding names the writer it cannot see, and three tests bite
+- E1 reads the chain's record: chain 6's own writes are not a shipment
+
+
+## 3.0.281
+
+- gpg_safe: a stream is never asked twice, and the socket directory goes with the call
+
+
+## 3.0.280
+
+- gpg_safe review: nothing but gpg names a step, and the guard reads continued lines
+
+
+## 3.0.279
+
+- Backups: every gpg runs in a home of its own and asks again for a lost agent
+
+
 ## 3.0.278
 
 

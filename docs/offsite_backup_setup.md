@@ -177,15 +177,22 @@ exit code, not the directory listing.
 Not a drill — the machine is gone and you are rebuilding.
 
 1. Fetch the newest archive from the Storage Box and unpack it.
-2. `gpg --decrypt env.gpg > .env` with the passphrase you kept off-box.
+2. `gpg --decrypt env.gpg > .env` with the passphrase you kept off-box. Since
+   stage 5 the same file also goes off-site beside every Postgres dump, as
+   `key-api-bot/postgres/env-<stamp>.gpg` — and once the week of silence has
+   retired the nightly Parquet archive, that is the newest copy.
 3. Check `export_parquet/_deploy.json` for `deploy_sha` and check out that
    commit. Parquet is not self-describing: `phase2_import` rebuilds the schema
    from the application's own DDL, so restoring an old snapshot against newer
    code can silently drop columns the export has and the target does not. The
    column-coverage report inside phase 2 prints exactly which.
 4. Run `deploy/restore_from_export.py` against a data directory containing
-   `export_parquet/`, then move `analytics_clean.duckdb` into place as
-   `analytics.duckdb` and start the stack.
+   `export_parquet/` — the command is in its docstring, and it carries
+   `-e KS_DUCKDB=on`, because a `.env` taken during the week of silence says
+   `KS_DUCKDB=off` and the switch refuses the rebuild under it — then move
+   `analytics_clean.duckdb` into place as `analytics.duckdb` and start the
+   stack. The line in `.env` then decides what the stack runs as: under
+   `off` web leaves this file unopened and reads Postgres, restored next.
 5. Bronze is now current as of the archive. The incremental sync closes the gap
    from KeyCRM on its own; a full rebuild from the API instead costs thousands
    of requests, dominated by one call per buyer, and is the third line of

@@ -6,6 +6,7 @@ import { SmsChannelFields, composeSmsText } from './SmsChannelFields'
 import { useSendTestSms } from '../hooks/useApi'
 import { useToast } from './Toast'
 import { smsCost } from '../utils/smsCost'
+import { useLayer } from '../utils/layerStack'
 import type { SmsChannel, SmsTestSendResult } from '../types/api'
 
 // ─── SmsTestSendDialog ───────────────────────────────────────────────────────
@@ -39,6 +40,8 @@ export const SmsTestSendDialog = memo(function SmsTestSendDialog({
   const [result, setResult] = useState<SmsTestSendResult | null>(null)
   const send = useSendTestSms()
   const { addToast } = useToast()
+  // On the stack of what "back" closes first — Telegram's BackButton.
+  useLayer(true, onClose)
 
   const trimmed = text.trim()
   const digits = useMemo(() => phone.replace(/\D/g, ''), [phone])

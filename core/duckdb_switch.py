@@ -19,17 +19,26 @@ on `/api/health` as `duckdb_switch.opened_while_off` (sites and counts, never
 an exception's text: the endpoint is public), and paged CRITICAL by the canary
 as `duckdb_opened_while_off`.
 
-**`off` does not yet make web work without DuckDB.** That is stage 5's code
-decoupling (`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`). Since its PR-1,
-`get_store()` under `off` hands out the store unconnected, so a caller that
-only hosts a Postgres router on it works, and the tripwire stands at
-`connection()`, where the file is reached. What still reaches it is the
-stage 5 sweep's `KNOWN_RESIDUAL` (`tests/unit/test_duckdb_off_sweep.py`) —
-order intake among it: the order step inherits its watermark from DuckDB
-until Postgres holds one, so every sync tick's order step is refused. Web's
-startup contains a refusal rather than dying of it, so `/api/health` answers
-and the page can be seen. Never set it in production before that list is
-empty.
+**What `off` does is stage 5's code decoupling**
+(`.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`). Since its PR-1, `get_store()`
+under `off` hands out the store unconnected, so a caller that only hosts a
+Postgres router on it works, and the tripwire stands at `connection()`,
+where the file is reached. What still reaches it is the stage 5 sweep's
+`KNOWN_RESIDUAL` (`tests/unit/test_duckdb_off_sweep.py`); what used to be
+inherited from DuckDB's `sync_metadata` — the order step's window among it —
+is read from its Postgres copy since PR-5 (`core/pg_frozen_metadata.py`),
+and the list is empty since PR-0 to PR-8 together. PR-9 widened the sweep
+to every door a week exercises — every route that is not a GET and every
+one outside `/api/`, the sockets, the events, the assistant's tools and
+routes, a real viewer's session, web's stop — with Postgres refusing and
+with it answering on a derived history, each with KeyCRM and TurboSMS
+answering and refusing, and walked the code for any way in
+the sweep does not open (`tests/unit/test_duckdb_off_entry_points.py`): the
+list stayed empty. Web's startup contains a refusal rather than dying of it,
+so `/api/health` answers and the page can be seen. That is the code's half
+of the week's licence, not the licence: the host tools (PR-10), the second
+Ark (PR-11), the rehearsal on the production copies and the owner's own yes
+come before anybody sets it in production.
 
 COUNTED WHERE IT IS RAISED
 
@@ -62,6 +71,25 @@ Read once, in `core.runtime_modes.configure_modes()`, before the boot sync —
 and, unlike the other cached modes, lazily on the first open if no entry point
 configured it: a script that forgot `configure_modes()` must not be the one
 process that opens the file under `off`.
+
+OFF IS A CLAIM, CHECKED AT THE START (stage 5's PR-2)
+
+In web, `off` holds only when nothing web does still needs the file: step 13
+in force, every write chain on Postgres, the user list there, step 13's
+record and the chains' frozen watermarks in Postgres' copy, and no page open
+that a check `off` stands down would announce resolved unseen
+(`core/duckdb_off.py`). One of them unmet and web runs `on` — the owner's
+OD-S5-1 (a): the file is opened, order intake goes on, the week of silence
+does not start — publishes the unmet keys as `duckdb_switch.held_back`, and
+the canary pages `duckdb_off_held_back` CRITICAL. The verdict is reached once
+per process (`hold`) and kept. A script under `off` reaches none and stays
+`off`: it is not the syncer, and it must not open the file in a week web may
+be keeping silent. It cannot tell whether web is: the host's sidecars start
+from `.env`, and the Sunday compaction's runs with web stopped. So while web
+is held back the weekly compaction and the nightly DuckDB snapshot are
+refused too, as web writes the file on — a hold is to be cleared, not lived
+in, and each refusal says so (`HELD_BACK_NOTE`) instead of saying only that
+the week has started (review of PR-2).
 """
 from __future__ import annotations
 
@@ -74,7 +102,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Union
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -105,9 +133,26 @@ OTHER = "other"
 _mode: Optional[str] = None
 _value: Optional[str] = None
 _mode_error: Optional[str] = None
+# The verdict on `off` (`core.duckdb_off`, stage 5's PR-2): None until web's
+# start under `off` has reached it, then the keys it found unmet — empty when
+# `off` holds. Kept for the life of the process, like step 13's: a start that
+# ran `on` must not be handed a scheduler that runs `off`, nor the other way
+# round.
+_held_back: Optional[Tuple[str, ...]] = None
 
 _lock = threading.Lock()
 _opened: Dict[str, Dict[str, object]] = {}
+
+# What a host sidecar refused under `off` says about the week, after the
+# sentence saying that a web running `off` has started it: the sidecar reads
+# `KS_DUCKDB` from `.env` and reaches no verdict, so it is refused whether web
+# runs `off` or was held back on `on` — and held back, web goes on writing the
+# file the refusal leaves uncompacted and unsnapshotted (review of PR-2). One
+# sentence for every such refusal, short because weekly_compact.sh quotes 300
+# characters of the line it ends; `/api/health` publishes `held_back` under
+# `off` alone (`health_block`).
+HELD_BACK_NOTE = (f"If web is held back (/api/health duckdb_switch.held_back), it "
+                  f"has not: meet those keys or set {ENV}={ON}")
 
 
 class DuckDBOpenedWhileOff(RuntimeError):
@@ -124,8 +169,13 @@ class DuckDBOpenedWhileOff(RuntimeError):
 
 
 def configure_mode() -> str:
-    """Read `KS_DUCKDB` once. Never raises. Called by `configure_modes()`."""
-    global _mode, _value, _mode_error
+    """Read `KS_DUCKDB` once. Never raises. Called by `configure_modes()`.
+
+    A verdict that held `off` back to `on` in this process (`hold`) is kept:
+    the second `configure_modes()` — the scheduler's — reads `off` again and
+    still runs `on`. A value other than `off` forgets the verdict, which was
+    about `off` alone."""
+    global _mode, _value, _mode_error, _held_back
     previous = _mode
     raw = os.getenv(ENV)
     value = (raw or "").strip().lower()
@@ -135,6 +185,10 @@ def configure_mode() -> str:
     else:
         mode = ON
         error = f"{ENV}={value!r} is not one of {_VALID}; running as {ON!r}"
+    if mode != OFF:
+        _held_back = None
+    elif _held_back:
+        mode = ON
     # Once per cause, as `read_fallback.configure_mode` does: web's startup and
     # the scheduler both configure.
     if error and error != _mode_error:
@@ -168,6 +222,30 @@ def mode_error() -> Optional[str]:
 
 def is_off() -> bool:
     return mode() == OFF
+
+
+def hold(unmet: Sequence[str]) -> str:
+    """Record the verdict on `off` for this process and return the mode it
+    leaves: `on` when `unmet` names any key — held back, OD-S5-1 (a): the
+    file is opened, order intake goes on, the week of silence does not start
+    — and `off` as configured when it names none. Called by
+    `core.duckdb_off.settle()`, in web only and only when `KS_DUCKDB=off` was
+    read. Local state, never raises."""
+    global _mode, _held_back
+    _held_back = tuple(unmet)
+    if _held_back and _mode == OFF:
+        _mode = ON
+    return mode()
+
+
+def held_back() -> Optional[Tuple[str, ...]]:
+    """The keys of `off`'s verdict this process found unmet: empty when it
+    holds, None when no verdict was reached — `KS_DUCKDB` is not `off`, the
+    process is not web (a script stays `off`), or nothing configured the
+    modes. Without a verdict `off` refuses every open, which is the safe
+    direction: a process that never asked must not open the file."""
+    mode()
+    return _held_back
 
 
 def _plumbing(module: str) -> bool:
@@ -335,6 +413,31 @@ def open_file(path: Union[str, Path], *, read_only: bool = False,
     return con
 
 
+class RefusedConnection:
+    """A DuckDB connection in name only, for code that takes one and must not
+    reach the file under `off`: every statement is refused through `guard()`
+    — counted, logged, raised — and, this module being plumbing to `_site()`,
+    the refusal names the function that issued the statement, not this class.
+
+    The integrity scan is handed one under `off` (stage 5, PR-7): every check
+    over the file stands down there, and one that does not is caught in the
+    act rather than failing on a None in a way the switch would never count.
+    Under `on` nothing hands one out; a statement then raises all the same,
+    since there is no file behind it."""
+
+    def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+        guard()
+        raise RuntimeError("RefusedConnection: there is no DuckDB connection here")
+
+    sql = execute
+
+
+@contextlib.asynccontextmanager
+async def refused_connection():
+    """`async with` a `RefusedConnection` — where `store.connection()` stood."""
+    yield RefusedConnection()
+
+
 def opened() -> Dict[str, Dict[str, object]]:
     """`{site: {count, last_at}}` — opens refused under `off` since this
     process started. A copy."""
@@ -345,12 +448,20 @@ def opened() -> Dict[str, Dict[str, object]]:
 def health_block() -> Dict[str, Any]:
     """What `/api/health` publishes as `duckdb_switch`. Local state, no I/O,
     no exception text."""
-    return {
+    block: Dict[str, Any] = {
         "mode": mode(),
         "value": value(),
         "error": mode_error(),
         "opened_while_off": opened(),
     }
+    # Under `KS_DUCKDB=off` only, so `on` publishes what it always did: the
+    # keys `off`'s verdict found unmet — the process then runs `on` and the
+    # canary pages `duckdb_off_held_back` — `[]` when it holds, None before
+    # any verdict. Keys, never details: this endpoint is public, and the
+    # details quote the environment; they are in web's log.
+    if _value == OFF:
+        block["held_back"] = None if _held_back is None else list(_held_back)
+    return block
 
 
 def reset_counts() -> None:
@@ -366,7 +477,7 @@ def reset_counts() -> None:
 def reset() -> None:
     """Forget the mode and every count. Tests only; a process never forgets
     its own."""
-    global _mode, _value, _mode_error
+    global _mode, _value, _mode_error, _held_back
     with _lock:
         _opened.clear()
-    _mode = _value = _mode_error = None
+    _mode = _value = _mode_error = _held_back = None

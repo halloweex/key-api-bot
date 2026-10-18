@@ -149,6 +149,27 @@ CHAIN_TABLES: Tuple[str, ...] = (
     "bronze.orders", "bronze.order_products", "bronze.expenses",
     "app.order_backfill_misses")
 
+# The tables whose `meta.mirror_state.last_ok_at` this chain's own writer
+# stamps: `pg_landing._write_order_rows` and `_write_rows` run the mirror's
+# statement, and the canary's `mirror_stale:bronze.orders` and
+# `order_versions_stalled` keep their meaning under the chain only because they
+# do (module docstring). Not the misses, which are written with no watermark.
+#
+# This chain keeps no record of its own instants (chain 6's `writes:<table>`),
+# so the daily comparison cannot tell its writes from a shipment's here and
+# does not judge these three for `chain_shipper_overwrote`
+# (`core.chain_latch.MirrorStamp`). Decided rather than owed: no shipper
+# reaches these tables while the chain is latched — DuckDB's writers raise
+# `ChainOwnsOrders` before the mirror, and every other order shipper stands
+# down on the marker and the owner rows (DN-22a, DN-22b) — and with the marker
+# lost `chain_latch_disagrees` and `order_owner_row_without_marker` say so,
+# CRITICAL, for as long as it lasts. A record would add little besides: the
+# chain moves these watermarks on every tick that writes an order or its
+# costs, so a stamp not its own would seldom survive to the morning's
+# comparison.
+CHAIN_STAMPS_MIRROR_STATE: Tuple[str, ...] = (
+    "bronze.orders", "bronze.order_products", "bronze.expenses")
+
 # The revision that refuses every image built before this chain; the flag
 # moves nothing until this build requires it (`chain_latch.lockout_unmet`).
 LOCKOUT_REVISION = "0035_batch_e_chains"

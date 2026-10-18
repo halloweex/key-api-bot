@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import type { SmsCampaignResultsResponse, SmsComparison, SmsGroupStats } from '../../types/api'
 
 // src/lib/i18n.ts reads localStorage while the module is being imported, and
@@ -128,12 +129,15 @@ describe('SmsCampaignResults', () => {
     expect(container.querySelectorAll('td .text-emerald-700')).toHaveLength(1)
   })
 
-  it('says so in the row when a tier has no control to compare against', () => {
+  it('says so in the row when a segment has no control to compare against', () => {
     renderWith(response({
-      segments: [{ tier: 'VIP', target: stats(), holdout: stats({ contacts: 0, converted: 0 }), comparison: null }],
+      segments: [
+        { tier: 'VIP', target: stats(), holdout: stats({ contacts: 0, converted: 0 }), comparison: null },
+        { tier: 'CORE', target: stats(), holdout: stats({ contacts: 40, converted: 1 }), comparison: comparison() },
+      ],
     }))
 
-    expect(screen.getByText('sms.noControlInTier')).toBeTruthy()
+    expect(screen.getByText('sms.noControlInSegment')).toBeTruthy()
   })
 
   it('shows the totals with the per-contact figure they scale from', () => {
@@ -324,3 +328,108 @@ describe('SmsCampaignResults, read by someone who is not a statistician', () => 
     expect(screen.getByText(/sms\.headlineApparent/)).toBeInTheDocument()
   })
 })
+
+describe('SmsCampaignResults, for a follow-up and the campaign it followed', () => {
+  it('says a follow-up has no control and where its effect is read', () => {
+    const onCampaignChange = vi.fn()
+    results.current = response({
+      campaign: 'aug-last-day', followUpOf: 'aug-promo', followUps: [],
+      overall: { target: stats(), holdout: stats({ contacts: 0, converted: 0 }),
+                 comparison: null },
+      segments: [{ tier: 'ALL', target: stats(),
+                   holdout: stats({ contacts: 0, converted: 0 }), comparison: null }],
+    })
+    render(<SmsCampaignResults campaign="aug-last-day" onCampaignChange={onCampaignChange} />)
+
+    expect(screen.getByText(/sms\.followUpResultsNote/)).toBeTruthy()
+    // The way to the reading that means something is one click.
+    screen.getByRole('button', { name: /sms\.followUpOpenRoot/ }).click()
+    expect(onCampaignChange).toHaveBeenCalledWith('aug-promo')
+  })
+
+  it('lists the follow-ups on the campaign whose lift now includes them', () => {
+    renderWith(response({
+      followUps: [{ campaign: 'aug-last-day', sentAt: '2026-08-05T18:00:00Z',
+                    recipients: 4900 }],
+    }))
+
+    expect(screen.getByText('sms.followUpsTitle')).toBeTruthy()
+    expect(screen.getByText(/sms\.followUpsItem.*aug-last-day/)).toBeTruthy()
+    expect(screen.getByText('sms.followUpsNote')).toBeTruthy()
+  })
+
+  it('says neither for a campaign that was never followed up', () => {
+    renderWith(response({ followUps: [] }))
+
+    expect(screen.queryByText('sms.followUpsTitle')).toBeNull()
+    expect(screen.queryByText(/sms\.followUpResultsNote/)).toBeNull()
+  })
+})
+
+// ─── One arm, or several ────────────────────────────────────────────────────
+//
+// sms-2026-10-17 was measured as one arm (grouping single, arm ALL), and its
+// table printed «Все группы» and «Аудитория» with the same figures twice. A
+// row is a measurement segment, never an audience group.
+
+describe('the rows are segments', () => {
+  const single = () => response({
+    overall: {
+      target: stats({ contacts: 3635, converted: 40 }),
+      holdout: stats({ contacts: 429, converted: 0 }),
+      comparison: comparison({ liftPp: 1.1 }),
+    },
+    segments: [{
+      tier: 'ALL',
+      target: stats({ contacts: 3635, converted: 40 }),
+      holdout: stats({ contacts: 429, converted: 0 }),
+      comparison: comparison({ liftPp: 1.1 }),
+    }],
+  })
+
+  it('prints a single-arm campaign once, named after its arm', () => {
+    renderWith(single())
+
+    const rows = screen.getAllByRole('row')
+    expect(rows).toHaveLength(2)                       // header + the one arm
+    expect(within(rows[1]).getByText('sms.tier.ALL')).toBeTruthy()
+    expect(within(rows[1]).getByText('40 / 3,635')).toBeTruthy()
+    expect(screen.queryByText('sms.overall')).toBeNull()
+    expect(screen.getAllByText('+1.1')).toHaveLength(1)
+  })
+
+  it('keeps the whole campaign above each segment when there are several', () => {
+    renderWith(response({
+      segments: ['VIP', 'CORE', 'REACTIVATION'].map((tier) => ({
+        tier: tier as 'VIP' | 'CORE' | 'REACTIVATION',
+        target: stats(), holdout: stats({ contacts: 40, converted: 1 }), comparison: comparison(),
+      })),
+    }))
+
+    const rows = screen.getAllByRole('row')
+    expect(rows).toHaveLength(5)                       // header + whole + three
+    expect(within(rows[1]).getByText('sms.overall')).toBeTruthy()
+    expect(['VIP', 'CORE', 'REACTIVATION'].map((tier, i) =>
+      within(rows[i + 2]).queryByText(`sms.tier.${tier}`) != null)).toEqual([true, true, true])
+  })
+
+  it('names the column a segment, not an audience group', () => {
+    renderWith(response())
+
+    expect(screen.getByRole('columnheader', { name: 'sms.colSegment' })).toBeTruthy()
+    expect(screen.queryByText('sms.colGroup')).toBeNull()
+  })
+
+  it('titles the statistics for one arm or for several', async () => {
+    const { unmount } = renderWith(single())
+    await userEvent.click(screen.getByRole('button', { name: /sms\.statsToggle/ }))
+    expect(screen.getByRole('heading', { name: 'sms.forestTitleSingle' })).toBeTruthy()
+    expect(screen.getByText('sms.forestDescSingle')).toBeTruthy()
+    unmount()
+
+    renderWith(response())
+    await userEvent.click(screen.getByRole('button', { name: /sms\.statsToggle/ }))
+    expect(screen.getByRole('heading', { name: 'sms.forestTitle' })).toBeTruthy()
+  })
+})
+

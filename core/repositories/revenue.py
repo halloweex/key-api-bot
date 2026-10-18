@@ -9,7 +9,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from core.duckdb_constants import KNOWN_SALES_TYPES, UNKNOWN_BRAND, brand_where
 from core.models import OrderStatus
 from core.sql_dialect import TODAY_IN_KYIV
-from core import read_fallback
+from core import duckdb_switch, read_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -637,6 +637,17 @@ class RevenueMixin:
                 if lines is not None and returns is not None:
                     pg_totals = (lines[0][0], lines[0][1],
                                  returns[0][0], returns[0][1])
+        if (pg_totals is None and duckdb_switch.is_off()
+                and not (category_id or brand or promocode)
+                and source_id and source_id not in self._GOLD_SOURCE_COLUMNS):
+            # A source with no column in Gold (Opencart): Postgres is not
+            # asked, by routing, and DuckDB's Gold branch below answers four
+            # zeros without reading a row — through a connection all the
+            # same, the one the file switched off refuses. Under KS_DUCKDB=off
+            # the same zeros, without it (stage 5, PR-8). Every other way to
+            # the block below was refused before it: a gate by `no_address`,
+            # a failed read by `fall_back`.
+            pg_totals = (0, 0, 0, 0)
         if pg_totals is not None:
             total_orders, total_revenue = int(pg_totals[0]), float(pg_totals[1])
             total_returns, returns_revenue = int(pg_totals[2]), float(pg_totals[3])

@@ -25,11 +25,13 @@ const cmp = (
   incrementalMarginTotal: 38_995,
 })
 
+// The rows are segments — the arms a campaign is measured in — named as the
+// results table names them: the whole campaign first, then each level.
 const ROWS: ForestRow[] = [
-  { label: 'Campaign overall', comparison: cmp(2.05, [0.4, 3.7], true), contacts: 5416, emphasis: true },
+  { label: 'Whole campaign', comparison: cmp(2.05, [0.4, 3.7], true), contacts: 5416, emphasis: true },
   { label: 'VIP', comparison: cmp(3.1, [-0.2, 6.4], false), contacts: 820 },
-  { label: 'CORE', comparison: cmp(1.8, [0.1, 3.5], true), contacts: 3100 },
-  { label: 'REACTIVATION', comparison: cmp(0.6, [-1.9, 3.1], false, false), contacts: 1496 },
+  { label: 'Core', comparison: cmp(1.8, [0.1, 3.5], true), contacts: 3100 },
+  { label: 'Reactivation', comparison: cmp(0.6, [-1.9, 3.1], false, false), contacts: 1496 },
 ]
 
 const meta = {
@@ -43,6 +45,11 @@ type Story = StoryObj<typeof meta>
 
 export const Default: Story = {}
 
+/** A campaign measured as one arm: one bar, named after the arm — the whole
+ *  audience — not a "campaign overall" row with nothing under it. */
 export const SingleArm: Story = {
-  args: { rows: [ROWS[0]] },
+  args: {
+    rows: [{ ...ROWS[0], label: 'Whole audience', emphasis: false }],
+    title: 'Lift',
+  },
 }

@@ -106,6 +106,18 @@ async def read_unavailable_handler(request: Request, exc: ReadUnavailable):
     )
 
 
+from web.routes.api.customers import SmsRefusal
+
+
+@app.exception_handler(SmsRefusal)
+async def sms_refusal_handler(request: Request, exc: SmsRefusal):
+    """An SMS campaign refusal: the English `detail` every caller reads, and
+    beside it the `reason` and figures the page says in its reader's language
+    (`core/sms_refusals.py`). The status is the refusal's own."""
+    return JSONResponse(status_code=exc.status_code, content=exc.content(),
+                        headers=exc.headers)
+
+
 @app.exception_handler(duckdb_switch.DuckDBOpenedWhileOff)
 async def duckdb_opened_while_off_handler(request: Request,
                                           exc: duckdb_switch.DuckDBOpenedWhileOff):
@@ -206,8 +218,9 @@ async def startup_event():
     # The cached modes, before the boot sync below writes a single order. The
     # scheduler used to be the only caller, and it starts after that sync — so
     # the boot's orders landed in Postgres unmarked under KS_PG_DERIVE=own.
-    # See `core/runtime_modes.py`.
-    configure_modes()
+    # See `core/runtime_modes.py`. `web=True`: under KS_DUCKDB=off, this is
+    # where off's coherence verdict is reached (stage 5's PR-2).
+    configure_modes(web=True)
 
     # Initialize DuckDB analytics store and sync from API
     logger.info("Initializing DuckDB analytics store...")

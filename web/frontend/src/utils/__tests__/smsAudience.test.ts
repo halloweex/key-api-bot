@@ -1,15 +1,19 @@
 import { describe, it, expect } from 'vitest'
 import {
+  ALL_TIME_DAYS,
   audienceFromPreset,
   audienceToParams,
-  countFilters,
-  dateToDaysAgo,
-  daysAgoToDate,
-  describeAudience,
   emptyAudience,
-  hasFilters,
-  invertedRanges,
+  MAX_WINDOW_DAYS,
 } from '../smsAudience'
+import type { SmsAudienceCriteria, SmsAudienceFilters } from '../../types/api'
+
+/** An audience of one group — what every audience was before groups. */
+function oneGroup(
+  filters: SmsAudienceFilters, rest: Partial<SmsAudienceCriteria> = {}, days = 270,
+): SmsAudienceCriteria {
+  return { ...emptyAudience(), ...rest, groups: [{ maxRecencyDays: days, filters }] }
+}
 
 describe('audienceToParams', () => {
   it('sends one arm and no rules when nothing is chosen', () => {
@@ -28,21 +32,17 @@ describe('audienceToParams', () => {
   })
 
   it('carries every filter family under its API name', () => {
-    const p = new URLSearchParams(audienceToParams({
-      ...emptyAudience(),
-      grouping: 'single',
-      filters: {
-        recencyMin: 30, recencyMax: 90,
-        ordersMin: 2, ltvMin: 1000, aovMax: 5000,
-        firstOrderFrom: '2026-01-01',
-        cities: ['Kyiv', 'Lviv'],
-        brands: ['Medi-Peel', 'Anua'],
-        categoryIds: [10, 11],
-        sourceIds: [1],
-        promocodeUsed: 'KS-AUG',
-        boughtWithinDays: 90,
-      },
-    }))
+    const p = new URLSearchParams(audienceToParams(oneGroup({
+      recencyMin: 30, recencyMax: 90,
+      ordersMin: 2, ltvMin: 1000, aovMax: 5000,
+      firstOrderFrom: '2026-01-01',
+      cities: ['Kyiv', 'Lviv'],
+      brands: ['Medi-Peel', 'Anua'],
+      categoryIds: [10, 11],
+      sourceIds: [1],
+      promocodeUsed: 'KS-AUG',
+      boughtWithinDays: 90,
+    }, { grouping: 'single' })))
 
     expect(p.get('recency_min')).toBe('30')
     expect(p.get('recency_max')).toBe('90')
@@ -59,9 +59,7 @@ describe('audienceToParams', () => {
   })
 
   it('keeps a zero, which is a real bound', () => {
-    const p = new URLSearchParams(audienceToParams({
-      ...emptyAudience(), filters: { recencyMin: 0, ltvMin: 0 },
-    }))
+    const p = new URLSearchParams(audienceToParams(oneGroup({ recencyMin: 0, ltvMin: 0 })))
 
     expect(p.get('recency_min')).toBe('0')
     expect(p.get('ltv_min')).toBe('0')
@@ -116,25 +114,12 @@ describe('audienceToParams', () => {
   })
 })
 
-describe('counting filters', () => {
-  it('ignores empty lists and blank strings', () => {
-    const filters = { brands: [], promocodeUsed: '', recencyMin: 30 }
-    expect(countFilters(filters)).toBe(1)
-    expect(hasFilters(filters)).toBe(true)
-    expect(hasFilters({ brands: [] })).toBe(false)
-  })
-})
-
 describe('audienceFromPreset', () => {
   it('round-trips what the form produced', () => {
-    const audience = {
-      ...emptyAudience(),
-      grouping: 'single' as const,
-      ltvBasis: 'revenue' as const,
-      holdoutPct: 30,
-      tiers: [],
-      filters: { brands: ['Anua'], categoryIds: [10], recencyMax: 90 },
-    }
+    const audience = oneGroup(
+      { brands: ['Anua'], categoryIds: [10], recencyMax: 90 },
+      { grouping: 'single', ltvBasis: 'revenue', holdoutPct: 30, tiers: [] },
+    )
 
     expect(audienceFromPreset(JSON.parse(JSON.stringify(audience)))).toEqual(audience)
   })
@@ -154,7 +139,7 @@ describe('audienceFromPreset', () => {
     expect(loaded.grouping).toBe('single')
     expect(loaded.holdoutPct).toBe(10)
     expect(loaded.tiers).toEqual(['VIP'])
-    expect(loaded.filters).toEqual({ brands: ['Anua'] })
+    expect(loaded.groups).toEqual([{ maxRecencyDays: 270, filters: { brands: ['Anua'] } }])
   })
 
   it('treats a non-object as no preset at all', () => {
@@ -170,91 +155,49 @@ describe('the base window', () => {
   })
 
   it('carries a widened window', () => {
-    const p = new URLSearchParams(audienceToParams({
-      ...emptyAudience(), maxRecencyDays: 730,
-    }))
+    const p = new URLSearchParams(audienceToParams(oneGroup({}, {}, 730)))
     expect(p.get('max_recency_days')).toBe('730')
   })
 
+  it('reaches as far as the server allows, which is all time', () => {
+    // The page no longer shows a window: a group with no "last order"
+    // condition sends the ceiling, and the ceiling covers the whole history.
+    expect(ALL_TIME_DAYS).toBe(MAX_WINDOW_DAYS)
+    expect(MAX_WINDOW_DAYS).toBe(3650)
+    const p = new URLSearchParams(audienceToParams(oneGroup({}, {}, ALL_TIME_DAYS)))
+    expect(p.get('max_recency_days')).toBe('3650')
+  })
+
   it('comes back from a preset, and falls back when one predates it', () => {
-    expect(audienceFromPreset({ maxRecencyDays: 540 }).maxRecencyDays).toBe(540)
-    expect(audienceFromPreset({ grouping: 'single' }).maxRecencyDays).toBe(270)
+    expect(audienceFromPreset({ maxRecencyDays: 540 }).groups[0].maxRecencyDays).toBe(540)
+    expect(audienceFromPreset({ grouping: 'single' }).groups[0].maxRecencyDays).toBe(270)
   })
 })
 
-describe('describeAudience', () => {
-  const t = (key: string, opts?: Record<string, unknown>) =>
-    opts ? `${key}(${JSON.stringify(opts)})` : key
-
-  it('says outright when an audience has no filters', () => {
-    // Two of the audiences that ship with the page are exactly this, and
-    // picking one changes nothing on screen.
-    expect(describeAudience(emptyAudience(), t)).toContain('sms.summaryNoFilters')
+describe('orders in a period', () => {
+  it('sends the end of the period and an upper count under their API names', () => {
+    const p = new URLSearchParams(audienceToParams(oneGroup({
+      periodOrdersMin: 2, periodOrdersMax: 3, periodFrom: '2026-01-01', periodTo: '2026-10-14',
+    })))
+    expect(p.get('period_orders_min')).toBe('2')
+    expect(p.get('period_orders_max')).toBe('3')
+    expect(p.get('period_from')).toBe('2026-01-01')
+    expect(p.get('period_to')).toBe('2026-10-14')
   })
 
-  it('counts the filters that are set', () => {
-    const described = describeAudience({
-      ...emptyAudience(),
-      filters: { brands: ['Anua'], recencyMin: 90, firstOrderFrom: '2026-01-01' },
-    }, t)
-
-    expect(described).toContain('sms.summaryFilters({"count":3})')
+  it('keeps an upper count of zero — "none in the period" is a real condition', () => {
+    const p = new URLSearchParams(audienceToParams(oneGroup({
+      periodOrdersMax: 0, periodDays: 90,
+    })))
+    expect(p.get('period_orders_max')).toBe('0')
+    expect(p.has('period_orders_min')).toBe(false)
   })
 
-  it('states the split, the basis, the holdout and the window', () => {
-    const described = describeAudience({
-      ...emptyAudience(), grouping: 'single', holdoutPct: 30, maxRecencyDays: 540,
-    }, t)
-
-    expect(described).toContain('sms.grouping.single')
-    expect(described).toContain('sms.basisMargin')
-    expect(described).toContain('sms.summaryHoldout({"pct":30})')
-    expect(described).toContain('sms.summaryWindow({"days":540})')
-  })
-})
-
-describe('invertedRanges', () => {
-  it('names the pair being typed backwards', () => {
-    // "from 90" typed, "to 2" half-typed on the way to 237 — the state every
-    // range passes through, and it used to earn a 400 from the server.
-    expect(invertedRanges({ recencyMin: 90, recencyMax: 2 })).toEqual(['recency'])
-    expect(invertedRanges({ firstOrderFrom: '2026-06-01', firstOrderTo: '2026-01-01' }))
-      .toEqual(['firstOrder'])
-  })
-
-  it('says nothing about a range with one edge, or a sane one', () => {
-    expect(invertedRanges({ recencyMin: 90 })).toEqual([])
-    expect(invertedRanges({ recencyMin: 90, recencyMax: 237 })).toEqual([])
-    expect(invertedRanges({})).toEqual([])
-  })
-})
-
-describe('the recency window said in dates', () => {
-  function isoDaysAgo(days: number): string {
-    const d = new Date()
-    d.setDate(d.getDate() - days)
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-  }
-
-  it('round-trips a date through days and back', () => {
-    // The pairing runs backwards: an earlier last order is a larger number of
-    // days, which is the thing nobody should have to hold in their head.
-    expect(dateToDaysAgo(isoDaysAgo(90))).toBe(90)
-    expect(dateToDaysAgo(isoDaysAgo(237))).toBe(237)
-    expect(daysAgoToDate(90)).toBe(isoDaysAgo(90))
-  })
-
-  it('treats today as zero and refuses to go negative', () => {
-    expect(dateToDaysAgo(isoDaysAgo(0))).toBe(0)
-    expect(dateToDaysAgo(isoDaysAgo(-5))).toBe(0)
-  })
-
-  it('says nothing for an empty or malformed date', () => {
-    expect(dateToDaysAgo('')).toBeUndefined()
-    expect(dateToDaysAgo('not-a-date')).toBeUndefined()
-    expect(daysAgoToDate(null)).toBe('')
-    expect(daysAgoToDate(undefined)).toBe('')
+  it('reads both back from a preset, and keeps the dates over the days', () => {
+    const restored = audienceFromPreset({
+      filters: { periodOrdersMax: 0, periodTo: '2026-10-14', periodDays: 30 },
+    })
+    expect(restored.groups[0].filters).toEqual({ periodOrdersMax: 0, periodTo: '2026-10-14' })
   })
 })
 
@@ -262,10 +205,9 @@ describe('the gender filter', () => {
   it('travels as flat query parameters, like every other filter', () => {
     // Flat rather than a JSON body because the CSV download is a link the
     // browser follows, and the session gate reads the query string.
-    const p = new URLSearchParams(audienceToParams({
-      ...emptyAudience(),
-      filters: { genders: ['m'], genderMinConfidence: 'high' },
-    }))
+    const p = new URLSearchParams(audienceToParams(
+      oneGroup({ genders: ['m'], genderMinConfidence: 'high' }),
+    ))
     expect(p.get('gender')).toBe('m')
     expect(p.get('gender_min_confidence')).toBe('high')
   })
@@ -274,10 +216,7 @@ describe('the gender filter', () => {
     // `city` and `brand` travel the same way and the server splits all three
     // with the same `_text_list`. A repeated parameter would need a second
     // parsing rule for no gain.
-    const p = new URLSearchParams(audienceToParams({
-      ...emptyAudience(),
-      filters: { genders: ['f', 'm'] },
-    }))
+    const p = new URLSearchParams(audienceToParams(oneGroup({ genders: ['f', 'm'] })))
     expect(p.get('gender')).toBe('f,m')
   })
 
@@ -289,18 +228,12 @@ describe('the gender filter', () => {
     expect(p.has('gender_min_confidence')).toBe(false)
   })
 
-  it('counts towards the badge on the collapsed panel', () => {
-    expect(countFilters({ genders: ['f'] })).toBe(1)
-    expect(countFilters({ genders: ['f'], genderMinConfidence: 'certain' })).toBe(2)
-    expect(countFilters({ genders: [] })).toBe(0)
-  })
-
   it('survives a round trip through a saved preset', () => {
     const restored = audienceFromPreset({
       filters: { genders: ['m'], genderMinConfidence: 'certain' },
     })
-    expect(restored.filters.genders).toEqual(['m'])
-    expect(restored.filters.genderMinConfidence).toBe('certain')
+    expect(restored.groups[0].filters.genders).toEqual(['m'])
+    expect(restored.groups[0].filters.genderMinConfidence).toBe('certain')
   })
 
   it('drops a value the API would refuse', () => {
@@ -309,7 +242,7 @@ describe('the gender filter', () => {
     const restored = audienceFromPreset({
       filters: { genders: ['f', 'x', ''], genderMinConfidence: 'nonsense' },
     })
-    expect(restored.filters.genders).toEqual(['f'])
-    expect(restored.filters.genderMinConfidence).toBeUndefined()
+    expect(restored.groups[0].filters.genders).toEqual(['f'])
+    expect(restored.groups[0].filters.genderMinConfidence).toBeUndefined()
   })
 })

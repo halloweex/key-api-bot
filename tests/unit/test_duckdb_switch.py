@@ -25,7 +25,11 @@ reading the code (core/duckdb_switch.py). What is held here:
   counts, survives a boot sync that failed or was refused, and a route that
   reaches the file answers 503 naming `duckdb`; `/api/health` publishes the
   sites, and the canary pages them CRITICAL and keeps the watch only while
-  web runs `off`.
+  web runs `off`;
+- the health endpoints under `off` (stage 5, PR-3) reach for nothing:
+  `duckdb.status` and the ledger say `off`, there is no FATAL, and `duckdb`
+  is not a cause of degradation — so the canary's healthy probe of the week
+  pages nothing and says the week holds.
 
 What still reaches the file under `off`, in the state production will be in,
 is `tests/unit/test_duckdb_off_sweep.py`'s.
@@ -393,8 +397,10 @@ class TestTheOpener:
         with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff) as raised:
             duckdb_switch.open_file(tmp_path / "a.duckdb")
         block = duckdb_switch.health_block()
-        assert set(block) == {"mode", "value", "error", "opened_while_off"}
+        # `held_back` under off only: None here, no verdict reached (PR-2).
+        assert set(block) == {"mode", "value", "error", "opened_while_off", "held_back"}
         assert block["mode"] == "off" and block["value"] == "off"
+        assert block["held_back"] is None
         for entry in block["opened_while_off"].values():
             assert set(entry) == {"count", "last_at"}
         assert str(raised.value) not in json.dumps(block)
@@ -913,7 +919,28 @@ class TestTheCompaction:
         assert first.startswith(
             "🚨 Compact aborted: compact failed (exit 1): KS_DUCKDB=off: the weekly "
             "compaction is refused before it opens the DuckDB file"), first
-        assert "Remove weekly_compact.sh from root's crontab" in first, first
+        assert "remove weekly_compact.sh from root's crontab" in first, first
+
+    def test_the_cron_does_not_say_a_held_back_week_has_started(
+        self, live, monkeypatch, capsys, tmp_path, fake_bin,
+    ):
+        """Review of PR-2: this sidecar reads `KS_DUCKDB` from `.env` and
+        reaches no verdict, so it is refused under a web held back on `on`
+        (core/duckdb_off.py) as under one running off — and its line said the
+        week of silence had started and the cron line should go, while web
+        wrote the file it had just left uncompacted. The removal is now said
+        of a web running off, and the hold is named beside it — whole, inside
+        the 300 characters the wrapper quotes. Mutation: the old line."""
+        from tests.unit.test_weekly_compact_wrapper import _run as wrapper_run
+
+        monkeypatch.setenv("FORCE_COMPACT", "1")
+        _off(monkeypatch)
+        with pytest.raises(SystemExit):
+            live.main()
+        run = wrapper_run(tmp_path / "wrapper", fake_bin, capsys.readouterr().out, 1, "")
+        first = run.notify.splitlines()[0]
+        assert first.endswith(duckdb_switch.HELD_BACK_NOTE), first
+        assert "If web runs off, the week of silence has started" in first, first
 
 
 class TestTheNightlySnapshot:
@@ -967,10 +994,45 @@ class TestTheNightlySnapshot:
         printed = capsys.readouterr().out
         assert ("KS_DUCKDB=off: the nightly DuckDB snapshot is refused before it opens "
                 "the backup") in printed, printed
-        assert "Remove daily_offsite.sh from root's crontab" in printed
+        assert "remove daily_offsite.sh from root's crontab" in printed
         assert reached == []
         assert list(duckdb_switch.opened()) == ["compact_duckdb:phase1_export"]
         assert not compact.EXPORT_DIR.exists() and not module.PREVIOUS_PATH.exists()
+
+    def test_it_does_not_say_a_held_back_week_has_started(
+        self, snapshot, monkeypatch, capsys,
+    ):
+        """Review of PR-2: started from `.env`, this sidecar is refused under
+        a web held back on `on` too, and said the week of silence had started
+        and its cron line should go, while web wrote the file and took the
+        backups it no longer shipped. Mutation: the old line."""
+        module, _ = snapshot
+        _off(monkeypatch)
+        with pytest.raises(SystemExit):
+            module.main()
+        [line] = [ln for ln in capsys.readouterr().out.splitlines()
+                  if "nightly DuckDB snapshot is refused" in ln]
+        assert line.endswith(duckdb_switch.HELD_BACK_NOTE), line
+        assert ("If web runs off and the second Ark is off-site, the week of "
+                "silence has started") in line, line
+
+    def test_an_image_older_than_the_hold_still_refuses_in_a_line(
+        self, snapshot, monkeypatch, capsys,
+    ):
+        """This file is mounted from the host's checkout while `core` comes
+        from the image: an image built before the note has none to add, and
+        importing it by name would turn every nightly refusal into an
+        ImportError. Its web cannot be held back either, so the line without
+        the note is still true. Mutation: import `HELD_BACK_NOTE` by name."""
+        module, _ = snapshot
+        monkeypatch.delattr(duckdb_switch, "HELD_BACK_NOTE")
+        _off(monkeypatch)
+        with pytest.raises(SystemExit) as exit_:
+            module.main()
+        assert exit_.value.code == 1
+        printed = capsys.readouterr().out
+        assert "remove daily_offsite.sh from root's crontab." in printed, printed
+        assert "held_back" not in printed
 
 
 # ─── Web: it starts, and it says so ──────────────────────────────────────────
@@ -990,9 +1052,14 @@ class TestTheStartup:
     def _off_boot(self, monkeypatch, data, init_and_sync):
         """web's real `startup_event` under off (`duckdb_off`, whose directory
         is `data`), around the boot sync it is given; the campaign restore
-        recorded rather than written. Returns (main, restore)."""
+        recorded rather than written. Returns (main, restore).
+
+        Off's coherence verdict (PR-2) is answered as met: its keys are
+        `test_duckdb_off_verdict.py`'s, and what these sweep is the startup
+        of a web that does run off."""
         import core.duckdb_store as store_module
 
+        monkeypatch.setattr("core.duckdb_off.evaluate", lambda env, facts: [])
         main = self._stub(monkeypatch)
         restore = AsyncMock(return_value=False)
         monkeypatch.setattr(store_module.DuckDBStore, "backfill_sms_campaign_record",
@@ -1061,6 +1128,41 @@ class TestTheStartup:
         said = " ".join(str(c.args[0]) for c in main.logger.critical.call_args_list)
         assert "the boot sync reached for the DuckDB file and was refused" in said
         restore.assert_awaited_once()
+
+    def test_off_held_back_starts_as_on_and_opens_the_file(self, monkeypatch, duckdb_off):
+        """Stage 5's PR-2, OD-S5-1 (a): a precondition of off unmet, and web
+        runs `on` — the store is connected before it is handed out, the boot
+        sync runs on it, nothing is refused, and the unmet key is published.
+        Mutation: drop the `settle()` call from `configure_modes(web=True)`."""
+        import core.duckdb_store as store_module
+        from core import duckdb_off as verdict
+
+        main = self._stub(monkeypatch)
+        monkeypatch.setattr(verdict, "evaluate", lambda env, facts: [
+            verdict.Unmet(verdict.USER_STORE, "KS_USER_STORE is 'duckdb'")])
+        monkeypatch.setattr(store_module.DuckDBStore, "backfill_sms_campaign_record",
+                            AsyncMock(return_value=False))
+        connected = []
+
+        async def boot_sync(**_):
+            store = await store_module.get_store()
+            connected.append(store._connection is not None)
+            await store_module.close_store()
+
+        monkeypatch.setattr(main, "init_and_sync", boot_sync)
+        monkeypatch.setattr(main, "logger", MagicMock())
+        try:
+            asyncio.run(main.startup_event())
+        finally:
+            # Under on the startup asks the store for its counts after the
+            # boot sync, and that store is connected.
+            asyncio.run(store_module.close_store())
+        assert connected == [True], "on: connected before it is handed out"
+        assert duckdb_switch.mode() == "on" and duckdb_switch.value() == "off"
+        assert duckdb_switch.held_back() == (verdict.USER_STORE,)
+        assert duckdb_switch.opened() == {}
+        assert (duckdb_off / "analytics.duckdb").exists(), "held back, the file is opened"
+        assert duckdb_switch.health_block()["held_back"] == [verdict.USER_STORE]
 
     def test_on_is_the_path_it_always_was(self, monkeypatch):
         main = self._stub(monkeypatch)
@@ -1207,28 +1309,120 @@ class TestWhatWebPublishes:
         assert canary.duckdb_silent(health) is None
 
     def test_off_publishes_every_site_that_reached_for_the_file(
-        self, admin_client, monkeypatch,  # noqa: F811
+        self, admin_client, monkeypatch, duckdb_off,  # noqa: F811
     ):
-        """Health itself still counts DuckDB's tables (`get_stats`, until
-        stage 5's PR-3), so under off its first answer already carries a
-        site — the tripwire proving itself. The 60 s stats cache is emptied
-        first: a count cached under `on` by an earlier request is not a reach
-        for the file. Mutation: drop `duckdb_switch` from `health_check`'s
+        """A path that reached for the file under off is on the next health
+        answer, by its site — and health itself adds none: it stopped counting
+        DuckDB's tables under off (stage 5, PR-3), so a site there is
+        somebody else's. Mutation: drop `duckdb_switch` from `health_check`'s
         answer."""
-        from web.routes.api import health as health_routes
+        from core.duckdb_store import get_store
 
-        monkeypatch.setitem(health_routes._stats_cache, "data", None)
-        monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
-        _off(monkeypatch)
+        async def reaches_for_the_file():
+            async with (await get_store()).connection():
+                pass
+
+        with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
+            asyncio.run(reaches_for_the_file())
         health = admin_client.get("/api/health").json()
         block = health["duckdb_switch"]
         assert block["mode"] == "off"
         assert list(block["opened_while_off"]) == [
-            "web.routes.api.health:health_check"], block
+            f"{__name__}:reaches_for_the_file"], block
         assert "tried to open" not in json.dumps(block)
         [(key, _line)] = canary.check_duckdb_switch(health)
         assert key == "duckdb_opened_while_off"
         assert canary.duckdb_silent(health) is False
+
+
+class TestHealthUnderOff:
+    """Stage 5, PR-3: under off the health endpoints do not reach for the
+    file. `/api/health` publishes `duckdb.status=off`, `migrations.status=off`
+    and no FATAL, and `duckdb` is not a cause of degradation — so the probe
+    the canary takes every 15 minutes, and the Docker healthcheck every 30 s,
+    are neither a site of the tripwire nor an outage. Under on every answer
+    is what it was; the tests of `health_check`, the FATAL and the ledger
+    hold that."""
+
+    @pytest.fixture
+    def stats_cache_empty(self, monkeypatch):
+        """A count an earlier request cached under on is not an answer under
+        off — and would hide a `get_stats` that still ran."""
+        from web.routes.api import health as health_routes
+
+        monkeypatch.setitem(health_routes._stats_cache, "data", None)
+        monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
+
+    def test_health_is_healthy_and_reaches_nothing(
+        self, admin_client, duckdb_off, stats_cache_empty,  # noqa: F811
+    ):
+        """The design's proof: one `/api/health` under off opens nothing,
+        reads healthy, and the canary judging that very payload pages neither
+        `health_status` nor `duckdb_opened_while_off`, and the week's watch
+        says silent. Mutations: drop the `off` branch of the stats block
+        (`health_check` becomes a site, `degraded_by == ["duckdb"]`), or of
+        the ledger or the FATAL (each a site)."""
+        response = admin_client.get("/api/health")
+        assert response.status_code == 200, response.text
+        health = response.json()
+        assert duckdb_switch.opened() == {}
+        assert health["duckdb_switch"]["opened_while_off"] == {}
+        assert health["status"] == "healthy", health["degraded_by"]
+        assert health["degraded_by"] == []
+        assert health["duckdb"]["status"] == "off"
+        assert health["duckdb"]["fatal"] is None
+        assert health["duckdb"]["latency_ms"] is None
+        assert health["migrations"] == {"status": "off"}
+        assert not duckdb_off.exists()
+
+        result = asyncio.run(_probe(health))
+        assert "health_status" not in result.failure_keys, result.failures
+        assert "duckdb_opened_while_off" not in result.failure_keys
+        assert result.health_status == "healthy"
+        assert result.duckdb_silent is True
+
+    def test_detailed_health_and_the_stats_route_say_off(
+        self, admin_client, duckdb_off, stats_cache_empty,  # noqa: F811
+    ):
+        """`/health/detailed` reads healthy for DuckDB's part, and
+        `/api/duckdb/stats` answers `off` instead of an error naming the
+        refusal. Mutation: drop either `off` branch."""
+        detailed = admin_client.get("/api/health/detailed").json()
+        assert detailed["components"]["duckdb"] == {"status": "off"}
+        assert detailed["status"] == "healthy"
+        assert admin_client.get("/api/duckdb/stats").json() == {"status": "off"}
+        assert duckdb_switch.opened() == {}
+        assert not duckdb_off.exists()
+
+    def test_under_on_the_store_is_asked_as_ever(
+        self, admin_client, monkeypatch, stats_cache_empty,  # noqa: F811
+    ):
+        """The other side of every branch: under on the three answers come
+        from the store — its counts, its ledger, its FATAL marker — and a
+        store that cannot count still degrades health as `duckdb`."""
+        from web.routes.api import health as health_routes
+
+        store = MagicMock()
+        store.get_stats = AsyncMock(return_value={"orders": 7, "products": 3})
+        store.schema_status = MagicMock(return_value={"status": "ok", "applied": 9})
+        store.fatal_status = MagicMock(return_value=None)
+        monkeypatch.setattr(health_routes, "get_store", AsyncMock(return_value=store))
+        health = admin_client.get("/api/health").json()
+        assert health["duckdb"]["status"] == "connected"
+        assert health["duckdb"]["orders"] == 7
+        assert health["migrations"] == {"status": "ok", "applied": 9}
+        assert store.fatal_status.called
+        assert admin_client.get("/api/duckdb/stats").json() == {
+            "status": "connected", "orders": 7, "products": 3}
+        assert admin_client.get("/api/health/detailed").json()[
+            "components"]["duckdb"]["status"] == "connected"
+
+        store.get_stats = AsyncMock(side_effect=RuntimeError("cannot count"))
+        monkeypatch.setitem(health_routes._stats_cache, "data", None)
+        monkeypatch.setitem(health_routes._stats_cache, "expires_at", 0)
+        health = admin_client.get("/api/health").json()
+        assert health["duckdb"]["status"] == "error"
+        assert health["degraded_by"] == ["duckdb"]
 
 
 # ─── The canary ──────────────────────────────────────────────────────────────
@@ -1282,8 +1476,11 @@ class TestTheCanary:
 
     @pytest.mark.asyncio
     async def test_its_lever_outranks_the_outage_it_causes(self):
-        """Under off today web cannot work, so health is degraded too — the
-        cause is the switch, and its lever comes first."""
+        """An open under off can come with an outage beside it — health
+        degraded for another cause, a path that needed the file failing with
+        it. Health no longer degrades for DuckDB under off (PR-3), so the
+        outage is somebody else's symptom, and the switch's lever comes
+        first."""
         payload = _healthy_payload()
         payload["status"] = "degraded"
         payload["duckdb_switch"] = {"mode": "off", "value": "off", "error": None,

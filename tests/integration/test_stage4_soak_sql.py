@@ -3035,11 +3035,24 @@ SHADOW_OFF = {"dq_journal_direct": "0", "watchdogs_on": "0", "weekly_ledger_on":
 
 
 async def clean_shadow(conn):
-    """No owner row and no copy stamp for any shadow chain's table — inside the
+    """No owner row and no copy stamp for any shadow chain's table, and no week
+    under KS_DUCKDB=off behind it (the canary's tripwire watch) — inside the
     scenario's transaction, so whatever another test left is only hidden."""
     await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
     await conn.execute("DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
                        list(SHADOW_TABLES))
+    await conn.execute(
+        "DELETE FROM app.alert_series WHERE condition_key = 'watch:duckdb_switch'")
+
+
+async def off_week_ran(conn):
+    """The canary's tripwire watch: written only while web runs KS_DUCKDB=off,
+    so its row is the trace that a week of silence has run (stage 5)."""
+    await conn.execute(
+        "INSERT INTO app.alert_series (condition_key, kind, state, first_fired_at, "
+        "last_fired_at, fired_count, instance) "
+        "VALUES ('watch:duckdb_switch', 'event', 'event', $1, $2, 500, 'bot')",
+        ago(days=9), ago(days=2))
 
 
 async def shadow_owner(conn, table, at):
@@ -3188,6 +3201,41 @@ class TestH2ShadowComparison:
             await shadow_issue(conn, DQ_RUN_IDS[0], check, "app.memory_samples", severity)
             v, detail = await verdict(conn, self.FILE, **self.ON)
         assert v == "FAIL" and check in detail, detail
+
+    @pytest.mark.asyncio
+    async def test_after_a_week_under_off_a_missing_row_is_accepted(self, pool):
+        """OD-S5-3 (a): a way back from KS_DUCKDB=off reads that week's rows as
+        shadow_missing_in_duckdb every morning until the drop, and the owner
+        accepted it — so it is listed, and the soak does not fail on it.
+        Mutation: drop `off_ran` — H2 fails every day until the drop."""
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await off_week_ran(conn)
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
+            await shadow_issue(conn, DQ_RUN_IDS[0], "shadow_missing_in_duckdb",
+                               "app.memory_samples", "WARN")
+            v, detail = await verdict(conn, self.FILE, **self.ON)
+        assert v == "PASS", detail
+        assert "zero shadow findings" in detail, detail
+        assert ("accepted after the week under KS_DUCKDB=off (OD-S5-3 (a)): "
+                "shadow_missing_in_duckdb on app.memory_samples (1)") in detail, detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("check", ["shadow_duckdb_only_rows", "shadow_row_values"])
+    async def test_after_a_week_under_off_the_criticals_still_fail(self, pool, check):
+        """Only the WARN the owner accepted is accepted: a row written round
+        the chain, or two stores disagreeing, is no consequence of a week
+        under off. Mutation: accept every shadow finding once off has run."""
+        async with scenario(pool) as conn:
+            await clean_shadow(conn)
+            await off_week_ran(conn)
+            await dq_run(conn, DQ_RUN_IDS[0], layer="mirror_landing", started_at=self.TODAY_0730)
+            await shadow_issue(conn, DQ_RUN_IDS[0], "shadow_missing_in_duckdb",
+                               "app.memory_samples", "WARN")
+            await shadow_issue(conn, DQ_RUN_IDS[0], check, "app.disk_samples", "CRITICAL")
+            v, detail = await verdict(conn, self.FILE, **self.ON)
+        assert v == "FAIL" and check in detail, detail
+        assert "shadow_missing_in_duckdb" not in detail, detail
 
     @pytest.mark.asyncio
     async def test_a_lagging_prune_and_other_findings_are_not_this_checks(self, pool):

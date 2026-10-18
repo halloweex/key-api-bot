@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueries, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../api/client'
 import { useQueryParams, useFilterStore } from '../store/filterStore'
 import type { FilterStore } from '../types/filters'
@@ -903,12 +903,94 @@ export function useMarginAlerts() {
 // ─── SMS Campaigns ──────────────────────────────────────────────────────────
 
 export function useSmsSegments(params: string, enabled = true) {
+  const followUp = (p: unknown) => typeof p === 'string' && p.includes('follow_up_of=')
   return useQuery<SmsSegmentsResponse>({
     queryKey: ['smsSegments', params] as const,
     queryFn: () => api.getSmsSegments(params),
     staleTime: CACHE_TTL.STANDARD,
     enabled,
+    // Every edit of a condition is a new query. Without this the counts, the
+    // sentence's total and "Next" blank out for the length of each request —
+    // a flicker under the thumb on every tap. The previous answer stays until
+    // the next one lands; never across a switch between a new audience and a
+    // follow-up, whose numbers mean different people.
+    placeholderData: (previous, previousQuery) =>
+      previousQuery && followUp(previousQuery.queryKey[1]) === followUp(params)
+        ? previous : undefined,
   })
+}
+
+/** One answer of `useSmsAudienceCounts`. */
+export type SmsAudienceCount =
+  | { status: 'loading' }
+  | { status: 'done'; data: SmsSegmentsResponse }
+  | { status: 'error' }
+
+/**
+ * Previews of several audiences that are not the one being built — how many a
+ * template would select, what a group would match without one of its
+ * conditions — asked ONE AT A TIME and kept for half an hour.
+ *
+ * The preview is capped at 60 a minute per client and takes over a second on
+ * production; nine template chips asked at once would spend a sixth of the
+ * minute in a burst and queue in front of the audience's own count. So each
+ * one waits for the one before it to settle, and only `enabled` lets the row
+ * ask at all (the caller enables it once the chips are on screen).
+ *
+ * Its own cache key, not `smsSegments`: a send invalidates the audience's
+ * preview, and a template's count from twenty minutes ago is still the count
+ * worth showing — refetching nine of them together after every send is the
+ * burst this exists to avoid. Never retried: a count that failed shows
+ * nothing, and the next visit asks again.
+ */
+export function useSmsAudienceCounts(
+  items: Array<{ key: string; params: string | null }>,
+  enabled = true,
+): Record<string, SmsAudienceCount> {
+  const client = useQueryClient()
+  const keyOf = (params: string) => ['smsAudienceCount', params] as const
+  const settled = (params: string) => {
+    const state = client.getQueryState(keyOf(params))
+    return state?.status === 'success' || state?.status === 'error'
+  }
+
+  // One query per distinct question, in the order first asked. `useQueries`
+  // does not take one key twice — observers get shared and updates lost, and
+  // the queue below stalls — and two items asking the same thing (a template
+  // and a group's preview can) need one answer anyway.
+  const asked: string[] = []
+  for (const { params } of items) {
+    if (params != null && !asked.includes(params)) asked.push(params)
+  }
+
+  // Only the first unsettled one may ask; the ones after it wait their turn.
+  const turns: boolean[] = []
+  for (let i = 0, open = true; i < asked.length; i++) {
+    turns.push(enabled && open)
+    if (!settled(asked[i])) open = false
+  }
+  const results = useQueries({
+    queries: asked.map((params, i) => ({
+      queryKey: keyOf(params),
+      queryFn: () => api.getSmsSegments(params),
+      enabled: turns[i],
+      staleTime: CACHE_TTL.COMPUTED,
+      gcTime: CACHE_TTL.COMPUTED,
+      refetchOnMount: false,
+      refetchOnReconnect: false,
+      retry: false,
+    })),
+  })
+
+  const out: Record<string, SmsAudienceCount> = {}
+  for (const { key, params } of items) {
+    if (params == null) continue
+    const r = results[asked.indexOf(params)]
+    out[key] = r.data ? { status: 'done', data: r.data }
+      : r.isError ? { status: 'error' }
+      : { status: 'loading' }
+  }
+  return out
 }
 
 export function useSmsCampaigns(enabled = true) {
@@ -952,16 +1034,26 @@ export function useSendSmsCampaign() {
 
   return useMutation<
     SmsSendResult, Error,
-    { campaign: string; text: string; channel: SmsChannel; viber?: SmsViberOptions }
+    {
+      campaign: string
+      text: string
+      /** The campaign name as typed back; the server refuses a send without it. */
+      confirmCampaign: string
+      channel: SmsChannel
+      viber?: SmsViberOptions
+    }
   >({
-    mutationFn: ({ campaign, text, channel, viber }) =>
-      api.sendSmsCampaign(campaign, text, channel, viber),
+    mutationFn: ({ campaign, text, confirmCampaign, channel, viber }) =>
+      api.sendSmsCampaign(campaign, text, confirmCampaign, channel, viber),
     onSuccess: () => {
       // The send stamps sent_at and creates opt-outs, so both the campaign list
       // and the next segmentation are stale.
       queryClient.invalidateQueries({ queryKey: ['smsCampaigns'] })
       queryClient.invalidateQueries({ queryKey: ['smsSegments'] })
     },
+    // Spent or not — a refusal may be the balance itself — the figure on
+    // screen is no longer the one to trust.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['smsBalance'] }),
   })
 }
 
@@ -1022,5 +1114,18 @@ export function useSmsChannels() {
     queryKey: ['smsChannels'] as const,
     queryFn: () => api.getSmsChannels(),
     staleTime: CACHE_TTL.STATIC,
+  })
+}
+
+/** The channels with the gateway's balance, read afresh each time the send
+ *  dialog opens: the figure has to be today's, not the one cached when the
+ *  page loaded. The server checks it again before sending. */
+export function useSmsBalance() {
+  return useQuery<SmsChannelsResponse>({
+    queryKey: ['smsBalance'] as const,
+    queryFn: () => api.getSmsChannels(true),
+    staleTime: 0,
+    refetchOnMount: 'always',
+    retry: false,
   })
 }

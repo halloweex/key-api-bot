@@ -7,13 +7,17 @@ import re
 from datetime import date as _date, datetime as _datetime
 
 from fastapi import APIRouter, Path, Query, Request, HTTPException, Depends
-from fastapi.responses import StreamingResponse
-from typing import Optional
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import ValidationError as PydanticValidationError
+from typing import Annotated, List, Optional
 
 from core.gender import CONFIDENCE_LADDER, GENDERS
+from core.sms_refusals import REFUSAL_REASONS
 from core.repositories.customers import (
-    BUILTIN_AUDIENCE_PRESETS, SMS_GROUPINGS, SMS_LTV_BASES, SMS_TIER_DEFAULTS,
-    SmsAudienceFilters,
+    BUILTIN_AUDIENCE_PRESETS, DEFAULT_WINDOW_DAYS, MAX_AUDIENCE_GROUPS,
+    SMS_GROUPINGS, SMS_LTV_BASES, SMS_RECENT_CAMPAIGN_HOURS, SMS_TIER_DEFAULTS,
+    SmsAudienceFilters, SmsAudienceGroup,
 )
 from core.turbosms import (
     PartialSendError, TurboSmsClient, TurboSmsConfig, TurboSmsError,
@@ -30,6 +34,35 @@ from ._deps import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+class SmsRefusal(HTTPException):
+    """A refusal whose JSON carries `reason` and its figures beside `detail`.
+
+    `detail` is the English sentence every caller has always read; `reason`
+    is one of `core.sms_refusals.REFUSAL_REASONS`, which the page turns into
+    its reader's language. Raised rather than returned, so a dependency can
+    refuse too; `web/main.py` answers it. Without that handler it degrades to
+    an ordinary HTTPException — the same status and `detail`, no `reason`.
+    """
+
+    def __init__(self, status_code: int, detail: str, reason: str, **figures):
+        if reason not in REFUSAL_REASONS:
+            raise KeyError(f"unknown SMS refusal reason {reason!r}")
+        super().__init__(status_code=status_code, detail=detail)
+        self.reason = reason
+        self.figures = figures
+
+    def content(self) -> dict:
+        return {"detail": self.detail, "reason": self.reason, **self.figures}
+
+
+def _refused(status_code: int, e: Exception) -> HTTPException:
+    """The store's refusal as an answer: with its reason when it names one."""
+    reason = getattr(e, "reason", None)
+    if reason is None:
+        return HTTPException(status_code=status_code, detail=str(e))
+    return SmsRefusal(status_code, str(e), reason, **getattr(e, "figures", {}))
 
 
 @router.get("/customers/insights")
@@ -205,8 +238,227 @@ def _text_list(raw: Optional[str]) -> list:
     return out
 
 
+# Every parameter that decides who is in an audience. A follow-up's audience is
+# decided by the campaign it follows and nothing else, so any of these beside
+# `follow_up_of` is refused rather than ignored: a filter that was silently
+# dropped reads, to whoever typed it, as a filter that worked.
+_AUDIENCE_SHAPING_PARAMS = frozenset({
+    "max_recency_days", "ltv_basis", "vip_ltv", "core_ltv", "core_min_orders",
+    "reactivation_max_recency", "tier", "grouping",
+    "recency_min", "recency_max", "orders_min", "orders_max", "ltv_min", "ltv_max",
+    "aov_min", "aov_max", "first_order_from", "first_order_to", "city", "gender",
+    "gender_min_confidence", "brand", "category_id", "source_id", "promocode_used",
+    "bought_within_days", "period_orders_min", "period_orders_max", "period_from",
+    "period_to", "period_days", "or_groups",
+})
+
+
+# ─── Audience groups ──────────────────────────────────────────────────────
+# An audience is one or more groups, a customer being in it if they match ANY
+# of them. The first group is the flat parameters below, exactly as before
+# groups existed — so every saved link, preset and past campaign still names
+# one group and selects what it selected. Any further group travels in ONE
+# query parameter, `or_groups`, as a JSON array of objects whose keys are the
+# flat parameters' names. Still the query string, because the CSV is a link
+# the browser follows and `api_gate` reads `sales_type` from it — which is why
+# `sales_type` and everything else common to the campaign stays flat and is
+# not a group's to set.
+
+# A group's filters in the shape `or_groups` carries them. Every bound is the
+# flat parameter's own (`tests/integration/test_sms_audience_groups_api.py`
+# compares the two), and `extra="forbid"` because a key nobody reads is a
+# condition somebody thinks is applied.
+_Text = Annotated[str, Field(max_length=200)]
+
+# The widest base window a group may ask for. Ten years reaches past the first
+# order the warehouse holds, so it is how the page says "all time" for a group
+# with no time condition of its own: every group has a window, and one wider
+# than the whole history is the honest spelling of none. It was 730, which
+# made "everybody who ever bought" unsayable once the history passed two
+# years — and a group whose only condition is a period ("nothing since
+# January") needs every customer in reach to count over.
+_MAX_WINDOW_DAYS = 3650
+
+
+class _AudienceGroupParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    max_recency_days: int = Field(DEFAULT_WINDOW_DAYS, ge=30, le=_MAX_WINDOW_DAYS)
+    recency_min: Optional[int] = Field(None, ge=0, le=3650)
+    recency_max: Optional[int] = Field(None, ge=0, le=3650)
+    orders_min: Optional[int] = Field(None, ge=0, le=1000)
+    orders_max: Optional[int] = Field(None, ge=0, le=1000)
+    ltv_min: Optional[float] = Field(None, ge=-1_000_000, le=100_000_000)
+    ltv_max: Optional[float] = Field(None, ge=-1_000_000, le=100_000_000)
+    aov_min: Optional[float] = Field(None, ge=0, le=100_000_000)
+    aov_max: Optional[float] = Field(None, ge=0, le=100_000_000)
+    first_order_from: Optional[_date] = None
+    first_order_to: Optional[_date] = None
+    city: Optional[List[_Text]] = Field(None, max_length=50)
+    gender: Optional[List[_Text]] = Field(None, max_length=2)
+    gender_min_confidence: Optional[str] = Field(None, max_length=10)
+    brand: Optional[List[_Text]] = Field(None, max_length=100)
+    category_id: Optional[List[int]] = Field(None, max_length=100)
+    source_id: Optional[List[int]] = Field(None, max_length=20)
+    promocode_used: Optional[str] = Field(None, max_length=40)
+    bought_within_days: Optional[int] = Field(None, ge=1, le=3650)
+    period_orders_min: Optional[int] = Field(None, ge=1, le=1000)
+    period_orders_max: Optional[int] = Field(None, ge=0, le=1000)
+    period_from: Optional[_date] = None
+    period_to: Optional[_date] = None
+    period_days: Optional[int] = Field(None, ge=1, le=3650)
+
+
+_EXTRA_GROUPS = TypeAdapter(List[_AudienceGroupParams])
+
+# The longest `or_groups` accepted. Four groups of every filter at its widest
+# would not reach it; it exists so a URL cannot carry a megabyte of JSON into
+# a parser.
+_OR_GROUPS_MAX_CHARS = 8_000
+
+
+def _clean_texts(values) -> list:
+    """Strip, drop blanks and case-insensitive duplicates, keep the order."""
+    seen, out = set(), []
+    for value in values or ():
+        piece = value.strip()
+        if piece and piece.lower() not in seen:
+            seen.add(piece.lower())
+            out.append(piece)
+    return out
+
+
+def _audience_group(values: dict, label: str) -> SmsAudienceGroup:
+    """One group's validated conditions, from either transport.
+
+    `values` holds the flat parameters' names, typed and with lists already
+    split, so the first group and every `or_groups` entry pass the same rules
+    and refuse in the same words — with the group named when there are
+    several, because "orders_min must not exceed orders_max" is no help when
+    four groups each have one. A lone group (`label=""`) refuses exactly as
+    the audience did before groups existed.
+    """
+    def refuse(detail: str):
+        raise HTTPException(
+            status_code=400, detail=f"{label}: {detail}" if label else detail,
+        )
+
+    genders = tuple(g.lower() for g in _clean_texts(values.get("gender")))
+    for g in genders:
+        if g not in GENDERS:
+            refuse(f"gender must be one of {', '.join(GENDERS)}")
+    # Refused rows carry NULL, and NULL never satisfies `IN`. So there is no
+    # spelling of this parameter that selects them, and offering one would be a
+    # campaign addressed by gender to people whose gender nobody could decide.
+    confidence = values.get("gender_min_confidence")
+    if confidence is not None:
+        confidence = confidence.strip().lower()
+        if confidence not in CONFIDENCE_LADDER:
+            refuse(f"gender_min_confidence must be one of {', '.join(CONFIDENCE_LADDER)}")
+
+    # A window whose edges are the wrong way round returns nothing and looks
+    # like a data problem, so it is refused with the reason instead.
+    for lo, hi, name in (
+        ("recency_min", "recency_max", "recency"),
+        ("orders_min", "orders_max", "orders"),
+        ("ltv_min", "ltv_max", "ltv"),
+        ("aov_min", "aov_max", "aov"),
+        ("first_order_from", "first_order_to", "first_order"),
+        ("period_orders_min", "period_orders_max", "period_orders"),
+    ):
+        if values.get(lo) is not None and values.get(hi) is not None \
+                and values[lo] > values[hi]:
+            refuse(f"{name}_min must not exceed {name}_max")
+
+    # Orders in a period: a date range (from, to, or both), or within N days —
+    # one of the two shapes, and a count without either says nothing about
+    # when. `period_days` ends the period today, so a `period_to` beside it
+    # would be a second end.
+    period_from, period_to = values.get("period_from"), values.get("period_to")
+    period_days = values.get("period_days")
+    if period_from is not None and period_days is not None:
+        refuse("period_from and period_days are two ways to say one period — pick one")
+    if period_to is not None and period_days is not None:
+        refuse("period_to and period_days are two ways to end one period — pick one")
+    if period_from is not None and period_to is not None and period_from > period_to:
+        refuse("period_from must not exceed period_to")
+    has_period = period_from is not None or period_to is not None \
+        or period_days is not None
+    for bound in ("period_orders_min", "period_orders_max"):
+        if values.get(bound) is not None and not has_period:
+            refuse(f"{bound} needs a period: period_from, period_to or period_days")
+
+    filters = SmsAudienceFilters(
+        recency_min_days=values.get("recency_min"),
+        recency_max_days=values.get("recency_max"),
+        orders_min=values.get("orders_min"),
+        orders_max=values.get("orders_max"),
+        ltv_min=values.get("ltv_min"),
+        ltv_max=values.get("ltv_max"),
+        aov_min=values.get("aov_min"),
+        aov_max=values.get("aov_max"),
+        first_order_from=values.get("first_order_from"),
+        first_order_to=values.get("first_order_to"),
+        cities=tuple(_clean_texts(values.get("city"))),
+        genders=genders,
+        gender_min_confidence=confidence,
+        brands=tuple(_clean_texts(values.get("brand"))),
+        category_ids=tuple(dict.fromkeys(values.get("category_id") or ())),
+        source_ids=tuple(dict.fromkeys(values.get("source_id") or ())),
+        promocode=(values.get("promocode_used") or "").strip() or None,
+        bought_within_days=values.get("bought_within_days"),
+        period_orders_min=values.get("period_orders_min"),
+        period_orders_max=values.get("period_orders_max"),
+        period_from=period_from,
+        period_to=period_to,
+        period_days=period_days,
+    )
+    return SmsAudienceGroup(
+        max_recency_days=values.get("max_recency_days", DEFAULT_WINDOW_DAYS),
+        filters=filters,
+    )
+
+
+def _extra_audience_groups(raw: Optional[str]) -> List[SmsAudienceGroup]:
+    """Groups 2..N out of `or_groups`, or a 400 saying what is wrong with it."""
+    if raw is None:
+        return []
+    if len(raw) > _OR_GROUPS_MAX_CHARS:
+        raise HTTPException(status_code=400, detail="or_groups is too long")
+    try:
+        parsed = _EXTRA_GROUPS.validate_json(raw)
+    except PydanticValidationError as e:
+        first = e.errors()[0]
+        loc = list(first.get("loc", ()))
+        where = "or_groups"
+        if loc and isinstance(loc[0], int):
+            where = f"group {loc[0] + 2}"
+            loc = loc[1:]
+        field_name = ".".join(str(part) for part in loc)
+        raise HTTPException(
+            status_code=400,
+            detail=(f"{where}: {field_name + ': ' if field_name else ''}"
+                    f"{first.get('msg', 'invalid')}"),
+        )
+    if not parsed:
+        raise HTTPException(
+            status_code=400,
+            detail="or_groups must hold at least one group — leave it out for one group",
+        )
+    if len(parsed) + 1 > MAX_AUDIENCE_GROUPS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"an audience holds at most {MAX_AUDIENCE_GROUPS} groups",
+        )
+    return [
+        _audience_group(group.model_dump(), f"group {n}")
+        for n, group in enumerate(parsed, start=2)
+    ]
+
+
 def _sms_segment_params(
-    max_recency_days: int = Query(270, ge=30, le=730),
+    request: Request,
+    max_recency_days: int = Query(270, ge=30, le=_MAX_WINDOW_DAYS),
     ltv_basis: str = Query(
         "revenue",
         description="revenue or margin — which lifetime value drives tier assignment",
@@ -222,6 +474,12 @@ def _sms_segment_params(
     core_min_orders: int = Query(2, ge=2, le=50),
     # Optional so a window narrower than the default does not become an error:
     # only a value somebody actually typed can contradict the window.
+    #
+    # Still capped at two years when the window goes to ten: the level is
+    # one-order buyers recent enough to win back, and a single order three
+    # years ago is not that. Unset it stays 120 whatever the window, so an
+    # "all time" group does not put every one-order buyer of years past into
+    # the reactivation level.
     reactivation_max_recency: Optional[int] = Query(None, ge=7, le=730),
     sales_type: Optional[str] = Query("retail"),
     holdout_pct: int = Query(10, ge=0, le=50),
@@ -254,12 +512,62 @@ def _sms_segment_params(
     source_id: Optional[str] = Query(None, max_length=200),
     promocode_used: Optional[str] = Query(None, max_length=40),
     bought_within_days: Optional[int] = Query(None, ge=1, le=3650),
+    # Orders in a period — between N and M orders from a date, up to a date,
+    # between two dates (both edges inclusive), or within the last N days.
+    # `orders_min` counts the whole history and cannot say "two purchases this
+    # year". `period_orders_max=0` alone is "bought, but not in the period".
+    period_orders_min: Optional[int] = Query(None, ge=1, le=1000),
+    period_orders_max: Optional[int] = Query(None, ge=0, le=1000),
+    period_from: Optional[_date] = Query(None),
+    period_to: Optional[_date] = Query(None),
+    period_days: Optional[int] = Query(None, ge=1, le=3650),
+    # ─── More groups, ORed with the one above ────────────────────────────
+    or_groups: Optional[str] = Query(
+        None,
+        description="JSON array of further audience groups, each an object with "
+                    "the per-group parameters above (max_recency_days and the "
+                    "filters); a customer is in the audience if they match any "
+                    "group",
+    ),
+    # ─── A follow-up ─────────────────────────────────────────────────────
+    follow_up_of: Optional[str] = Query(
+        None, pattern=_CAMPAIGN_PATTERN,
+        description="A sent campaign to follow up: the audience becomes exactly its "
+                    "accepted target arm, with no control of its own",
+    ),
 ) -> dict:
     """Validate and normalise the segmentation criteria shared by both endpoints."""
     try:
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    if follow_up_of is not None:
+        shaping = sorted(k for k in request.query_params if k in _AUDIENCE_SHAPING_PARAMS)
+        if shaping:
+            raise SmsRefusal(
+                400,
+                f"a follow-up goes to exactly the people {follow_up_of!r} reached; "
+                f"{', '.join(shaping)} cannot narrow it — leave them out, or "
+                f"build a new audience instead",
+                "follow_up_narrowed", root=follow_up_of, params=shaping,
+            )
+        # Forced, and refused when asked for: a follow-up withholding people of
+        # its own would draw a second control out of the first one's targets,
+        # and the first one's control is the only baseline either has.
+        if "holdout_pct" in request.query_params and holdout_pct != 0:
+            raise SmsRefusal(
+                400,
+                "a follow-up has no control group of its own — it is measured "
+                f"on {follow_up_of!r}'s control, so holdout_pct must be 0",
+                "follow_up_holdout", root=follow_up_of,
+            )
+        if follow_up_of == campaign:
+            raise SmsRefusal(
+                400, "a campaign cannot follow itself up", "follow_up_self",
+                root=follow_up_of,
+            )
+        holdout_pct = 0
 
     if ltv_basis not in SMS_LTV_BASES:
         raise HTTPException(
@@ -298,38 +606,6 @@ def _sms_segment_params(
         raise HTTPException(
             status_code=400, detail="core_ltv must not exceed vip_ltv",
         )
-    if reactivation_max_recency is None:
-        # The reactivation window cannot outlast the base window it lives in.
-        # Pinning it at 120 made "last 60 days" a 400 rather than a narrower
-        # audience, which is the opposite of what the control is for.
-        reactivation_max_recency = min(120, max_recency_days)
-
-    if reactivation_max_recency > max_recency_days:
-        raise HTTPException(
-            status_code=400,
-            detail="reactivation_max_recency must not exceed max_recency_days",
-        )
-
-    genders = tuple(g.strip().lower() for g in _text_list(gender))
-    for g in genders:
-        if g not in GENDERS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"gender must be one of {', '.join(GENDERS)}",
-            )
-    # Refused rows carry NULL, and NULL never satisfies `IN`. So there is no
-    # spelling of this parameter that selects them, and offering one would be a
-    # campaign addressed by gender to people whose gender nobody could decide.
-    if gender_min_confidence is not None:
-        gender_min_confidence = gender_min_confidence.strip().lower()
-        if gender_min_confidence not in CONFIDENCE_LADDER:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "gender_min_confidence must be one of "
-                    f"{', '.join(CONFIDENCE_LADDER)}"
-                ),
-            )
 
     if grouping not in SMS_GROUPINGS:
         raise HTTPException(
@@ -337,43 +613,46 @@ def _sms_segment_params(
             detail=f"grouping must be one of {', '.join(SMS_GROUPINGS)}",
         )
 
-    # A window whose edges are the wrong way round returns nothing and looks
-    # like a data problem, so it is refused with the reason instead.
-    for lo, hi, label in (
-        (recency_min, recency_max, "recency"),
-        (orders_min, orders_max, "orders"),
-        (ltv_min, ltv_max, "ltv"),
-        (aov_min, aov_max, "aov"),
-        (first_order_from, first_order_to, "first_order"),
-    ):
-        if lo is not None and hi is not None and lo > hi:
-            raise HTTPException(
-                status_code=400, detail=f"{label}_min must not exceed {label}_max",
-            )
+    # The first group is the flat parameters — the audience as it was before
+    # groups, refused in the words it was refused in then.
+    first = _audience_group({
+        "max_recency_days": max_recency_days,
+        "recency_min": recency_min, "recency_max": recency_max,
+        "orders_min": orders_min, "orders_max": orders_max,
+        "ltv_min": ltv_min, "ltv_max": ltv_max,
+        "aov_min": aov_min, "aov_max": aov_max,
+        "first_order_from": first_order_from, "first_order_to": first_order_to,
+        "city": _text_list(city),
+        "gender": _text_list(gender),
+        "gender_min_confidence": gender_min_confidence,
+        "brand": _text_list(brand),
+        "category_id": _int_list(category_id, "category_id"),
+        "source_id": _int_list(source_id, "source_id"),
+        "promocode_used": promocode_used,
+        "bought_within_days": bought_within_days,
+        "period_orders_min": period_orders_min,
+        "period_orders_max": period_orders_max,
+        "period_from": period_from, "period_to": period_to,
+        "period_days": period_days,
+    }, "group 1" if or_groups is not None else "")
+    groups = [first] + _extra_audience_groups(or_groups)
+    widest = max(g.max_recency_days for g in groups)
 
-    filters = SmsAudienceFilters(
-        recency_min_days=recency_min,
-        recency_max_days=recency_max,
-        orders_min=orders_min,
-        orders_max=orders_max,
-        ltv_min=ltv_min,
-        ltv_max=ltv_max,
-        aov_min=aov_min,
-        aov_max=aov_max,
-        first_order_from=first_order_from,
-        first_order_to=first_order_to,
-        cities=tuple(_text_list(city)),
-        genders=genders,
-        gender_min_confidence=gender_min_confidence,
-        brands=tuple(_text_list(brand)),
-        category_ids=tuple(_int_list(category_id, "category_id")),
-        source_ids=tuple(_int_list(source_id, "source_id")),
-        promocode=(promocode_used or "").strip() or None,
-        bought_within_days=bought_within_days,
-    )
+    if reactivation_max_recency is None:
+        # The reactivation window cannot outlast the base window it lives in.
+        # Pinning it at 120 made "last 60 days" a 400 rather than a narrower
+        # audience, which is the opposite of what the control is for. With
+        # groups the base window is the widest of theirs.
+        reactivation_max_recency = min(120, widest)
+
+    if reactivation_max_recency > widest:
+        raise HTTPException(
+            status_code=400,
+            detail="reactivation_max_recency must not exceed max_recency_days",
+        )
 
     return {
-        "max_recency_days": max_recency_days,
+        "groups": groups,
         "ltv_basis": ltv_basis,
         "vip_ltv": vip_ltv,
         "core_ltv": core_ltv,
@@ -384,8 +663,53 @@ def _sms_segment_params(
         "campaign": campaign,
         "tier": tiers,
         "grouping": grouping,
-        "filters": filters,
+        "follow_up_of": follow_up_of,
     }
+
+
+async def _sms_audience(store, criteria: dict, *, include_customers: bool, limit: int) -> dict:
+    """The audience `criteria` names — the one call the preview and the freeze share.
+
+    A follow-up is read off the campaign it follows; everything else is
+    segmented. Both answers have one shape, and both routes go through here,
+    so the roster frozen is the roster that was on screen.
+    """
+    root = criteria["follow_up_of"]
+    if root is None:
+        segment_args = {k: v for k, v in criteria.items()
+                        if k not in ("follow_up_of", "groups")}
+        groups = criteria["groups"]
+        if len(groups) == 1:
+            # One group is the audience as it was before groups existed, and
+            # it is asked for the way it was asked for then.
+            segment_args.update(max_recency_days=groups[0].max_recency_days,
+                                filters=groups[0].filters)
+        else:
+            segment_args["groups"] = groups
+        return await store.get_sms_segments(
+            include_customers=include_customers, limit=limit, **segment_args,
+        )
+
+    try:
+        data = await store.get_sms_follow_up_audience(
+            root, campaign=criteria["campaign"],
+            include_customers=include_customers, limit=limit,
+        )
+    except ValueError as e:
+        status = 404 if "not frozen" in str(e) else 409
+        raise _refused(status, e)
+
+    # `api_gate` checked the sales type in this request's query string, and only
+    # that one. Inheriting a different one from the root would let a follow-up
+    # reach a roster the caller was never cleared to see.
+    if data["salesType"] != criteria["sales_type"]:
+        raise SmsRefusal(
+            409,
+            f"campaign {root!r} was built for sales_type={data['salesType']}; "
+            f"a follow-up inherits it — pass sales_type={data['salesType']}",
+            "follow_up_sales_type", root=root, salesType=data["salesType"],
+        )
+    return data
 
 
 @router.get("/customers/sms-segments")
@@ -415,6 +739,10 @@ async def get_sms_segments(
 
     `view` covers the sizes; the rows themselves need `edit`, the same
     permission the CSV download needs, because they are the same data.
+
+    `follow_up_of=X` previews a follow-up instead: X's accepted target arm,
+    less anyone opted out since, in the same shape — the same function the
+    freeze calls, so what is frozen is what this showed.
     """
     if include_customers and not await has_permission(user, "sms", "edit"):
         raise HTTPException(
@@ -422,8 +750,8 @@ async def get_sms_segments(
             detail="Customer rows require edit access to SMS campaigns",
         )
     store = await get_store()
-    return await store.get_sms_segments(
-        include_customers=include_customers, limit=limit, **criteria,
+    return await _sms_audience(
+        store, criteria, include_customers=include_customers, limit=limit,
     )
 
 
@@ -457,8 +785,17 @@ async def export_sms_segments_csv(
     shifts daily, so a roster that is not recorded now cannot be reconstructed
     later — and without it there is no control group to measure against.
     """
+    if criteria["follow_up_of"] is not None:
+        # The file and its freeze describe a segmented audience: tiers, LTV,
+        # city. A follow-up is somebody else's roster sent twice, and it is
+        # created where nothing leaves as a file.
+        raise HTTPException(
+            status_code=400,
+            detail="a follow-up is created with POST /customers/sms-campaigns, "
+                   "not exported",
+        )
     store = await get_store()
-    data = await store.get_sms_segments(include_customers=True, limit=limit, **criteria)
+    data = await _sms_audience(store, criteria, include_customers=True, limit=limit)
 
     # Freezing must happen before the file leaves — the roster recorded here is
     # the only control group that will exist when results are measured.
@@ -482,7 +819,7 @@ async def export_sms_segments_csv(
                 overwrite=overwrite,
             )
         except ValueError as e:
-            raise HTTPException(status_code=409, detail=str(e))
+            raise _refused(409, e)
 
     rows = data["customers"]
     if not include_holdout:
@@ -490,9 +827,9 @@ async def export_sms_segments_csv(
 
     # Exports carry customer PII — record who pulled which list.
     logger.info(
-        "SMS segment export: user=%s campaign=%s tier=%s rows=%d holdout=%s",
+        "SMS segment export: user=%s campaign=%s tier=%s groups=%d rows=%d holdout=%s",
         user.get("user_id"), criteria["campaign"], criteria["tier"] or "all",
-        len(rows), include_holdout,
+        len(criteria["groups"]), len(rows), include_holdout,
     )
 
     output = io.StringIO()
@@ -727,45 +1064,57 @@ async def create_sms_campaign(
     the send goes through the gateway, and the file was pure ceremony. The
     roster still has to be recorded at this instant for the campaign to be
     measurable at all; that is what this endpoint is for.
+
+    `follow_up_of=X` freezes a follow-up: exactly X's target members whose
+    message the gateway accepted, less anyone opted out since, with no
+    control of its own. X must be sent and must not itself be a follow-up.
+    The link is kept in the campaign's criteria, where the send's overlap
+    check and the results read it.
     """
     if criteria["campaign"] == "default":
-        raise HTTPException(
-            status_code=400,
-            detail="name the campaign — 'default' is the placeholder the preview uses",
+        raise SmsRefusal(
+            400, "name the campaign — 'default' is the placeholder the preview uses",
+            "name_placeholder",
         )
 
     store = await get_store()
-    data = await store.get_sms_segments(include_customers=True, limit=limit, **criteria)
+    data = await _sms_audience(store, criteria, include_customers=True, limit=limit)
 
     if data["truncated"]:
-        raise HTTPException(
-            status_code=400,
-            detail="refusing to freeze a truncated roster — raise `limit` so the "
-                   "whole audience is recorded",
+        raise SmsRefusal(
+            400,
+            "refusing to freeze a truncated roster — raise `limit` so the "
+            "whole audience is recorded",
+            "roster_truncated", limit=limit,
         )
     if not data["customers"]:
-        raise HTTPException(
-            status_code=400,
-            detail="this audience is empty — nothing to freeze",
+        raise SmsRefusal(
+            400, "this audience is empty — nothing to freeze", "audience_empty",
         )
 
+    # A follow-up carries its root's basis; the query's own default would
+    # misdescribe the figures frozen with every member.
+    ltv_basis = (data["ltvBasis"] if criteria["follow_up_of"]
+                 else criteria["ltv_basis"])
     try:
         frozen = await store.freeze_sms_campaign(
             campaign=criteria["campaign"],
             customers=data["customers"],
             criteria=data["criteria"],
-            ltv_basis=criteria["ltv_basis"],
+            ltv_basis=ltv_basis,
             sales_type=criteria["sales_type"],
             holdout_pct=criteria["holdout_pct"],
             promocode=promocode,
             overwrite=overwrite,
         )
     except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+        raise _refused(409, e)
 
     logger.info(
-        "SMS campaign created: user=%s campaign=%s grouping=%s target=%d holdout=%d",
+        "SMS campaign created: user=%s campaign=%s grouping=%s groups=%d "
+        "follow_up_of=%s target=%d holdout=%d",
         user.get("user_id"), criteria["campaign"], criteria["grouping"],
+        len(criteria["groups"]), criteria["follow_up_of"],
         data["totals"]["target"], data["totals"]["holdout"],
     )
     return {
@@ -817,6 +1166,95 @@ async def mark_sms_campaign_sent(
     return result
 
 
+# What the balance has to cover, over the configured tariff.
+#
+# The contract rate in config (1.28 ₴) holds for top-ups of 10 000 ₴ and more;
+# a smaller top-up bills 1.29. Two percent over the configured figure covers
+# that and rounding, so a send this guard lets through is not then cut short
+# at the gateway — which bills batches it then fails to dispatch, and took the
+# balance to −675 ₴ the one time it ran dry mid-roster.
+SMS_BALANCE_MARGIN = 1.02
+
+# How long the page waits for the balance before showing none. The send reads
+# it on the client's own timeout: there, an answer is worth waiting for.
+_BALANCE_READ_TIMEOUT_S = 5.0
+
+
+def _refusal(detail: str, reason: str, **extra) -> JSONResponse:
+    """A 409 that says why in `detail`, as every refusal here does, and carries
+    the figures behind it beside the sentence for a page that wants them."""
+    if reason not in REFUSAL_REASONS:
+        raise KeyError(f"unknown SMS refusal reason {reason!r}")
+    return JSONResponse(
+        status_code=409, content={"detail": detail, "reason": reason, **extra},
+    )
+
+
+async def _refuse_before_sending(
+    store, campaign: str, recipients: int, text: str,
+) -> Optional[JSONResponse]:
+    """Why this claimed campaign must not go to the gateway, or None.
+
+    Asked after the claim and before a single message leaves, so a refusal
+    hands the campaign back intact. Both questions are about money and about
+    the measurement, in that order of cheapness: the database first, the
+    gateway second.
+    """
+    conflicts = await store.find_sms_send_conflicts(campaign)
+    if conflicts:
+        named = "; ".join(
+            f"{c['people']} in the {c['arm']} arm of {c['campaign']!r} "
+            f"(sent {c['sentAt']})"
+            for c in conflicts
+        )
+        why = [f"refused: this roster overlaps campaigns sent in the last "
+               f"{SMS_RECENT_CAMPAIGN_HOURS} h — {named}."]
+        if any(c["arm"] == "control" for c in conflicts):
+            why.append("Messaging another campaign's control group destroys its "
+                       "measurement, and nothing overrides that.")
+        if any(c["arm"] == "target" for c in conflicts):
+            why.append("A second message to another campaign's recipients has to "
+                       "be a declared follow-up of it (follow_up_of).")
+        why.append("Nothing was sent; the campaign is unsent.")
+        return _refusal(" ".join(why), "recent_campaign", conflicts=conflicts,
+                        hours=SMS_RECENT_CAMPAIGN_HOURS)
+
+    parts = count_segments(text).parts
+    price = TurboSmsConfig().price_per_part
+    # Priced as SMS for everyone, Viber included: the hybrid falls back to SMS
+    # for whoever Viber cannot reach, and that is not known until after.
+    cost = round(recipients * parts * price * SMS_BALANCE_MARGIN, 2)
+    figures = {"recipients": recipients, "parts": parts, "pricePerPart": price,
+               "margin": SMS_BALANCE_MARGIN, "cost": cost}
+
+    balance, why = None, None
+    try:
+        async with TurboSmsClient() as client:
+            balance = await client.balance()
+    except TurboSmsError as e:
+        why = str(e)
+
+    if balance is None:
+        return _refusal(
+            f"could not read the TurboSMS balance ({why or 'the gateway gave no figure'}) "
+            f"— this send costs up to {cost:.2f} ₴ and is not started without "
+            f"knowing it is covered. Nothing was sent; the campaign is unsent.",
+            "balance_unreadable",
+            balance=None, shortfall=None, **figures,
+        )
+    if balance < cost:
+        shortfall = round(cost - balance, 2)
+        return _refusal(
+            f"the TurboSMS balance is {balance:.2f} ₴ and this send costs up to "
+            f"{cost:.2f} ₴ ({recipients} recipients × {parts} part(s) × {price} ₴, "
+            f"+{round((SMS_BALANCE_MARGIN - 1) * 100)}%) — {shortfall:.2f} ₴ short. "
+            f"Top up and send again; nothing was sent and the campaign is unsent.",
+            "balance_short",
+            balance=balance, shortfall=shortfall, **figures,
+        )
+    return None
+
+
 @router.post("/customers/sms-campaigns/{campaign}/send")
 @limiter.limit("3/minute")
 async def send_sms_campaign(
@@ -827,6 +1265,12 @@ async def send_sms_campaign(
     viber_text: Optional[str] = Query(None, max_length=1000),
     button_caption: Optional[str] = Query(None, max_length=30),
     button_url: Optional[str] = Query(None, max_length=300),
+    # Optional in the signature only so that leaving it out is a 409 with the
+    # reason, like a wrong one, rather than FastAPI's 422 about a field.
+    confirm_campaign: Optional[str] = Query(
+        None, max_length=200,
+        description="The campaign name, typed back by whoever is sending",
+    ),
     user: dict = Depends(require_permission("sms", "edit")),
 ):
     """
@@ -844,7 +1288,24 @@ async def send_sms_campaign(
     to stand on its own with the link spelled out.
 
     Sending twice is refused: the campaign is stamped sent on the first pass.
+
+    Refused before the claim when `confirm_campaign` is missing or is not the
+    campaign's name. Refused after it — handed back, nothing sent — when the
+    roster overlaps a campaign sent in the last day (another's control at
+    all, another's targets unless this is its declared follow-up), when the
+    TurboSMS balance cannot be read, or when it does not cover the send.
     """
+    # The name typed back is checked here and not only in the dialog: a
+    # replayed request, a script or a second tab would otherwise skip the one
+    # deliberate act this send asks for. Before the claim, so it costs nothing.
+    if (confirm_campaign or "").strip() != campaign:
+        raise SmsRefusal(
+            409,
+            f"type the campaign name {campaign!r} to confirm the send — "
+            f"confirm_campaign is missing or does not match",
+            "confirm_mismatch", campaign=campaign,
+        )
+
     # Assembled before the claim, because it is built from query parameters
     # alone and can be rejected. Taking the claim first meant a caption with no
     # URL answered 400 with the campaign stamped sent — and nothing clears that
@@ -857,14 +1318,34 @@ async def send_sms_campaign(
         targets = await store.get_sms_campaign_targets(campaign)
     except ValueError as e:
         status = 404 if "not frozen" in str(e) else 409
-        raise HTTPException(status_code=status, detail=str(e))
+        raise _refused(status, e)
 
     if not targets:
         # Only knowable after the claim, so it has to be handed back here.
         await store.release_sms_campaign(campaign)
-        raise HTTPException(status_code=409, detail="campaign has no target recipients")
+        raise SmsRefusal(409, "campaign has no target recipients", "no_targets",
+                         campaign=campaign)
 
     by_phone = {t["phone"]: t["buyerId"] for t in targets}
+
+    try:
+        refusal = await _refuse_before_sending(store, campaign, len(by_phone), text)
+    except Exception:
+        # Nothing has left yet. A guard that could not answer must not leave
+        # the campaign claimed, or it is stuck unsendable with its roster unsent.
+        try:
+            await store.release_sms_campaign(campaign)
+        except Exception:  # noqa: BLE001 — the original failure is the one to raise
+            logger.exception("SMS claim could not be released: campaign=%s", campaign)
+        raise
+    if refusal is not None:
+        await store.release_sms_campaign(campaign)
+        logger.warning(
+            "SMS campaign send refused before the gateway: user=%s campaign=%s "
+            "reason=%s",
+            user.get("user_id"), campaign, json.loads(refusal.body)["reason"],
+        )
+        return refusal
 
     # A roster past the gateway's per-request limit is split, so a later batch
     # can fail with earlier ones already delivered. Those have to be recorded
@@ -890,7 +1371,7 @@ async def send_sms_campaign(
             # above keeps the claim, because messages did leave.
             await store.release_sms_campaign(campaign)
             logger.error("TurboSMS send failed: campaign=%s error=%s", campaign, e)
-            raise HTTPException(status_code=502, detail=str(e))
+            raise SmsRefusal(502, str(e), "gateway_refused", error=str(e))
         # A read timeout, a 5xx or an unreadable body is an unknown answer, not
         # a negative one: the whole batch was uploaded and the gateway may be
         # delivering it right now. Releasing here is how the roster gets sent
@@ -901,12 +1382,11 @@ async def send_sms_campaign(
             "TurboSMS send outcome unknown, claim kept: campaign=%s error=%s",
             campaign, e,
         )
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"{e}. The gateway may have accepted the batch, so the campaign "
-                f"stays claimed — check the TurboSMS panel before releasing it."
-            ),
+        raise SmsRefusal(
+            502,
+            f"{e}. The gateway may have accepted the batch, so the campaign "
+            f"stays claimed — check the TurboSMS panel before releasing it.",
+            "gateway_outcome_unknown", error=str(e),
         )
 
     accepted, failed, stoplisted = {}, {}, []
@@ -977,16 +1457,37 @@ def _build_viber(
 
 @router.get("/customers/sms/channels")
 @limiter.limit("30/minute")
-async def get_sms_channels(request: Request, user: dict = Depends(require_permission("sms", "view"))):
+async def get_sms_channels(
+    request: Request,
+    include_balance: bool = Query(
+        False, description="Also ask the gateway for the account balance",
+    ),
+    user: dict = Depends(require_permission("sms", "view")),
+):
     """
     Which channels this deployment can actually send on.
 
     Viber sender names are registered separately from SMS alpha names, so a
     working SMS setup says nothing about Viber. The dashboard needs to know
     before it offers the choice, rather than finding out from a 502.
+
+    `balance` is the TurboSMS account balance in ₴, asked of the gateway only
+    with `include_balance=true` — the send dialog asks, every other reader of
+    this configuration does not, and a configuration read should not depend on
+    the gateway answering. Null when not asked, not configured, or unreadable.
+    The send checks the balance again itself; this figure is for the page.
     """
     config = TurboSmsConfig()
+    balance = None
+    if include_balance and config.configured:
+        config.timeout = _BALANCE_READ_TIMEOUT_S
+        try:
+            async with TurboSmsClient(config) as client:
+                balance = await client.balance()
+        except TurboSmsError as e:
+            logger.warning("TurboSMS balance unreadable: %s", e)
     return {
+        "balance": balance,
         "sms": config.configured,
         "viber": config.viber_configured,
         "smsSender": config.sender or None,

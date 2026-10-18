@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { smsCost } from '../smsCost'
+import { smsCost, smsSendRequirement } from '../smsCost'
 
 // This mirrors tests/unit/test_turbosms.py::TestCountSegments. The two
 // implementations have to agree, or the counter under the textarea contradicts
@@ -57,5 +57,17 @@ describe('smsCost', () => {
 
   it('still counts a BMP symbol as one unit', () => {
     expect(smsCost('❤').characters).toBe(1)
+  })
+})
+
+describe('smsSendRequirement', () => {
+  it('asks the balance for the cost plus 2%, as the server does', () => {
+    // 100 recipients × 1 part × 1.28 ₴ = 128 ₴; with 2% = 130.56 ₴ — the
+    // figure the server's refusal names for the same send.
+    expect(smsSendRequirement(100, 1, 1.28)).toEqual({ cost: 128, required: 130.56 })
+  })
+
+  it('doubles with a second part', () => {
+    expect(smsSendRequirement(100, 2, 1.28)).toEqual({ cost: 256, required: 261.12 })
   })
 })

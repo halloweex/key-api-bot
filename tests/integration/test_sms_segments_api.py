@@ -911,6 +911,23 @@ class TestMultiTierSelection:
         assert "sms_aug_core-reactivation" in r.headers["content-disposition"]
 
 
+class _FundedGateway:
+    """A fake gateway whose balance covers any send these tests make.
+
+    The send reads the balance before it sends, so every fake that is meant to
+    reach `send` has to answer that first; the guard has tests of its own.
+    """
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def balance(self):
+        return 1_000_000.0
+
+
 class TestPartialSend:
     """A batch failing mid-roster must not look like a clean failure.
 
@@ -941,6 +958,9 @@ class TestPartialSend:
             async def release_sms_campaign(self, campaign):
                 recorded["released"] = campaign
 
+            async def find_sms_send_conflicts(self, campaign):
+                return []
+
         async def _fake_get_store():
             return _Store()
 
@@ -950,7 +970,7 @@ class TestPartialSend:
     def test_what_already_went_is_recorded(self, client, sending_store, monkeypatch):
         from core.turbosms import PartialSendError, SendResult, TurboSmsError
 
-        class _Client:
+        class _Client(_FundedGateway):
             async def __aenter__(self):
                 return self
 
@@ -970,7 +990,8 @@ class TestPartialSend:
         )
 
         body = client.post(
-            self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers(),
+            self.SEND_PATH, params={"text": "hi", "confirm_campaign": "aug"},
+            headers=_admin_headers(),
         ).json()
 
         assert sending_store["accepted"] == {1: "m-1"}, "the delivered one is kept"
@@ -982,7 +1003,7 @@ class TestPartialSend:
     ):
         from core.turbosms import TurboSmsError
 
-        class _Client:
+        class _Client(_FundedGateway):
             async def __aenter__(self):
                 return self
 
@@ -998,7 +1019,8 @@ class TestPartialSend:
         )
 
         r = client.post(
-            self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers(),
+            self.SEND_PATH, params={"text": "hi", "confirm_campaign": "aug"},
+            headers=_admin_headers(),
         )
 
         assert r.status_code == 502
@@ -1020,7 +1042,7 @@ class TestPartialSend:
         """
         from core.turbosms import TurboSmsError
 
-        class _Client:
+        class _Client(_FundedGateway):
             async def __aenter__(self):
                 return self
 
@@ -1035,7 +1057,8 @@ class TestPartialSend:
         )
 
         r = client.post(
-            self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers(),
+            self.SEND_PATH, params={"text": "hi", "confirm_campaign": "aug"},
+            headers=_admin_headers(),
         )
 
         assert r.status_code == 502
@@ -1047,7 +1070,7 @@ class TestPartialSend:
         """Messages left, so the campaign must never become sendable again."""
         from core.turbosms import PartialSendError, SendResult, TurboSmsError
 
-        class _Client:
+        class _Client(_FundedGateway):
             async def __aenter__(self):
                 return self
 
@@ -1065,7 +1088,8 @@ class TestPartialSend:
             "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _Client()
         )
 
-        client.post(self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers())
+        client.post(self.SEND_PATH, params={"text": "hi", "confirm_campaign": "aug"},
+                    headers=_admin_headers())
 
         assert "released" not in sending_store
 
@@ -1113,6 +1137,9 @@ class TestSendClaimIsNotAbandoned:
         async def release_sms_campaign(self, campaign):
             self.sent_at = None
 
+        async def find_sms_send_conflicts(self, campaign):
+            return []
+
         async def record_sms_send(self, campaign, accepted, stoplisted, failed, **kw):
             return {"campaign": campaign, "accepted": len(accepted),
                     "stoplisted": len(stoplisted), "failed": len(failed)}
@@ -1152,7 +1179,8 @@ class TestSendClaimIsNotAbandoned:
         """
         r = client.post(
             self.SEND_PATH,
-            params={"text": "hi", "channel": "viber_sms", "button_caption": "Shop"},
+            params={"text": "hi", "channel": "viber_sms", "button_caption": "Shop",
+                    "confirm_campaign": "aug"},
             headers=_admin_headers(),
         )
 
@@ -1166,13 +1194,14 @@ class TestSendClaimIsNotAbandoned:
         """The consequence, stated as the operator meets it."""
         client.post(
             self.SEND_PATH,
-            params={"text": "hi", "channel": "viber_sms", "button_caption": "Shop"},
+            params={"text": "hi", "channel": "viber_sms", "button_caption": "Shop",
+                    "confirm_campaign": "aug"},
             headers=_admin_headers(),
         )
 
         from core.turbosms import SendResult
 
-        class _Client:
+        class _Client(_FundedGateway):
             async def __aenter__(self):
                 return self
 
@@ -1187,7 +1216,8 @@ class TestSendClaimIsNotAbandoned:
             "web.routes.api.customers.TurboSmsClient", lambda *a, **kw: _Client()
         )
 
-        r = client.post(self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers())
+        r = client.post(self.SEND_PATH, params={"text": "hi", "confirm_campaign": "aug"},
+                    headers=_admin_headers())
 
         assert r.status_code == 200, \
             f"the corrected send must go through, got {r.status_code}: {r.text}"
@@ -1198,7 +1228,8 @@ class TestSendClaimIsNotAbandoned:
     ):
         """Emptiness is only knowable after the claim, so it must be released."""
         r = client.post(
-            self.SEND_PATH, params={"text": "hi"}, headers=_admin_headers(),
+            self.SEND_PATH, params={"text": "hi", "confirm_campaign": "aug"},
+            headers=_admin_headers(),
         )
 
         assert r.status_code == 409

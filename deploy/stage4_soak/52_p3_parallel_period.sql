@@ -31,9 +31,15 @@
 -- breach inside the day, a lever or fallback page still standing, the F1
 -- watch's latest probe inside the day found a fallback, or step 13 is on
 -- DuckDB. UNKNOWN: no F1 watch, a watch not written for 35 min, or one clean
--- for less than the day. PASS: otherwise, with how many of the 720 h are
+-- for less than the day. PASS: otherwise, with how many of the 336 h are
 -- behind it and what started the clock; "covered" is the period done.
 -- Undeclared, the check is not applicable.
+--
+-- NOT A BREACH HERE
+-- `duckdb_off_held_back` — KS_DUCKDB=off held on `on` by an unmet
+-- precondition of off. It breaks the week of silence (P4) and not this period
+-- (owner decision OD-S5-7): DuckDB became a writer of nothing, it is opened as
+-- it was all period.
 --
 -- WHAT IT CANNOT SEE
 -- Whatever P2 and F1 cannot. And it is not the stage-5 gate by itself: the

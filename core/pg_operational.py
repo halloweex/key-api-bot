@@ -105,7 +105,7 @@ import logging
 from dataclasses import dataclass
 import re
 import time
-from typing import Any, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -649,6 +649,32 @@ OPERATIONAL_REPLICATION_LOCK = asyncio.Lock()
 FORM_COPY_WAIT_S = 3.0
 
 
+# The three tables no write chain owns that are still copied out of DuckDB,
+# and that freeze as history under `KS_DUCKDB=off` (stage 5, PR-7; owner's
+# decision OD-S5-4, no DROP). Their DuckDB writers are already dead in the
+# target state: `warehouse_refreshes` is written by DuckDB's own warehouse
+# tick, which step 13 does not register; `reconciliation_log` has had no
+# writer since OD-10 retired the legacy reconciliation; and the keys of
+# `sync_metadata` that still move are the chains', which write them to
+# `meta.chain_watermarks`, where this copy never reaches (revision 0032) —
+# what is left there is what `core.pg_frozen_metadata` reads as the frozen
+# stand-in. So under `off` the copy stands down for them like for a chain's
+# tables, and the last copy is the record; the daily comparison stands down
+# with it (`stood_down_under_off`). Any other table this module copies that
+# no chain owns is still read out of DuckDB under `off` — and refused, counted
+# and paged there, rather than frozen in silence.
+DUCKDB_HISTORY_TABLES: Tuple[str, ...] = (
+    SYNC_METADATA_TABLE, REFRESHES_TABLE, RECONCILIATION_LOG_TABLE,
+)
+
+
+def stood_down_under_off() -> FrozenSet[str]:
+    """`DUCKDB_HISTORY_TABLES` under `KS_DUCKDB=off`; nothing under `on`."""
+    from core import duckdb_switch
+
+    return frozenset(DUCKDB_HISTORY_TABLES) if duckdb_switch.is_off() else frozenset()
+
+
 def _tables_to_ship(stood_down) -> Tuple[str, ...]:
     """Every table `replicate_operational` copies, minus the stood-down ones."""
     return tuple(
@@ -727,6 +753,8 @@ async def replicate_operational(
             # holds — and its tables are stamped failing, so the watermark says so
             # rather than aging quietly. Every other table still ships (DN-01).
             stood_down, chain_errors = stood_down_tables_checked()
+            # Under KS_DUCKDB=off the history tables too (`DUCKDB_HISTORY_TABLES`).
+            stood_down = stood_down | stood_down_under_off()
             # Before the owner rows are read, the local markers and flags are all
             # this run has, so a failure this early may stamp a table an owner row
             # would have held down. It is never written either way.
@@ -789,15 +817,23 @@ async def replicate_operational(
                             f"SELECT MAX({spec.watermark}) FROM {spec.pg_table}"
                         )
 
-            async with store.connection() as conn:
-                replaced = read_full_replace(conn, skip=stood_down)
-                appended = read_appends(conn, since, skip=stood_down)
-                totals = {
-                    spec.pg_table: conn.execute(
-                        f"SELECT COUNT(*) FROM {spec.dk_table}"
-                    ).fetchone()[0]
-                    for spec in _APPEND_ABOVE if spec.pg_table not in stood_down
-                }
+            # Under KS_DUCKDB=off, with nothing left to copy, DuckDB is not
+            # opened at all (stage 5, PR-7): every table here is a chain's or
+            # history. Under on it is read as it always was, empty or not.
+            from core import duckdb_switch
+
+            if shipping or not duckdb_switch.is_off():
+                async with store.connection() as conn:
+                    replaced = read_full_replace(conn, skip=stood_down)
+                    appended = read_appends(conn, since, skip=stood_down)
+                    totals = {
+                        spec.pg_table: conn.execute(
+                            f"SELECT COUNT(*) FROM {spec.dk_table}"
+                        ).fetchone()[0]
+                        for spec in _APPEND_ABOVE if spec.pg_table not in stood_down
+                    }
+            else:
+                replaced, appended, totals = {}, {}, {}
 
             async with pool.acquire() as conn:
                 async with conn.transaction():

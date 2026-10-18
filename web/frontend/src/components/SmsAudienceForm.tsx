@@ -1,280 +1,84 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useMemo, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import {
-  Banknote, CalendarClock, CalendarRange, ChevronDown, ChevronUp, Clock,
-  Layers, MapPin, Receipt, ShieldCheck, ShoppingBag, Sparkles, Store, Tag,
-  Ticket, UserPlus, Users, VenusAndMars, X,
-} from 'lucide-react'
-import { Badge } from './Badge'
+import { Plus } from 'lucide-react'
+import { AudienceGroupCard } from './AudienceGroupCard'
 import { Button } from './Button'
-import { Select } from './Select'
-import type { IconComponent } from './icons'
-import { useBrands, useCategories } from '../hooks/useApi'
+import { FilterChip } from './FilterChip'
+import { TemplateChips } from './TemplateChips'
+import { Wrapper } from './Wrapper'
+import { useBrands, useCategories, useSmsAudienceCounts } from '../hooks/useApi'
+import { useIsPhone } from '../hooks/useMediaQuery'
 import {
-  countFilters, dateToDaysAgo, daysAgoToDate,
-  DEFAULT_WINDOW_DAYS, MAX_WINDOW_DAYS, MIN_WINDOW_DAYS,
-} from '../utils/smsAudience'
-import { alphaFor, mdePercentagePoints, verdictFor, type MdeVerdict } from '../utils/mde'
+  applyTemplate, definitionToCriteria, emptyConditionGroup, newId, TEMPLATE_KEYS,
+  type AudienceDefinition, type ConditionGroup, type TemplateKey,
+} from '../utils/smsConditions'
+import { audienceToParams, MAX_AUDIENCE_GROUPS } from '../utils/smsAudience'
+import {
+  diagnoseGroup, diagnosisProbes, emptyKind, probeCount, type EmptyKind,
+} from '../utils/smsGroupDiagnosis'
 import { formatNumber } from '../utils/formatters'
-import type {
-  SmsAudienceCriteria, SmsAudienceFilters, SmsLtvBasis, SmsSegment,
-  SmsTier,
-} from '../types/api'
+import type { SmsAudienceGroupShare, SmsSegment, SmsTier } from '../types/api'
 
 // ─── SmsAudienceForm ─────────────────────────────────────────────────────────
 //
-// The controls that define who gets the message.
+// Step 1's body: who the campaign is for.
 //
-// Until this existed the audience was six numbers hardcoded in the API and one
-// dropdown on screen, so every campaign went to the same cohort and "everyone
-// who bought this brand since May" was not a thing anybody could ask for. The
-// filters here are the questions actually asked when a promotion is planned:
-// what they bought, how much they are worth, how long since they last came
-// back, and where they are.
+// It was a form with every field of every filter showing in every group —
+// about fifteen inputs a group, three screens with two groups — and the owner
+// got lost in it on the first real campaign. It is now built the way the
+// segment builders people already know are (Klaviyo, Shopify, Braze):
 //
-// Two families, and they read the customer differently. The aggregate ones
-// (recency, orders, value) narrow who is in the audience. The content ones
-// (brand, category, source, promocode) ask whether the customer ever bought a
-// particular thing — optionally within a window, which is what makes "since
-// May" expressible.
+// 1. «С чего начнём?» — a template, a past campaign or a saved audience,
+//    each of which fills the groups with ordinary, editable conditions;
+// 2. the groups: each one sentences joined by «и», and the groups joined by
+//    «ИЛИ» — a customer is in the audience if they match any group;
+// 3. what is common to the whole campaign: the value level as a filter.
 //
-// Every field states its own example under it. The filters are used a few
-// times a month by somebody who does not hold this model in their head, and
-// "Days since last order: 90 — quiet for three months" is the difference
-// between a control that is understood and one that is guessed at.
+// How the result is measured — the split by value level, its thresholds, the
+// ranking basis — is step 2's, beside the control group.
+//
+// Two kinds of preview besides the audience's own, both asked in turn through
+// one queue (`useSmsAudienceCounts`): which condition emptied a group, for a
+// group that brings nobody, and how many each template would select, once the
+// templates are on screen. The groups' questions go first — they are about the
+// audience being built.
 
-const SOURCES: Array<{ id: number; label: string }> = [
-  // The active sources, as Silver classifies them. Opencart (3) is deprecated
-  // and never reaches revenue, so offering it would be offering an empty set.
-  { id: 1, label: 'Instagram' },
-  { id: 2, label: 'Telegram' },
-  { id: 4, label: 'Shopify' },
-  { id: 5, label: 'Виставка' },
-]
+// A template that opens with a blank to fill selects nothing in particular yet.
+const UNCOUNTED_TEMPLATES: TemplateKey[] = ['brand']
 
-const TIERS: SmsTier[] = ['VIP', 'CORE', 'REACTIVATION']
+const LEVELS: SmsTier[] = ['VIP', 'CORE', 'REACTIVATION']
 
-const INPUT = `px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg
-               text-slate-800 placeholder:text-slate-300
-               focus:outline-none focus:ring-2 focus:ring-purple-500/30
-               focus:border-purple-400`
-
-function Chip({
-  active, onClick, children,
-}: {
-  active: boolean
-  onClick: () => void
-  children: React.ReactNode
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      className={`px-3.5 py-2 text-sm rounded-lg border transition-colors tabular-nums ${
-        active
-          ? 'border-purple-400 bg-purple-50 text-purple-800 font-medium'
-          : 'border-slate-200 text-slate-600 hover:border-slate-300 hover:bg-slate-50'
-      }`}
-    >
-      {children}
-    </button>
-  )
-}
-
-/** One family of filters, under the question it answers. */
-function Group({
-  icon: Icon, title, hint, children,
-}: {
-  icon: IconComponent
-  title: string
-  hint: string
-  children: React.ReactNode
-}) {
-  return (
-    <section className="rounded-lg border border-slate-200 bg-slate-50/70 p-4">
-      <div className="flex items-center gap-2">
-        <span className="text-slate-400"><Icon className="w-4 h-4" aria-hidden /></span>
-        <h4 className="text-sm font-semibold text-slate-800">{title}</h4>
-      </div>
-      <p className="text-xs text-slate-500 mt-1 mb-3 leading-snug">{hint}</p>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">{children}</div>
-    </section>
-  )
-}
-
-/** One control, its icon, and the example that says what goes in it. */
-function Field({
-  icon: Icon, label, example, children,
-}: {
-  icon: IconComponent
-  label: string
-  example?: string
-  children: React.ReactNode
-}) {
-  return (
-    <div>
-      <div className="flex items-center gap-1.5 mb-1.5">
-        <span className="text-slate-400"><Icon className="w-4 h-4" aria-hidden /></span>
-        <span className="text-sm font-medium text-slate-700">{label}</span>
-      </div>
-      {children}
-      {example && (
-        <p className="mt-1.5 text-xs text-slate-500 leading-snug">{example}</p>
-      )}
-    </div>
-  )
-}
-
-/** A from–to pair. The unit sits beside the boxes, not inside the label. */
-function NumberPair({
-  label, unit, fromPlaceholder, toPlaceholder, from, to, onFrom, onTo, step,
-}: {
-  label: string
-  unit?: string
-  fromPlaceholder?: string
-  toPlaceholder?: string
-  from: number | null | undefined
-  to: number | null | undefined
-  onFrom: (v: number | undefined) => void
-  onTo: (v: number | undefined) => void
-  step?: number
-}) {
-  const parse = (raw: string) => (raw === '' ? undefined : Number(raw))
-
-  return (
-    <div className="flex items-center gap-2">
-      <input
-        type="number" step={step} className={`${INPUT} w-24 tabular-nums`}
-        aria-label={`${label} min`} placeholder={fromPlaceholder}
-        value={from ?? ''} onChange={(e) => onFrom(parse(e.target.value))}
-      />
-      <span className="text-slate-400 text-sm">—</span>
-      <input
-        type="number" step={step} className={`${INPUT} w-24 tabular-nums`}
-        aria-label={`${label} max`} placeholder={toPlaceholder}
-        value={to ?? ''} onChange={(e) => onTo(parse(e.target.value))}
-      />
-      {unit && <span className="text-xs text-slate-500">{unit}</span>}
-    </div>
-  )
-}
-
-/** A picker that turns a list into removable chips. */
-function MultiPicker({
-  options, values, onChange, placeholder, label,
-}: {
-  options: Array<{ value: string; label: string }>
-  values: string[]
-  onChange: (next: string[]) => void
-  placeholder: string
-  label: string
-}) {
-  const remaining = options.filter((o) => !values.includes(o.value))
-
-  return (
-    <>
-      <Select
-        options={remaining}
-        value=""
-        onChange={(v) => v && onChange([...values, v])}
-        placeholder={placeholder}
-        aria-label={label}
-      />
-      {values.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {values.map((v) => (
-            <span
-              key={v}
-              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs rounded-md
-                         bg-purple-50 text-purple-800 border border-purple-100"
-            >
-              {options.find((o) => o.value === v)?.label ?? v}
-              <button
-                type="button"
-                aria-label={`remove ${v}`}
-                onClick={() => onChange(values.filter((x) => x !== v))}
-                className="text-purple-300 hover:text-purple-800"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-    </>
-  )
+function duplicate(group: ConditionGroup): ConditionGroup {
+  return {
+    id: newId('g'),
+    conditions: group.conditions.map((c) => ({ ...c, id: newId() })),
+  }
 }
 
 export const SmsAudienceForm = memo(function SmsAudienceForm({
   audience,
   onChange,
+  shares,
   segments,
+  library,
+  settled = true,
 }: {
-  audience: SmsAudienceCriteria
-  onChange: (next: SmsAudienceCriteria) => void
-  /** The arms of the audience as it currently stands, for the tier sizes. */
+  audience: AudienceDefinition
+  onChange: (next: AudienceDefinition) => void
+  /** Each group's part of the audience, from the latest preview. */
+  shares?: SmsAudienceGroupShare[]
+  /** The arms of the latest preview, for the size beside each level. */
   segments?: SmsSegment[]
+  /** "Like a past campaign" and the saved audiences, after the templates. */
+  library?: ReactNode
+  /** The shares are this audience's, not a previous one's still on screen. */
+  settled?: boolean
 }) {
   const { t } = useTranslation()
-  // Open. The filters are the reason this page was rebuilt; behind a chevron
-  // they read as an advanced corner, and the first person to use the wizard
-  // reported there were no date filters at all.
-  const [open, setOpen] = useState(true)
-  const [measureOpen, setMeasureOpen] = useState(false)
+  const phone = useIsPhone()
   const { data: brands } = useBrands()
   const { data: categories } = useCategories()
-
-  const filters = audience.filters
-  const active = countFilters(filters)
-
-  function setFilter<K extends keyof SmsAudienceFilters>(
-    key: K, value: SmsAudienceFilters[K],
-  ) {
-    const next = { ...filters }
-    if (value === undefined || value === '' || (Array.isArray(value) && !value.length)) {
-      delete next[key]
-    } else {
-      next[key] = value
-    }
-    onChange({ ...audience, filters: next })
-  }
-
-  const rules = audience.tierRules
-  // The thresholds the server would apply if these are left blank. They differ
-  // by basis, so the placeholders have to follow the basis rather than state a
-  // constant that is wrong half the time.
-  const defaults = audience.ltvBasis === 'margin'
-    ? { vip: 5500, core: 2750 }
-    : { vip: 10000, core: 5000 }
-
-  function setRule(key: keyof typeof rules, raw: string) {
-    const next = { ...rules }
-    if (raw === '') delete next[key]
-    else next[key] = Number(raw)
-    onChange({ ...audience, tierRules: next })
-  }
-
-  // What this split can prove. Precision comes from the smaller arm, so a
-  // three-way split of a small audience measures nothing — and the only place
-  // to say that is where the split is chosen.
-  const sensitivity = useMemo(() => {
-    const arms = (segments ?? []).filter(
-      (s) => audience.grouping !== 'rfm' || audience.tiers.length === 0
-        || audience.tiers.includes(s.tier),
-    )
-    const alpha = alphaFor(arms.length)
-    return arms
-      .map((arm) => {
-        const mde = mdePercentagePoints(arm.target, arm.holdout, { alpha })
-        return mde == null ? null : { tier: arm.tier, mde, verdict: verdictFor(mde)! }
-      })
-      .filter((x): x is { tier: SmsTier; mde: number; verdict: MdeVerdict } => x !== null)
-  }, [segments, audience.grouping, audience.tiers])
-
-  const worst: MdeVerdict = sensitivity.some((a) => a.verdict === 'hopeless')
-    ? 'hopeless'
-    : sensitivity.some((a) => a.verdict === 'tight') ? 'tight' : 'good'
+  const [editingId, setEditingId] = useState<string | null>(null)
 
   const brandOptions = useMemo(
     () => (brands ?? []).map((b) => ({ value: b.name, label: b.name })),
@@ -285,555 +89,198 @@ export const SmsAudienceForm = memo(function SmsAudienceForm({
     [categories],
   )
 
+  const groups = audience.groups
+  // Shares belong to the groups they were counted for. While a new preview is
+  // on its way after a group was added or removed they would be pinned to the
+  // wrong cards, so they are shown only when the counts line up.
+  const shown = shares?.length === groups.length ? shares : undefined
+
+  // ── Which condition emptied a group ─────────────────────────────────────
+  const empties = useMemo(() => (settled && shown ? groups.map((_, i) => emptyKind(shown[i])) : []),
+    [settled, shown, groups])
+  const probes = useMemo(() => empties.flatMap((kind, i) => (kind
+    ? diagnosisProbes(audience, i, kind).map((p) => ({ ...p, group: i, kind }))
+    : [])), [empties, audience])
+
+  // ── How many each template would select ─────────────────────────────────
+  // Keyed on what a template keeps of the audience — how it is measured —
+  // since it replaces the rest.
+  const [templatesSeen, setTemplatesSeen] = useState(false)
+  const { grouping, ltvBasis, holdoutPct, tierRules } = audience
+  const templateParams = useMemo(() => TEMPLATE_KEYS.map((key) => ({
+    key: `template:${key}`,
+    params: !templatesSeen || UNCOUNTED_TEMPLATES.includes(key) ? null
+      : audienceToParams(definitionToCriteria(applyTemplate(key, {
+          grouping, ltvBasis, holdoutPct, tierRules, tiers: [], groups: [],
+        }).definition)),
+  })), [templatesSeen, grouping, ltvBasis, holdoutPct, tierRules])
+
+  const counts = useSmsAudienceCounts([
+    ...probes.map((p) => ({ key: p.key, params: p.params })),
+    ...templateParams,
+  ])
+
+  const diagnoses = groups.map((_, i) => {
+    const kind = empties[i] as EmptyKind | null | undefined
+    if (!kind) return undefined
+    const byCondition: Record<string, number | null | undefined> = {}
+    for (const p of probes.filter((x) => x.group === i)) {
+      const c = counts[p.key]
+      byCondition[p.without] = c?.status === 'done' ? probeCount(kind, c.data)
+        : c?.status === 'error' ? null : undefined
+    }
+    return diagnoseGroup(audience, i, kind, byCondition)
+  })
+
+  const templateCount = (key: TemplateKey) => {
+    const c = counts[`template:${key}`]
+    if (!c || c.status === 'error') return undefined
+    return c.status === 'loading' ? '…' : formatNumber(c.data.totals.customers)
+  }
+
+  function setGroup(index: number, next: ConditionGroup) {
+    onChange({ ...audience, groups: groups.map((g, i) => (i === index ? next : g)) })
+  }
+
+  // A template replaces every group. One tap on the wrong chip must not cost
+  // an audience that took ten decisions, so the one before stays a tap away.
+  const [beforeTemplate, setBeforeTemplate] = useState<AudienceDefinition | null>(null)
+
+  function pickTemplate(key: string) {
+    const { definition, focus } = applyTemplate(key as TemplateKey, audience)
+    const hadConditions = audience.groups.some((g) => g.conditions.length > 0)
+    setBeforeTemplate(hadConditions ? (beforeTemplate ?? audience) : null)
+    onChange(definition)
+    setEditingId(focus ?? null)
+  }
+
+  const canAddGroup = groups.length < MAX_AUDIENCE_GROUPS
+  const firstHasConditions = (groups[0]?.conditions.length ?? 0) > 0
+
   return (
-    <div className="space-y-4">
-      {/* ── The filters themselves ───────────────────────────────────── */}
-      <div>
-        <button
-          type="button"
-          onClick={() => setOpen(!open)}
-          aria-expanded={open}
-          className="flex items-center gap-1.5 text-sm font-medium text-slate-700
-                     hover:text-slate-900"
-        >
-          {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          {t('sms.filtersTitle')}
-          {active > 0 && <Badge tone="purple">{active}</Badge>}
-        </button>
-        <p className="mt-1 text-xs text-slate-500">{t('sms.filtersHint')}</p>
-
-        {open && (
-          <div className="mt-3 space-y-3">
-            {/* ── When they bought ─────────────────────────────────── */}
-            <Group
-              icon={Clock}
-              title={t('sms.filterGroupWhen')}
-              hint={t('sms.filterGroupWhenHint')}
-            >
-              <Field
-                icon={CalendarRange}
-                label={t('sms.filterWindow')}
-                example={t('sms.filterWindowHint')}
-              >
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    min={MIN_WINDOW_DAYS}
-                    max={MAX_WINDOW_DAYS}
-                    className={`${INPUT} w-24 tabular-nums`}
-                    aria-label={t('sms.filterWindow')}
-                    value={audience.maxRecencyDays}
-                    onChange={(e) => {
-                      const raw = Number(e.target.value)
-                      // Clamped rather than validated: an out-of-range window
-                      // is a 422 from the server and an empty screen here.
-                      const days = Number.isFinite(raw)
-                        ? Math.min(MAX_WINDOW_DAYS, Math.max(MIN_WINDOW_DAYS, raw))
-                        : DEFAULT_WINDOW_DAYS
-                      onChange({ ...audience, maxRecencyDays: days })
-                    }}
-                  />
-                  <span className="text-xs text-slate-500">{t('sms.unitDays')}</span>
-                </div>
-              </Field>
-
-              <Field
-                icon={CalendarClock}
-                label={t('sms.filterLastOrder')}
-                example={
-                  filters.recencyMin != null || filters.recencyMax != null
-                    ? t('sms.filterLastOrderAsDays', {
-                        from: filters.recencyMin ?? 0,
-                        to: filters.recencyMax ?? '∞',
-                      })
-                    : t('sms.filterLastOrderHint')
-                }
-              >
-                <div className="flex items-center gap-2">
-                  <input
-                    type="date" className={`${INPUT} w-full`}
-                    aria-label={t('sms.filterLastOrderFrom')}
-                    value={daysAgoToDate(filters.recencyMax)}
-                    onChange={(e) => setFilter('recencyMax', dateToDaysAgo(e.target.value))}
-                  />
-                  <span className="text-slate-400 text-sm">—</span>
-                  <input
-                    type="date" className={`${INPUT} w-full`}
-                    aria-label={t('sms.filterLastOrderTo')}
-                    value={daysAgoToDate(filters.recencyMin)}
-                    onChange={(e) => setFilter('recencyMin', dateToDaysAgo(e.target.value))}
-                  />
-                </div>
-              </Field>
-
-              <Field
-                icon={Clock}
-                label={t('sms.filterRecency')}
-                example={t('sms.filterRecencyHint')}
-              >
-                <NumberPair
-                  label={t('sms.filterRecency')}
-                  unit={t('sms.unitDays')}
-                  fromPlaceholder="90" toPlaceholder="270"
-                  from={filters.recencyMin} to={filters.recencyMax}
-                  onFrom={(v) => setFilter('recencyMin', v)}
-                  onTo={(v) => setFilter('recencyMax', v)}
-                />
-              </Field>
-
-              <Field
-                icon={UserPlus}
-                label={t('sms.filterFirstOrder')}
-                example={t('sms.exFirstOrder')}
-              >
-                <div className="flex items-center gap-2">
-                  <input
-                    type="date" className={`${INPUT} w-full`}
-                    aria-label={t('sms.filterFirstOrderFrom')}
-                    value={filters.firstOrderFrom ?? ''}
-                    onChange={(e) => setFilter('firstOrderFrom', e.target.value)}
-                  />
-                  <span className="text-slate-400 text-sm">—</span>
-                  <input
-                    type="date" className={`${INPUT} w-full`}
-                    aria-label={t('sms.filterFirstOrderTo')}
-                    value={filters.firstOrderTo ?? ''}
-                    onChange={(e) => setFilter('firstOrderTo', e.target.value)}
-                  />
-                </div>
-              </Field>
-            </Group>
-
-            {/* The one contradiction the two time rules can produce: asking for
-                people quieter than the window itself returns nobody, and the
-                funnel alone would not say why. */}
-            {filters.recencyMin != null && filters.recencyMin >= audience.maxRecencyDays && (
-              <p className="text-sm text-amber-800 bg-amber-50 border border-amber-100
-                            rounded-lg px-3 py-2">
-                {t('sms.windowConflict', {
-                  window: audience.maxRecencyDays, min: filters.recencyMin,
-                })}
-              </p>
+    <Wrapper dir="column" gap="lg">
+      <TemplateChips
+        title={t('sms.tpl.title')}
+        items={TEMPLATE_KEYS.map((key) => ({
+          key, label: t(`sms.tpl.${key}`), hint: t(`sms.tpl.${key}Hint`),
+          count: templateCount(key),
+        }))}
+        onPick={pickTemplate}
+        onVisible={() => setTemplatesSeen(true)}
+        extra={(
+          <Wrapper dir="column" gap="sm">
+            {library}
+            {beforeTemplate && (
+              <Wrapper dir="row" gap="sm" align="center" wrap>
+                <span className="text-xs text-slate-600">{t('sms.tpl.replaced')}</span>
+                <Button size="sm" variant="ghost" onClick={() => {
+                  onChange(beforeTemplate)
+                  setBeforeTemplate(null)
+                  setEditingId(null)
+                }}>
+                  {t('sms.tpl.undo')}
+                </Button>
+              </Wrapper>
             )}
-
-            {/* ── How much they bought ─────────────────────────────── */}
-            <Group
-              icon={Banknote}
-              title={t('sms.filterGroupHowMuch')}
-              hint={t('sms.filterGroupHowMuchHint')}
-            >
-              <Field
-                icon={ShoppingBag}
-                label={t('sms.filterOrders')}
-                example={t('sms.exOrders')}
-              >
-                <NumberPair
-                  label={t('sms.filterOrders')}
-                  unit={t('sms.unitOrders')}
-                  fromPlaceholder="2" toPlaceholder="10"
-                  from={filters.ordersMin} to={filters.ordersMax}
-                  onFrom={(v) => setFilter('ordersMin', v)}
-                  onTo={(v) => setFilter('ordersMax', v)}
-                />
-              </Field>
-
-              <Field
-                icon={Banknote}
-                label={t('sms.filterLtv')}
-                example={t('sms.exLtv')}
-              >
-                <NumberPair
-                  label={t('sms.filterLtv')}
-                  unit="₴"
-                  fromPlaceholder="5000" toPlaceholder="50000"
-                  from={filters.ltvMin} to={filters.ltvMax}
-                  onFrom={(v) => setFilter('ltvMin', v)}
-                  onTo={(v) => setFilter('ltvMax', v)}
-                  step={100}
-                />
-              </Field>
-
-              <Field
-                icon={Receipt}
-                label={t('sms.filterAov')}
-                example={t('sms.exAov')}
-              >
-                <NumberPair
-                  label={t('sms.filterAov')}
-                  unit="₴"
-                  fromPlaceholder="1000" toPlaceholder="5000"
-                  from={filters.aovMin} to={filters.aovMax}
-                  onFrom={(v) => setFilter('aovMin', v)}
-                  onTo={(v) => setFilter('aovMax', v)}
-                  step={100}
-                />
-              </Field>
-
-              <Field
-                icon={Sparkles}
-                label={t('sms.levelLabel')}
-                example={
-                  audience.tiers.length === 0 ? t('sms.levelAllHint') : undefined
-                }
-              >
-                <div className="flex flex-wrap gap-2" role="group" aria-label={t('sms.levelLabel')}>
-                  {TIERS.map((tier) => {
-                    const size = segments?.find((s) => s.tier === tier)?.target
-                    return (
-                      <Chip
-                        key={tier}
-                        active={audience.tiers.includes(tier)}
-                        onClick={() =>
-                          onChange({
-                            ...audience,
-                            tiers: audience.tiers.includes(tier)
-                              ? audience.tiers.filter((x) => x !== tier)
-                              : [...audience.tiers, tier],
-                          })}
-                      >
-                        {t(`sms.tier.${tier}`)}
-                        {size != null && ` · ${formatNumber(size)}`}
-                      </Chip>
-                    )
-                  })}
-                </div>
-              </Field>
-
-              <Field
-                icon={Banknote}
-                label={t('sms.basisLabel')}
-                example={t('sms.basisHint')}
-              >
-                <Select
-                  options={[
-                    { value: 'margin', label: t('sms.basisMargin') },
-                    { value: 'revenue', label: t('sms.basisRevenue') },
-                  ]}
-                  value={audience.ltvBasis}
-                  onChange={(v) =>
-                    onChange({ ...audience, ltvBasis: (v as SmsLtvBasis) || 'margin' })}
-                  allowEmpty={false}
-                  aria-label={t('sms.basisLabel')}
-                />
-              </Field>
-
-            </Group>
-
-            {/* ── What they bought ─────────────────────────────────── */}
-            <Group
-              icon={ShoppingBag}
-              title={t('sms.filterGroupWhat')}
-              hint={t('sms.filterGroupWhatHint')}
-            >
-              <Field
-                icon={Tag}
-                label={t('sms.filterBrand')}
-                example={t('sms.exBrand')}
-              >
-                <MultiPicker
-                  label={t('sms.filterBrand')}
-                  options={brandOptions}
-                  values={filters.brands ?? []}
-                  onChange={(v) => setFilter('brands', v)}
-                  placeholder={t('sms.filterBrandPlaceholder')}
-                />
-              </Field>
-
-              <Field
-                icon={Layers}
-                label={t('sms.filterCategory')}
-                example={t('sms.exCategory')}
-              >
-                <MultiPicker
-                  label={t('sms.filterCategory')}
-                  options={categoryOptions}
-                  values={(filters.categoryIds ?? []).map(String)}
-                  onChange={(v) => setFilter('categoryIds', v.map(Number))}
-                  placeholder={t('sms.filterCategoryPlaceholder')}
-                />
-              </Field>
-
-              <Field
-                icon={Store}
-                label={t('sms.filterSource')}
-                example={t('sms.exSource')}
-              >
-                <div className="flex flex-wrap gap-2">
-                  {SOURCES.map((s) => (
-                    <Chip
-                      key={s.id}
-                      active={(filters.sourceIds ?? []).includes(s.id)}
-                      onClick={() => {
-                        const current = filters.sourceIds ?? []
-                        setFilter(
-                          'sourceIds',
-                          current.includes(s.id)
-                            ? current.filter((x) => x !== s.id)
-                            : [...current, s.id],
-                        )
-                      }}
-                    >
-                      {s.label}
-                    </Chip>
-                  ))}
-                </div>
-              </Field>
-
-              <Field
-                icon={Ticket}
-                label={t('sms.filterPromocode')}
-                example={t('sms.exPromocode')}
-              >
-                <input
-                  type="text"
-                  className={`${INPUT} w-full`}
-                  placeholder="KS-AUG"
-                  maxLength={40}
-                  aria-label={t('sms.filterPromocode')}
-                  value={filters.promocodeUsed ?? ''}
-                  onChange={(e) => setFilter('promocodeUsed', e.target.value)}
-                />
-              </Field>
-
-              {/* Sits inside this group because it qualifies only this group:
-                  it is "bought that, recently", not a rule of its own. */}
-              <Field
-                icon={CalendarClock}
-                label={t('sms.filterBoughtWithin')}
-                example={t('sms.filterBoughtWithinHint')}
-              >
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    className={`${INPUT} w-24 tabular-nums`}
-                    placeholder="180"
-                    aria-label={t('sms.filterBoughtWithin')}
-                    value={filters.boughtWithinDays ?? ''}
-                    onChange={(e) =>
-                      setFilter(
-                        'boughtWithinDays',
-                        e.target.value === '' ? undefined : Number(e.target.value),
-                      )}
-                  />
-                  <span className="text-xs text-slate-500">{t('sms.unitDays')}</span>
-                </div>
-              </Field>
-            </Group>
-
-            {/* ── Who they are ─────────────────────────────────────── */}
-            <Group
-              icon={Users}
-              title={t('sms.filterGroupWho')}
-              hint={t('sms.filterGroupWhoHint')}
-            >
-              <Field
-                icon={VenusAndMars}
-                label={t('sms.filterGender')}
-                example={t('sms.exGender')}
-              >
-                <div
-                  className="flex flex-wrap gap-2"
-                  role="group"
-                  aria-label={t('sms.filterGender')}
-                >
-                  {(['f', 'm'] as const).map((g) => (
-                    <Chip
-                      key={g}
-                      active={(filters.genders ?? []).includes(g)}
-                      onClick={() => {
-                        const on = filters.genders ?? []
-                        setFilter(
-                          'genders',
-                          on.includes(g) ? on.filter((x) => x !== g) : [...on, g],
-                        )
-                      }}
-                    >
-                      {t(g === 'f' ? 'sms.genderFemale' : 'sms.genderMale')}
-                    </Chip>
-                  ))}
-                </div>
-                {(filters.genders ?? []).length > 0 && (
-                  <p className="mt-1.5 text-xs text-slate-500">
-                    {t('sms.genderNullNote')}
-                  </p>
-                )}
-              </Field>
-
-              <Field
-                icon={ShieldCheck}
-                label={t('sms.filterGenderConfidence')}
-                example={t('sms.exGenderConfidence')}
-              >
-                <Select
-                  options={[
-                    { value: 'medium', label: t('sms.genderConfAny') },
-                    { value: 'high', label: t('sms.genderConfHigh') },
-                    { value: 'certain', label: t('sms.genderConfCertain') },
-                  ]}
-                  value={filters.genderMinConfidence ?? ''}
-                  onChange={(v) =>
-                    setFilter(
-                      'genderMinConfidence',
-                      (v as 'certain' | 'high' | 'medium') || null,
-                    )}
-                  aria-label={t('sms.filterGenderConfidence')}
-                />
-              </Field>
-
-              <Field
-                icon={MapPin}
-                label={t('sms.filterCity')}
-                example={t('sms.exCity')}
-              >
-                <input
-                  type="text"
-                  className={`${INPUT} w-full`}
-                  placeholder={t('sms.filterCityPlaceholder')}
-                  aria-label={t('sms.filterCity')}
-                  value={(filters.cities ?? []).join(', ')}
-                  onChange={(e) =>
-                    setFilter(
-                      'cities',
-                      e.target.value.split(',').map((c) => c.trim()).filter(Boolean),
-                    )}
-                />
-              </Field>
-            </Group>
-
-            {active > 0 && (
-              <Button
-                variant="secondary" size="sm"
-                onClick={() => onChange({ ...audience, filters: {} })}
-              >
-                {t('sms.clearFilters')}
-              </Button>
-            )}
-          </div>
+          </Wrapper>
         )}
-      </div>
+      />
 
-      {/* ── Measurement, folded away ─────────────────────────────────── */}
-      {/* Off the manager's path on purpose. Building a campaign is: who gets
-          it, what it says, send. Arms, thresholds and multiplicity corrections
-          are an analyst's questions, and putting them in the middle of that
-          path is what made the sequence unreadable — filters, then somehow
-          three tiers. One switch, phrased as what it gets you and what it
-          costs, and everything else stays folded. */}
-      <div>
-        <button
-          type="button"
-          onClick={() => setMeasureOpen(!measureOpen)}
-          aria-expanded={measureOpen}
-          className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-700"
-        >
-          {measureOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          {t('sms.measureTitle')}
-          {audience.grouping === 'rfm' && <Badge tone="purple">{t('sms.measureOn')}</Badge>}
-        </button>
-
-        {measureOpen && (
-          <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50/70 p-4
-                          flex flex-col gap-3">
-            <Field
-              icon={Banknote}
-              label={t('sms.tierRulesLabel')}
-              example={t('sms.tierRulesHint')}
-              >
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-600 w-24">{t('sms.tier.VIP')}</span>
-                  <span className="text-xs text-slate-400">≥</span>
-                  <input
-                    type="number" step={100} className={`${INPUT} w-28 tabular-nums`}
-                    aria-label={`${t('sms.tier.VIP')} ${t('sms.filterLtv')}`}
-                    placeholder={String(defaults.vip)}
-                    value={rules.vipLtv ?? ''}
-                    onChange={(e) => setRule('vipLtv', e.target.value)}
-                  />
-                  <span className="text-xs text-slate-500">₴</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-600 w-24">{t('sms.tier.CORE')}</span>
-                  <span className="text-xs text-slate-400">≥</span>
-                  <input
-                    type="number" className={`${INPUT} w-16 tabular-nums`}
-                    aria-label={`${t('sms.tier.CORE')} ${t('sms.filterOrders')}`}
-                    placeholder="2"
-                    value={rules.coreMinOrders ?? ''}
-                    onChange={(e) => setRule('coreMinOrders', e.target.value)}
-                  />
-                  <span className="text-xs text-slate-500">{t('sms.orRule')}</span>
-                  <input
-                    type="number" step={100} className={`${INPUT} w-24 tabular-nums`}
-                    aria-label={`${t('sms.tier.CORE')} ${t('sms.filterLtv')}`}
-                    placeholder={String(defaults.core)}
-                    value={rules.coreLtv ?? ''}
-                    onChange={(e) => setRule('coreLtv', e.target.value)}
-                  />
-                  <span className="text-xs text-slate-500">₴</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-600 w-24">
-                    {t('sms.tier.REACTIVATION')}
-                  </span>
-                  <span className="text-xs text-slate-400">≤</span>
-                  <input
-                    type="number" className={`${INPUT} w-20 tabular-nums`}
-                    aria-label={`${t('sms.tier.REACTIVATION')} ${t('sms.filterRecency')}`}
-                    placeholder="120"
-                    value={rules.reactivationMaxRecency ?? ''}
-                    onChange={(e) => setRule('reactivationMaxRecency', e.target.value)}
-                  />
-                  <span className="text-xs text-slate-500">{t('sms.unitDays')}</span>
-                </div>
-              </div>
-              </Field>
-            <label className="flex items-start gap-2.5 cursor-pointer">
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={audience.grouping === 'rfm'}
-                onChange={(e) =>
-                  onChange({ ...audience, grouping: e.target.checked ? 'rfm' : 'single' })}
-              />
-              <span>
-                <span className="text-sm font-medium text-slate-800">
-                  {t('sms.measureSplit')}
+      <Wrapper dir="column" gap="sm">
+        {groups.map((group, i) => (
+          <Wrapper key={group.id} dir="column" gap="sm">
+            {i > 0 && (
+              <div className="flex items-center gap-3" role="separator"
+                   aria-label={t('sms.groupsOrLabel')}>
+                <span className="h-px flex-1 bg-purple-200" aria-hidden />
+                <span className="rounded-full bg-purple-100 px-3 py-0.5 text-xs font-bold
+                                 uppercase tracking-wider text-purple-800">
+                  {t('sms.groupsOr')}
                 </span>
-                <span className="block text-xs text-slate-500 leading-snug mt-0.5">
-                  {t('sms.measureSplitHint')}
-                </span>
-              </span>
-            </label>
-
-            {sensitivity.length > 0 && (
-              <div>
-                <p className="text-xs font-medium text-slate-700">{t('sms.mdeLabel')}</p>
-                <ul className="mt-1 space-y-1">
-                  {sensitivity.map((arm) => (
-                    <li key={arm.tier} className="flex items-baseline gap-2 text-sm">
-                      <span className="text-slate-600 w-28">{t(`sms.tier.${arm.tier}`)}</span>
-                      <span
-                        className={`tabular-nums font-medium ${
-                          arm.verdict === 'good'
-                            ? 'text-green-700'
-                            : arm.verdict === 'tight' ? 'text-amber-700' : 'text-red-700'
-                        }`}
-                      >
-                        {t('sms.mdeValue', { pp: arm.mde.toFixed(2) })}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-                <p className="mt-1.5 text-xs text-slate-500 leading-snug">
-                  {t(worst === 'hopeless' ? 'sms.mdeHopeless'
-                     : worst === 'tight' ? 'sms.mdeTight' : 'sms.mdeGood')}
-                </p>
+                <span className="h-px flex-1 bg-purple-200" aria-hidden />
               </div>
             )}
-          </div>
+            <AudienceGroupCard
+              index={i}
+              group={group}
+              onChange={(next) => setGroup(i, next)}
+              onRemove={groups.length > 1
+                ? () => onChange({ ...audience, groups: groups.filter((_, j) => j !== i) })
+                : undefined}
+              onDuplicate={canAddGroup && group.conditions.length > 0
+                ? () => onChange({
+                    ...audience,
+                    groups: [...groups.slice(0, i + 1), duplicate(group), ...groups.slice(i + 1)],
+                  })
+                : undefined}
+              share={shown?.[i]}
+              single={groups.length === 1}
+              editingId={editingId}
+              onEditingChange={setEditingId}
+              phone={phone}
+              brandOptions={brandOptions}
+              categoryOptions={categoryOptions}
+              diagnosis={diagnoses[i]}
+            />
+          </Wrapper>
+        ))}
+
+        {firstHasConditions && (
+          <Wrapper dir="row" gap="sm" align="center" wrap>
+            <Button
+              variant="secondary" size="sm"
+              disabled={!canAddGroup}
+              onClick={() => onChange({ ...audience, groups: [...groups, emptyConditionGroup()] })}
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden /> {t('sms.groupAdd')}
+            </Button>
+            <span className="text-xs text-slate-500">
+              {canAddGroup
+                ? t('sms.groupAddHint')
+                : t('sms.groupMax', { max: MAX_AUDIENCE_GROUPS })}
+            </span>
+          </Wrapper>
         )}
-      </div>
-    </div>
+      </Wrapper>
+
+      {/* Applied to everybody the groups selected, after one SMS per phone:
+          "VIPs only" is the VIPs among the union, not a condition of one
+          group. */}
+      <section aria-label={t('sms.commonTitle')}
+               className="rounded-xl border border-slate-200 bg-white p-3 sm:p-4">
+        <Wrapper dir="column" gap="sm">
+          <h3 className="text-sm font-semibold text-slate-800">
+            {t('sms.commonTitle')}
+            <span className="font-normal text-slate-500"> · {t('sms.levelLabel')}</span>
+          </h3>
+          <div role="group" aria-label={t('sms.levelLabel')}>
+            <Wrapper dir="row" gap="xs" wrap>
+              {LEVELS.map((tier) => {
+                const size = segments?.find((s) => s.tier === tier)?.target
+                return (
+                  <FilterChip
+                    key={tier}
+                    size="md"
+                    active={audience.tiers.includes(tier)}
+                    onClick={() => onChange({
+                      ...audience,
+                      tiers: audience.tiers.includes(tier)
+                        ? audience.tiers.filter((x) => x !== tier)
+                        : [...audience.tiers, tier],
+                    })}
+                  >
+                    {t(`sms.tier.${tier}`)}
+                    {size != null && ` · ${formatNumber(size)}`}
+                  </FilterChip>
+                )
+              })}
+            </Wrapper>
+          </div>
+          <p className="text-xs text-slate-500">
+            {audience.tiers.length === 0 ? t('sms.levelAllHint') : t('sms.levelHint')}
+          </p>
+        </Wrapper>
+      </section>
+    </Wrapper>
   )
 })

@@ -168,7 +168,7 @@ def _make_world(tmp_path, *, real_gpg=False):
     tmp_path = tmp_path.resolve()
     root = tmp_path / "repo"
     (root / "deploy").mkdir(parents=True)
-    for name in ("ark_ship.sh", "pg_offsite_lib.sh", "ark_freeze.py"):
+    for name in ("ark_ship.sh", "pg_offsite_lib.sh", "ark_freeze.py", "gpg_safe.sh"):
         shutil.copy(DEPLOY / name, root / "deploy" / name)
     (root / "data").mkdir()
     source = root / "data" / "analytics.duckdb"
@@ -220,6 +220,7 @@ def _make_world(tmp_path, *, real_gpg=False):
                 "FAKE_SFTP_CALLS": str(root / "calls-sftp.log"),
                 "FAKE_GPG_CALLS": str(root / "calls-gpg.log"),
                 "FAKE_DOCKER_CALLS": str(root / "calls-docker.log"),
+                "GPG_SAFE_DELAYS": "0 0",
             })
             env.update({k: str(v) for k, v in env_extra.items()})
             for name in ("sftp", "gpg", "docker"):
@@ -260,6 +261,15 @@ def _make_world(tmp_path, *, real_gpg=False):
 @pytest.fixture
 def world(tmp_path):
     return _make_world(tmp_path)
+
+
+@pytest.mark.parametrize("call", [1, 2], ids=["encrypt", "decrypt"])
+def test_a_lost_agent_is_asked_again_on_either_ark_call(world, call):
+    """The encryption is a bare call under errexit, the read-back sits behind
+    `|| fail`: either one losing its agent once still ships the Ark."""
+    run = world.run("--source", "data/analytics.duckdb", FAKE_GPG_NO_AGENT_AT=call)
+    assert run.code == 0, run.out
+    assert "ARK SHIPPED AND VERIFIED" in run.out and "asking again" in run.out
 
 
 @pytest.fixture(scope="module")

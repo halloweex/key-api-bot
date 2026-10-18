@@ -2622,6 +2622,11 @@ class DuckDBStore(
         KeyCRM failing — was never fetched by the incremental sync at all.
         Present, Postgres's value wins: the copy-back deletes it on release,
         and a stale one left behind only widens the window.
+
+        Under `KS_DUCKDB=off` the inherited stamp is read from DuckDB's
+        `sync_metadata` as Postgres last copied it (`app.sync_metadata`,
+        `core.pg_frozen_metadata`): the same value, since it stopped moving
+        at the latch, and the file is not opened (stage 5, PR-5).
         """
         full_key = f"last_sync_{key}"
         # Only the chain that owns this key is asked — never every chain, or a
@@ -2635,7 +2640,11 @@ class DuckDBStore(
             if value is not None or not getattr(
                     chain, "CHAIN_WATERMARK_INHERITS_DUCKDB", False):
                 return value
-            # Inherited: DuckDB's frozen stamp, read below.
+            # Inherited: DuckDB's frozen stamp — under `off`, its copy.
+            if duckdb_switch.is_off():
+                from core.pg_frozen_metadata import frozen_stamp
+                return await frozen_stamp(full_key)
+            # Under `on`, read below.
         async with self.connection() as conn:
             result = conn.execute(
                 "SELECT value FROM sync_metadata WHERE key = ?",

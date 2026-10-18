@@ -10,8 +10,15 @@ stop believing in.
 So each script is copied into a scratch repository root, given a directory to
 treat as the Storage Box, and run against fakes on PATH: `sftp` speaks the
 batch mini-language against that directory, `gpg` prefixes a marker line
-instead of encrypting, `flock` answers held or free, and `docker` reports row
-counts. Every fake records its calls, which is how the promises are checked.
+instead of encrypting, `flock` answers held or free, `docker` reports row
+counts, and `date +%u` names the weekday a test asks for. Every fake records
+its calls, which is how the promises are checked.
+
+Since stage 5 (OD-S5-6) every shipment carries `.env` beside the dump — the
+copy that rode only in the DuckDB Parquet archive, whose nightly branch the
+week of silence retires — so the shipment is four files, and
+offsite_check.sh reports the DuckDB copy as frozen, never judged, while
+`.env` says KS_DUCKDB=off.
 
 The one thing a fake cannot prove is that real gpg round-trips, so
 `test_real_gpg_round_trips` runs when a real one is installed and skips when
@@ -86,9 +93,18 @@ exit 0
 # the two ways a passphrase file can betray the archive: `fail` is the rotated
 # or truncated one, which is what the nightly read-back could never see while
 # it only hashed ciphertext; `garble` is a round trip that succeeds and returns
-# something else.
+# something else. FAKE_GPG_DECRYPT_ONLY narrows either to the decrypts whose
+# input path contains it — one file of the shipment at a time.
 FAKE_GPG = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_GPG_CALLS"
+if [ "${FAKE_GPG_NO_AGENT:-}" = always ] || {
+        [ -n "${FAKE_GPG_NO_AGENT_ONCE:-}" ] && [ ! -e "$FAKE_GPG_NO_AGENT_ONCE" ]; } || {
+        [ -n "${FAKE_GPG_NO_AGENT_AT:-}" ] && [ "$(grep -c . "$FAKE_GPG_CALLS")" = "$FAKE_GPG_NO_AGENT_AT" ]; }; then
+    [ -n "${FAKE_GPG_NO_AGENT_ONCE:-}" ] && : > "$FAKE_GPG_NO_AGENT_ONCE"
+    echo "gpg: failed to start gpg-agent '/usr/bin/gpg-agent': General error" >&2
+    echo "gpg: problem with the agent: No agent running" >&2
+    exit 2
+fi
 out=""; in=""; pf=""; mode=enc
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -104,10 +120,12 @@ done
 if [ "$mode" = enc ]; then
     { printf 'FAKEGPG\n'; cat "$in"; } > "$out"
 else
-    [ "${FAKE_GPG_DECRYPT:-}" = fail ] && { echo "gpg: decryption failed" >&2; exit 2; }
+    betray="${FAKE_GPG_DECRYPT:-}"
+    case "$in" in *"${FAKE_GPG_DECRYPT_ONLY:-}"*) ;; *) betray="" ;; esac
+    [ "$betray" = fail ] && { echo "gpg: decryption failed" >&2; exit 2; }
     head -n 1 "$in" | grep -qx FAKEGPG || { echo "gpg: decryption failed" >&2; exit 2; }
     tail -n +2 "$in" > "$out"
-    [ "${FAKE_GPG_DECRYPT:-}" = garble ] && printf 'extra\n' >> "$out"
+    [ "$betray" = garble ] && printf 'extra\n' >> "$out"
 fi
 exit 0
 """
@@ -152,7 +170,15 @@ esac
 exit 0
 """
 
-FAKES = {"sftp": FAKE_SFTP, "gpg": FAKE_GPG, "flock": FAKE_FLOCK, "docker": FAKE_DOCKER}
+# The weekday, when a test names one: offsite_check.sh speaks its heartbeat
+# on Mondays only. Everything else is the real date.
+FAKE_DATE = f"""#!/usr/bin/env bash
+if [ "$*" = "+%u" ] && [ -n "${{FAKE_DOW:-}}" ]; then echo "$FAKE_DOW"; exit 0; fi
+exec {shutil.which("date")} "$@"
+"""
+
+FAKES = {"sftp": FAKE_SFTP, "gpg": FAKE_GPG, "flock": FAKE_FLOCK, "docker": FAKE_DOCKER,
+         "date": FAKE_DATE}
 
 
 class Run:
@@ -187,7 +213,8 @@ def world(tmp_path):
     root = tmp_path / "repo"
     (root / "deploy").mkdir(parents=True)
     for name in ("pg_offsite.sh", "pg_offsite_lib.sh", "notify.sh",
-                 "offsite_check.sh", "pg_restore_drill.sh"):
+                 "offsite_check.sh", "pg_restore_drill.sh", "gpg_safe.sh",
+                 "duckdb_env.sh"):
         shutil.copy(DEPLOY / name, root / "deploy" / name)
 
     bin_dir = tmp_path / "bin"
@@ -204,7 +231,9 @@ def world(tmp_path):
 
     # The kill switch, so notify() returns before it can reach Telegram or the
     # alert archive. tests/conftest.py's fixture does not cover a subprocess.
-    (root / ".env").write_text("KS_ALERTS_DISABLED=1\nADMIN_USER_IDS=1,2\n")
+    # The password line is what makes .env worth encrypting (OD-S5-6).
+    (root / ".env").write_text("KS_ALERTS_DISABLED=1\nADMIN_USER_IDS=1,2\n"
+                               "POSTGRES_PASSWORD=s3cret-pw-in-env\n")
     (root / "deploy" / "backup.env").write_text(
         f"BACKUP_REMOTE=u1-sub1@box.example\n"
         f"BACKUP_SSH_KEY={tmp_path}/key\n"
@@ -236,11 +265,13 @@ def world(tmp_path):
                 if (dumps / name).exists():
                     os.utime(dumps / name, (when, when))
 
-        def seed_remote(self, *stamps, extras=(), manifest=True):
+        def seed_remote(self, *stamps, extras=(), manifest=True, env=False):
             self.remote.mkdir(parents=True, exist_ok=True)
             for stamp in stamps:
                 (self.remote / f"ks-{stamp}.dump.gpg").write_text("old")
                 (self.remote / f"roles-{stamp}.sql.gpg").write_text("old")
+                if env:
+                    (self.remote / f"env-{stamp}.gpg").write_text("old")
                 if manifest:
                     (self.remote / f"ks-{stamp}.sha256").write_text("old")
             for extra in extras:
@@ -256,6 +287,7 @@ def world(tmp_path):
                 "FAKE_SFTP_CALLS": str(root / "calls-sftp.log"),
                 "FAKE_GPG_CALLS": str(root / "calls-gpg.log"),
                 "FAKE_DOCKER_CALLS": str(root / "calls-docker.log"),
+                "GPG_SAFE_DELAYS": "0 0",
             })
             env.update({k: str(v) for k, v in env_extra.items()})
             done = subprocess.run(
@@ -269,30 +301,74 @@ def world(tmp_path):
 # ── the shipment ──────────────────────────────────────────────────────────────
 
 class TestTheShipment:
-    def test_a_healthy_run_ships_three_files_and_writes_the_marker(self, world):
+    def test_a_healthy_run_ships_four_files_and_writes_the_marker(self, world):
         world.dump()
         run = world.run()
         assert run.code == 0, run.out
 
         names = sorted(p.name for p in world.remote.iterdir())
-        assert names == [f"ks-{STAMP}.dump.gpg", f"ks-{STAMP}.sha256",
+        assert names == [f"env-{STAMP}.gpg", f"ks-{STAMP}.dump.gpg", f"ks-{STAMP}.sha256",
                          f"roles-{STAMP}.sql.gpg"], run.out
         assert world.marker.exists()
         # The manifest hashes the ciphertext, which is what travels and
         # therefore what a verification can compare without the passphrase.
         manifest = (world.remote / f"ks-{STAMP}.sha256").read_text()
-        assert _sha256(world.remote / f"ks-{STAMP}.dump.gpg") in manifest
+        for name in (f"ks-{STAMP}.dump.gpg", f"roles-{STAMP}.sql.gpg", f"env-{STAMP}.gpg"):
+            assert f"{_sha256(world.remote / name)}  {name}" in manifest.splitlines(), name
         assert "FAKEGPG" in (world.remote / f"ks-{STAMP}.dump.gpg").read_text()
 
+    def test_the_configuration_rides_with_every_shipment(self, world):
+        """OD-S5-6: .env's one off-site copy rode in the DuckDB Parquet
+        archive, whose nightly branch the week of silence retires. It now goes
+        with every Postgres shipment, encrypted, and decrypts to the file on
+        this disk. Mutation: drop `env-$stamp.gpg` from the upload."""
+        world.dump()
+        run = world.run()
+        assert run.code == 0, run.out
+        shipped = world.remote / f"env-{STAMP}.gpg"
+        assert shipped.read_text() == "FAKEGPG\n" + (world.root / ".env").read_text()
+        assert f"verified: env-{STAMP}.gpg opens with" in run.out
+
+    def test_the_manifest_is_uploaded_last(self, world):
+        """A manifest off-site is what says a shipment finished — retention
+        counts nothing else and the drill reads nothing else — so it goes up
+        after the configuration, never before. Mutation: put the manifest
+        before `env-$stamp.gpg`."""
+        world.dump()
+        run = world.run()
+        assert run.code == 0, run.out
+        puts = [c.split()[1] for c in run.sftp if c.startswith("put ")]
+        assert puts and puts[-1].endswith(f"ks-{STAMP}.sha256"), puts
+        assert any(p.endswith(f"env-{STAMP}.gpg") for p in puts), puts
+
+    @pytest.mark.parametrize("content", [None, ""], ids=["missing", "empty"])
+    def test_without_a_configuration_file_nothing_is_shipped(self, world, content):
+        """A shipment without .env is the one a restore cannot start from, so
+        it fails — loudly, and not as "not configured", because backup.env is
+        fine. Mutation: skip the env file when it is absent."""
+        world.dump()
+        env = world.root / ".env"
+        if content is None:
+            env.unlink()
+        else:
+            env.write_text(content)
+        run = world.run()
+        assert run.code == 1, run.out
+        assert ".env is missing, empty or unreadable" in run.out
+        assert not world.marker.exists()
+        assert not any(world.remote_root.rglob("*.gpg"))
+
     def test_nothing_reaches_the_remote_in_the_clear(self, world):
-        """The dump carries ~6 000 phone numbers; OD-01 made this mandatory."""
+        """The dump carries ~6 000 phone numbers; OD-01 made this mandatory.
+        And .env carries every secret this host holds (OD-S5-6)."""
         world.dump(body="0501234567 Ivanenko")
         assert world.run().code == 0
         for path in world.remote.iterdir():
             if path.suffix == ".gpg":
                 assert path.read_text().startswith("FAKEGPG")
-        assert not any("0501234567" in p.read_text()
-                       for p in world.remote.iterdir() if p.suffix != ".gpg")
+        for secret in ("0501234567", "s3cret-pw-in-env"):
+            assert not any(secret in p.read_text()
+                           for p in world.remote.iterdir() if p.suffix != ".gpg"), secret
 
     def test_the_passphrase_travels_as_a_path_and_never_as_a_value(self, world):
         world.dump()
@@ -307,6 +383,7 @@ class TestTheShipment:
     @pytest.mark.parametrize("victim,expected", [
         (f"ks-{STAMP}.dump.gpg", "sha256 mismatch"),
         (f"roles-{STAMP}.sql.gpg", "sha256 mismatch"),
+        (f"env-{STAMP}.gpg", "sha256 mismatch"),
         (f"ks-{STAMP}.sha256", "manifest that came back"),
     ])
     def test_a_file_that_arrived_damaged_refuses_and_leaves_no_marker(
@@ -342,15 +419,82 @@ class TestTheShipment:
         assert expected in run.out
         assert not world.marker.exists(), "a marker was written for a copy nothing can open"
 
+    @pytest.mark.parametrize("mode,expected", [
+        ("fail", "the .env copy that landed off-site will not decrypt"),
+        ("garble", "the .env copy off-site decrypts to something other than .env"),
+    ])
+    def test_a_configuration_that_does_not_open_is_not_a_copy(self, world, mode, expected):
+        """The dump opening says nothing about the configuration beside it, so
+        it is read back and opened on its own — and its plaintext, every
+        secret on this host, is gone before the run ends. Mutation: verify
+        the dump alone."""
+        world.dump()
+        run = world.run(FAKE_GPG_DECRYPT=mode, FAKE_GPG_DECRYPT_ONLY=f"env-{STAMP}.gpg")
+        assert run.code != 0, run.out
+        assert expected in run.out
+        assert f"verified: ks-{STAMP}.dump.gpg opens with" in run.out
+        assert not world.marker.exists(), "a marker was written for a .env nothing can open"
+
     def test_the_healthy_run_opens_the_copy_it_shipped(self, world):
-        """Two encryptions and one decryption: the shipment is not finished
-        until the bytes off-site have been read back *and* opened."""
+        """Three encryptions and two decryptions — the dump's and the
+        configuration's: the shipment is not finished until the bytes
+        off-site have been read back *and* opened."""
         world.dump()
         run = world.run()
         assert run.code == 0, run.out
-        assert sum(1 for c in run.gpg if "--symmetric" in c) == 2, run.gpg
-        assert sum(1 for c in run.gpg if "-d" in c.split()) == 1, run.gpg
-        assert "opens with" in run.out
+        assert sum(1 for c in run.gpg if "--symmetric" in c) == 3, run.gpg
+        assert sum(1 for c in run.gpg if "-d" in c.split()) == 2, run.gpg
+        assert run.out.count("opens with") == 2
+
+    def test_a_missing_agent_is_asked_again_and_the_night_ships(self, world, tmp_path):
+        """2026-10-10 07:40 UTC: a root SSH login eleven seconds earlier left
+        gpg with no agent, the run stopped at `encrypt`, and the night's copy
+        went off-site only when somebody re-ran it by hand. gpg_safe asks a
+        call that found no agent again, so the same night ships on its own."""
+        world.dump()
+        run = world.run(FAKE_GPG_NO_AGENT_ONCE=tmp_path / "agent-lost-once")
+        assert run.code == 0, run.out
+        assert "asking again" in run.out
+        assert world.marker.exists()
+        # one refused encryption, then the three and both read-backs as ever
+        assert sum(1 for c in run.gpg if "--symmetric" in c) == 4, run.gpg
+        assert sum(1 for c in run.gpg if "-d" in c.split()) == 2, run.gpg
+
+    @pytest.mark.parametrize("call", [4, 5], ids=["dump", "env"])
+    def test_the_read_back_survives_a_lost_agent_too(self, world, call):
+        """Both verification decrypts are called under `if !`, where errexit
+        is off inside gpg_safe: the three encryptions are calls 1-3, so the
+        dump's read-back is call 4 and the configuration's call 5. The one
+        that loses its agent is asked again, and the night still ships and
+        verifies."""
+        world.dump()
+        run = world.run(FAKE_GPG_NO_AGENT_AT=call)
+        assert run.code == 0, run.out
+        assert "asking again" in run.out and run.out.count("opens with") == 2
+        assert world.marker.exists()
+        assert sum(1 for c in run.gpg if "-d" in c.split()) == 3, run.gpg
+
+    def test_an_agent_that_never_comes_back_still_fails_the_night(self, world):
+        """Asking again is bounded: three calls, then the failure the alert
+        has always carried, and no marker for a copy that never left."""
+        world.dump()
+        run = world.run(FAKE_GPG_NO_AGENT="always")
+        assert run.code != 0, run.out
+        assert "No agent running" in run.out
+        assert not world.marker.exists()
+        assert len([c for c in run.gpg if c]) == 3, run.gpg
+        assert not any(world.remote_root.rglob("*.gpg"))
+
+    def test_every_gpg_call_gets_a_home_of_its_own(self, world):
+        """The fix for that night is the home: each call runs in a fresh
+        /tmp/ks-gnupg.* directory and leaves none behind, so no call ever asks
+        root's default sockets, which systemd holds while a session is open."""
+        world.dump()
+        before = set(Path("/tmp").glob("ks-gnupg.*"))
+        run = world.run()
+        assert run.code == 0, run.out
+        assert all(c.split()[0] == "--no-keyring" for c in run.gpg if c), run.gpg
+        assert set(Path("/tmp").glob("ks-gnupg.*")) == before
 
     def test_an_empty_dump_is_not_a_backup(self, world):
         world.dump(body="")
@@ -431,10 +575,21 @@ class TestTheShipment:
 
 
 class TestRetention:
+    def test_a_shipment_from_before_the_configuration_rode_is_pruned_whole(self, world):
+        """Stamps shipped before OD-S5-6 have no env-<stamp>.gpg; retention
+        removes the three they have and asks for the fourth softly."""
+        world.dump()
+        world.seed_remote(*OLDER)
+        run = world.run(BACKUP_PG_RETAIN=1)
+        assert run.code == 0, run.out
+        assert sorted(p.name for p in world.remote.iterdir()) == [
+            f"env-{STAMP}.gpg", f"ks-{STAMP}.dump.gpg", f"ks-{STAMP}.sha256",
+            f"roles-{STAMP}.sql.gpg"], run.out
+
     def test_it_deletes_its_own_oldest_beyond_n_and_nothing_else(self, world):
         world.dump()
         world.seed_remote(*OLDER, extras=("ks-warehouse-20260101-000000.tar",
-                                          "notes.txt"))
+                                          "notes.txt", "env.gpg"), env=True)
         run = world.run(BACKUP_PG_RETAIN=2)
         assert run.code == 0, run.out
 
@@ -442,7 +597,11 @@ class TestRetention:
         assert stamps == [OLDER[2], STAMP], run.out
         for stamp in OLDER[:2]:
             assert not (world.remote / f"roles-{stamp}.sql.gpg").exists()
+            assert not (world.remote / f"env-{stamp}.gpg").exists()
             assert not (world.remote / f"ks-{stamp}.sha256").exists()
+        assert (world.remote / f"env-{OLDER[2]}.gpg").exists()
+        # An unstamped env.gpg is not a name this family mints.
+        assert (world.remote / "env.gpg").exists()
         # Files this script did not mint are not its to delete, whatever their
         # age: the Parquet archive's own naming lives one directory up and a
         # stray note is somebody's.
@@ -480,13 +639,17 @@ class TestRetention:
         stay on the box for ever."""
         world.dump()
         world.seed_remote(*OLDER)
-        world.seed_remote("20260604-000000", manifest=False)
+        world.seed_remote("20260604-000000", manifest=False, env=True)
+        (world.remote / "env-20260605-000000.gpg.part").write_text("truncated")
         run = world.run(BACKUP_PG_RETAIN=4)
         assert run.code == 0, run.out
 
         stamps = sorted(p.name[3:-9] for p in world.remote.glob("ks-*.dump.gpg"))
         assert stamps == [*OLDER, STAMP], run.out
         assert not (world.remote / "roles-20260604-000000.sql.gpg").exists()
+        # The configuration is the same shipment's debris: no manifest, no copy.
+        assert not (world.remote / "env-20260604-000000.gpg").exists()
+        assert not list(world.remote.glob("*.part")), run.out
 
     def test_an_unreadable_retention_still_sweeps_the_debris(self, world):
         """The sweep runs before RETAIN is parsed. A typo in backup.env stands
@@ -591,6 +754,103 @@ class TestOffsiteCheck:
         assert "disk watchdog last sampled" in run.out
 
 
+class TestOffsiteCheckInTheWeekOfSilence:
+    """Stage 5, PR-10. With KS_DUCKDB=off in .env the DuckDB copy is frozen on
+    purpose — daily_offsite.sh stands down and its cron line is retired — so
+    its marker only ages, and judging it would page "off-site copy is stale"
+    every morning from the second day of the week. Under `off` it is reported
+    as frozen with its age and never fails the run; the Postgres marker,
+    which now answers for .env too (OD-S5-6), and the watchdog are judged as
+    before, and the Monday heartbeat keeps speaking."""
+
+    _instruments = TestOffsiteCheck._instruments
+
+    def _off(self, world, line="KS_DUCKDB=off"):
+        env = world.root / ".env"
+        env.write_text(env.read_text() + line + "\n")
+
+    @pytest.mark.parametrize("offsite_h", [200, None], ids=["frozen-200h", "never"])
+    def test_a_frozen_duckdb_copy_is_reported_and_never_fails(self, world, offsite_h):
+        """Mutation: judge the DuckDB marker under `off` as under `on` — exit 1
+        and a stale page, every morning of the week."""
+        self._off(world)
+        self._instruments(world, offsite_h=offsite_h, pg_h=1)
+        run = world.run("offsite_check.sh", FAKE_DOW="3")
+        assert run.code == 0, run.out
+        assert "CRITICAL" not in run.out and "notify suppressed" not in run.out, run.out
+        if offsite_h is None:
+            assert "frozen (KS_DUCKDB=off), no copy ever left" in run.out
+        else:
+            assert "frozen (KS_DUCKDB=off), last copy 200h ago" in run.out
+        assert "instruments ok: off-site frozen" in run.out
+        assert "postgres and .env 1h ago" in run.out
+
+    @pytest.mark.parametrize("line", [
+        'KS_DUCKDB="off"', "KS_DUCKDB=off  # week of silence", "  KS_DUCKDB=off",
+        "export KS_DUCKDB=off", "KS_DUCKDB = off",
+    ], ids=["quoted", "inline-comment", "leading-space", "export", "spaces-around-equals"])
+    def test_every_off_the_two_scripts_stand_down_on_is_frozen_too(self, world, line):
+        """The same reading as the two scripts whose copy this judges: every
+        line compose reads as off stands them down, so their marker stops for
+        the same reason. Mutation: read the line the way the first reader
+        did, `^KS_DUCKDB=` and nothing else — four of these page the copy
+        stale every morning of the week."""
+        self._off(world, line)
+        self._instruments(world, offsite_h=200, pg_h=1)
+        run = world.run("offsite_check.sh", FAKE_DOW="3")
+        assert run.code == 0, run.out
+        assert "frozen (KS_DUCKDB=off)" in run.out
+
+    def test_the_postgres_copy_is_still_judged_and_names_the_env(self, world):
+        """The Postgres marker is the only off-site .env's age under `off`, so
+        a stale one still fails the run — and its page says what else it is
+        now the only copy of. Mutation: let the frozen branch return early."""
+        self._off(world)
+        self._instruments(world, offsite_h=200, pg_h=40)
+        run = world.run("offsite_check.sh", FAKE_DOW="3")
+        assert run.code == 1, run.out
+        assert ("newest Postgres copy off-site is 40h old (max 36h), and with it the "
+                "only off-site .env") in run.out
+        assert "notify suppressed (KS_ALERTS_DISABLED): 🚨 Postgres" in run.out
+        assert "newest off-site copy is" not in run.out
+        # And the never-shipped page says the same.
+        (world.root / "data" / ".pg_offsite_last_ok").unlink()
+        run = world.run("offsite_check.sh", FAKE_DOW="3")
+        assert run.code == 1, run.out
+        assert "no Postgres copy has ever left this host" in run.out
+        assert "and with it the only off-site .env" in run.out
+
+    def test_a_stopped_watchdog_is_still_judged(self, world):
+        self._off(world)
+        self._instruments(world, offsite_h=200, watchdog_h=100, pg_h=1)
+        run = world.run("offsite_check.sh", FAKE_DOW="3")
+        assert run.code == 1, run.out
+        assert "disk watchdog last sampled" in run.out
+
+    def test_the_monday_heartbeat_keeps_speaking_and_says_frozen(self, world):
+        """The heartbeat is the only dead-man's switch on the off-site path
+        itself, so the week must not silence it. The kill switch is on in
+        this fixture: what is asserted is that notify() was reached with the
+        frozen line."""
+        self._off(world)
+        self._instruments(world, offsite_h=200, pg_h=1)
+        run = world.run("offsite_check.sh", FAKE_DOW="1")
+        assert run.code == 0, run.out
+        assert "notify suppressed (KS_ALERTS_DISABLED): 🫀" in run.out, run.out
+
+    @pytest.mark.parametrize("line", ["KS_DUCKDB=on", "KS_DUCKDB=of", ""],
+                             ids=["on", "typo", "unset"])
+    def test_under_on_the_duckdb_copy_is_judged_as_ever(self, world, line):
+        """Nothing changes under `on` — nor under a value web runs `on` over."""
+        if line:
+            self._off(world, line)
+        self._instruments(world, offsite_h=100, pg_h=1)
+        run = world.run("offsite_check.sh", FAKE_DOW="3")
+        assert run.code == 1, run.out
+        assert "off-site copy is 100h old" in run.out
+        assert "frozen" not in run.out and ".env" not in run.out
+
+
 # ── the drill ─────────────────────────────────────────────────────────────────
 
 LIVE = {
@@ -648,6 +908,17 @@ class TestTheRemoteDrill:
         # Live is read through the SELECT-only role and never through ks_app.
         live_reads = [c for c in run.docker if "ks-postgres" in c]
         assert live_reads and all("-U ks_readonly" in c for c in live_reads), live_reads
+
+    @pytest.mark.parametrize("call", [6, 7], ids=["dump", "roles"])
+    def test_a_lost_agent_on_either_decrypt_is_asked_again(self, world, call):
+        """Both decrypts sit behind `|| fail`. The shipment made calls 1-5
+        (three encryptions, two read-backs), so the drill's dump decrypt is
+        call 6 and its roles decrypt call 7."""
+        self._shipped(world)
+        run = world.run("pg_restore_drill.sh", ["--from-remote"], **LIVE, **RESTORED,
+                        FAKE_GPG_NO_AGENT_AT=call)
+        assert run.code == 0, run.out
+        assert "PASS" in run.out and "asking again" in run.out
 
     def test_a_corrupted_remote_copy_is_caught_before_it_is_restored(self, world):
         self._shipped(world)

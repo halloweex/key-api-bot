@@ -53,6 +53,7 @@ from core.sql_dialect import (
     CLICKHOUSE_ANALYTICS, DUCKDB, DUCKDB_ANALYTICS, POSTGRES, TODAY_IN_KYIV,
     inventory_view_selects, sms_segments_select,
 )
+from core.repositories.customers import SmsAudienceFilters
 from tests.sql_helper import strip_comments_and_literals
 
 # Spellings that ask the engine what day it is.
@@ -64,7 +65,12 @@ SMS_FRAGMENTS = dict(
     tier_case="CASE WHEN 1 = 1 THEN 'VIP' END",
     arm_expr="'ALL'",
     ok_tier_expr="TRUE",
-    filter_sql="",
+    # A group counting orders in the last N days, so the period column's
+    # notion of today is in the text this reads.
+    group_predicates=["(period_orders_1 >= ?)"],
+    period_columns=[
+        SmsAudienceFilters(period_days=92).period_count("period_orders_1")[0],
+    ],
     tier_subset="",
 )
 

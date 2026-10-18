@@ -17,8 +17,31 @@ from __future__ import annotations
 
 import pytest
 
-from core.repositories.customers import SmsAudienceFilters
+from datetime import date
+
+from core.repositories.customers import (
+    SmsAudienceFilters, SmsAudienceGroup, audience_group_fragments,
+)
 from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
+
+# Rendered with four OR-groups, counting orders in a period every way it can
+# be said — since a date, within N days, a closed range with both bounds on
+# the count, and up to a date with none in it — and narrower than one another:
+# every construct the groups add — the period count in `cust`, a group's own
+# window, the flags, the mask, the per-group funnel — is in the text these
+# tests read. The group predicates name DuckDB's line table; that fragment's
+# own dialect test is `TestTheFilterPredicateTravelsToo` below.
+_GROUPS = audience_group_fragments(
+    [SmsAudienceGroup(365, SmsAudienceFilters(period_orders_min=2,
+                                              period_from=date(2026, 1, 1))),
+     SmsAudienceGroup(92, SmsAudienceFilters(period_orders_min=1, period_days=92)),
+     SmsAudienceGroup(3650, SmsAudienceFilters(
+         period_orders_min=1, period_orders_max=3,
+         period_from=date(2025, 1, 1), period_to=date(2025, 12, 31))),
+     SmsAudienceGroup(730, SmsAudienceFilters(period_orders_max=0,
+                                              period_to=date(2024, 12, 31)))],
+    "revenue_ltv", "retail", "silver_order_lines",
+)
 
 FRAGMENTS = dict(
     ltv_column="revenue_ltv",
@@ -26,7 +49,8 @@ FRAGMENTS = dict(
     tier_case="CASE WHEN c.revenue_ltv >= ? THEN 'VIP' END",
     arm_expr="tier_level",
     ok_tier_expr="tier_level IS NOT NULL",
-    filter_sql="TRUE",
+    group_predicates=_GROUPS["group_predicates"],
+    period_columns=_GROUPS["period_columns"],
     tier_subset="",
 )
 
@@ -45,6 +69,7 @@ def _statements(sql: str) -> str:
 # a substitution meant for something else. `app.buyer_gender` sits above it for
 # the same reason: both bare forms begin with "buyer".
 _NAMES = (
+    ("app.sms_campaign_members", "sms_campaign_members"),
     ("app.marketing_optouts", "marketing_optouts"),
     ("bronze.offer_stocks", "offer_stocks"),
     ("silver.order_lines", "silver_order_lines"),
@@ -71,7 +96,8 @@ class TestOneBody:
     def test_each_rendering_names_its_own_tables(self, dialect):
         sql = sms_segments_select(dialect, **FRAGMENTS)
         for name in (dialect.order_lines, dialect.offer_stocks,
-                     dialect.buyers, dialect.marketing_optouts):
+                     dialect.buyers, dialect.marketing_optouts,
+                     dialect.sms_campaign_members):
             assert name in sql
 
     def test_no_placeholder_hole_was_left_unfilled(self):

@@ -108,12 +108,20 @@ function dedupKey(endpoint: string, queryParams?: string): string {
 export class ApiError extends Error {
   status: number
   code: string
+  /**
+   * The JSON the server answered with, when it was an object. A refusal names
+   * itself there — `reason` beside `detail`, with its figures — so a page can
+   * say it in its reader's language instead of showing the English `detail`
+   * (`utils/smsRefusal.ts`).
+   */
+  body?: Record<string, unknown>
 
-  constructor(status: number, message: string, code = 'API_ERROR') {
+  constructor(status: number, message: string, code = 'API_ERROR', body?: Record<string, unknown>) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.body = body
   }
 
   /**
@@ -129,7 +137,11 @@ export class ApiError extends Error {
     try {
       const body = await response.json()
       const detail = typeof body?.detail === 'string' ? body.detail : null
-      return detail ? new ApiError(response.status, detail, fallback.code) : fallback
+      const object = body && typeof body === 'object' && !Array.isArray(body)
+        ? body as Record<string, unknown> : undefined
+      return detail
+        ? new ApiError(response.status, detail, fallback.code, object)
+        : fallback
     } catch {
       return fallback
     }
@@ -855,13 +867,18 @@ export const api = {
       'POST',
     ),
 
+  // `confirmCampaign` is the name as the person typed it back. The server
+  // checks it too and refuses a send that does not carry it, so the one
+  // deliberate act this asks for cannot be skipped by a stale tab or a replay.
   sendSmsCampaign: (
-    campaign: string, text: string,
+    campaign: string, text: string, confirmCampaign: string,
     channel: SmsChannel = 'sms', viber?: SmsViberOptions,
   ) =>
     fetchApiMutation<SmsSendResult>(
       `/customers/sms-campaigns/${encodeURIComponent(campaign)}/send`
-        + `?text=${encodeURIComponent(text)}&${channelParams(channel, viber)}`,
+        + `?text=${encodeURIComponent(text)}`
+        + `&confirm_campaign=${encodeURIComponent(confirmCampaign)}`
+        + `&${channelParams(channel, viber)}`,
       'POST',
       // Thousands of recipients take minutes at the gateway. On the default
       // 10s the request aborted while the send carried on server-side, and
@@ -881,8 +898,14 @@ export const api = {
       'POST',
     ),
 
-  getSmsChannels: (options?: FetchOptions) =>
-    fetchApi<SmsChannelsResponse>('/customers/sms/channels', undefined, options),
+  // The balance is asked of the gateway only when wanted: everything else
+  // reading the channels is reading configuration.
+  getSmsChannels: (includeBalance = false, options?: FetchOptions) =>
+    fetchApi<SmsChannelsResponse>(
+      '/customers/sms/channels',
+      includeBalance ? 'include_balance=true' : undefined,
+      options,
+    ),
 
   getSmsAudiencePresets: (options?: FetchOptions) =>
     fetchApi<SmsAudiencePresetsResponse>(

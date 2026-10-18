@@ -154,6 +154,11 @@ REGISTRY: Dict[str, ConditionSpec] = {
         "web restarts and opens no DuckDB file under KS_DUCKDB=off, or runs on"),
     # KS_DUCKDB set to a value web did not understand: ran as `on` (OD-09).
     "duckdb_mode_invalid": _c("web restarts with a valid KS_DUCKDB"),
+    # KS_DUCKDB=off with a precondition of off unmet: web runs `on` — opens the
+    # file, takes orders — and the week of silence does not start (stage 5's
+    # PR-2, OD-S5-1 (a)). The verdict is the web process's for its life.
+    "duckdb_off_held_back": _c(
+        "web restarts with every precondition of KS_DUCKDB=off met, or with KS_DUCKDB=on"),
     # KS_GOALS_HISTORY set to a value web refuses — anything but unset or
     # silver since chain 7b-4 retired it, `bridge` included: every read of
     # the calculators' history raises — the goal widget, the calculator GETs
@@ -257,12 +262,17 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # The shadow chains' comparison (OD-02 (c)): Postgres writes, DuckDB is
     # handed each row after the commit. Nothing re-ships these tables, so
     # none clears by a job running again — each clears when the rows on the
-    # two sides agree, which for a failed shadow is the copy-back.
+    # two sides agree. A row DuckDB never received is never carried there:
+    # the copy-back would, but it releases the latch and hands the chain's
+    # writes back to DuckDB, so it is a rollback and not a cure — and after
+    # a week under KS_DUCKDB=off these rows stand until the drop, accepted
+    # (OD-S5-3 (a)).
     "shadow_duckdb_only_rows": _c(
         "the writer that went round the chain is found and its rows decided "
         "— a human, not a job"),
     "shadow_missing_in_duckdb": _c(
-        "scripts/chain_copy_back.py carries the rows, or they age out"),
+        "the rows age out of Postgres, or DuckDB is dropped — never a "
+        "copy-back, which hands the chain back to DuckDB"),
     "shadow_row_values": _c("the two stores agree on the row again"),
     "shadow_pruned_rows": _c("the next shadow prune removes them"),
     # Not a data defect: the writer moved and its watchdog did not. It
@@ -311,9 +321,14 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # shipment that has already overwritten rows and cannot be un-shipped.
     "chain_latch_disagrees": _c(
         "the marker and the owner rows agree again — a human, not a job"),
+    # On a table the chain stamps itself and keeps a record of (chain 6's
+    # catalogue) it also stops at the chain's next write, which moves the
+    # watermark back onto an instant the record carries — the stamp that was
+    # not the chain's is then out of the check's sight, not repaired.
     "chain_shipper_overwrote": _c(
         "nothing repairs the rows it replaced; it stops when the chain is "
-        "handed back with scripts/chain_copy_back.py, which releases the latch"),
+        "handed back with scripts/chain_copy_back.py, which releases the latch, "
+        "or, on a table the chain stamps itself, at the chain's next write"),
     # Owner rows naming a table no chain in the running build declares — an
     # image older than the chain (DN-22b review). The copies stand down on
     # them; the build's own writers do not know the chain, so a human decides.

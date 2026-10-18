@@ -81,7 +81,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any, Awaitable, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple,
+)
 
 from core.data_quality import IntegrityIssue, Severity
 from core.landing_rows import CATEGORY_COLUMNS, PRODUCT_COLUMNS
@@ -1013,7 +1015,13 @@ def compare_shadow(
     - **A row only Postgres holds is a shadow write that failed** — WARN
       (`shadow_missing_in_duckdb`), past the grace on Postgres's clock.
       Postgres is the writer of record, so nothing is lost; DuckDB is only
-      the way back's input, and the copy-back carries the row.
+      the way back's input. Or it is a row written while web ran
+      `KS_DUCKDB=off`, where the shadow stands down by design: after a week
+      of silence that went back to `on`, that week's rows are reported here
+      every morning until DuckDB is dropped, which OD-S5-3 (a) accepts. The
+      finding cannot tell the two apart, so it dates the rows on Postgres's
+      clock and says both — and never names the copy-back as the cure: it
+      releases the chain's latch and hands its writes back to DuckDB.
     - **A differing row is CRITICAL** (`shadow_row_values`) unless either
       side's clock is inside the grace: the window is between the Postgres
       commit and the shadow's, and between the two reads.
@@ -1078,6 +1086,14 @@ def compare_shadow(
     pg_only = sorted(pg_rows.keys() - dk_rows.keys())
     missing = [k for k in pg_only if not recent(pg_synced.get(k))]
     if missing:
+        # Dated, because the date is what tells the two causes apart: the
+        # per-process counters that would say "when" are gone after the
+        # restart that is the way back from KS_DUCKDB=off.
+        stamps = sorted(s for s in (_as_utc(pg_synced.get(k)) for k in missing)
+                        if s is not None)
+        dated = (f"written by Postgres from {stamps[0].isoformat(timespec='seconds')} "
+                 f"to {stamps[-1].isoformat(timespec='seconds')}"
+                 if stamps else "with no Postgres stamp to date them by")
         issues.append(IntegrityIssue(
             check_name="shadow_missing_in_duckdb",
             table_name=table,
@@ -1086,11 +1102,18 @@ def compare_shadow(
             sample_ids=_sample(spec, missing, max_samples),
             description=(
                 f"{len(missing)} row(s) in {table} never reached DuckDB's "
-                f"{spec.dk_table}: the shadow write after the Postgres commit "
-                "failed, or the process stopped between the two. Postgres "
-                "holds them, so nothing is lost; DuckDB is the way back's "
-                "input, and scripts/chain_copy_back.py carries them. The "
-                "chain's shadow_failures in /api/health says when."
+                f"{spec.dk_table}, {dated}. Postgres holds them, so nothing "
+                "is lost. Rows written while web ran KS_DUCKDB=off are "
+                "expected: the shadow stands down there, and after a week of "
+                "silence that went back to on they are reported every morning "
+                "until DuckDB is dropped (OD-S5-3 (a)) — nothing to do. Any "
+                "other is a shadow write that failed after the Postgres "
+                "commit, or a process that stopped between the two: the web "
+                "ERROR log at those times says which "
+                "(write_chains.<chain>.shadow_failures counts it only until "
+                "web restarts). Never run scripts/chain_copy_back.py to clear "
+                "this: it releases the chain's latch and hands its writes "
+                "back to DuckDB."
             ),
         ))
 
@@ -1145,14 +1168,17 @@ def read_duckdb_side(
 
 
 async def reconcile_mirror(
-    dk_side: Mapping[
+    dk_side: Optional[Mapping[
         str, Tuple[Mapping[int, Tuple[Any, ...]], Mapping[int, Optional[datetime]]]
-    ],
+    ]],
     *,
     specs: Sequence[MirroredTable] = MIRRORED_TABLES,
     now: Optional[datetime] = None,
     grace_minutes: int = MIRROR_GRACE_MINUTES,
     max_samples: int = 10,
+    read_duckdb: Optional[Callable[[Sequence[MirroredTable]], Awaitable[Mapping[
+        str, Tuple[Mapping[int, Tuple[Any, ...]], Mapping[int, Optional[datetime]]]
+    ]]]] = None,
 ) -> List[IntegrityIssue]:
     """Compare an already-read DuckDB side against Postgres.
 
@@ -1160,6 +1186,13 @@ async def reconcile_mirror(
     break a sync — a check that cannot run has produced no verdict, and the job
     above records that as a failed run so the layer goes stale instead of
     reading clean. See `fetch_last_success_ages`.
+
+    Or, with `dk_side=None`, a DuckDB side read only when needed: `read_duckdb`
+    is awaited with the specs that survived the stand-down, after it, and not
+    at all when none did. That is how the job calls it under `KS_DUCKDB=off`
+    (stage 5, PR-7), where every table here belongs to a latched chain and
+    nothing is left to read; a spec that survives is read, and the read is
+    refused and counted like any other reach for the file.
     """
     from core import pg_landing
     from core.pg import get_pool, require_revision
@@ -1201,6 +1234,8 @@ async def reconcile_mirror(
     specs = tuple(s for s in specs if s.pg_table not in held)
     if not specs:
         return issues
+    if dk_side is None:
+        dk_side = await read_duckdb(specs)
     watermarks = await fetch_watermarks(pool)
 
     for spec in specs:
@@ -3841,6 +3876,7 @@ def _chain_flag_findings(chain_errors: Dict[str, str]) -> List[IntegrityIssue]:
 
 def _chain_latch_findings(
     owners: Dict[str, str], watermarks: Dict[str, Dict[str, Any]],
+    mirror_stamps: Mapping[str, Any],
 ) -> List[IntegrityIssue]:
     """The two ways the ownership latch can be wrong (DN-06).
 
@@ -3856,12 +3892,32 @@ def _chain_latch_findings(
     the moment somebody flips it back. Both are CRITICAL and neither is
     repaired here: a "repair" would be guessing which store a human meant.
 
-    **`chain_shipper_overwrote`.** The shipper full-replaces these tables out
-    of DuckDB, so a successful shipment dated after the handover wrote over
-    rows only Postgres held. `last_ok_at` newer than the latch is exactly that
-    event, and it is the detector the stage-4 plan calls E1. It cannot fire on
-    a shipment that predates the handover, which is why the owner row stores
-    the moment ownership passed and never moves it forward.
+    **`chain_shipper_overwrote`.** A shipper out of DuckDB — the hourly copy,
+    which replaces these tables whole, or a mirror — stamps `last_ok_at` when
+    it succeeds, so a success dated after the handover wrote a DuckDB that has
+    stopped receiving these rows over the ones Postgres held. `last_ok_at`
+    newer than the latch is exactly that event, and it is the detector the
+    stage-4 plan calls E1. It cannot fire on a shipment that predates the
+    handover, which is why the owner row stores the moment ownership passed and
+    never moves it forward.
+
+    That reading holds only for a table nothing else stamps. A chain whose own
+    writer stamps the watermark declares the table
+    (`CHAIN_STAMPS_MIRROR_STATE`, `core.chain_latch.MirrorStamp`), and there a
+    watermark after the latch is first the chain's own write: chain 6 stamps
+    one on every write, and until this asked, every morning paged its hourly
+    writes as a shipment over them (2026-10-10 on). For such a table the
+    judgement is the chain's record of its own instants, handed in as
+    `mirror_stamps` — the watermark and the record from one statement, so this
+    reads that statement's `last_ok_at` and not `watermarks`', which is older
+    and would pair with a record that has moved on. At a recorded instant it is
+    the chain's write and nothing is filed; at any other it is CRITICAL as
+    before; with a record nobody can parse, or none read, it is CRITICAL too,
+    saying it could not tell — never quiet. Only until the chain's next write,
+    though: that moves the watermark back onto a recorded instant, and the
+    stamp that was not the chain's is no longer in sight (the writer's module
+    names what sees it then). A chain that declares the table and keeps no
+    record is not judged on it at all: chain 3, whose module says why.
 
     **`chain_owner_unregistered`.** An owner row naming a table no chain in
     this build declares: the build is older than the chain (a rollback, a
@@ -3873,7 +3929,8 @@ def _chain_latch_findings(
 
     Takes the owner rows the caller has already read rather than reading them
     itself: the same query decides which tables this run may compare at all,
-    and two reads could disagree about that within one run.
+    and two reads could disagree about that within one run. Pure, like the
+    rest: `_read_mirror_stamps` is the read.
     """
     from core import chain_latch
     from core.write_chains import WRITE_CHAINS, chain_name
@@ -3884,6 +3941,8 @@ def _chain_latch_findings(
         tables = tuple(chain.CHAIN_TABLES)
         local = chain_latch.latched_at(name)
         claimed = {t: owners[t] for t in tables if t in owners}
+        stamped_by_chain = frozenset(getattr(chain, "CHAIN_STAMPS_MIRROR_STATE", ()))
+        keeps_record = hasattr(chain, "read_mirror_stamps")
 
         if local and len(claimed) < len(tables):
             issues.append(IntegrityIssue(
@@ -3921,23 +3980,54 @@ def _chain_latch_findings(
             since = claimed.get(table) or local
             if not since:
                 continue
-            last_ok = (watermarks.get(table) or {}).get("last_ok_at")
+            if table not in stamped_by_chain:
+                last_ok = (watermarks.get(table) or {}).get("last_ok_at")
+                if last_ok is None or not _after(last_ok, since):
+                    continue
+                issues.append(_shipper_overwrote(table, (
+                    f"{table} changed hands at {since}, and a shipment out of "
+                    f"DuckDB recorded success on it at {last_ok.isoformat()} — "
+                    "after it. That shipper wrote DuckDB's copy, frozen since "
+                    "the handover, over this table — whole, for the hourly "
+                    "copy — so what was written here since then is lost where "
+                    "the copy reached it. Do not re-run the shipper."
+                )))
+                continue
+            if not keeps_record:
+                # The chain stamps the watermark and keeps no record of when:
+                # its writes and a shipment's look alike, and the chain's
+                # module says why that is not judged (`CHAIN_STAMPS_MIRROR_STATE`).
+                continue
+            stamp = mirror_stamps.get(table)
+            last_ok = (stamp.last_ok_at if stamp is not None
+                       else (watermarks.get(table) or {}).get("last_ok_at"))
             if last_ok is None or not _after(last_ok, since):
                 continue
-            issues.append(IntegrityIssue(
-                check_name="chain_shipper_overwrote",
-                table_name=table,
-                severity=Severity.CRITICAL,
-                count=1,
-                description=(
-                    f"{table} changed hands at {since}, and the hourly "
-                    f"replication recorded a successful shipment at "
-                    f"{last_ok.isoformat()} — after it. That shipment replaced "
-                    "the table out of a DuckDB that has stopped receiving "
-                    "these rows, so whatever was written here since the "
-                    "handover is gone. Do not re-run the shipper."
-                ),
-            ))
+            if stamp is None:
+                why = (f"and the record {name} keeps of its own writes was not "
+                       "read, so whether that was the chain's own write or a "
+                       "shipment over it cannot be told.")
+            elif stamp.unreadable is not None:
+                why = (f"and the record {name} keeps of its own writes cannot "
+                       f"be read ({stamp.unreadable}), so whether that was the "
+                       "chain's own write or a shipment over it cannot be told; "
+                       "the chain's writer stops on the same record.")
+            elif stamp.last_ok_us in stamp.stamps:
+                continue                # the chain's own write, recorded
+            else:
+                why = (f"at an instant the record {name} keeps of its own "
+                       "writes does not carry, so something else stamped it. "
+                       "In this process that is the sync's mirror out of "
+                       "DuckDB, which writes a chain's table only while the "
+                       "chain reads as routed to DuckDB (its marker lost, "
+                       "which chain_latch_disagrees pages beside this); "
+                       "otherwise a writer outside this process — a script, "
+                       "a manual UPDATE — which nothing else here sees.")
+            issues.append(_shipper_overwrote(table, (
+                f"{table} changed hands at {since}, and a write recorded "
+                f"success on it at {last_ok.isoformat()} — after it — {why} "
+                "Do not re-run the shipper."
+            )))
 
     unregistered = chain_latch.unregistered_owned_tables(owners)
     if unregistered:
@@ -3959,6 +4049,43 @@ def _chain_latch_findings(
             ),
         ))
     return issues
+
+
+def _shipper_overwrote(table: str, description: str) -> IntegrityIssue:
+    return IntegrityIssue(
+        check_name="chain_shipper_overwrote",
+        table_name=table,
+        severity=Severity.CRITICAL,
+        count=1,
+        description=description,
+    )
+
+
+async def _read_mirror_stamps(pool, owners: Mapping[str, str]) -> Dict[str, Any]:
+    """`{table: MirrorStamp}` for `_chain_latch_findings`: the watermark and
+    the record of every chain that stamps the watermark itself and keeps a
+    record of when (`read_mirror_stamps`), each chain's in one statement of its
+    own. Asked only of a chain that has changed hands — an owner row or a
+    marker — since E1 judges no other, and the record is the chain's to read:
+    this module never names the table it lives in.
+
+    Not contained: a read that fails fails the run, like every read here. A
+    record nobody can parse is not a failure — the reader answers it as
+    `unreadable`, and the finding says so."""
+    from core import chain_latch
+    from core.write_chains import WRITE_CHAINS, chain_name
+
+    out: Dict[str, Any] = {}
+    for chain in WRITE_CHAINS:
+        reader = getattr(chain, "read_mirror_stamps", None)
+        if reader is None:
+            continue
+        if not (chain_latch.latched_at(chain_name(chain))
+                or any(t in owners for t in chain.CHAIN_TABLES)):
+            continue
+        async with pool.acquire() as conn:
+            out.update(await reader(conn))
+    return out
 
 
 def _after(moment: datetime, stamp: str) -> bool:
@@ -4043,6 +4170,14 @@ async def reconcile_operational(
     # — once the shipper had overwritten them — report two agreeing copies.
     # `chain_owner_unregistered` below says which tables and why.
     stood_down = stood_down | chain_latch.owned_tables(owners)
+    # Under KS_DUCKDB=off the history tables too, as their copy does
+    # (`pg_operational.DUCKDB_HISTORY_TABLES`, OD-S5-4): DuckDB's side is the
+    # frozen file, and the last copy is the record (stage 5, PR-7).
+    from core import duckdb_switch
+    from core.pg_operational import stood_down_under_off
+
+    stood_down = stood_down | stood_down_under_off()
+    duckdb_off = duckdb_switch.is_off()
 
     # The third state (OD-02 (c)): a shadow chain writing Postgres still
     # hands DuckDB every row, so its tables come back off the stood-down set
@@ -4067,7 +4202,8 @@ async def reconcile_operational(
     # unreachable on every run where the copies agreed — which is every healthy
     # run, and the only kind this has had.
     issues: List[IntegrityIssue] = _chain_flag_findings(chain_errors)
-    issues += _chain_latch_findings(owners, watermarks)
+    issues += _chain_latch_findings(
+        owners, watermarks, await _read_mirror_stamps(pool, owners))
 
     # ── the four read whole ──
     # A shadowed table is read in Postgres FIRST: a write landing between the
@@ -4075,8 +4211,12 @@ async def reconcile_operational(
     # the grace forgives on the side that always has a clock.
     pg_first = {spec.pg_table: await fetch_pg_rows_with_clock(pool, spec)
                 for spec in shadow_specs}
-    async with store.connection() as conn:
-        dk_side = read_duckdb_side(conn, whole)
+    # Under KS_DUCKDB=off DuckDB is opened only for something to read — here
+    # and for the fingerprints below. Under on, as it always was.
+    dk_side: Dict[str, Any] = {}
+    if whole or not duckdb_off:
+        async with store.connection() as conn:
+            dk_side = read_duckdb_side(conn, whole)
 
     for spec in whole:
         dk_rows, dk_synced = dk_side[spec.pg_table]
@@ -4097,8 +4237,10 @@ async def reconcile_operational(
     # ── the two fingerprinted ──
     appended = tuple(
         s for s in APPEND_ONLY_TABLES if s.pg_table not in stood_down)
-    async with store.connection() as conn:
-        dk_prints = {s.pg_table: fingerprints(conn, s) for s in appended}
+    dk_prints: Dict[str, Any] = {}
+    if appended or not duckdb_off:
+        async with store.connection() as conn:
+            dk_prints = {s.pg_table: fingerprints(conn, s) for s in appended}
 
     suspects: Dict[str, List[int]] = {}
     for spec in appended:
