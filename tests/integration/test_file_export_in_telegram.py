@@ -12,8 +12,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from core import telegram_user_files
 from web.main import app
 from web.routes.api._deps import limiter
+
+# The real sender, taken before `tests/conftest.py` stubs it for every test,
+# for the two tests about the sender itself.
+_REAL_SEND = telegram_user_files.send_user_document_http
 from tests.integration.test_tab_permissions import (
     PLAIN_ID,
     _cookie,
@@ -109,8 +114,6 @@ def test_needs_a_session(client, sent):
 
 @pytest.mark.asyncio
 async def test_the_kill_switch_silences_it(monkeypatch):
-    from core import telegram_user_files
-
     monkeypatch.setenv("KS_ALERTS_DISABLED", "1")
 
     class _Boom:
@@ -118,7 +121,22 @@ async def test_the_kill_switch_silences_it(monkeypatch):
             raise AssertionError("reached the network")
 
     monkeypatch.setattr(telegram_user_files.httpx, "AsyncClient", _Boom)
-    assert await telegram_user_files.send_user_document_http(1, b"x", "a.csv") is False
+    assert await _REAL_SEND(1, b"x", "a.csv") is False
+
+
+def test_the_suite_cannot_send_a_real_document(client, monkeypatch):
+    """`.env` holds the real bot token and the suite runs with the kill switch
+    off, so a test reaching the route without its own stub would post to a real
+    chat. `tests/conftest.py` stubs the sender for every test; this one has
+    none of its own and must reach no client."""
+    opened = []
+    monkeypatch.setattr(telegram_user_files.httpx, "AsyncClient",
+                        lambda *a, **k: opened.append(a) or pytest.fail("reached httpx"))
+    headers = _login(monkeypatch)
+    r = client.post(URL, json={"filename": "a.csv", "content": "x"}, headers=headers)
+    assert r.status_code == 502
+    assert opened == []
+    assert telegram_user_files.send_user_document_http is not _REAL_SEND
 
 
 FRONTEND = Path(__file__).resolve().parents[2] / "web" / "frontend" / "src"
