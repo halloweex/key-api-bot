@@ -281,8 +281,10 @@ class TestFollowUpAudience:
         assert audience["totals"] == {"customers": 1, "target": 1, "holdout": 0}
         assert audience["criteria"]["followUpOf"] == "root"
         assert audience["criteria"]["holdoutPct"] == 0
+        # No number here was rejected in two campaigns, so the last stage
+        # removes nobody; `test_sms_segments.py` is where it does.
         assert [(s["stage"], s["remaining"]) for s in audience["funnel"]] == [
-            ("rootTarget", 4), ("accepted", 3), ("subscribed", 1),
+            ("rootTarget", 4), ("accepted", 3), ("subscribed", 1), ("reachable", 1),
         ]
 
     @pytest.mark.asyncio

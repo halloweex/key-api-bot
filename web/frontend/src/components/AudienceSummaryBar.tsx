@@ -16,12 +16,19 @@ import { Button } from './Button'
 // While something holds the step (an unfinished condition, no name) the
 // button is disabled and the bar says why in place of the counts, so a
 // greyed-out button is never the only clue.
+//
+// Inside the Telegram Mini App the action is Telegram's own MainButton, just
+// under the page, and a second «Далее» drawn above it would be the same
+// button twice: `actionPlacement="native"` leaves the sentence and the counts
+// and drops the drawn one. The caller says so only once the native button is
+// actually being driven.
 
 export function AudienceSummaryBar({
   sentence,
   stats,
   blocked,
   action,
+  actionPlacement = 'inline',
 }: {
   sentence: string
   /** «4 101 человек · 1 035 в нескольких группах», or a loading line. */
@@ -30,6 +37,8 @@ export function AudienceSummaryBar({
   blocked?: string | null
   /** The step's action — «Далее · 3 691 получателей». */
   action: { label: string; onClick: () => void; disabled?: boolean }
+  /** `native`: the action is Telegram's MainButton, so none is drawn here. */
+  actionPlacement?: 'inline' | 'native'
 }) {
   return (
     <div
@@ -48,12 +57,14 @@ export function AudienceSummaryBar({
             {blocked || stats}
           </p>
         </div>
-        <div className="shrink-0">
-          <Button variant="primary" onClick={action.onClick} disabled={action.disabled}
-                  fullWidth>
-            {action.label}
-          </Button>
-        </div>
+        {actionPlacement === 'inline' && (
+          <div className="shrink-0">
+            <Button variant="primary" onClick={action.onClick} disabled={action.disabled}
+                    fullWidth>
+              {action.label}
+            </Button>
+          </div>
+        )}
       </div>
     </div>
   )

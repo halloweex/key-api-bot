@@ -11,8 +11,8 @@ import {
   allowedPeriodKinds, DAY_CHIPS, MAX_DAYS, MAX_ORDERS, SOURCES,
   type Condition, type CountOp, type OrdersCondition, type WhenValue,
 } from '../utils/smsConditions'
-import { plural, sourceLabel } from '../utils/smsConditionText'
-import { kyivToday } from '../utils/smsDates'
+import { plural, sourceLabel, type T } from '../utils/smsConditionText'
+import { daysAgoRange, formatDay, kyivToday, lastDays, rangeEnds } from '../utils/smsDates'
 
 // ─── SmsConditionEditor ──────────────────────────────────────────────────────
 //
@@ -114,6 +114,37 @@ function OrdersEditor({
 
 type WhenKind = WhenValue['kind']
 
+const isDays = (n: number | null | undefined, min = 1): n is number =>
+  typeof n === 'number' && Number.isInteger(n) && n >= min && n <= MAX_DAYS
+
+/**
+ * Which dates a relative "when" is today, in the words under a period's
+ * number — computed with `lastDays`/`daysAgoRange`, the arithmetic the
+ * conditions are sent with, so the line cannot say one edge and the query
+ * count another. Null while the number is not one the query would take.
+ */
+function resolvedWhen(value: WhenValue, today: string, t: T) {
+  if (value.kind === 'within' && isDays(value.days)) {
+    const { from, to } = lastDays(value.days, today)
+    return t('periodControl.resolved', rangeEnds(from, to))
+  }
+  if (value.kind === 'before' && isDays(value.days)) {
+    const { to } = daysAgoRange(value.days, null, today)
+    return t('periodControl.resolvedUpTo', { to: formatDay(to!, { month: 'long' }) })
+  }
+  if (value.kind === 'ago') {
+    const lo = isDays(value.min, 0) ? value.min : null
+    const hi = isDays(value.max, 0) ? value.max : null
+    if (lo == null && hi == null) return null
+    if (lo != null && hi != null && lo > hi) return null
+    const { from, to } = daysAgoRange(lo, hi, today)
+    if (from && to) return t('periodControl.resolved', rangeEnds(from, to))
+    if (to) return t('periodControl.resolvedUpTo', { to: formatDay(to, { month: 'long' }) })
+    return t('periodControl.resolved', rangeEnds(from!, today))
+  }
+  return null
+}
+
 function WhenEditor({
   value, onChange,
 }: { value: WhenValue; onChange: (w: WhenValue) => void }) {
@@ -183,6 +214,9 @@ function WhenEditor({
             unit={t('sms.cond.edit.daysAgo', { word: plural(t, 'word.days', value.max ?? 5) })}
           />
         </Wrapper>
+      )}
+      {resolvedWhen(value, today, t) && (
+        <p className="text-xs text-slate-500 tabular-nums">{resolvedWhen(value, today, t)}</p>
       )}
       {value.kind === 'dates' && (
         <DateRangeField

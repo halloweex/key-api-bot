@@ -77,16 +77,48 @@ export function inclusiveDays(from: string, to: string): number {
   return daysBetween(from, to) + 1
 }
 
+/**
+ * The calendar days "the last N days" covers — exactly as the server counts
+ * them, and the one place the page does that arithmetic.
+ *
+ * Every relative time on the server is `today − date <= N` in Kyiv dates:
+ * recency, orders within N days (`period_days`), "bought within N days" and,
+ * resolved here, the first order. So the first day in is today − N and today
+ * is in too: N + 1 calendar days. On 18 Oct 2026 the last 91 days are
+ * 19 Jul – 18 Oct, both included. The built-in presets were written against
+ * that rule; the label says it rather than the rule bending to the label.
+ */
+export function lastDays(days: number, today: string = kyivToday()): { from: string; to: string } {
+  return { from: addDays(today, -days), to: today }
+}
+
+/**
+ * "Between `min` and `max` days ago", as dates: the later end is the fewer
+ * days. Either bound may be missing — "N or more days ago" has no start.
+ */
+export function daysAgoRange(
+  min: number | null | undefined, max: number | null | undefined, today: string = kyivToday(),
+): { from?: string; to?: string } {
+  return {
+    from: typeof max === 'number' ? addDays(today, -max) : undefined,
+    to: typeof min === 'number' ? addDays(today, -min) : undefined,
+  }
+}
+
 function locale(): string {
   return LANGUAGE_LOCALES[i18n.language as SupportedLanguage] || 'en-US'
 }
 
 type Parts = { day: string; month: string; year: string }
 
-function parts(iso: string): Parts {
+/** How a month is said: «окт» in a dense sentence, «октября» where it is
+ *  the whole message, as under a period's number. */
+export type MonthStyle = 'short' | 'long'
+
+function parts(iso: string, month: MonthStyle = 'short'): Parts {
   const out: Parts = { day: '', month: '', year: '' }
   for (const p of new Intl.DateTimeFormat(locale(), {
-    day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC',
+    day: 'numeric', month, year: 'numeric', timeZone: 'UTC',
   }).formatToParts(new Date(toUtc(iso)))) {
     if (p.type === 'day') out.day = p.value
     // "янв." and "жовт." carry a period that reads as the end of a sentence
@@ -109,9 +141,11 @@ function english(): boolean {
  * is already in the genitive, which is the one thing a hand-written table of
  * month names gets wrong.
  */
-export function formatDay(iso: string, { withYear = true } = {}): string {
+export function formatDay(
+  iso: string, { withYear = true, month = 'short' }: { withYear?: boolean; month?: MonthStyle } = {},
+): string {
   if (!isIsoDate(iso)) return iso
-  const p = parts(iso)
+  const p = parts(iso, month)
   if (english()) return withYear ? `${p.month} ${p.day}, ${p.year}` : `${p.month} ${p.day}`
   return withYear ? `${p.day} ${p.month} ${p.year}` : `${p.day} ${p.month}`
 }
@@ -121,4 +155,14 @@ export function formatDayRange(from: string, to: string): string {
   if (!isIsoDate(from) || !isIsoDate(to)) return `${from} – ${to}`
   const sameYear = from.slice(0, 4) === to.slice(0, 4)
   return `${formatDay(from, { withYear: !sameYear })} – ${formatDay(to)}`
+}
+
+/** Both ends of a range for a sentence of their own, the year said once:
+ *  { from: «19 июля», to: «18 октября 2026» }. */
+export function rangeEnds(from: string, to: string): { from: string; to: string } {
+  const sameYear = from.slice(0, 4) === to.slice(0, 4)
+  return {
+    from: formatDay(from, { withYear: !sameYear, month: 'long' }),
+    to: formatDay(to, { month: 'long' }),
+  }
 }

@@ -271,3 +271,40 @@ describe('a follow-up', () => {
     expect(screen.queryByText('sms.followUpNoControl')).toBeNull()
   })
 })
+
+describe('a refusal the server names', () => {
+  async function pressSend() {
+    render(<SmsSendDialog campaign={campaign} onClose={() => {}} />)
+    const [message, confirm] = screen.getAllByRole('textbox')
+    await userEvent.type(message, 'Знижка 20%')
+    await userEvent.type(confirm, 'aug-promo')
+    await userEvent.click(sendButton())
+  }
+
+  it("is said in the reader's language, not as the server's English", async () => {
+    const { ApiError } = await import('../../api/client')
+    await pressSend()
+    const { onError } = mutate.mock.calls[0][1]
+    onError(new ApiError(409, 'the TurboSMS balance is 4650.00 ₴ and this send costs …',
+      'CLIENT_ERROR', { reason: 'balance_short', balance: 4650, cost: 4746.12,
+                       shortfall: 96.12, recipients: 5560, parts: 1, pricePerPart: 1.28,
+                       margin: 1.02 }))
+
+    const toast = addToast.mock.calls.at(-1)![0]
+    // Not "the gateway refused": a guard refused before the gateway was asked.
+    expect(toast.title).toBe('sms.sendRefused')
+    expect(toast.message).toMatch(/^sms\.refusal\.balance_short/)
+    expect(toast.message).not.toContain('TurboSMS balance is')
+  })
+
+  it('falls back to what the server said when it names nothing', async () => {
+    const { ApiError } = await import('../../api/client')
+    await pressSend()
+    const { onError } = mutate.mock.calls[0][1]
+    onError(new ApiError(502, 'TurboSMS rejected the request: 103 INVALID_SENDER'))
+
+    const toast = addToast.mock.calls.at(-1)![0]
+    expect(toast.title).toBe('sms.sendFailed')
+    expect(toast.message).toBe('TurboSMS rejected the request: 103 INVALID_SENDER')
+  })
+})

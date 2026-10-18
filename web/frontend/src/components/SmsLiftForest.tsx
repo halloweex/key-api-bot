@@ -54,7 +54,15 @@ function ticksFor([lo, hi]: [number, number]): number[] {
   return out
 }
 
-export const SmsLiftForest = memo(function SmsLiftForest({ rows }: { rows: ForestRow[] }) {
+export const SmsLiftForest = memo(function SmsLiftForest({
+  rows,
+  title,
+}: {
+  rows: ForestRow[]
+  /** What the chart is called for a screen reader; the visible heading is the
+   *  caller's. One arm is "lift", several are "lift by segment". */
+  title?: string
+}) {
   const { t } = useTranslation()
   const [hovered, setHovered] = useState<number | null>(null)
 
@@ -66,7 +74,7 @@ export const SmsLiftForest = memo(function SmsLiftForest({ rows }: { rows: Fores
 
   return (
     <figure className="m-0">
-      <figcaption className="sr-only">{t('sms.forestTitle')}</figcaption>
+      <figcaption className="sr-only">{title ?? t('sms.forestTitle')}</figcaption>
 
       {/* ── State key: colour carries meaning, so it is named ─────────── */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-500 mb-2">

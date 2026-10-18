@@ -364,7 +364,7 @@ async def test_funnel_survives_an_empty_segmentation(tmp_path):
     assert result["totals"]["customers"] == 0
     assert _funnel(result) == {
         "customers": 1, "inWindow": 0, "filtered": 0, "tiered": 0,
-        "phone": 0, "subscribed": 0, "uniquePhone": 0,
+        "phone": 0, "subscribed": 0, "reachable": 0, "uniquePhone": 0,
     }
 
     await store.close()
@@ -774,5 +774,117 @@ async def test_tier_subset_does_not_change_who_wins_a_shared_phone(tmp_path):
         tier=["REACTIVATION"], include_customers=True, holdout_pct=0,
     )
     assert only_react["customers"] == []
+
+    await store.close()
+
+
+# ─── A number the gateway keeps rejecting ───────────────────────────────────
+#
+# On production, every number rejected (REJECTD/Rejected) in one campaign and
+# messaged again later was rejected again: 15 of 15, none delivered. So a
+# number rejected in two campaigns is left out — read from the delivery
+# reports, never written as an opt-out, and shown as its own funnel stage.
+
+def _member(buyer_id: int, phone: str) -> dict:
+    return {"buyerId": buyer_id, "phone": phone, "tier": "ALL", "assignment": "target",
+            "orders": 1, "revenueLtv": 1000.0, "marginLtv": 500.0, "recencyDays": 10}
+
+
+async def _rejected_in(store, campaign: str, members: dict, rejected: dict) -> None:
+    """Freeze `campaign` over `members` {buyer: phone}, send it, and have the
+    gateway reject `rejected` {buyer: status}: some refused at the send, the
+    rest by a later delivery report."""
+    await store.freeze_sms_campaign(
+        campaign=campaign, customers=[_member(b, p) for b, p in members.items()],
+        criteria={}, ltv_basis="margin", sales_type="retail", holdout_pct=0,
+    )
+    targets = await store.get_sms_campaign_targets(campaign)
+    at_send = {b: s for b, s in rejected.items() if s == "Rejected"}
+    await store.record_sms_send(
+        campaign,
+        {t["buyerId"]: f"{campaign}-{t['buyerId']}" for t in targets
+         if t["buyerId"] not in at_send},
+        [], at_send,
+    )
+    for b, status in rejected.items():
+        if status != "Rejected":
+            await store.record_sms_delivery(
+                f"{campaign}-{b}", status, False, event_id=f"{campaign}-{b}-dlr",
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_number_rejected_in_two_campaigns_is_left_out(tmp_path):
+    store = await _make_store(tmp_path)
+    await _seed(store)
+    # Buyer 1's number: refused at the send in August, rejected by a delivery
+    # report in October. Buyer 2's: rejected once only.
+    await _rejected_in(store, "aug", {1: "380961111111", 2: "380962222222"},
+                       {1: "Rejected", 2: "REJECTD"})
+    await _rejected_in(store, "oct", {1: "380961111111", 2: "380962222222"},
+                       {1: "REJECTD"})
+
+    result = await store.get_sms_segments(include_customers=True, holdout_pct=0)
+    funnel = _funnel(result)
+
+    assert 1 not in _by_id(result), "rejected in two campaigns"
+    assert 2 in _by_id(result), "one rejection can be a temporary block"
+    assert funnel["subscribed"] == 4, "a rejected number is not an opt-out"
+    assert funnel["reachable"] == 3
+    assert funnel["uniquePhone"] == 3
+    # Nothing was written to say so.
+    async with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM marketing_optouts").fetchone()[0] == 0
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_two_buyers_on_one_number_in_one_campaign_are_one_rejection(tmp_path):
+    """Counted by campaign, not by row: the same number under two buyer
+    records, rejected in one campaign, is rejected once."""
+    store = await _make_store(tmp_path)
+    await _seed(store)
+    await _rejected_in(store, "aug", {1: "380961111111", 9: "380961111111"},
+                       {1: "REJECTD", 9: "REJECTD"})
+
+    result = await store.get_sms_segments(include_customers=True, holdout_pct=0)
+
+    assert 1 in _by_id(result)
+    assert _funnel(result)["reachable"] == _funnel(result)["subscribed"]
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_other_failures_do_not_count_as_rejections(tmp_path):
+    """EXPIRED and UNDELIV are a phone switched off or out of reach — not the
+    operator refusing the number."""
+    store = await _make_store(tmp_path)
+    await _seed(store)
+    await _rejected_in(store, "aug", {1: "380961111111"}, {1: "EXPIRED"})
+    await _rejected_in(store, "oct", {1: "380961111111"}, {1: "UNDELIV"})
+
+    assert 1 in _by_id(await store.get_sms_segments(include_customers=True, holdout_pct=0))
+
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_leaves_out_a_number_rejected_twice(tmp_path):
+    """A same-day push to a number the operator refused this morning, and in
+    August, would be refused a third time."""
+    store = await _make_store(tmp_path)
+    await _seed(store)
+    await _rejected_in(store, "aug", {1: "380961111111"}, {1: "REJECTD"})
+    await _rejected_in(store, "oct", {1: "380961111111", 2: "380962222222"},
+                       {1: "REJECTD"})
+
+    data = await store.get_sms_follow_up_audience(
+        "oct", campaign="oct-last-day", include_customers=True, limit=100,
+    )
+
+    assert [c["buyerId"] for c in data["customers"]] == [2]
+    assert _funnel(data) == {"rootTarget": 2, "accepted": 2, "subscribed": 2, "reachable": 1}
 
     await store.close()

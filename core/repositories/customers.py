@@ -135,6 +135,7 @@ def _compare_groups(
     }
 
 from core.sms_holdout import assign_arm
+from core.sms_refusals import SmsCampaignRefused
 from core.sql_dialect import (
     AT_RISK_TYPES, CLICKHOUSE_ANALYTICS, COHORT_LTV_TYPES,
     COHORT_RETENTION_TYPES, DAYS_TO_SECOND_TYPES, DUCKDB_ANALYTICS,
@@ -144,7 +145,17 @@ from core.sql_dialect import (
 )
 from core.pg_sms import refuse_while_unported, sms_store_is_postgres
 from core.sql_dialect import (
-    DUCKDB, POSTGRES, TODAY_IN_KYIV, numbered, sms_segments_select,
+    DUCKDB, POSTGRES, SMS_REJECTED_STATUSES, SMS_UNREACHABLE_AFTER_CAMPAIGNS,
+    TODAY_IN_KYIV, numbered, sms_segments_select,
+)
+
+# The numbers the gateway rejected in two campaigns, as the audience query
+# reads them (`sql_dialect.SMS_REJECTED_STATUSES`) — here for the follow-up's
+# roster, which is read straight off the members table.
+_REJECTED_NUMBERS_SQL = (
+    "SELECT phone AS rejected_phone FROM {members} WHERE delivery_status IN ("
+    + ", ".join(f"'{s}'" for s in SMS_REJECTED_STATUSES)
+    + f") GROUP BY phone HAVING COUNT(DISTINCT campaign) >= {int(SMS_UNREACHABLE_AFTER_CAMPAIGNS)}"
 )
 
 # Tier cut-offs per LTV basis for get_sms_segments.
@@ -641,6 +652,13 @@ def _load_json(raw: Any) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _iso(value: Any) -> Optional[str]:
+    """A stored timestamp as JSON can carry it, whichever engine read it."""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def _local_times(row: Sequence[Any]) -> tuple:
     """asyncpg's UTC timestamps in the offset DuckDB would have used.
 
@@ -906,10 +924,10 @@ def sms_segments_fragments(
     return fragments, params, audience["window"]
 
 
-# The audience query's fixed projection: the customer, the funnel, and the
-# group mask. One `f_group_N` per group follows, which is why the row is
-# sliced rather than unpacked whole.
-_SEGMENT_FIXED_COLUMNS = 27
+# The audience query's fixed projection: the customer, the funnel, the group
+# mask and the reachable count. One `f_group_N` per group follows, which is
+# why the row is sliced rather than unpacked whole.
+_SEGMENT_FIXED_COLUMNS = 28
 
 
 class CustomersMixin:
@@ -1905,8 +1923,9 @@ class CustomersMixin:
                 customers is empty (an empty roster measures nothing).
         """
         if not customers:
-            raise ValueError(
-                "refusing to freeze an empty roster — nothing could be measured"
+            raise SmsCampaignRefused(
+                "refusing to freeze an empty roster — nothing could be measured",
+                "audience_empty",
             )
 
         async with self._sms_tx() as tx:
@@ -1916,14 +1935,16 @@ class CustomersMixin:
 
             if exists is not None:
                 if not overwrite:
-                    raise ValueError(
+                    raise SmsCampaignRefused(
                         f"campaign {campaign!r} is already frozen — pass overwrite "
-                        f"to replace it, or use a new campaign name"
+                        f"to replace it, or use a new campaign name",
+                        "already_frozen", campaign=campaign,
                     )
                 if exists[0] is not None:
-                    raise ValueError(
+                    raise SmsCampaignRefused(
                         f"campaign {campaign!r} was already sent on {exists[0]} — "
-                        f"its roster is the control group and cannot be rewritten"
+                        f"its roster is the control group and cannot be rewritten",
+                        "roster_sent", campaign=campaign, sentAt=_iso(exists[0]),
                     )
                 await tx.none(
                     "DELETE FROM {members} WHERE campaign = ?", [campaign])
@@ -1941,10 +1962,11 @@ class CustomersMixin:
                     [campaign],
                 )
                 if replaced is None:
-                    raise ValueError(
+                    raise SmsCampaignRefused(
                         f"campaign {campaign!r} was claimed for sending while "
                         f"being re-frozen — its roster is the control group and "
-                        f"cannot be rewritten"
+                        f"cannot be rewritten",
+                        "claimed_while_refreezing", campaign=campaign,
                     )
 
             await tx.none(
@@ -2089,10 +2111,13 @@ class CustomersMixin:
                 mode="one",
             )
             if camp is None:
-                raise ValueError(f"campaign {campaign!r} is not frozen")
-            raise ValueError(
+                raise SmsCampaignRefused(
+                    f"campaign {campaign!r} is not frozen", "not_frozen", campaign=campaign,
+                )
+            raise SmsCampaignRefused(
                 f"campaign {campaign!r} was already sent on {camp[0]} — "
-                f"sending twice would double-message the roster"
+                f"sending twice would double-message the roster",
+                "already_sent", campaign=campaign, sentAt=_iso(camp[0]),
             )
 
         rows = await self._sms_run(
@@ -2227,21 +2252,26 @@ class CustomersMixin:
             [root], mode="one",
         )
         if camp is None:
-            raise ValueError(f"campaign {root!r} is not frozen")
+            raise SmsCampaignRefused(
+                f"campaign {root!r} is not frozen", "not_frozen", campaign=root,
+            )
         sent_at, criteria, ltv_basis, sales_type = camp
         if sent_at is None:
-            raise ValueError(
+            raise SmsCampaignRefused(
                 f"campaign {root!r} has not been sent — a follow-up goes to the "
-                f"people the first message reached"
+                f"people the first message reached",
+                "follow_up_root_unsent", root=root,
             )
         parent = follow_up_root(_load_json(criteria))
         if parent is not None:
-            raise ValueError(
+            raise SmsCampaignRefused(
                 f"campaign {root!r} is itself a follow-up of {parent!r} — point "
-                f"this one at {parent!r}, the campaign both are measured on"
+                f"this one at {parent!r}, the campaign both are measured on",
+                "follow_up_of_follow_up", root=root, parent=parent,
             )
 
         rows = await self._sms_run(
+            "WITH rejected_numbers AS (" + _REJECTED_NUMBERS_SQL + ")"
             """
             SELECT m.buyer_id, m.phone, m.tier, m.orders_at_export,
                    m.revenue_ltv_at_export, m.margin_ltv_at_export,
@@ -2251,8 +2281,11 @@ class CustomersMixin:
                        SELECT 1 FROM {optouts} o
                        WHERE o.channel = 'sms'
                          AND (o.buyer_id = m.buyer_id OR o.phone = m.phone)
-                   ) AS subscribed
+                   ) AS subscribed,
+                   -- Joined, not asked with NOT EXISTS: see the audience query.
+                   r.rejected_phone IS NULL AS reachable
             FROM {members} m
+            LEFT JOIN rejected_numbers r ON r.rejected_phone = m.phone
             WHERE m.campaign = ? AND m.assignment = 'target'
             ORDER BY m.buyer_id
             """,
@@ -2261,12 +2294,15 @@ class CustomersMixin:
 
         root_targets = len(rows)
         accepted = [r for r in rows if r[7]]
-        kept = [r for r in accepted if r[8]]
+        subscribed = [r for r in accepted if r[8]]
+        # The gateway rejected the number in two campaigns — this one may be
+        # one of them: the audience leaves it out, and so does a follow-up.
+        kept = [r for r in subscribed if r[9]]
 
         tiers: Dict[str, Dict[str, Any]] = {}
         customers = []
         for (buyer_id, phone, tier, orders, revenue_ltv, margin_ltv, recency,
-             _accepted, _subscribed) in kept:
+             _accepted, _subscribed, _reachable) in kept:
             ltv = revenue_ltv if ltv_basis == "revenue" else margin_ltv
             stats = tiers.setdefault(tier, {
                 "tier": tier, "total": 0, "target": 0, "holdout": 0,
@@ -2327,7 +2363,8 @@ class CustomersMixin:
             "funnel": [
                 {"stage": "rootTarget", "remaining": root_targets},
                 {"stage": "accepted", "remaining": len(accepted)},
-                {"stage": "subscribed", "remaining": len(kept)},
+                {"stage": "subscribed", "remaining": len(subscribed)},
+                {"stage": "reachable", "remaining": len(kept)},
             ],
             "segments": segments,
             "totals": {"customers": len(kept), "target": len(kept), "holdout": 0},
@@ -3128,7 +3165,7 @@ class CustomersMixin:
 
         tiers: Dict[str, Dict[str, Any]] = {}
         customers = []
-        funnel_counts = (0, 0, 0, 0, 0, 0, 0)
+        funnel_counts = (0, 0, 0, 0, 0, 0, 0, 0)
         # Per group: how many customers its own conditions matched (the
         # funnel's `filtered` stage, one group at a time), how many of the
         # audience are in it, and how many are in it and in no other.
@@ -3141,9 +3178,9 @@ class CustomersMixin:
              recency, last_order, first_order,
              last_order_id, last_order_total, last_order_item_count, last_order_items,
              f_customers, f_in_window, f_filtered, f_tiered, f_phone, f_subscribed,
-             f_eligible, group_mask) = row[:_SEGMENT_FIXED_COLUMNS]
+             f_eligible, group_mask, f_reachable) = row[:_SEGMENT_FIXED_COLUMNS]
             funnel_counts = (f_customers, f_in_window, f_filtered, f_tiered,
-                             f_phone, f_subscribed, f_eligible)
+                             f_phone, f_subscribed, f_reachable, f_eligible)
             matched = [int(v or 0) for v in row[_SEGMENT_FIXED_COLUMNS:]]
             # The funnel row survives the RIGHT JOIN even when no customer does.
             if buyer_id is None:
@@ -3220,7 +3257,7 @@ class CustomersMixin:
 
         total_customers = sum(s["total"] for s in summary)
         (f_customers, f_in_window, f_filtered, f_tiered, f_phone, f_subscribed,
-         f_eligible) = funnel_counts
+         f_reachable, f_eligible) = funnel_counts
         return {
             "campaign": campaign,
             "salesType": sales_type,
@@ -3274,6 +3311,10 @@ class CustomersMixin:
                 {"stage": "tiered", "remaining": int(f_tiered or 0)},
                 {"stage": "phone", "remaining": int(f_phone or 0)},
                 {"stage": "subscribed", "remaining": int(f_subscribed or 0)},
+                # Numbers the gateway rejected in two campaigns
+                # (`sql_dialect.SMS_REJECTED_STATUSES`): shown as their own
+                # stage, never folded into the opt-outs above.
+                {"stage": "reachable", "remaining": int(f_reachable or 0)},
                 {"stage": "uniquePhone", "remaining": int(f_eligible or 0)},
             ],
             "segments": summary,

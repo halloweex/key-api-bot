@@ -119,9 +119,9 @@ class TestItDoesNotTakeTheDuckDbLock:
 
         # One funnel row, no customers — the shape a RIGHT JOIN returns when
         # nothing survives, which is enough to prove the path ran: the
-        # customer columns empty, the funnel, the group mask and one group's
-        # count.
-        funnel_only = [(None,) * 19 + (0, 0, 0, 0, 0, 0, 0) + (0,) + (0,)]
+        # customer columns empty, the funnel, the group mask, the reachable
+        # count and one group's count.
+        funnel_only = [(None,) * 19 + (0, 0, 0, 0, 0, 0, 0) + (0,) + (0,) + (0,)]
         try:
             monkeypatch.setattr(type(store), "connection", _explode)
             with patch("core.pg_sms_read.fetch_segments",

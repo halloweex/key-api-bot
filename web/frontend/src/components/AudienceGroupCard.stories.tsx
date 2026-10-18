@@ -3,6 +3,7 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { AudienceGroupCard } from './AudienceGroupCard'
 import type { PickOption } from './MultiPick'
 import type { Condition, ConditionGroup } from '../utils/smsConditions'
+import type { GroupDiagnosis } from '../utils/smsGroupDiagnosis'
 import type { SmsAudienceGroupShare } from '../types/api'
 
 /**
@@ -11,7 +12,9 @@ import type { SmsAudienceGroupShare } from '../types/api'
  *
  * The card says what it brings once a preview has counted it — «2,612 people
  * · 1,025 only here» — and says so when it brings nobody, because a group
- * that empties itself is the one place a slip shows as a number.
+ * that empties itself is the one place a slip shows as a number. Then it says
+ * WHICH condition did it, once the page has asked the preview what the group
+ * matches without each of its conditions (`utils/smsGroupDiagnosis.ts`).
  *
  * One condition is edited at a time. On desktop its inputs open under its
  * sentence and every change counts at once; on a phone they open in a bottom
@@ -49,7 +52,7 @@ const OWNER_SHARE_1: SmsAudienceGroupShare = {
 
 function Live({
   initial, index = 0, share, single = false, phone = false, editing = null,
-  removable = true,
+  removable = true, diagnosis,
 }: {
   initial: ConditionGroup
   index?: number
@@ -58,6 +61,7 @@ function Live({
   phone?: boolean
   editing?: string | null
   removable?: boolean
+  diagnosis?: GroupDiagnosis | 'pending' | null
 }) {
   const [group, setGroup] = useState(initial)
   const [editingId, setEditingId] = useState<string | null>(editing)
@@ -75,6 +79,7 @@ function Live({
       phone={phone}
       brandOptions={BRANDS}
       categoryOptions={CATEGORIES}
+      diagnosis={diagnosis}
     />
   )
 }
@@ -128,7 +133,48 @@ export const TheSlip92: Story = {
         }],
       }}
       share={{ group: 1, matched: 0, recipients: 0, onlyHere: 0 }}
+      diagnosis={{ kind: 'alone', conditionId: 'g1-orders' }}
     />
+  ),
+}
+
+// A group of three that matches nobody, and the four things the card can say
+// about it once the previews without each condition are in.
+const EMPTY_OF_THREE: ConditionGroup = {
+  id: 'g1',
+  conditions: [
+    { id: 'e-orders', type: 'orders', op: 'atLeast', count: 2, countMax: null, period: { kind: 'all' } },
+    { id: 'e-first', type: 'firstOrder', when: { kind: 'within', days: 30 } },
+    { id: 'e-city', type: 'city', cities: ['Ужгород'] },
+  ],
+}
+const NOBODY: SmsAudienceGroupShare = { group: 1, matched: 0, recipients: 0, onlyHere: 0 }
+
+/** Still asking: the plain sentence, and that the cause is being looked for. */
+export const NobodyFindingWhy: Story = {
+  render: () => <Live initial={EMPTY_OF_THREE} share={NOBODY} single diagnosis="pending" />,
+}
+
+/** One condition, with the others, leaves nobody; without it 812 would match. */
+export const NobodyOneConditionCutsAll: Story = {
+  render: () => (
+    <Live initial={EMPTY_OF_THREE} share={NOBODY} single
+          diagnosis={{ kind: 'cuts', conditionId: 'e-first', without: 812 }} />
+  ),
+}
+
+/** Two conditions exclude each other: either removed brings people back. */
+export const NobodyTwoClash: Story = {
+  render: () => (
+    <Live initial={EMPTY_OF_THREE} share={NOBODY} single
+          diagnosis={{ kind: 'clash', conditionIds: ['e-orders', 'e-first'] }} />
+  ),
+}
+
+/** No one condition to blame: it takes the whole group. */
+export const NobodyTogether: Story = {
+  render: () => (
+    <Live initial={EMPTY_OF_THREE} share={NOBODY} single diagnosis={{ kind: 'together' }} />
   ),
 }
 
@@ -168,6 +214,23 @@ export const MatchedButUnreachable: Story = {
         conditions: [{ id: 'g1-city', type: 'city', cities: ['Ужгород'] }],
       }}
       share={{ group: 1, matched: 14, recipients: 0, onlyHere: 0 }}
+    />
+  ),
+}
+
+/** Unreachable, with the cause found: without the city, 1,240 could be messaged. */
+export const UnreachableWithCause: Story = {
+  render: () => (
+    <Live
+      initial={{
+        id: 'g1',
+        conditions: [
+          { id: 'g1-city', type: 'city', cities: ['Ужгород'] },
+          { id: 'g1-gender', type: 'gender', genders: ['m'], confidence: null },
+        ],
+      }}
+      share={{ group: 1, matched: 14, recipients: 0, onlyHere: 0 }}
+      diagnosis={{ kind: 'reach', conditionId: 'g1-city', without: 1_240 }}
     />
   ),
 }

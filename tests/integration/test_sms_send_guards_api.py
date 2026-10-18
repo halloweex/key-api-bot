@@ -173,6 +173,10 @@ class TestTheTypedName:
 
         assert r.status_code == 409
         assert "confirm" in r.json()["detail"]
+        # Named, so the page can say it in its reader's language; `detail`
+        # stays the English sentence API callers read.
+        assert r.json()["reason"] == "confirm_mismatch"
+        assert r.json()["campaign"] == "aug"
         assert store.claims == 0, "nothing may be claimed for an unconfirmed send"
         assert gateway.calls == []
 
@@ -182,6 +186,7 @@ class TestTheTypedName:
                         headers=_headers())
 
         assert r.status_code == 409
+        assert r.json()["reason"] == "confirm_mismatch"
         assert store.claims == 0
         assert gateway.calls == []
 
@@ -303,6 +308,7 @@ class TestRecentCampaigns:
         body = r.json()
         assert body["reason"] == "recent_campaign"
         assert body["conflicts"] == store.conflicts
+        assert body["hours"] == 24, "the page says how far back it looked"
         assert "oct-vip" in body["detail"] and "control" in body["detail"]
         assert "120" in body["detail"] and "follow_up_of" in body["detail"]
         assert gateway.calls == [], "not even the balance is asked"
@@ -439,6 +445,9 @@ class TestFollowUpRoutes:
 
         assert r.status_code == 400
         assert next(iter(extra)) in r.json()["detail"]
+        assert r.json()["reason"] == "follow_up_narrowed"
+        assert r.json()["root"] == "root"
+        assert r.json()["params"] == [next(iter(extra))]
         assert "root-last-day" not in {
             c["campaign"] for c in await real_store.list_sms_campaigns()}
 
@@ -453,6 +462,7 @@ class TestFollowUpRoutes:
 
         assert r.status_code == 400
         assert "holdout" in r.json()["detail"]
+        assert r.json()["reason"] == "follow_up_holdout"
 
     @pytest.mark.asyncio
     async def test_a_holdout_of_zero_is_what_it_is_anyway(self, client, real_store):
@@ -477,6 +487,8 @@ class TestFollowUpRoutes:
 
         assert r.status_code == 409
         assert "has not been sent" in r.json()["detail"]
+        assert r.json()["reason"] == "follow_up_root_unsent"
+        assert r.json()["root"] == "root"
 
     @pytest.mark.asyncio
     async def test_a_follow_up_of_a_follow_up_is_refused(self, client, real_store):
@@ -495,12 +507,16 @@ class TestFollowUpRoutes:
 
         assert r.status_code == 409
         assert "'root'" in r.json()["detail"], "the refusal names the root to use"
+        assert r.json()["reason"] == "follow_up_of_follow_up"
+        assert (r.json()["root"], r.json()["parent"]) == ("noon", "root")
 
     @pytest.mark.asyncio
     async def test_an_unknown_root_is_404(self, client, real_store):
         r = client.get(SEGMENTS, params={"follow_up_of": "nobody"}, headers=_headers())
 
         assert r.status_code == 404
+        assert r.json()["reason"] == "not_frozen"
+        assert r.json()["campaign"] == "nobody"
 
     @pytest.mark.asyncio
     async def test_another_sales_type_must_be_named(self, client, real_store):
@@ -519,6 +535,8 @@ class TestFollowUpRoutes:
 
         assert refused.status_code == 409
         assert "sales_type=all" in refused.json()["detail"]
+        assert refused.json()["reason"] == "follow_up_sales_type"
+        assert refused.json()["salesType"] == "all"
         assert named.status_code == 200, named.text
 
     @pytest.mark.asyncio
@@ -536,3 +554,98 @@ class TestFollowUpRoutes:
                         headers=_headers())
 
         assert r.status_code == 400
+        assert r.json()["reason"] == "follow_up_self"
+
+
+# ─── E. Every refusal is named, over a real store ───────────────────────────
+#
+# The page says a refusal in its reader's language from `reason` and the
+# figures beside it (`core/sms_refusals.py`); `detail` stays the English
+# sentence for API callers. These are the refusals that only a real store
+# can produce: the state of a campaign, not a guard of the route.
+
+class TestRefusalsAreNamed:
+
+    @pytest.mark.asyncio
+    async def test_a_second_send_is_already_sent(self, client, real_store, gateway):
+        await _sent_root(real_store)
+
+        r = client.post("/api/customers/sms-campaigns/root/send",
+                        params={"text": "hi", "confirm_campaign": "root"},
+                        headers=_headers())
+
+        assert r.status_code == 409
+        assert "already sent" in r.json()["detail"]
+        assert r.json()["reason"] == "already_sent"
+        assert r.json()["campaign"] == "root"
+        assert r.json()["sentAt"], "the page says when it went"
+        assert gateway.sends == 0
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_campaign_is_not_frozen(self, client, real_store, gateway):
+        r = client.post("/api/customers/sms-campaigns/nobody/send",
+                        params={"text": "hi", "confirm_campaign": "nobody"},
+                        headers=_headers())
+
+        assert r.status_code == 404
+        assert r.json()["reason"] == "not_frozen"
+        assert r.json()["campaign"] == "nobody"
+
+    @pytest.mark.asyncio
+    async def test_the_placeholder_name_is_refused(self, client, real_store):
+        r = client.post(CREATE, params={"campaign": "default", "grouping": "single"},
+                        headers=_headers())
+
+        assert r.status_code == 400
+        assert r.json()["reason"] == "name_placeholder"
+        assert "default" in r.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_a_taken_name_is_already_frozen(self, client, real_store):
+        await _sent_root(real_store)
+        await real_store.freeze_sms_campaign(
+            campaign="taken", customers=[_member(1)], criteria={},
+            ltv_basis="margin", sales_type="retail", holdout_pct=10,
+        )
+
+        r = client.post(CREATE, params={"campaign": "taken", "follow_up_of": "root"},
+                        headers=_headers())
+
+        assert r.status_code == 409
+        assert r.json()["reason"] == "already_frozen"
+        assert r.json()["campaign"] == "taken"
+
+    @pytest.mark.asyncio
+    async def test_an_empty_audience_is_refused(self, client, real_store):
+        r = client.post(CREATE, params={"campaign": "nobody-here", "grouping": "single"},
+                        headers=_headers())
+
+        assert r.status_code == 400
+        assert r.json()["reason"] == "audience_empty"
+
+    def test_a_gateway_refusal_is_named_and_hands_the_claim_back(
+        self, client, store, gateway, monkeypatch,
+    ):
+        from core.turbosms import TurboSmsError
+
+        class _Refusing:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def balance(self):
+                return 1_000_000.0
+
+            async def send(self, *a, **kw):
+                raise TurboSmsError("sender name is not approved", unsent=True)
+
+        monkeypatch.setattr("web.routes.api.customers.TurboSmsClient", lambda *a, **k: _Refusing())
+
+        r = _send(client)
+
+        assert r.status_code == 502
+        assert r.json()["reason"] == "gateway_refused"
+        assert "sender name is not approved" in r.json()["error"]
+        assert store.releases == 1

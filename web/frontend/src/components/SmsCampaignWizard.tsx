@@ -22,6 +22,10 @@ import { SmsTestSendDialog } from './SmsTestSendDialog'
 import { useToast } from './Toast'
 import { useIsPhone } from '../hooks/useMediaQuery'
 import {
+  useTelegramBackButton, useTelegramMainButton, useTelegramWebApp,
+} from '../hooks/useTelegramButtons'
+import { closeTopLayer, useAnyLayerOpen } from '../utils/layerStack'
+import {
   useCreateSmsCampaign,
   useDeleteSmsAudiencePreset,
   useSaveSmsAudiencePreset,
@@ -41,6 +45,7 @@ import { clearDraft, loadDraft, saveDraft } from '../utils/smsDraft'
 import { followUpCandidates, followUpParams } from '../utils/smsFollowUp'
 import { suggestCampaignName } from '../utils/smsCampaignName'
 import { smsCost } from '../utils/smsCost'
+import { describeSmsError, refusalMessage } from '../utils/smsRefusal'
 import { formatCurrency, formatNumber } from '../utils/formatters'
 import type { SmsCampaignSummary } from '../types/api'
 
@@ -68,6 +73,12 @@ import type { SmsCampaignSummary } from '../types/api'
 // messaged a second time. It has no audience to build and no control of its
 // own — it is read on the first campaign's control — so it skips those steps
 // and its preview and freeze are one `follow_up_of` query.
+//
+// Inside the Telegram Mini App the audience step's «Далее · N получателей» is
+// Telegram's MainButton — the same label, enabled state and handler as the
+// bar's — and the BackButton closes the sheet on top, else steps back. Both
+// are hidden on every other step, when a sheet covers the step, and when the
+// wizard closes. Outside Telegram nothing of this runs.
 
 const CAMPAIGN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/
 const SMS_LIMIT = 600
@@ -370,7 +381,9 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
         addToast({ type: 'success', title: t('sms.campaignCreated', { campaign }) })
       },
       onError: (e: Error) =>
-        addToast({ type: 'error', title: t('sms.campaignCreateFailed'), message: e.message }),
+        addToast({
+          type: 'error', title: t('sms.campaignCreateFailed'), message: describeSmsError(e, t),
+        }),
     })
   }
 
@@ -431,6 +444,27 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
         n: formatNumber(target), word: plural(t, 'word.recipients', target),
       })
     : t('sms.wizardNext')
+  const nextDisabled = target === 0 || !campaignValid || stale || Boolean(error)
+    || (!followUp && (open.length > 0 || emptyGroups.length > 0))
+  const goNext = () => setStep(followUp ? 'message' : 'control')
+
+  // ── Telegram's own buttons, inside the Mini App ─────────────────────────
+  const webApp = useTelegramWebApp()
+  const layerOpen = useAnyLayerOpen()
+  useTelegramMainButton(webApp, {
+    visible: step === 'audience' && !layerOpen,
+    text: nextLabel,
+    enabled: !nextDisabled,
+    onClick: goNext,
+  })
+  const stepIndex = steps.indexOf(step)
+  useTelegramBackButton(webApp, {
+    visible: layerOpen || stepIndex > 0,
+    onClick: () => {
+      if (closeTopLayer()) return
+      if (stepIndex > 0) setStep(steps[stepIndex - 1])
+    },
+  })
 
   return (
     <Card>
@@ -500,7 +534,11 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
             audience gets fixed, and the draft would reopen the same one. */}
         {error && (
           <Wrapper dir="column" marginBottom="md">
-            <ApiErrorState error={error} onRetry={() => refetch()} />
+            <ApiErrorState
+              error={error} onRetry={() => refetch()}
+              title={t('sms.previewFailed')}
+              message={refusalMessage(error, t) ?? undefined}
+            />
           </Wrapper>
         )}
         <>
@@ -544,6 +582,7 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                       audience={audience}
                       onChange={editAudience}
                       shares={sharesAligned && !isPlaceholderData ? shares : undefined}
+                      settled={!stale}
                       segments={data?.segments}
                       library={(
                         <Wrapper dir="column" gap="sm">
@@ -594,12 +633,8 @@ export const SmsCampaignWizard = memo(function SmsCampaignWizard({
                   sentence={sentence}
                   stats={stats}
                   blocked={blocked}
-                  action={{
-                    label: nextLabel,
-                    onClick: () => setStep(followUp ? 'message' : 'control'),
-                    disabled: target === 0 || !campaignValid || stale || Boolean(error)
-                      || (!followUp && (open.length > 0 || emptyGroups.length > 0)),
-                  }}
+                  action={{ label: nextLabel, onClick: goNext, disabled: nextDisabled }}
+                  actionPlacement={webApp ? 'native' : 'inline'}
                 />
               </Wrapper>
             )}

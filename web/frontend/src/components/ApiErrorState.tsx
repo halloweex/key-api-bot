@@ -12,6 +12,9 @@ interface ApiErrorStateProps {
   error: Error | null
   onRetry?: () => void
   title?: string
+  /** What the error means, when the caller can say it better than the
+   *  server's own text — a refusal translated for the reader. */
+  message?: string
 }
 
 interface ErrorInfo {
@@ -115,6 +118,7 @@ export const ApiErrorState = memo(function ApiErrorState({
   error,
   onRetry,
   title = 'Failed to load data',
+  message,
 }: ApiErrorStateProps) {
   const { t } = useTranslation()
   const [retryCount, setRetryCount] = useState(0)
@@ -162,7 +166,7 @@ export const ApiErrorState = memo(function ApiErrorState({
         <LottieAnimation animationData={errorAnimation} loop={false} size="md" />
       </Wrapper>
       <h3 className="text-slate-900 font-semibold text-lg mb-1">{errorInfo.title}</h3>
-      <p className="text-slate-500 text-sm mb-5 max-w-xs">{errorInfo.message}</p>
+      <p className="text-slate-500 text-sm mb-5 max-w-xs">{message ?? errorInfo.message}</p>
 
       {autoRetrying && retryCount < 3 && (
         <div className="flex items-center gap-2.5 text-sm text-slate-500 mb-4 bg-white px-4 py-2 rounded-full shadow-sm">

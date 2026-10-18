@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { X } from 'lucide-react'
+import { pushLayer } from '../utils/layerStack'
 
 // ─── BottomSheet ─────────────────────────────────────────────────────────────
 //
@@ -13,7 +14,8 @@ import { X } from 'lucide-react'
 // that leads to an editor closes and the editor opens in its place, so "back"
 // is always one tap and nothing is buried under anything.
 //
-// Closing: the × in the header, a tap on the dimmed page, or Escape. The
+// Closing: the × in the header, a tap on the dimmed page, Escape, or the
+// Telegram Mini App's BackButton (the sheet is on `utils/layerStack`). The
 // footer slot holds the one action that ends the task («Готово»), sticky
 // above the home indicator, so it is reachable however long the body is.
 
@@ -69,6 +71,9 @@ export function BottomSheet({
       }
     }
     document.addEventListener('keydown', onKey)
+    // "Back" closes the sheet before anything under it — Telegram's
+    // BackButton asks the stack (`utils/layerStack.ts`).
+    const popLayer = pushLayer(() => close.current())
     // Into the sheet, so a keyboard or a screen reader is where the eye is.
     const first = panel.current?.querySelector<HTMLElement>(
       'input, select, textarea, button:not([data-sheet-close]), [tabindex]:not([tabindex="-1"])',
@@ -77,6 +82,7 @@ export function BottomSheet({
     return () => {
       document.body.style.overflow = overflow
       document.removeEventListener('keydown', onKey)
+      popLayer()
       opener?.focus?.()
     }
   }, [open])

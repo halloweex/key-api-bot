@@ -32,6 +32,13 @@ import { ApiError } from '../api/client'
 // same six figures are columns: one row per arm, totals row first, so reading
 // down a column is the comparison. The forest plot is the only chart, because
 // interval width is the one thing a table cannot show.
+//
+// A campaign measured as one arm (grouping `single`, or one level picked) has
+// one row: its totals ARE the arm, and a «whole campaign» row above an
+// identical «whole audience» row read as two results (the owner asked why, on
+// sms-2026-10-17). A row is a measurement arm — a segment — never an audience
+// group: «Группа 1/2» is how the wizard names the OR-ed parts of an audience,
+// which a campaign's results know nothing about.
 
 // The window should match how long the offer lives. Days after it expires add
 // ordinary trading to both arms equally — no effect, more variance — so a long
@@ -226,19 +233,25 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
   // more use than quietly dropping them.
   const notSent = data?.overall.target.notSent ?? 0
 
-  // Totals first, then the tiers. Both the table and the chart read from this,
-  // so the two can never fall out of step.
+  // Totals first, then the arms. Both the table and the chart read from this,
+  // so the two can never fall out of step. One arm is one row: the campaign's
+  // totals, named after the arm they are — the same figures the headline reads.
+  const singleArm = (data?.segments.length ?? 0) === 1
   const rows = useMemo<ResultRow[]>(() => {
     if (!data) return []
+    const overall: ResultRow = {
+      key: 'overall',
+      label: data.segments.length === 1
+        ? t(`sms.tier.${data.segments[0].tier}`)
+        : t('sms.overall'),
+      target: data.overall.target,
+      holdout: data.overall.holdout,
+      comparison: data.overall.comparison,
+      emphasis: data.segments.length !== 1,
+    }
+    if (data.segments.length <= 1) return [overall]
     return [
-      {
-        key: 'overall',
-        label: t('sms.overall'),
-        target: data.overall.target,
-        holdout: data.overall.holdout,
-        comparison: data.overall.comparison,
-        emphasis: true,
-      },
+      overall,
       ...data.segments.map((s) => ({
         key: s.tier,
         label: t(`sms.tier.${s.tier}`),
@@ -398,10 +411,15 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
                 {showStats && (
                   <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50/70 p-4">
                     <h3 className="text-sm font-medium text-slate-700 mb-1">
-                      {t('sms.forestTitle')}
+                      {t(singleArm ? 'sms.forestTitleSingle' : 'sms.forestTitle')}
                     </h3>
-                    <p className="text-xs text-slate-500 mb-3">{t('sms.forestDesc')}</p>
-                    <SmsLiftForest rows={forestRows} />
+                    <p className="text-xs text-slate-500 mb-3">
+                      {t(singleArm ? 'sms.forestDescSingle' : 'sms.forestDesc')}
+                    </p>
+                    <SmsLiftForest
+                      rows={forestRows}
+                      title={t(singleArm ? 'sms.forestTitleSingle' : 'sms.forestTitle')}
+                    />
                   </div>
                 )}
               </div>
@@ -413,7 +431,7 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
                 <DataTable>
                   <thead>
                     <Tr header>
-                      <Th>{t('sms.colGroup')}</Th>
+                      <Th>{t('sms.colSegment')}</Th>
                       <Th align="right">{t('sms.colMessaged')}</Th>
                       <Th align="right">{t('sms.colControl')}</Th>
                       <Th align="right">{`${t('sms.lift')}, ${t('sms.pp')}`}</Th>
@@ -468,7 +486,7 @@ export const SmsCampaignResults = memo(function SmsCampaignResults({
                           ) : (
                             <Td align="right" colSpan={showStats ? 4 : 3}>
                               <span className="text-[11px] text-slate-500">
-                                {t('sms.noControlInTier')}
+                                {t('sms.noControlInSegment')}
                               </span>
                             </Td>
                           )}
