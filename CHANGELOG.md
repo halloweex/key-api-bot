@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.291
+
+- SMS results: one row for a one-arm campaign, and rows named as segments
+- SMS wizard follow-ups: refusals in the reader's language, counts, the emptying condition, Telegram buttons, a truthful period label, twice-rejected numbers
+
+
 ## 3.0.290
 
 - feat(sms): step 1 of the campaign wizard holds conditions, not parameters
