@@ -16,7 +16,22 @@ export const ChatMessage = memo(function ChatMessage({ message, index }: ChatMes
   const [copied, setCopied] = useState(false)
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(message.content)
+    try {
+      await navigator.clipboard.writeText(message.content)
+    } catch {
+      // Telegram's WebView can refuse the async clipboard; the old selection
+      // copy still works there. Without this the button failed in silence.
+      const area = document.createElement('textarea')
+      area.value = message.content
+      area.setAttribute('readonly', '')
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      const ok = document.execCommand('copy')
+      area.remove()
+      if (!ok) return
+    }
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }

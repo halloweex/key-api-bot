@@ -180,6 +180,9 @@ EXAMPLE_BODIES: Dict[str, Any] = {
     # The tabs picked on the approval card, before the grant.
     "POST /api/admin/access-requests/{user_id}/approve": {"preset": "standard"},
     "PATCH /api/me/preferences": {"language": "uk", "notifications_enabled": True},
+    # A CSV the page already holds, for the bot to send to the requester's
+    # own chat; with the network off it answers 502 having sent nothing.
+    "POST /api/me/send-file": {"filename": "sweep.csv", "content": "a,b\n1,2"},
     "PUT /api/customers/sms-audience-presets/{name}": {
         "grouping": "single", "recency_max": 270},
     # Filled in by `webhook_body`: the signature depends on the event id.

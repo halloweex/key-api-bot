@@ -96,6 +96,11 @@ def _no_telegram_from_tests(monkeypatch):
         monkeypatch.setattr(
             f"core.telegram_alerts.{name}", _blocked, raising=False,
         )
+    # The bot's document sender behind `POST /api/me/send-file`: the same
+    # token, to whichever id the test signed in as.
+    monkeypatch.setattr(
+        "core.telegram_user_files.send_user_document_http", _blocked, raising=False,
+    )
 
 
 @pytest.fixture(autouse=True)

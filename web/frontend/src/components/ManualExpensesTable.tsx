@@ -1,4 +1,4 @@
-import { memo, useMemo, useState, useCallback } from 'react'
+import { memo, useMemo, useState, useCallback, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ChartContainer } from './ChartContainer'
@@ -122,21 +122,61 @@ interface DeleteButtonProps {
   isDeleting: boolean
 }
 
+// Two steps on the page rather than `window.confirm`: the dashboard runs as a
+// Telegram Mini App, and Telegram Desktop's WebView may never show a JS
+// dialog — `confirm()` there returns false and the trash can does nothing.
+const CONFIRM_RESET_MS = 4000
+
 const DeleteButton = memo(function DeleteButton({ expenseId, onDelete, isDeleting }: DeleteButtonProps) {
   const { t } = useTranslation()
+  const [armed, setArmed] = useState(false)
+
+  useEffect(() => {
+    if (!armed) return
+    const timer = setTimeout(() => setArmed(false), CONFIRM_RESET_MS)
+    return () => clearTimeout(timer)
+  }, [armed])
+
+  if (isDeleting) {
+    return (
+      <span className="inline-flex p-1.5">
+        <span className="block w-4 h-4 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
+      </span>
+    )
+  }
+
+  if (armed) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => { setArmed(false); onDelete(expenseId) }}
+          className="px-2 py-1 text-xs font-medium rounded-lg text-white bg-red-500 hover:bg-red-600 transition-colors"
+        >
+          {t('chart.deleteConfirm')}
+        </button>
+        <button
+          type="button"
+          onClick={() => setArmed(false)}
+          className="px-1.5 py-1 text-xs rounded-lg text-slate-500 hover:bg-slate-100 transition-colors"
+          title={t('common.cancel')}
+          aria-label={t('common.cancel')}
+        >
+          ✕
+        </button>
+      </span>
+    )
+  }
+
   return (
     <button
-      onClick={() => onDelete(expenseId)}
-      disabled={isDeleting}
-      className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50
-                 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+      type="button"
+      onClick={() => setArmed(true)}
+      className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors"
       title={t('chart.deleteExpense')}
+      aria-label={t('chart.deleteExpense')}
     >
-      {isDeleting ? (
-        <span className="block w-4 h-4 border-2 border-slate-300 border-t-transparent rounded-full animate-spin" />
-      ) : (
-        <TrashIcon className="w-4 h-4" />
-      )}
+      <TrashIcon className="w-4 h-4" />
     </button>
   )
 })
@@ -202,9 +242,7 @@ export const ManualExpensesTable = memo(function ManualExpensesTable() {
   })
 
   const handleDelete = useCallback((expenseId: number) => {
-    if (confirm(t('chart.deleteConfirm'))) {
-      deleteMutation.mutate(expenseId)
-    }
+    deleteMutation.mutate(expenseId)
   }, [deleteMutation])
 
   const isEmpty = !isLoading && (!data?.expenses || data.expenses.length === 0)
