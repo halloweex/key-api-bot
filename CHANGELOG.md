@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.292
+
+- Traffic tab splits organic traffic into the channels it is made of
+
+
 ## 3.0.291
 
 - SMS results: one row for a one-arm campaign, and rows named as segments
