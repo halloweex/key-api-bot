@@ -6,7 +6,10 @@ from datetime import date
 from typing import Optional, List, Dict, Any
 
 from core.utm_classify import (
+    ORGANIC_CHANNELS,
     classify_traffic,
+    organic_channel,
+    organic_detail,
     parse_utm_from_comment,
     tab_platform,
     utm_columns,
@@ -369,6 +372,158 @@ class TrafficMixin:
                 'by_platform': {k: len(v) for k, v in new_by_platform.items()},
                 'by_traffic_type': {k: len(v) for k, v in new_by_type.items()},
             },
+        }
+
+    # How many names one channel lists under it. Email alone carried 88 letters
+    # in 180 days; the tab shows the head and says how many more there were.
+    ORGANIC_DETAIL_LIMIT = 20
+
+    async def get_traffic_organic(
+        self,
+        start_date: date,
+        end_date: date,
+        sales_type: str = "all",
+        source_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Organic traffic split into the channels it is made of.
+
+        `organic` on the cards is one verdict over very different things — a
+        manager's order in Instagram Direct, the link in the profile, a
+        blogger's story, a welcome letter, a free Google listing — and this
+        says which. The channel is `core.utm_classify.organic_channel`, decided
+        here from the stored tags rather than stored, so the rule can change
+        without a reclassify.
+
+        Each channel carries its orders and revenue, the new buyers it brought
+        (people, counted as sets for `get_traffic_analytics`' reason), the
+        same figures for the period of equal length just before, and the names
+        inside it: the letters, the bloggers' story tags, the sites.
+
+        The tags are compared lower-cased in Python, never in SQL: `LOWER` in
+        PostgreSQL follows the database's collation and DuckDB's does not, so
+        the two engines would group a Cyrillic tag two ways.
+        """
+        filters = [
+            "NOT s.is_return",
+            "s.is_active_source",
+            "s.order_date IS NOT NULL",
+            "s.order_date >= ?",
+            "s.order_date <= ?",
+            f"{self._TRAFFIC_TYPE_EXPR} = 'organic'",
+        ]
+        extra: list = []
+        if source_id:
+            filters.append("s.source_id = ?")
+            extra.append(source_id)
+        if sales_type != "all":
+            filters.append("s.sales_type = ?")
+            extra.append(sales_type)
+        where_clause = " AND ".join(filters)
+
+        # Ordinals in the GROUP BY, because naming `platform` there would bind
+        # the input column `u.platform` in PostgreSQL rather than the COALESCE.
+        tags = f"""
+                s.source_id,
+                u.traffic_type IS NOT NULL AS tagged,
+                {self._PLATFORM_EXPR} AS platform,
+                COALESCE(u.utm_source, '') AS utm_source,
+                COALESCE(u.utm_medium, '') AS utm_medium,
+                COALESCE(u.utm_campaign, '') AS utm_campaign,
+                COALESCE(u.utm_content, '') AS utm_content"""
+        orders_sql = f"""
+            SELECT {tags},
+                COUNT(DISTINCT s.id) AS orders,
+                COALESCE(SUM(s.grand_total), 0) AS revenue
+            FROM {{silver_orders}} s
+            LEFT JOIN {{order_utm}} u ON s.id = u.order_id
+            WHERE {where_clause}
+            GROUP BY 1, 2, 3, 4, 5, 6, 7
+        """
+
+        def _place(row) -> tuple[str, Optional[str]]:
+            src, tagged, platform, utm_source, utm_medium, utm_campaign, utm_content = row[:7]
+            channel = organic_channel(
+                source_id=src, tagged=bool(tagged), platform=platform,
+                utm_medium=utm_medium, utm_campaign=utm_campaign,
+            )
+            return channel, organic_detail(
+                channel, utm_source=utm_source, utm_medium=utm_medium,
+                utm_campaign=utm_campaign, utm_content=utm_content,
+            )
+
+        async def _by_channel(start: date, end: date):
+            rows = await self._traffic_run(orders_sql, [start, end, *extra])
+            channels: Dict[str, Dict[str, float]] = {}
+            details: Dict[str, Dict[str, Dict[str, float]]] = {}
+            for row in rows:
+                channel, label = _place(row)
+                orders, revenue = int(row[7]), float(row[8])
+                bucket = channels.setdefault(channel, {'orders': 0, 'revenue': 0.0})
+                bucket['orders'] += orders
+                bucket['revenue'] += revenue
+                if label is not None:
+                    item = details.setdefault(channel, {}).setdefault(
+                        label, {'orders': 0, 'revenue': 0.0})
+                    item['orders'] += orders
+                    item['revenue'] += revenue
+            return channels, details
+
+        prev_start, prev_end = self._comparison_window(
+            start_date, end_date, "previous_period")
+        current, details = await _by_channel(start_date, end_date)
+        previous, _ = await _by_channel(prev_start, prev_end)
+
+        new_rows = await self._traffic_run(f"""
+            SELECT DISTINCT {tags}, s.buyer_id
+            FROM {{silver_orders}} s
+            LEFT JOIN {{order_utm}} u ON s.id = u.order_id
+            WHERE {where_clause} AND s.is_new_customer
+        """, [start_date, end_date, *extra])
+        new_buyers: Dict[str, set] = {}
+        for row in new_rows:
+            new_buyers.setdefault(_place(row)[0], set()).add(row[7])
+
+        def _sorted_details(channel: str) -> List[Dict[str, Any]]:
+            items = sorted(
+                details.get(channel, {}).items(),
+                key=lambda kv: (-kv[1]['revenue'], -kv[1]['orders'], kv[0]),
+            )
+            return [{'label': label, **_rounded(v)}
+                    for label, v in items[:self.ORGANIC_DETAIL_LIMIT]]
+
+        rank = {c: i for i, c in enumerate(ORGANIC_CHANNELS)}
+        names = sorted(
+            set(current) | set(previous),
+            key=lambda c: (-current.get(c, {}).get('revenue', 0.0),
+                           -previous.get(c, {}).get('revenue', 0.0),
+                           rank.get(c, len(rank)), c),
+        )
+
+        def _total(buckets: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
+            return _rounded({
+                'orders': sum(b['orders'] for b in buckets.values()),
+                'revenue': sum(b['revenue'] for b in buckets.values()),
+            })
+
+        return {
+            'period': {'start': start_date.isoformat(), 'end': end_date.isoformat()},
+            'previous_period': {'start': prev_start.isoformat(), 'end': prev_end.isoformat()},
+            'totals': {
+                **_total(current),
+                'new_customers': len(set().union(*new_buyers.values())),
+            },
+            'previous_totals': _total(previous),
+            'channels': [
+                {
+                    'channel': c,
+                    **_rounded(current.get(c)),
+                    'new_customers': len(new_buyers.get(c, ())),
+                    'previous': _rounded(previous.get(c)),
+                    'details': _sorted_details(c),
+                    'details_total': len(details.get(c, {})),
+                }
+                for c in names
+            ],
         }
 
     async def get_traffic_trend(

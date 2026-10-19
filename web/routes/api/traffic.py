@@ -49,6 +49,34 @@ async def get_traffic_analytics(
     )
 
 
+@router.get("/traffic/organic")
+@limiter.limit("30/minute")
+async def get_traffic_organic(
+    request: Request,
+    period: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    source_id: Optional[int] = Query(None),
+    sales_type: Optional[str] = Query("retail"),
+):
+    """Organic traffic by channel, against the period just before it."""
+    try:
+        validate_period(period)
+        validate_source_id(source_id)
+        sales_type = validate_sales_type(sales_type)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    start_dt = _dt.strptime(start, "%Y-%m-%d").date()
+    end_dt = _dt.strptime(end, "%Y-%m-%d").date()
+
+    store = await get_store()
+    return await store.get_traffic_organic(
+        start_date=start_dt, end_date=end_dt, sales_type=sales_type, source_id=source_id,
+    )
+
+
 @router.get("/traffic/trend")
 @limiter.limit("30/minute")
 async def get_traffic_trend(

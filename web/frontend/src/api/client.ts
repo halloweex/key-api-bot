@@ -51,6 +51,7 @@ import type {
   AccessRequestsResponse,
   TabFeature,
   TrafficAnalyticsResponse,
+  TrafficOrganicResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
   TrafficROASResponse,
@@ -762,6 +763,9 @@ export const api = {
   // Traffic Analytics
   getTrafficAnalytics: (params: string, options?: FetchOptions) =>
     fetchApi<TrafficAnalyticsResponse>('/traffic/analytics', params, options),
+
+  getTrafficOrganic: (params: string, options?: FetchOptions) =>
+    fetchApi<TrafficOrganicResponse>('/traffic/organic', params, options),
 
   getTrafficTrend: (params: string, options?: FetchOptions) =>
     fetchApi<TrafficTrendResponse>('/traffic/trend', params, options),

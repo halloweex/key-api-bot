@@ -1052,6 +1052,51 @@ export interface TrafficAnalyticsResponse {
   new_customers: TrafficNewCustomers
 }
 
+/**
+ * The channels organic is split into on /traffic — `ORGANIC_CHANNELS` in
+ * `core/utm_classify.py`, decided from the stored tags at read time.
+ */
+export type OrganicChannelKey =
+  | 'instagram_direct'
+  | 'instagram_site'
+  | 'instagram_stories'
+  | 'telegram'
+  | 'email_campaigns'
+  | 'email_flows'
+  | 'google_organic'
+  | 'ai'
+  | 'facebook'
+  | 'tiktok'
+  | 'other'
+
+/** One name inside a channel: a letter, a blogger's story tag, a site. */
+export interface OrganicChannelDetail {
+  /** As written in the tag; empty for a tagged order with no such field. */
+  label: string
+  orders: number
+  revenue: number
+}
+
+export interface OrganicChannel extends TrafficMetric {
+  channel: OrganicChannelKey
+  /** People whose first order ever came through this channel in the period. */
+  new_customers: number
+  /** The period of equal length just before. */
+  previous: TrafficMetric
+  /** The head of the list, by revenue; `details_total` says how many there were. */
+  details: OrganicChannelDetail[]
+  details_total: number
+}
+
+export interface TrafficOrganicResponse {
+  period: { start: string; end: string }
+  previous_period: { start: string; end: string }
+  totals: TrafficMetric & { new_customers: number }
+  previous_totals: TrafficMetric
+  /** By revenue, a channel that sold only in the previous period included. */
+  channels: OrganicChannel[]
+}
+
 export interface TrafficTrendDay {
   date: string
   paid_orders: number
