@@ -4,6 +4,7 @@ import { PageShell } from './PageShell'
 import { TrafficSummaryCards } from './TrafficSummaryCards'
 import { ROASSection } from './ROASSection'
 import { PlatformBreakdownChart } from './PlatformBreakdownChart'
+import { OrganicBreakdown } from './OrganicBreakdown'
 import { TrafficTrendChart } from './TrafficTrendChart'
 import { TrafficTransactionsTable } from './TrafficTransactionsTable'
 import { UtmCampaignsTable } from './UtmCampaignsTable'
@@ -23,6 +24,9 @@ export const TrafficPage = memo(function TrafficPage() {
       </section>
       <section aria-label={t('traffic.platformBreakdown')}>
         <PlatformBreakdownChart />
+      </section>
+      <section aria-label={t('traffic.organicBreakdown')}>
+        <OrganicBreakdown />
       </section>
       <section aria-label={t('traffic.utmCampaigns')}>
         <UtmCampaignsTable />

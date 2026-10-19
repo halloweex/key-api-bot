@@ -1,0 +1,348 @@
+"""Organic on /traffic, split into the channels it is made of.
+
+`organic` is one verdict over very different things. Measured on production
+2026-10-19, 180 days of retail, ₴14.1M of it: ₴9.0M were orders a manager took
+in Instagram Direct with nothing in the comment, ₴3.1M visits from the link in
+the profile, ₴0.9M email — welcome and abandoned-cart letters more than the
+newsletters — ₴0.7M Telegram, ₴0.3M Google's free listings, and a handful of
+bloggers' stories and ChatGPT answers. One number on a card said none of that.
+
+The rule is `core.utm_classify.organic_channel`, read from the stored tags at
+query time. Every case below is a tag production actually carries; the
+two-engine half is `tests/integration/test_traffic_two_engines.py`.
+"""
+from __future__ import annotations
+
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Optional
+
+import pytest
+
+from core.duckdb_store import DuckDBStore
+from core.utm_classify import (
+    ORGANIC_CHANNELS,
+    classify_traffic,
+    organic_channel,
+    organic_detail,
+)
+
+DAY = date(2026, 8, 12)
+WINDOW = (DAY - timedelta(days=1), DAY + timedelta(days=1))
+# Inside the three days before WINDOW: `_comparison_window`'s previous period.
+BEFORE = DAY - timedelta(days=3)
+
+
+def _channel(utm: dict, *, source_id: int = 4) -> str:
+    """The channel the tab gives a comment carrying `utm`, through the real
+    classifier — so a test here cannot pass on a verdict the parser would
+    never write."""
+    traffic_type, platform = classify_traffic(utm)
+    assert traffic_type == "organic", (utm, traffic_type)
+    return organic_channel(
+        source_id=source_id, tagged=True, platform=platform,
+        utm_medium=utm.get("utm_medium"), utm_campaign=utm.get("utm_campaign"),
+    )
+
+
+class TestTheRule:
+
+    def test_an_order_with_no_tag_is_direct_or_telegram_by_its_source(self):
+        """Organic without a verdict is organic only through the readers'
+        COALESCE: a manager's order on source 1 or 2. That is what Direct
+        means, and it is two thirds of organic revenue."""
+        for source_id, expected in ((1, "instagram_direct"), (2, "telegram")):
+            assert organic_channel(
+                source_id=source_id, tagged=False,
+                platform="instagram" if source_id == 1 else "telegram",
+                utm_medium=None, utm_campaign=None,
+            ) == expected
+
+    @pytest.mark.parametrize("utm,expected", [
+        ({"utm_source": "ig", "utm_medium": "social",
+          "utm_content": "link_in_bio"}, "instagram_site"),
+        ({"utm_source": "instagram", "utm_medium": "social"}, "instagram_site"),
+        ({"utm_source": "instagram"}, "instagram_site"),
+        ({"utm_source": "instagram", "utm_medium": "stories_tanya_pads",
+          "utm_campaign": "tanya10"}, "instagram_stories"),
+        ({"utm_source": "instagram", "utm_medium": "stories"}, "instagram_stories"),
+        ({"utm_source": "klaviyo", "utm_medium": "klaviyo",
+          "utm_campaign": "[07/28/26] Campaign #12: [PR] Бʼюті-рулетка"},
+         "email_campaigns"),
+        ({"utm_source": "klaviyo", "utm_medium": "campaign"}, "email_campaigns"),
+        ({"utm_source": "klaviyo", "utm_medium": "email",
+          "utm_campaign": "Welcome Email 1a: Welcome & Gift Reveal (Vt8RBn)"},
+         "email_flows"),
+        ({"utm_source": "klaviyo", "utm_medium": "flow"}, "email_flows"),
+        ({"utm_source": "rivo", "utm_medium": "email",
+          "utm_campaign": "rivo-loyalty-points-earned-email"}, "email_flows"),
+        ({"utm_source": "shopify_email", "utm_medium": "email",
+          "utm_campaign": "Твій кошик чекає на тебе 🛍️_186454245708"}, "email_flows"),
+        ({"utm_source": "klaviyo", "utm_campaign": "()"}, "email_flows"),
+        ({"utm_source": "google", "utm_medium": "product_sync",
+          "utm_campaign": "sag_organic"}, "google_organic"),
+        ({"utm_source": "chatgpt.com"}, "ai"),
+        ({"utm_source": "facebook", "utm_medium": "social"}, "facebook"),
+        ({"utm_source": "tiktok", "utm_medium": "social"}, "tiktok"),
+        ({"utm_source": "telegram", "utm_medium": "social"}, "telegram"),
+        ({"utm_source": "wishpicks", "utm_medium": "referral"}, "other"),
+    ])
+    def test_every_tag_production_carries_lands_somewhere_named(self, utm, expected):
+        assert _channel(utm) == expected
+
+    def test_a_campaign_is_told_by_its_name_whatever_the_medium(self):
+        """The dated "Campaign #N" name is Klaviyo's own for a newsletter, so
+        it decides even where the medium says `email`."""
+        assert _channel({"utm_source": "klaviyo", "utm_medium": "email",
+                         "utm_campaign": "[09/04/26] Campaign #2: осінь"}) \
+            == "email_campaigns"
+
+    def test_the_medium_is_compared_without_case(self):
+        assert _channel({"utm_source": "instagram",
+                         "utm_medium": "Stories_Anna15"}) == "instagram_stories"
+
+    def test_the_channels_are_the_ones_the_tab_knows(self):
+        """Every channel the rule can return is in `ORGANIC_CHANNELS`, which
+        the frontend translates; a new one has to be named there too."""
+        returned = {
+            organic_channel(source_id=s, tagged=t, platform=p,
+                            utm_medium=m, utm_campaign=c)
+            for s in (1, 2, 4) for t in (True, False)
+            for p in ("instagram", "email", "google", "telegram", "ai",
+                      "facebook", "tiktok", "other", "unattributed")
+            for m in ("", "stories_x", "klaviyo", "email")
+            for c in ("", "Campaign #1")
+        }
+        assert returned <= set(ORGANIC_CHANNELS)
+
+
+class TestTheNameInsideAChannel:
+
+    def test_what_each_channel_lists(self):
+        tags = dict(utm_source="Klaviyo", utm_medium="stories_tanya10",
+                    utm_campaign="Welcome Email 1", utm_content="link_in_bio")
+        assert organic_detail("email_flows", **tags) == "Welcome Email 1"
+        assert organic_detail("email_campaigns", **tags) == "Welcome Email 1"
+        assert organic_detail("instagram_stories", **tags) == "stories_tanya10"
+        assert organic_detail("instagram_site", **tags) == "Welcome Email 1"
+        assert organic_detail("ai", **tags) == "Klaviyo"
+        assert organic_detail("other", **tags) == "Klaviyo"
+
+    def test_the_profile_link_falls_back_to_the_content(self):
+        """1 140 of 1 171 profile-link orders carry no campaign, only
+        `utm_content=link_in_bio`."""
+        assert organic_detail("instagram_site", utm_source="ig",
+                              utm_medium="social", utm_campaign="",
+                              utm_content="link_in_bio") == "link_in_bio"
+
+    def test_channels_with_nothing_finer_list_nothing(self):
+        for channel in ("instagram_direct", "telegram", "google_organic"):
+            assert organic_detail(channel, utm_source="google",
+                                  utm_medium="product_sync",
+                                  utm_campaign="sag_organic",
+                                  utm_content="sag_organic") is None
+
+
+# ─── The repository, on DuckDB ────────────────────────────────────────────────
+
+async def _store(tmp_path: Path) -> DuckDBStore:
+    s = DuckDBStore(db_path=tmp_path / "organic.duckdb")
+    await s.connect()
+    return s
+
+
+async def _order(store: DuckDBStore, order_id: int, *, total: float = 100.0,
+                 source_id: int = 4, day: date = DAY, buyer_id: Optional[int] = None,
+                 new: bool = False, utm: Optional[dict] = None,
+                 sales_type: str = "retail") -> None:
+    """One Silver order and, when `utm` is given, the row the parser would
+    have written for those tags — verdict included, through the real
+    classifier."""
+    buyer = order_id if buyer_id is None else buyer_id
+    async with store.connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO silver_orders (
+                id, source_id, status_id, grand_total, ordered_at, buyer_id,
+                manager_id, order_date, is_return, sales_type, is_active_source,
+                source_name, is_new_customer, buyer_first_order_date, promocode
+            ) VALUES (?, ?, 12, ?, NULL, ?, NULL, ?, FALSE, ?, TRUE, 'x', ?, ?, NULL)
+            """,
+            [order_id, source_id, total, buyer, day, sales_type, new,
+             day if new else day - timedelta(days=90)],
+        )
+        if utm is not None:
+            traffic_type, platform = classify_traffic(utm)
+            conn.execute(
+                "INSERT INTO silver_order_utm (order_id, utm_source, utm_medium,"
+                " utm_campaign, utm_content, traffic_type, platform, parsed_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                [order_id, utm.get("utm_source"), utm.get("utm_medium"),
+                 utm.get("utm_campaign"), utm.get("utm_content"),
+                 traffic_type, platform],
+            )
+
+
+async def _organic(store: DuckDBStore, **kwargs) -> dict:
+    return await store.get_traffic_organic(*WINDOW, **kwargs)
+
+
+def _by_channel(out: dict) -> dict:
+    return {c["channel"]: c for c in out["channels"]}
+
+
+BIO = {"utm_source": "ig", "utm_medium": "social", "utm_content": "link_in_bio"}
+WELCOME = {"utm_source": "klaviyo", "utm_medium": "email",
+           "utm_campaign": "Welcome Email 1a"}
+NEWSLETTER = {"utm_source": "klaviyo", "utm_medium": "klaviyo",
+              "utm_campaign": "[08/10/26] Campaign #4: Neogen"}
+PAID = {"utm_source": "fbads", "utm_medium": "paid", "utm_campaign": "spring"}
+
+
+class TestTheBreakdown:
+
+    @pytest.mark.asyncio
+    async def test_each_order_is_counted_in_its_channel_and_paid_is_not(self, tmp_path):
+        store = await _store(tmp_path)
+        try:
+            await _order(store, 1, total=3000, source_id=1)
+            await _order(store, 2, total=2000, source_id=1)
+            await _order(store, 3, total=500, source_id=2)
+            await _order(store, 4, total=1200, utm=BIO)
+            await _order(store, 5, total=800, utm=WELCOME)
+            await _order(store, 6, total=400, utm=NEWSLETTER)
+            await _order(store, 7, total=9999, utm=PAID)
+            out = await _organic(store)
+        finally:
+            await store.close()
+
+        channels = _by_channel(out)
+        assert [c["channel"] for c in out["channels"]] == [
+            "instagram_direct", "instagram_site", "email_flows", "telegram",
+            "email_campaigns",
+        ]
+        assert channels["instagram_direct"]["orders"] == 2
+        assert channels["instagram_direct"]["revenue"] == 5000.0
+        assert channels["email_flows"]["revenue"] == 800.0
+        assert out["totals"]["orders"] == 6
+        assert out["totals"]["revenue"] == 7900.0
+
+    @pytest.mark.asyncio
+    async def test_the_total_is_the_organic_card(self, tmp_path):
+        """The breakdown is of the card above it: the same orders, so the
+        same sums — or a reader adding the rows gets a number the card does
+        not show."""
+        store = await _store(tmp_path)
+        try:
+            await _order(store, 1, total=3000, source_id=1)
+            await _order(store, 2, total=500, source_id=2)
+            await _order(store, 3, total=1200, utm=BIO)
+            await _order(store, 4, total=777, source_id=4)  # unknown, no tag
+            await _order(store, 5, total=9999, utm=PAID)
+            organic = await _organic(store, sales_type="retail")
+            card = (await store.get_traffic_analytics(
+                *WINDOW, sales_type="retail"))["summary"]["organic"]
+        finally:
+            await store.close()
+
+        assert {k: organic["totals"][k] for k in ("orders", "revenue")} == card
+
+    @pytest.mark.asyncio
+    async def test_the_previous_period_is_the_same_length_just_before(self, tmp_path):
+        """A channel that sold last period and nothing this one is the row an
+        analyst most needs, so it is listed, with zeros where it stopped."""
+        store = await _store(tmp_path)
+        try:
+            await _order(store, 1, total=3000, source_id=1)
+            await _order(store, 2, total=1000, source_id=1, day=BEFORE)
+            await _order(store, 3, total=600, day=BEFORE, utm=NEWSLETTER)
+            await _order(store, 4, total=50, day=WINDOW[0] - timedelta(days=4),
+                         utm=NEWSLETTER)  # a day before the previous window
+            out = await _organic(store)
+        finally:
+            await store.close()
+
+        assert out["previous_period"] == {
+            "start": (WINDOW[0] - timedelta(days=3)).isoformat(),
+            "end": (WINDOW[0] - timedelta(days=1)).isoformat(),
+        }
+        channels = _by_channel(out)
+        assert channels["instagram_direct"]["previous"] == {
+            "orders": 1, "revenue": 1000.0}
+        assert channels["email_campaigns"]["orders"] == 0
+        assert channels["email_campaigns"]["previous"] == {
+            "orders": 1, "revenue": 600.0}
+        assert out["previous_totals"] == {"orders": 2, "revenue": 1600.0}
+
+    @pytest.mark.asyncio
+    async def test_new_buyers_are_people_and_do_not_add_up(self, tmp_path):
+        """Buyer 50's first day carried a Direct order and a welcome-letter
+        order: new on both rows, one person in the total. Buyer 51 is not
+        new at all."""
+        store = await _store(tmp_path)
+        try:
+            await _order(store, 1, source_id=1, buyer_id=50, new=True)
+            await _order(store, 2, buyer_id=50, new=True, utm=WELCOME)
+            await _order(store, 3, source_id=1, buyer_id=51, new=False)
+            out = await _organic(store)
+        finally:
+            await store.close()
+
+        channels = _by_channel(out)
+        assert channels["instagram_direct"]["new_customers"] == 1
+        assert channels["email_flows"]["new_customers"] == 1
+        assert out["totals"]["new_customers"] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_names_inside_a_channel_are_ranked_and_capped(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setattr(DuckDBStore, "ORGANIC_DETAIL_LIMIT", 2)
+        store = await _store(tmp_path)
+        try:
+            for i, (name, total) in enumerate(
+                    [("Welcome", 100), ("Cart", 300), ("Winback", 200),
+                     ("Cart", 50)], start=1):
+                await _order(store, i, total=total, utm={
+                    "utm_source": "klaviyo", "utm_medium": "email",
+                    "utm_campaign": name})
+            await _order(store, 9, total=999, source_id=1)
+            out = await _organic(store)
+        finally:
+            await store.close()
+
+        channels = _by_channel(out)
+        assert channels["email_flows"]["details"] == [
+            {"label": "Cart", "orders": 2, "revenue": 350.0},
+            {"label": "Winback", "orders": 1, "revenue": 200.0},
+        ]
+        assert channels["email_flows"]["details_total"] == 3
+        assert channels["instagram_direct"]["details"] == []
+        assert channels["instagram_direct"]["details_total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_the_filters_are_the_tabs(self, tmp_path):
+        store = await _store(tmp_path)
+        try:
+            await _order(store, 1, total=3000, source_id=1)
+            await _order(store, 2, total=1200, utm=BIO)
+            await _order(store, 3, total=700, source_id=1, sales_type="b2b")
+            retail_shopify = await _organic(store, sales_type="retail", source_id=4)
+            everyone = await _organic(store, sales_type="all")
+        finally:
+            await store.close()
+
+        assert [c["channel"] for c in retail_shopify["channels"]] == ["instagram_site"]
+        assert everyone["totals"] == {"orders": 3, "revenue": 4900.0,
+                                      "new_customers": 0}
+
+    @pytest.mark.asyncio
+    async def test_an_empty_window_is_an_empty_breakdown(self, tmp_path):
+        store = await _store(tmp_path)
+        try:
+            out = await _organic(store)
+        finally:
+            await store.close()
+
+        assert out["channels"] == []
+        assert out["totals"] == {"orders": 0, "revenue": 0.0, "new_customers": 0}

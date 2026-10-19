@@ -40,6 +40,7 @@ import type {
   StockAction,
   RestockAlert,
   TrafficAnalyticsResponse,
+  TrafficOrganicResponse,
   UtmCampaignsResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
@@ -128,6 +129,7 @@ export const queryKeys = {
   restockAlerts: () => ['restockAlerts'] as const,
   // Traffic analytics
   trafficAnalytics: (params: string) => ['trafficAnalytics', params] as const,
+  trafficOrganic: (params: string) => ['trafficOrganic', params] as const,
   trafficTrend: (params: string) => ['trafficTrend', params] as const,
   trafficTransactions: (params: string) => ['trafficTransactions', params] as const,
   trafficROAS: (params: string) => ['trafficROAS', params] as const,
@@ -626,6 +628,16 @@ export function useTrafficAnalytics() {
   return useQuery<TrafficAnalyticsResponse>({
     queryKey: queryKeys.trafficAnalytics(queryParams),
     queryFn: () => api.getTrafficAnalytics(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useTrafficOrganic() {
+  const queryParams = useQueryParams()
+
+  return useQuery<TrafficOrganicResponse>({
+    queryKey: queryKeys.trafficOrganic(queryParams),
+    queryFn: () => api.getTrafficOrganic(queryParams),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

@@ -56,6 +56,7 @@ ORDERS = [
     (6, 1, 900.0, 7, 19),     # return — excluded
     (7, 1, 700.0, 8, 1),      # tied on revenue with 5
     (8, 3, 400.0, 9, 1),      # Opencart — inactive source, excluded
+    (9, 4, 450.0, 10, 1),     # Shopify, a Klaviyo newsletter → organic / email
 ]
 
 # (order_id, utm_source, utm_medium, utm_campaign, traffic_type, platform, fbclid)
@@ -67,6 +68,8 @@ UTM = [
     (6, "fbads", "paid", "spring", "paid_confirmed", "facebook", None),
     (7, "fbads", "paid", "beta", "paid_confirmed", "facebook", None),
     (8, "fbads", "paid", "spring", "paid_confirmed", "facebook", None),
+    (9, "klaviyo", "klaviyo", "[07/28/26] Campaign #12: Beauty roulette",
+     "organic", "email", None),
 ]
 
 UTM_COLUMNS = (
@@ -233,6 +236,9 @@ CALLS = (
     ("get_traffic_analytics", {}),
     ("get_traffic_analytics", {"sales_type": "retail"}),
     ("get_traffic_analytics", {"source_id": 1}),
+    ("get_traffic_organic", {}),
+    ("get_traffic_organic", {"sales_type": "retail"}),
+    ("get_traffic_organic", {"source_id": 2}),
     ("get_traffic_trend", {}),
     ("get_traffic_trend", {"source_id": 2}),
     ("get_traffic_transactions", {}),
@@ -287,7 +293,8 @@ async def test_an_order_with_no_utm_row_still_counts(both_engines, monkeypatch):
     for out in (duck, pg):
         assert out["by_platform"]["telegram"]["orders"] == 1
         assert out["by_platform"]["telegram"]["revenue"] == 300.0
-        assert out["summary"]["organic"]["orders"] == 1
+        # Order 3, and order 9's newsletter, which has a UTM row of its own.
+        assert out["summary"]["organic"]["orders"] == 2
 
 
 # Derived from ORDERS rather than written out, because writing it out is how
@@ -357,3 +364,23 @@ async def test_two_campaigns_tied_on_revenue_paginate_the_same_way(
     for duck, pg in (first, second):
         assert [c["campaign"] for c in pg["campaigns"]] == \
                [c["campaign"] for c in duck["campaigns"]]
+
+
+@pytest.mark.asyncio
+async def test_organic_is_split_the_same_way_in_both(both_engines, monkeypatch):
+    """Order 3 is organic only through the COALESCE — no UTM row, source 2 —
+    and order 9 through its tags. The channel is decided in Python from what
+    each engine returns, so what this attacks is the statement: the boolean
+    that says "tagged", the COALESCE it is grouped on, and GROUP BY ordinals,
+    any of which one engine could read differently from the other."""
+    duck, pg = await _both(both_engines, monkeypatch, "get_traffic_organic", {})
+    for out in (duck, pg):
+        channels = {c["channel"]: c for c in out["channels"]}
+        assert set(channels) == {"telegram", "email_campaigns"}
+        assert channels["telegram"]["revenue"] == 300.0
+        assert channels["telegram"]["details"] == []
+        assert channels["email_campaigns"]["details"] == [{
+            "label": "[07/28/26] Campaign #12: Beauty roulette",
+            "orders": 1, "revenue": 450.0,
+        }]
+        assert out["totals"]["new_customers"] == 2

@@ -315,3 +315,88 @@ def tab_platform(platform: str, traffic_type: str) -> str:
     if platform == "google":
         return "google_ads" if traffic_type in GOOGLE_PAID_TYPES else "google_organic"
     return platform
+
+
+# The channels /traffic splits organic into, in the order the tab lists them
+# when two carry the same revenue. "Organic" is one verdict and several
+# different things: an order a manager took in Instagram Direct, a visit from
+# the link in the profile, a blogger's story, a welcome letter, a free Google
+# listing. Measured on production 2026-10-19, 180 days of retail: Direct is
+# ₴9.0M of the ₴14.1M, the profile link ₴3.1M, email ₴0.9M (automated letters
+# more than two thirds of it), Telegram ₴0.7M, Google's free listings ₴0.3M.
+ORGANIC_CHANNELS: Tuple[str, ...] = (
+    "instagram_direct", "instagram_site", "instagram_stories", "telegram",
+    "email_campaigns", "email_flows", "google_organic", "ai",
+    "facebook", "tiktok", "other",
+)
+
+# Klaviyo tags a campaign `utm_medium=klaviyo` and names it
+# "[MM/DD/YY] Campaign #N: …"; its flows (welcome, abandoned cart, post
+# purchase) are tagged `email`. In 2025 it said `campaign` and `flow` outright.
+# Rivo's loyalty letters and Shopify Email's are automations too — Shopify
+# Email named a campaign no differently from a flow, so its few 2025 campaigns
+# read as automated letters, and nothing in the tag can tell them apart.
+_EMAIL_CAMPAIGN_RE = re.compile(r'campaign\s*#', re.IGNORECASE)
+
+
+def organic_channel(
+    *,
+    source_id: Optional[int],
+    tagged: bool,
+    platform: str,
+    utm_medium: Optional[str],
+    utm_campaign: Optional[str],
+) -> str:
+    """Which `ORGANIC_CHANNELS` entry one organic order belongs to.
+
+    `tagged` is whether the parser gave the order a verdict at all. An order
+    without one is organic only through the readers' COALESCE — source 1 or 2,
+    taken by a manager in Instagram or Telegram with nothing in the comment —
+    and that is the whole of what "Instagram Direct" means here.
+
+    Read at query time from the stored tags, never stored, so changing this
+    rule needs no reclassify: unlike `classify_traffic`, nothing materialises
+    what it returns.
+    """
+    if not tagged:
+        return "telegram" if source_id == 2 else "instagram_direct"
+    medium = (utm_medium or "").strip().lower()
+    if platform == "instagram":
+        return "instagram_stories" if medium.startswith("stories") else "instagram_site"
+    if platform == "email":
+        if medium in ("klaviyo", "campaign") or _EMAIL_CAMPAIGN_RE.search(utm_campaign or ""):
+            return "email_campaigns"
+        return "email_flows"
+    if platform == "google":
+        return "google_organic"
+    if platform in ("telegram", "ai", "facebook", "tiktok"):
+        return platform
+    return "other"
+
+
+def organic_detail(
+    channel: str,
+    *,
+    utm_source: Optional[str],
+    utm_medium: Optional[str],
+    utm_campaign: Optional[str],
+    utm_content: Optional[str],
+) -> Optional[str]:
+    """What one organic order is called inside its channel, or None where the
+    channel has nothing finer to say (Direct and Telegram carry no tag, and
+    every free Google listing is tagged `sag_organic`).
+
+    The letter for email, the story tag for a blogger, the campaign or the
+    link for the profile, the site for everything else — each as written in
+    the tag, so the marketer finds what they typed. An empty string is a
+    tagged order with no such field, which the tab shows as "no tag".
+    """
+    if channel in ("instagram_direct", "telegram", "google_organic"):
+        return None
+    if channel in ("email_campaigns", "email_flows"):
+        return (utm_campaign or "").strip()
+    if channel == "instagram_stories":
+        return (utm_medium or "").strip()
+    if channel == "instagram_site":
+        return (utm_campaign or utm_content or "").strip()
+    return (utm_source or "").strip()

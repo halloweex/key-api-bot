@@ -21,6 +21,7 @@ import pytest
 
 from core.permissions import ACCESS_PRESETS, Role, TAB_FEATURE_KEYS
 from core.sms_refusals import REFUSAL_REASONS
+from core.utm_classify import ORGANIC_CHANNELS
 
 LOCALES = Path(__file__).resolve().parents[2] / "web" / "frontend" / "src" / "locales"
 LANGUAGES = ("en", "uk", "ru")
@@ -49,6 +50,10 @@ VOCABULARIES = {
     # reader's language (`utils/smsRefusal.ts`); a reason with no sentence
     # falls back to the server's English `detail`.
     "sms.refusal.": sorted(REFUSAL_REASONS),
+    # `t(`traffic.organicChannel.${channel}`)` names a row of the organic
+    # breakdown on /traffic, and its `…Desc.` twin says how it is decided.
+    "traffic.organicChannel.": list(ORGANIC_CHANNELS),
+    "traffic.organicChannelDesc.": list(ORGANIC_CHANNELS),
 }
 
 
