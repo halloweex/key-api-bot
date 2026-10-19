@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.293
+
+- The doors sweep sends /api/me/send-file a body; the suite blocks its sender
+- One test of "inside Telegram", shared by the exports and the wizard
+- Exports and the delete confirm work inside the Telegram Mini App
+
+
 ## 3.0.292
 
 - Traffic tab splits organic traffic into the channels it is made of
