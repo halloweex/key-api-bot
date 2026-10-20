@@ -186,3 +186,70 @@ jobs:
       - name: Stop the throwaway PostgreSQL
         if: always()
         run: docker rm -f -v ci-pg || true
+
+  # The type checker, as a job of its own beside the suite.
+  #
+  # Beside, not inside: the suite takes twenty minutes and this a minute or
+  # two, and a failing step ahead of "Run the suite" would skip the suite with
+  # it, so a pull request with one wrong type would come back with no test
+  # results. Two jobs, two verdicts.
+  #
+  # Its first run (2026-10-21) found 1 122 findings. Five of them were three
+  # live defects on lines no test executed: the web memory watchdog had raised
+  # AttributeError on every alert since 2026-09-14, a language chosen in the
+  # bot's settings was stored and never confirmed since 2026-08-12, and
+  # /api/health had published `sync: null` since 2026-02-12. The other 1 117
+  # are `.basedpyright/baseline.json` — what this job tolerates, and nothing
+  # else.
+  #
+  # WHAT FAILS IT
+  #
+  # Any error or warning that is not in the baseline, and a baseline that
+  # still lists a finding the code no longer has. The baseline matches by
+  # file, rule and column span — not by line, so moving code does not disturb
+  # it — and an entry a fix left behind would quietly admit the next finding
+  # of the same shape in that file. So it may only shrink, in the commit that
+  # shrinks it.
+  #
+  # WHY THE LOCK HERE TOO
+  #
+  # The findings depend on the installed packages' own annotations as much as
+  # on this repository: another fastapi, pandas or python-telegram-bot gives
+  # another list, and the baseline would read as broken. `pyrightconfig.json`
+  # owns the scope, the mode and the Python it models, so the command takes no
+  # paths and no flags, and what fails here fails the same way in
+  # python:3.14-slim on a laptop.
+  typecheck:
+    name: basedpyright
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.lock
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.lock
+
+      - name: Type check
+        run: basedpyright
+
+      # After a clean check, rewriting the baseline can only drop entries, so
+      # any difference is a finding somebody fixed and left listed.
+      - name: The baseline only shrinks
+        run: |
+          basedpyright --writebaseline > /dev/null
+          if ! git diff --quiet -- .basedpyright/baseline.json; then
+            echo "::error::.basedpyright/baseline.json lists findings the code no longer has. Run 'basedpyright --writebaseline' in python:3.14-slim with requirements-dev.lock installed, and commit the smaller baseline."
+            git diff --stat -- .basedpyright/baseline.json
+            exit 1
+          fi
