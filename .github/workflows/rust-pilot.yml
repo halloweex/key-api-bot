@@ -1,0 +1,189 @@
+# The Rust pilot (rust/README.md): one endpoint, never deployed.
+#
+# `cargo` is the workspace's own gate: rustfmt, clippy with warnings as
+# errors, and the tests — the CPython fixtures among them. `harness` builds
+# the image Dockerfile.rust describes, starts it beside a throwaway Postgres
+# set up as ci.yml sets one up, and sends the same requests to the Python app
+# and to the pilot: any difference, or a skip, fails the job. Then a short
+# benchmark on the runner, printed and not judged.
+#
+# WHAT THIS DOES NOT DO
+#
+# Deploy, push an image, or reach anything outside the runner: no secret is
+# read, and it does not run on main — pull requests and by hand only. It runs
+# on every pull request on purpose: the harness's job is to notice the day a
+# Python change moves the endpoint, and a paths filter would list the modules
+# somebody remembered. Deleting the pilot deletes this file with it.
+name: Rust pilot
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: rust-pilot-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cargo:
+    name: cargo fmt, clippy, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain rust-toolchain.toml pins, and the image built on the
+      # same one: two versions would make "it compiled in CI" a statement
+      # about a compiler the image does not use.
+      - name: Install the pinned toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          grep -q "^FROM rust:${channel}-slim" ../Dockerfile.rust \
+            || { echo "::error::Dockerfile.rust does not build on rust ${channel}"; exit 1; }
+          rustup toolchain install "$channel" --profile minimal \
+            --component rustfmt --component clippy
+          rustc --version && cargo --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            rust/target/
+          key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+      - name: Release build, timed
+        run: |
+          start=$(date +%s)
+          cargo build --release --locked -p ks-api
+          echo "release build: $(( $(date +%s) - start )) s (cold unless the cache above hit)"
+          ls -l target/release/ks-api
+
+  harness:
+    name: Python against Rust, one Postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.lock
+
+      # No layer cache on a fresh runner: this is the cold build, timed.
+      - name: Build the pilot's images
+        run: |
+          start=$(date +%s)
+          docker build -f Dockerfile.rust -t ks-rust-pilot:ci rust
+          echo "image build, cold: $(( $(date +%s) - start )) s"
+          docker build -f Dockerfile.rust --target loadgen -t ks-rust-loadgen:ci rust
+          docker image inspect ks-rust-pilot:ci --format 'image: {{.Size}} bytes'
+          docker builder prune -f --max-used-space "${GATE_CACHE_MAX:-4GB}"
+
+      # ci.yml's recipe, and its reason for waiting on the entrypoint's line.
+      - name: Start a throwaway PostgreSQL
+        run: |
+          docker run -d --name ci-pg -p 127.0.0.1:5432:5432 --cpuset-cpus 1 \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=ci-only \
+            -e POSTGRES_DB=ks \
+            -e POSTGRES_INITDB_ARGS="--locale=C.UTF-8 --encoding=UTF8" \
+            -v "$PWD/postgres/initdb:/docker-entrypoint-initdb.d:ro" \
+            postgres:17.2-alpine
+          for _ in $(seq 1 90); do
+            docker logs ci-pg 2>&1 \
+              | grep -q "PostgreSQL init process complete" && break
+            sleep 1
+          done
+          for _ in $(seq 1 60); do
+            docker exec ci-pg pg_isready -U postgres -d ks >/dev/null 2>&1 && break
+            sleep 1
+          done
+          docker exec ci-pg psql -U postgres \
+            -tAc "ALTER ROLE ks_app WITH PASSWORD 'ci-only'" >/dev/null
+
+      - name: Apply the migrations
+        env:
+          KS_PG_DSN: postgresql://ks_app:ci-only@127.0.0.1:5432/ks
+        run: alembic upgrade head
+
+      # Loopback only: the pilot checks no session.
+      - name: Start the pilot
+        run: |
+          docker run -d --name ks-rust-pilot --network host --cpuset-cpus 0 \
+            -e KS_PG_DSN=postgresql://ks_app:ci-only@127.0.0.1:5432/ks \
+            -e KS_PILOT_LISTEN=127.0.0.1:8090 -e KS_PILOT_TEST_CLOCK=1 \
+            ks-rust-pilot:ci
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8090/healthz && break
+            sleep 1
+          done
+
+      - name: Run the harness
+        env:
+          KS_PG_DSN: postgresql://ks_app:ci-only@127.0.0.1:5432/ks
+          KS_RUST_PILOT_URL: http://127.0.0.1:8090
+          KS_RUST_PILOT_REPORT: rust-pilot-report.json
+        run: |
+          set -o pipefail
+          pytest -q -rs -p no:cacheprovider tests/integration/test_rust_pilot_trend.py \
+            | tee harness.out
+          if grep -qE "[0-9]+ skipped" harness.out; then
+            echo "::error::the harness skipped instead of comparing"
+            exit 1
+          fi
+          python - <<'EOF'
+          import json
+          report = json.load(open("rust-pilot-report.json"))
+          matrix = report["matrix"]
+          print(json.dumps({**report["seed"], **{k: v for k, v in matrix.items()
+                                                 if k != "mismatches"}}, indent=1))
+          EOF
+
+      # Same requests, same Postgres, one CPU each; numbers for the report,
+      # not a gate. The harness emptied the tables it seeded, hence the seed.
+      - name: A short benchmark on the runner
+        env:
+          KS_PG_DSN: postgresql://ks_app:ci-only@127.0.0.1:5432/ks
+          KS_READ_GOLD: postgres
+          KS_DUCKDB: "off"
+          KS_ALERTS_DISABLED: "1"
+          DASHBOARD_SECRET_KEY: ci-only-not-a-secret
+          TZ: Europe/Kyiv
+        run: |
+          python -m tests.rust_pilot_fixture
+          taskset -c 0 uvicorn rust.bench.py_app:app --host 127.0.0.1 --port 8080 \
+            --lifespan off > uvicorn.log 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null "http://127.0.0.1:8080/api/revenue/trend?period=today" && break
+            sleep 1
+          done
+          for target in 8090 8080; do
+            for c in 1 16; do
+              docker run --rm --network host --cpuset-cpus 2-3 \
+                -v "$PWD/rust/bench/paths.txt:/paths.txt:ro" ks-rust-loadgen:ci \
+                --target "http://127.0.0.1:$target" --paths /paths.txt \
+                --concurrency "$c" --warmup 3 --duration 15 --label "port-$target-c$c"
+            done
+          done
+
+      - name: Stop the containers
+        if: always()
+        run: docker rm -f -v ks-rust-pilot ci-pg || true
