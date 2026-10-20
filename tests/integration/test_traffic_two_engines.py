@@ -378,9 +378,13 @@ async def test_organic_is_split_the_same_way_in_both(both_engines, monkeypatch):
         channels = {c["channel"]: c for c in out["channels"]}
         assert set(channels) == {"telegram", "email_campaigns"}
         assert channels["telegram"]["revenue"] == 300.0
-        assert channels["telegram"]["details"] == []
+        assert channels["telegram"]["details"] == [{
+            "source": "", "medium": "", "campaign": "", "content": "",
+            "orders": 1, "revenue": 300.0,
+        }]
         assert channels["email_campaigns"]["details"] == [{
-            "label": "[07/28/26] Campaign #12: Beauty roulette",
-            "orders": 1, "revenue": 450.0,
+            "source": "klaviyo", "medium": "klaviyo",
+            "campaign": "[07/28/26] Campaign #12: Beauty roulette",
+            "content": "", "orders": 1, "revenue": 450.0,
         }]
         assert out["totals"]["new_customers"] == 2
