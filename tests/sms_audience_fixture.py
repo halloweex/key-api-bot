@@ -10,20 +10,39 @@ Dates are counted back from **today in Kyiv**, because that is the day the
 query counts from (`TODAY_IN_KYIV`). A fixture written against the laptop's
 `date.today()` and a store reading Kyiv's calendar disagrees for three hours
 every night, and a test of a 92-day edge is exactly the test that notices.
+
+And today is asked **when a test seeds**, never when this module is imported.
+The query asks for its own today each time it runs, and the suite runs for
+half an hour: a day frozen at collection is a day stale for every test that
+runs after Kyiv's midnight. On 2026-10-20 a CI run collected before midnight
+and failed eight of these tests after it. So nothing here holds a date —
+everything dated is a function of `today`, and a test takes its `today` once,
+seeds with it and asks with it.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+import datetime as dt
+from datetime import date, timedelta
 from zoneinfo import ZoneInfo
 
-KYIV_TODAY = datetime.now(ZoneInfo("Europe/Kyiv")).date()
+
+def kyiv_today() -> date:
+    # The clock is looked up at the call, so nothing about it is bound at import.
+    return dt.datetime.now(ZoneInfo("Europe/Kyiv")).date()
+
+
+def ago(days: int, today: date) -> date:
+    return today - timedelta(days=days)
+
 
 # "Since" for group A: 200 days back, clear of any year boundary.
-PERIOD_FROM = KYIV_TODAY - timedelta(days=200)
+def period_from(today: date) -> date:
+    return ago(200, today)
 
 
-def ago(days: int) -> date:
-    return KYIV_TODAY - timedelta(days=days)
+# "From 200 to 100 days ago".
+def period_range(today: date) -> tuple:
+    return ago(200, today), ago(100, today)
 
 
 # (buyer, name, city, phone)
@@ -92,7 +111,7 @@ def _lines():
 
 # ─── The answers ────────────────────────────────────────────────────────────
 #
-# Group A: at least two orders since PERIOD_FROM, window 365.
+# Group A: at least two orders since `period_from`, window 365.
 # Group B: last order within 92 days.
 
 A_MATCHED = {1, 3, 8, 10, 14}                     # its conditions, before phones
@@ -119,30 +138,31 @@ B_ONLY = 2                         # 2, 12
 # same mistake in the SQL cannot pass together.
 
 def counted_orders(sales_type: str = "retail") -> dict:
-    """buyer → [(order_id, order_date, total)] of the orders the audience
+    """buyer → [(order_id, days ago, total)] of the orders the audience
     counts: not returns, not a retired source, the campaign's sales type."""
     out: dict = {}
     for oid, buyer, days, total, stype, ret, active, _src, _promo in ORDERS:
         if ret or not active or (sales_type != "all" and stype != sales_type):
             continue
-        out.setdefault(buyer, []).append((oid, ago(days), total))
+        out.setdefault(buyer, []).append((oid, days, total))
     return out
 
 
-def matched(window: int, *, in_period=None, at_least=None, at_most=None,
-            sales_type: str = "retail") -> set:
+def matched(window: int, today: date, *, in_period=None, at_least=None,
+            at_most=None, sales_type: str = "retail") -> set:
     """The buyers one group's own conditions select: last order inside
     `window` days and, when `in_period` (a predicate over a date) is given,
     between `at_least` and `at_most` of their orders dated in it — at least
-    one when neither bound is set, no floor when only `at_most` is."""
+    one when neither bound is set, no floor when only `at_most` is. Orders
+    are dated on `today`, the day the rows were seeded."""
     if in_period is not None and at_least is None and at_most is None:
         at_least = 1
     out = set()
     for buyer, orders in counted_orders(sales_type).items():
-        if (KYIV_TODAY - max(d for _, d, _ in orders)).days > window:
+        if min(days for _, days, _ in orders) > window:
             continue
         if in_period is not None:
-            n = sum(1 for _, d, _ in orders if in_period(d))
+            n = sum(1 for _, days, _ in orders if in_period(ago(days, today)))
             if at_least is not None and n < at_least:
                 continue
             if at_most is not None and n > at_most:
@@ -171,55 +191,71 @@ def recipients(buyers, sales_type: str = "retail") -> set:
     return set(winners.values())
 
 
-# The period's shapes, its bounds and the widest window, one group each:
-# (label, window, the group's filter fields, the oracle's terms, the answer by
-# hand). Shared by the DuckDB tests and the two-engine ones so both ask the
-# same questions. Dates are the oracle's own, so a case cannot drift from it.
-RANGE_FROM, RANGE_TO = ago(200), ago(100)    # "from 200 to 100 days ago"
+def period_cases(today: date) -> list:
+    """The period's shapes, its bounds and the widest window, one group each:
+    (label, window, the group's filter fields, the oracle's terms, the answer
+    by hand), dated on `today`. Shared by the DuckDB tests and the two-engine
+    ones so both ask the same questions. Dates are the oracle's own, so a case
+    cannot drift from it."""
+    since = period_from(today)
+    range_from, range_to = period_range(today)
+    return [
+        # 3 and 10 have two orders since 200 days ago but one of them after the
+        # range ends — `period_to` is what takes them out. 8 keeps its number,
+        # because 9, who shares it, is not in this audience.
+        ("from and to, at least two", 365,
+         dict(period_orders_min=2, period_from=range_from, period_to=range_to),
+         dict(in_period=lambda d: range_from <= d <= range_to, at_least=2),
+         {1, 8, 14}),
+        # Every order up to a date: 2 (400 days), 4 (300 and 250) and 15
+        # (1000), which only an all-time window holds.
+        ("up to a date", 3650,
+         dict(period_to=since),
+         dict(in_period=lambda d: d <= since),
+         {2, 4, 15}),
+        # Exactly one order in 200 days: min = max. 11 has one too and no
+        # usable phone; 1, 3, 8, 10 and 14 have two.
+        ("exactly one in 200 days", 365,
+         dict(period_orders_min=1, period_orders_max=1, period_days=200),
+         dict(in_period=lambda d: (today - d).days <= 200, at_least=1, at_most=1),
+         {2, 5, 6, 7, 9, 12, 13}),
+        # Bought, but nothing since the date: 4 and 15 bought only before it;
+        # 2 and 14 bought before it and in it, so they are out.
+        ("none since a date, all time", 3650,
+         dict(period_orders_max=0, period_from=since),
+         dict(in_period=lambda d: d >= since, at_most=0),
+         {4, 15}),
+        # The same within two years: the window still cuts a group, so 15 goes.
+        ("none since a date, two years", 730,
+         dict(period_orders_max=0, period_from=since),
+         dict(in_period=lambda d: d >= since, at_most=0),
+         {4}),
+        # Nothing in the last 92 days — 12, at exactly 92, is in the period and
+        # so out; 13 at 93 is in. 8 keeps the shared number: 9 bought 20 days
+        # ago.
+        ("none in 92 days", 3650,
+         dict(period_orders_max=0, period_days=92),
+         dict(in_period=lambda d: (today - d).days <= 92, at_most=0),
+         {1, 4, 5, 6, 7, 8, 13, 14, 15}),
+        # All time and no condition: everyone reachable, 15 included.
+        ("all time", 3650, {}, {}, {1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14, 15}),
+    ]
 
-PERIOD_CASES = [
-    # 3 and 10 have two orders since 200 days ago but one of them after the
-    # range ends — `period_to` is what takes them out. 8 keeps its number,
-    # because 9, who shares it, is not in this audience.
-    ("from and to, at least two", 365,
-     dict(period_orders_min=2, period_from=RANGE_FROM, period_to=RANGE_TO),
-     dict(in_period=lambda d: RANGE_FROM <= d <= RANGE_TO, at_least=2),
-     {1, 8, 14}),
-    # Every order up to a date: 2 (400 days), 4 (300 and 250) and 15 (1000),
-    # which only an all-time window holds.
-    ("up to a date", 3650,
-     dict(period_to=PERIOD_FROM),
-     dict(in_period=lambda d: d <= PERIOD_FROM),
-     {2, 4, 15}),
-    # Exactly one order in 200 days: min = max. 11 has one too and no usable
-    # phone; 1, 3, 8, 10 and 14 have two.
-    ("exactly one in 200 days", 365,
-     dict(period_orders_min=1, period_orders_max=1, period_days=200),
-     dict(in_period=lambda d: (KYIV_TODAY - d).days <= 200, at_least=1, at_most=1),
-     {2, 5, 6, 7, 9, 12, 13}),
-    # Bought, but nothing since the date: 4 and 15 bought only before it;
-    # 2 and 14 bought before it and in it, so they are out.
-    ("none since a date, all time", 3650,
-     dict(period_orders_max=0, period_from=PERIOD_FROM),
-     dict(in_period=lambda d: d >= PERIOD_FROM, at_most=0),
-     {4, 15}),
-    # The same within two years: the window still cuts a group, so 15 goes.
-    ("none since a date, two years", 730,
-     dict(period_orders_max=0, period_from=PERIOD_FROM),
-     dict(in_period=lambda d: d >= PERIOD_FROM, at_most=0),
-     {4}),
-    # Nothing in the last 92 days — 12, at exactly 92, is in the period and
-    # so out; 13 at 93 is in. 8 keeps the shared number: 9 bought 20 days ago.
-    ("none in 92 days", 3650,
-     dict(period_orders_max=0, period_days=92),
-     dict(in_period=lambda d: (KYIV_TODAY - d).days <= 92, at_most=0),
-     {1, 4, 5, 6, 7, 8, 13, 14, 15}),
-    # All time and no condition: everyone reachable, 15 included.
-    ("all time", 3650, {}, {}, {1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14, 15}),
-]
+
+# A parametrised test names its cases at collection, long before it runs. So
+# a list of cases with dates in it is a function of the day — `period_cases`,
+# and the two-engine tests' own — parametrised by label and built on the
+# test's `today`. A label never depends on the day, so any day lists them.
+
+def labels_of(cases_on) -> list:
+    return [case[0] for case in cases_on(date(2000, 1, 1))]
 
 
-def seed_duckdb_conn(conn) -> None:
+def case_named(cases_on, label: str, today: date) -> tuple:
+    return next(case for case in cases_on(today) if case[0] == label)
+
+
+def seed_duckdb_conn(conn, today: date) -> None:
     for pid, brand, sku, cat in PRODUCTS:
         conn.execute("INSERT INTO products (id, name, brand, sku, category_id)"
                      " VALUES (?,?,?,?,?)", [pid, f"p{pid}", brand, sku, cat])
@@ -236,7 +272,7 @@ def seed_duckdb_conn(conn) -> None:
         conn.execute("INSERT INTO marketing_optouts (buyer_id, channel, phone)"
                      " VALUES (?,?,?)", [bid, channel, phone])
     for oid, buyer, days, total, stype, ret, active, src, promo in ORDERS:
-        day = ago(days)
+        day = ago(days, today)
         conn.execute(
             "INSERT INTO silver_orders (id, source_id, status_id, grand_total,"
             " ordered_at, buyer_id, manager_id, order_date, is_return,"
@@ -250,7 +286,7 @@ def seed_duckdb_conn(conn) -> None:
                      " quantity, price_sold) VALUES (?,?,?,?,?,?)", list(line))
 
 
-async def seed_postgres(conn) -> None:
+async def seed_postgres(conn, today: date) -> None:
     await conn.execute(
         "TRUNCATE silver.orders, bronze.order_products, bronze.products,"
         " bronze.categories, bronze.buyers, bronze.offer_stocks,"
@@ -279,8 +315,9 @@ async def seed_postgres(conn) -> None:
         " buyer_first_order_date, promocode)"
         " VALUES ($1,$2,1,$3,$4,$5,NULL,$6,$7,$8,$9,$10,FALSE,$11,$12)",
         [(oid, src, total,
-          datetime.fromisoformat(f"{ago(days).isoformat()} 10:00:00+00:00"), buyer,
-          ago(days), ret, stype, active, f"src{src}", ago(days), promo)
+          dt.datetime.fromisoformat(f"{ago(days, today).isoformat()} 10:00:00+00:00"),
+          buyer, ago(days, today), ret, stype, active, f"src{src}",
+          ago(days, today), promo)
          for oid, buyer, days, total, stype, ret, active, src, promo in ORDERS])
     await conn.executemany(
         "INSERT INTO bronze.order_products (id, order_id, product_id, name,"
