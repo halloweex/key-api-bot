@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.296
+
+- Trend forecast predicts at most FORECAST_HORIZON_DAYS ahead
+- Dashboard dates: a malformed date or an over-long range is a 400, not a 500
+
+
 ## 3.0.295
 
 - Organic channels say what they are made of, GA4's way
