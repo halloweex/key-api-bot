@@ -186,7 +186,10 @@ it was a 500 until then. A range longer than `MAX_RANGE_DAYS` (3 660 days,
 ten years and a week) is a 400 naming `date_range`: four endpoints build one
 list entry per day of the range on web's event loop — the trend, its
 comparison, expenses summary and profit, customer insights — and
-0002-01-01..9999-12-30 cost the trend 6.8 s and 95 MB of JSON.
+0002-01-01..9999-12-30 cost the trend 6.8 s and 95 MB of JSON. The trend's
+`include_forecast` predicts at most `FORECAST_HORIZON_DAYS` (60) ahead, where
+the date picker stops; eight years ahead had held the single ML thread for
+70 s.
 
 ## DuckDB Schema
 
