@@ -1,14 +1,20 @@
 # GENERATED — do not hand-edit. What CI installs.
 #
-# `requirements.lock` plus the twelve packages the suite needs and the runtime
+# `requirements.lock` plus the fourteen packages CI needs and the runtime
 # images must not carry. A strict superset: verified at generation time that
 # installing the dev tools moved **no** runtime package — same 64 versions,
-# plus alembic, coverage, greenlet, iniconfig, mako, pluggy, pyflakes,
-# pygments, pytest, pytest-asyncio, pytest-cov and sqlalchemy.
+# plus alembic, basedpyright, coverage, greenlet, iniconfig, mako,
+# nodejs-wheel-binaries, pluggy, pyflakes, pygments, pytest, pytest-asyncio,
+# pytest-cov and sqlalchemy.
 #
 # pyflakes (2026-09-18) was added without re-resolving the rest: the previous
 # lock plus `pyflakes==3.4.0`, frozen in python:3.14-slim, so the diff is that
 # one line and not a drift of three unrelated dev tools.
+#
+# basedpyright (2026-10-21) the same way: the previous lock plus
+# `basedpyright==1.40.2`, frozen in python:3.14-slim at the images' digest.
+# It brings one package, `nodejs-wheel-binaries` — the Node runtime pyright
+# is written for, as a wheel — so the diff is those two lines.
 #
 # That property is the point. If the dev install were allowed to nudge, say,
 # `pydantic`, CI would be testing a set production does not run — which is the
@@ -39,6 +45,7 @@ annotated-types==0.8.0
 anthropic==1.0.0
 anyio==4.14.2
 asyncpg==0.31.0
+basedpyright==1.40.2
 camel-converter==5.1.1
 certifi==2026.7.22
 charset-normalizer==3.5.1
@@ -65,6 +72,7 @@ limits==5.8.0
 meilisearch==0.43.0
 narwhals==2.25.0
 nest-asyncio==1.6.0
+nodejs-wheel-binaries==24.19.0
 numpy==2.5.2
 openpyxl==3.1.5
 orjson==3.12.0

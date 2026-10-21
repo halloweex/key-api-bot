@@ -14,6 +14,7 @@ import math
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -351,3 +352,76 @@ class TestPersistence:
             assert remaining == 1
         finally:
             await store.close()
+
+
+class TestTheWebWatchdogSendsWhatItJudges:
+    """The scheduler's half: a verdict of `evaluate_memory` reaching a human.
+
+    Everything above tests the verdict, and the one test of the job itself
+    replaces the evaluation so the alert path is never reached. On 2026-09-14
+    the retirement of the H3 bronze subsystem (afaaab19) deleted the two class
+    attributes that path reads — the per-level cooldowns and the clock of the
+    last alert — together with the bronze alert above them. From then on every
+    WARN, CRITICAL and OOM kill of the web container raised AttributeError in
+    a job nobody is paged for, and the watchdog said nothing at exactly the
+    moments it exists for. Found by the type checker, not by a test.
+    """
+
+    @pytest.fixture
+    def watch(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from core import alerting, duckdb_store, memory_monitor, watchdog_samples
+        from core.scheduler import BackgroundScheduler
+
+        reading = {"mem": _sample(650)}
+        monkeypatch.setattr(memory_monitor, "read_cgroup_memory", lambda: reading["mem"])
+        monkeypatch.setattr(duckdb_store, "get_store", AsyncMock(return_value=object()))
+        # The previous stored sample: no kill recorded yet.
+        monkeypatch.setattr(watchdog_samples, "memory_tick", AsyncMock(
+            return_value={"last": {"oom_kills": 0}, "peak_24h": None}))
+        sent = AsyncMock(return_value=True)
+        monkeypatch.setattr(alerting, "raise_alert", sent)
+        monkeypatch.setattr(alerting, "resolve_group", AsyncMock())
+        monkeypatch.setattr(BackgroundScheduler, "_get_db_size_mb", staticmethod(lambda: None))
+
+        def at(working_mb, oom=0):
+            reading["mem"] = _sample(working_mb, oom=oom)
+
+        return SimpleNamespace(scheduler=BackgroundScheduler(), at=at, sent=sent)
+
+    @pytest.mark.asyncio
+    async def test_a_critical_reading_is_sent(self, watch):
+        """Mutation: delete the cooldown table again — AttributeError, nothing sent."""
+        watch.at(0.95 * LIVE_LIMIT / MB)
+        result = await watch.scheduler._run_memory_monitor()
+
+        assert result["alert_sent"] == "CRITICAL", result
+        watch.sent.assert_awaited_once()
+        assert watch.sent.await_args.kwargs["conditions"] == ["memory:web:CRITICAL"]
+
+    @pytest.mark.asyncio
+    async def test_the_same_level_inside_its_cooldown_is_held(self, watch):
+        """A WARN waits 24 h and a CRITICAL 6 h before it is sent again —
+        the documented pre-OOM exception to the Gate's daily decay."""
+        watch.at(0.85 * LIVE_LIMIT / MB)
+        first = await watch.scheduler._run_memory_monitor()
+        second = await watch.scheduler._run_memory_monitor()
+
+        assert first["alert_sent"] == "WARN", first
+        assert second.get("alert_suppressed") == "WARN", second
+        watch.sent.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_an_oom_kill_is_never_held(self, watch):
+        """A kill is a fact about the past: it goes out inside a CRITICAL's
+        cooldown, unkeyed, and spools for the diagnostician."""
+        watch.at(0.95 * LIVE_LIMIT / MB)
+        await watch.scheduler._run_memory_monitor()
+        watch.at(0.95 * LIVE_LIMIT / MB, oom=1)
+        result = await watch.scheduler._run_memory_monitor()
+
+        assert result["alert_sent"] == "CRITICAL", result
+        assert watch.sent.await_count == 2
+        assert watch.sent.await_args.kwargs["conditions"] == []
+        assert watch.sent.await_args.kwargs["spool_as"] == "memory:web:oom"

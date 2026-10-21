@@ -116,31 +116,31 @@ class TestTheRule:
         assert returned <= set(ORGANIC_CHANNELS)
 
 
-class TestTheNameInsideAChannel:
+class TestTheRowInsideAChannel:
+    """GA4's shape: source / medium, then campaign and content."""
 
-    def test_what_each_channel_lists(self):
-        tags = dict(utm_source="Klaviyo", utm_medium="stories_tanya10",
-                    utm_campaign="Welcome Email 1", utm_content="link_in_bio")
-        assert organic_detail("email_flows", **tags) == "Welcome Email 1"
-        assert organic_detail("email_campaigns", **tags) == "Welcome Email 1"
-        assert organic_detail("instagram_stories", **tags) == "stories_tanya10"
-        assert organic_detail("instagram_site", **tags) == "Welcome Email 1"
-        assert organic_detail("ai", **tags) == "Klaviyo"
-        assert organic_detail("other", **tags) == "Klaviyo"
+    def test_source_and_medium_are_a_place_and_read_lower_case(self):
+        """`Instagram` and `instagram` are one source in GA4's report and
+        one row here; the campaign is the marketer's own text and keeps its
+        case, so they find the letter they named."""
+        assert organic_detail(
+            utm_source=" Instagram ", utm_medium="Stories_Tanya_Pads",
+            utm_campaign="Tanya10", utm_content="",
+        ) == ("instagram", "stories_tanya_pads", "Tanya10", "")
 
-    def test_the_profile_link_falls_back_to_the_content(self):
+    def test_the_profile_link_is_told_by_its_content(self):
         """1 140 of 1 171 profile-link orders carry no campaign, only
-        `utm_content=link_in_bio`."""
-        assert organic_detail("instagram_site", utm_source="ig",
-                              utm_medium="social", utm_campaign="",
-                              utm_content="link_in_bio") == "link_in_bio"
+        `utm_content=link_in_bio` — so content is part of the row."""
+        assert organic_detail(
+            utm_source="ig", utm_medium="social",
+            utm_campaign=None, utm_content="link_in_bio",
+        ) == ("ig", "social", "", "link_in_bio")
 
-    def test_channels_with_nothing_finer_list_nothing(self):
-        for channel in ("instagram_direct", "telegram", "google_organic"):
-            assert organic_detail(channel, utm_source="google",
-                                  utm_medium="product_sync",
-                                  utm_campaign="sag_organic",
-                                  utm_content="sag_organic") is None
+    def test_an_untagged_order_is_a_row_of_its_own(self):
+        """Direct is made of orders with no tags at all, and saying so is
+        the answer to "what is in Direct" — so the row exists, all empty."""
+        assert organic_detail(utm_source=None, utm_medium=None,
+                              utm_campaign=None, utm_content=None) == ("", "", "", "")
 
 
 # ─── The repository, on DuckDB ────────────────────────────────────────────────
@@ -294,7 +294,7 @@ class TestTheBreakdown:
         assert out["totals"]["new_customers"] == 1
 
     @pytest.mark.asyncio
-    async def test_the_names_inside_a_channel_are_ranked_and_capped(
+    async def test_the_rows_inside_a_channel_are_ranked_and_capped(
         self, tmp_path, monkeypatch,
     ):
         monkeypatch.setattr(DuckDBStore, "ORGANIC_DETAIL_LIMIT", 2)
@@ -312,13 +312,17 @@ class TestTheBreakdown:
             await store.close()
 
         channels = _by_channel(out)
+
+        def row(campaign, orders, revenue, source="klaviyo", medium="email"):
+            return {"source": source, "medium": medium, "campaign": campaign,
+                    "content": "", "orders": orders, "revenue": revenue}
+
         assert channels["email_flows"]["details"] == [
-            {"label": "Cart", "orders": 2, "revenue": 350.0},
-            {"label": "Winback", "orders": 1, "revenue": 200.0},
-        ]
+            row("Cart", 2, 350.0), row("Winback", 1, 200.0)]
         assert channels["email_flows"]["details_total"] == 3
-        assert channels["instagram_direct"]["details"] == []
-        assert channels["instagram_direct"]["details_total"] == 0
+        assert channels["instagram_direct"]["details"] == [
+            row("", 1, 999.0, source="", medium="")]
+        assert channels["instagram_direct"]["details_total"] == 1
 
     @pytest.mark.asyncio
     async def test_the_filters_are_the_tabs(self, tmp_path):

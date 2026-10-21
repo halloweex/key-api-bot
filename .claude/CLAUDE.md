@@ -367,6 +367,52 @@ PYTHONPATH=. python tests/test_data_consistency.py 2025-12-07
 python scripts/force_resync.py --days 365
 ```
 
+### Type checking
+
+`basedpyright` is CI's second job (`typecheck`), beside the suite. It covers
+`core web bot scripts deploy migrations`, everything the pyflakes guard walks
+except `tests/`. It runs in `standard` mode and models Python 3.14 on Linux
+(`pyrightconfig.json`). It fails on any error or warning that is not in
+`.basedpyright/baseline.json`, and on a baseline that still lists a finding the
+code no longer has. **The baseline only shrinks.**
+
+pyflakes sees a name nobody defined; this sees a call that cannot succeed, on
+lines no test runs. Its first run (2026-10-21) found 1 122 findings, and five
+of them were three live defects:
+
+- the web memory watchdog had raised AttributeError on every alert since
+  2026-09-14;
+- a language chosen in the bot's settings had been stored and never confirmed
+  since #76;
+- `/api/health` had published `sync: null` since 2026-02-12.
+
+The other 1 117 are the baseline. Most of them are:
+
+- python-telegram-bot's Optional attributes;
+- DuckDB rows typed `tuple | None`;
+- values the code knows are set and the checker cannot see;
+- third-party stubs.
+
+One is a latent defect in code nothing calls (`MeiliClient.get_stats` calls
+`.get` on a pydantic model).
+
+Run it the way CI does. The findings depend on the installed packages' own
+annotations, and the laptop's fastapi and pandas are not production's:
+
+```bash
+docker run --rm -v "$PWD:/w" -w /w python:3.14-slim sh -c \
+  'pip install -q -r requirements-dev.lock && basedpyright'
+```
+
+The baseline matches a finding by file, rule and column span, not by line.
+Moving code leaves it alone, but editing the expression a baselined finding
+sits on changes its span, and the finding then reads as new. When that
+happens, fix it, or rewrite the baseline with `basedpyright --writebaseline`
+in the same container, so that the moved entry shows in the diff. Rewrite the
+baseline in the same commit as any fix that removes a finding, or the job
+fails on the leftover. A basedpyright bump is a commit of its own, with the
+baseline rewritten beside it.
+
 ## Caching
 
 **There is no server-side response cache, and there never has been in
@@ -3335,8 +3381,17 @@ Google. Канал — `core.utm_classify.organic_channel`, одиннадцат
 
 У каждого канала: заказы, выручка, новые клиенты (множествами, по причине
 абзаца выше), те же цифры за предыдущий период равной длины
-(`_comparison_window`) и до 20 имён внутри — письмо, метка сторис, сайт —
-`details_total` говорит, сколько их было всего. Канал, продававший только в
+(`_comparison_window`) и до 20 строк внутри **в форме отчёта GA4 «Привлечение
+трафика»** — `source / medium`, под ним кампания и `utm_content`
+(`organic_detail`; source и medium в нижнем регистре, кампания как написана);
+`details_total` говорит, сколько их было всего. Заказ совсем без меток — своя
+строка «без UTM-міток», а не пропуск: для Direct эта строка и есть ответ на
+«что входит». Под названием канала — его группа в словаре GA4 (Organic Social,
+Email, Organic Shopping, Referral; «поза сайтом» для заказов менеджера, которых
+GA4 не видит), и подсказка «?» — таблица «канал → какие source / medium → группа».
+Это **название, а не обещание**: сам GA4 раскладывает сырые метки по своим
+правилам (`klaviyo / klaviyo` у него Unassigned), и подсказка это говорит.
+Канал, продававший только в
 прошлом периоде, остаётся в списке с нулями: это строка, которая нужна больше
 всех. Итог блока равен карточке «Органічний» (тест держит). Метки сравниваются в
 нижнем регистре **в Python, не в SQL**: `LOWER` в PostgreSQL зависит от

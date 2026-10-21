@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.295
+
+- Organic channels say what they are made of, GA4's way
+
+
+## 3.0.294
+
+- Type checking in CI: basedpyright with a baseline that only shrinks
+- /api/health publishes its sync block again
+- Choosing a language in the bot's settings confirms it again
+- The web memory watchdog sends its alerts again
+
+
 ## 3.0.293
 
 - The doors sweep sends /api/me/send-file a body; the suite blocks its sender
