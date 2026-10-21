@@ -61,6 +61,8 @@ pub enum Failure {
     Unavailable(ReadError),
     /// A branch the pilot leaves to Python.
     NotInPilot(&'static str),
+    /// slowapi's 429, carrying `str(limit)`.
+    RateLimited(String),
 }
 
 impl From<Raised> for Failure {
@@ -126,12 +128,17 @@ fn iso(date: NaiveDate) -> String {
 }
 
 /// The JSON body for a 200, or the reason there is none.
+///
+/// `admit` runs where slowapi's check does: after FastAPI parsed the query
+/// (so a 422 costs nothing) and before the route's own validation.
 pub async fn revenue_trend<G: Gold>(
     gold: &G,
     raw_query: &str,
     now: DateTime<Utc>,
+    admit: impl FnOnce() -> Result<(), Failure>,
 ) -> Result<Vec<u8>, Failure> {
     let q = params::parse(raw_query).map_err(Failure::Unprocessable)?;
+    admit()?;
     let bad = Failure::BadRequest;
     validate::period(q.period.as_deref()).map_err(bad)?;
     let source_id = validate::source_id(q.source_id.as_ref()).map_err(bad)?;
@@ -322,7 +329,7 @@ mod tests {
     }
 
     async fn body(query: &str) -> serde_json::Value {
-        let bytes = revenue_trend(&gold(), query, at("2026-10-20T12:00:00Z"))
+        let bytes = revenue_trend(&gold(), query, at("2026-10-20T12:00:00Z"), || Ok(()))
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
@@ -335,6 +342,7 @@ mod tests {
                 &gold(),
                 "start_date=2026-10-19&end_date=2026-10-21",
                 at("2026-10-20T12:00:00Z"),
+                || Ok(()),
             )
             .await
             .unwrap(),
@@ -366,16 +374,21 @@ mod tests {
             ("source_id=3", "source_without_gold_channel"),
             ("period=month&include_forecast=true", "forecast_overlay"),
         ] {
-            match revenue_trend(&gold(), query, now).await {
+            match revenue_trend(&gold(), query, now, || Ok(())).await {
                 Err(Failure::NotInPilot(b)) => assert_eq!(b, branch, "{query}"),
                 other => panic!("{query}: {other:?}"),
             }
         }
         // …and the forecast flag where Python would not attempt one.
         assert!(
-            revenue_trend(&gold(), "period=last_month&include_forecast=true", now)
-                .await
-                .is_ok()
+            revenue_trend(
+                &gold(),
+                "period=last_month&include_forecast=true",
+                now,
+                || Ok(())
+            )
+            .await
+            .is_ok()
         );
     }
 }
