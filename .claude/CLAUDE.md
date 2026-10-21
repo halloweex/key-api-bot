@@ -177,6 +177,17 @@ success.
 
 **Query params**: `period` (today/yesterday/week/last_week/month/last_month) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
 
+`start_date` and `end_date` are read by `strptime("%Y-%m-%d")` in
+`core/filters.parse_period`, and only as a pair: one alone is ignored, and a
+known `period` wins over both. The forms `strptime` forgives (`2026-1-5`,
+`2026-01- 5`) stay accepted — decided 2026-10-21, refusing them would only
+turn working requests into errors. A date it refuses is a 400 naming the field;
+it was a 500 until then. A range longer than `MAX_RANGE_DAYS` (3 660 days,
+ten years and a week) is a 400 naming `date_range`: four endpoints build one
+list entry per day of the range on web's event loop — the trend, its
+comparison, expenses summary and profit, customer insights — and
+0002-01-01..9999-12-30 cost the trend 6.8 s and 95 MB of JSON.
+
 ## DuckDB Schema
 
 ```

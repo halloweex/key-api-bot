@@ -51,10 +51,10 @@ async def get_expense_summary(
         validate_period(period)
         validate_source_id(source_id)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_expense_summary(
         start, end, source_id=source_id, expense_type_id=expense_type_id, sales_type=sales_type,
     )
@@ -76,10 +76,10 @@ async def get_profit_analysis(
         validate_period(period)
         validate_source_id(source_id)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_profit_analysis(
         start, end, source_id=source_id, sales_type=sales_type,
     )

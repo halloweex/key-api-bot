@@ -8,8 +8,23 @@ from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from core.exceptions import ValidationError
+from core.validators import validate_date_string
+
 # DuckDB stores dates in Kyiv timezone, so all period calculations must use it
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
+
+# The longest range explicit dates may ask for, both ends counted: ten years
+# and a week. Four endpoints build one list entry per day of the range in
+# Python — /api/revenue/trend (twice, with its comparison), /api/expenses/summary,
+# /api/expenses/profit and /api/customers/insights — so an unbounded range was
+# a request for millions of entries, built synchronously on web's event loop.
+# Measured on a throwaway store (Python 3.14, 2026-10-21): 0002-01-01 to
+# 9999-12-30 cost the trend 6.8 s, 95 MB of JSON and +376 MB of memory, and
+# each of the other three 5.5-6.2 s; ten years cost each of them 0.02 s and
+# 0.1 MB. Ten years is longer than the store's whole history, so the cap
+# refuses nothing a person asks for. Over it is a 400 naming `date_range`.
+MAX_RANGE_DAYS = 3660
 
 
 @dataclass
@@ -62,6 +77,23 @@ def parse_period(
 
     Returns:
         DateRange with start and end dates
+
+    Raises:
+        ValidationError: `start_date` or `end_date` that is not a date, or a
+            range over MAX_RANGE_DAYS (`date_range`). Routes answer it 400.
+
+    The explicit dates are read by `validate_date_string`, which is the same
+    `strptime("%Y-%m-%d")` they always went through. So every form it forgives
+    is still accepted and comes back zero-padded — `2026-1-5`, `2026-01- 5`, a
+    year in Arabic-Indic digits — and that is a decision, not an oversight
+    (2026-10-21): refusing them would turn requests that answer today into
+    400s for no gain anyone can name. What it refuses — a day that does not
+    exist, a two-digit year, a time after the date — used to escape as a bare
+    ValueError and answer 500.
+
+    Unchanged, also on purpose: a date without its pair is ignored, a known
+    period shortcut wins over the dates, and a range whose start is after its
+    end is accepted and covers no days.
 
     Examples:
         >>> parse_period("today")
@@ -118,8 +150,14 @@ def parse_period(
 
     # Handle explicit dates
     if start_date and end_date:
-        start = datetime.strptime(start_date, "%Y-%m-%d").date()
-        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        start = validate_date_string(start_date, "start_date")
+        end = validate_date_string(end_date, "end_date")
+        days = (end - start).days + 1
+        if days > MAX_RANGE_DAYS:
+            raise ValidationError(
+                "date_range", f"Date range cannot exceed {MAX_RANGE_DAYS} days",
+                f"{days} days",
+            )
         return DateRange(start, end)
 
     # Default to today

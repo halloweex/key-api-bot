@@ -42,10 +42,10 @@ async def get_margin_overview(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = margin_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = margin_service.parse_period(period, start_date, end_date)
     return await margin_service.get_margin_overview(start, end, sales_type=sales_type)
 
 
@@ -63,10 +63,10 @@ async def get_margin_by_brand(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = margin_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = margin_service.parse_period(period, start_date, end_date)
     return await margin_service.get_margin_by_brand(start, end, sales_type=sales_type, limit=limit)
 
 
@@ -83,10 +83,10 @@ async def get_margin_by_category(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = margin_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = margin_service.parse_period(period, start_date, end_date)
     return await margin_service.get_margin_by_category(start, end, sales_type=sales_type)
 
 
@@ -103,10 +103,10 @@ async def get_margin_trend(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = margin_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = margin_service.parse_period(period, start_date, end_date)
     return await margin_service.get_margin_trend(start, end, sales_type=sales_type)
 
 
@@ -124,10 +124,10 @@ async def get_margin_brand_category(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = margin_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = margin_service.parse_period(period, start_date, end_date)
     return await margin_service.get_margin_brand_category(start, end, sales_type=sales_type, min_revenue=min_revenue)
 
 
@@ -145,8 +145,8 @@ async def get_margin_alerts(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = margin_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = margin_service.parse_period(period, start_date, end_date)
     return await margin_service.get_margin_alerts(start, end, sales_type=sales_type, margin_floor=margin_floor)
