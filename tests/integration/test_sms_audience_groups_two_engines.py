@@ -47,43 +47,50 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-GROUP_A = SmsAudienceGroup(
-    365, SmsAudienceFilters(period_orders_min=2, period_from=fx.PERIOD_FROM),
-)
+def group_a(today):
+    return SmsAudienceGroup(
+        365, SmsAudienceFilters(period_orders_min=2,
+                                period_from=fx.period_from(today)),
+    )
+
+
 GROUP_B = SmsAudienceGroup(92, SmsAudienceFilters())
+
 
 # One group, every way it could be asked before groups existed. Each filter
 # that existed then appears in at least one case, as does each grouping, both
-# bases, a level subset and both sales types.
-LEGACY_CASES = [
-    ("defaults", {}),
-    ("narrow window", dict(window=92)),
-    ("widest window", dict(window=730)),
-    # Wider than the API allowed before groups, so no past campaign used it;
-    # the query must still be the old one's at the new cap.
-    ("all-time window", dict(window=3650)),
-    ("shortest window", dict(window=30)),
-    ("rfm on revenue", dict(grouping="rfm")),
-    ("rfm on margin", dict(grouping="rfm", ltv_basis="margin")),
-    ("one level", dict(grouping="rfm", tiers=("REACTIVATION",))),
-    ("sales_type all", dict(sales_type="all", window=730)),
-    ("lifetime orders", dict(filters=SmsAudienceFilters(orders_min=2, orders_max=5),
-                             window=730)),
-    ("recency range", dict(filters=SmsAudienceFilters(recency_min_days=20,
-                                                      recency_max_days=160))),
-    ("value and basket", dict(filters=SmsAudienceFilters(ltv_min=1500.0,
-                                                         aov_max=1200.0),
-                              window=730)),
-    ("first order", dict(filters=SmsAudienceFilters(first_order_from=fx.ago(200),
-                                                    first_order_to=fx.ago(100)))),
-    ("city", dict(filters=SmsAudienceFilters(cities=("київ",)))),
-    ("brand ever", dict(filters=SmsAudienceFilters(brands=("Anua",)), window=730)),
-    ("brand recently", dict(filters=SmsAudienceFilters(brands=("Cosrx",),
-                                                       bought_within_days=60))),
-    ("category branch", dict(filters=SmsAudienceFilters(category_ids=(10,)))),
-    ("source", dict(filters=SmsAudienceFilters(source_ids=(4,)), window=730)),
-    ("promocode", dict(filters=SmsAudienceFilters(promocode="aug"))),
-]
+# bases, a level subset and both sales types. Dated on the test's `today`.
+def legacy_cases(today):
+    return [
+        ("defaults", {}),
+        ("narrow window", dict(window=92)),
+        ("widest window", dict(window=730)),
+        # Wider than the API allowed before groups, so no past campaign used
+        # it; the query must still be the old one's at the new cap.
+        ("all-time window", dict(window=3650)),
+        ("shortest window", dict(window=30)),
+        ("rfm on revenue", dict(grouping="rfm")),
+        ("rfm on margin", dict(grouping="rfm", ltv_basis="margin")),
+        ("one level", dict(grouping="rfm", tiers=("REACTIVATION",))),
+        ("sales_type all", dict(sales_type="all", window=730)),
+        ("lifetime orders", dict(filters=SmsAudienceFilters(orders_min=2,
+                                                            orders_max=5),
+                                 window=730)),
+        ("recency range", dict(filters=SmsAudienceFilters(recency_min_days=20,
+                                                          recency_max_days=160))),
+        ("value and basket", dict(filters=SmsAudienceFilters(ltv_min=1500.0,
+                                                             aov_max=1200.0),
+                                  window=730)),
+        ("first order", dict(filters=SmsAudienceFilters(
+            first_order_from=fx.ago(200, today), first_order_to=fx.ago(100, today)))),
+        ("city", dict(filters=SmsAudienceFilters(cities=("київ",)))),
+        ("brand ever", dict(filters=SmsAudienceFilters(brands=("Anua",)), window=730)),
+        ("brand recently", dict(filters=SmsAudienceFilters(brands=("Cosrx",),
+                                                           bought_within_days=60))),
+        ("category branch", dict(filters=SmsAudienceFilters(category_ids=(10,)))),
+        ("source", dict(filters=SmsAudienceFilters(source_ids=(4,)), window=730)),
+        ("promocode", dict(filters=SmsAudienceFilters(promocode="aug"))),
+    ]
 
 
 class _PoolOf:
@@ -103,15 +110,22 @@ class _PoolOf:
         return _Ctx()
 
 
+@pytest.fixture
+def today():
+    """The day both engines are seeded on and every date a test asks about is
+    counted from — taken per test, never at import (see the fixture)."""
+    return fx.kyiv_today()
+
+
 @pytest_asyncio.fixture
-async def engines(tmp_path):
+async def engines(tmp_path, today):
     store = DuckDBStore(db_path=tmp_path / "groups.duckdb")
     await store.connect()
     conn = await asyncpg.connect(DSN)
     try:
         async with store.connection() as duck:
-            fx.seed_duckdb_conn(duck)
-        await fx.seed_postgres(conn)
+            fx.seed_duckdb_conn(duck, today)
+        await fx.seed_postgres(conn, today)
         yield store, conn
     finally:
         await conn.close()
@@ -148,13 +162,13 @@ async def _on_duckdb(store, monkeypatch, **kwargs):
 
 class TestOneGroupIsTheAudienceBeforeGroups:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("label,case", LEGACY_CASES,
-                             ids=[c[0] for c in LEGACY_CASES])
+    @pytest.mark.parametrize("label", fx.labels_of(legacy_cases))
     @pytest.mark.parametrize("dialect", (DUCKDB, POSTGRES), ids=("duckdb", "postgres"))
     async def test_the_rows_are_the_old_querys_rows(
-        self, engines, dialect, label, case,
+        self, engines, today, dialect, label,
     ):
         store, conn = engines
+        _, case = fx.case_named(legacy_cases, label, today)
         basis = case.get("ltv_basis", "revenue")
         window = case.get("window", 270)
         filters = case.get("filters") or SmsAudienceFilters()
@@ -190,12 +204,12 @@ class TestOneGroupIsTheAudienceBeforeGroups:
         )
 
     @pytest.mark.asyncio
-    async def test_the_cases_are_not_all_the_same_audience(self, engines):
+    async def test_the_cases_are_not_all_the_same_audience(self, engines, today):
         """A pin that compared one roster eighteen times would prove one
         thing. The cases must actually select different people."""
         store, conn = engines
         rosters = set()
-        for _label, case in LEGACY_CASES:
+        for _label, case in legacy_cases(today):
             basis = case.get("ltv_basis", "revenue")
             window = case.get("window", 270)
             sql, params = legacy_render(
@@ -214,10 +228,10 @@ class TestOneGroupIsTheAudienceBeforeGroups:
 
 class TestGroupsOnPostgres:
     @pytest.mark.asyncio
-    async def test_the_owners_campaign(self, engines, monkeypatch):
+    async def test_the_owners_campaign(self, engines, monkeypatch, today):
         store, conn = engines
         result = await _on_postgres(
-            store, conn, monkeypatch, groups=[GROUP_A, GROUP_B],
+            store, conn, monkeypatch, groups=[group_a(today), GROUP_B],
             grouping="single", holdout_pct=0, include_customers=True,
         )
         assert {c["buyerId"] for c in result["customers"]} == fx.UNION
@@ -228,9 +242,9 @@ class TestGroupsOnPostgres:
             len(fx.B_MATCHED), fx.B_RECIPIENTS, fx.B_ONLY)
 
     @pytest.mark.asyncio
-    async def test_each_group_alone(self, engines, monkeypatch):
+    async def test_each_group_alone(self, engines, monkeypatch, today):
         store, conn = engines
-        for group, expected in ((GROUP_A, fx.A_ALONE), (GROUP_B, fx.B_ALONE)):
+        for group, expected in ((group_a(today), fx.A_ALONE), (GROUP_B, fx.B_ALONE)):
             result = await _on_postgres(
                 store, conn, monkeypatch, groups=[group], grouping="single",
                 include_customers=True,
@@ -257,13 +271,13 @@ class TestThePeriodsShapesOnBothEngines:
     two engines return one result, funnel and frozen criteria included."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("label,window,fields,terms,answer", fx.PERIOD_CASES,
-                             ids=[c[0] for c in fx.PERIOD_CASES])
+    @pytest.mark.parametrize("label", fx.labels_of(fx.period_cases))
     async def test_both_engines_select_the_oracles_answer(
-        self, engines, monkeypatch, label, window, fields, terms, answer,
+        self, engines, monkeypatch, today, label,
     ):
         store, conn = engines
-        mine = fx.matched(window, **terms)
+        _, window, fields, terms, answer = fx.case_named(fx.period_cases, label, today)
+        mine = fx.matched(window, today, **terms)
         assert fx.recipients(mine) == answer, f"{label}: the oracle disagrees with the hand"
         kwargs = dict(groups=[SmsAudienceGroup(window, SmsAudienceFilters(**fields))],
                       grouping="single", holdout_pct=20, campaign="period-shapes",
@@ -279,46 +293,50 @@ class TestThePeriodsShapesOnBothEngines:
             assert duck[key] == postgres[key], f"{label}: {key} differs"
 
 
-class TestTheEnginesAgree:
-    CASES = [
-        ("the owner's campaign", dict(groups=[GROUP_A, GROUP_B])),
-        ("a narrower A", dict(groups=[SmsAudienceGroup(180, GROUP_A.filters),
-                                      GROUP_B])),
-        ("all sales types", dict(groups=[GROUP_A, GROUP_B], sales_type="all")),
+def agree_cases(today):
+    a, (range_from, range_to) = group_a(today), fx.period_range(today)
+    since = fx.period_from(today)
+    return [
+        ("the owner's campaign", dict(groups=[a, GROUP_B])),
+        ("a narrower A", dict(groups=[SmsAudienceGroup(180, a.filters), GROUP_B])),
+        ("all sales types", dict(groups=[a, GROUP_B], sales_type="all")),
         ("three groups, mixed", dict(groups=[
-            GROUP_A,
+            a,
             SmsAudienceGroup(120, SmsAudienceFilters(period_days=60,
                                                      cities=("Львів",))),
             SmsAudienceGroup(400, SmsAudienceFilters(brands=("Anua",),
                                                      period_orders_min=1,
                                                      period_from=date(2000, 1, 1))),
         ])),
-        ("split by level", dict(groups=[GROUP_A, GROUP_B], grouping="rfm",
+        ("split by level", dict(groups=[a, GROUP_B], grouping="rfm",
                                 ltv_basis="margin")),
-        ("one level of the union", dict(groups=[GROUP_A, GROUP_B], grouping="rfm",
+        ("one level of the union", dict(groups=[a, GROUP_B], grouping="rfm",
                                         tier=["REACTIVATION"])),
         # The range, its bounds and the all-time window beside other groups:
         # "two in the range" OR "lapsed since the date, all time" OR B.
         ("ranges and bounds, ORed", dict(groups=[
             SmsAudienceGroup(365, SmsAudienceFilters(
                 period_orders_min=2, period_orders_max=2,
-                period_from=fx.RANGE_FROM, period_to=fx.RANGE_TO)),
+                period_from=range_from, period_to=range_to)),
             SmsAudienceGroup(3650, SmsAudienceFilters(
-                period_orders_max=0, period_from=fx.PERIOD_FROM)),
+                period_orders_max=0, period_from=since)),
             GROUP_B,
         ])),
         ("up to a date, margin levels", dict(groups=[
-            SmsAudienceGroup(3650, SmsAudienceFilters(period_to=fx.PERIOD_FROM)),
+            SmsAudienceGroup(3650, SmsAudienceFilters(period_to=since)),
             SmsAudienceGroup(92, SmsAudienceFilters(period_orders_max=0,
                                                     period_days=30)),
         ], grouping="rfm", ltv_basis="margin")),
     ]
 
+
+class TestTheEnginesAgree:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("label,kwargs", CASES, ids=[c[0] for c in CASES])
-    async def test_the_whole_result_is_the_same(self, engines, monkeypatch,
-                                                label, kwargs):
+    @pytest.mark.parametrize("label", fx.labels_of(agree_cases))
+    async def test_the_whole_result_is_the_same(self, engines, monkeypatch, today,
+                                                label):
         store, conn = engines
+        _, kwargs = fx.case_named(agree_cases, label, today)
         common = dict(include_customers=True, campaign="groups-compare",
                       holdout_pct=20, grouping="single")
         common.update(kwargs)
