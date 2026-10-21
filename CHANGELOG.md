@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.295
+
+- Organic channels say what they are made of, GA4's way
+
+
 ## 3.0.294
 
 - Type checking in CI: basedpyright with a baseline that only shrinks
