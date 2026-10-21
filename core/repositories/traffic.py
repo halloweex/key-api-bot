@@ -396,8 +396,10 @@ class TrafficMixin:
 
         Each channel carries its orders and revenue, the new buyers it brought
         (people, counted as sets for `get_traffic_analytics`' reason), the
-        same figures for the period of equal length just before, and the names
-        inside it: the letters, the bloggers' story tags, the sites.
+        same figures for the period of equal length just before, and what it
+        is made of in GA4's shape — source / medium, then campaign and content
+        (`organic_detail`) — so the tab can show which tags put an order in
+        which channel. An untagged order is a row of its own, all four empty.
 
         The tags are compared lower-cased in Python, never in SQL: `LOWER` in
         PostgreSQL follows the database's collation and DuckDB's does not, so
@@ -440,32 +442,31 @@ class TrafficMixin:
             GROUP BY 1, 2, 3, 4, 5, 6, 7
         """
 
-        def _place(row) -> tuple[str, Optional[str]]:
+        def _place(row) -> tuple[str, tuple[str, str, str, str]]:
             src, tagged, platform, utm_source, utm_medium, utm_campaign, utm_content = row[:7]
             channel = organic_channel(
                 source_id=src, tagged=bool(tagged), platform=platform,
                 utm_medium=utm_medium, utm_campaign=utm_campaign,
             )
             return channel, organic_detail(
-                channel, utm_source=utm_source, utm_medium=utm_medium,
+                utm_source=utm_source, utm_medium=utm_medium,
                 utm_campaign=utm_campaign, utm_content=utm_content,
             )
 
         async def _by_channel(start: date, end: date):
             rows = await self._traffic_run(orders_sql, [start, end, *extra])
             channels: Dict[str, Dict[str, float]] = {}
-            details: Dict[str, Dict[str, Dict[str, float]]] = {}
+            details: Dict[str, Dict[tuple, Dict[str, float]]] = {}
             for row in rows:
-                channel, label = _place(row)
+                channel, key = _place(row)
                 orders, revenue = int(row[7]), float(row[8])
-                bucket = channels.setdefault(channel, {'orders': 0, 'revenue': 0.0})
-                bucket['orders'] += orders
-                bucket['revenue'] += revenue
-                if label is not None:
-                    item = details.setdefault(channel, {}).setdefault(
-                        label, {'orders': 0, 'revenue': 0.0})
-                    item['orders'] += orders
-                    item['revenue'] += revenue
+                for bucket in (
+                    channels.setdefault(channel, {'orders': 0, 'revenue': 0.0}),
+                    details.setdefault(channel, {}).setdefault(
+                        key, {'orders': 0, 'revenue': 0.0}),
+                ):
+                    bucket['orders'] += orders
+                    bucket['revenue'] += revenue
             return channels, details
 
         prev_start, prev_end = self._comparison_window(
@@ -488,8 +489,12 @@ class TrafficMixin:
                 details.get(channel, {}).items(),
                 key=lambda kv: (-kv[1]['revenue'], -kv[1]['orders'], kv[0]),
             )
-            return [{'label': label, **_rounded(v)}
-                    for label, v in items[:self.ORGANIC_DETAIL_LIMIT]]
+            return [
+                {'source': source, 'medium': medium, 'campaign': campaign,
+                 'content': content, **_rounded(v)}
+                for (source, medium, campaign, content), v
+                in items[:self.ORGANIC_DETAIL_LIMIT]
+            ]
 
         rank = {c: i for i, c in enumerate(ORGANIC_CHANNELS)}
         names = sorted(

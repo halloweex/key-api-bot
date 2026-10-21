@@ -1069,10 +1069,17 @@ export type OrganicChannelKey =
   | 'tiktok'
   | 'other'
 
-/** One name inside a channel: a letter, a blogger's story tag, a site. */
+/**
+ * One row inside a channel, in GA4's traffic-acquisition shape: source /
+ * medium, then campaign and content. Source and medium are lower-cased;
+ * campaign and content are as written. All four empty is an order with no
+ * UTM tags at all — a manager's order in Direct or Telegram.
+ */
 export interface OrganicChannelDetail {
-  /** As written in the tag; empty for a tagged order with no such field. */
-  label: string
+  source: string
+  medium: string
+  campaign: string
+  content: string
   orders: number
   revenue: number
 }
@@ -1083,7 +1090,7 @@ export interface OrganicChannel extends TrafficMetric {
   new_customers: number
   /** The period of equal length just before. */
   previous: TrafficMetric
-  /** The head of the list, by revenue; `details_total` says how many there were. */
+  /** The head of the list by revenue; `details_total` says how many rows there were. */
   details: OrganicChannelDetail[]
   details_total: number
 }

@@ -375,28 +375,27 @@ def organic_channel(
 
 
 def organic_detail(
-    channel: str,
     *,
     utm_source: Optional[str],
     utm_medium: Optional[str],
     utm_campaign: Optional[str],
     utm_content: Optional[str],
-) -> Optional[str]:
-    """What one organic order is called inside its channel, or None where the
-    channel has nothing finer to say (Direct and Telegram carry no tag, and
-    every free Google listing is tagged `sag_organic`).
+) -> Tuple[str, str, str, str]:
+    """The row one organic order is listed under inside its channel:
+    `(source, medium, campaign, content)`, the shape of GA4's traffic
+    acquisition report — "source / medium", then the campaign beneath it.
 
-    The letter for email, the story tag for a blogger, the campaign or the
-    link for the profile, the site for everything else — each as written in
-    the tag, so the marketer finds what they typed. An empty string is a
-    tagged order with no such field, which the tab shows as "no tag".
+    Source and medium are lower-cased, because they name a place and GA4's
+    readers know them that way (`ig / social`, `klaviyo / email`); campaign
+    and content stay as written, so the marketer finds the letter or the
+    blogger's code they typed. An order with no tags at all — Direct, a
+    manager's Telegram order — is `('', '', '', '')`, which the tab names
+    "no UTM tags" rather than hiding the row, since that row *is* what the
+    channel is made of.
     """
-    if channel in ("instagram_direct", "telegram", "google_organic"):
-        return None
-    if channel in ("email_campaigns", "email_flows"):
-        return (utm_campaign or "").strip()
-    if channel == "instagram_stories":
-        return (utm_medium or "").strip()
-    if channel == "instagram_site":
-        return (utm_campaign or utm_content or "").strip()
-    return (utm_source or "").strip()
+    return (
+        (utm_source or "").strip().lower(),
+        (utm_medium or "").strip().lower(),
+        (utm_campaign or "").strip(),
+        (utm_content or "").strip(),
+    )
