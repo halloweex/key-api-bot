@@ -89,10 +89,10 @@ async def get_revenue_trend(
         sales_type = validate_sales_type(sales_type)
         if compare_type not in ("previous_period", "year_ago", "month_ago"):
             compare_type = "previous_period"
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     result = await dashboard_service.get_revenue_trend(
         start, end, category_id=category_id, brand=brand, source_id=source_id,
         sales_type=sales_type, compare_type=compare_type, promocode=promocode,
@@ -258,10 +258,10 @@ async def get_sales_by_source(
         brand = validate_brand_name(brand)
         promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_sales_by_source(
         start, end, category_id, brand=brand, source_id=source_id, sales_type=sales_type,
         promocode=promocode,
@@ -292,10 +292,10 @@ async def get_top_products(
         promocode = validate_promocode(promocode)
         limit = validate_limit(limit, max_value=50)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_top_products(
         start, end, source_id, limit, category_id, brand=brand, sales_type=sales_type,
         promocode=promocode,
@@ -324,10 +324,10 @@ async def get_summary(
         brand = validate_brand_name(brand)
         promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_summary_stats(
         start, end, category_id, brand=brand, source_id=source_id, sales_type=sales_type,
         promocode=promocode,
@@ -349,10 +349,9 @@ async def get_returns(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
 
     store = await get_store()
     start_dt = _datetime.strptime(start, "%Y-%m-%d").date()
@@ -382,10 +381,10 @@ async def get_product_performance(
         brand = validate_brand_name(brand)
         promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_product_performance(
         start, end, brand=brand, source_id=source_id, sales_type=sales_type,
         promocode=promocode,
@@ -406,10 +405,10 @@ async def get_brand_analytics(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_brand_analytics(start, end, sales_type=sales_type)
 
 
@@ -427,10 +426,10 @@ async def get_promocode_analytics(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_promocode_analytics(start, end, sales_type=sales_type)
 
 
@@ -455,10 +454,10 @@ async def get_subcategory_breakdown(
         brand = validate_brand_name(brand)
         promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_subcategory_breakdown(
         start, end,
         parent_category=parent_category,

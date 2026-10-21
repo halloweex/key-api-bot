@@ -56,10 +56,10 @@ async def get_marketing_summary(
             validate_period(period)
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _datetime.strptime(start, "%Y-%m-%d").date()
     end_dt = _datetime.strptime(end, "%Y-%m-%d").date()
 
@@ -114,10 +114,10 @@ async def export_marketing_csv(
             validate_period(period)
         validate_category_id(category_id)
         brand = validate_brand_name(brand)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as ex:
         raise HTTPException(status_code=400, detail=str(ex))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _datetime.strptime(start, "%Y-%m-%d").date()
     end_dt = _datetime.strptime(end, "%Y-%m-%d").date()
 

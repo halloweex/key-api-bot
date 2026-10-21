@@ -29,10 +29,10 @@ async def get_basket_summary(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
@@ -58,10 +58,10 @@ async def get_product_pairs(
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
         limit = validate_limit(limit, max_value=50)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
@@ -85,10 +85,10 @@ async def get_basket_distribution(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
@@ -113,10 +113,10 @@ async def get_category_combos(
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
         limit = validate_limit(limit, max_value=30)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
@@ -141,10 +141,10 @@ async def get_brand_affinity(
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
         limit = validate_limit(limit, max_value=30)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
@@ -170,10 +170,10 @@ async def get_product_momentum(
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
         limit = validate_limit(limit, max_value=20)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
