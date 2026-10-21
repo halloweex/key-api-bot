@@ -281,6 +281,10 @@ class BackgroundScheduler:
         self._state_lock = threading.Lock()
         # Serializes memory-heavy jobs to prevent OOM from compounding
         self._heavy_job_lock = asyncio.Lock()
+        # When the memory monitor last sent each level (epoch seconds). Per
+        # instance, not a class-level dict: one shared dict let one
+        # scheduler's alert hold back another's.
+        self._mem_last_alert: Dict[str, float] = {}
 
     async def start(self) -> None:
         """Start the scheduler and register all jobs."""
@@ -4155,7 +4159,21 @@ class BackgroundScheduler:
             logger.info(f"Order gap backfill: {out}")
             return out
 
-    # ─── Bronze Promotion & Prune ────────────────────────────────────────────
+    # ─── Memory Monitor ───────────────────────────────────────────────────────
+    #
+    # Thresholds, the working-set definition and the evaluator live in
+    # core/memory_monitor.py, which explains at length why this no longer
+    # judges memory.current. Short version: that number is half page cache on
+    # this host, so it tracked database size rather than memory pressure.
+
+    # Cooldowns per level to avoid alert spam (seconds). The clock they are
+    # measured against, `_mem_last_alert`, is set in `__init__`. Both were
+    # deleted with the bronze alert above them on 2026-09-14, and every alert
+    # this job raised was an AttributeError until the type checker named it.
+    _MEM_ALERT_COOLDOWNS = {
+        "WARN": 86400,      # 24 hours
+        "CRITICAL": 21600,  # 6 hours
+    }
 
     @staticmethod
     def _get_db_size_mb() -> Optional[float]:
