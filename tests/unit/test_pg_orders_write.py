@@ -1125,14 +1125,28 @@ class TestThePreflight:
         """Each preflight is bounded at `_PREFLIGHT_TIMEOUT_S` (5 s). Asked one
         after the other, a hung Postgres cost 10 s — the canary's whole
         `HEALTH_TIMEOUT_S` — before anything else `/api/health` builds (the
-        chain-3 review). Mutation: await the two in turn."""
-        import time
+        chain-3 review). Mutation: await the two in turn.
 
+        Judged by order, not by the clock: both must be asked before the
+        first bound expires. A stopwatch round the block measured everything
+        else it builds too, and a CI runner once took 1.30 s against a limit
+        of 0.85 — more than two bounds in a row would have cost."""
         from core import pg_inventory_write
         from web.routes.api import health
 
+        seen = []
+
         async def hang():
+            seen.append("asked")
             await asyncio.sleep(3600)
+
+        bounded = health._bounded_preflight
+
+        async def bounded_and_seen(preflight):
+            answer = await bounded(preflight)
+            if preflight is hang:          # it never answers: the bound expired
+                seen.append("bound expired")
+            return answer
 
         bound = 0.5
         health._preflight_cache.update(data=None, expires_at=0)
@@ -1140,14 +1154,14 @@ class TestThePreflight:
         try:
             with patch.object(pg_inventory_write, "preflight", hang), \
                     patch.object(pow_, "preflight", hang), \
+                    patch.object(health, "_bounded_preflight", bounded_and_seen), \
                     patch.object(health, "_PREFLIGHT_TIMEOUT_S", bound):
-                started = time.monotonic()
                 block = await health._write_chains_block()
-                took = time.monotonic() - started
         finally:
             health._preflight_cache.update(data=None, expires_at=0)
             health._orders_preflight_cache.update(data=None, expires_at=0)
-        assert took < 1.7 * bound, f"{took:.2f} s for two preflights bounded at {bound} s"
+        assert seen == ["asked", "asked", "bound expired", "bound expired"], (
+            f"the second preflight was not asked before the first bound expired: {seen}")
         for chain in (pg_inventory_write.CHAIN, pow_.CHAIN):
             assert block[chain]["preflight"]["ok"] is False
             assert "did not answer" in block[chain]["preflight"]["reasons"][0]
