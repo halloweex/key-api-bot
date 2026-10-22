@@ -1,9 +1,11 @@
 """The Rust pilot answers `GET /api/revenue/trend` the way the Python app does.
 
 One Postgres, two services. Python is the real application — `web.main.app`
-with its middleware, its exception handlers and a signed admin session,
-called in-process — and Rust is `rust/crates/ks-api` at `KS_RUST_PILOT_URL`.
-Every request below goes to both. The answers must have the same status, the
+with its middleware, its exception handlers and its rate limit, called
+in-process — and Rust is `rust/crates/ks-api` at `KS_RUST_PILOT_URL`. Every
+request below goes to both, with the same signed admin session, and with an
+`X-Real-IP` of its own, so both check the route's 30-a-minute limit and
+neither trips it: who may ask is `test_rust_pilot_access.py`'s matter. The answers must have the same status, the
 same content type and the same JSON once keys are sorted: `json.loads` then
 `json.dumps`, so `0` and `0.0` stay different numbers and a float must agree
 to the last bit. That compares what a client parses, not what it means.
@@ -37,7 +39,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 from collections import Counter
+from itertools import count
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, patch
@@ -228,7 +232,8 @@ async def services(seeded, duckdb_off, monkeypatch):
 
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_READ_GOLD", "postgres")
-    monkeypatch.setattr(limiter, "enabled", False)
+    monkeypatch.setattr(limiter, "enabled", True)
+    limiter.reset()
     monkeypatch.setattr("core.filters.datetime", _Clock)
     monkeypatch.setattr("web.routes.api.analytics._datetime", _Clock)
     read_fallback.reset_counts()
@@ -241,18 +246,26 @@ async def services(seeded, duckdb_off, monkeypatch):
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
             async with httpx.AsyncClient(transport=transport, base_url="http://python",
                                          cookies={SESSION_COOKIE: cookie}) as python, \
-                    httpx.AsyncClient(base_url=PILOT, timeout=60) as rust:
+                    httpx.AsyncClient(base_url=PILOT, timeout=60,
+                                      cookies={SESSION_COOKIE: cookie}) as rust:
                 yield python, rust
     finally:
         _Clock.pinned = None
         await pool.close()
 
 
+# A client key per request, and per run: the pilot's limiter outlives a test
+# process, so a rerun within the minute must not reuse a key.
+_RUN = secrets.token_hex(3)
+_CLIENTS = count(1)
+
+
 async def _ask(python, rust, query: str, now: Optional[str]):
     _Clock.pinned = datetime.fromisoformat(now) if now else None
-    headers = {"X-Pilot-Now": now} if now else {}
-    py = await python.get(f"{ROUTE}?{query}")
-    rs = await rust.get(f"{ROUTE}?{query}", headers=headers)
+    client = {"X-Real-IP": f"trend-{_RUN}-{next(_CLIENTS)}"}
+    py = await python.get(f"{ROUTE}?{query}", headers=client)
+    rs = await rust.get(f"{ROUTE}?{query}",
+                        headers={**client, **({"X-Pilot-Now": now} if now else {})})
     return py, rs
 
 

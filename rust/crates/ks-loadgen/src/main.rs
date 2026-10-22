@@ -5,8 +5,13 @@
 //!
 //! ```text
 //! ks-loadgen --target http://host:8090 --paths paths.txt \
-//!     --concurrency 8 --warmup 5 --duration 30 --label rust
+//!     --concurrency 8 --warmup 5 --duration 30 --label rust \
+//!     --header 'Cookie: dashboard_session=…' --rotate-real-ip
 //! ```
+//!
+//! `--header` is sent with every request; `--rotate-real-ip` gives each
+//! request an `X-Real-IP` of its own, so a per-client rate limit is checked
+//! on both services and trips on neither.
 //!
 //! Prints one JSON object: throughput, latency percentiles (nearest rank,
 //! microsecond resolution), status counts and transport errors.
@@ -30,12 +35,15 @@ struct Args {
     warmup: Duration,
     duration: Duration,
     label: String,
+    headers: Vec<(String, String)>,
+    rotate_real_ip: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut args = std::env::args().skip(1);
     let (mut target, mut paths_file, mut label) = (None, None, String::from("run"));
     let (mut concurrency, mut warmup, mut duration) = (1_usize, 5.0_f64, 30.0_f64);
+    let (mut headers, mut rotate_real_ip) = (Vec::new(), false);
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
@@ -45,6 +53,14 @@ fn parse_args() -> Result<Args, String> {
             "--concurrency" => concurrency = value()?.parse().map_err(|_| "--concurrency")?,
             "--warmup" => warmup = value()?.parse().map_err(|_| "--warmup")?,
             "--duration" => duration = value()?.parse().map_err(|_| "--duration")?,
+            "--header" => {
+                let header = value()?;
+                let (name, v) = header
+                    .split_once(':')
+                    .ok_or(format!("--header {header:?} is not `Name: value`"))?;
+                headers.push((name.trim().to_owned(), v.trim().to_owned()));
+            }
+            "--rotate-real-ip" => rotate_real_ip = true,
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -66,6 +82,8 @@ fn parse_args() -> Result<Args, String> {
         warmup: Duration::from_secs_f64(warmup),
         duration: Duration::from_secs_f64(duration),
         label,
+        headers,
+        rotate_real_ip,
     })
 }
 
@@ -115,6 +133,7 @@ async fn main() -> ExitCode {
     let workers: Vec<_> = (0..args.concurrency)
         .map(|_| {
             let (client, uris, next) = (client.clone(), uris.clone(), next.clone());
+            let (headers, rotate) = (args.headers.clone(), args.rotate_real_ip);
             tokio::spawn(async move {
                 let mut tally = Tally::default();
                 loop {
@@ -122,10 +141,16 @@ async fn main() -> ExitCode {
                     if started >= stop_at {
                         return tally;
                     }
-                    let uri = uris[next.fetch_add(1, Ordering::Relaxed) % uris.len()].clone();
-                    let request = Request::get(uri)
-                        .body(Empty::new())
-                        .expect("a GET with no body");
+                    let n = next.fetch_add(1, Ordering::Relaxed);
+                    let mut builder = Request::get(uris[n % uris.len()].clone());
+                    for (name, value) in &headers {
+                        builder = builder.header(name.as_str(), value.as_str());
+                    }
+                    if rotate {
+                        let ip = format!("10.{}.{}.{}", (n >> 16) & 255, (n >> 8) & 255, n & 255);
+                        builder = builder.header("x-real-ip", ip);
+                    }
+                    let request = builder.body(Empty::new()).expect("a GET with no body");
                     let outcome = async {
                         let response = client.request(request).await.map_err(|e| e.to_string())?;
                         let status = response.status().as_u16();
