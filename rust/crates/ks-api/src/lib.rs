@@ -2,8 +2,10 @@
 //! answer for answer with the Python app over the same Postgres Gold.
 //!
 //! It is not deployed and serves no one. `tests/integration/test_rust_pilot_trend.py`
-//! sends both services the same requests and requires the same answers.
+//! sends both services the same requests and requires the same answers, and
+//! `test_rust_pilot_access.py` does the same for who may ask.
 
+pub mod access;
 pub mod gold;
 mod http;
 pub mod params;

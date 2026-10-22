@@ -1,10 +1,12 @@
-# The Rust pilot (rust/README.md): one endpoint, never deployed.
+# The Rust pilot (rust/README.md): one endpoint and the access layer in front
+# of every route, never deployed.
 #
 # `cargo` is the workspace's own gate: rustfmt, clippy with warnings as
 # errors, and the tests — the CPython fixtures among them. `harness` builds
-# the image Dockerfile.rust describes, starts it beside a throwaway Postgres
-# set up as ci.yml sets one up, and sends the same requests to the Python app
-# and to the pilot: any difference, or a skip, fails the job. Then a short
+# the images Dockerfile.rust describes, starts the harness build beside a
+# throwaway Postgres set up as ci.yml sets one up, and sends the same
+# requests to the Python app and to the pilot — the trend's matrix and the
+# access matrix: any difference, or a skip, fails the job. Then a short
 # benchmark on the runner, printed and not judged.
 #
 # WHAT THIS DOES NOT DO
@@ -59,8 +61,10 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock', 'rust/rust-toolchain.toml') }}
 
       - run: cargo fmt --all --check
+      # Both builds: the service, and the harness's with its test clock.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked
 
       - name: Release build, timed
         run: |
@@ -88,11 +92,14 @@ jobs:
           pip install -r requirements-dev.lock
 
       # No layer cache on a fresh runner: this is the cold build, timed.
+      # The service image is built for its size; the harness runs the
+      # `harness` build of the same code, the one with a test clock.
       - name: Build the pilot's images
         run: |
           start=$(date +%s)
           docker build -f Dockerfile.rust -t ks-rust-pilot:ci rust
           echo "image build, cold: $(( $(date +%s) - start )) s"
+          docker build -f Dockerfile.rust --target harness -t ks-rust-pilot-harness:ci rust
           docker build -f Dockerfile.rust --target loadgen -t ks-rust-loadgen:ci rust
           docker image inspect ks-rust-pilot:ci --format 'image: {{.Size}} bytes'
           docker builder prune -f --max-used-space "${GATE_CACHE_MAX:-4GB}"
@@ -124,27 +131,37 @@ jobs:
           KS_PG_DSN: postgresql://ks_app:ci-only@127.0.0.1:5432/ks
         run: alembic upgrade head
 
-      # Loopback only: the pilot checks no session.
+      # Loopback only. The session key is the suite's own test key
+      # (tests/conftest.py) and the hardcoded admins are read out of
+      # core.permissions, so neither is written down here; the pilot refuses
+      # to start unless the ids hash to what its contract says.
       - name: Start the pilot
         run: |
+          secret=$(python -c "import os, tests.conftest; print(os.environ['DASHBOARD_SECRET_KEY'])")
+          admins=$(python -c "from core.permissions import ADMIN_USER_IDS as a; print(','.join(map(str, sorted(a))))")
+          echo "PILOT_SECRET=$secret" >> "$GITHUB_ENV"
           docker run -d --name ks-rust-pilot --network host --cpuset-cpus 0 \
             -e KS_PG_DSN=postgresql://ks_app:ci-only@127.0.0.1:5432/ks \
             -e KS_PILOT_LISTEN=127.0.0.1:8090 -e KS_PILOT_TEST_CLOCK=1 \
-            ks-rust-pilot:ci
+            -e DASHBOARD_SECRET_KEY="$secret" -e KS_HARDCODED_ADMIN_IDS="$admins" \
+            -e KS_USER_STORE=postgres -e KS_BOT_STORE=postgres \
+            ks-rust-pilot-harness:ci
           for _ in $(seq 1 30); do
             curl -fsS http://127.0.0.1:8090/healthz && break
             sleep 1
           done
+          curl -fsS http://127.0.0.1:8090/healthz || { docker logs ks-rust-pilot; exit 1; }
 
       - name: Run the harness
         env:
           KS_PG_DSN: postgresql://ks_app:ci-only@127.0.0.1:5432/ks
           KS_RUST_PILOT_URL: http://127.0.0.1:8090
           KS_RUST_PILOT_REPORT: rust-pilot-report.json
+          KS_RUST_PILOT_ACCESS_REPORT: rust-pilot-access-report.json
         run: |
           set -o pipefail
           pytest -q -rs -p no:cacheprovider tests/integration/test_rust_pilot_trend.py \
-            | tee harness.out
+            tests/integration/test_rust_pilot_access.py | tee harness.out
           if grep -qE "[0-9]+ skipped" harness.out; then
             echo "::error::the harness skipped instead of comparing"
             exit 1
@@ -155,32 +172,50 @@ jobs:
           matrix = report["matrix"]
           print(json.dumps({**report["seed"], **{k: v for k, v in matrix.items()
                                                  if k != "mismatches"}}, indent=1))
+          access = json.load(open("rust-pilot-access-report.json"))
+          print(json.dumps(access, indent=1, ensure_ascii=False))
           EOF
 
       # Same requests, same Postgres, one CPU each; numbers for the report,
       # not a gate. The harness emptied the tables it seeded, hence the seed.
+      # Both sides check the session and the limit: as a hardcoded admin (a
+      # signature, no read) and as an approved viewer (Postgres reads), each
+      # request with an X-Real-IP of its own so the limit never trips.
       - name: A short benchmark on the runner
         env:
           KS_PG_DSN: postgresql://ks_app:ci-only@127.0.0.1:5432/ks
           KS_READ_GOLD: postgres
           KS_DUCKDB: "off"
           KS_ALERTS_DISABLED: "1"
-          DASHBOARD_SECRET_KEY: ci-only-not-a-secret
+          KS_USER_STORE: postgres
+          KS_BOT_STORE: postgres
           TZ: Europe/Kyiv
         run: |
+          export DASHBOARD_SECRET_KEY="$PILOT_SECRET"
           python -m tests.rust_pilot_fixture
+          docker exec ci-pg psql -U postgres -d ks -qc \
+            "INSERT INTO app.dashboard_users (user_id, role, status) VALUES (9100000999, 'viewer', 'approved') ON CONFLICT (user_id) DO NOTHING"
+          admin=$(python -c "from core.permissions import ADMIN_USER_IDS as a; from web.routes.auth import session_serializer as s; print(s.dumps({'user_id': min(a), 'role': 'admin'}))" 2>/dev/null)
+          viewer=$(python -c "from web.routes.auth import session_serializer as s; print(s.dumps({'user_id': 9100000999, 'role': 'viewer'}))" 2>/dev/null)
           taskset -c 0 uvicorn rust.bench.py_app:app --host 127.0.0.1 --port 8080 \
             --lifespan off > uvicorn.log 2>&1 &
           for _ in $(seq 1 30); do
-            curl -fsS -o /dev/null "http://127.0.0.1:8080/api/revenue/trend?period=today" && break
+            curl -fsS -o /dev/null -H "Cookie: dashboard_session=$admin" \
+              "http://127.0.0.1:8080/api/revenue/trend?period=today" && break
             sleep 1
           done
           for target in 8090 8080; do
-            for c in 1 16; do
-              docker run --rm --network host --cpuset-cpus 2-3 \
-                -v "$PWD/rust/bench/paths.txt:/paths.txt:ro" ks-rust-loadgen:ci \
-                --target "http://127.0.0.1:$target" --paths /paths.txt \
-                --concurrency "$c" --warmup 3 --duration 15 --label "port-$target-c$c"
+            for caller in admin viewer; do
+              cookie=$admin
+              [ "$caller" = viewer ] && cookie=$viewer
+              for c in 1 16; do
+                docker run --rm --network host --cpuset-cpus 2-3 \
+                  -v "$PWD/rust/bench/paths.txt:/paths.txt:ro" ks-rust-loadgen:ci \
+                  --target "http://127.0.0.1:$target" --paths /paths.txt \
+                  --concurrency "$c" --warmup 3 --duration 15 \
+                  --label "port-$target-$caller-c$c" \
+                  --header "Cookie: dashboard_session=$cookie" --rotate-real-ip
+              done
             done
           done
 
