@@ -242,6 +242,27 @@ def _never_the_real_chain_latch(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _never_the_real_data_directory(monkeypatch, tmp_path):
+    """No test may sample, or leave a heartbeat in, the real data directory.
+
+    The disk watchdog walks the data directory and writes
+    `health/watchdog_last_sample` into it, which host cron reads as proof the
+    watchdog is alive. Until step 14's S14-01 it found that directory as the
+    DuckDB store's parent, so `_never_the_production_database`'s redirect of
+    the store kept every test out of `data/`; it reads `core.paths.DATA_DIR`
+    now, so the redirect is made here, at the one name the scheduler reads.
+    `tmp_path` itself, the directory a test's own store usually sits in, so a
+    test that builds its store there and expects the heartbeat beside it
+    still finds it.
+
+    The scheduler's name and not `core.paths.DATA_DIR`: the modules that read
+    the directory bind it at import, so patching `core.paths` would bind this
+    test's tmp_path into whichever of them was first imported inside it, for
+    the rest of the session."""
+    monkeypatch.setattr("core.scheduler.DATA_DIR", tmp_path)
+
+
+@pytest.fixture(autouse=True)
 def _a_fresh_orders_chain_hold(monkeypatch):
     """Every test starts as a process that has not held chain 3 on DuckDB.
 

@@ -6,7 +6,7 @@ in, `gold.daily_revenue` out, no KeyCRM and no DuckDB anywhere in the path.
 
 ONE SET OF MEASURES, TWO SHAPES
 
-The eight aggregates come from `GOLD_MEASURES` in `core/duckdb_store.py`,
+The eight aggregates come from `GOLD_MEASURES` in `core/warehouse_sql.py`,
 verbatim — the same dict DuckDB renders into `GOLD_REVENUE_SELECT_SQL`. A test
 asserts each expression appears in both. That is charter rule 1, and #101 is
 the standing proof of how fast a second copy diverges.
@@ -91,8 +91,8 @@ def select_sql(dialect=None) -> str:
     mapping in `core/mirror_reconciliation.py` is asserted by running it, not
     by reading it.
     """
-    from core.duckdb_store import GOLD_MEASURES
     from core.sql_dialect import POSTGRES
+    from core.warehouse_sql import GOLD_MEASURES
 
     dialect = dialect or POSTGRES
     # Every select item is `<expr> AS <column>`, including `sales_type AS

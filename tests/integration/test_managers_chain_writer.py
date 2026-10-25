@@ -479,8 +479,8 @@ class TestTheReviewAgainstARealPostgres:
         classified non-retail: its past stays what the seed said. Mutation:
         `WHERE FALSE AND m.id = $1` in the classification's seed — the March
         order resolves `internal` (the review's reproduction)."""
-        from core.duckdb_store import silver_sales_type_case
         from core.sql_dialect import POSTGRES
+        from core.warehouse_sql import silver_sales_type_case
 
         store, pool, env = stores
         async with pool.acquire() as conn:

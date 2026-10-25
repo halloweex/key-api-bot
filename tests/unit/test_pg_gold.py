@@ -22,7 +22,6 @@ import pytest
 from core.duckdb_constants import REVENUE_SOURCE_IDS
 from core.duckdb_store import (
     DUCKDB_GOLD_COLUMNS,
-    GOLD_MEASURES,
     GOLD_REVENUE_SELECT_SQL,
     GOLD_SOURCE_MEASURES,
     DuckDBStore,
@@ -44,6 +43,7 @@ from core.pg_gold import (
     select_sql,
 )
 from core.sql_dialect import DUCKDB
+from core.warehouse_sql import GOLD_MEASURES
 
 # Anchored on this file, not on the working directory: a suite that only passes
 # when pytest is launched from the repository root passes for a reason nobody

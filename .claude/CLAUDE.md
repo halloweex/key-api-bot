@@ -2582,9 +2582,16 @@ so Gold can never aggregate a Silver the next statement is about to replace.
 `TRUNCATE` then one `INSERT`, in one transaction, for `pg_silver`'s reasons.
 
 **The measures are shared; the shape is not.** The eight aggregates live in
-`GOLD_MEASURES` (`core/duckdb_store.py`) and are rendered verbatim into both
-`GOLD_REVENUE_SELECT_SQL` and the Postgres projection — rule 1, with a test
-per expression. What does not transfer is DuckDB's channel columns:
+`GOLD_MEASURES` (`core/warehouse_sql.py`) and are rendered verbatim into the
+Postgres projection, ClickHouse's derivation and DuckDB's
+`GOLD_REVENUE_SELECT_SQL` — rule 1, with a test per expression. They lived in
+`core/duckdb_store.py`, beside Silver's projection, until step 14's S14-01:
+every Postgres derivation tick imported the DuckDB store, and with it the
+`duckdb` driver and pandas, to render a string. Both moved, unchanged
+(`core/warehouse_sql.py`; the old names are re-exported for one release), and
+`tests/unit/test_warehouse_sql.py` holds every Postgres and ClickHouse
+rendering to the bytes 57fd7c22 produced. What does not transfer is DuckDB's
+channel columns:
 `instagram_revenue` and its five siblings can only name a channel somebody
 wrote a column for. Source 5 (Виставка) arrived with #101 and is
 **₴266,059.00 across 177 orders** that sits in `revenue` and in none of the
