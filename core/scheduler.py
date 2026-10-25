@@ -2435,7 +2435,7 @@ class BackgroundScheduler:
             # inside its grace, so a `reconcile_gold` that ran when it should
             # not have files nothing on the morning after a busy sync, and
             # reads exactly like one that stood down. The step-13 rehearsal
-            # judges P5 on this list.
+            # judged P5 on this list, until S14-03 deleted it.
             checks_run: list = []
 
             async def check(name, run) -> bool:

@@ -467,13 +467,9 @@ STORE_ROUTERS: Dict[str, Tuple[str, bool, Tuple[str, ...]]] = {
 _TX_METHODS = ("all", "one", "none", "many")
 
 # DuckDB writes that never reach the analytics file. Each says why; a listed
-# site that no longer exists fails, as in RENDERED_DDL.
-NOT_THE_FILE = {
-    ("deploy/measure_dlr_throughput.py", "seed_duckdb"):
-        "a benchmark's own DuckDB, created in a temp directory",
-    ("deploy/measure_dlr_throughput.py", "main"):
-        "a benchmark's own DuckDB, created in a temp directory",
-}
+# site that no longer exists fails, as in RENDERED_DDL. Empty since S14-03
+# deleted its two entries' benchmark, `deploy/measure_dlr_throughput.py`.
+NOT_THE_FILE: Dict[Tuple[str, str], str] = {}
 
 # Write statements that name their table as a `{hole}` the module fills per
 # engine — one text for DuckDB and Postgres. The literal pass reads a name
@@ -506,8 +502,6 @@ TEMPLATED_ELSEWHERE = {
     ("core/report_ledger.py", "UPSERT_SQL"):
         "Postgres: the two send ledgers' chain writers (`$n` placeholders); "
         "DuckDB's half is each report's own literal",
-    ("deploy/step13_rehearsal/probe.py", "_DELETE_ONE"):
-        "the step-13 rehearsal's copy of the file, one `python -c` per table",
 }
 # A write keyword whose table is a named `{hole}`. An f-string's own holes
 # read as `HOLE`, which has no name; `{{name}}` in one reads as `{name}`.

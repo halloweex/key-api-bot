@@ -31,15 +31,14 @@ You are a QA engineer for KoreanStory Analytics project.
 - Chart data accuracy
 
 ## Key Test Files
-- `tests/test_data_consistency.py` - Data validation tests
+- `tests/unit/`, `tests/integration/` — see "Testing" in `.claude/CLAUDE.md`
+  (`tests/test_data_consistency.py`, KeyCRM against the DuckDB file, was
+  deleted in step 14's S14-03; `reconciliation_pg` makes that comparison daily)
 
 ## Commands
 ```bash
 # Run all tests
 PYTHONPATH=. pytest tests/ -v
-
-# Check specific date
-PYTHONPATH=. python tests/test_data_consistency.py 2025-12-07
 
 # Test with coverage
 PYTHONPATH=. pytest tests/ --cov=core --cov=web

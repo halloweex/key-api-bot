@@ -1030,7 +1030,7 @@ class TestOnlyTheseProcessesRefuse:
         entries = {fn.key for fn in entry_points(graph)}
         assert "scripts/weekly_report_preview.py:main" in entries
         assert not configures_the_mode(graph.trees["scripts/weekly_report_preview.py"])
-        assert configures_the_mode(graph.trees["scripts/force_resync.py"])
+        assert configures_the_mode(graph.trees["scripts/backfill_utm.py"])
 
     def test_the_bot_never_configures_the_mode(self):
         """`bot/` is outside the walk because it cannot refuse: it never reads

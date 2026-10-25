@@ -9,8 +9,9 @@ cleanup took the other's Postgres with it.
 The guard walks `deploy/` for any script that removes named stores, rather than
 naming the two that exist today — a third gate written tomorrow is exactly the
 one nobody would think to add to a list. The step-13 rehearsal was that third
-script: its Postgres is `reh-pg`, held in `$REH_PG`, which the first form of
-this walk (`docker rm -f -v "$PG"`, the gates' spelling) could not see.
+script: its Postgres was `reh-pg`, held in `$REH_PG`, which the first form of
+this walk (`docker rm -f -v "$PG"`, the gates' spelling) could not see. Step
+14's S14-03 deleted the rehearsal; the walk stays as it was.
 """
 from __future__ import annotations
 
@@ -41,25 +42,23 @@ def _first(lines, pattern):
     return None
 
 
-def test_the_walk_finds_both_gates_and_the_rehearsal():
+def test_the_walk_finds_both_gates():
     names = {path.name for path, _ in _gates()}
-    assert {"gate_with_stores.sh", "quick_gate.sh", "step13_rehearsal.sh"} <= names
+    assert {"gate_with_stores.sh", "quick_gate.sh"} <= names
 
 
 def test_every_gate_waits_for_the_lock_before_it_touches_a_store():
     for path, text in _gates():
         lines = text.splitlines()
         lock = _first(lines, re.escape(LOCK) + "$")
-        # `flock 9` waits for a gate to finish; `flock -n 9` refuses instead —
-        # the rehearsal holds the host for an hour, and a gate in front of it
-        # is a reason to come back later. Either takes the lock.
-        wait = _first(lines, r"(?:.*\s)?flock (?:-n )?9\b")
-        # The first top-level call of whatever removes the stores: `cleanup`
-        # in the gates, `remove_all` in the rehearsal (whose `cleanup`
-        # honours --keep). Unindented: a call inside a function body is a
-        # definition, not a run.
+        # `flock 9` waits for a gate to finish. (The step-13 rehearsal took
+        # it with `flock -n 9` and removed its stores with `remove_all`; S14-03
+        # deleted it, and the two spellings went from here with it.)
+        wait = _first(lines, r"(?:.*\s)?flock 9\b")
+        # The first top-level call of `cleanup`, which removes the stores.
+        # Unindented: a call inside a function body is a definition, not a run.
         first_cleanup = next((n for n, l in enumerate(lines)
-                              if re.fullmatch(r"(?:cleanup|remove_all)", l)), None)
+                              if re.fullmatch(r"cleanup", l)), None)
         first_run = _first(lines, r"docker run\b")
         assert lock is not None, f"{path.name}: no host lock"
         assert wait is not None and wait > lock, f"{path.name}: the lock is never waited on"
@@ -77,14 +76,9 @@ def test_every_gate_installs_the_migration_tools_at_the_locks_versions():
     for path, text in _gates():
         code = [l for l in text.splitlines() if not l.lstrip().startswith("#")]
         installs = [l for l in code if "pip install" in l and "alembic" in l]
-        if not installs:
-            # No install at all: then it migrates with the migrate image,
-            # which carries alembic at the pinned versions (Dockerfile.migrate)
-            # and needs no network — the rehearsal's network has none.
-            runs = [l for l in code if "alembic upgrade head" in l]
-            assert any("MIGRATE_IMAGE" in l for l in runs), (
-                f"{path.name}: migrates neither with a pinned install nor the migrate image")
-            continue
+        # The rehearsal migrated with the migrate image instead, on a network
+        # with no route out; it went in S14-03, so every gate left installs.
+        assert installs, f"{path.name}: migrates without a pinned install"
         for line in installs:
             assert "-c /app/requirements-dev.lock" in line, f"{path.name}: {line.strip()}"
             assert "sqlalchemy[asyncio]" in line, f"{path.name}: {line.strip()}"

@@ -50,10 +50,8 @@ key-api-bot/
 │   │                            # web image — the compact sidecar runs from it.
 │   ├── compact_duckdb.py        # Host cron, Sunday 02:00 UTC. Do not touch.
 │   ├── weekly_compact.sh        # The cron entry itself
-│   ├── check_date.py            # Compare DuckDB vs KeyCRM for date
 │   ├── check_turbosms_signature.py  # Is TURBOSMS_WEBHOOK_SECRET the one the gateway signs with?
-│   ├── utm_reclassify_dryrun.py # What a UTM reclassify would move; read-only, snapshots the verdicts
-│   └── force_resync.py          # Force rebuild DuckDB from API
+│   └── utm_reclassify_dryrun.py # What a UTM reclassify would move; read-only, snapshots the verdicts
 │
 ├── deploy/                       # Reached only from host cron, never imported
 │   ├── daily_offsite.sh         # 02:45 daily — snapshot + ship off-site
@@ -62,9 +60,7 @@ key-api-bot/
 │   └── restore_from_export.py   # The only restore path, on the pinned image. Never delete.
 │
 ├── tests/                        # 67 files. pytest.ini sets testpaths, so only
-│   │                            # this tree is collected — scripts/ is not.
-│   └── test_data_consistency.py # KeyCRM vs DuckDB; marked `external`,
-│                                # deselected by default, run with -m external
+│                                # this tree is collected — scripts/ is not.
 │
 ├── nginx/nginx.conf             # Reverse proxy configuration
 ├── .github/workflows/deploy.yml # GitHub Actions auto-deployment
@@ -406,17 +402,12 @@ KS_PG_DSN=... pytest -q
 # ways: it compares *rendered* timestamps, so it only passes where the
 # renderer agrees with Postgres. CI and the production image are UTC.
 TZ=UTC KS_PG_DSN=... pytest -q
-
-# The external tests, deliberately: these reach the live KeyCRM API and the
-# production DuckDB file.
-pytest -m external -v
-
-# Check specific date
-PYTHONPATH=. python tests/test_data_consistency.py 2025-12-07
-
-# Force resync DuckDB
-python scripts/force_resync.py --days 365
 ```
+
+`pytest -m external` runs nothing today: its one test, KeyCRM against the
+production DuckDB file, went in step 14's S14-03 with `scripts/check_date.py`
+and `scripts/force_resync.py`. `reconciliation_pg` makes that comparison every
+morning, and a resync is `POST /api/duckdb/resync`.
 
 ### Type checking
 
@@ -1279,9 +1270,13 @@ caption over Telegram's 1 024, or any render failure costs the picture and
 nothing else — the text still goes out.
 
 Preview any of it on a real phone with `scripts/weekly_report_preview.py`,
-which honours the kill switch and writes nothing to the send ledger;
+which honours the kill switch and writes nothing to the send ledger. It reads
+Postgres through the job's own readers (`build_report` and its `fetch_*`, or
+the traffic report's), refuses without `KS_READ_WEEKLY` (or `KS_READ_TRAFFIC`)
+at `postgres` and `KS_PG_DSN`, and hands them a store that refuses to
+connect, so it opens no DuckDB file (it read a DuckDB backup until S14-03).
 `--fixture` renders the 31.08–06.09.2026 week from Gold rows copied out of
-Postgres, for a laptop whose DuckDB copy is stale.
+Postgres, and reads nothing.
 
 **The instance signature is admins-only** (owner's decision, 2026-09-07).
 `· prod-vps` answers an operator's question and only an admin can act on the
@@ -4181,8 +4176,9 @@ When DuckDB's
 no verdict, so `POST /api/traffic/reclassify` is the lever only if that parse
 fails. Every day spent under `postgres` is a day no independent derivation
 proves Postgres Silver/Gold, and that cannot be re-verified afterwards. The
-gate-stack rehearsal on the production backups — a container killed mid
-Postgres rebuild, the owed state surviving — runs on the host before any flip.
+gate-stack rehearsal on the production backups (a container killed mid
+Postgres rebuild, the owed state surviving) ran on the host before the
+2026-10-09 flip; see "The step-13 rehearsal (history; deleted in S14-03)".
 
 **After a flip, a start with any precondition unmet IS the way back**, not
 only an operator's unset: the same full rebuild and hold, and the next start
@@ -4276,266 +4272,36 @@ checklist done, not a switch thrown. An exception reading any fact is
 published by its class alone and logged whole: a driver's text names the
 database user, host and port.
 
-### The step-13 rehearsal (`deploy/step13_rehearsal.sh`)
+### The step-13 rehearsal (history; deleted in S14-03)
 
-The gate-stack rehearsal named above, as one command and one table. It
-exercises PR #268's eight points on **copies** of production, on the host,
-beside the live stack: P1 the flip with every precondition, P2 DuckDB frozen
-while Postgres derives, P3 web killed inside the Postgres derivation (Gold's
-`TRUNCATE` held by a lock, so the kill lands between Silver's commit and
-Gold's), P4 the three mutations (a deleted Silver row, a landed order, an
-unknown sales_type via a trigger on the copy), P5 both DQ jobs under the
-stand-down, P6 restarts — graceful, after the kill, graceful — and one
-resolve, P7 one precondition broken and the canary paging, P8 the way back.
-P3, P6, P8 and D1 judge the stops the container shows, not the ones the
-script meant: `docker inspect` after each stop and start (exit 0, or exit 137
-after the rehearsal's `docker kill` and not the OOM killer), and P6 counts the
-restart after the kill only when its SIGKILL is the one `p3.json` records.
-Every stop of reh-web gets production's grace — web's `stop_grace_period`,
-120 s since the DuckDB kill guard and compose's 10 s default before it
-(`STOP_GRACE_S`, pinned to `docker-compose.yml`) — and records the
-container's state after it, so one that outruns the grace is recorded as the
-kill a deploy would have made: P6 reads F5s's and F7's, D1 phase 0's and
-F7's, P8 the stop the way back starts from and its own last one, and a stop
-that outran the grace is UNKNOWN there until somebody has read why web did
-not stop in time. D1 reads those last two as well, because its DELETE comes
-after them: a loss it finds behind one that was no deploy's stop is still
-FAIL, and says that a kill after P3's may have cost it. Three
-stops recorded nothing until 2026-10-08 — both around the way back, and the
-one after a run that did not flip — while phase 0's had already taken 7 of
-the 10 s it had then on 400 orders. A test walks the script for a stop of reh-web
-without a state file, and for a record or a judge fed another phase's.
-Plus D1 (what P3's kill cost DuckDB's indexes, below), K0 (KeyCRM never
-called) and Z0 (no other container on the host moved). Z0 records every other container's
-`StartedAt`, `RestartCount` and `OOMKilled`, not just its id: a restart
-policy brings an OOM-killed live web back under the same id and name, so
-only those say it happened, and one that did is a FAIL until somebody has
-read why. A container gone or new is UNKNOWN — a deploy or a cron one-off,
-or, on a laptop, other work. Exit 0 all PASS, 1 any FAIL, 2 UNKNOWN only,
-3 not set up.
-
-**What keeps it off production**, each pinned by parsing the script —
-and the watchdog, the lock and the disk guard by running its own functions
-against stubbed `docker`, `df` and `du`
-(`tests/unit/test_step13_rehearsal_script.py`): every container, one-offs
-included, and the network are named `reh-*`, and nothing else is ever acted
-on — the one look at the rest is Z0's `docker ps` and `docker inspect`, and
-no `docker compose`;
-the network is `--internal`, so there is no route to KeyCRM, Telegram or any
-live container; `--pull never` on every `docker run`, so the image the next
-`up -d` starts is not changed; hard memory caps (web 1.5 g with DuckDB at
-768 MB, Postgres 512 m, ClickHouse 1.5 g) and `--oom-score-adj 1000` on
-every container — the caps bound what the rehearsal takes, but if the host
-runs short anyway the kernel kills the largest RSS, the live web, unless the
-rehearsal's processes ask to go first (at 0 the live one went, reproduced);
-a start guard on `MemAvailable`, and one on the disk that projects every
-copy onto both filesystems it lands on against 74 %, a point under the live
-monitor's 75 % WARN, which would otherwise page production's admins about
-the rehearsal's own files; a watchdog on both that kills the `reh-*`
-containers itself and only then signals the shell, which runs its TERM trap
-once its foreground command returns — 25 minutes for a `docker exec`,
-unbounded for `pg_restore`; `/tmp/ks-gate.lock` taken with `flock -n` before
-anything starts, and the watchdog launched with fd 9 closed and alive only
-while the shell is — a SIGKILLed shell left it looping with the lock, every
-gate waiting in `flock 9` and `--cleanup-only` refusing, and now it removes
-what the shell started instead; the tree mounted read-only and never
-written; cleanup on EXIT with `docker rm -f -v`, deaf to a second signal.
-reh-web runs with `KS_ALERTS_DISABLED=1`, no `BOT_TOKEN`, and
-`KEYCRM_BASE_URL` pointing at a
-stub (`deploy/step13_rehearsal/keycrm_stub.py`) — nothing in the application
-switches the sync off, so the base URL and the network are what keep the
-quota untouched. The canary is `bot/canary.py` imported inside reh-web and
-judged against its own `/api/health`, never sent. Jobs are triggered through
-reh-web's own API with a session signed by a key minted for the run.
-
-**Production enters as copies only**: the newest nightly `pg_dump` (streamed
-into `reh-pg`, ownership kept, on roles initdb creates with per-run
-passwords) and the newest `data/backups/analytics-*.duckdb` — never the live
-file — copied into the rehearsal's own directory (mode 700), plus the
-`KS_WRITE_*` chain flags read from `.env` by exact name. The copies go at the
-end; only the table survives, in `step13-rehearsal-<stamp>.txt` beside that
-directory, ids, counts and keys only. `--keep` leaves the copies and names
-each in red: the directory, and the stopped `reh-pg` (a full restore of
-production's Postgres, buyers and phones) and `reh-ch` in their anonymous
-volumes; `--cleanup-only` removes what a killed run left. A window guard
-refuses to start within 100 minutes of any reh-web or host cron
-(`--any-hour` overrides): ~75 minutes on production's data.
-
-`--local` runs it on a laptop over synthetic data, and is refused on the
-host — root, or `/opt/key-api-bot` present — since it skips the window,
-the memory guard and the watchdog: `seed_synthetic.py`
-invents an account, the stub serves it, a reh-web over an empty directory
-syncs it the way production once synced the real one, and the rehearsal
-proper then restores that dump and that backup by the host's path. The
-floor (`KS_PG_SILVER_INTERVAL_S`) is 120 s on the host and 60 s locally
-instead of 600 s; every property is "within floor plus a tick", so its size
-changes nothing proved. On 2026-10-02 a local run over 400 orders, on an
-image built from this branch (3.0.261, revision 0033) with `--build`,
-passed P1–P8, D1 and K0 in 22 minutes, exit 2 for Z0 alone, UNKNOWN for
-other sessions' containers. P4a and P5 judged F4's runs as F5s read them,
-both whole through `fetch_run_issues`; D1 swept 23 indexes at both stops
-and found none short. That PASS said less than it read as. F5s's graceful
-stop had checkpointed F4's runs before F6's kill, so they were out of its
-reach; what the sweep asked within it was whatever reh-web wrote after that
-checkpoint, the fixture's fourth version among it — landed by F6 before the
-kill, and asked of the single-column indexes on `orders` and
-`order_products` (`idx_orders_status` among them). That row survived
-because the sync touches `orders` after a restart, not because the kill
-could not reach it. And the sweep asked
-single-column indexes only: 23 of the 57, the other 34 the 12 composite
-ones and 22 left empty by the seed (counted on the 10-07 run, whose seed is
-the same deterministic one; none was one-valued). Its P6 counted a `kill`
-restart the script recorded whether or not F6 had killed anything; that
-run's P3 shows
-the kill landed, but P6 could not have told. The run the day before, on
-the same image with P4a and P5 read after the kill, failed both on the
-DuckDB defect below and on nothing else: the live process showed both
-runs' findings at F4, and after F6's kill `fetch_run_issues` returned none
-of them. An earlier note here said a run had passed everything on an image
-of main at 3.0.264, revision 0034; the image it ran was built at revision
-0033, and its P4a and P5 had read around the defect.
-
-On 2026-10-07, with P6 and D1 reworked and main merged (an image built from
-this branch, 3.0.267, revision 0034), the first local run did not flip:
-chain 7b had added `goals_bridge` (`KS_GOALS_HISTORY=silver`; 7b-4 removed it
-again) to the preconditions and reh-web's list lacked it — and the script, deciding the
-flip with a grep that `utm_parse`'s `"mode": "postgres"` matched, ran every
-phase after F1 anyway. The script now asks the probe for the writer's mode
-out of the snapshot P1 judges, and a test runs this tree's
-`evaluate_preconditions` over the list: F1 must leave nothing unmet, phase
-0 exactly `read_fallback_off`. The next run passed P1–P8 and K0 in 22
-minutes and failed D1 as predicted: after the kill and F7's checkpoint,
-`idx_dqi_run`, `idx_dqr_layer` and `idx_dqr_started_at` each missed F5w's
-run, `fetch_run_issues` returned 0 of its 1 finding, and deleting the run's
-rows from `data_quality_issues` and `data_quality_runs` was DuckDB's FATAL.
-The fixture order and its line came out of every index on `orders` and
-`order_products` that holds them — after a restart the sync touches
-`orders`, and nothing touches the DQ journal — but that is two of the four
-composite indexes on `orders`, not all four as this note first said: the
-fixture has no buyer and no manager, and DuckDB keeps no index entry for a
-row with a NULL in any key column, so `idx_orders_buyer_date`,
-`idx_orders_manager_date` and their single-column twins never held it and
-the DELETE asked them nothing. Z0 failed on another session's ClickHouse
-container, stopped (exit 0, not the OOM
-killer, no restart policy) and started again 12 s into the run. What the
-local run cannot answer is production's own readiness — whether the copy's
-preconditions hold, the way back's full rebuild inside 1.5 GB, and the
-timings at 47 k orders — which is what the host run is for.
-
-**P5 reads the stand-down off the job, not off its silence.**
-`dq_mirror_landing` names every check it asked, verdict or raise, as
-`checks_run` on its completion line, and P5 fails on a retired comparison
-there and is UNKNOWN without the list. Absent findings could not fail it:
-`compare_gold` excuses every cell whose orders synced inside its 20-minute
-grace — every cell of the local seed, and on the host the fixture's — so a
-review that ran `reconcile_gold` under the stand-down got a PASS.
-
-**The local runs found two things outside the rehearsal.** With a
-Silver row deleted and a Gold row bumped in one window, ClickHouse's
-comparison raised instead of filing: `compare_gold_cells` sorts cell keys
-whose roll-up `source_id` is NULL beside per-source ints, so one day that
-differs in both grains is a `TypeError`, `gold_values_unwatched`, and never
-`ch_engines_gold_mismatch`. The mutations now run one per DQ run.
-
-**And DuckDB 1.5.5 drops index entries across a SIGKILL — production's
-shape, not the rehearsal's.** Every index made by `CREATE INDEX` — all 57,
-on 26 tables; `PRIMARY KEY` and `UNIQUE` constraints keep theirs, and so
-does an index that was empty at the last checkpoint — loses the
-rows a kill caught in the WAL when the first checkpoint after the restart is
-one DuckDB takes on its own (at close, which is the next `docker stop`, or
-past `wal_autocheckpoint`) and nothing wrote that table, or filtered it on a
-value it holds, first. Replay buffers the entries in the still-unbound index;
-that checkpoint writes the index without them, and they stay out. Measured
-with production's own code on a fresh file: schema by `DuckDBStore.connect()`,
-runs by `persist_run` in a process then SIGKILLed, the restart as
-`connect()` then `close()` — `fetch_run_issues` answered 0 of 2 and 0 of 5,
-`fetch_run_diffs` 0 of 3, and with rows in every indexed table each of the
-45 single-column indexes answered for 2 of 5; with the hourly
-`duckdb_checkpoint` job's explicit `CHECKPOINT` before the close, every one
-answered whole. The same in web's image (Python 3.14, Linux) and on macOS.
-Nothing the product runs at start binds them. A blind read
-is the mildest of what follows:
-
-- **reads through the index miss the rows** — `fetch_run_issues` and
-  `fetch_run_diffs` (`run_id = ?`), so `/api/health/data-quality` and the
-  09:00 digest list no finding under a run whose counts (read by its
-  primary key, intact) say it has some;
-- **a `DELETE` through it leaves them** — the sync's
-  `DELETE FROM order_products WHERE order_id IN (?)` for a one-order batch
-  and `DELETE FROM buyer_contacts WHERE buyer_id = ?`: stale line items and
-  contacts;
-- **the next write that must take a lost row out of an index is a DuckDB
-  FATAL** ("Failed to delete all rows from index") — `UPDATE orders` on a
-  status change, `INSERT OR REPLACE` into `order_products` or `buyers`, the
-  samples' retention `DELETE`. A FATAL invalidates the instance: every later
-  statement on web's connection fails and nothing in the store reconnects.
-  A restart does not clear it — the index is still short, so the same write
-  fails the same way.
-
-The exposure is an OOM kill of web followed, within the hour before
-`duckdb_checkpoint` first runs in the new process, by a deploy or any other
-stop. The Sunday compaction rebuilds every index from its table (a row a
-`DELETE` missed survives it as a row), and so does `DROP INDEX` +
-`CREATE INDEX` with web stopped. A `CHECKPOINT` as the first statement after
-`duckdb.connect()` kept every entry in the same measurement; whether the
-store should take one is the owner's call, not this rehearsal's.
-
-**The rehearsal's F6 is that kill, so nothing P4 and P5 judge is read after
-it.** F5s stops reh-web gracefully after F5 — the checkpoint a deploy
-takes — and reads F4's two runs there, scan and `fetch_run_issues` side by
-side; P4a and P5 judge that read. The kill stays inside a live derivation
-for P3, and F7 still reads after it for P2's frozen state and P6's gate
-file.
-
-**D1 asks what the kill cost of the rows it could cost** — those written
-after F5s's checkpoint, since a graceful stop puts everything before it out
-of a kill's reach: one integrity run F5w triggers, and the fixture's fourth
-version F6 lands (an order and its line). An index holds no row with a NULL
-in any key column — measured on 1.5.5 by losing every entry across a kill
-and deleting each row: only a row with every key set is the FATAL — and the
-fixture has no buyer and no manager, so it is in two of the four composite
-indexes on `orders` (`idx_orders_source_date`, `idx_orders_status_date`),
-and the buyer and manager ones cannot be asked about it. `window_rows`
-reads which index holds how many of the window's rows (`held`), D1 counts
-only those as asked and names the rest, and an index whose holding was not
-read leaves the row UNKNOWN. After the kill and F7's graceful stop — the
-checkpoint that writes the loss down; a read-only open before it still sees
-every row the WAL holds — the run is read by `fetch_run_issues` beside a
-scan. At the end, on the copy about to be removed, the window's rows are
-deleted table by table in a process each, found by a predicate no index
-serves: a `DELETE` must take each row out of every index on its table that
-holds it, so a lost entry is DuckDB's FATAL, and that is the only question
-a composite index answers — on 1.5.5 none serves a read. Each process opens
-the copy through the image's own `duckdb_switch.open_file`, as the product's next
-start would. A bare read-write open there, as D1 had it until the kill
-guard was merged beside it, replays a WAL the last stop left and closes
-lossily, so the next table's DELETE was a FATAL of D1's own making
-(measured: a killed writer's rows in two tables, the first DELETE clean,
-the second the FATAL; `test_the_ends_delete_costs_no_index_of_its_own_duckdb_1_5_5`).
-An image without the guard cannot import it, and the DELETE is UNKNOWN.
-The copy reaches that DELETE after the way back, through two more stops of
-reh-web, and a loss found behind one that was not graceful (or not
-recorded) may be that stop's kill: still FAIL, and the verdict names the
-stop — a hedge written for an image whose restarts were lossy; through the
-guard neither a restart nor D1's own open loses what a WAL holds. Every
-single-column index is also swept at both
-stops (lookup limits lifted, held to `count_if` over the table). A loss
-after the kill is a FAIL labelled **DuckDB 1.5.5's known defect, not a
-step-13 regression** — the switch writes no DuckDB index, and an OOM kill of
-the live web costs the same; a loss already there before the kill is the
-copy's own and is not given that label. Nothing the product runs at start
-touches the DQ journal, so on 1.5.5 as the store opens today D1 fails on
-the window's run — the 2026-10-07 run above did, on the DQ journal alone. A
-`CHECKPOINT` of the replayed WAL before anything else runs —
-`duckdb_switch.open_file`, the kill guard ("A killed DuckDB writer, and what the
-next start used to lose"), merged after this was written — should turn it
-PASS, and nothing here depends on it; the rehearsal has not yet been run
-against an image that carries it.
-Two earlier notes here called it one odd segment, then a DQ-journal matter,
-and the judges first read P4a and P5 after the kill, which passed what the
-product could not show anyone.
-`test_the_sweep_finds_what_a_kill_costs_duckdb_1_5_5` holds the loss on
-DuckDB itself: if an upgrade makes it zero, re-measure before changing it.
+`deploy/step13_rehearsal.sh` was the gate-stack rehearsal named above: the
+switch tried on **copies** of production (the newest nightly `pg_dump` and
+DuckDB backup) in a throwaway `reh-*` stack on an `--internal` network with a
+KeyCRM stub, beside the live one, or with `--local` on a laptop over synthetic
+data. It judged PR #268's eight points (the flip, DuckDB frozen while Postgres
+derives, web killed inside the Postgres derivation, three mutations, both DQ
+jobs under the stand-down, restarts, a broken precondition paging the canary,
+the way back) and three of its own: what the kill cost DuckDB's indexes, no
+call to KeyCRM, no other container on the host moved. The local runs, over
+synthetic data, did not all pass. On 2026-10-01 P4a and P5, read after the
+kill, failed on the index loss below. On 2026-10-02 P1–P8, D1 and K0 passed
+and Z0 was UNKNOWN on other sessions' containers (exit 2), with a D1 that
+asked only single-column indexes, of rows the sync touches after a restart.
+On 2026-10-07 the first run did not flip (its precondition list lacked
+`goals_bridge`), and the next passed P1–P8 and K0, failed D1 on DuckDB 1.5.5's
+index loss across a kill and failed Z0 on another session's ClickHouse
+container. The host run on the production backups passed 11 checks of 11,
+before the switch on 2026-10-09. The local runs found two things outside the
+rehearsal. DuckDB 1.5.5 drops every `CREATE INDEX` entry a SIGKILL leaves in
+the WAL at the next checkpoint DuckDB takes on its own, the defect
+`open_file`'s first `CHECKPOINT` closes ("A killed DuckDB writer, and what the
+next start used to lose"). And `core/ch_silver.compare_gold_cells` sorts cell keys whose
+roll-up `source_id` is NULL beside per-source ints, so one day that differs in
+both grains raises `TypeError` (`gold_values_unwatched`) instead of filing
+`ch_engines_gold_mismatch`; the rehearsal ran its mutations one per DQ run
+around it, and the code is as it was. With step 13 a constant since S14-00
+there is nothing left to rehearse, so S14-03 deleted the script, its helpers
+(`deploy/step13_rehearsal/`) and its two test files; git keeps them.
 
 ### OD-10: the DuckDB-only doors, retired (2026-09-30)
 
@@ -4952,15 +4718,14 @@ pinned image ("The archive tools on a pinned image").
   docstring) carries the same `-e`, for a `.env` decrypted from the week.
 
 **Not done in PR-10, though the plan (2.9) gave it these**, and what each does
-under `off` meanwhile — none of them opens the live file or pages:
-`scripts/check_date.py` and `scripts/force_resync.py` are refused by the
-switch with a traceback rather than one line; `scripts/weekly_report_preview.py`
-still reads a DuckDB copy, not the `KS_READ_*` readers; `deploy/dq_history.py`
-and `deploy/measure_dlr_throughput.py` are not retired (`HOST_TOOLS` still
-lists the first); `deploy/agent/run_agent.sh` still routes `duckdb_*` alerts
-to the `default` runbook, and the runbooks (`_common`, `disk`, `memory`,
-`warehouse`, `health`) still describe DuckDB as the live file; two
-`REMEDIATION` levers in `core/data_quality.py` still name DuckDB
+under `off` meanwhile — none of them opens the live file or pages. Step 14's
+S14-03 did the first part. It deleted `check_date.py` and `force_resync.py`
+from `scripts/` and `dq_history.py` and `measure_dlr_throughput.py` from
+`deploy/`, and `scripts/weekly_report_preview.py` now reads Postgres through
+the report's own readers. Still as PR-10 left them: `deploy/agent/run_agent.sh`
+routes `duckdb_*` alerts to the `default` runbook, and the runbooks (`_common`,
+`disk`, `memory`, `warehouse`, `health`) still describe DuckDB as the live
+file; two `REMEDIATION` levers in `core/data_quality.py` still name DuckDB
 (`POST /api/duckdb/sync-all-buyers`, and restoring a catalogue row from it),
 as does the scheduler's memory lever.
 
@@ -5667,9 +5432,9 @@ latch keeps the writes in Postgres — and, after step 13, its own
 DuckDB rebuild, a CRITICAL `warehouse_preconditions_unmet`, and the soak
 clock restarting. (An unlatched chain 3 or 5 is held on such an image
 whatever the line says: the bridge is a code constant there.)
-`deploy/step13_rehearsal.sh` keeps the line for the same reason. With the
-line there is no switch back to make: an image from before 7b-4 reads
-Silver under it too.
+The step-13 rehearsal kept the line for the same reason, until S14-03
+deleted it. With the line there is no switch back to make: an image from
+before 7b-4 reads Silver under it too.
 
 What guarded the bridge went with it: step 13's `goals_bridge` precondition
 and its registry walk (so step 13's start asks no write chain its mode any
@@ -5990,14 +5755,15 @@ Reliable solution for completely re-uploading historical data to DuckDB from scr
 **Stale — this was built differently.** The admin endpoint exists as
 `POST /duckdb/resync` in `web/routes/api/admin.py:21` and nginx already routes
 it (`nginx.conf:103`). Neither `core/resync_service.py` nor
-`scripts/full_resync.py` was ever created; the CLI equivalent is
-`scripts/force_resync.py`. Kept for the design rationale below, not as a task
-list — do not implement it a second time.
+`scripts/full_resync.py` was ever created; the CLI equivalent,
+`scripts/force_resync.py`, was deleted in step 14's S14-03, and the endpoint
+is the one way in. Kept for the design rationale below, not as a task list —
+do not implement it a second time.
 
 | File | Purpose | Status |
 |------|---------|--------|
 | `core/resync_service.py` | Core resync logic, verification | never created |
-| `scripts/full_resync.py` | CLI interface | superseded by `scripts/force_resync.py` |
+| `scripts/full_resync.py` | CLI interface | never created; `scripts/force_resync.py` stood in until S14-03 |
 | `web/routes/api.py` | API endpoint (admin) | shipped as `web/routes/api/admin.py:21` |
 
 ### CLI Usage
