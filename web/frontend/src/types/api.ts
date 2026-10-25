@@ -1787,3 +1787,52 @@ export interface SmsTestSendResult {
     parts: number
   }
 }
+
+// ─── Telegram bot activity ───────────────────────────────────────────────────
+// The customer bot's own readout (ks-tg-bot, `activity_report`), passed through
+// by /api/tg-bot/activity. Days are Kyiv days; the admins are not counted.
+
+export interface TgBotActivityDay {
+  day: string
+  active: number
+  new: number
+  registered: number
+}
+
+export interface TgBotActivityWeek {
+  /** The Monday the week starts on; the current week is partial. */
+  week: string
+  active: number
+  new: number
+  returning: number
+}
+
+export interface TgBotActivityResponse {
+  version: number
+  generated_at: string
+  tz: string
+  days: number
+  /** First day the bot's event log has; activity before it was not recorded. */
+  log_starts: string | null
+  users_total: number
+  registered_total: number
+  registered_7d: number
+  registered_prev_7d: number
+  wau_days: number
+  wau: number
+  mau_days: number
+  mau: number
+  /** 100 × WAU / MAU, null while MAU is too small to divide. */
+  stickiness: number | null
+  activation_days: number
+  activation_cohort_days: number
+  activation_cohort: number
+  activation_registered: number
+  /** Percent, null while the cohort is too small. */
+  activation: number | null
+  daily: TgBotActivityDay[]
+  weekly: TgBotActivityWeek[]
+  /** Set by this server: true when the bot could not be asked and this is the last good answer. */
+  stale: boolean
+  fetched_at: string
+}
