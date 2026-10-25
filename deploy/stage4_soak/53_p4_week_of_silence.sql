@@ -29,8 +29,9 @@
 -- - the levers: P2's journal rows and pages, every one of them, since off;
 -- - the fallbacks: F1's pages and watch;
 -- - off held back: web reads KS_DUCKDB=off and runs `on` because a
---   precondition of off is unmet (core/duckdb_off.py, OD-S5-1 (a)) — it opens
---   the file at boot, so the week is not running. The canary pages
+--   precondition of off is unmet (core/duckdb_off.py, OD-S5-1 (a); an image
+--   before step 14 — since S14-00 web runs off whatever .env says and is never
+--   held back) — it opens the file at boot, so the week is not running. The canary pages
 --   `duckdb_off_held_back`; the switch's watch is not written, since web does
 --   not run off. A breach here and not in P3 (OD-S5-7): DuckDB became a writer
 --   of nothing, so the parallel period is not broken.

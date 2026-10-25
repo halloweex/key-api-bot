@@ -273,10 +273,12 @@ class HealthResponse(BaseModel):
             "for every open refused under off since the process started, a "
             "site being the `module:function` that asked; never an "
             "exception's text. Paged CRITICAL by the canary when non-empty. "
-            "Under KS_DUCKDB=off only, `held_back`: the keys of off's "
-            "coherence verdict web found unmet at its start, so it runs on "
-            "(paged CRITICAL as duckdb_off_held_back); [] when off holds, "
-            "null before any verdict. Keys only, never the details."
+            "Under KS_DUCKDB=off only, `held_back`: since step 14's S14-00 "
+            "always [] from web, which runs off whatever KS_DUCKDB says. An "
+            "image from before step 14 published there the keys of off's "
+            "coherence verdict web found unmet at its start, so it ran on "
+            "(paged CRITICAL as duckdb_off_held_back), and null before any "
+            "verdict. Keys only, never the details."
         ),
     )
     warehouse_writer_mode: Optional[Dict[str, Any]] = Field(

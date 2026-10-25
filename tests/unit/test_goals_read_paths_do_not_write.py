@@ -61,6 +61,20 @@ from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
     fresh_read_fallback,
 )
 
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is which paths write the goal tables, not where the
+    tables live, and it was written against DuckDB. So this module keeps
+    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
+    until their DuckDB branches go."""
+    from core import pg_goals_write, pg_forecast_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_goals_write, pg_forecast_write)
+
+
 REPO = Path(__file__).resolve().parents[2]
 KYIV = ZoneInfo("Europe/Kyiv")
 
@@ -227,6 +241,11 @@ class TestNoGetWrites:
         async def _nothing(sql, params=()):
             return []
 
+        # Production's state, which this module's fixture otherwise routes
+        # away from: chain 7b-3 on Postgres.
+        for name in ("writes_postgres", "reads_postgres"):
+            monkeypatch.setattr(pg_forecast_write, name, lambda: True)
+        monkeypatch.setattr(pg_forecast_write, "_routes_postgres", lambda *, log=False: True)
         monkeypatch.setattr(pg_forecast_write, "persist_goal_tables", _recorder)
         monkeypatch.setattr(pg_forecast_write, "store_predictions", _recorder)
         monkeypatch.setattr("core.pg_goals_read.fetch", _nothing)

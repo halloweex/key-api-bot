@@ -63,6 +63,11 @@ async def pool(monkeypatch):
     # real `rebuild_silver` sets this once per process, and a test that runs
     # it must not decide the next test's verdict.
     monkeypatch.setattr(pg_silver, "FIRST_REBUILT_AT", None)
+    # The twins are this module's subject, not the write chains: since step
+    # 14's S14-00 every chain is watched, and their empty tables here would be
+    # the integrity job's findings beside the twins'. No chain watched, as it
+    # was before S14-00 with every flag off.
+    monkeypatch.setattr("core.pg_chain_invariants.watched_chains", lambda: {})
     p = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
     await _clean(p)
     async with p.acquire() as conn:
@@ -916,36 +921,6 @@ class TestTheJobEndToEnd:
         assert not any(c.startswith("pg_") for c in unverified)          # the twins looked
 
     @pytest.mark.asyncio
-    async def test_off_the_twins_do_not_run_and_hold_their_conditions(self, pool, job, monkeypatch):
-        from core import pg_warehouse_dq
-
-        scheduler, store, sent = job
-        monkeypatch.delenv("KS_DQ_PG_WAREHOUSE", raising=False)
-        async with pool.acquire() as conn:
-            await _bronze(conn, IDS[0], total=555, minutes_ago=150)
-
-        with patch.object(pg_warehouse_dq, "read_facts", AsyncMock()) as read:
-            result = await scheduler._run_dq_integrity()
-
-        assert read.await_count == 0
-        issues = await self._issues(store, result["run_id"])
-        assert not any(name.startswith("pg_") for name in issues)
-        assert sent.await_count == 0
-        unverified = set(scheduler._resolve_dq_layer.await_args.kwargs["unverified"])
-        assert not unverified & pg_warehouse_dq.all_conditions()   # stood down, not blind
-
-    @pytest.mark.asyncio
-    async def test_a_flag_not_understood_is_filed_and_holds_everything(self, pool, job, monkeypatch):
-        from core import pg_warehouse_dq
-
-        scheduler, store, _sent = job
-        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "yes")
-        result = await scheduler._run_dq_integrity()
-        assert "pg_warehouse_dq_flag_invalid" in await self._issues(store, result["run_id"])
-        unverified = set(scheduler._resolve_dq_layer.await_args.kwargs["unverified"])
-        assert pg_warehouse_dq.all_conditions() <= unverified
-
-    @pytest.mark.asyncio
     async def test_the_duckdb_half_failing_still_pages_a_postgres_critical_and_resolves_the_twins(
         self, pool, job, monkeypatch,
     ):
@@ -1088,27 +1063,6 @@ class TestTheJobEndToEnd:
         assert "pg_silver_row_values" in still, case
         assert paged == ([] if case == "covered" else [["pg_silver_row_values"]])
 
-    @pytest.mark.asyncio
-    async def test_off_a_stale_postgres_silver_row_is_not_read(self, rv, job, monkeypatch):
-        """Flag off: the recompute is never run, not run and discarded."""
-        from core import pg_warehouse_dq
-
-        scheduler, store, sent = job
-        monkeypatch.delenv("KS_DQ_PG_WAREHOUSE", raising=False)
-        async with rv.acquire() as conn:
-            await _touch(conn, ROW_IDS[0], minutes_ago=30, grand_total=150)
-            await _journal(conn, minutes_ago=10)
-
-        with patch.object(pg_warehouse_dq, "read_facts",
-                          AsyncMock(wraps=pg_warehouse_dq.read_facts)) as read, \
-             patch.object(pg_warehouse_dq, "_read_row_values",
-                          AsyncMock(wraps=pg_warehouse_dq._read_row_values)) as recompute:
-            result = await scheduler._run_dq_integrity()
-
-        assert read.await_count == 0 and recompute.await_count == 0
-        assert "pg_silver_row_values" not in await self._issues(store, result["run_id"])
-        assert sent.await_count == 0
-
 
 # ─── DN-14: the journal the signal check reads, and the pairing record ───────
 
@@ -1202,45 +1156,6 @@ class TestThePairingThroughTheJob:
     _issues = TestTheJobEndToEnd._issues
 
     @pytest.mark.asyncio
-    async def test_it_carries_both_engines_and_what_the_twins_file_alone(
-        self, pool, job, monkeypatch,
-    ):
-        import json
-
-        scheduler, store, _sent = job
-        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
-        async with pool.acquire() as conn:
-            for oid, sales_type in ((IDS[72], "retail"), (IDS[73], "internal")):
-                await _bronze(conn, oid, total=0, minutes_ago=150)
-                await _silver(conn, oid, total=0, sales_type=sales_type)
-                await conn.execute(
-                    "INSERT INTO bronze.order_products (id, order_id, product_id, name, quantity,"
-                    " price_sold) VALUES ($1, $2, NULL, 'x', 2, 150)", oid * 1000 + 1, oid)
-
-        result = await scheduler._run_dq_integrity()
-
-        issues = await self._issues(store, result["run_id"])
-        row = issues["pg_twin_pairing"]
-        assert (row["severity"], row["count"]) == ("INFO", 1)
-        record = json.loads(row["description"])
-        duck, pg, alone = record["duckdb"], record["postgres"], record["standalone"]
-        assert {"headline_vs_line_items", "goods_shipped_without_sale", "silver_arc",
-                "attribution_coverage"} <= set(duck["looked"])
-        assert (duck["headline_vs_line_items"], duck["goods_shipped_without_sale"]) == (0, 0)
-        assert pg["headline_vs_line_items"] >= 1 and pg["goods_shipped_without_sale"] >= 1
-        assert duck["attribution"]["orders"] == 0 and duck["attribution"]["pct"] is None
-        assert pg["attribution"]["orders"] >= 2 and pg["unwatched"] == {}
-        # Standing alone the twins file both line-item findings, with Postgres'
-        # counts; beside a DuckDB that looked they file neither, and disagree
-        # exactly when the counts differ by more than the orders in flight.
-        assert alone["pg_headline_vs_line_items"] == pg["headline_vs_line_items"]
-        assert alone["pg_goods_shipped_without_sale"] == pg["goods_shipped_without_sale"]
-        assert "pg_headline_vs_line_items" not in issues
-        assert "pg_goods_shipped_without_sale" not in issues
-        assert ("pg_line_items_disagree" in issues) == (
-            pg["headline_vs_line_items"] > record["in_flight"])
-
-    @pytest.mark.asyncio
     async def test_with_the_duckdb_guards_stood_down_the_twins_file_what_the_record_said(
         self, pool, job, monkeypatch,
     ):
@@ -1288,13 +1203,6 @@ class TestThePairingThroughTheJob:
             assert issues[name]["count"] == record["standalone"][name]
         assert "pg_line_items_disagree" not in issues
         assert "integrity_check_raised" not in issues
-
-    @pytest.mark.asyncio
-    async def test_off_there_is_no_record(self, pool, job, monkeypatch):
-        scheduler, store, _sent = job
-        monkeypatch.delenv("KS_DQ_PG_WAREHOUSE", raising=False)
-        result = await scheduler._run_dq_integrity()
-        assert "pg_twin_pairing" not in await self._issues(store, result["run_id"])
 
     @pytest.mark.asyncio
     async def test_the_duckdb_half_failing_still_records_the_postgres_side(
@@ -1551,37 +1459,6 @@ class TestTheLandingThroughTheJob:
                     LANDING[20] * 1000 + position, LANDING[20])
 
     @pytest.mark.asyncio
-    async def test_duckdb_looking_the_twin_compares_and_holds_its_critical(
-        self, landing, job, monkeypatch,
-    ):
-        import json
-
-        scheduler, store, sent = job
-        monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
-        in_flight = (await _landing_facts(landing)).watermark.in_flight
-        await self._orphans(landing, in_flight + 1)
-
-        result = await scheduler._run_dq_integrity()
-
-        issues = await self._issues(store, result["run_id"])
-        assert "pg_fk_orphan_order_products_order_id" not in issues      # compared, not filed
-        disagree = issues["pg_order_landing_disagree"]
-        assert disagree["severity"] == "WARN"
-        assert "fk_orphan_order_products_order_id: Postgres" in disagree["description"]
-        assert "pg_fk_orphan_order_products_order_id" not in [
-            c for call in sent.await_args_list for c in call.kwargs["conditions"]]
-        unverified = scheduler._resolve_dq_layer.await_args.kwargs["unverified"]
-        assert "pg_fk_orphan_order_products_order_id" in unverified       # the rows still stand
-        record = json.loads(issues["pg_twin_pairing"]["description"])
-        assert record["duckdb"]["fk_orphan_order_products_order_id"] == 0
-        assert record["postgres"]["fk_orphan_order_products_order_id"] >= in_flight + 1
-        assert record["standalone"]["pg_fk_orphan_order_products_order_id"] == (
-            record["postgres"]["fk_orphan_order_products_order_id"])
-        assert set(record["duckdb"]["looked"]) >= {
-            "orders_without_line_items", "fk_orphan_order_products_order_id",
-            "status_group_agreement"}
-
-    @pytest.mark.asyncio
     async def test_duckdb_failing_the_twin_stands_in_and_pages(self, landing, job, monkeypatch):
         scheduler, store, sent = job
         monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
@@ -1699,54 +1576,16 @@ async def _land_in_bronze(pool, orders, products):
             await conn.execute(_BRONZE_ITEM, *row)
 
 
-async def _land_in_duckdb(store, orders, products):
-    async with store.connection() as conn:
-        for row, _minutes_ago in orders:
-            conn.execute(_DUCK_ORDER, list(row))
-        for row in products:
-            conn.execute(_DUCK_ITEM, list(row))
-
-
-async def _copy_bronze_to_duckdb(pool, store):
-    """DuckDB made to hold exactly what bronze holds — the state the mirror
-    keeps and Reconciliation A holds to zero — whatever other tests left."""
-    async with pool.acquire() as conn:
-        orders = await conn.fetch(
-            "SELECT id, source_id, status_id, status_group_id, grand_total, ordered_at,"
-            " created_at, updated_at FROM bronze.orders")
-        products = await conn.fetch(
-            "SELECT id, order_id, product_id, name, quantity, price_sold"
-            " FROM bronze.order_products")
-    await _land_in_duckdb(store, [(tuple(r), None) for r in orders],
-                          [tuple(r) for r in products])
-
-
-def _duckdb_landing_counts(issues):
-    from core.pg_warehouse_dq import LANDING_TWINS
-
-    counts = {name: 0 for _g, name, _t in LANDING_TWINS}
-    for issue in issues:
-        if issue.check_name in counts:
-            counts[issue.check_name] += int(issue.count)
-    return counts
-
-
-@pytest_asyncio.fixture
-async def duck(tmp_path):
-    from core.duckdb_store import DuckDBStore
-
-    store = DuckDBStore(db_path=tmp_path / "landing.duckdb")
-    await store.connect()
-    yield store
-    await store.close()
-
-
 class TestTheEnginesCountAlike:
     @pytest.mark.asyncio
-    async def test_the_same_rows_give_every_check_the_same_count(self, landing, duck):
+    async def test_the_same_rows_give_every_check_the_same_count(self, landing):
         """DuckDB's six checks over its tables and the twins over bronze, the
-        same rows in each: equal, check by check, and none of them 0."""
-        from core.data_quality import check_internal_integrity
+        same rows in each: equal, check by check, and none of them 0.
+
+        Since step 14's S14-00 DuckDB's six stand down for good (chain 3 is a
+        constant), so DuckDB's side is the literal it answered on this very
+        fixture beside the twins until then — rule 9's golden literal, taken
+        from DuckDB's answer, never from the code being tested."""
         from core.pg_warehouse_dq import landing_counts
 
         orders, products = _landing_rows(HEALTHY_LANDING + DEFECT_LANDING, 0)
@@ -1760,19 +1599,15 @@ class TestTheEnginesCountAlike:
         b, a = landing_counts(before.order_landing), landing_counts(after.order_landing)
         postgres = {k: a[k] - b[k] for k in a}
 
-        await _land_in_duckdb(duck, orders, products)
-        async with duck.connection() as conn:
-            duckdb = _duckdb_landing_counts(check_internal_integrity(conn))
-
-        assert postgres == duckdb
-        assert duckdb == {
+        assert postgres == {
             "orders_without_line_items": 2, "fk_orphan_order_products_order_id": ORPHAN_ITEMS,
             "not_null_orders_ordered_at": 1, "value_domain_orders_status_id": 2,
             "value_domain_orders_source_id": 1, "status_group_vs_return_list": 3}
 
     @pytest.mark.asyncio
-    async def test_the_healthy_shapes_count_nothing_in_either(self, landing, duck):
-        from core.data_quality import check_internal_integrity
+    async def test_the_healthy_shapes_count_nothing_in_either(self, landing):
+        """Nothing in Postgres. (DuckDB's half, nothing either, went with its
+        checks in S14-00.)"""
         from core.pg_warehouse_dq import landing_counts
 
         orders, products = _landing_rows(HEALTHY_LANDING, 0)
@@ -1782,15 +1617,12 @@ class TestTheEnginesCountAlike:
         assert landing_counts(after.order_landing) == landing_counts(before.order_landing)
         assert after.order_landing.without_items == before.order_landing.without_items
 
-        await _land_in_duckdb(duck, orders, products)
-        async with duck.connection() as conn:
-            assert set(_duckdb_landing_counts(check_internal_integrity(conn)).values()) == {0}
-
 
 class TestAHealthyLandingThroughTheJob:
-    """Production's state, which the flag is already on over: DuckDB and bronze
-    hold the same rows, of every healthy shape. The twins compare and must say
-    nothing — no disagreement, no finding of their own, no condition held."""
+    """Production's state: bronze holds rows of every healthy shape, and since
+    step 14's S14-00 DuckDB's landing checks stand down for good, so the twins
+    stand alone. They must say nothing — no disagreement, no finding of their
+    own, no condition held."""
 
     job = TestTheJobEndToEnd.job
     _issues = TestTheJobEndToEnd._issues
@@ -1804,7 +1636,6 @@ class TestAHealthyLandingThroughTheJob:
         scheduler, store, _sent = job
         monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
         await _land_in_bronze(landing, *_landing_rows(HEALTHY_LANDING, 0))
-        await _copy_bronze_to_duckdb(landing, store)
 
         result = await scheduler._run_dq_integrity()
 
@@ -1813,9 +1644,9 @@ class TestAHealthyLandingThroughTheJob:
             pg_warehouse_dq.UNWATCHED_NAMES["order_landing"]}
         assert not landing_conditions & set(issues), sorted(landing_conditions & set(issues))
         record = json.loads(issues["pg_twin_pairing"]["description"])
-        for _guard, name, _twin in pg_warehouse_dq.LANDING_TWINS:
-            assert record["duckdb"][name] is not None, name            # both looked
-            assert record["duckdb"][name] == record["postgres"][name], name
+        for _guard, name, twin in pg_warehouse_dq.LANDING_TWINS:
+            assert record["duckdb"][name] is None, name           # DuckDB stood down
+            assert record["standalone"].get(twin, 0) == 0, twin
         # Held only where DuckDB files the same rows under its own name — rows
         # another test left in the shared bronze, never these.
         unverified = set(scheduler._resolve_dq_layer.await_args.kwargs["unverified"])

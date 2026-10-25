@@ -5,10 +5,16 @@ chain's flag for every question, so a typo in KS_WRITE_EXPENSES raised inside
 `get_last_sync_time("orders")` — the first call of the incremental sync — and
 order intake stopped silently for the eight hours the canary allows. It also
 broke the hourly copy of every stage-3 table and the freshness check.
+
+Since step 14's S14-00 a flag routes nothing — every chain writes Postgres,
+a constant — so what a typo stopped is gone with the tests that held it (the
+orders watermark beside an unrelated typo, chain 4's typo). What stays is
+that the registry never raises over one and publishes it, so a rollback to
+an image from before step 14, which still routes by the flags, is not taken
+blind.
 """
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -47,7 +53,7 @@ class TestTheRegistryNeverRaises:
     def test_an_inventory_typo_stands_its_keys_down_and_names_itself(self, flags):
         flags.setenv("KS_WRITE_INVENTORY", "on")
         keys, errors = write_chains.stood_down_sync_keys_checked()
-        assert keys == frozenset({"last_sync_offers", "last_sync_stocks"})
+        assert {"last_sync_offers", "last_sync_stocks"} <= keys
         assert list(errors) == ["pg_inventory_write"]
 
     def test_modes_are_published_with_the_error(self, flags):
@@ -64,35 +70,10 @@ class TestTheRegistryNeverRaises:
             # The chain's shape, not its state: chain 8 freezes DuckDB
             # (OD-02 (c) shadows only chains 9, 10 and 11).
             "shadow": False}
-        assert modes["pg_inventory_write"]["mode"] is None and "yes" in modes["pg_inventory_write"]["error"]
-
-    def test_valid_flags_are_unchanged(self, flags):
-        flags.setenv("KS_WRITE_EXPENSES", "postgres")
-        assert write_chains.stood_down_tables_checked() == (frozenset({"app.manual_expenses"}), {})
-
-
-class TestOrdersSurviveAnUnrelatedTypo:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("env", ["KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY",
-                                     "KS_WRITE_CATALOGUE"])
-    async def test_the_orders_watermark_still_reads_and_writes(self, flags, store, env):
-        flags.setenv(env, "postgrse")
-        stamp = datetime(2026, 9, 17, 10, 0, tzinfo=timezone.utc)
-        await store.set_last_sync_time("orders", stamp)
-        assert await store.get_last_sync_time("orders") == stamp
-
-    @pytest.mark.asyncio
-    async def test_a_chains_own_key_still_stops_on_its_own_typo(self, flags, store):
-        flags.setenv("KS_WRITE_INVENTORY", "postgrse")
-        with pytest.raises(RuntimeError, match="KS_WRITE_INVENTORY"):
-            await store.get_last_sync_time("offers")
-
-    def test_a_chains_own_writer_still_raises(self, flags):
-        from core import pg_expenses_write
-
-        flags.setenv("KS_WRITE_EXPENSES", "postgrse")
-        with pytest.raises(RuntimeError):
-            pg_expenses_write.writes_postgres()
+        # Since S14-00 the mode is Postgres whatever the flag says; the typo is
+        # still published, for a rollback to read.
+        assert modes["pg_inventory_write"]["mode"] == "postgres"
+        assert "yes" in modes["pg_inventory_write"]["error"]
 
 
 class TestTheFreshnessCheckSaysItCannotJudge:
@@ -121,7 +102,8 @@ class TestItIsSeen:
 
         flags.setenv("KS_WRITE_EXPENSES", "postgrse")
         block = _write_chains()
-        assert block["pg_expenses_write"]["error"] and block["pg_inventory_write"]["mode"] == "duckdb"
+        assert block["pg_expenses_write"]["error"]
+        assert block["pg_expenses_write"]["mode"] == "postgres"     # S14-00
 
     def test_the_canary_pages_on_a_chain_flag_error(self):
         from bot import canary
@@ -201,72 +183,3 @@ class TestTheDailyComparisonFilesIt:
         assert max(built) < min(returns), "a chain finding is built after a return"
 
 
-class TestChainFourTypo:
-    """`KS_WRITE_BUYERS` nobody can read stops chain 4 and nothing else: the
-    buyers have nowhere known to go, so they are not written anywhere — and
-    orders, offers, stocks, the stats page and the other riders go on."""
-
-    @pytest.fixture
-    def typo(self, flags):
-        flags.setenv("KS_WRITE_BUYERS", "postgre")
-        return flags
-
-    @pytest.mark.asyncio
-    async def test_orders_offers_and_stocks_keep_their_watermarks(self, typo, store):
-        stamp = datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc)
-        for entity in ("orders", "offers", "stocks"):
-            await store.set_last_sync_time(entity, stamp)
-            assert await store.get_last_sync_time(entity) == stamp
-        with pytest.raises(RuntimeError, match="KS_WRITE_BUYERS"):
-            await store.get_last_sync_time("buyers")
-
-    @pytest.mark.asyncio
-    async def test_the_real_stats_answer_without_the_buyers(self, typo, store):
-        stats = await store.get_stats()
-        assert "orders" in stats and "buyers" not in stats
-        assert "buyer_contacts" not in stats
-
-    @pytest.mark.parametrize("how", ["flagged", "latched"])
-    @pytest.mark.asyncio
-    async def test_with_the_chain_on_postgres_the_stats_leave_them_out(
-            self, flags, store, how):
-        """DuckDB's counts stop there, and a count that never moves reads as
-        a sync that stopped (review of PR-3)."""
-        from core import chain_latch, pg_buyers_write
-
-        if how == "flagged":
-            flags.setenv("KS_WRITE_BUYERS", "postgres")
-            for reader in ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD"):
-                flags.setenv(reader, "postgres")
-        else:
-            chain_latch.latch(pg_buyers_write.CHAIN, pg_buyers_write.WRITE_ENV)
-        stats = await store.get_stats()
-        assert "orders" in stats
-        assert "buyers" not in stats and "buyer_contacts" not in stats
-
-    @pytest.mark.asyncio
-    async def test_with_the_chain_on_duckdb_the_stats_carry_them(self, flags, store):
-        """The control: nothing moved, nothing left out."""
-        stats = await store.get_stats()
-        assert stats["buyers"] == 0 and stats["buyer_contacts"] == 0
-
-    @pytest.mark.asyncio
-    async def test_the_rider_says_the_gender_stood_down_and_the_rest_run(self, typo):
-        from unittest.mock import AsyncMock
-
-        from core.scheduler import BackgroundScheduler
-
-        derive = AsyncMock(side_effect=AssertionError("DuckDB derived"))
-        derive_pg = AsyncMock(side_effect=AssertionError("Postgres derived"))
-        with patch("core.duckdb_store.get_store", new=AsyncMock()), \
-             patch("core.gender_backfill.derive_gender", new=derive), \
-             patch("core.pg_buyers_write.derive_gender_pg", new=derive_pg), \
-             patch("core.pg_operational.replicate_operational",
-                   new=AsyncMock(return_value={"movements_appended": 3})), \
-             patch("core.pg_bot_state.replicate_bot_state",
-                   new=AsyncMock(return_value={"rows": {}})):
-            result = await BackgroundScheduler()._run_replicate_operational()
-        assert "KS_WRITE_BUYERS" in result["gender"]["stood_down"]
-        assert result["movements_appended"] == 3
-        assert "bot_state" in result and "buyers_backfill" in result
-        assert "orders_backfill" in result and "expenses_backfill" in result

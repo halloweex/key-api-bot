@@ -133,44 +133,6 @@ class TestUnderChain4TheSelectionFollowsTheWrites:
         assert await store.upsert_buyers([Buyer.from_api({"id": 1, "full_name": "Олена"})]) == 1
         writer.assert_awaited_once()
 
-    @pytest.mark.asyncio
-    async def test_with_the_chain_on_duckdb_the_read_switch_still_decides(
-            self, monkeypatch, fetch, tmp_path):
-        """The control: nothing moved, so today's routing — and its typo — stand."""
-        from core.duckdb_store import DuckDBStore
-
-        monkeypatch.delenv("KS_WRITE_BUYERS", raising=False)
-        monkeypatch.setenv("KS_READ_BUYER_SYNC", "postgre")
-        s = DuckDBStore(db_path=tmp_path / "control.duckdb")
-        with pytest.raises(ValueError):
-            await s.get_missing_buyer_ids(10)
-        fetch.assert_not_awaited()
-
-
-class TestAChainFlagNobodyCanReadFetchesNothing:
-    @pytest.mark.asyncio
-    async def test_the_step_refuses_before_kycrm_is_asked(self, monkeypatch):
-        """`POST /duckdb/sync-buyers` calls the step directly; with a flag
-        nobody can read the write would raise only after up to 500 GETs."""
-        from core import sync_service as mod
-        from core.sync_service import SyncService
-
-        monkeypatch.setenv("KS_WRITE_BUYERS", "postgre")
-        client = AsyncMock()
-        monkeypatch.setattr(mod, "get_async_client", AsyncMock(return_value=client))
-        store = MagicMock()
-        store.get_missing_buyer_ids = AsyncMock(return_value=[1])
-        store.set_last_sync_time = AsyncMock()
-        svc = SyncService(store=store)
-
-        assert await svc.sync_missing_buyers() == 0
-        store.get_missing_buyer_ids.assert_not_awaited()
-        client.fetch_buyers_by_ids.assert_not_awaited()
-        store.set_last_sync_time.assert_not_awaited()
-        state = svc.buyer_sync_state
-        assert state.last_error_class == "RuntimeError"
-        assert state.consecutive_failures == 1, "a writer with nowhere to write is a failure"
-
 
 class TestASkippedBuyerIsCounted:
     @pytest.mark.asyncio

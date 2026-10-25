@@ -8,7 +8,9 @@ table's rewrite clock is no longer always `bronze.buyers`: an order dates its
 own rows (`bronze.orders.mirrored_at`), its line items their own
 (`bronze.order_products.mirrored_at`, grouped by order), an expense its own,
 and the handover's sentences name chain 3's levers. Against a real Postgres
-the whole tool is proved in `tests/integration/test_chain_copy_back_orders.py`.
+the whole tool was proved in `tests/integration/test_chain_copy_back_orders.py`
+until step 14's S14-00, which deleted it with the DuckDB order writer its
+pre-flip states were set up through; the tool itself goes in S14-04.
 
 Each test names the mutation it exists to fail on.
 """
@@ -290,41 +292,6 @@ def _payload(oid, *, status=12, products=2):
         "expenses": [{"id": 900 + oid, "expense_type_id": 1, "amount": 10.5,
                       "status": "paid"}],
     }
-
-
-class TestTheDuckDBWriteOfTheSameKeys:
-    """The copy-back writes every chain-3 table into DuckDB as DELETE then
-    INSERT of the keys it already holds, in one transaction — and `orders`
-    carries four secondary indexes besides its key. Proven on DuckDB itself
-    rather than assumed (design §6): chains 1 and 4 only proved it on tables
-    with fewer indexes."""
-
-    @pytest.mark.asyncio
-    async def test_each_table_round_trips_in_one_transaction(self, duck, specs):
-        await duck.upsert_orders([_payload(1), _payload(2)])
-        await duck.upsert_expenses_batch([_payload(1), _payload(2)])
-        rewritten = {
-            ORDERS: [tuple(r) for r in (
-                (1, 1, 19, 6, Decimal("90.00"), T0, T0, T0, 7, 4, "utm2", None),
-                (2, 1, 12, 4, Decimal("100.00"), T0, T0, T0, 7, 4, "utm", None))],
-            LINES: [(1000, 1, 700, "Товар 0", 3, Decimal("50.00")),
-                    (2000, 2, 700, "Товар 0", 1, Decimal("50.00"))],
-            EXPENSES: [(901, 1, 1, Decimal("11.00"), None, "paid", None, None),
-                       (902, 2, 1, Decimal("10.50"), None, "paid", None, None)],
-        }
-        async with duck.connection() as conn:
-            conn.execute("BEGIN TRANSACTION")
-            for table in (ORDERS, LINES, EXPENSES):
-                chain_transfer._write_duckdb(conn, specs[table], rewritten[table])
-            conn.execute("COMMIT")
-            assert conn.execute(
-                "SELECT status_id, grand_total, manager_comment FROM orders "
-                "WHERE id = 1").fetchone() == (19, Decimal("90.00"), "utm2")
-            # The basket shrank to one line per order: 1001 and 2001 are gone.
-            assert [r[0] for r in conn.execute(
-                "SELECT id FROM order_products ORDER BY id").fetchall()] == [1000, 2000]
-            assert conn.execute(
-                "SELECT amount FROM expenses WHERE id = 901").fetchone()[0] == Decimal("11.00")
 
 
 class TestTheRunbookNamesChain3sShippers:

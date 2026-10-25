@@ -18,7 +18,7 @@ from decimal import Decimal
 
 import pytest
 
-from core import chain_latch, write_chains
+from core import write_chains
 from core.data_quality import Severity
 from core.mirror_reconciliation import (
     OPERATIONAL_TABLES,
@@ -79,15 +79,6 @@ def _spec(table: str):
 
 
 class TestTheRegistrySplitsTheAnswer:
-    def test_a_shadow_chain_at_postgres_is_stood_down_and_compared(self, shadow_chain):
-        """Mutation: `compared_in_shadow` returns the empty set — the table
-        would be stood down by both, and the comparison would go blind on the
-        one store the chain still feeds."""
-        shadow_chain()
-        assert SENDS in write_chains.stood_down_tables(), "the copy must stop"
-        assert write_chains.compared_in_shadow() == frozenset({SENDS})
-        assert write_chains.chain_modes()["pg_fake_shadow_write"]["shadow"] is True
-
     def test_the_copy_stops_whatever_the_shape(self, shadow_chain):
         """The shipper's answer is not split: a full replace out of DuckDB
         would delete every Postgres row whose shadow failed. Mutation: leave
@@ -95,11 +86,6 @@ class TestTheRegistrySplitsTheAnswer:
         shadow_chain()
         tables, errors = write_chains.stood_down_tables_checked()
         assert SENDS in tables and not errors
-
-    def test_at_duckdb_it_is_neither(self, shadow_chain):
-        shadow_chain(env=lambda: False)
-        assert SENDS not in write_chains.stood_down_tables()
-        assert write_chains.compared_in_shadow() == frozenset()
 
     def test_a_typo_stands_down_and_is_not_compared(self, shadow_chain):
         """A flag nobody can read writes nowhere — the writers raise — so
@@ -118,14 +104,6 @@ class TestTheRegistrySplitsTheAnswer:
         assert SENDS in write_chains.stood_down_tables()
         assert write_chains.compared_in_shadow() == frozenset()
         assert write_chains.chain_modes()["pg_fake_shadow_write"]["shadow"] is False
-
-    def test_a_latched_shadow_chain_with_its_flag_back_is_compared(self, shadow_chain):
-        """OD-19 (a) applies unchanged: the latch outranks the flag, the chain
-        still writes Postgres and still shadows, so it is still compared."""
-        shadow_chain(env=lambda: False)
-        chain_latch.latch("pg_fake_shadow_write")
-        assert write_chains.compared_in_shadow() == frozenset({SENDS})
-        assert write_chains.chain_modes()["pg_fake_shadow_write"]["mismatch"] is True
 
     def test_under_duckdb_off_nothing_is_compared_in_shadow(
             self, shadow_chain, duckdb_off):
@@ -382,42 +360,6 @@ ROW = (W1, "retail", Decimal("10.00"), 3, OLD)
 
 class TestTheJobComparesTheShadow:
     @pytest.mark.asyncio
-    async def test_it_compares_and_ignores_the_frozen_watermark(
-            self, shadow_chain, pg, tmp_path):
-        """Mutation: drop `- shadowed` in `reconcile_operational` — the ledger
-        is never read and nothing would ever say a shadow failed. And a
-        `mirror_failing` here would be the shipper's stamp read as the
-        shadow's health."""
-        from core.mirror_reconciliation import reconcile_operational
-
-        shadow_chain()
-        log = []
-        pg(_Pool(log, rows=[ROW, (W2, "retail", Decimal("9.00"), 2, OLD)]))
-        store = await _store(tmp_path, log, [ROW])
-        issues = await reconcile_operational(store, now=NOW)
-
-        on_sends = _names(i for i in issues if i.table_name == SENDS)
-        assert set(on_sends) == {"shadow_missing_in_duckdb"}, issues
-        assert ("postgres", SENDS, True) in log
-
-    @pytest.mark.asyncio
-    async def test_postgres_is_read_before_duckdb(self, shadow_chain, pg, tmp_path):
-        """A write landing between the reads then shows DuckDB-only with a
-        fresh DuckDB clock — forgiven on the side that always has one.
-        Mutation: read DuckDB first."""
-        from core.mirror_reconciliation import reconcile_operational
-
-        shadow_chain()
-        log = []
-        pg(_Pool(log, rows=[ROW]))
-        store = await _store(tmp_path, log, [ROW])
-        log.clear()
-        await reconcile_operational(store, now=NOW)
-        first_pg = log.index(("postgres", SENDS, True))
-        assert ("duckdb",) in log[first_pg:], log
-        assert ("duckdb",) not in log[:first_pg], log
-
-    @pytest.mark.asyncio
     async def test_a_frozen_chain_still_stands_down(self, shadow_chain, pg, tmp_path):
         from core.mirror_reconciliation import reconcile_operational
 
@@ -444,7 +386,6 @@ class TestTheJobComparesTheShadow:
         assert "chain_latch_disagrees" in {i.check_name for i in issues}
         assert not [e for e in log if e[0] == "postgres"]
         assert not [i for i in issues if i.table_name == SENDS]
-
 
     @pytest.mark.asyncio
     async def test_under_duckdb_off_the_shadow_tables_are_not_read(

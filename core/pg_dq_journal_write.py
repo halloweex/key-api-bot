@@ -106,33 +106,25 @@ def env_writes_postgres() -> bool:
 
 
 def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_DQ_JOURNAL=postgres` must not move the writes yet, or
-    None: the lock-out alone (`chain_latch.lockout_unmet`). Never raises and
-    never asks Postgres."""
-    return chain_latch.lockout_unmet(LOCKOUT_REVISION)
+    """None, a constant since step 14's S14-00: the chain writes Postgres
+    whatever its flag says, and the lock-out it waited on is not asked any
+    more — production requires 0035 and has latched the chain. Kept for the
+    registry's `unmet_precondition` field until S14-11."""
+    return None
 
 
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the latch outranks the flag, and
-    the flag moves the writes only once `unmet_precondition()` holds."""
-    if chain_latch.latched(CHAIN):
-        return True
-    return env_writes_postgres() and unmet_precondition() is None
+    """True, a constant since step 14's S14-00: neither the flag, nor the
+    latch, nor the lock-out routes any more; the first write in a process
+    still takes the latch (decision 3). Last consumers: the journal's door,
+    the digest's beat and the registry — S14-10."""
+    return True
 
 
 def reads_postgres() -> bool:
-    """Whether a read of the journal asks Postgres. `writes_postgres()`, but a
-    flag nobody can read on a chain that never wrote here answers False rather
-    than raising: the writer then refuses in both stores, so neither moves,
-    and DuckDB holds the whole journal — chain 7a's `reads_postgres` reason.
-    Raising would take the layer ages, and with them every canary verdict,
-    down over a variable about writes; `write_chain_flag_invalid` pages it."""
-    if chain_latch.latched(CHAIN):
-        return True
-    try:
-        return env_writes_postgres() and unmet_precondition() is None
-    except RuntimeError:
-        return False
+    """Whether a read of the journal asks Postgres: True, a constant since
+    S14-00 — the readers follow the writer, with no fallback."""
+    return True
 
 
 def _latch() -> str:

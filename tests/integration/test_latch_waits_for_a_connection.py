@@ -528,7 +528,7 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
 class TestAnAcquireThatFailsLeavesTheChainUnlatched:
     @pytest.mark.parametrize("writer", list(WRITERS))
     @pytest.mark.asyncio
-    async def test_no_marker_no_owner_row_and_the_flag_still_decides(
+    async def test_no_marker_and_no_owner_row(
         self, stores, refusing, writer,
     ):
         store, live, env = stores
@@ -566,10 +566,10 @@ class TestAnAcquireThatFailsLeavesTheChainUnlatched:
         chain_latch._latched = None                 # read the disk, not the cache
         assert not chain_latch.latched(chain.CHAIN)
         assert await chain_latch.read_owners(live) == {}
-
-        # And so the rollback this chain came with is still there.
-        env.setenv(chain.WRITE_ENV, "duckdb")
-        assert chain.writes_postgres() is False
+        # Until step 14's S14-00 the flag put back to duckdb then routed the
+        # chain to DuckDB again. Nothing routes by the flag now; what still
+        # matters is that an image from before step 14, which does, would find
+        # no marker.
 
 
 class TestAClaimRollsBackWithItsWrite:

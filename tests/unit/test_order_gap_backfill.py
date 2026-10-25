@@ -11,6 +11,21 @@ import pytest
 from core.duckdb_store import DuckDBStore
 
 
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. The
+    gap scan's and the misses ledger's semantics are pinned here on
+    DuckDB's implementation, the Postgres one's in
+    tests/integration/test_orders_chain_writer.py; S14-09 decides what of
+    this to carry over. So this module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_orders_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_orders_write)
+
+
 async def _store(tmp_path):
     store = DuckDBStore(db_path=tmp_path / "t.duckdb")
     await store.connect()

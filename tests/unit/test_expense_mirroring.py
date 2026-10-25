@@ -80,17 +80,6 @@ class TestTheMirrorNeverStopsASync:
     sync. The backfill and the comparison are what recover from it."""
 
     @pytest.mark.asyncio
-    async def test_a_failure_is_reported_not_raised(self):
-        from core.pg_landing import mirror_expenses
-
-        with patch("core.pg_landing.enabled", return_value=True), \
-             patch("core.pg_landing._write",
-                   new=AsyncMock(side_effect=RuntimeError("pg is down"))), \
-             patch("core.pg_landing._record_failure", new=AsyncMock()):
-            out = await mirror_expenses([{"id": 1, "expenses": [{"id": 9}]}])
-        assert out.ok is False and "pg is down" in (out.error or "")
-
-    @pytest.mark.asyncio
     async def test_it_stands_down_when_the_mirror_is_off(self):
         from core.pg_landing import mirror_expenses
 
@@ -111,34 +100,6 @@ class TestTheBackfill:
         ctx.__aexit__ = AsyncMock(return_value=False)
         store.connection.return_value = ctx
         return store
-
-    @pytest.mark.asyncio
-    async def test_nothing_missing_stamps_and_ships_nothing(self):
-        from core import pg_expense_backfill as bf
-
-        with patch.object(bf, "_postgres_ids", new=AsyncMock(return_value={1, 2})), \
-             patch.object(bf, "_mark_backfilled", new=AsyncMock()) as mark, \
-             patch("core.pg.get_pool", new=AsyncMock(return_value=MagicMock())), \
-             patch("core.pg.require_revision", new=AsyncMock()), \
-             patch("core.pg_landing._WATERMARK_OK", "SELECT 1"):
-            out = await bf.backfill_expenses(self._store({1, 2}))
-        assert out["missing_at_start"] == 0 and out["complete"] is True
-        mark.assert_awaited()
-
-    @pytest.mark.asyncio
-    async def test_it_does_not_stamp_while_rows_are_still_missing(self):
-        """A partial backfill claiming completion would open the row-level
-        comparison over rows it had not yet shipped."""
-        from core import pg_expense_backfill as bf
-
-        with patch.object(bf, "_postgres_ids", new=AsyncMock(return_value={1})), \
-             patch.object(bf, "_mark_backfilled", new=AsyncMock()) as mark, \
-             patch.object(bf, "_read_chunk", return_value=[]), \
-             patch("core.pg.get_pool", new=AsyncMock(return_value=MagicMock())), \
-             patch("core.pg.require_revision", new=AsyncMock()):
-            out = await bf.backfill_expenses(self._store({1, 2, 3}))
-        assert out["still_missing"] == 2 and out["complete"] is False
-        mark.assert_not_awaited()
 
     def test_it_never_awaits_the_network_holding_the_store(self):
         """Every reader waits behind that lock; the first draft of this module

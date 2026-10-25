@@ -40,6 +40,22 @@ from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
 )
 from web.main import app
 
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant.
+    This module's subject is how a route reads its dates, not where its rows
+    live, and it runs against the per-test DuckDB file with no Postgres
+    behind the client. `/api/returns` joins the managers, whose reads follow
+    chain 5 to Postgres once it writes there, and the marketing report and
+    its CSV read chain 7a's target line the same way; so this module keeps
+    DuckDB as those chains' store (`tests.conftest.route_chains_to_duckdb`)
+    until their DuckDB branches go."""
+    from core import pg_goals_write, pg_managers_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_goals_write, pg_managers_write)
+
+
 DATED = sorted(
     (e for e in iter_endpoints(app)
      if "GET" in e.methods and e.path.startswith("/api/")

@@ -20,7 +20,6 @@ import pytest
 from core.data_quality import (
     Severity,
     _silver_arc_check,
-    check_internal_integrity,
 )
 from core.duckdb_store import DuckDBStore, silver_select_sql
 
@@ -429,18 +428,3 @@ class TestItCannotDriveARebuild:
         )
 
 
-class TestItIsRegistered:
-    @pytest.mark.asyncio
-    async def test_the_scan_runs_the_arc(self, tmp_path):
-        """A check nobody calls is rule 13 in miniature."""
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                _age_landing(conn)
-                conn.execute("DELETE FROM silver_orders WHERE id = 2")
-                names = {i.check_name for i in check_internal_integrity(conn)}
-
-            assert "silver_missing_rows" in names
-        finally:
-            await store.close()

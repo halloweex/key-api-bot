@@ -180,6 +180,13 @@ REGISTRY: Dict[str, ConditionSpec] = {
     # KS_WRITE_*, or latched while its readers read DuckDB (DN-26).
     "write_chain_precondition_unmet": _c(
         "the read flag the chain names is set to postgres and web restarts"),
+    # What the host's backup scripts last proved, judged from `/api/health`'s
+    # `backups` block at `core/backup_evidence.py`'s limits: a PITR drill or
+    # an off-site restore drill older than eight days, an off-site shipment
+    # older than 36 h, or one that never passed (step 14's S14-00 — until
+    # then only chain 3's precondition judged the two drills).
+    "backup_evidence_stale": _c(
+        "every backup marker the host scripts write is inside its limit"),
     # A report delivered and its ledger row still spooled (chains 11a/11b,
     # OD-16 (a)): the next tick of that report drains it into Postgres.
     "report_ledger_pending": _c("the report's next daily tick lands the spooled row"),

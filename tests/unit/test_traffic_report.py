@@ -28,6 +28,19 @@ from core.traffic_report import (
 from tests.unit.test_rich_report import SUPPORTED_TAGS
 
 
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is the report and its delivery, not where the send
+    ledger lives, and it was written against DuckDB. So this module keeps
+    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
+    until their DuckDB branches go."""
+    from core import pg_weekly_ledger_write, pg_traffic_ledger_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_weekly_ledger_write, pg_traffic_ledger_write)
+
+
 def _analytics(scale=1.0, unknown_orders=40, totals_orders=300):
     return {
         "totals": {"orders": totals_orders, "revenue": 700_000 * scale},

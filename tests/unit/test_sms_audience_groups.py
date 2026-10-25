@@ -34,6 +34,15 @@ from core.repositories.customers import (
 from core.sql_dialect import DUCKDB, TODAY_IN_KYIV, sms_segments_select
 from tests import sms_audience_fixture as fx
 
+
+@pytest.fixture(autouse=True)
+def _sms_on_duckdb(monkeypatch):
+    """This module's engine is DuckDB, as it was before step 14's S14-00 made
+    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
+    from tests.conftest import sms_store_on_duckdb
+
+    sms_store_on_duckdb(monkeypatch)
+
 GROUP_A = SmsAudienceGroup(
     365, SmsAudienceFilters(period_orders_min=2, period_from=fx.PERIOD_FROM),
 )

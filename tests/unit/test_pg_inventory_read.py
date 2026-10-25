@@ -122,24 +122,6 @@ class TestItDoesNotTakeTheDuckDbLock:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_a_postgres_fault_falls_back_to_duckdb(self, tmp_path, monkeypatch):
-        """Nothing diverges between these two — the tab writes nothing — so a
-        fault costs the engine, not the tab. The opposite of `/sms`, where a
-        silent fallback would answer from a store missing every opt-out
-        recorded since the switch."""
-        monkeypatch.setenv(pg_inventory_read.ENV, "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://unused/unused")
-        store = DuckDBStore(db_path=tmp_path / "fallback.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_inventory_read.fetch_many",
-                       new=AsyncMock(side_effect=RuntimeError("pool is gone"))):
-                result = await store.get_restock_alerts(limit=10)
-            assert result == []
-        finally:
-            await store.close()
-
 
 class TestNoResultOrderIsLeftToThePlanner:
     """Every routed query that produces an ordered result ends its ORDER BY on

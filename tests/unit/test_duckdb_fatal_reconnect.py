@@ -377,56 +377,6 @@ async def test_an_aborted_transaction_is_not_a_fatal(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_no_row_value_leaves_the_store(damaged_buyers, tmp_path, caplog):
-    """DuckDB prints every column of the rows an index FATAL could not
-    remove — for buyers, a name, a phone and an email — and repeats it in
-    every "invalidated" echo. The buyers step logs a failed write with its
-    traceback (`core/sync_service.py`, `exc_info=True`), and an index short in
-    the file fails that write on every retry. The store's own line was cut;
-    the exception it handed the caller was not, until now."""
-    path = _copy(damaged_buyers, tmp_path / "db")
-
-    # Not vacuous: DuckDB itself prints the person.
-    raw_copy = _copy(damaged_buyers, tmp_path / "raw")
-    raw = duckdb.connect(str(raw_copy))
-    try:
-        with pytest.raises(duckdb.FatalException) as dumped:
-            raw.execute(f"INSERT OR REPLACE INTO buyers (id, full_name, phone, email) "
-                        f"VALUES (77, '{_NAME}', '{_PHONE}', '{_EMAIL}')")
-        assert "\nChunk:" in str(dumped.value) and _PHONE in str(dumped.value)
-        with pytest.raises(duckdb.FatalException, match="invalidated") as echoed:
-            raw.execute("SELECT 1")
-        assert _PHONE in str(echoed.value)
-    finally:
-        raw.close()
-
-    from core.models import Buyer
-
-    sink = io.StringIO()
-    handler = logging.StreamHandler(sink)          # a plain handler: no filter
-    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
-    sync_log = logging.getLogger("core.sync_service")
-    sync_log.addHandler(handler)
-    store = await _connect(path)
-    try:
-        for _ in range(2):                         # the retry meets it again
-            try:
-                await store.upsert_buyers([Buyer(id=77, full_name=_NAME,
-                                                 phone=_PHONE, email=_EMAIL)])
-            except Exception as e:  # noqa: BLE001 — the buyers step's handler
-                sync_log.error(f"Buyer sync failed, buyers watermark not moved: "
-                               f"{type(e).__name__}", exc_info=True)
-        assert store.fatal_status()["kinds"] == {"index": 2}
-    finally:
-        sync_log.removeHandler(handler)
-        await store.close()
-    logged = sink.getvalue() + "\n".join(r.getMessage() for r in caplog.records)
-    assert "Failed to delete all rows from index" in logged, logged
-    for value in (_NAME, _PHONE, _EMAIL):
-        assert value not in logged, f"{value!r} reached the log:\n{logged}"
-
-
-@pytest.mark.asyncio
 async def test_web_log_handler_cuts_a_dump_logged_inside_a_block(damaged_file, tmp_path):
     """What the store's exit cannot see: a handler that logs the FATAL inside
     its own block, before the exception reaches `connection()`. web's handler

@@ -80,11 +80,15 @@ async def stores(tmp_path, monkeypatch):
     # The copy is serialised by a module lock; one bound to another test's
     # event loop would fail the first time a run here waits on it.
     monkeypatch.setattr(pg_operational, "OPERATIONAL_REPLICATION_LOCK", asyncio.Lock())
-    # Every chain on DuckDB, so every table is shipped and every one stamped.
     for chain in WRITE_CHAINS:
         monkeypatch.delenv(chain.WRITE_ENV, raising=False)
+    # Since step 14's S14-00 every chain writes Postgres whatever its flag
+    # says, so the copy stands every chain's tables down: what it still
+    # ships, and stamps, is the rest — DuckDB's history tables.
+    from core.write_chains import stood_down_tables
 
-    tables = _all_shipped_tables()
+    tables = tuple(t for t in _all_shipped_tables() if t not in stood_down_tables())
+    assert "app.reconciliation_log" in tables
     store = DuckDBStore(db_path=tmp_path / "ops.duckdb")
     await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)

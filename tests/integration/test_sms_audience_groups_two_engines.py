@@ -40,6 +40,16 @@ from core.sql_dialect import DUCKDB, POSTGRES, numbered, sms_segments_select
 from tests import sms_audience_fixture as fx
 from tests.sms_segments_legacy import legacy_render
 
+
+@pytest.fixture(autouse=True)
+def _sms_store_follows_env(monkeypatch):
+    """Since step 14's S14-00 the store switch decides nothing; this module's
+    two engines are chosen as before it (`tests.conftest.sms_store_follows_env`)."""
+    from tests.conftest import sms_store_follows_env
+
+    sms_store_follows_env(monkeypatch)
+
+
 asyncpg = pytest.importorskip("asyncpg")
 
 DSN = os.getenv("KS_PG_DSN")

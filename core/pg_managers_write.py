@@ -61,7 +61,11 @@ derives it from the daily spec), so it is the web container's clock passed in
 by the caller — `datetime.now(timezone.utc)` — never Postgres' `now()`; DuckDB's
 `CURRENT_TIMESTAMP` default reads the same host clock. Chain 7a's rule.
 
-HELD ON DUCKDB UNTIL WHAT READS THE TABLES FOLLOWS
+HELD ON DUCKDB UNTIL WHAT READS THE TABLES FOLLOWS — UNTIL S14-00
+
+Since step 14's S14-00 the chain writes Postgres whatever its flag says and
+asks no precondition (`writes_postgres`, `unmet_precondition`, `mode`, `reads_postgres` are
+constants). What follows is the history.
 
 `unmet_precondition()` names four things; until all hold an unlatched chain
 runs as duckdb whatever its flag says (DN-26's hook, generic in the registry).
@@ -96,7 +100,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import time
 from datetime import date, datetime
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
@@ -212,92 +215,25 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
-# ─── Preconditions ───────────────────────────────────────────────────────────
-
-# Chain 3's module, asked by name: a build without it is unmet, not an import
-# error that would make the whole question unreadable.
-_CHAIN3 = "core.pg_orders_write"
-
-
-def _step13_unmet() -> Optional[str]:
-    from core import warehouse_cutover
-
-    if warehouse_cutover.writes_postgres():
-        return None
-    return ("step13: DuckDB still derives the warehouse (KS_WRITE_WAREHOUSE is "
-            "not in force), and it would derive sales_type from a "
-            "classification this chain freezes")
-
-
-def _chain3_unmet() -> Optional[str]:
-    import importlib
-
-    try:
-        chain3 = importlib.import_module(_CHAIN3)
-    except ModuleNotFoundError as exc:
-        if exc.name != _CHAIN3:
-            raise
-        return ("chain3: the orders chain is not in this build, and "
-                "update_manager_stats reads the orders it would freeze")
-    mode = chain3.mode()
-    if mode == "postgres":
-        return None
-    return (f"chain3: the orders are not written to Postgres "
-            f"({getattr(chain3, 'WRITE_ENV', 'KS_WRITE_ORDERS')} runs as {mode}), "
-            "and update_manager_stats reads them: flip chain 3 first, so the "
-            "copy-backs run in reverse")
-
-
-def _read_fallback_unmet() -> Optional[str]:
-    from core import read_fallback
-
-    if read_fallback.refusing():
-        return None
-    return ("read_fallback_off: KS_READ_FALLBACK is not off, so a failed read "
-            "of the classification would be answered from DuckDB's frozen copy")
-
-
-# `(key, check)`: the key is the precondition's name, the word every reason
-# starts with — spelled here, not derived from the function's name, which
-# would read `_read_fallback_unmet` as "read_fallback".
-_CHECKS = (
-    (chain_latch.LOCKOUT_KEY, lambda: chain_latch.lockout_unmet(LOCKOUT_REVISION)),
-    ("step13", _step13_unmet),
-    ("chain3", _chain3_unmet),
-    ("read_fallback_off", _read_fallback_unmet),
-)
+# ─── Preconditions — none since S14-00 ──────────────────────────────────────
+#
+# Until step 14's S14-00 the flag moved the writes only with the lock-out
+# revision, step 13 and chain 3 in force and `KS_READ_FALLBACK=off`. Production
+# met all four when they became constants; their checks went with them.
 
 
 def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_MANAGERS=postgres` must not move the writes yet, or None.
-
-    Never raises and never asks Postgres: `/api/health` reads it through the
-    registry and must still answer with Postgres down. A fact that cannot be
-    read is unmet, because nobody can then say it holds. Every fact is stable
-    for the life of a process — a constant, a verdict cached at start — so the
-    answer cannot come good mid-process and flip the chain with nobody
-    watching; a fact that could would need chain 3's `held_until_restart`.
-    `unmet_reasons()` joined with "; ".
-    """
-    reasons = unmet_reasons()
-    return "; ".join(reasons) if reasons else None
+    """None, a constant since step 14's S14-00: the chain writes Postgres
+    whatever its flag says, and nothing it waited on — the lock-out, step 13,
+    chain 3, the read fallback — is asked any more; production met every one.
+    Kept for the registry's `unmet_precondition` field, which keeps its shape
+    until S14-11."""
+    return None
 
 
 def unmet_reasons() -> List[str]:
-    """Every unmet precondition, one entry each, in `_CHECKS` order; empty
-    when none. What the preflight publishes — never the joined form split
-    back apart, which only works while no reason carries a "; " of its own
-    (chain 3's did, batch-E review). Never raises."""
-    reasons: List[str] = []
-    for key, check in _CHECKS:
-        try:
-            why = check()
-        except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-            # Keyed by the precondition's name, as the answer it stands for.
-            why = f"{key}: could not be read ({type(exc).__name__})"
-        if why:
-            reasons.append(why)
-    return reasons
+    """Empty, a constant since S14-00 (`unmet_precondition`)."""
+    return []
 
 
 def _warn_unmet(reason: str) -> None:
@@ -310,49 +246,27 @@ def _warn_unmet(reason: str) -> None:
 
 
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
-    read. Unlatched, the flag moves the writes only once `unmet_precondition()`
-    holds. Raises on a flag nobody can read while unlatched; `mode()` is the
-    question that never raises.
+    """Whether this chain writes Postgres — the one answer every caller reads:
+    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
+    nor a precondition routes any more; the first write in a process still
+    takes the latch (decision 3), which the images before step 14 route by.
+    Last
+    consumers: the four repository methods, the managers step, the
+    retail-status route and the registry — S14-11.
     """
-    if chain_latch.latched(CHAIN):
-        return True
-    if not env_writes_postgres():
-        return False
-    unmet = unmet_precondition()
-    if unmet:
-        _warn_unmet(unmet)
-        return False
     return True
 
 
-def _self():
-    return sys.modules[__name__]
-
-
 def mode() -> Optional[str]:
-    """Where this chain's writes go: "postgres", "duckdb", or None when
-    `KS_WRITE_MANAGERS` is not understood and no latch overrides it. The
-    registry's answer for this chain alone (`write_chains._chain_state`).
-    Never raises."""
-    from core import write_chains
-
-    return write_chains._chain_state(_self())["mode"]
+    """Where this chain's writes go: "postgres", a constant since step 14's
+    S14-00 — never None, since no flag is read for it."""
+    return "postgres"
 
 
 def reads_postgres() -> bool:
-    """Whether a read of these tables must ask Postgres — wherever the writes
-    go. Never raises.
-
-    Chain 7a's arrangement with one difference: the flag alone is not where
-    the writes go here, because a flag held by an unmet precondition writes
-    DuckDB, and a read must follow the rows rather than the variable. A flag
-    nobody can read on a chain that never wrote here hands the choice back
-    (neither copy moves: the writers refuse and the replica stands down).
-    """
-    return chain_latch.latched(CHAIN) or mode() == "postgres"
+    """Whether a read of these tables must ask Postgres: True, a constant
+    since S14-00."""
+    return True
 
 
 def reads_the_chain(sql: str) -> bool:

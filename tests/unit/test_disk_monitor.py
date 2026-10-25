@@ -25,6 +25,20 @@ from core.disk_monitor import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is the disk watchdog's judgement, not where its
+    samples live, and it reads the history back from DuckDB. So this
+    module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_watchdog_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_watchdog_write)
+
+
 # Ten consecutive samples read out of production `disk_samples` on
 # 2026-08-12, covering 2026-08-10 07:00 → 2026-08-12 19:00 Kyiv.
 # Measured growth across them: 607-682 MB/24h. A flat line.

@@ -29,6 +29,22 @@ import pytest
 from core.duckdb_constants import EXHIBITION_SOURCE_ID, RETAIL_MANAGER_IDS
 from core.duckdb_store import DuckDBStore
 
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module pins the classification's as-of-date semantics, and the one
+    CASE every consumer derives sales_type from, on DuckDB's writer; chain
+    5's Postgres writer is held by
+    tests/integration/test_managers_chain_writer.py. So this module keeps
+    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
+    until their DuckDB branches go."""
+    from core import pg_managers_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_managers_write)
+
+
 UNLISTED = 34  # deliberately not in RETAIL_MANAGER_IDS
 
 

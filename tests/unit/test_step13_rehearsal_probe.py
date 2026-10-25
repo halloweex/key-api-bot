@@ -1768,8 +1768,14 @@ def test_every_log_line_the_script_greps_is_one_the_code_writes():
     patterns |= set(re.findall(r"grep -q?c?F (?:-- )?'([^']+)'", script))
     patterns = {p for p in patterns if not p.startswith("REH-KEYCRM")}
     assert len(patterns) >= 10, patterns
+    # Step 13's flip is a constant since step 14's S14-00: no precondition is
+    # evaluated at a start, so the line P1 counted is no longer written, and
+    # this rehearsal is for images before it (S14-03 deletes it).
+    retired = {"every precondition holds: DuckDB no longer derives",
+               "precondition(s) of the switch are unmet"}
+    assert retired <= patterns, "a retired pattern the script no longer greps"
     code = _code_text()
-    for pattern in sorted(patterns):
+    for pattern in sorted(patterns - retired):
         literal = pattern.replace("(changed_ids=full)", "(changed_ids=")
         assert literal in code, f"the script greps for {pattern!r}, which nothing writes"
 

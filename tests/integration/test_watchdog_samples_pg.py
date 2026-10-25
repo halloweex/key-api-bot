@@ -4,8 +4,10 @@
   both at the same instant;
 - the differencing reads are Postgres's own, in the tick's transaction — a
   history only Postgres holds is found, which is the chain map's warning met;
-- the daily comparison is silent on an honest shadow, names a failed one, and
-  reads a prune DuckDB has not caught up with as INFO;
+- the daily comparison was silent on an honest shadow, named a failed one,
+  and read a prune DuckDB had not caught up with as INFO (since step 14's S14-00 the comparison no longer compares a shadow —
+  `compared_in_shadow()` is empty, as it has been in production under
+  `KS_DUCKDB=off` — and its test went with it);
 - the standing watch reads the spans with its real SQL;
 - the way back is a near no-op copy that refuses nothing for a lagging prune.
 """
@@ -160,36 +162,6 @@ class TestOneTickTwoStores:
             pg, dk = await _rows(store, pool, table, cols)
             assert pg == dk, table
             assert pg and all(r[0] > old[table] for r in pg), table
-
-
-class TestTheShadowIsCompared:
-    @pytest.mark.asyncio
-    async def test_honest_failed_and_lagging(self, stores):
-        from core.mirror_reconciliation import reconcile_operational
-
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        old = datetime.now(timezone.utc) - timedelta(hours=5)
-        await watchdog_samples.disk_tick(store, _sample(old), {"duckdb": 1})
-        honest = [i for i in await reconcile_operational(store) if i.table_name in TABLES]
-        assert honest == [], honest
-
-        # A shadow that failed: the sample is in Postgres only.
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM disk_samples")
-        found = {(i.check_name, i.table_name) for i in await reconcile_operational(store)
-                 if i.table_name in TABLES}
-        assert found == {("shadow_missing_in_duckdb", "app.disk_samples")}
-
-        # A DuckDB prune that lagged: DuckDB holds a sample older than
-        # anything Postgres still holds. Retention, not a defect.
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO disk_samples VALUES (?, 2000.25, 41.5, 99.75)", [old])
-            conn.execute("INSERT INTO disk_samples VALUES (?, 1, 1, 1)",
-                         [old - timedelta(days=15)])
-        found = {(i.check_name, i.severity.value) for i in await reconcile_operational(store)
-                 if i.table_name in TABLES}
-        assert found == {("shadow_pruned_rows", "INFO")}
 
 
 class TestTheStandingWatch:

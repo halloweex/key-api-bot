@@ -10,6 +10,10 @@ Three shapes this replaces, each measured:
   out of memory under the production limit (8 000 already do);
 * `sync-all-buyers` would have held the heavy-job lock through ~460 sequential
   KeyCRM pages, stopping the minute sync for as long.
+
+Since step 14's S14-00 chain 4 writes the buyers, a constant, so DuckDB's
+portions and their mirroring are no path production takes: those tests, and
+the refusal of a flag nobody can read, went with it.
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ import ast
 import asyncio
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -61,90 +65,6 @@ class TestPortions:
         # Below the measured failure point with room to spare: 6 500 commit,
         # 8 000 run out of memory under the production 4 GB limit.
         assert DuckDBStore.BUYER_WRITE_PORTION == 1000
-
-    @pytest.mark.asyncio
-    async def test_a_batch_is_split_into_portions_each_mirrored(self, tmp_path):
-        """25 buyers at a portion of 10 is the same arithmetic as 2 500 at 1 000
-        — three transactions, three mirrors, the last one short — without ten
-        seconds of real writes in every test run."""
-        store = DuckDBStore(db_path=tmp_path / "p.duckdb")
-        await store.connect()
-        store.BUYER_WRITE_PORTION = 10
-        mirrored = []
-
-        async def spy(portion):
-            mirrored.append(len(portion))
-            return {"rows": len(portion)}
-
-        try:
-            with patch("core.pg_buyers.mirror_buyers", new=spy), \
-                 patch.object(store, "_upsert_buyer_portion",
-                              wraps=store._upsert_buyer_portion) as portion:
-                assert await store.upsert_buyers(_buyers(25)) == 25
-            assert portion.await_count == 3
-            assert mirrored == [10, 10, 5]
-            async with store.connection() as conn:
-                assert conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0] == 25
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_portion_whose_mirror_failed_is_retried_at_the_end(self, tmp_path):
-        """The next portion's success would otherwise stamp the watermark
-        healthy, and the ids-diff never ships a buyer Postgres already has."""
-        store = DuckDBStore(db_path=tmp_path / "p.duckdb")
-        await store.connect()
-        store.BUYER_WRITE_PORTION = 10
-        calls = []
-
-        async def flaky(portion):
-            calls.append([b.id for b in portion])
-            return {"error": "pg down"} if len(calls) == 2 else {"rows": len(portion)}
-
-        try:
-            with patch("core.pg_buyers.mirror_buyers", new=flaky):
-                assert await store.upsert_buyers(_buyers(25)) == 25
-            assert len(calls) == 4, calls           # three portions, one retry
-            assert calls[3] == calls[1]             # the failed portion again
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_mirror_that_keeps_failing_raises_after_duckdb_committed(self, tmp_path):
-        store = DuckDBStore(db_path=tmp_path / "p.duckdb")
-        await store.connect()
-        store.BUYER_WRITE_PORTION = 10
-
-        async def down(portion):
-            return {"error": "pg down"}
-
-        try:
-            with patch("core.pg_buyers.mirror_buyers", new=down):
-                with pytest.raises(RuntimeError, match="25 buyer"):
-                    await store.upsert_buyers(_buyers(25))
-            async with store.connection() as conn:
-                assert conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0] == 25
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_portion_is_mirrored_only_after_it_committed(self, tmp_path):
-        store = DuckDBStore(db_path=tmp_path / "p.duckdb")
-        await store.connect()
-        seen = []
-
-        async def spy(portion):
-            # The store lock is free and the rows are there: committed first.
-            async with store.connection() as conn:
-                seen.append(conn.execute("SELECT COUNT(*) FROM buyers").fetchone()[0])
-            return {}
-
-        try:
-            with patch("core.pg_buyers.mirror_buyers", new=spy):
-                await store.upsert_buyers(_buyers(3))
-            assert seen == [3]
-        finally:
-            await store.close()
 
 
 class _FakeLock:
@@ -204,50 +124,6 @@ def _keycrm(monkeypatch, fetch):
     monkeypatch.setattr(keycrm, "KeyCRMClient", MagicMock(return_value=client))
 
 
-class TestTheFullSyncRun:
-    """`_sync_all_buyers`, the detached body of sync-all-buyers, driven directly."""
-
-    @pytest.mark.asyncio
-    async def test_keycrm_is_fetched_with_the_lock_free_and_each_portion_under_it(
-            self, monkeypatch):
-        from core.scheduler import get_scheduler
-        from web.routes.api.admin import _sync_all_buyers
-
-        held_while_writing = []
-
-        async def upsert(portion):
-            held_while_writing.append(get_scheduler()._heavy_job_lock.locked())
-            return len(portion)
-
-        async def fetch():
-            assert not get_scheduler()._heavy_job_lock.locked(), \
-                "the KeyCRM pages were fetched under the heavy-job lock"
-            return _buyers(2100)
-
-        _keycrm(monkeypatch, fetch)
-        result = await _sync_all_buyers(_store_for_sync_all(upsert))
-
-        assert result["status"] == "done" and result["buyers_written"] == 2100
-        assert held_while_writing == [True, True, True]
-        assert not get_scheduler()._heavy_job_lock.locked()
-
-    @pytest.mark.asyncio
-    async def test_a_busy_warehouse_stops_the_run_and_says_how_far_it_got(
-            self, monkeypatch):
-        from core.scheduler import get_scheduler
-        from web.routes.api import admin
-
-        _keycrm(monkeypatch, AsyncMock(return_value=_buyers(10)))
-        monkeypatch.setattr(admin, "SYNC_ALL_LOCK_WAIT_S", 0.05)
-        monkeypatch.setattr(get_scheduler(), "_heavy_job_lock", _FakeLock())
-        upsert = AsyncMock(side_effect=AssertionError("wrote without the lock"))
-
-        result = await admin._sync_all_buyers(_store_for_sync_all(upsert))
-
-        assert result["status"] == "stopped"
-        assert (result["buyers_fetched"], result["buyers_written"]) == (10, 0)
-
-
 class TestUnderChain4:
     """The buyers land in Postgres alone, so sync-all counts them there, and a
     flag nobody can read is refused at both doors before anything starts."""
@@ -273,34 +149,6 @@ class TestUnderChain4:
 
         assert (result["before_count"], result["after_count"],
                 result["new_buyers"]) == (100, 103, 3)
-
-    def test_sync_all_refuses_a_flag_nobody_can_read_before_it_starts(
-            self, monkeypatch, fresh_limits):
-        from web.routes.api import admin
-
-        monkeypatch.setenv("KS_WRITE_BUYERS", "postgre")
-        body = AsyncMock(side_effect=AssertionError("started"))
-        monkeypatch.setattr(admin, "_sync_all_buyers", body)
-        monkeypatch.setattr(admin, "get_store", AsyncMock(return_value=MagicMock()))
-
-        r = _client().post("/api/duckdb/sync-all-buyers")
-
-        assert r.status_code == 409, r.text
-        assert "KS_WRITE_BUYERS" in r.json()["detail"]
-        body.assert_not_called()
-
-    def test_the_manual_sync_refuses_it_too(self, monkeypatch, fresh_limits):
-        from core import sync_service
-        from web.routes.api import admin
-
-        monkeypatch.setenv("KS_WRITE_BUYERS", "postgre")
-        monkeypatch.setattr(sync_service, "get_sync_service",
-                            AsyncMock(side_effect=AssertionError("step ran")))
-
-        r = _client().post("/api/duckdb/sync-buyers")
-
-        assert r.status_code == 409, r.text
-        assert "KS_WRITE_BUYERS" in r.json()["detail"]
 
 
 class TestTheRoutes:

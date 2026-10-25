@@ -42,18 +42,14 @@ def mode(monkeypatch):
 
 
 class TestTheMode:
-    def test_default_is_piggyback(self, mode):
-        assert mode(None) == "piggyback" and not pg_derivation.owns()
-
-    def test_own(self, mode):
-        assert mode("own") == "own" and pg_derivation.owns()
-
-    def test_an_unknown_value_falls_back_and_says_so(self, mode):
-        """Not a raise: refusing to start would take the dashboard down over a
-        derivation setting. Today's behaviour, and the reason on record."""
-        assert mode("owned") == "piggyback"
-        assert not pg_derivation.owns()
-        assert "owned" in pg_derivation.mode_error()
+    @pytest.mark.parametrize("value", [None, "own", "piggyback", "owned"])
+    def test_own_whatever_the_variable_says(self, mode, value):
+        """Since step 14's S14-00 the mode is `own`, a constant — production's
+        value since step 13 made it a precondition. The tests of `piggyback`
+        and of a typo falling back to it went with them. Mutation: read the
+        variable again."""
+        assert mode(value) == "own" and pg_derivation.owns()
+        assert pg_derivation.mode() == "own" and pg_derivation.mode_error() is None
 
     def test_the_write_path_never_reads_the_environment(self, mode, monkeypatch):
         mode("own")
@@ -218,16 +214,15 @@ class TestTheDuckDBTickUnderOwn:
             asyncio.run(BackgroundScheduler()._rebuild_pg_layers(silver, gold))
         return silver, gold, profile, ship
 
-    def test_under_own_it_only_ships_utm(self, mode):
+    def test_under_own_and_the_postgres_parse_it_does_nothing(self, mode):
+        """Since S14-00 both are constants: Postgres derives on its own signal
+        and parses the UTM verdicts itself, so the tick has nothing left to do
+        in Postgres. (The piggyback branch and the UTM ship stay in the code
+        until S14-15; no production state reaches them.)"""
         mode("own")
         silver, gold, profile, ship = self._run()
-        assert not silver.await_count and not gold.await_count and not profile.await_count
-        assert ship.await_count == 1
-
-    def test_under_piggyback_it_is_unchanged(self, mode):
-        mode(None)
-        silver, gold, profile, ship = self._run()
-        assert (silver.await_count, gold.await_count, profile.await_count, ship.await_count) == (1, 1, 1, 1)
+        assert (silver.await_count, gold.await_count, profile.await_count,
+                ship.await_count) == (0, 0, 0, 0)
 
 
 class TestTheJobIsRegisteredOnlyUnderOwn:
@@ -252,9 +247,9 @@ class TestTheJobIsRegisteredOnlyUnderOwn:
         mode("own")
         assert "pg_warehouse_derive" in self._jobs()
 
-    def test_piggyback(self, mode):
-        mode(None)
-        assert "pg_warehouse_derive" not in self._jobs()
+    def test_whatever_the_variable_says(self, mode):
+        mode("piggyback")
+        assert "pg_warehouse_derive" in self._jobs()
 
 
 class TestTheWatchdogJudgesWhatWebDeclares:
@@ -306,28 +301,26 @@ class TestHealthDeclaresTheDerivedTablesUnderOwn:
                 health._mirror_cache["data"] = None
 
     def test_own(self, mode):
+        """With the UTM parse in Postgres too (S14-00's constant), its table
+        is declared beside the derived ones."""
         mode("own")
         data = self._mirrors()
-        assert set(data) == {"bronze.orders", "silver.orders", "gold.daily_revenue"}
+        assert set(data) == {"bronze.orders", "silver.orders", "gold.daily_revenue",
+                             "silver.order_utm"}
         assert data["silver.orders"]["max_age_s"] == pg_derivation.DERIVED_MAX_AGE_S
         assert "max_age_s" not in data["bronze.orders"]
-
-    def test_piggyback(self, mode):
-        mode(None)
-        assert set(self._mirrors()) == {"bronze.orders"}
 
 
 class TestATypoIsVisible:
     """Found reviewing #210: an unknown KS_PG_DERIVE fell back to piggyback and
     left one log line — while the comment promised /api/health would say so."""
 
-    def test_health_publishes_the_mode_and_the_error(self, mode):
+    def test_health_publishes_the_mode_and_no_error(self, mode):
+        """Since S14-00 no value is read, so none is an error: the block keeps
+        its shape and says `own`."""
         from web.routes.api.health import _derivation_mode
 
         mode("owned")
-        block = _derivation_mode()
-        assert block["mode"] == "piggyback" and "owned" in block["error"]
-        mode("own")
         assert _derivation_mode() == {"mode": "own", "error": None}
 
     def test_the_canary_pages_on_the_error(self):
@@ -379,10 +372,15 @@ def job(mode, monkeypatch):
     """A scheduler under own whose process has already derived once, so a tick
     with nothing owed is quiet — a web container past its first minute. Every
     piece of process state the job keeps is put back afterwards."""
+    from core import warehouse_cutover
     from core.scheduler import BackgroundScheduler
 
     mode("own")
     monkeypatch.delenv("KS_PG_SILVER_INTERVAL_S", raising=False)   # the 600 s floor
+    # Past its first minute, the process has also settled the warehouse
+    # writer — which, `postgres` being a constant since S14-00, closes the
+    # `warehouse` group once at its first tick.
+    monkeypatch.setattr(warehouse_cutover, "_settled", True)
     before = (BackgroundScheduler._pg_derive_ran, BackgroundScheduler._pg_derive_started,
               pg_derivation._signal_failures)
     BackgroundScheduler._pg_derive_ran = True
@@ -410,6 +408,8 @@ class TestASignalThatCannotBeRead:
         raise_alert, resolve = AsyncMock(return_value=1), AsyncMock(return_value=0)
         with patch("core.pg.get_pool", AsyncMock(return_value=_Pool())), \
              patch("core.pg.require_revision", AsyncMock()), \
+             patch("core.pg_utm_parse.parse_incremental_locked",
+                   AsyncMock(return_value={"status": "success"})), \
              patch.object(pg_derivation, "read_owed", AsyncMock(side_effect=reads)), \
              patch.object(pg_derivation, "last_attempt_at", AsyncMock(return_value=now)), \
              patch("core.alerting.raise_alert", raise_alert), \
@@ -578,14 +578,6 @@ class TestHealthPublishesTheCount:
         pg_derivation.note_signal_unreadable()
         assert _signal_reads() == {"signal_unreadable_ticks": 2}
 
-    def test_under_piggyback_it_is_null(self, mode):
-        """The counting job is not registered there; a zero would claim a watch
-        nobody keeps."""
-        from web.routes.api.health import _signal_reads
-
-        mode(None)
-        assert _signal_reads() == {"signal_unreadable_ticks": None}
-
     def test_the_block_carries_it(self):
         tree = ast.parse((REPO / "web/routes/api/health.py").read_text(encoding="utf-8"))
         block = next(n for n in ast.walk(tree)
@@ -599,7 +591,7 @@ _STEPS = ("silver", "gold", "profile", "validate", "complete", "record_run")
 
 
 def _derive(job, *, reads=((3, 2, None),), journal_attempt=None, verdict=None,
-            raising=()):
+            raising=(), utm=None):
     """One tick through `_run_pg_derivation` with every Postgres step patched.
     `raising` names the steps that raise; `reads` are what successive signal
     reads return or raise. Returns the result and the mocks."""
@@ -610,8 +602,14 @@ def _derive(job, *, reads=((3, 2, None),), journal_attempt=None, verdict=None,
                     else AsyncMock(return_value=values[name])) for name in _STEPS}
     mocks["record_failure"] = AsyncMock()
     mocks["clear_tail"] = AsyncMock(return_value=False)
+    # The derivation's last step since S14-00's constant (`KS_UTM_PARSE`
+    # postgres): its own failure is its own, recorded by the parse, never
+    # the derivation's — so here it simply succeeds, unless a test hands its
+    # own (`tests/unit/test_utm_parse_wiring.py`).
+    mocks["utm"] = utm if utm is not None else AsyncMock(return_value={"status": "success"})
     with patch("core.pg.get_pool", AsyncMock(return_value=_Pool())), \
          patch("core.pg.require_revision", AsyncMock()), \
+         patch("core.pg_utm_parse.parse_incremental_locked", mocks["utm"]), \
          patch("core.pg_silver.rebuild_silver", mocks["silver"]), \
          patch("core.pg_gold.rebuild_gold", mocks["gold"]), \
          patch("core.pg_vitrina.rebuild_customer_profile", mocks["profile"]), \

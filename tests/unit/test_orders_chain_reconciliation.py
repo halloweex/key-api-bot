@@ -98,7 +98,7 @@ class TestTheJob:
         sched._resolve_dq_layer.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("latched", [True, False])
+    @pytest.mark.parametrize("latched", [True])
     async def test_a_stood_down_arm_journals_no_run(self, off, monkeypatch, latched):
         """A stood-down arm compared nothing, so a run on its layer would be a
         fresh, clean `reconciliation` verdict — through chain 9's door, into
@@ -133,23 +133,12 @@ class TestTheJob:
             assert result["run_id"] == 7
         sched._persist_postgres_reconciliation.assert_awaited_once()
 
-    @pytest.mark.asyncio
-    async def test_off_the_duckdb_arm_runs_as_it_always_has(self, off):
-        extract = MagicMock(return_value={})
-        persist = MagicMock(return_value=7)
-        sched, sync, result = await _run(
-            duckdb_orders=extract, persist=persist, classify=[_missing(5)],
-            pg_result={"issues": [], "discrepancies": [_missing(77)], "error": None})
-        extract.assert_called_once()
-        assert persist.call_args.kwargs["layer"] == "reconciliation"
-        assert sync.repair_orders.await_args.args[0] == [5]     # DuckDB's own set
-        sched._resolve_dq_layer.assert_awaited_once()
-        assert "stood_down" not in result
-
 
 class TestTheLayerIsNotWatched:
     def test_the_predicate(self, off):
-        assert pg_orders_write.stood_down_layers() == frozenset()
+        """`{"reconciliation"}` with the chain latched or not: a constant since
+        step 14's S14-00, which an exception can no longer open."""
+        assert pg_orders_write.stood_down_layers() == frozenset({"reconciliation"})
         chain_latch.latch(pg_orders_write.CHAIN)
         assert pg_orders_write.stood_down_layers() == frozenset({"reconciliation"})
 
@@ -178,16 +167,15 @@ class TestTheLayerIsNotWatched:
             "reconciliation": {**old, "stood_down": True}, "reconciliation_pg": old}})
         assert "dq_stale:reconciliation_pg" in {k for k, _ in failures}
 
-    def test_health_marks_the_layer_and_only_under_the_chain(self, off):
-        """Mutation: mark it in the cached stats, or not at all."""
+    def test_health_marks_the_layer(self, off):
+        """Mutation: mark it in the cached stats, or not at all. (Only under
+        the chain until step 14's S14-00; the chain is a constant now.)"""
         from web.routes.api.health import _mark_stood_down
         from web.schemas import DataQualityFreshness
 
         block = {"reconciliation": {"last_success_at": None, "age_seconds": 9},
                  "reconciliation_pg": {"last_success_at": None, "age_seconds": 9}}
-        assert _mark_stood_down(block) == block
         assert _mark_stood_down(None) is None
-        chain_latch.latch(pg_orders_write.CHAIN)
         marked = _mark_stood_down(block)
         assert marked["reconciliation"]["stood_down"] is True
         assert "stood_down" not in marked["reconciliation_pg"]
@@ -195,7 +183,7 @@ class TestTheLayerIsNotWatched:
         assert DataQualityFreshness(**marked["reconciliation"]).stood_down is True
         assert DataQualityFreshness.model_fields["stood_down"].description
 
-    @pytest.mark.parametrize("journal_chain", [True, False])
+    @pytest.mark.parametrize("journal_chain", [True])
     def test_the_endpoint_marks_the_block_chain_9_answers(self, off, journal_chain):
         """Through `/api/health` and the canary, with chain 3 latched. Under
         chain 9 `_journal_ages` answers Postgres's block and ignores the one
@@ -277,7 +265,7 @@ class TestTheLayerIsNotWatched:
         assert "dq_reconciliation_catchup" in scheduler._scheduler.added
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("latched", [True, False])
+    @pytest.mark.parametrize("latched", [True])
     async def test_the_digest_skips_it(self, off, tmp_path, latched):
         """Run against a real journal, every watched layer fresh and clean but
         `reconciliation`, which nothing has written. Mutation: digest the
@@ -291,6 +279,12 @@ class TestTheLayerIsNotWatched:
         from core.data_quality import WATCHED_LAYERS, persist_run
         from tests.unit.test_dq_digest_beat import _install_outbox, _make_store
 
+        from core import pg_dq_journal_write
+        from tests.conftest import route_chains_to_duckdb
+
+        # The journal written and read in DuckDB here, as the digest's own
+        # tests keep it (`tests/unit/test_dq_digest_beat.py`).
+        route_chains_to_duckdb(off, pg_dq_journal_write)
         store = await _make_store(tmp_path, off)
         outbox = _install_outbox(off)
         at = datetime.now(timezone.utc) - timedelta(minutes=30)

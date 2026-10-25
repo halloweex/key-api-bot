@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -61,6 +61,20 @@ async def _duck(tmp_path, name="consumers.duckdb"):
     store = DuckDBStore(db_path=tmp_path / name)
     await store.connect()
     return store
+
+
+def _ledger_answers(monkeypatch):
+    """The report ledgers as production holds them: in Postgres (chains 11a
+    and 11b, a constant since step 14's S14-00), asked before any read of the
+    report's own. Here the week is unsent and a write is recorded, so the
+    refusal under test is the report's read and "no ledger row" is "never
+    marked"."""
+    from core import report_ledger
+
+    monkeypatch.setattr(report_ledger, "already_sent", AsyncMock(return_value=False))
+    mark = AsyncMock(side_effect=AssertionError("the ledger was written"))
+    monkeypatch.setattr(report_ledger, "mark_sent", mark)
+    return mark
 
 
 def _serve(monkeypatch, store) -> None:
@@ -99,6 +113,7 @@ class TestWeeklyReport:
     ):
         store, week_start, sent, scheduler = await self._job(monkeypatch, tmp_path)
         try:
+            marked = _ledger_answers(monkeypatch)
             _unaddressed(monkeypatch, "KS_READ_WEEKLY")
             _mode(monkeypatch, "off")
 
@@ -107,7 +122,7 @@ class TestWeeklyReport:
             assert result == {"sent": False, "week": week_start.isoformat(),
                               **_refused("weekly_report")}
             assert sent == []
-            assert not await self._ledger(store, week_start)
+            marked.assert_not_awaited()
             assert read_fallback.refusals()["weekly_report"]["count"] >= 1
             assert read_fallback.counts() == {}
         finally:
@@ -130,23 +145,6 @@ class TestWeeklyReport:
             assert sent == []
             assert not await self._ledger(store, week_start)
             assert read_fallback.counts() == {}
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_under_duckdb_the_same_switch_is_read_from_duckdb_and_sent(
-        self, stores, monkeypatch, tmp_path,
-    ):
-        store, week_start, sent, scheduler = await self._job(monkeypatch, tmp_path)
-        try:
-            _unaddressed(monkeypatch, "KS_READ_WEEKLY")
-            _mode(monkeypatch, "duckdb")
-
-            result = await scheduler._run_weekly_report()
-
-            assert result["sent"] is True and result["revenue"] == 35_000
-            assert await self._ledger(store, week_start)
-            assert read_fallback.refusals() == {}
         finally:
             await store.close()
 
@@ -206,6 +204,7 @@ class TestTrafficReport:
         try:
             week_start = await _seed_gold(store)
             scheduler, sent = self._wire(monkeypatch, store, tmp_path)
+            marked = _ledger_answers(monkeypatch)
             monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
             _mode(monkeypatch, "off")
 
@@ -214,7 +213,7 @@ class TestTrafficReport:
             assert result == {"sent": False, "week": week_start.isoformat(),
                               **_refused("traffic")}
             assert sent == []
-            assert not await self._ledger(store, week_start)
+            marked.assert_not_awaited()
             assert read_fallback.counts() == {}
             assert read_fallback.refusals()["traffic"]["count"] >= 1
         finally:
@@ -232,6 +231,7 @@ class TestTrafficReport:
         try:
             week_start = await _seed_gold(store)
             scheduler, sent = self._wire(monkeypatch, store, tmp_path)
+            marked = _ledger_answers(monkeypatch)
             _unaddressed(monkeypatch, "KS_READ_WEEKLY")
             _mode(monkeypatch, "off")
 
@@ -240,30 +240,7 @@ class TestTrafficReport:
             assert result == {"sent": False, "week": week_start.isoformat(),
                               **_refused("weekly_report")}
             assert sent == []
-            assert not await self._ledger(store, week_start)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_under_duckdb_the_same_pool_falls_back_as_before(
-        self, stores, monkeypatch, tmp_path,
-    ):
-        from tests.unit.test_traffic_report import _seed_gold
-
-        store = await _duck(tmp_path)
-        try:
-            await _seed_gold(store)
-            scheduler, _sent = self._wire(monkeypatch, store, tmp_path)
-            monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
-            _mode(monkeypatch, "duckdb")
-
-            result = await scheduler._run_traffic_report()
-
-            # DuckDB answered — an empty Silver, so no orders — and the
-            # fallback was counted, exactly as before DN-20c.
-            assert result["reason"] == "no_orders"
-            assert read_fallback.counts()["traffic"]["count"] >= 1
-            assert read_fallback.refusals() == {}
+            marked.assert_not_awaited()
         finally:
             await store.close()
 
@@ -316,28 +293,6 @@ class TestSeasonalityJob:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_under_duckdb_the_same_pool_falls_back_and_writes_both(
-        self, stores, monkeypatch, tmp_path,
-    ):
-        from core.scheduler import BackgroundScheduler
-
-        store = await _goals_store(tmp_path)
-        try:
-            _serve(monkeypatch, store)
-            monkeypatch.setenv("KS_READ_GOALS", "postgres")
-            _mode(monkeypatch, "duckdb")
-
-            result = await BackgroundScheduler()._run_seasonality_calc()
-
-            assert result["retail_months"] == 1
-            assert set(result["retail_goals"]) == {"daily", "weekly", "monthly"}
-            indices, growth = await _goal_tables(store)
-            assert indices == 1 and growth == 1
-            assert read_fallback.counts()["goals"]["count"] >= 1
-        finally:
-            await store.close()
-
 
 class TestSeasonalityJobRefusedAtEveryRead:
     """Chain 7b: under KS_GOALS_HISTORY=silver every history read the job
@@ -360,12 +315,18 @@ class TestSeasonalityJobRefusedAtEveryRead:
     async def test_a_refusal_at_any_read_writes_nothing(
         self, stores, monkeypatch, tmp_path,
     ):
+        from core import pg_forecast_write
         from core.repositories.goals import GoalsMixin
         from core.scheduler import BackgroundScheduler
+        from tests.conftest import route_chains_to_duckdb
         from tests.unit.test_goals_off_duckdb_silver import _seed_history
 
         store = await _duck(tmp_path, "goals-every-read.duckdb")
         try:
+            # The property is the job's — read everything, then store once —
+            # and not the store's: the goal tables stay in DuckDB here, as
+            # they were before S14-00 made chain 7b-3 a constant.
+            route_chains_to_duckdb(monkeypatch, pg_forecast_write)
             _serve(monkeypatch, store)
             monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
             monkeypatch.delenv("KS_READ_GOALS", raising=False)
@@ -485,26 +446,6 @@ class TestTraining:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_under_duckdb_the_same_switch_reads_duckdb(
-        self, stores, model, monkeypatch, tmp_path,
-    ):
-        from core.scheduler import BackgroundScheduler
-
-        store = await _duck(tmp_path)
-        try:
-            _serve(monkeypatch, store)
-            _unaddressed(monkeypatch, "KS_READ_FORECAST_INPUT")
-            _mode(monkeypatch, "duckdb")
-
-            result = await BackgroundScheduler()._run_revenue_prediction()
-
-            # An empty DuckDB answered: too little to train on — not a skip.
-            assert result["status"] == "insufficient_data"
-            assert model()
-            assert read_fallback.refusals() == {}
-        finally:
-            await store.close()
 
     def test_the_manual_trigger_is_a_503_like_any_route(
         self, stores, model, admin_client, monkeypatch,
@@ -711,39 +652,27 @@ class TestSearchIndex:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_under_duckdb_the_same_switch_indexes_from_duckdb(
-        self, stores, meili, monkeypatch, tmp_path,
-    ):
-        from core.scheduler import BackgroundScheduler
-
-        store = await _duck(tmp_path)
-        try:
-            _sync_service(monkeypatch, store)
-            _unaddressed(monkeypatch, "KS_READ_SEARCH_INDEX")
-            _mode(monkeypatch, "duckdb")
-
-            result = await BackgroundScheduler()._run_meilisearch_sync()
-
-            assert result == {"buyers": 0, "orders": 0, "products": 0}
-            # A first sync of an empty DuckDB still stamps its watermark.
-            store.set_last_sync_time.assert_awaited()
-            assert read_fallback.refusals() == {}
-        finally:
-            await store.close()
 
     @pytest.mark.asyncio
     async def test_the_boot_contains_it(
         self, stores, meili, monkeypatch, tmp_path, caplog,
     ):
+        """Web's boot, which since S14-00 is always `KS_DUCKDB=off`: the
+        orders held are asked of where they are written, never DuckDB's
+        counts."""
+        from core import duckdb_switch
         from core import sync_service as sync_mod
 
         store = await _duck(tmp_path)
         try:
             _serve(monkeypatch, store)
             monkeypatch.setattr(sync_mod, "get_store", AsyncMock(return_value=store))
-            monkeypatch.setattr(store, "get_stats",
-                                AsyncMock(return_value={"orders": 1, "products": 0}))
+            monkeypatch.setattr(store, "orders_held", AsyncMock(return_value=1))
+            # Chain 1's rebuild, Postgres's since S14-00; not this test's.
+            monkeypatch.setattr(store, "refresh_sku_inventory_status",
+                                AsyncMock(return_value=0))
+            monkeypatch.setattr(sync_mod.warehouse_cutover, "settle_writer", AsyncMock())
+            monkeypatch.setattr(duckdb_switch, "is_off", lambda: True)
             service = _sync_service(monkeypatch, store)
             service.incremental_sync = AsyncMock(return_value={})
             monkeypatch.setattr(sync_mod, "init_meilisearch", AsyncMock(return_value=True))
@@ -761,84 +690,3 @@ class TestSearchIndex:
 
 # ─── The buyers step, inside the sync tick ────────────────────────────────
 
-class TestSyncTick:
-    """The tick is every two minutes and its other steps must not pay for
-    this one. The buyers step already contains every failure of its
-    selection — the watermark held, the step skipped for the tick — and a
-    refusal is one of them."""
-
-    FRESH, STALE = timedelta(minutes=1), timedelta(hours=2)
-
-    def _tick(self, monkeypatch, store):
-        from core import sync_service as sync_mod
-        from core.scheduler import BackgroundScheduler
-
-        service = _sync_service(monkeypatch, store)
-        service._should_skip_sync = lambda: (False, None)
-        service._fetch_orders_with_date_filter = AsyncMock(return_value=[])
-        service.sync_offers = AsyncMock(return_value=3)
-        service.sync_stocks = AsyncMock(return_value=4)
-        monkeypatch.setattr(sync_mod, "get_async_client", AsyncMock())
-
-        now = datetime.now(timezone.utc)
-
-        async def _last(kind):
-            stale = kind in ("buyers", "offers", "stocks")
-            return now - (self.STALE if stale else self.FRESH)
-
-        monkeypatch.setattr(store, "get_last_sync_time", AsyncMock(side_effect=_last))
-        for name in ("refresh_sku_inventory_status", "record_sku_inventory_snapshot",
-                     "record_inventory_snapshot"):
-            monkeypatch.setattr(store, name, AsyncMock(return_value=0))
-        return BackgroundScheduler(), service
-
-    @staticmethod
-    def _stamped(store) -> set:
-        return {c.args[0] for c in store.set_last_sync_time.await_args_list}
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("state", ["no_address", "engine_fails"])
-    async def test_under_off_the_tick_completes_its_other_steps(
-        self, state, stores, monkeypatch, tmp_path,
-    ):
-        store = await _duck(tmp_path)
-        try:
-            scheduler, service = self._tick(monkeypatch, store)
-            if state == "no_address":
-                _unaddressed(monkeypatch, "KS_READ_BUYER_SYNC")
-            else:
-                monkeypatch.setenv("KS_READ_BUYER_SYNC", "postgres")
-            _mode(monkeypatch, "off")
-
-            stats = await scheduler._run_incremental_sync()
-
-            assert stats["buyers"] == 0
-            assert stats["offers"] == 3 and stats["stocks"] == 4
-            service.sync_offers.assert_awaited_once()
-            service.sync_stocks.assert_awaited_once()
-            assert "buyers" not in self._stamped(store), (
-                "the buyers watermark moved over a selection nobody read")
-            assert read_fallback.counts() == {}
-            if state == "no_address":
-                assert read_fallback.refusals()["buyer_sync"]["count"] == 1
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_under_duckdb_the_same_switch_selects_from_duckdb(
-        self, stores, monkeypatch, tmp_path,
-    ):
-        store = await _duck(tmp_path)
-        try:
-            scheduler, _service = self._tick(monkeypatch, store)
-            _unaddressed(monkeypatch, "KS_READ_BUYER_SYNC")
-            _mode(monkeypatch, "duckdb")
-
-            stats = await scheduler._run_incremental_sync()
-
-            # DuckDB answered "nobody missing", a completed step, stamped.
-            assert stats["buyers"] == 0 and stats["offers"] == 3
-            assert "buyers" in self._stamped(store)
-            assert read_fallback.refusals() == {}
-        finally:
-            await store.close()
