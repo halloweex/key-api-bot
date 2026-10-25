@@ -38,6 +38,7 @@ from .products_intel import router as products_intel_router
 from .margin import router as margin_router
 from .me import router as me_router
 from .webhooks import router as webhooks_router
+from .tg_bot import router as tg_bot_router
 
 router = APIRouter(tags=["api"])
 
@@ -68,5 +69,7 @@ router.include_router(
     margin_router, dependencies=[Depends(require_permission("margin"))],
 )
 router.include_router(me_router)
+# The customer bot's activity counts, asked of the bot itself (tg_bot.py).
+router.include_router(tg_bot_router, dependencies=[Depends(require_admin)])
 # Inbound machine callers: no session, each endpoint authenticates itself.
 router.include_router(webhooks_router)
