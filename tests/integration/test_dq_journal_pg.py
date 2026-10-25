@@ -174,7 +174,11 @@ class TestTheReadersAgree:
                 NOW, NOW)
             pg_ages = await chain.last_success_ages(conn, ("integrity", "reconciliation"))
         assert pg_health == dk_health
-        assert pg_health["integrity"]["last_run"]["started_at"].endswith("+03:00")
+        # Kyiv's offset at the run's own instant: +03:00 in summer, +02:00
+        # from the last Sunday of October. A literal "+03:00" here failed
+        # every run from the morning the clocks went back (2026-10-25).
+        started_at = datetime.fromisoformat(pg_health["integrity"]["last_run"]["started_at"])
+        assert started_at.utcoffset() == started_at.astimezone(ZoneInfo("Europe/Kyiv")).utcoffset()
         assert [(s.run, s.issues, s.diffs, s.previous_issues, s.previous_diffs)
                 for s in pg_sections] == \
             [(s.run, s.issues, s.diffs, s.previous_issues, s.previous_diffs)
