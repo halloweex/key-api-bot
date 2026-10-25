@@ -26,9 +26,13 @@ struct Window {
 /// the bound on memory is a period's worth of clients, as in `limits`.
 const SWEEP_ABOVE: usize = 10_000;
 
+/// Endpoint → limit → client: the contract's handful of limits each hold
+/// their clients, so a window costs its client's key and nothing else.
+type Clients = HashMap<String, Window>;
+
 #[derive(Default)]
 struct Windows {
-    open: HashMap<(String, String, String), Window>,
+    by_scope: HashMap<String, HashMap<String, Clients>>,
     swept_at: f64,
 }
 
@@ -37,21 +41,41 @@ pub struct Limiter {
     windows: Mutex<Windows>,
 }
 
+/// `map[key]`, inserting the default first — allocating only on a miss.
+fn slot<'m, V: Default>(map: &'m mut HashMap<String, V>, key: &str) -> &'m mut V {
+    if !map.contains_key(key) {
+        map.insert(key.to_owned(), V::default());
+    }
+    map.get_mut(key).expect("present: inserted just above")
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Window {
+            count: 0,
+            expires_at: 0.0,
+        }
+    }
+}
+
 impl Limiter {
     /// One hit at `now` (Unix seconds); whether it is within the limit.
     pub fn hit(&self, limit: &RateLimit, key: &str, now: f64) -> bool {
         let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
-        if windows.open.len() > SWEEP_ABOVE && now - windows.swept_at >= 1.0 {
-            windows.open.retain(|_, w| w.expires_at > now);
+        let open: usize = windows
+            .by_scope
+            .values()
+            .flat_map(HashMap::values)
+            .map(HashMap::len)
+            .sum();
+        if open > SWEEP_ABOVE && now - windows.swept_at >= 1.0 {
+            for clients in windows.by_scope.values_mut().flat_map(HashMap::values_mut) {
+                clients.retain(|_, w| w.expires_at > now);
+            }
             windows.swept_at = now;
         }
-        let window = windows
-            .open
-            .entry((limit.limit.clone(), key.to_owned(), limit.scope.clone()))
-            .or_insert(Window {
-                count: 0,
-                expires_at: 0.0,
-            });
+        let limits = slot(&mut windows.by_scope, &limit.scope);
+        let window = slot(slot(limits, &limit.limit), key);
         if window.expires_at <= now {
             window.count = 0;
         }
