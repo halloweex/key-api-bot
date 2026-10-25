@@ -1173,19 +1173,26 @@ class TestThePreflight:
         "5 s" answer came after 60 s for chain 3 and 30 s for chain 1, and
         each held its cache lock — and every later /api/health — meanwhile
         (batch-E review). A hang that cancels promptly, as above, cannot see
-        it. Mutation: a bare `asyncio.wait_for(preflight(), bound)`."""
-        import time
+        it. Mutation: a bare `asyncio.wait_for(preflight(), bound)`.
 
+        Judged by order, not by the clock: the cancel request is answered
+        only after the block has answered, so the block must answer while
+        every cut read is still unwinding — and every one must then unwind.
+        It was `took < 1.7 × bound`, a margin of 0.21 s for whatever else the
+        block builds, the margin a CI runner overran in the test above."""
         from core import pg_inventory_write, pg_managers_write
         from web.routes.api import health
 
-        bound, unwind = 0.3, 2.0
+        bound = 0.3
+        cancel_answered = asyncio.Event()
+        unwound = []
 
         async def cancel_hangs():
             try:
                 await asyncio.sleep(3600)
             except asyncio.CancelledError:
-                await asyncio.sleep(unwind)        # the cancel request, unanswered
+                await cancel_answered.wait()        # the cancel request, unanswered
+                unwound.append("unwound")
                 raise
 
         caches = (health._preflight_cache, health._orders_preflight_cache,
@@ -1197,14 +1204,24 @@ class TestThePreflight:
                     patch.object(pow_, "preflight", cancel_hangs), \
                     patch.object(pg_managers_write, "preflight", cancel_hangs), \
                     patch.object(health, "_PREFLIGHT_TIMEOUT_S", bound):
-                started = time.monotonic()
-                block = await health._write_chains_block()
-                took = time.monotonic() - started
-                await asyncio.sleep(unwind + 0.2)    # let the left-behind reads end
+                # Not a limit on the answer: a block that waits for the
+                # unwind waits for ever, and this turns that into a failure.
+                try:
+                    block = await asyncio.wait_for(health._write_chains_block(), 10)
+                except asyncio.TimeoutError:
+                    pytest.fail("the answer waited for the cut reads to unwind")
+                unwound_at_answer = list(unwound)
+                cancel_answered.set()
+                for _ in range(200):                 # let the left-behind reads end
+                    if len(unwound) == 3:
+                        break
+                    await asyncio.sleep(0.01)
         finally:
+            cancel_answered.set()
             for cache in caches:
                 cache.update(data=None, expires_at=0)
-        assert took < 1.7 * bound, f"{took:.2f} s for preflights bounded at {bound} s"
+        assert unwound_at_answer == [], "the answer waited for a cut read to unwind"
+        assert unwound == ["unwound"] * 3, "a read cut at the bound was not cancelled"
         for chain in (pg_inventory_write.CHAIN, pow_.CHAIN, pg_managers_write.CHAIN):
             assert "did not answer" in block[chain]["preflight"]["reasons"][0]
 
