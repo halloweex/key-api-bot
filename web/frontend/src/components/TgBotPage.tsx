@@ -9,6 +9,8 @@ import { InfoBanner } from './InfoBanner'
 import { SegmentedControl } from './SegmentedControl'
 import { TgBotActivityChart } from './TgBotActivityChart'
 import { TgBotWeeklyChart } from './TgBotWeeklyChart'
+import { TgBotEntryFunnel } from './TgBotEntryFunnel'
+import { TgBotExitsTable } from './TgBotExitsTable'
 import { useTgBotActivity } from '../hooks/useApi'
 import { formatNumber, formatPercent } from '../utils/formatters'
 
@@ -101,6 +103,28 @@ export const TgBotPage = memo(function TgBotPage() {
           onRetry={refetch}
         />
       </ChartGrid>
+
+      <section>
+        <TgBotEntryFunnel
+          steps={data?.entry ?? []}
+          isLoading={isLoading}
+          error={failure}
+          onRetry={refetch}
+        />
+      </section>
+
+      <section>
+        <TgBotExitsTable
+          rows={data?.taps ?? []}
+          tapsSince={data?.taps_since ?? null}
+          silenceDays={data?.silence_days ?? 7}
+          sessionGapMinutes={data?.session_gap_minutes ?? 30}
+          leftTotal={data?.left_total ?? 0}
+          isLoading={isLoading}
+          error={failure}
+          onRetry={refetch}
+        />
+      </section>
     </PageShell>
   )
 })

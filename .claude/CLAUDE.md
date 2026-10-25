@@ -164,7 +164,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
-| `/api/tg-bot/activity` | The customer Telegram bot's activity — daily/weekly active, new, registrations, WAU/MAU, activation — for page `/tg-bot` (admin). `days` ∈ 30/90/180. Asked of ks-tg-bot's `GET /internal/activity` at `KS_TG_BOT_URL` (default `http://ks-tg-bot:8081`, the shared `key-api-bot_default` network) with bearer `KS_TG_BOT_TOKEN`; counts only, no customer data. Unset token → 503 "not configured". Last good answer kept 120 s per window and served `stale: true` while the bot is unreachable — `web/services/tg_bot_service.py` |
+| `/api/tg-bot/activity` | The customer Telegram bot's activity — daily/weekly active, new, registrations, WAU/MAU, activation, the entry funnel and the press table (which button people leave after) — for page `/tg-bot` (tab `tgbot`: admins and the marketing presets). `days` ∈ 30/90/180. Asked of ks-tg-bot's `GET /internal/activity` at `KS_TG_BOT_URL` (default `http://ks-tg-bot:8081`, the shared `key-api-bot_default` network) with bearer `KS_TG_BOT_TOKEN`; counts only, no customer data. Unset token → 503 "not configured". Last good answer kept 120 s per window and served `stale: true` while the bot is unreachable — `web/services/tg_bot_service.py` |
 
 **Retired by the owner's decision OD-10 (2026-09-30)**, and kept retired by
 `tests/unit/test_od10_retired_doors.py`: `GET /api/buyers/{id}`,
@@ -795,8 +795,14 @@ inside it.**
 
 - `TAB_FEATURES` (`core/permissions.py`) is the grantable list, in the
   sidebar's order: dashboard, products, traffic, inventory, reports,
-  marketing, margin, expenses, sms. The admin checklist, the bot's keyboard
+  marketing, margin, expenses, sms, tgbot. The admin checklist, the bot's keyboard
   and the route table are all built from it, so a new tab is added once.
+- `tgbot` (/tg-bot, the customer Telegram bot's activity) was admin-only on
+  the day it shipped, 2026-10-25, and the owner opened it to the marketers the
+  same day. It sits in the `marketer` and `marketing` presets and in no role's
+  `DEFAULT_TABS`: a viewer with no override does not see it. Accounts that
+  already held a preset kept their stored list, so the one marketer then
+  approved (the `marketer` preset, editor) was given the tab by hand.
 - `user_management` is deliberately **not** in it. The admin pages stay on the
   admin role: a checkbox that hands somebody the access system itself would
   make every other rule here advisory. `analytics` and `customers` are absent

@@ -900,6 +900,8 @@ export interface Permissions {
   products: FeaturePermissions
   marketing: FeaturePermissions
   margin: FeaturePermissions
+  // The customer Telegram bot's activity (/tg-bot).
+  tgbot: FeaturePermissions
 }
 
 // The features that are a page somebody can be given or denied on its own.
@@ -908,7 +910,7 @@ export interface Permissions {
 // the components index by.
 export const TAB_FEATURES = [
   'dashboard', 'products', 'traffic', 'inventory', 'reports',
-  'marketing', 'margin', 'expenses', 'sms',
+  'marketing', 'margin', 'expenses', 'sms', 'tgbot',
 ] as const
 
 export type TabFeature = (typeof TAB_FEATURES)[number]
@@ -1807,6 +1809,23 @@ export interface TgBotActivityWeek {
   returning: number
 }
 
+/** One button, command or kind of message, over the window (bot/taps.py). */
+export interface TgBotTapRow {
+  what: string
+  label: string
+  presses: number
+  people: number
+  /** Visits that ended on this press: nothing pressed for `session_gap_minutes` after. */
+  session_exits: number
+  /** People whose last press this was and who have done nothing for `silence_days`. */
+  left_after: number
+}
+
+export interface TgBotEntryStep {
+  key: 'started' | 'touched_share' | 'registered' | 'acted' | 'came_back'
+  people: number
+}
+
 export interface TgBotActivityResponse {
   version: number
   generated_at: string
@@ -1832,6 +1851,13 @@ export interface TgBotActivityResponse {
   activation: number | null
   daily: TgBotActivityDay[]
   weekly: TgBotActivityWeek[]
+  /** First day presses were recorded in the window; null before the tap journal shipped. */
+  taps_since: string | null
+  silence_days: number
+  session_gap_minutes: number
+  left_total: number
+  taps: TgBotTapRow[]
+  entry: TgBotEntryStep[]
   /** Set by this server: true when the bot could not be asked and this is the last good answer. */
   stale: boolean
   fetched_at: string
