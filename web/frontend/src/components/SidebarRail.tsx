@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import {
   BarChart3, Lightbulb, Activity, Box, ClipboardList, Rocket, Percent,
-  CircleDollarSign, Users, ShieldCheck, PanelLeft, User, MessageSquare,
+  CircleDollarSign, Users, ShieldCheck, PanelLeft, User, MessageSquare, Send,
 } from 'lucide-react'
 import { useNavStore } from '../store/navStore'
 import { useAuth, usePermission, useUserDisplayName } from '../hooks/useAuth'
@@ -229,6 +229,9 @@ export const SidebarRail = memo(function SidebarRail() {
         {canSms && (
           <CollapsedNavIcon href="/sms" icon={MessageSquare} label={t('nav.smsCampaigns')} />
         )}
+        {isAdmin && (
+          <CollapsedNavIcon href="/tg-bot" icon={Send} label={t('nav.tgBot')} />
+        )}
       </div>
 
       {/* Expanded content */}
@@ -276,6 +279,11 @@ export const SidebarRail = memo(function SidebarRail() {
           {canSms && (
             <NavLink href="/sms" icon={MessageSquare}>
               {t('nav.smsCampaigns')}
+            </NavLink>
+          )}
+          {isAdmin && (
+            <NavLink href="/tg-bot" icon={Send}>
+              {t('nav.tgBot')}
             </NavLink>
           )}
           <NavLink href="/financial" icon={CircleDollarSign} disabled>
