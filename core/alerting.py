@@ -116,8 +116,8 @@ REGISTRY: Dict[str, ConditionSpec] = {
     "read_fallback_mode_invalid": _c("web restarts with a valid KS_READ_FALLBACK"),
     # A read this web process answered from DuckDB because its engine failed
     # (OD-07). The counters are per process, so only a restart empties them;
-    # the page stands until then, and the soak before KS_READ_FALLBACK=off
-    # reads it back out of the journal (deploy/stage4_soak/22_f1_*).
+    # the page stands until then. The soak's F1 read it back out of the
+    # journal before KS_READ_FALLBACK=off, until step 14's S14-02 retired it.
     "read_fallback_used": _c("web restarts and answers no read from DuckDB"),
     # A read switch web serves from DuckDB on every request with nothing to
     # count: an engine named without its address, or the cohorts' switch not

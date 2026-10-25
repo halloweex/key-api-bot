@@ -13,12 +13,25 @@ What is skipped:
   - phase 1 (export)    — the snapshot is what we are restoring FROM
   - phase 4 (swap)      — a drill must never touch a canonical database
 
-Run inside the app image with a scratch directory mounted at /app/data, holding
-`export_parquet/` from an archive. It writes analytics_clean.duckdb next to it
-and leaves the caller to throw the whole directory away:
+Run inside the pinned image with a scratch directory mounted at /app/data,
+holding `export_parquet/` from an archive. It writes analytics_clean.duckdb next
+to it and leaves the caller to throw the whole directory away:
 
-    docker run --rm -v /tmp/drill:/app/data --env-file .env -e KS_DUCKDB=on \\
-        halloweex/keycrm-web:latest python /app/deploy/restore_from_export.py
+    docker run --rm --pull never -v /tmp/drill:/app/data --env-file .env -e KS_DUCKDB=on \\
+        -v "$PWD/deploy/restore_from_export.py:/app/deploy/restore_from_export.py:ro" \\
+        halloweex/keycrm-web:rollback-step14 python /app/deploy/restore_from_export.py
+
+The pinned image is `rollback-step14` on the host, the last image before step
+14, pinned at S14-00's deploy (step 14's H1/H2): DuckDB 1.5.5, the version
+that wrote every archive, and the `compact_duckdb` this file imports from its
+/app/scripts. Never `:latest`: from step 14's S14-19 on it carries no DuckDB,
+and step 14 takes the application's DDL, which phase 2 rebuilds the schema
+from, out of main. On a machine that has lost the host, load that image from
+wherever it was saved (`docker save`, or pull the numbered tag it was pinned
+from — the version production ran when S14-00 deployed — from the registry
+and tag it `rollback-step14`). This file runs in that image, so it imports
+nothing the image does not carry — tests/unit/test_archive_image.py holds it
+to the standard library and the names it uses from `compact_duckdb`.
 
 `-e KS_DUCKDB=on` because a `.env` from the week of silence — the live one, or
 one restored from `env-<stamp>.gpg` — says `off`, and the switch would refuse

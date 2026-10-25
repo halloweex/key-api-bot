@@ -3,9 +3,9 @@
 #
 # Sourced by scripts/weekly_compact.sh, deploy/daily_offsite.sh and
 # deploy/offsite_check.sh — the three host-cron scripts the week of silence
-# changes (stage 5, PR-10) — by deploy/restore-test.sh, and by
-# deploy/stage4_soak.sh, whose P4 judges the week on the same reading rather
-# than a parse of its own. It defines and
+# changes (stage 5, PR-10) — and by deploy/restore-test.sh.
+# deploy/stage4_soak.sh's P4 judged the week on the same reading, rather than
+# a parse of its own, until step 14's S14-02 retired it. It defines and
 # does not act, and it sets no shell options: errexit is the caller's. Bash
 # 3.2 and up, because a laptop runs the tests.
 #
@@ -192,9 +192,9 @@ ks_duckdb_env_note() {
             note="KS_DUCKDB in .env reads off to docker run --env-file and $KS_DUCKDB_ENV_WEB to compose, whose last line for it is a KS_DUCKDB: line docker skips: an image from before step 14 runs web on (a step-14 web runs off whatever it says), and a sidecar would be refused; make it one line, KS_DUCKDB=off. "
         else
             case "$KS_DUCKDB_ENV" in
-                invalid) note="KS_DUCKDB is written with quotes or a comment ($KS_DUCKDB_ENV_VALUE): compose drops them and web runs off, but docker run --env-file keeps them, so a sidecar would read a value the switch does not understand and run on, and the soak's P4 fails on it; $bare. " ;;
-                refused) note="KS_DUCKDB is written with export, or with a space around its = (or after a colon): compose reads it and web runs off, but docker run --env-file refuses the whole file, so no sidecar starts from it — not this one, not the restore drill — and the soak's P4 fails on it; $bare. " ;;
-                on) note="KS_DUCKDB is written KS_DUCKDB:off, which compose reads and docker run --env-file skips: web runs off, but a sidecar would run on, and the soak's P4 fails on it; $bare. " ;;
+                invalid) note="KS_DUCKDB is written with quotes or a comment ($KS_DUCKDB_ENV_VALUE): compose drops them and web runs off, but docker run --env-file keeps them, so a sidecar would read a value the switch does not understand and run on; $bare. " ;;
+                refused) note="KS_DUCKDB is written with export, or with a space around its = (or after a colon): compose reads it and web runs off, but docker run --env-file refuses the whole file, so no sidecar starts from it — not this one, not the restore drill; $bare. " ;;
+                on) note="KS_DUCKDB is written KS_DUCKDB:off, which compose reads and docker run --env-file skips: web runs off, but a sidecar would run on; $bare. " ;;
             esac
         fi
     fi

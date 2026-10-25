@@ -46,17 +46,21 @@ pytestmark = pytest.mark.skipif(
     reason="needs bash, awk, tar, gzip, diff and cmp")
 
 STAMP_RE = re.compile(r"^\d{8}T\d{6}Z$")
+# The image the Ark runs in since step 14 (S14-02): deploy/backup.env names it.
+PINNED = "halloweex/keycrm-web:rollback-step14"
 PHONE = "0501234567"
 FIRST_ARK = "ark-20260823T212918Z.tar.gz"
 OLDER = ["20260901T000000Z", "20260902T000000Z", "20260903T000000Z"]
 
 # Runs the real ark_freeze.py with this interpreter, the container's paths
 # mapped back to the host's, under the umask a real container starts with. It
-# records every call, and three knobs stand in for what a real container can
-# do to the run: no image on the host, a writer touching the source while it
-# is frozen, and a verification that fails on one path only — the downloaded
-# copy's, which nothing else can make fail without breaking a check that runs
-# before it.
+# records every call, and four knobs stand in for what a real container can
+# do to the run: no image on the host, an image whose DuckDB is missing or
+# another version (step 14's pinned-image probe, answered here rather than by
+# this interpreter's own DuckDB, whose version is the dev lock's business), a
+# writer touching the source while it is frozen, and a verification that
+# fails on one path only — the downloaded copy's, which nothing else can make
+# fail without breaking a check that runs before it.
 FAKE_DOCKER = r'''#!{python}
 import os, subprocess, sys
 
@@ -86,6 +90,15 @@ while i < len(args):
         continue
     break
 cmd = ([entry] if entry else []) + args[i + 1:]
+
+if len(cmd) >= 3 and cmd[1] == "-c" and "import duckdb" in cmd[2]:
+    have = os.environ.get("FAKE_DOCKER_DUCKDB", "1.5.5")
+    if have == "absent":
+        print("Traceback (most recent call last):", file=sys.stderr)
+        print("ModuleNotFoundError: No module named 'duckdb'", file=sys.stderr)
+        sys.exit(1)
+    print(have)
+    sys.exit(0)
 
 def host(p):
     for src, dst in sorted(mounts, key=lambda m: -len(m[1])):
@@ -168,7 +181,8 @@ def _make_world(tmp_path, *, real_gpg=False):
     tmp_path = tmp_path.resolve()
     root = tmp_path / "repo"
     (root / "deploy").mkdir(parents=True)
-    for name in ("ark_ship.sh", "pg_offsite_lib.sh", "ark_freeze.py", "gpg_safe.sh"):
+    for name in ("ark_ship.sh", "pg_offsite_lib.sh", "ark_freeze.py", "gpg_safe.sh",
+                 "archive_image.sh"):
         shutil.copy(DEPLOY / name, root / "deploy" / name)
     (root / "data").mkdir()
     source = root / "data" / "analytics.duckdb"
@@ -196,6 +210,7 @@ def _make_world(tmp_path, *, real_gpg=False):
         f"BACKUP_ENV_PASSFILE={passfile}\n"
         f"BACKUP_REMOTE_DIR=key-api-bot\n"
         f"BACKUP_ARK_DIR={arks}\n"
+        f"BACKUP_ARK_IMAGE={PINNED}\n"
     )
 
     class World:
@@ -229,6 +244,16 @@ def _make_world(tmp_path, *, real_gpg=False):
                 ["bash", str(root / "deploy" / "ark_ship.sh"), *map(str, args)],
                 cwd=cwd or root, env=env, capture_output=True, text=True, timeout=300)
             return Run(done, self)
+
+        def configure(self, **values):
+            """deploy/backup.env with `values` set — a value of None drops
+            the line. The script sources the file after the environment, so
+            an image is changed here and not by an environment variable."""
+            path = self.root / "deploy" / "backup.env"
+            lines = [ln for ln in path.read_text().splitlines()
+                     if ln.split("=", 1)[0] not in values]
+            lines += [f"{k}={v}" for k, v in values.items() if v is not None]
+            path.write_text("\n".join(lines) + "\n")
 
         def ark_dirs(self):
             if not self.arks.exists():
@@ -315,6 +340,19 @@ class TestTheShipment:
         assert re.search(rf"SOURCE RELEASED \S+: nothing below reads .* \(sha256 {want}\)",
                          run.out), run.out
         assert f"sha256 {want}" in run.out.split("ARK SHIPPED AND VERIFIED")[1]
+
+    def test_the_pinned_image_is_asked_before_the_freeze(self, healthy):
+        """Step 14 (S14-02): the first container is the probe, of the pinned
+        image, before the freeze — and every container after it is started
+        from that same image. Mutation: probe after the freeze, or freeze in
+        :latest."""
+        world, run = healthy
+        probe, *rest = run.docker_runs
+        assert "import duckdb" in probe and probe.split(" -c ")[0].endswith(PINNED), probe
+        assert any("--source" in c for c in rest)
+        for call in rest:
+            assert f" {PINNED} " in f" {call} ", call
+        assert f"image: {PINNED} (DuckDB 1.5.5)" in run.out
 
     def test_the_source_is_released_before_anything_leaves_the_host(self, healthy):
         """Steps 4-6 of the week may start at that line, so nothing after it
@@ -645,8 +683,57 @@ class TestRefusals:
     def test_without_the_image_it_does_not_pull(self, world):
         run = world.run("--source", "data/analytics.duckdb", FAKE_DOCKER_NO_IMAGE=1)
         assert run.code == 2, run.out
-        assert "this does not pull" in run.out
+        assert "this does not pull" in run.out and "rollback-step14" in run.out
         assert not run.docker_runs
+
+    # ── step 14 (S14-02): the pinned image, or nothing ─────────────────────
+
+    @pytest.mark.parametrize("ark, restore, words", [
+        (None, None, "BACKUP_ARK_IMAGE is not set"),
+        ("halloweex/keycrm-web:latest", None, "BACKUP_ARK_IMAGE=halloweex/keycrm-web:latest moves"),
+        ("halloweex/keycrm-web", None, "names no tag, which is :latest"),
+        (None, "halloweex/keycrm-web:latest", "BACKUP_RESTORE_IMAGE=halloweex/keycrm-web:latest moves"),
+    ], ids=["unset", "latest", "untagged", "restore-image-latest"])
+    def test_without_a_pinned_image_variable_it_refuses(self, world, ark, restore, words):
+        """It used to default to :latest — the image production runs — which
+        loses DuckDB at step 14's S14-19. Now the variable is required, a
+        moving tag is refused before docker is asked anything, and the line
+        names the tag to use. BACKUP_RESTORE_IMAGE stands in for an unset
+        BACKUP_ARK_IMAGE, and is judged the same. Mutation: put the :latest
+        default back."""
+        world.configure(BACKUP_ARK_IMAGE=ark, BACKUP_RESTORE_IMAGE=restore)
+        run = world.run("--source", "data/analytics.duckdb")
+        assert run.code == 2, run.out
+        assert words in run.out and "rollback-step14" in run.out, run.out
+        assert not run.docker and not run.sftp and not run.gpg
+        assert world.ark_dirs() == []
+
+    def test_the_restore_image_stands_in_for_the_arks(self, world):
+        """BACKUP_RESTORE_IMAGE stands in for an unset BACKUP_ARK_IMAGE and is
+        probed the same way: a pinned tag of an image from S14-19 on, which
+        carries no DuckDB, is refused, and the line names the variable that
+        chose it."""
+        world.configure(BACKUP_ARK_IMAGE=None, BACKUP_RESTORE_IMAGE="halloweex/keycrm-web:s14-19")
+        run = world.run("--source", "data/analytics.duckdb", FAKE_DOCKER_DUCKDB="absent")
+        assert run.code == 2, run.out
+        assert "halloweex/keycrm-web:s14-19 cannot import duckdb" in run.out
+        assert "BACKUP_RESTORE_IMAGE=halloweex/keycrm-web:rollback-step14" in run.out
+
+    @pytest.mark.parametrize("have, words", [
+        ("absent", "cannot import duckdb (ModuleNotFoundError: No module named 'duckdb')"),
+        ("1.4.3", "carries DuckDB 1.4.3, not 1.5.5"),
+    ], ids=["no-duckdb", "another-version"])
+    def test_an_image_without_duckdb_1_5_5_is_refused(self, world, have, words):
+        """The image after step 14's S14-19 has no DuckDB; another version did
+        not write the file. Either is a refusal, exit 2, after asking the
+        image in a throwaway container and before anything is frozen or
+        sent. Mutation: drop the probe."""
+        run = world.run("--source", "data/analytics.duckdb", FAKE_DOCKER_DUCKDB=have)
+        assert run.code == 2, run.out
+        assert words in run.out and "rollback-step14" in run.out, run.out
+        [probe] = run.docker_runs
+        assert "import duckdb" in probe and "--network none" in probe and "--pull never" in probe
+        assert world.ark_dirs() == [] and not run.sftp and not run.gpg
 
     def test_a_held_lock_refuses(self, world):
         run = world.run("--source", "data/analytics.duckdb", FAKE_FLOCK_HELD=1)
