@@ -900,6 +900,8 @@ export interface Permissions {
   products: FeaturePermissions
   marketing: FeaturePermissions
   margin: FeaturePermissions
+  // The customer Telegram bot's activity (/tg-bot).
+  tgbot: FeaturePermissions
 }
 
 // The features that are a page somebody can be given or denied on its own.
@@ -908,7 +910,7 @@ export interface Permissions {
 // the components index by.
 export const TAB_FEATURES = [
   'dashboard', 'products', 'traffic', 'inventory', 'reports',
-  'marketing', 'margin', 'expenses', 'sms',
+  'marketing', 'margin', 'expenses', 'sms', 'tgbot',
 ] as const
 
 export type TabFeature = (typeof TAB_FEATURES)[number]

@@ -1,9 +1,10 @@
-"""The customer Telegram bot's activity, for the admin page /tg-bot.
+"""The customer Telegram bot's activity, for the page /tg-bot.
 
-Admin-only, gated once at the include in ``web/routes/api/__init__.py``. Not a
-tab in ``core/permissions.py``: the numbers carry no customer data, but nobody
-has asked to grant them to anyone, and a tab is the access model's to add when
-someone does. The data is the bot's own readout — see
+Gated once at the include in ``web/routes/api/__init__.py`` on the ``tgbot``
+tab. It was admin-only on the day it shipped; the owner then opened it to the
+marketers, which is what a tab is for — it sits in the ``marketer`` and
+``marketing`` presets, and any account can be given it from the checklist. The
+numbers carry no customer data. The data is the bot's own readout — see
 ``web/services/tg_bot_service.py`` for how it is fetched and why it is cached.
 """
 from fastapi import APIRouter, HTTPException, Query, Request

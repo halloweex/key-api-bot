@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { tabSummary, defaultTabsFor, firstAllowedPath } from '../access'
+import { TAB_FEATURES } from '../../types/api'
 import type { Permissions, TabFeature } from '../../types/api'
 
 const label = (tab: TabFeature) => tab
@@ -42,7 +43,7 @@ describe('defaultTabsFor', () => {
   })
 
   it('reads null as every tab, which is what "not narrowed" means', () => {
-    expect(defaultTabsFor(defaults, 'admin')).toHaveLength(9)
+    expect(defaultTabsFor(defaults, 'admin')).toHaveLength(TAB_FEATURES.length)
   })
 
   it('says nothing when the matrix has not loaded or the role is unknown', () => {

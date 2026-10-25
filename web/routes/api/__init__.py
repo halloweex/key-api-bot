@@ -70,6 +70,9 @@ router.include_router(
 )
 router.include_router(me_router)
 # The customer bot's activity counts, asked of the bot itself (tg_bot.py).
-router.include_router(tg_bot_router, dependencies=[Depends(require_admin)])
+# A tab since the owner opened it to the marketers; admins hold every tab.
+router.include_router(
+    tg_bot_router, dependencies=[Depends(require_permission("tgbot"))],
+)
 # Inbound machine callers: no session, each endpoint authenticates itself.
 router.include_router(webhooks_router)

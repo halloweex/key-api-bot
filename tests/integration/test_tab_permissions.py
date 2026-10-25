@@ -45,6 +45,7 @@ TAB_ENDPOINTS = {
     "reports": "/api/reports/summary",
     "marketing": "/api/reports/marketing-summary",
     "margin": "/api/margin/overview",
+    "tgbot": "/api/tg-bot/activity",
     "expenses": "/api/expenses/summary",
     "sms": "/api/customers/sms-segments",
 }
