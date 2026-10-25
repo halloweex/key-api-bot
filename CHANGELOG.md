@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.298
+
+- Tests: a journal timestamp carries Kyiv's offset for its own instant
+- Tests: name the inside-the-window sweep for what it holds
+- Window comment: the date picker reaches neither end in practice
+- Marketing report: a year back from 29 February is 28 February, not a 500
+- Dashboard dates outside 2000-01-01..2099-12-31 are a 400, not a 500
+
+
 ## 3.0.297
 
 - /tg-bot: a page for the customer bot's activity (admin)
