@@ -182,7 +182,17 @@ success.
 known `period` wins over both. The forms `strptime` forgives (`2026-1-5`,
 `2026-01- 5`) stay accepted — decided 2026-10-21, refusing them would only
 turn working requests into errors. A date it refuses is a 400 naming the field;
-it was a 500 until then. A range longer than `MAX_RANGE_DAYS` (3 660 days,
+it was a 500 until then. Each date must also lie in 2000-01-01..2099-12-31
+(`EARLIEST_DATE`, `LATEST_DATE`, the owner's decision of 2026-10-22), the
+start judged before the end, or it is a 400 naming its field: `Date must be
+between 2000-01-01 and 2099-12-31`. Python's calendar ends at 0001-01-01 and
+9999-12-31, and eight routes stepped off it and answered 500 —
+`end_date=9999-12-31` under the per-day loops, a start in year 1 under a
+comparison, a backwards range whose previous period runs past 9999-12-31 —
+while a date beyond the window answered zeros everywhere else. Inside it every
+date a route derives lies between 1989-12-24 and 2199-12-30, which
+`tests/unit/test_filters_parse_period.py` holds the comparison windows to. A
+range longer than `MAX_RANGE_DAYS` (3 660 days,
 ten years and a week) is a 400 naming `date_range`: four endpoints build one
 list entry per day of the range on web's event loop — the trend, its
 comparison, expenses summary and profit, customer insights — and
