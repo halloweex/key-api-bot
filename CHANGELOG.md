@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.297
+
+- /tg-bot: a page for the customer bot's activity (admin)
+- GET /api/tg-bot/activity: the customer bot's activity, asked of the bot
+- DQ journal test takes Kyiv's offset at the run's instant, not +03:00
+- Cadence wrapper tests hold the trigger's own cadence, not a literal 6 h
+
+
 ## 3.0.296
 
 - Trend forecast predicts at most FORECAST_HORIZON_DAYS ahead
