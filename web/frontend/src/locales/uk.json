@@ -1393,5 +1393,22 @@
   "tgBot.returning": "Повторні",
   "tgBot.logStarts": "початок журналу",
   "tgBot.staleTitle": "Бот не відповідає",
-  "tgBot.staleBody": "Показано його останню відповідь від {{time}}."
+  "tgBot.staleBody": "Показано його останню відповідь від {{time}}.",
+  "tgBot.entryTitle": "Де відвалюються новачки",
+  "tgBot.entryHint": "Люди, що вперше зʼявилися за період. Відсоток — від попереднього кроку.",
+  "tgBot.entryEmpty": "За цей період новачків немає",
+  "tgBot.step.started": "Натиснули /start",
+  "tgBot.step.touched_share": "Взялися за «Поділитися номером»",
+  "tgBot.step.registered": "Зареєструвалися",
+  "tgBot.step.acted": "Щось зробили після реєстрації",
+  "tgBot.step.came_back": "Повернулися в інший день",
+  "tgBot.exitsTitle": "Після якої кнопки йдуть",
+  "tgBot.exitsHint": "Візит закінчується після {{gap}} хв без натискань. «Пішли» — останнє натискання перед {{days}} днями тиші; таких людей поки {{left}}.",
+  "tgBot.exitsSince": "Натискання записуються з {{date}}.",
+  "tgBot.exitsEmpty": "Натискання записуються з 25.10.2026 — зʼявляться тут, щойно клієнти почнуть користуватися ботом.",
+  "tgBot.colButton": "Кнопка або дія",
+  "tgBot.colPresses": "Натискань",
+  "tgBot.colPeople": "Людей",
+  "tgBot.colVisitEnded": "Кінець візиту",
+  "tgBot.colLeftAfter": "Пішли після"
 }

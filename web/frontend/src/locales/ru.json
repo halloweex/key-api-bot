@@ -1393,5 +1393,22 @@
   "tgBot.returning": "Вернувшиеся",
   "tgBot.logStarts": "начало журнала",
   "tgBot.staleTitle": "Бот не отвечает",
-  "tgBot.staleBody": "Показан его последний ответ от {{time}}."
+  "tgBot.staleBody": "Показан его последний ответ от {{time}}.",
+  "tgBot.entryTitle": "Где отваливаются новички",
+  "tgBot.entryHint": "Люди, впервые появившиеся за период. Процент — от предыдущего шага.",
+  "tgBot.entryEmpty": "За этот период новичков нет",
+  "tgBot.step.started": "Нажали /start",
+  "tgBot.step.touched_share": "Взялись за «Поделиться номером»",
+  "tgBot.step.registered": "Зарегистрировались",
+  "tgBot.step.acted": "Что-то сделали после регистрации",
+  "tgBot.step.came_back": "Вернулись в другой день",
+  "tgBot.exitsTitle": "После какой кнопки уходят",
+  "tgBot.exitsHint": "Визит заканчивается после {{gap}} мин без нажатий. «Ушли» — последнее нажатие перед {{days}} днями тишины; таких людей пока {{left}}.",
+  "tgBot.exitsSince": "Нажатия записываются с {{date}}.",
+  "tgBot.exitsEmpty": "Нажатия записываются с 25.10.2026 — появятся здесь, как только клиенты начнут пользоваться ботом.",
+  "tgBot.colButton": "Кнопка или действие",
+  "tgBot.colPresses": "Нажатий",
+  "tgBot.colPeople": "Людей",
+  "tgBot.colVisitEnded": "Конец визита",
+  "tgBot.colLeftAfter": "Ушли после"
 }
