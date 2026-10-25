@@ -4,9 +4,12 @@ The dashboard's access layer in Rust — the session cookie, roles, tabs and
 the rate limit in front of every route — and one endpoint behind it,
 `GET /api/revenue/trend` on its Gold branch, each answering exactly as the
 Python app does over the same Postgres. It exists to measure what a port
-costs and what it buys. **It is not deployed.** It checks sessions as the app
-does, and it is still a pilot nobody has reviewed for exposure; it listens on
-`127.0.0.1:8090` unless `KS_PILOT_LISTEN` says otherwise.
+costs and what it buys. **It answers no one.** `docker-compose.yml` can run it
+(service `rust-api`, profile `rust`), and nginx sends it nothing until
+`nginx/rust/routes.conf` names a route — see "Switching a route" below. It
+checks sessions as the app does, and it is still a pilot nobody has reviewed
+for exposure; it listens on `127.0.0.1:8090` unless `KS_PILOT_LISTEN` says
+otherwise.
 
 ```
 rust/
@@ -155,3 +158,26 @@ for p in today yesterday week last_week month last_month last_7_days last_28_day
       echo "/api/revenue/trend?$q&compare_type=$c"
 done; done; done; done
 ```
+
+## Switching a route
+
+Everything a route needs to move is already in place and routes nothing:
+
+- **The service.** `rust-api` in `docker-compose.yml`, in the `rust` profile, so
+  a plain `docker compose pull` / `up -d` never touches it. It reads Postgres as
+  `ks_readonly`, publishes no port, and its healthcheck (`ks-api healthcheck`)
+  asks `/readyz`: Postgres answers that role and the schema is at the
+  contract's revision. An image older than the schema shows up unhealthy.
+- **The switch.** `nginx/rust/routes.conf`, mounted as a directory and empty.
+  One line per route switches it —
+  `location = /api/revenue/trend { include /etc/nginx/rust/proxy.conf; }` —
+  and deleting the line takes it back.
+- **The fallback.** `proxy.conf` hands a request back to web on the pilot's own
+  501 ("the Python app serves it") and on the 502 nginx makes when the pilot
+  does not answer, and passes every other answer through. `ua=` and `us=` in
+  nginx's log name both hops of a handed-back request.
+- **The deploy.** `deploy.yml` builds this image only when `rust/**` or
+  `Dockerfile.rust` changed, on an arm64 runner, and deploys it in its own job:
+  pull, `up` under the profile, wait for healthy, `nginx -t`, `nginx -s reload`.
+  A change to `routes.conf` alone is that job's reload and nothing else
+  (`.github/scripts/changed_components.py` decides).
