@@ -258,9 +258,9 @@ class TestWhatTheWindowLeaves:
     @pytest.mark.parametrize("compare_type", ["previous_period", "year_ago", "month_ago"])
     @pytest.mark.parametrize("start, end", FARTHEST)
     def test_every_comparison_window_stays_on_the_calendar(self, start, end, compare_type):
-        """The trend, the organic traffic block and (with its own copy of
-        `previous_period`) the product momentum all derive their comparison
-        this way."""
+        """The trend, the organic traffic block and the marketing report
+        derive their comparison this way, and the product momentum its own
+        copy of `previous_period`."""
         from core.repositories.revenue import RevenueMixin
 
         parse_period(None, start.isoformat(), end.isoformat())

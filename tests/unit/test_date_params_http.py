@@ -23,8 +23,9 @@ app-wide ValidationError handler would have answered 400 as well, but with
 
 Valid input answers as it did: a form `strptime` forgives gives the body its
 ISO spelling gives, a range of exactly the cap is answered, and so are the
-window's own edges, under every comparison. `parse_period` itself is
-tests/unit/test_filters_parse_period.py.
+window's own edges, under every comparison. So is 29 February, which the
+marketing report and its CSV answered 500 until its year ago became the
+trend's. `parse_period` itself is tests/unit/test_filters_parse_period.py.
 """
 from datetime import date, timedelta
 
@@ -141,11 +142,16 @@ def test_the_trend_refuses_them_under_every_comparison(admin_client, compare_typ
 
 
 # The window's own edges, and a backwards range across all of it: every
-# comparison and per-day loop they start stays on the calendar.
+# comparison and per-day loop they start stays on the calendar. Then 29
+# February at either end of a range and alone, which the marketing report and
+# its CSV answered 500: their year ago was `date.replace(year=...)`.
 INSIDE = [
     ("2000-01-01", "2000-01-01"),
     ("2099-12-31", "2099-12-31"),
     ("2099-12-31", "2000-01-01"),
+    ("2024-02-29", "2024-03-31"),
+    ("2024-02-01", "2024-02-29"),
+    ("2028-02-29", "2028-02-29"),
 ]
 
 
@@ -162,6 +168,25 @@ def test_the_trend_answers_the_edges_under_every_comparison(admin_client, compar
     r = admin_client.get("/api/revenue/trend", params={
         "start_date": start, "end_date": end, "compare_type": compare_type})
     assert r.status_code == 200, r.text
+
+
+FEBRUARY_2024 = {"start_date": "2024-02-01", "end_date": "2024-02-29"}
+
+
+def test_the_marketing_report_takes_29_february_a_year_back_to_the_28th(admin_client):
+    """The same dates a year back, as the trend's year ago has always taken
+    them; the previous period is the 29 days before, as it was."""
+    r = admin_client.get("/api/reports/marketing-summary", params=FEBRUARY_2024)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert (body["yoy_start_date"], body["yoy_end_date"]) == ("2023-02-01", "2023-02-28")
+    assert (body["prev_start_date"], body["prev_end_date"]) == ("2024-01-03", "2024-01-31")
+
+
+def test_the_marketing_csv_labels_29_february_a_year_back_as_the_28th(admin_client):
+    r = admin_client.get("/api/reports/marketing-summary/export/csv", params=FEBRUARY_2024)
+    assert r.status_code == 200, r.text
+    assert "2023-02-01 — 2023-02-28" in r.content.decode("utf-8-sig")
 
 
 class TestValidInputAnswersAsBefore:

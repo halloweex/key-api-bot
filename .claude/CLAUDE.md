@@ -191,8 +191,11 @@ between 2000-01-01 and 2099-12-31`. Python's calendar ends at 0001-01-01 and
 comparison, a backwards range whose previous period runs past 9999-12-31 —
 while a date beyond the window answered zeros everywhere else. Inside it every
 date a route derives lies between 1989-12-24 and 2199-12-30, which
-`tests/unit/test_filters_parse_period.py` holds the comparison windows to. A
-range longer than `MAX_RANGE_DAYS` (3 660 days,
+`tests/unit/test_filters_parse_period.py` holds the comparison windows to.
+29 February is an ordinary date: a year back from it is 28 February, by
+`RevenueMixin._comparison_window`, which the marketing report shares with the
+trend since its own `date.replace(year=…)` answered 500 on a range starting or
+ending there. A range longer than `MAX_RANGE_DAYS` (3 660 days,
 ten years and a week) is a 400 naming `date_range`: four endpoints build one
 list entry per day of the range on web's event loop — the trend, its
 comparison, expenses summary and profit, customer insights — and
