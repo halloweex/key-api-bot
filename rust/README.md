@@ -34,7 +34,7 @@ rust/
 │   ├── src/pytables.rs     GENERATED: Unicode facts CPython 3.14 answers with
 │   ├── gen_pytables.py     writes pytables.rs and tests/fixtures/python_semantics.jsonl
 │   ├── gen_access_fixtures.py   writes tests/fixtures/access_semantics.jsonl
-│   └── tests/              the port against 8 631 CPython answers
+│   └── tests/              the port against 8 629 CPython answers
 ├── crates/ks-loadgen/      the benchmark's closed-loop client
 └── bench/                  bench.sh, the Python side (py_app.py), paths.txt
 ```
