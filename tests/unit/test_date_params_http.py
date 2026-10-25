@@ -133,8 +133,8 @@ def test_a_date_outside_the_window_is_a_400_naming_it(admin_client, endpoint, fi
 @pytest.mark.parametrize("compare_type", COMPARISONS)
 @pytest.mark.parametrize("field, start, end", OUTSIDE[3:])
 def test_the_trend_refuses_them_under_every_comparison(admin_client, compare_type, field, start, end):
-    """Year 1 answered 500 under each comparison, each one stepping off the
-    calendar its own way: a year back, a month back, a period back."""
+    """All three answered 500 under every comparison, year 1 stepping off
+    the calendar its own way under each: a year, a month or a period back."""
     r = admin_client.get("/api/revenue/trend", params={
         "start_date": start, "end_date": end, "compare_type": compare_type})
     assert r.status_code == 400
@@ -157,14 +157,14 @@ INSIDE = [
 
 @pytest.mark.parametrize("start, end", INSIDE)
 @pytest.mark.parametrize("endpoint", DATED, ids=lambda e: e.path)
-def test_the_window_edges_are_answered(admin_client, endpoint, start, end):
+def test_dates_inside_the_window_are_answered(admin_client, endpoint, start, end):
     r = _get(admin_client, endpoint, start_date=start, end_date=end)
     assert r.status_code == 200, r.text
 
 
 @pytest.mark.parametrize("compare_type", COMPARISONS)
 @pytest.mark.parametrize("start, end", INSIDE)
-def test_the_trend_answers_the_edges_under_every_comparison(admin_client, compare_type, start, end):
+def test_the_trend_answers_them_under_every_comparison(admin_client, compare_type, start, end):
     r = admin_client.get("/api/revenue/trend", params={
         "start_date": start, "end_date": end, "compare_type": compare_type})
     assert r.status_code == 200, r.text
