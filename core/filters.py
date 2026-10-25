@@ -35,8 +35,8 @@ MAX_RANGE_DAYS = 3660
 # answered 500 on four of them, a start in year 1 and a backwards range from
 # 9999 on five. Inside this window every date they derive falls between
 # 1989-12-24 and 2199-12-30. A date outside it is a 400 naming its field; 1999
-# and 2100 answered zeros before. The dashboard's date picker stops at today,
-# and the store's whole history lies inside the window.
+# and 2100 answered zeros before. The dashboard's own picker reaches neither
+# end in practice, and the store's whole history lies inside the window.
 EARLIEST_DATE = date(2000, 1, 1)
 LATEST_DATE = date(2099, 12, 31)
 
