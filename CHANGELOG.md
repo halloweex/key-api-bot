@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.299
+
+- /tg-bot: where newcomers drop off, and after which press people leave
+- /tg-bot becomes the tgbot tab, held by the marketing presets
+
+
 ## 3.0.298
 
 - Tests: a journal timestamp carries Kyiv's offset for its own instant
