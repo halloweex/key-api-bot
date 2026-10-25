@@ -12,6 +12,9 @@
 //! written down again, and refused unless they hash to what the contract
 //! says the code holds; and, in a `test-clock` build only,
 //! `KS_PILOT_TEST_CLOCK=1`, which lets the harness freeze the trend's "now".
+//!
+//! `ks-api healthcheck` is the container's healthcheck: it asks the running
+//! service's `/readyz` and exits 0 or 1, since the image has no shell.
 
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -185,8 +188,29 @@ async fn run() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// `ks-api healthcheck`, the container's healthcheck: this process's own
+/// `/readyz`, on the address `KS_PILOT_LISTEN` names, within four seconds.
+async fn healthcheck() -> ExitCode {
+    let Ok(listen) = env_or("KS_PILOT_LISTEN", SocketAddr::from(([127, 0, 0, 1], 8090))) else {
+        return ExitCode::FAILURE;
+    };
+    let target = ks_api::health::loopback(listen);
+    match tokio::time::timeout(
+        Duration::from_secs(4),
+        ks_api::health::probe(target, "/readyz"),
+    )
+    .await
+    {
+        Ok(Ok(true)) => ExitCode::SUCCESS,
+        _ => ExitCode::FAILURE,
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        return healthcheck().await;
+    }
     tracing_subscriber::fmt().with_target(false).init();
     match run().await {
         Ok(()) => ExitCode::SUCCESS,

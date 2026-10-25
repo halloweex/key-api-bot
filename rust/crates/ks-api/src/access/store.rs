@@ -77,6 +77,18 @@ impl PgAccess {
             .map_err(|_| StoreError(format!("no answer within {:?}", self.timeout)))?
     }
 
+    /// Whether this service can answer anybody: Postgres answers its role,
+    /// and the schema is at the revision the contract was exported from. An
+    /// image older than the schema refuses every session, so `/readyz` —
+    /// the container's healthcheck — asks exactly this.
+    pub async fn ready(&self) -> Result<(), StoreError> {
+        self.within(async {
+            let mut conn = self.pool.acquire().await?;
+            self.require_revision(&mut conn).await
+        })
+        .await
+    }
+
     /// `require_revision()`: absent, unreadable or another revision all fail.
     async fn require_revision(&self, conn: &mut PgConnection) -> Result<(), StoreError> {
         let found: Option<String> =
