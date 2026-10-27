@@ -17,8 +17,9 @@ send) — lives in `core/report_ledger.py`, shared with chain 11b.
 
 Two chains rather than one flag (the chain map: "two small steps"), because
 the two reports deliver on their own days and either may be rolled back alone.
-The first Postgres write latches the chain (OD-19 (a)); the way back is
-`scripts/chain_copy_back.py weekly_ledger`.
+The first Postgres write latches the chain (OD-19 (a)); the way back was
+`scripts/chain_copy_back.py weekly_ledger` (deleted in step 14's S14-04;
+the way back since is an image from before step 14, `core.rollback_lever`).
 """
 from __future__ import annotations
 
@@ -88,20 +89,6 @@ def pending() -> Dict[str, Any]:
     from core.report_ledger import pending_of
 
     return pending_of(CHAIN)
-
-
-async def land_pending(store) -> int:
-    """Land every spooled row in Postgres, then in DuckDB — what the gate does
-    under `postgres` — and return how many landed. Never raises.
-
-    The copy-back's first write (`core.chain_transfer.copy_back`): a spooled
-    week is a delivery neither store holds, and a copy that read Postgres
-    without it would release the chain with the week in a file nothing under
-    `duckdb` used to read. `pending()` afterwards says what did not land.
-    """
-    from core.report_ledger import WEEKLY, drain
-
-    return await drain(store, WEEKLY)
 
 
 def _latch() -> str:

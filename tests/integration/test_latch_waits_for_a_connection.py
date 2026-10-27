@@ -1,7 +1,8 @@
 """The latch waits for a connection: every chain's writers, against a live pool.
 
-The latch is permanent — only `scripts/chain_copy_back.py` releases it — so a
-write that never reaches Postgres must not take it. `core.pg.get_pool` sets no
+The latch is permanent — `scripts/chain_copy_back.py` was the only thing that
+released it, and step 14's S14-04 deleted it — so a write that never reaches
+Postgres must not take it. `core.pg.get_pool` sets no
 acquire timeout, so a pool with no free connection makes a writer *wait*, and
 until 2026-09-25 chains 1, 8 and 7a took the marker before that wait began:
 between getting the pool and `pool.acquire()`. Whatever then ended the wait

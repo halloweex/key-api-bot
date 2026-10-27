@@ -151,7 +151,7 @@ BUYERS_OVERRIDE_FLOOR="${SOAK_BUYERS_OVERRIDE_FLOOR:-}"
 BUYERS_HELD_BY=""
 BUYERS_NOTE=""
 if [ "$BUYERS_LATCHED" = "1" ] && [ "$BUYERS_ON" != "1" ]; then
-    BUYERS_NOTE=" (latched: chain 4 owns its tables in Postgres, and KS_WRITE_BUYERS says otherwise — only scripts/chain_copy_back.py undoes that)"
+    BUYERS_NOTE=" (latched: chain 4 owns its tables in Postgres, and KS_WRITE_BUYERS says otherwise; nothing in a step-14 image undoes that. Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows)"
     BUYERS_ON=1
 elif [ "$BUYERS_ON" = "1" ] && [ "$BUYERS_LATCHED" = "0" ]; then
     for reader in KS_SMS_STORE KS_READ_SEARCH_INDEX KS_READ_DASHBOARD; do
@@ -178,7 +178,7 @@ MANAGERS_LATCHED="$(latch_state pg_managers_write)"
 MANAGERS_FLIP_AT="${SOAK_MANAGERS_FLIP_AT:-}"
 MANAGERS_NOTE=""
 if [ "$MANAGERS_LATCHED" = "1" ] && [ "$MANAGERS_ON" != "1" ]; then
-    MANAGERS_NOTE=" (latched: chain 5 owns its tables in Postgres, and KS_WRITE_MANAGERS says otherwise — only scripts/chain_copy_back.py undoes that)"
+    MANAGERS_NOTE=" (latched: chain 5 owns its tables in Postgres, and KS_WRITE_MANAGERS says otherwise; nothing in a step-14 image undoes that. Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows)"
     MANAGERS_ON=1
 elif [ "$MANAGERS_ON" = "1" ] && [ "$MANAGERS_LATCHED" = "0" ]; then
     MANAGERS_ON=pending
@@ -200,7 +200,7 @@ ORDERS_LATCHED="$(latch_state pg_orders_write)"
 ORDERS_FLIP_AT="${SOAK_ORDERS_FLIP_AT:-}"
 ORDERS_NOTE=""
 if [ "$ORDERS_LATCHED" = "1" ] && [ "$ORDERS_ON" != "1" ]; then
-    ORDERS_NOTE=" (latched: chain 3 owns its tables in Postgres, and KS_WRITE_ORDERS says otherwise — only scripts/chain_copy_back.py undoes that)"
+    ORDERS_NOTE=" (latched: chain 3 owns its tables in Postgres, and KS_WRITE_ORDERS says otherwise; nothing in a step-14 image undoes that. Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows)"
     ORDERS_ON=1
 elif [ "$ORDERS_ON" = "1" ] && [ "$ORDERS_LATCHED" = "0" ]; then
     ORDERS_ON=pending
@@ -243,7 +243,7 @@ TRAFFIC_LEDGER_ON="$(shadow_state KS_WRITE_TRAFFIC_LEDGER pg_traffic_ledger_writ
 # writes it every hour.
 INVENTORY_NOTE=""
 if [ "$INVENTORY_LATCHED" = "1" ] && [ "$INVENTORY_ON" != "1" ]; then
-    INVENTORY_NOTE=" (latched: chain 1 owns its tables in Postgres, and KS_WRITE_INVENTORY says otherwise — only scripts/chain_copy_back.py undoes that)"
+    INVENTORY_NOTE=" (latched: chain 1 owns its tables in Postgres, and KS_WRITE_INVENTORY says otherwise; nothing in a step-14 image undoes that. Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows)"
     INVENTORY_ON=1
 fi
 

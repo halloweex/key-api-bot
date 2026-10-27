@@ -121,10 +121,6 @@ _DESTINATION = {
     # journal's own table and has no DuckDB copy either.
     ("core/alert_archive.py", "_write_watch"): (
         "the alert journal lives in Postgres alone; there is no copy", None),
-    # A rollback lever's use (OD-17 (a)), in the same journal and written
-    # inside the release's own transaction.
-    ("core/lever_journal.py", "record"): (
-        "the alert journal lives in Postgres alone; there is no copy", None),
     ("core/ch_history.py", "ship_history"): (
         "writes ClickHouse's history.*, not Postgres", None),
     ("core/pg_silver.py", "rebuild_silver"): (
@@ -140,10 +136,6 @@ _DESTINATION = {
         "moved by its own switch before the registry existed", "user_store_is_postgres"),
     ("core/pg_bot_state.py", "replicate_bot_state"): (
         "moved by its own switch before the registry existed", "ENGINE_ENV"),
-    ("core/chain_transfer.py", "copy_back"): (
-        "DN-08's copy-back writes DuckDB out of Postgres; its one Postgres write "
-        "is `release_chain`'s delete of meta.chain_watermarks — the walk reads "
-        "`_write_duckdb`'s DuckDB statements as its own", None),
 }
 
 # The store helpers that route every statement handed to them by a switch of
@@ -2276,7 +2268,11 @@ class TestTheComparisonSaysWhyItStoodDown:
         assert page.table_name == ", ".join(sorted((GENDER, BUYERS, CONTACTS)))
         assert page.count == 3
         assert STAMP in page.description
-        assert "scripts/chain_copy_back.py" in page.description
+        # The lever since step 14's S14-04 deleted the copy-back.
+        from core.rollback_lever import ROLLBACK_LEVER
+
+        assert ROLLBACK_LEVER in page.description
+        assert "chain_copy_back" not in page.description
         assert [i for i in issues if i.table_name == GENDER] == []
         assert _read_a_table(pool, [GENDER]) == [], pool.sql
 
@@ -2308,9 +2304,11 @@ class TestTheComparisonSaysWhyItStoodDown:
         from core.alerting import REGISTRY, Kind
         from core.data_quality import human_check_name, remediation_for
 
+        from core.rollback_lever import ROLLBACK_LEVER
+
         (lever,) = remediation_for(["chain_owner_unregistered"])
-        assert "scripts/chain_copy_back.py" in lever and len(lever) <= 150
-        assert "never re-ship" in lever.lower()
+        assert lever.startswith(ROLLBACK_LEVER) and len(lever) <= 150
+        assert "chain_copy_back" not in lever
         assert "does not know" in human_check_name("chain_owner_unregistered")
         spec = REGISTRY["chain_owner_unregistered"]
         assert spec.kind is Kind.CONDITION

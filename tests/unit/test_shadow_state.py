@@ -419,100 +419,6 @@ class TestTheJobComparesTheShadow:
         assert not [i for i in issues if i.table_name == SENDS]
 
 
-# ─── The copy-back: the prune rule and the carried keys ──────────────────────
-
-
-class TestTheHandoverKnowsASweep:
-    def _spec(self, table):
-        from core import chain_transfer
-
-        chain = types.SimpleNamespace(CHAIN="x", CHAIN_TABLES=(table,))
-        (spec,) = chain_transfer.chain_specs(chain)
-        return spec
-
-    def test_a_lagging_prune_is_info_and_a_newer_row_still_refuses(self):
-        """Mutation: drop the rule (every chain-10 flip refuses on a lagging
-        prune), or apply it to a row newer than Postgres's oldest (a stranded
-        sample deleted unasked)."""
-        from core.chain_transfer import classify_handover
-
-        spec = self._spec("app.memory_samples")
-        assert spec.prune_clock == "sampled_at"
-        kept = OLD
-        aged, stranded = OLD - timedelta(days=15), OLD + timedelta(hours=1)
-        row = lambda at: (at, 100.0, 10.0, 512.0, 0)  # noqa: E731
-        dk = {aged: row(aged), kept: row(kept), stranded: row(stranded)}
-        pg = {kept: row(kept)}
-        issues = classify_handover(spec, dk, pg, moved_on=True)
-        found = {(i.check_name, i.severity): i.count for i in issues}
-        assert found[("handover_rows_pruned", Severity.INFO)] == 1
-        assert found[("handover_rows_missing", Severity.CRITICAL)] == 1
-
-    def test_a_table_that_never_sweeps_has_no_prune_clock(self):
-        assert self._spec(SENDS).prune_clock is None
-        assert self._spec("app.data_quality_runs").prune_clock is None
-
-
-class TestTheMarkerKeysTravelWithTheSyncKeys:
-    def test_carried_keys_are_both_lists(self):
-        """Mutation: drop `CHAIN_MARKER_KEYS` from `_carried_keys` — the digest
-        beat left in `meta.chain_watermarks` is inherited, stale, by the next
-        flip."""
-        from core.chain_transfer import _carried_keys
-
-        chain = types.SimpleNamespace(CHAIN_SYNC_KEYS=("last_sync_a",),
-                                      CHAIN_MARKER_KEYS=("dq_digest_last_sent",))
-        assert _carried_keys(chain) == ("last_sync_a", "dq_digest_last_sent")
-        assert _carried_keys(types.SimpleNamespace()) == ()
-
-    @pytest.mark.asyncio
-    async def test_the_release_deletes_the_marker_keys(self, flags):
-        """The release's DELETE carries the marker keys with the owner rows.
-        The same transaction also writes the release's lever record
-        (core/lever_journal.py, OD-17 (a)), so the fake reads the DELETE's
-        keys off the DELETE alone and holds the record to the same
-        connection."""
-        from core import lever_journal
-        from core.chain_transfer import release_chain
-
-        deleted, statements = [], []
-
-        class Conn:
-            def transaction(self):
-                return _Ctx()
-
-            async def execute(self, sql, *args):
-                statements.append((sql, args))
-                if sql.startswith("DELETE FROM meta.chain_watermarks"):
-                    deleted.extend(args[0])
-
-        class Pool:
-            def acquire(self):
-                return _Ctx(Conn())
-
-        chain = types.ModuleType("core.pg_fake_marker_write")
-        chain.CHAIN_TABLES = ("app.data_quality_runs",)
-        chain.CHAIN_MARKER_KEYS = ("dq_digest_last_sent",)
-        await release_chain(Pool(), chain)
-        assert "dq_digest_last_sent" in deleted
-        assert "owner:app.data_quality_runs" in deleted
-        assert [args[0] for sql, args in statements if "alert_events" in sql] == [
-            lever_journal.lever_key(lever_journal.CHAIN_COPY_BACK)]
-
-    def test_every_site_reads_through_the_one_helper(self):
-        """`_read_sync_keys` and `release_chain` both ask `_carried_keys`, so a
-        key cannot be carried back and then left standing. Mutation: spell
-        `CHAIN_SYNC_KEYS` at one site again."""
-        import inspect
-
-        from core import chain_transfer
-
-        for fn in (chain_transfer._read_sync_keys, chain_transfer.release_chain):
-            src = inspect.getsource(fn)
-            assert "_carried_keys(" in src, fn.__name__
-            assert '"CHAIN_SYNC_KEYS"' not in src, fn.__name__
-
-
 # ─── The shadow write primitive ──────────────────────────────────────────────
 
 
@@ -921,15 +827,13 @@ class TestEveryShadowChainIsRegistered:
         assert _declares_shadow(ast.parse("CHAIN_SHADOW = True\n"))
         assert not _declares_shadow(ast.parse("CHAIN_SHADOW = False\n"))
 
-    def test_every_shadow_table_is_one_the_copy_back_replaces_whole(self):
-        """A shadow chain's way back is a full replace (`_FULL_REPLACE`) and
-        its comparison is an `OPERATIONAL_TABLES` spec; `chain_specs` raises
-        for a table with neither."""
-        from core import chain_transfer
+    def test_every_shadow_table_is_one_the_hourly_copy_replaces_whole(self):
+        """A shadow chain's tables are full replaces (`_FULL_REPLACE`), the
+        hourly copy that stands down for them. The copy-back read them the
+        same way, until step 14's S14-04 deleted it."""
         from core.pg_operational import _FULL_REPLACE
 
         whole = {pg for pg, *_ in _FULL_REPLACE}
         for chain in write_chains.shadow_chains():
             assert set(chain.CHAIN_TABLES) <= whole, chain.__name__
-            assert chain_transfer.chain_specs(chain)
         assert set(SHADOW_CANDIDATES) <= whole

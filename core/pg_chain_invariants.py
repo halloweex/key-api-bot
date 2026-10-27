@@ -76,7 +76,8 @@ Goals (chain 7a, DN-25):
   write a NULL is a writer that stopped, and before it one the replication
   carried across; the finding says which (`_null_issues`). Each one costs
   something specific: `updated_at` is the clock the copy-back's handover
-  orders two versions of a goal by, so a NULL leaves it nothing to order with;
+  orders two versions of a goal by — an image from before step 14's, since
+  S14-04 deleted this build's — so a NULL leaves it nothing to order with;
   and `get_smart_goals` keeps a stored goal only `if is_custom`, so a NULL
   there silently replaces the number a human typed with the suggestion. No
   allocator and no watermark: the table is keyed on `period_type` and has no
@@ -113,8 +114,9 @@ The buyers (chain 4):
   shipped yet is not a defect — so it is judged from the latch on. Production
   held none of either on 2026-09-30.
 * **`full_name`.** Postgres allows NULL there and DuckDB does not, so a NULL
-  is a buyer `scripts/chain_copy_back.py` refuses to carry back
-  (`handover_rows_unwritable`). The shared parse writes `'Unknown'` for a
+  is a buyer the copy-back refuses to carry back (`handover_rows_unwritable`)
+  — the copy-back of an image from before step 14, since S14-04 deleted this
+  build's. The shared parse writes `'Unknown'` for a
   blank name; a NULL is a write that went round `landing_rows.buyer_row`.
 * **Every buyer's phone and email are in its contact list.** The parse takes
   the buyer's `phone`/`email` columns and its contact rows from the same
@@ -163,8 +165,9 @@ The manager classification (chain 5):
   a human can decide which answer the past should have.
 * **`is_retail` agrees with the latest open interval.** The screen shows one
   and Silver uses the other. WARN.
-* **`set_at`** — the copy-back's handover clock, which the Postgres column has
-  no default for (`chain_required_column_null`).
+* **`set_at`** — the copy-back's handover clock (an image from before step
+  14's, since S14-04 deleted this build's), which the Postgres column has no
+  default for (`chain_required_column_null`).
 * **Not its watermark.** The sync is daily; `_freshness_check` judges
   `last_sync_managers` at 192 h from `meta.chain_watermarks`.
 
@@ -189,8 +192,9 @@ The goal and forecast tables (chain 7b-3):
 * **All WARN.** Every value in the four tables can be computed again —
   `POST /api/goals/recalculate` and a training — so nothing here is worth a
   page at 01:00. An unstamped row is reported inside the staleness it blinds,
-  not as `chain_required_column_null`: these stamps order nothing in the
-  copy-back, which forgives them.
+  not as `chain_required_column_null`: these stamps ordered nothing in the
+  copy-back, which forgave them (and an image from before step 14's still
+  does; S14-04 deleted this build's).
 
 WHO IS WATCHED: THE CHAIN'S OWN ANSWER, NOT A SECOND ONE
 
@@ -1594,10 +1598,10 @@ def _null_issues(nulls: Nulls, chain: str,
                   "time-windowed read of this table, this check's own "
                   "included.")
     if nulls.table == "bronze.buyers":
-        cause += (" DuckDB declares full_name NOT NULL, so "
-                  "scripts/chain_copy_back.py refuses to carry such a buyer "
-                  "back (handover_rows_unwritable) and the chain cannot be "
-                  "rolled back until the row is corrected.")
+        cause += (" DuckDB declares full_name NOT NULL, so the copy-back of "
+                  "an image from before step 14 refuses to carry such a buyer "
+                  "back (handover_rows_unwritable): correct the row before "
+                  "any rollback to rollback-step14.")
         if latched_at is not None:
             cause += (" The shared parse writes 'Unknown' for a blank name, "
                       "so a NULL is a write that went round "
@@ -1742,10 +1746,11 @@ def _buyer_issues(b: Buyers, chain: str) -> List:
                 "deletes a buyer, so these were written round it — or a buyer "
                 "was deleted by hand. The SMS audience joins contacts to "
                 "buyers, so an orphaned phone number is in no audience. "
-                "scripts/chain_copy_back.py does not refuse them: it reads "
-                "contacts through their buyers and leaves an orphaned one "
-                "behind, and carries an orphaned verdict into DuckDB — so "
-                "--handover will not name them. Correct them before a rollback.")))
+                "The copy-back of an image from before step 14 does not "
+                "refuse them: it reads contacts through their buyers and "
+                "leaves an orphaned one behind, and carries an orphaned "
+                "verdict into DuckDB — so its handover will not name them. "
+                "Correct them before any rollback to rollback-step14.")))
     if b.contact_missing:
         shown = ", ".join(str(i) for i in b.contact_missing_sample)
         issues.append(_issue(

@@ -59,10 +59,11 @@ against (`core.pg_chain_invariants`).
 From the latch on, "the chain wrote this row" is `mirrored_at` being one of the
 recorded stamps: the watch reads any other instant at or after the latch as
 written round the chain, CRITICAL for as long as the row keeps it, however many
-full writes pass; the copy-back counts only recorded rows as the chain's work
-(`chain_transfer._rewritten_since_latch`). It clears when KeyCRM serves the
-row again (the next full write re-stamps it) or when a human deletes it or
-restores it, `mirrored_at` included, from DuckDB's frozen copy.
+full writes pass; the copy-back counted only recorded rows as the chain's
+work (`chain_transfer._rewritten_since_latch`), until S14-04 deleted it. It
+clears when KeyCRM serves the row again (the next full write re-stamps it) or
+when a human deletes it or restores it, `mirrored_at` included, from DuckDB's
+frozen copy.
 
 The watermark is read the same way. The daily comparison takes a
 `last_ok_at` after the owner row for a shipment over the chain's rows
@@ -82,8 +83,9 @@ What it cannot see, named rather than claimed: a write that leaves
 `mirrored_at` alone, or copies an instant the chain did write. On a row KeyCRM
 serves the next full write overwrites it within the hour; on a retired one
 nothing in Postgres dates it — a trigger or a per-row history would, and both
-are a migration. The copy-back still refuses such an edit on a row retired
-before the flip, where DuckDB's frozen copy disagrees.
+are a migration. The copy-back refused such an edit on a row retired before
+the flip, where DuckDB's frozen copy disagrees; an image from before step 14
+still does, and S14-04 deleted this build's.
 
 The record row is locked FIRST, before any product: two full writes of one
 table queue on it and never interleave, so neither loses the other's stamp,
@@ -117,7 +119,9 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) inside
 `pool.acquire()` — with a bound, chain 4's — and claims both owner rows inside
 its transaction. From the first catalogue written here only
-`scripts/chain_copy_back.py catalogue` moves the writes back to DuckDB.
+`scripts/chain_copy_back.py catalogue` moved the writes back to DuckDB
+(deleted in step 14's S14-04; the way back since is an image from before
+step 14, `core.rollback_lever`).
 
 A PRECONDITION THE FLAG ENFORCES — UNTIL S14-00
 
@@ -166,16 +170,17 @@ WRITE_ENV = "KS_WRITE_CATALOGUE"
 
 # What this chain is called in `core.write_chains`, in the local latch marker
 # and in the `/api/health` block. One spelling, so a marker written by one
-# release is still read by the next. `chain_copy_back.py catalogue` resolves it.
+# release is still read by the next.
 CHAIN = "pg_catalogue_write"
 
 PRODUCTS = "bronze.products"
 CATEGORIES = "bronze.categories"
 
 # The tables this chain writes. `core.write_chains` reads this, and through it
-# the mirror (`pg_landing._mirror`), the daily comparison (`reconcile_mirror`),
-# the carry of retired rows and the copy-back. Each is a unit of its own
-# (`pg_landing.unit_of`): one writer, one table, one transaction.
+# the mirror (`pg_landing._mirror`), the daily comparison (`reconcile_mirror`)
+# and the carry of retired rows (and the copy-back, until step 14's S14-04
+# deleted it). Each is a unit of its own (`pg_landing.unit_of`): one writer,
+# one table, one transaction.
 CHAIN_TABLES: Tuple[str, ...] = (PRODUCTS, CATEGORIES)
 
 # The revision that refuses every image built before this chain; the flag
@@ -233,8 +238,9 @@ STATEMENT_TIMEOUT = "30s"
 # The record of the chain's own write instants (module docstring). The key
 # lives beside the owner rows in `meta.chain_watermarks`; nothing reads that
 # table except by an exact key or the `owner:` prefix, so a third family of
-# keys is seen by nobody but its readers: the watch, the copy-back and the
-# daily comparison (`read_mirror_stamps`).
+# keys is seen by nobody but its readers: the watch and the daily comparison
+# (`read_mirror_stamps`) — and the copy-back, until step 14's S14-04 deleted
+# it.
 RECORD_PREFIX = "writes:"
 
 # A row's `mirrored_at` as the record keeps it: whole microseconds since the
@@ -261,11 +267,6 @@ _MIRROR_STAMPS_SQL = (
     "FROM unnest($1::text[]) AS t(table_name) "
     "LEFT JOIN meta.mirror_state m ON m.table_name = t.table_name "
     "LEFT JOIN meta.chain_watermarks w ON w.key = $2::text || t.table_name")
-
-# Released with the owner rows by `scripts/chain_copy_back.py catalogue`: the
-# record describes writes DuckDB owns again, and a later flip starts a new one.
-CHAIN_RELEASED_KEYS: Tuple[str, ...] = tuple(
-    f"{RECORD_PREFIX}{table}" for table in CHAIN_TABLES)
 
 _EMPTY_RECORD_TEXT = '{"stamps": [], "previous": null}'
 # Created empty if absent, then locked: the first statement of a write after
@@ -305,8 +306,9 @@ class CatalogueRefused(ValueError):
 
 class WriteRecordUnreadable(ValueError):
     """`writes:<table>` holds something `parse_record` cannot read. The write
-    stops, the watch is blind and the copy-back refuses — none of them may
-    guess which instants were the chain's."""
+    stops and the watch is blind (and the copy-back refused, until step 14's
+    S14-04 deleted it) — none of them may guess which instants were the
+    chain's."""
 
 
 @dataclass(frozen=True)
@@ -353,9 +355,9 @@ async def read_mirror_stamps(conn) -> Dict[str, chain_latch.MirrorStamp]:
     Reads only. A record nobody can parse is answered as `unreadable`, never
     raised and never as an empty record: the comparison must say it could not
     tell, and the rest of its run must still compare. No record at all is an
-    empty one — the copy-back's and the watch's rule — so a table the chain has
-    not written yet (latched through the other one) has no instant of its own.
-    Only `stamps` is handed on, never `previous`."""
+    empty one — the watch's rule, and the copy-back's until S14-04 — so a
+    table the chain has not written yet (latched through the other one) has
+    no instant of its own. Only `stamps` is handed on, never `previous`."""
     out: Dict[str, chain_latch.MirrorStamp] = {}
     for row in await conn.fetch(_MIRROR_STAMPS_SQL,
                                 list(CHAIN_STAMPS_MIRROR_STATE), RECORD_PREFIX):

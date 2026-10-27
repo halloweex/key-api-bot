@@ -8,8 +8,10 @@
   and read a prune DuckDB had not caught up with as INFO (since step 14's S14-00 the comparison no longer compares a shadow —
   `compared_in_shadow()` is empty, as it has been in production under
   `KS_DUCKDB=off` — and its test went with it);
-- the standing watch reads the spans with its real SQL;
-- the way back is a near no-op copy that refuses nothing for a lagging prune.
+- the standing watch reads the spans with its real SQL.
+
+The way back — a near no-op copy that refused nothing for a lagging prune —
+went with the copy-back in step 14's S14-04.
 """
 from __future__ import annotations
 
@@ -180,26 +182,3 @@ class TestTheStandingWatch:
         names = {(i.check_name, i.table_name) for i in inv.check_chain_invariants(facts)}
         assert (inv.SAMPLES_STALE, "app.disk_samples") in names
         assert (inv.SAMPLES_STALE, "app.memory_samples") not in names
-
-
-class TestTheWayBack:
-    @pytest.mark.asyncio
-    async def test_a_lagging_prune_does_not_refuse_and_the_copy_releases(self, stores):
-        from core.chain_transfer import copy_back, handover_check
-
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        now = datetime.now(timezone.utc)
-        await watchdog_samples.disk_tick(store, _sample(now - timedelta(hours=3)), {"duckdb": 1})
-        await watchdog_samples.memory_tick(store, MEM)
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO disk_samples VALUES (?, 1, 1, 1)",
-                         [now - timedelta(days=16)])
-        issues = await handover_check(store, chain)
-        assert {(i.check_name, i.severity.value) for i in issues} == {
-            ("handover_rows_pruned", "INFO")}, issues
-        result = await copy_back(store, chain, dry_run=False)
-        assert result["findings"] == [] and result["released"] is True, result
-        for table, cols in COLS.items():
-            pg, dk = await _rows(store, pool, table, cols)
-            assert pg == dk, table

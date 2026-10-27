@@ -119,16 +119,17 @@ _EXEMPT_CALLS = {
     ("core/scheduler.py", "fetch_last_success_ages"),
 }
 # SQL naming the journal: the router, the stores' own machinery (DDL,
-# migrations, the hourly copy and its comparison, the copy-back, the snapshot
-# validation), the Postgres-side readers that already read the writer (chain
-# 1's preflight, the standing invariants). The one that gates on the hourly
-# copy's age drops that gate under `pg_dq_journal_write.reads_postgres()` —
-# the copy stands down with the chain — which `TestChainOnesPreflight` here
-# holds it to. Chain 7b's goals dry run was the second, and was retired with
-# the bridge it measured (chain 7b-4).
+# migrations, the hourly copy and its comparison, the snapshot validation;
+# the copy-back went with step 14's S14-04), the Postgres-side readers that
+# already read the writer (chain 1's preflight, the standing invariants). The
+# one that gates on the hourly copy's age drops that gate under
+# `pg_dq_journal_write.reads_postgres()` — the copy stands down with the
+# chain — which `TestChainOnesPreflight` here holds it to. Chain 7b's goals
+# dry run was the second, and was retired with the bridge it measured (chain
+# 7b-4).
 _SQL_ALLOWED = _ROUTER | {
     "core/migrations.py", "core/mirror_reconciliation.py", "core/pg_operational.py",
-    "core/chain_transfer.py", "core/snapshot_validation.py",
+    "core/snapshot_validation.py",
     "core/pg_inventory_write.py", "core/pg_chain_invariants.py",
 }
 _JOURNAL_SQL = re.compile(

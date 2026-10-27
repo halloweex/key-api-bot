@@ -225,35 +225,6 @@ class TestTheFullSyncAndTheHourlyReplace:
         assert len(await _pg_rows(pool)) == 27, "the hourly replace rolled it back"
 
 
-# ─── the way back ────────────────────────────────────────────────────────────
-
-
-class TestCopyBack:
-    @pytest.mark.asyncio
-    async def test_a_type_only_duckdb_holds_is_refused_before_anything_is_written(
-        self, stores,
-    ):
-        """A full replace would delete it, and a comparison run afterwards
-        could not see what the copy destroyed — so the handover asks first."""
-        from core.chain_transfer import CopyBackRefused, copy_back
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        await store.upsert_expense_types(_payload())
-        assert "error" not in await replicate_operational(store)
-        env.setenv(chain.WRITE_ENV, "postgres")
-        await store.upsert_expense_types(_payload(renamed={4: "Реклама"}))
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO expense_types (id, name) VALUES (99, 'only here')")
-        before = await _duck_rows(store)
-
-        with pytest.raises(CopyBackRefused):
-            await copy_back(store, chain, dry_run=False)
-
-        assert await _duck_rows(store) == before
-        assert chain_latch.latched(chain.CHAIN)
-
-
 # ─── the standing watch, on the real table ───────────────────────────────────
 
 

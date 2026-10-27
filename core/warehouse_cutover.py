@@ -1436,16 +1436,18 @@ async def readiness(env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
 # `managers.is_retail` and the intervals), under chain 3 every order since the
 # latch would be missing, and the Silver and Gold comparisons the way back
 # brings back would be set against that Silver. The copy-back's
-# `warehouse_dirty='full'` mark covers the order of ways back only when the
-# copy-back has already run, and an automatic way back runs no runbook.
+# `warehouse_dirty='full'` mark covered the order of ways back only when the
+# copy-back had already run (it went with step 14's S14-04), and an automatic
+# way back runs no runbook.
 #
 # So the start refuses it: it stays `postgres` — DuckDB does not derive,
 # Postgres goes on deriving from the tables the chains write — publishes the
 # chains in `/api/health` under `warehouse_writer_mode.way_back_refused`, and
-# the canary pages `warehouse_way_back_refused` (CRITICAL) with the lever:
-# copy the chains back (`scripts/chain_copy_back.py`, chain 5 before chain 3),
-# then take the way back. The latch outranks KS_WRITE_WAREHOUSE as it outranks
-# a chain's own flag (OD-19 (a)).
+# the canary pages `warehouse_way_back_refused` (CRITICAL) with the lever,
+# which was to copy the chains back (`scripts/chain_copy_back.py`, chain 5
+# before chain 3), then take the way back. Step 14's S14-04 deleted the
+# copy-back, so the lever is `core.rollback_lever` since. The latch outranks
+# KS_WRITE_WAREHOUSE as it outranks a chain's own flag (OD-19 (a)).
 #
 # Postgres derives on its own signal only under KS_PG_DERIVE=own; under
 # `piggyback` its rebuild rides the DuckDB tick, which a `postgres` start does
@@ -1508,18 +1510,19 @@ def _the_way_back(holding: Tuple[str, ...], why: str) -> str:
     global _way_back_refused
     if holding and holding != _way_back_refused:
         from core import pg_derivation
+        from core.rollback_lever import ROLLBACK_LEVER, ROLLBACK_RUNBOOK
 
         logger.critical(
             "%s would run as duckdb, but the way back is refused: write chain(s) "
             "%s own tables DuckDB derives from (%s) and froze DuckDB's copy at "
             "their latch, so a DuckDB rebuild would derive from them. Staying "
-            "postgres: DuckDB does not derive, and %s. Copy them back first "
-            "(scripts/chain_copy_back.py, chain 5 before chain 3), then take "
-            "the way back.", why, ", ".join(holding),
+            "postgres: DuckDB does not derive, and %s. Nothing in a step-14 "
+            "image copies them back: %s (%s).", why, ", ".join(holding),
             ", ".join(DUCKDB_DERIVATION_SOURCES),
             "Postgres derives on its own signal" if pg_derivation.owns() else
             f"NOTHING derives: {pg_derivation.ENV} is not own, so the Postgres "
-            "rebuild rides a DuckDB tick this process does not run")
+            "rebuild rides a DuckDB tick this process does not run",
+            ROLLBACK_LEVER, ROLLBACK_RUNBOOK)
     _way_back_refused = holding
     return POSTGRES if holding else DUCKDB
 

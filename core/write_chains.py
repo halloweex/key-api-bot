@@ -210,10 +210,11 @@ def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
 #   those tables facing Postgres→DuckDB (`compare_shadow`).
 #
 # A chain declares the shape with `CHAIN_SHADOW = True`. Everything else about
-# it — the latch, the owner rows, the copy-back, the flag's typo rule — is the
-# frozen chains' machinery unchanged: a shadow chain is latched by its first
-# Postgres write like any other, because a row whose shadow failed exists in
-# Postgres alone, and the flag is then no more a rollback than chain 8's.
+# it — the latch, the owner rows, the flag's typo rule, and the copy-back until
+# step 14's S14-04 deleted it — is the frozen chains' machinery unchanged: a
+# shadow chain is latched by its first Postgres write like any other, because
+# a row whose shadow failed exists in Postgres alone, and the flag is then no
+# more a rollback than chain 8's.
 
 
 def is_shadow(chain: ModuleType) -> bool:
@@ -242,9 +243,10 @@ def mismatched_chains() -> Dict[str, str]:
     their variable says otherwise.
 
     The shipper stamps these tables failing and the canary pages WARN on them.
-    Neither may repair it: the only way back is `scripts/chain_copy_back.py`,
-    which copies the rows to DuckDB, compares them at zero and releases both
-    copies of the latch.
+    Neither may repair it. The way back was `scripts/chain_copy_back.py`, which
+    copied the rows to DuckDB, compared them at zero and released both copies
+    of the latch; step 14's S14-04 deleted it, and the lever is
+    `core.rollback_lever` since.
     """
     return {name: str(state["latched_at"])
             for name, state in chain_modes().items() if state["mismatch"]}

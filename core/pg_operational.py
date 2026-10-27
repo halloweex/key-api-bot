@@ -918,8 +918,10 @@ async def replicate_operational(
             # it is the actionable half — correcting the variable to `postgres`
             # also ends the mismatch, while releasing the latch would not fix a
             # typo.
-            stamps = [(name, f"owned by Postgres since {at}; "
-                             "run scripts/chain_copy_back.py")
+            # The lever since step 14's S14-04 deleted the copy-back.
+            from core.rollback_lever import ROLLBACK_LEVER
+
+            stamps = [(name, f"owned by Postgres since {at}; {ROLLBACK_LEVER}")
                       for name, at in mismatches.items()]
             # A chain held down by its owner rows alone is stamped too, because
             # a stand-down that says nothing is a watermark ageing quietly — and
@@ -927,8 +929,7 @@ async def replicate_operational(
             # following KS_WRITE_* again while this job declines to ship. The
             # daily comparison files `chain_latch_disagrees` for the same state.
             stamps += [(name, f"owner rows in Postgres since {at} and no local "
-                              "marker: restore data/write-chain-owners or run "
-                              "scripts/chain_copy_back.py")
+                              f"marker: {ROLLBACK_LEVER}")
                        for name, at in marker_lost.items()]
             stamps += [(name, f"not shipped: {error}")
                        for name, error in chain_errors.items()]
