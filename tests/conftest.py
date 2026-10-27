@@ -277,6 +277,25 @@ def _a_fresh_orders_chain_hold(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _a_fresh_sync_service(monkeypatch):
+    """Every test starts with no `SyncService` singleton.
+
+    Its step states floor their ages at the instance's creation, so one made
+    by an earlier test reads, half an hour later, as a tick that never
+    reached the order step — `orders_sync_failing`, CRITICAL, on any test
+    that judges a live /api/health with the canary. Since S14-00 chain 3 is
+    always on Postgres, so the canary judges that step in every test; the
+    store-backed gate, which runs the suite for over an hour, failed
+    `test_duckdb_fatal_reconnect` on exactly this. Only reset when the module
+    is loaded: before that there is no singleton to leak."""
+    import sys
+
+    module = sys.modules.get("core.sync_service")
+    if module is not None:
+        monkeypatch.setattr(module, "_sync_service", None)
+
+
+@pytest.fixture(autouse=True)
 def _a_fresh_warehouse_writer(monkeypatch, tmp_path):
     """Every test starts as a process that has read nothing and settled
     nothing about the warehouse writer (DN-29).
