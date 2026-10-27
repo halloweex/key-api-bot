@@ -149,12 +149,22 @@ async def test_something_that_is_not_json_is_an_error():
 
 # --- the route --------------------------------------------------------------------
 
-def test_the_route_is_admin_only():
+def test_the_route_belongs_to_the_tgbot_tab_and_the_marketers_hold_it():
+    """Admin-only on the day it shipped; opened to the marketers the same day.
+    A tab is how that is said, and the two marketing presets carry it."""
+    from core import permissions as perm
     from tests.routes_helper import route_dependencies
     from web.main import app
     from web.routes.auth import require_admin
 
-    assert require_admin in set(route_dependencies(app, "/api/tg-bot/activity", "GET"))
+    # Who gets a 403 and who does not is tests/integration/test_tab_permissions.py,
+    # which walks every tab's endpoint; here only that the admin gate is gone.
+    assert require_admin not in set(route_dependencies(app, "/api/tg-bot/activity", "GET"))
+    assert "tgbot" in perm.TAB_FEATURE_KEYS
+    for preset in ("marketer", "marketing"):
+        assert "tgbot" in perm.ACCESS_PRESETS[preset], preset
+    for role in ("viewer", "editor"):
+        assert "tgbot" not in (perm.DEFAULT_TABS[role] or ()), role
 
 
 def _admin_client() -> TestClient:

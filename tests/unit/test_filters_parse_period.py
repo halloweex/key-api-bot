@@ -12,18 +12,30 @@ Two defects, both in the explicit dates, found by the Rust pilot of
   web's event loop and 95 MB of JSON for the trend alone. Over MAX_RANGE_DAYS
   is a ValidationError naming `date_range`.
 
+And a third, found by putting every dated route against the edges of the
+calendar: a well-formed date at either end of Python's calendar answered 500
+on eight routes, whose arithmetic stepped off it. Outside EARLIEST_DATE ..
+LATEST_DATE (2000-01-01 .. 2099-12-31, the owner's decision of 2026-10-22) is
+a ValidationError naming the field.
+
 Everything else is pinned as it was, because the pilot reproduces this
 function answer for answer: the shortcuts, the forms `strptime` forgives, a
 date without its pair, a shortcut beside dates, a range that runs backwards.
 The routes' half — 400, in the shape their other validators use — is
-tests/integration/test_date_params_http.py.
+tests/unit/test_date_params_http.py.
 """
 from datetime import date, timedelta
 
 import pytest
 
 from core.exceptions import ValidationError
-from core.filters import MAX_RANGE_DAYS, DateRange, parse_period
+from core.filters import (
+    EARLIEST_DATE,
+    LATEST_DATE,
+    MAX_RANGE_DAYS,
+    DateRange,
+    parse_period,
+)
 
 # A Wednesday, so `week` and `last_week` are not degenerate.
 TODAY = date(2026, 10, 21)
@@ -144,11 +156,20 @@ class TestTheRangeIsCapped:
             f"(got: '{MAX_RANGE_DAYS + 1} days')")
 
     def test_the_pilots_range_is_refused(self):
-        """3 651 693 days: 6.8 s of web's event loop for the trend, measured."""
+        """3 651 693 days, 6.8 s of web's event loop for the trend, measured.
+        Both its ends are outside the window now, so the start is what it is
+        refused on, before its days are counted."""
         with pytest.raises(ValidationError) as caught:
             _parse(start_date="0002-01-01", end_date="9999-12-30")
+        assert caught.value.field == "start_date"
+
+    def test_the_whole_window_is_over_the_cap(self):
+        """The window is a hundred years and the cap ten, so inside it the
+        cap still binds."""
+        with pytest.raises(ValidationError) as caught:
+            _parse(start_date=EARLIEST_DATE.isoformat(), end_date=LATEST_DATE.isoformat())
         assert caught.value.field == "date_range"
-        assert caught.value.value == "3651693 days"
+        assert caught.value.value == "36525 days"
 
     def test_the_cap_is_counted_after_parsing(self):
         """A forgiven form counts the same days as its ISO spelling."""
@@ -156,3 +177,92 @@ class TestTheRangeIsCapped:
         end = start + timedelta(days=MAX_RANGE_DAYS)
         with pytest.raises(ValidationError):
             _parse(start_date="2016-1-1", end_date=end.isoformat())
+
+
+class TestTheWindow:
+    def test_the_window_is_the_owners(self):
+        assert (EARLIEST_DATE, LATEST_DATE) == (date(2000, 1, 1), date(2099, 12, 31))
+
+    @pytest.mark.parametrize("day", ["2000-01-01", "2099-12-31"])
+    def test_both_ends_are_inside(self, day):
+        assert _parse(start_date=day, end_date=day).as_str_tuple() == (day, day)
+
+    # A day either side of the window, which answered zeros before, and the
+    # calendar's last day as the end alone, named before the range is
+    # counted. Then the three that answered 500: the calendar's last day under
+    # a per-day loop, year 1 under a comparison, and a backwards range whose
+    # previous period lands past 9999-12-31 — each starting outside too.
+    OUTSIDE = [
+        ("start_date", "1999-12-31", "2000-01-31"),
+        ("end_date", "2099-12-01", "2100-01-01"),
+        ("end_date", "2099-12-31", "9999-12-31"),
+        ("start_date", "9999-12-01", "9999-12-31"),
+        ("start_date", "0001-01-01", "0001-01-31"),
+        ("start_date", "9999-12-31", "0001-01-01"),
+    ]
+
+    @pytest.mark.parametrize("field, start_date, end_date", OUTSIDE)
+    def test_a_date_outside_names_its_field(self, field, start_date, end_date):
+        with pytest.raises(ValidationError) as caught:
+            _parse(start_date=start_date, end_date=end_date)
+        raw = start_date if field == "start_date" else end_date
+        assert caught.value.field == field
+        assert str(caught.value) == (
+            f"{field}: Date must be between 2000-01-01 and 2099-12-31 (got: {raw!r})")
+
+    def test_a_forgiven_form_outside_is_named_as_written(self):
+        with pytest.raises(ValidationError) as caught:
+            _parse(start_date="1999-1-5", end_date="2026-01-31")
+        assert caught.value.value == "1999-1-5"
+
+    def test_the_start_is_judged_whole_before_the_end(self):
+        """Read, then the window, the start before the end: the first wrong
+        date is the one named, whatever is wrong with the other."""
+        with pytest.raises(ValidationError) as caught:
+            _parse(start_date="1999-12-31", end_date="2026-02-30")
+        assert caught.value.field == "start_date"
+        with pytest.raises(ValidationError) as caught:
+            _parse(start_date="2026-02-30", end_date="9999-12-31")
+        assert str(caught.value).startswith("start_date: Invalid date format")
+
+    def test_a_backwards_range_across_the_window_is_accepted_as_before(self):
+        r = _parse(start_date="2099-12-31", end_date="2000-01-01")
+        assert (r.start, r.end) == (LATEST_DATE, EARLIEST_DATE)
+
+    @pytest.mark.parametrize("start_date, end_date", [
+        ("0001-01-01", None),
+        (None, "9999-12-31"),
+    ])
+    def test_a_date_outside_without_its_pair_is_ignored_as_before(self, start_date, end_date):
+        assert _parse(start_date=start_date, end_date=end_date).as_str_tuple() == (
+            "2026-10-21", "2026-10-21")
+
+    def test_a_shortcut_wins_over_dates_outside(self):
+        r = _parse("month", start_date="0001-01-01", end_date="9999-12-31")
+        assert r.as_str_tuple() == ("2026-10-01", "2026-10-21")
+
+
+class TestWhatTheWindowLeaves:
+    """The routes' own arithmetic at the farthest ranges the window and the
+    cap still let through. Every 500 the window closed was a comparison
+    window or a per-day step off the calendar; inside it, they all land
+    between 1989-12-24 and 2199-12-30, as `core/filters.py` says."""
+
+    CAP = timedelta(days=MAX_RANGE_DAYS - 1)
+    FARTHEST = [
+        (EARLIEST_DATE, EARLIEST_DATE + CAP),
+        (LATEST_DATE - CAP, LATEST_DATE),
+        (LATEST_DATE, EARLIEST_DATE),
+    ]
+
+    @pytest.mark.parametrize("compare_type", ["previous_period", "year_ago", "month_ago"])
+    @pytest.mark.parametrize("start, end", FARTHEST)
+    def test_every_comparison_window_stays_on_the_calendar(self, start, end, compare_type):
+        """The trend, the organic traffic block and the marketing report
+        derive their comparison this way, and the product momentum its own
+        copy of `previous_period`."""
+        from core.repositories.revenue import RevenueMixin
+
+        parse_period(None, start.isoformat(), end.isoformat())
+        window = RevenueMixin._comparison_window(start, end, compare_type)
+        assert date(1989, 12, 24) <= min(window) and max(window) <= date(2199, 12, 30)

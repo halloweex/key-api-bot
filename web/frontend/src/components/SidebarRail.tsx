@@ -85,6 +85,7 @@ export const SidebarRail = memo(function SidebarRail() {
   const { canView: canMarketing } = usePermission('marketing')
   const { canView: canMargin } = usePermission('margin')
   const { canView: canSms } = usePermission('sms')
+  const { canView: canTgBot } = usePermission('tgbot')
 
   // Health check for version
   const { data: health } = useQuery<HealthResponse>({
@@ -229,7 +230,7 @@ export const SidebarRail = memo(function SidebarRail() {
         {canSms && (
           <CollapsedNavIcon href="/sms" icon={MessageSquare} label={t('nav.smsCampaigns')} />
         )}
-        {isAdmin && (
+        {canTgBot && (
           <CollapsedNavIcon href="/tg-bot" icon={Send} label={t('nav.tgBot')} />
         )}
       </div>
@@ -281,7 +282,7 @@ export const SidebarRail = memo(function SidebarRail() {
               {t('nav.smsCampaigns')}
             </NavLink>
           )}
-          {isAdmin && (
+          {canTgBot && (
             <NavLink href="/tg-bot" icon={Send}>
               {t('nav.tgBot')}
             </NavLink>

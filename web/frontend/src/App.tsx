@@ -44,15 +44,15 @@ function App() {
     )
   }
 
-  // Customer Telegram bot activity (admin; the bot's own counts)
+  // Customer Telegram bot activity (the bot's own counts)
   if (path === '/v2/tg-bot' || path === '/tg-bot') {
     return (
       <AppShell>
-        <AdminGuard>
+        <PermissionGuard feature="tgbot">
           <Suspense fallback={<Spinner />}>
             <TgBotPage />
           </Suspense>
-        </AdminGuard>
+        </PermissionGuard>
       </AppShell>
     )
   }

@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.299
+
+- /tg-bot: where newcomers drop off, and after which press people leave
+- /tg-bot becomes the tgbot tab, held by the marketing presets
+
+
+## 3.0.298
+
+- Tests: a journal timestamp carries Kyiv's offset for its own instant
+- Tests: name the inside-the-window sweep for what it holds
+- Window comment: the date picker reaches neither end in practice
+- Marketing report: a year back from 29 February is 28 February, not a 500
+- Dashboard dates outside 2000-01-01..2099-12-31 are a 400, not a 500
+
+
+## 3.0.297
+
+- /tg-bot: a page for the customer bot's activity (admin)
+- GET /api/tg-bot/activity: the customer bot's activity, asked of the bot
+- DQ journal test takes Kyiv's offset at the run's instant, not +03:00
+- Cadence wrapper tests hold the trigger's own cadence, not a literal 6 h
+
+
 ## 3.0.296
 
 - Trend forecast predicts at most FORECAST_HORIZON_DAYS ahead

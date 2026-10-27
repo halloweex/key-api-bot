@@ -557,8 +557,9 @@ class RevenueMixin:
     def _comparison_window(
         start_date: date, end_date: date, compare_type: str,
     ) -> Tuple[date, date]:
-        """The comparison period's bounds — one home, two callers (the
-        pre-lock Postgres prefetch and the in-lock DuckDB path)."""
+        """The comparison period's bounds — one home for the trend (its
+        pre-lock Postgres prefetch and its in-lock DuckDB path), the organic
+        traffic block and the marketing report."""
         if compare_type == "year_ago":
             from dateutil.relativedelta import relativedelta
             return start_date - relativedelta(years=1), end_date - relativedelta(years=1)
@@ -2183,17 +2184,13 @@ class RevenueMixin:
         lines. Gold has no product dimension, so a narrowed report reads the
         line level instead — see `_MARKETING_LINES_PERIOD_SQL`.
         """
-        from datetime import timedelta
-
-        period_days = (end_date - start_date).days + 1
-
-        # Previous period: same duration immediately before
-        prev_end = start_date - timedelta(days=1)
-        prev_start = prev_end - timedelta(days=period_days - 1)
-
-        # Year ago: same dates shifted back 1 year
-        yoy_start = start_date.replace(year=start_date.year - 1)
-        yoy_end = end_date.replace(year=end_date.year - 1)
+        # Previous period: same duration immediately before. Year ago: the
+        # same dates a year back, 29 February to 28 February; this used
+        # `date.replace(year=...)`, which raised on a range starting or
+        # ending on 29 February and answered 500.
+        prev_start, prev_end = self._comparison_window(
+            start_date, end_date, "previous_period")
+        yoy_start, yoy_end = self._comparison_window(start_date, end_date, "year_ago")
 
         sales_where = "sales_type = ?" if sales_type != "all" else "1=1"
         sales_params = [sales_type] if sales_type != "all" else []
