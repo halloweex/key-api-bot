@@ -57,14 +57,23 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-GROUP_A = SmsAudienceGroup(
-    365, SmsAudienceFilters(period_orders_min=2, period_from=fx.PERIOD_FROM),
-)
+
+def group_a(window: int = 365) -> SmsAudienceGroup:
+    """Two or more orders since `fx.period_from()`. A function where B is a
+    constant because it carries a date, and a date built at import is the
+    collection's day, not the query's (the fixture's docstring says why)."""
+    return SmsAudienceGroup(
+        window, SmsAudienceFilters(period_orders_min=2, period_from=fx.period_from()),
+    )
+
+
 GROUP_B = SmsAudienceGroup(92, SmsAudienceFilters())
 
 # One group, every way it could be asked before groups existed. Each filter
 # that existed then appears in at least one case, as does each grouping, both
-# bases, a level subset and both sales types.
+# bases, a level subset and both sales types. A case's filters are a function,
+# called when the test runs: pytest builds this table at collection, and
+# "first order" carries dates.
 LEGACY_CASES = [
     ("defaults", {}),
     ("narrow window", dict(window=92)),
@@ -77,22 +86,29 @@ LEGACY_CASES = [
     ("rfm on margin", dict(grouping="rfm", ltv_basis="margin")),
     ("one level", dict(grouping="rfm", tiers=("REACTIVATION",))),
     ("sales_type all", dict(sales_type="all", window=730)),
-    ("lifetime orders", dict(filters=SmsAudienceFilters(orders_min=2, orders_max=5),
-                             window=730)),
-    ("recency range", dict(filters=SmsAudienceFilters(recency_min_days=20,
-                                                      recency_max_days=160))),
-    ("value and basket", dict(filters=SmsAudienceFilters(ltv_min=1500.0,
-                                                         aov_max=1200.0),
-                              window=730)),
-    ("first order", dict(filters=SmsAudienceFilters(first_order_from=fx.ago(200),
-                                                    first_order_to=fx.ago(100)))),
-    ("city", dict(filters=SmsAudienceFilters(cities=("київ",)))),
-    ("brand ever", dict(filters=SmsAudienceFilters(brands=("Anua",)), window=730)),
-    ("brand recently", dict(filters=SmsAudienceFilters(brands=("Cosrx",),
-                                                       bought_within_days=60))),
-    ("category branch", dict(filters=SmsAudienceFilters(category_ids=(10,)))),
-    ("source", dict(filters=SmsAudienceFilters(source_ids=(4,)), window=730)),
-    ("promocode", dict(filters=SmsAudienceFilters(promocode="aug"))),
+    ("lifetime orders", dict(
+        filters=lambda: SmsAudienceFilters(orders_min=2, orders_max=5),
+        window=730)),
+    ("recency range", dict(
+        filters=lambda: SmsAudienceFilters(recency_min_days=20,
+                                           recency_max_days=160))),
+    ("value and basket", dict(
+        filters=lambda: SmsAudienceFilters(ltv_min=1500.0, aov_max=1200.0),
+        window=730)),
+    ("first order", dict(
+        filters=lambda: SmsAudienceFilters(first_order_from=fx.ago(200),
+                                           first_order_to=fx.ago(100)))),
+    ("city", dict(filters=lambda: SmsAudienceFilters(cities=("київ",)))),
+    ("brand ever", dict(
+        filters=lambda: SmsAudienceFilters(brands=("Anua",)), window=730)),
+    ("brand recently", dict(
+        filters=lambda: SmsAudienceFilters(brands=("Cosrx",),
+                                           bought_within_days=60))),
+    ("category branch", dict(
+        filters=lambda: SmsAudienceFilters(category_ids=(10,)))),
+    ("source", dict(
+        filters=lambda: SmsAudienceFilters(source_ids=(4,)), window=730)),
+    ("promocode", dict(filters=lambda: SmsAudienceFilters(promocode="aug"))),
 ]
 
 
@@ -151,6 +167,11 @@ async def _on_postgres(store, conn, monkeypatch, **kwargs):
         monkeypatch.delenv("KS_SMS_STORE", raising=False)
 
 
+def _filters(case) -> SmsAudienceFilters:
+    build = case.get("filters")
+    return build() if build else SmsAudienceFilters()
+
+
 async def _on_duckdb(store, monkeypatch, **kwargs):
     monkeypatch.delenv("KS_SMS_STORE", raising=False)
     return await store.get_sms_segments(**kwargs)
@@ -167,7 +188,7 @@ class TestOneGroupIsTheAudienceBeforeGroups:
         store, conn = engines
         basis = case.get("ltv_basis", "revenue")
         window = case.get("window", 270)
-        filters = case.get("filters") or SmsAudienceFilters()
+        filters = _filters(case)
         common = dict(
             ltv_basis=basis,
             sales_type=case.get("sales_type", "retail"),
@@ -209,7 +230,7 @@ class TestOneGroupIsTheAudienceBeforeGroups:
             basis = case.get("ltv_basis", "revenue")
             window = case.get("window", 270)
             sql, params = legacy_render(
-                DUCKDB, case.get("filters") or SmsAudienceFilters(),
+                DUCKDB, _filters(case),
                 ltv_basis=basis, sales_type=case.get("sales_type", "retail"),
                 tiers=case.get("tiers", ()), grouping=case.get("grouping", "single"),
                 max_recency_days=window,
@@ -227,7 +248,7 @@ class TestGroupsOnPostgres:
     async def test_the_owners_campaign(self, engines, monkeypatch):
         store, conn = engines
         result = await _on_postgres(
-            store, conn, monkeypatch, groups=[GROUP_A, GROUP_B],
+            store, conn, monkeypatch, groups=[group_a(), GROUP_B],
             grouping="single", holdout_pct=0, include_customers=True,
         )
         assert {c["buyerId"] for c in result["customers"]} == fx.UNION
@@ -240,7 +261,7 @@ class TestGroupsOnPostgres:
     @pytest.mark.asyncio
     async def test_each_group_alone(self, engines, monkeypatch):
         store, conn = engines
-        for group, expected in ((GROUP_A, fx.A_ALONE), (GROUP_B, fx.B_ALONE)):
+        for group, expected in ((group_a(), fx.A_ALONE), (GROUP_B, fx.B_ALONE)):
             result = await _on_postgres(
                 store, conn, monkeypatch, groups=[group], grouping="single",
                 include_customers=True,
@@ -275,7 +296,7 @@ class TestThePeriodsShapesOnBothEngines:
         store, conn = engines
         mine = fx.matched(window, **terms)
         assert fx.recipients(mine) == answer, f"{label}: the oracle disagrees with the hand"
-        kwargs = dict(groups=[SmsAudienceGroup(window, SmsAudienceFilters(**fields))],
+        kwargs = dict(groups=[SmsAudienceGroup(window, SmsAudienceFilters(**fields()))],
                       grouping="single", holdout_pct=20, campaign="period-shapes",
                       include_customers=True)
         duck = await _on_duckdb(store, monkeypatch, **kwargs)
@@ -290,35 +311,38 @@ class TestThePeriodsShapesOnBothEngines:
 
 
 class TestTheEnginesAgree:
+    # Each case's arguments are a function, called when the test runs: they
+    # carry dates, and pytest builds this table at collection.
     CASES = [
-        ("the owner's campaign", dict(groups=[GROUP_A, GROUP_B])),
-        ("a narrower A", dict(groups=[SmsAudienceGroup(180, GROUP_A.filters),
-                                      GROUP_B])),
-        ("all sales types", dict(groups=[GROUP_A, GROUP_B], sales_type="all")),
-        ("three groups, mixed", dict(groups=[
-            GROUP_A,
+        ("the owner's campaign", lambda: dict(groups=[group_a(), GROUP_B])),
+        ("a narrower A", lambda: dict(groups=[group_a(180), GROUP_B])),
+        ("all sales types", lambda: dict(groups=[group_a(), GROUP_B],
+                                         sales_type="all")),
+        ("three groups, mixed", lambda: dict(groups=[
+            group_a(),
             SmsAudienceGroup(120, SmsAudienceFilters(period_days=60,
                                                      cities=("Львів",))),
             SmsAudienceGroup(400, SmsAudienceFilters(brands=("Anua",),
                                                      period_orders_min=1,
                                                      period_from=date(2000, 1, 1))),
         ])),
-        ("split by level", dict(groups=[GROUP_A, GROUP_B], grouping="rfm",
-                                ltv_basis="margin")),
-        ("one level of the union", dict(groups=[GROUP_A, GROUP_B], grouping="rfm",
-                                        tier=["REACTIVATION"])),
+        ("split by level", lambda: dict(groups=[group_a(), GROUP_B],
+                                        grouping="rfm", ltv_basis="margin")),
+        ("one level of the union", lambda: dict(groups=[group_a(), GROUP_B],
+                                                grouping="rfm",
+                                                tier=["REACTIVATION"])),
         # The range, its bounds and the all-time window beside other groups:
         # "two in the range" OR "lapsed since the date, all time" OR B.
-        ("ranges and bounds, ORed", dict(groups=[
+        ("ranges and bounds, ORed", lambda: dict(groups=[
             SmsAudienceGroup(365, SmsAudienceFilters(
                 period_orders_min=2, period_orders_max=2,
-                period_from=fx.RANGE_FROM, period_to=fx.RANGE_TO)),
+                period_from=fx.range_from(), period_to=fx.range_to())),
             SmsAudienceGroup(3650, SmsAudienceFilters(
-                period_orders_max=0, period_from=fx.PERIOD_FROM)),
+                period_orders_max=0, period_from=fx.period_from())),
             GROUP_B,
         ])),
-        ("up to a date, margin levels", dict(groups=[
-            SmsAudienceGroup(3650, SmsAudienceFilters(period_to=fx.PERIOD_FROM)),
+        ("up to a date, margin levels", lambda: dict(groups=[
+            SmsAudienceGroup(3650, SmsAudienceFilters(period_to=fx.period_from())),
             SmsAudienceGroup(92, SmsAudienceFilters(period_orders_max=0,
                                                     period_days=30)),
         ], grouping="rfm", ltv_basis="margin")),
@@ -331,7 +355,7 @@ class TestTheEnginesAgree:
         store, conn = engines
         common = dict(include_customers=True, campaign="groups-compare",
                       holdout_pct=20, grouping="single")
-        common.update(kwargs)
+        common.update(kwargs())
         duck = await _on_duckdb(store, monkeypatch, **common)
         postgres = await _on_postgres(store, conn, monkeypatch, **common)
         assert duck["totals"]["customers"] > 0, f"{label}: compared nobody"
