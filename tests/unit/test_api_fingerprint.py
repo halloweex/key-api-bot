@@ -306,15 +306,13 @@ def test_every_route_is_a_get_the_app_serves_with_parameters_it_declares():
     a GET route of the real app, and every query parameter one it reads —
     directly or through a dependency. Mutation: misspell a path or a
     parameter."""
-    from fastapi.dependencies.utils import get_flat_dependant
-    from fastapi.routing import APIRoute
-
+    from tests.routes_helper import iter_endpoints, query_param_names
     from web.main import app
 
-    served = {}
-    for route in app.routes:
-        if isinstance(route, APIRoute) and "GET" in route.methods:
-            served[route.path] = {p.alias for p in get_flat_dependant(route.dependant).query_params}
+    # Through the helper, never `app.routes`: on fastapi 0.141 that list holds
+    # the included routers, not their routes, and `get_flat_dependant` is not
+    # exported (this test failed in CI and the gate on exactly that).
+    served = {e.path: query_param_names(e) for e in iter_endpoints(app) if "GET" in e.methods}
     for row in fp.routes(date(2026, 8, 1), date(2026, 8, 31)):
         path, _, query = row["url"].partition("?")
         assert path in served, row

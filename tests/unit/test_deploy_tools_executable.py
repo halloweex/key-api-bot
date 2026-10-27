@@ -113,10 +113,14 @@ def test_a_tool_run_by_its_path_is_executable():
 def test_the_walk_sees_the_tools_it_guards():
     """If the derivation found nothing, the test above would pass by reading
     nothing. Each of these is run by its path in its own header or in a
-    runbook today."""
+    runbook today. `restore-test.sh` is run by its path only in
+    docs/offsite_backup_setup.md, which the store-backed gate does not mount,
+    so it is required only where that document is."""
     seen = {t.relative_to(REPO).as_posix() for t in _run_by_path()}
-    assert {"deploy/api_fingerprint.py", "deploy/ark_ship.sh",
-            "deploy/stage4_soak.sh", "deploy/restore-test.sh"} <= seen, seen
+    expected = {"deploy/api_fingerprint.py", "deploy/ark_ship.sh", "deploy/stage4_soak.sh"}
+    if (REPO / "docs" / "offsite_backup_setup.md").is_file():
+        expected.add("deploy/restore-test.sh")
+    assert expected <= seen, seen
 
 
 @pytest.mark.parametrize("line, counted", [
