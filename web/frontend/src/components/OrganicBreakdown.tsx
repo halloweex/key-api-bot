@@ -7,7 +7,7 @@ import { InfoPopover } from './InfoPopover'
 import { Wrapper } from './Wrapper'
 import { useTrafficAnalytics, useTrafficOrganic } from '../hooks/useApi'
 import { formatCurrency, formatDate, formatNumber, formatPercent } from '../utils/formatters'
-import type { OrganicChannel, OrganicChannelKey } from '../types/api'
+import type { OrganicChannel, OrganicChannelDetail, OrganicChannelKey } from '../types/api'
 
 // ─── Channels ─────────────────────────────────────────────────────────────────
 //
@@ -38,6 +38,32 @@ const CHANNEL_COLORS: Record<OrganicChannelKey, string> = {
 
 const colorOf = (channel: string): string =>
   CHANNEL_COLORS[channel as OrganicChannelKey] ?? CHANNEL_COLORS.other
+
+// The group each channel sits in, named in GA4's own vocabulary — the words a
+// marketer already reads in "Traffic acquisition". `null` is a sale with no
+// visit to the website at all, a manager's order in Direct or Telegram: GA4
+// never sees it, and saying so is half of what makes Direct legible. Telegram
+// holds both kinds. A name, not a promise: GA4 files raw tags by its own rules
+// and puts some elsewhere (`klaviyo / klaviyo` lands in Unassigned there),
+// which the explanation says in so many words.
+const GA4_GROUPS: Record<OrganicChannelKey, Array<string | null>> = {
+  instagram_direct: [null],
+  instagram_site: ['Organic Social'],
+  instagram_stories: ['Organic Social'],
+  telegram: [null, 'Organic Social'],
+  email_campaigns: ['Email'],
+  email_flows: ['Email'],
+  google_organic: ['Organic Shopping'],
+  ai: ['Referral'],
+  facebook: ['Organic Social'],
+  tiktok: ['Organic Social'],
+  other: ['Referral'],
+}
+
+function ga4Group(channel: string, t: (key: string) => string): string {
+  const groups = GA4_GROUPS[channel as OrganicChannelKey] ?? GA4_GROUPS.other
+  return groups.map((g) => g ?? t('traffic.organicGa4Offsite')).join(' / ')
+}
 
 // ─── Change against the previous period ───────────────────────────────────────
 
@@ -85,6 +111,33 @@ const ShareBar = memo(function ShareBar({ pct, color }: { pct: number; color: st
   )
 })
 
+// ─── One source / medium row ─────────────────────────────────────────────────
+//
+// GA4's traffic acquisition report: "source / medium" first, the campaign and
+// content beneath it. An order with no tags at all is named, not hidden — for
+// Direct that row is the whole answer to what the channel is made of.
+
+const DetailLabel = memo(function DetailLabel({ detail }: { detail: OrganicChannelDetail }) {
+  const { t } = useTranslation()
+  const untagged = !detail.source && !detail.medium && !detail.campaign && !detail.content
+  const notSet = t('traffic.organicNotSet')
+  const main = untagged
+    ? t('traffic.organicNoUtm')
+    : `${detail.source || notSet} / ${detail.medium || notSet}`
+  const sub = untagged
+    ? t('traffic.organicNoUtmHint')
+    : [detail.campaign, detail.content].filter(Boolean).join(' · ')
+
+  return (
+    <span className="block pl-6 sm:pl-10 max-w-[11rem] sm:max-w-md">
+      <span className="block text-xs text-slate-700 truncate" title={main}>{main}</span>
+      {sub && (
+        <span className="block text-[11px] text-slate-400 truncate" title={sub}>{sub}</span>
+      )}
+    </span>
+  )
+})
+
 // ─── Rows ─────────────────────────────────────────────────────────────────────
 
 const ChannelRows = memo(function ChannelRows({
@@ -129,7 +182,12 @@ const ChannelRows = memo(function ChannelRows({
               style={{ backgroundColor: colorOf(row.channel) }}
               aria-hidden="true"
             />
-            {name}
+            <span className="flex flex-col">
+              <span>{name}</span>
+              <span className="text-xs font-normal text-slate-400">
+                {t('traffic.organicGa4Group', { value: ga4Group(row.channel, t) })}
+              </span>
+            </span>
           </span>
         </Td>
         <Td align="right" tabular hideBelow="sm">{formatNumber(row.orders)}</Td>
@@ -143,15 +201,22 @@ const ChannelRows = memo(function ChannelRows({
           <ChangeValue change={changeOf(row.revenue, row.previous.revenue)} />
         </Td>
       </Tr>
-      {open && row.details.map((d) => (
-        <Tr key={`${row.channel}:${d.label}`} hover={false}>
-          <Td>
-            <span
-              className="block pl-6 sm:pl-10 text-xs text-slate-600 truncate max-w-[10rem] sm:max-w-md"
-              title={d.label || undefined}
-            >
-              {d.label || t('traffic.organicNoTag')}
+      {open && row.details.length > 0 && (
+        <Tr hover={false}>
+          <Td colSpan={7}>
+            <span className="block pl-6 sm:pl-10 text-[11px] uppercase tracking-wide text-slate-400">
+              {t('traffic.organicDetailHeader')}
             </span>
+          </Td>
+        </Tr>
+      )}
+      {open && row.details.map((d) => (
+        <Tr
+          key={`${row.channel}:${d.source}/${d.medium}/${d.campaign}/${d.content}`}
+          hover={false}
+        >
+          <Td>
+            <DetailLabel detail={d} />
           </Td>
           <Td align="right" tabular hideBelow="sm">
             <span className="text-xs text-slate-600">{formatNumber(d.orders)}</span>
@@ -218,22 +283,36 @@ export const OrganicBreakdown = memo(function OrganicBreakdown() {
         <InfoPopover title={t('traffic.organicHowTitle')} size="wide">
           <Wrapper dir="column" gap="sm">
             <p className="text-xs text-slate-300 leading-relaxed">{t('traffic.organicHowIntro')}</p>
-            <ul className="text-xs text-slate-300 leading-relaxed">
-              {CHANNELS.map((c) => (
-                <li key={c} className="flex items-start gap-2 py-0.5">
-                  <span
-                    className="mt-1 w-2 h-2 rounded-full shrink-0"
-                    style={{ backgroundColor: colorOf(c) }}
-                    aria-hidden="true"
-                  />
-                  <span>
-                    <span className="font-medium text-slate-100">{t(`traffic.organicChannel.${c}`)}</span>
-                    {' — '}
-                    {t(`traffic.organicChannelDesc.${c}`)}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <table className="w-full text-xs text-slate-300 leading-snug">
+              <thead>
+                <tr className="text-left text-slate-400">
+                  <th className="py-1 pr-2 font-medium">{t('traffic.organicColChannel')}</th>
+                  <th className="py-1 pr-2 font-medium">{t('traffic.organicHowColWhat')}</th>
+                  <th className="py-1 font-medium">{t('traffic.organicHowColGa4')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {CHANNELS.map((c) => (
+                  <tr key={c} className="border-t border-slate-700 align-top">
+                    <td className="py-1.5 pr-2">
+                      <span className="inline-flex items-start gap-1.5">
+                        <span
+                          className="mt-1 w-2 h-2 rounded-full shrink-0"
+                          style={{ backgroundColor: colorOf(c) }}
+                          aria-hidden="true"
+                        />
+                        <span className="font-medium text-slate-100">
+                          {t(`traffic.organicChannel.${c}`)}
+                        </span>
+                      </span>
+                    </td>
+                    <td className="py-1.5 pr-2">{t(`traffic.organicChannelDesc.${c}`)}</td>
+                    <td className="py-1.5 text-slate-200">{ga4Group(c, t)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="text-[11px] text-slate-400 leading-relaxed">{t('traffic.organicGa4Note')}</p>
           </Wrapper>
         </InfoPopover>
       }

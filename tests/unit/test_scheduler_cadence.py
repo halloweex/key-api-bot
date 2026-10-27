@@ -86,13 +86,26 @@ class TestTheWrapper:
                    func=probe, trigger=trigger)
         return s, s._scheduler.get_job("probe"), seen
 
-    def test_the_job_runs_under_its_triggers_cadence(self):
-        from core.scheduler import INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE
+    @staticmethod
+    def _six_hourly():
+        """The integrity check's trigger, and the cadence it has this week:
+        six hours, or seven within three days of the clocks going back — the
+        longest gap is what `_trigger_cadence_s` answers, by design, and a
+        literal 6 h failed every run in the days before 2026-10-25."""
+        from core.scheduler import (
+            INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE, BackgroundScheduler,
+        )
 
-        _, job, seen = self._probe(
-            CronTrigger(hour=INVARIANT_CHECK_HOURS, timezone=SCHEDULER_TIMEZONE))
+        trigger = CronTrigger(hour=INVARIANT_CHECK_HOURS, timezone=SCHEDULER_TIMEZONE)
+        expected = BackgroundScheduler._trigger_cadence_s(trigger)
+        assert expected in (6 * 3600, 7 * 3600)
+        return trigger, expected
+
+    def test_the_job_runs_under_its_triggers_cadence(self):
+        trigger, expected = self._six_hourly()
+        _, job, seen = self._probe(trigger)
         asyncio.run(job.func())
-        assert seen == [6 * 3600]
+        assert seen == [expected]
 
     def test_the_cadence_does_not_leak_past_the_job(self):
         from core.alerting import ALERT_CADENCE_S
@@ -109,16 +122,16 @@ class TestTheWrapper:
         """The catch-up re-adds `job.func` under a one-shot DateTrigger, which
         has no rhythm of its own. The cadence was captured at registration, so
         a caught-up integrity run still raises at six hours."""
-        from core.scheduler import INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE
+        from core.scheduler import SCHEDULER_TIMEZONE
 
-        s, job, seen = self._probe(
-            CronTrigger(hour=INVARIANT_CHECK_HOURS, timezone=SCHEDULER_TIMEZONE))
+        trigger, expected = self._six_hourly()
+        s, job, seen = self._probe(trigger)
         s._scheduler.add_job(
             job.func, trigger=DateTrigger(
                 run_date=datetime.now(SCHEDULER_TIMEZONE) + timedelta(hours=1)),
             id="probe_catchup")
         asyncio.run(s._scheduler.get_job("probe_catchup").func())
-        assert seen == [6 * 3600]
+        assert seen == [expected]
 
     def test_a_one_shot_trigger_has_no_cadence(self):
         from core.scheduler import BackgroundScheduler, SCHEDULER_TIMEZONE

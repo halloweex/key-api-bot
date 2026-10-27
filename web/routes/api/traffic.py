@@ -36,10 +36,10 @@ async def get_traffic_analytics(
         validate_period(period)
         validate_source_id(source_id)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
@@ -64,10 +64,10 @@ async def get_traffic_organic(
         validate_period(period)
         validate_source_id(source_id)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
@@ -92,10 +92,10 @@ async def get_traffic_trend(
         validate_period(period)
         validate_source_id(source_id)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
@@ -138,7 +138,10 @@ async def get_traffic_transactions(
     if platform and platform not in valid_platforms:
         raise HTTPException(status_code=400, detail=f"Invalid platform: {platform}")
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    try:
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
@@ -189,7 +192,10 @@ async def get_traffic_utm_campaigns(
     if sort_dir not in ("asc", "desc"):
         raise HTTPException(status_code=400, detail=f"Invalid sort_dir: {sort_dir}")
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
+    try:
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 
@@ -214,10 +220,10 @@ async def get_traffic_roas(
     try:
         validate_period(period)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     start_dt = _dt.strptime(start, "%Y-%m-%d").date()
     end_dt = _dt.strptime(end, "%Y-%m-%d").date()
 

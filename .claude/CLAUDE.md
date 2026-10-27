@@ -164,6 +164,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
+| `/api/tg-bot/activity` | The customer Telegram bot's activity — daily/weekly active, new, registrations, WAU/MAU, activation, the entry funnel and the press table (which button people leave after) — for page `/tg-bot` (tab `tgbot`: admins and the marketing presets). `days` ∈ 30/90/180. Asked of ks-tg-bot's `GET /internal/activity` at `KS_TG_BOT_URL` (default `http://ks-tg-bot:8081`, the shared `key-api-bot_default` network) with bearer `KS_TG_BOT_TOKEN`; counts only, no customer data. Unset token → 503 "not configured". Last good answer kept 120 s per window and served `stale: true` while the bot is unreachable — `web/services/tg_bot_service.py` |
 
 **Retired by the owner's decision OD-10 (2026-09-30)**, and kept retired by
 `tests/unit/test_od10_retired_doors.py`: `GET /api/buyers/{id}`,
@@ -176,6 +177,33 @@ catch-all used to serve those the shell with a 200, which a script reads as
 success.
 
 **Query params**: `period` (today/yesterday/week/last_week/month/last_month) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
+
+`start_date` and `end_date` are read by `strptime("%Y-%m-%d")` in
+`core/filters.parse_period`, and only as a pair: one alone is ignored, and a
+known `period` wins over both. The forms `strptime` forgives (`2026-1-5`,
+`2026-01- 5`) stay accepted — decided 2026-10-21, refusing them would only
+turn working requests into errors. A date it refuses is a 400 naming the field;
+it was a 500 until then. Each date must also lie in 2000-01-01..2099-12-31
+(`EARLIEST_DATE`, `LATEST_DATE`, the owner's decision of 2026-10-22), the
+start judged before the end, or it is a 400 naming its field: `Date must be
+between 2000-01-01 and 2099-12-31`. Python's calendar ends at 0001-01-01 and
+9999-12-31, and eight routes stepped off it and answered 500 —
+`end_date=9999-12-31` under the per-day loops, a start in year 1 under a
+comparison, a backwards range whose previous period runs past 9999-12-31 —
+while a date beyond the window answered zeros everywhere else. Inside it every
+date a route derives lies between 1989-12-24 and 2199-12-30, which
+`tests/unit/test_filters_parse_period.py` holds the comparison windows to.
+29 February is an ordinary date: a year back from it is 28 February, by
+`RevenueMixin._comparison_window`, which the marketing report shares with the
+trend since its own `date.replace(year=…)` answered 500 on a range starting or
+ending there. A range longer than `MAX_RANGE_DAYS` (3 660 days,
+ten years and a week) is a 400 naming `date_range`: four endpoints build one
+list entry per day of the range on web's event loop — the trend, its
+comparison, expenses summary and profit, customer insights — and
+0002-01-01..9999-12-30 cost the trend 6.8 s and 95 MB of JSON. The trend's
+`include_forecast` predicts at most `FORECAST_HORIZON_DAYS` (60) ahead, where
+the date picker stops; eight years ahead had held the single ML thread for
+70 s.
 
 ## DuckDB Schema
 
@@ -352,6 +380,52 @@ PYTHONPATH=. python tests/test_data_consistency.py 2025-12-07
 # Force resync DuckDB
 python scripts/force_resync.py --days 365
 ```
+
+### Type checking
+
+`basedpyright` is CI's second job (`typecheck`), beside the suite. It covers
+`core web bot scripts deploy migrations`, everything the pyflakes guard walks
+except `tests/`. It runs in `standard` mode and models Python 3.14 on Linux
+(`pyrightconfig.json`). It fails on any error or warning that is not in
+`.basedpyright/baseline.json`, and on a baseline that still lists a finding the
+code no longer has. **The baseline only shrinks.**
+
+pyflakes sees a name nobody defined; this sees a call that cannot succeed, on
+lines no test runs. Its first run (2026-10-21) found 1 122 findings, and five
+of them were three live defects:
+
+- the web memory watchdog had raised AttributeError on every alert since
+  2026-09-14;
+- a language chosen in the bot's settings had been stored and never confirmed
+  since #76;
+- `/api/health` had published `sync: null` since 2026-02-12.
+
+The other 1 117 are the baseline. Most of them are:
+
+- python-telegram-bot's Optional attributes;
+- DuckDB rows typed `tuple | None`;
+- values the code knows are set and the checker cannot see;
+- third-party stubs.
+
+One is a latent defect in code nothing calls (`MeiliClient.get_stats` calls
+`.get` on a pydantic model).
+
+Run it the way CI does. The findings depend on the installed packages' own
+annotations, and the laptop's fastapi and pandas are not production's:
+
+```bash
+docker run --rm -v "$PWD:/w" -w /w python:3.14-slim sh -c \
+  'pip install -q -r requirements-dev.lock && basedpyright'
+```
+
+The baseline matches a finding by file, rule and column span, not by line.
+Moving code leaves it alone, but editing the expression a baselined finding
+sits on changes its span, and the finding then reads as new. When that
+happens, fix it, or rewrite the baseline with `basedpyright --writebaseline`
+in the same container, so that the moved entry shows in the diff. Rewrite the
+baseline in the same commit as any fix that removes a finding, or the job
+fails on the leftover. A basedpyright bump is a commit of its own, with the
+baseline rewritten beside it.
 
 ## Caching
 
@@ -721,8 +795,14 @@ inside it.**
 
 - `TAB_FEATURES` (`core/permissions.py`) is the grantable list, in the
   sidebar's order: dashboard, products, traffic, inventory, reports,
-  marketing, margin, expenses, sms. The admin checklist, the bot's keyboard
+  marketing, margin, expenses, sms, tgbot. The admin checklist, the bot's keyboard
   and the route table are all built from it, so a new tab is added once.
+- `tgbot` (/tg-bot, the customer Telegram bot's activity) was admin-only on
+  the day it shipped, 2026-10-25, and the owner opened it to the marketers the
+  same day. It sits in the `marketer` and `marketing` presets and in no role's
+  `DEFAULT_TABS`: a viewer with no override does not see it. Accounts that
+  already held a preset kept their stored list, so the one marketer then
+  approved (the `marketer` preset, editor) was given the tab by hand.
 - `user_management` is deliberately **not** in it. The admin pages stay on the
   admin role: a checkbox that hands somebody the access system itself would
   make every other rule here advisory. `analytics` and `customers` are absent
@@ -3321,8 +3401,17 @@ Google. Канал — `core.utm_classify.organic_channel`, одиннадцат
 
 У каждого канала: заказы, выручка, новые клиенты (множествами, по причине
 абзаца выше), те же цифры за предыдущий период равной длины
-(`_comparison_window`) и до 20 имён внутри — письмо, метка сторис, сайт —
-`details_total` говорит, сколько их было всего. Канал, продававший только в
+(`_comparison_window`) и до 20 строк внутри **в форме отчёта GA4 «Привлечение
+трафика»** — `source / medium`, под ним кампания и `utm_content`
+(`organic_detail`; source и medium в нижнем регистре, кампания как написана);
+`details_total` говорит, сколько их было всего. Заказ совсем без меток — своя
+строка «без UTM-міток», а не пропуск: для Direct эта строка и есть ответ на
+«что входит». Под названием канала — его группа в словаре GA4 (Organic Social,
+Email, Organic Shopping, Referral; «поза сайтом» для заказов менеджера, которых
+GA4 не видит), и подсказка «?» — таблица «канал → какие source / medium → группа».
+Это **название, а не обещание**: сам GA4 раскладывает сырые метки по своим
+правилам (`klaviyo / klaviyo` у него Unassigned), и подсказка это говорит.
+Канал, продававший только в
 прошлом периоде, остаётся в списке с нулями: это строка, которая нужна больше
 всех. Итог блока равен карточке «Органічний» (тест держит). Метки сравниваются в
 нижнем регистре **в Python, не в SQL**: `LOWER` в PostgreSQL зависит от

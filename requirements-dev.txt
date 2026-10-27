@@ -41,3 +41,14 @@ PyYAML>=6.0
 # Pinned: a new release may report something new, and that should arrive as
 # a deliberate bump, not as a red CI run on somebody else's change.
 pyflakes==3.4.0
+
+# The type checker the `typecheck` job in .github/workflows/ci.yml runs under
+# pyrightconfig.json — pyflakes' blind spot one step wider: that sees a name
+# nobody defined, this sees a call that cannot succeed. Its first run found
+# three live defects on lines no test executed, among them a memory watchdog
+# that had raised AttributeError on every alert for five weeks. Pinned for
+# pyflakes' reason, and more so: a new release can move findings, and the
+# baseline (.basedpyright/baseline.json) is only true for the version that
+# wrote it. Bump it on its own, with the baseline rewritten in the same
+# commit.
+basedpyright==1.40.2

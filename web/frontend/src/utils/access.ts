@@ -16,6 +16,7 @@ export const TAB_PATHS: ReadonlyArray<{ feature: keyof Permissions; path: string
   { feature: 'marketing', path: '/marketing' },
   { feature: 'margin', path: '/margin' },
   { feature: 'sms', path: '/sms' },
+  { feature: 'tgbot', path: '/tg-bot' },
 ]
 
 /** The first page these permissions open, or null when they open none. */
