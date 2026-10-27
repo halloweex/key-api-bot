@@ -10,20 +10,36 @@ Dates are counted back from **today in Kyiv**, because that is the day the
 query counts from (`TODAY_IN_KYIV`). A fixture written against the laptop's
 `date.today()` and a store reading Kyiv's calendar disagrees for three hours
 every night, and a test of a 92-day edge is exactly the test that notices.
+
+And today is read **when it is used** — when a row is seeded, an answer
+computed or a case's filters built — never at import. The query reads its
+today when it runs, and CI imports this module at collection, half an hour
+before it reaches these tests: a suite started at 23:47 in Kyiv and reaching
+them at 00:11 seeded every row a day older than the query thought, and buyer
+12, at exactly 92 days, left the 92-day window (PR #305's run 39494883413).
+So nothing below holds a date; whatever needs one asks `kyiv_today()`, and
+`tests/unit/test_sms_audience_fixture_clock.py` loads this module and its
+tests under a clock that crosses midnight to prove it.
 """
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-KYIV_TODAY = datetime.now(ZoneInfo("Europe/Kyiv")).date()
+KYIV = ZoneInfo("Europe/Kyiv")
 
-# "Since" for group A: 200 days back, clear of any year boundary.
-PERIOD_FROM = KYIV_TODAY - timedelta(days=200)
+
+def kyiv_today() -> date:
+    return datetime.now(KYIV).date()
 
 
 def ago(days: int) -> date:
-    return KYIV_TODAY - timedelta(days=days)
+    return kyiv_today() - timedelta(days=days)
+
+
+def period_from() -> date:
+    """"Since" for group A: 200 days back, clear of any year boundary."""
+    return ago(200)
 
 
 # (buyer, name, city, phone)
@@ -92,7 +108,7 @@ def _lines():
 
 # ─── The answers ────────────────────────────────────────────────────────────
 #
-# Group A: at least two orders since PERIOD_FROM, window 365.
+# Group A: at least two orders since period_from(), window 365.
 # Group B: last order within 92 days.
 
 A_MATCHED = {1, 3, 8, 10, 14}                     # its conditions, before phones
@@ -139,7 +155,7 @@ def matched(window: int, *, in_period=None, at_least=None, at_most=None,
         at_least = 1
     out = set()
     for buyer, orders in counted_orders(sales_type).items():
-        if (KYIV_TODAY - max(d for _, d, _ in orders)).days > window:
+        if (kyiv_today() - max(d for _, d, _ in orders)).days > window:
             continue
         if in_period is not None:
             n = sum(1 for _, d, _ in orders if in_period(d))
@@ -171,51 +187,62 @@ def recipients(buyers, sales_type: str = "retail") -> set:
     return set(winners.values())
 
 
+def range_from() -> date:
+    """"From 200 to 100 days ago": the range's first day."""
+    return ago(200)
+
+
+def range_to() -> date:
+    return ago(100)
+
+
 # The period's shapes, its bounds and the widest window, one group each:
 # (label, window, the group's filter fields, the oracle's terms, the answer by
 # hand). Shared by the DuckDB tests and the two-engine ones so both ask the
 # same questions. Dates are the oracle's own, so a case cannot drift from it.
-RANGE_FROM, RANGE_TO = ago(200), ago(100)    # "from 200 to 100 days ago"
-
+# The fields are a function, called when the test runs: pytest builds this
+# table at collection, and a date in it would be the collection's.
 PERIOD_CASES = [
     # 3 and 10 have two orders since 200 days ago but one of them after the
     # range ends — `period_to` is what takes them out. 8 keeps its number,
     # because 9, who shares it, is not in this audience.
     ("from and to, at least two", 365,
-     dict(period_orders_min=2, period_from=RANGE_FROM, period_to=RANGE_TO),
-     dict(in_period=lambda d: RANGE_FROM <= d <= RANGE_TO, at_least=2),
+     lambda: dict(period_orders_min=2, period_from=range_from(),
+                  period_to=range_to()),
+     dict(in_period=lambda d: range_from() <= d <= range_to(), at_least=2),
      {1, 8, 14}),
     # Every order up to a date: 2 (400 days), 4 (300 and 250) and 15 (1000),
     # which only an all-time window holds.
     ("up to a date", 3650,
-     dict(period_to=PERIOD_FROM),
-     dict(in_period=lambda d: d <= PERIOD_FROM),
+     lambda: dict(period_to=period_from()),
+     dict(in_period=lambda d: d <= period_from()),
      {2, 4, 15}),
     # Exactly one order in 200 days: min = max. 11 has one too and no usable
     # phone; 1, 3, 8, 10 and 14 have two.
     ("exactly one in 200 days", 365,
-     dict(period_orders_min=1, period_orders_max=1, period_days=200),
-     dict(in_period=lambda d: (KYIV_TODAY - d).days <= 200, at_least=1, at_most=1),
+     lambda: dict(period_orders_min=1, period_orders_max=1, period_days=200),
+     dict(in_period=lambda d: (kyiv_today() - d).days <= 200, at_least=1,
+          at_most=1),
      {2, 5, 6, 7, 9, 12, 13}),
     # Bought, but nothing since the date: 4 and 15 bought only before it;
     # 2 and 14 bought before it and in it, so they are out.
     ("none since a date, all time", 3650,
-     dict(period_orders_max=0, period_from=PERIOD_FROM),
-     dict(in_period=lambda d: d >= PERIOD_FROM, at_most=0),
+     lambda: dict(period_orders_max=0, period_from=period_from()),
+     dict(in_period=lambda d: d >= period_from(), at_most=0),
      {4, 15}),
     # The same within two years: the window still cuts a group, so 15 goes.
     ("none since a date, two years", 730,
-     dict(period_orders_max=0, period_from=PERIOD_FROM),
-     dict(in_period=lambda d: d >= PERIOD_FROM, at_most=0),
+     lambda: dict(period_orders_max=0, period_from=period_from()),
+     dict(in_period=lambda d: d >= period_from(), at_most=0),
      {4}),
     # Nothing in the last 92 days — 12, at exactly 92, is in the period and
     # so out; 13 at 93 is in. 8 keeps the shared number: 9 bought 20 days ago.
     ("none in 92 days", 3650,
-     dict(period_orders_max=0, period_days=92),
-     dict(in_period=lambda d: (KYIV_TODAY - d).days <= 92, at_most=0),
+     lambda: dict(period_orders_max=0, period_days=92),
+     dict(in_period=lambda d: (kyiv_today() - d).days <= 92, at_most=0),
      {1, 4, 5, 6, 7, 8, 13, 14, 15}),
     # All time and no condition: everyone reachable, 15 included.
-    ("all time", 3650, {}, {}, {1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14, 15}),
+    ("all time", 3650, lambda: {}, {}, {1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 14, 15}),
 ]
 
 
