@@ -48,9 +48,9 @@ from core.weekly_report_image import (
 FORMS = ("rich", "rich-nocard", "rich-text", "card", "text")
 
 # Which weekly message to preview. The traffic one needs no fixture and no
-# readable DuckDB: its reads go through the repository, which follows
-# `KS_READ_TRAFFIC` to Postgres, so an empty throwaway store is enough to
-# carry the method and the numbers are still the live ones.
+# readable DuckDB: its reads go through the repository, which reads Postgres
+# whatever `KS_READ_TRAFFIC` says (step 14's S14-05), so an empty throwaway
+# store is enough to carry the method and the numbers are still the live ones.
 REPORTS = ("sales", "traffic")
 
 
@@ -206,9 +206,10 @@ async def send_traffic(chat_id: int, lang: str, db_path: str,
     """Build and send the traffic report exactly as the job would.
 
     The store is opened on `db_path` only to carry the repository methods —
-    with `KS_READ_TRAFFIC=postgres` not one of them touches the file, which
-    is why a throwaway path works while the production DuckDB is locked by
-    the running process.
+    they read Postgres alone since step 14's S14-05 and not one of them
+    touches the file, which is why a throwaway path works while the
+    production DuckDB is locked by the running process. They need
+    `KS_PG_DSN`; without it each read is refused (`ReadUnavailable`).
     """
     from core.duckdb_store import DuckDBStore
     from core.telegram_alerts import send_rich_message_http

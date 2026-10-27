@@ -38,6 +38,12 @@ the same question but a frozen one: nothing writes it and the hourly replace
 no longer runs. A Postgres failure on these reads raises, so the page fails
 where it can be seen instead of showing a goal nobody typed last.
 
+**Since step 14's S14-05 the /marketing target line no longer asks
+`reads_the_chain`.** `_marketing_run` has one path, Postgres, whatever
+`KS_READ_MARKETING` says, and a failure there is the page's counted refusal
+(`read_fallback.refuse("marketing", exc)`, a 503 naming `marketing`) rather
+than a raw raise. `get_goals` and `get_smart_goals` still ask it.
+
 THE ONE WRITER EVERY CALLER GOES THROUGH
 
 `set_goal` is the table's only writer: `POST /api/goals` calls it directly and
@@ -146,7 +152,9 @@ def reads_the_chain(sql: str) -> bool:
     router asks this of every statement it is handed, so a query that starts
     reading `{revenue_goals}` tomorrow follows the chain the day it does,
     through whichever router carries it. `tests/unit/test_goals_reads_follow_chain.py`
-    walks `core/` for every such statement and fails if its router does not ask.
+    walks `core/` for every such statement and fails if its router does not
+    ask — unless the router has no DuckDB tail to leave the chain by and
+    refuses a failure (`_marketing_run`, since step 14's S14-05).
     """
     return TABLE_HOLE in sql and reads_postgres()
 

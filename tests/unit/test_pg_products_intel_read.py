@@ -1,69 +1,22 @@
-"""Which engine answers the product-intelligence reads.
+"""The product-intelligence statements.
 
-The numbers are `tests/integration/test_products_intel_two_engines.py`'s job.
-Here: the flag, the holes, the ties, and that every method actually runs —
-`/margin` taught that a method which parses can still be one PostgreSQL cannot
-execute, and that a fallback turns that into a silent success.
+The numbers are `tests/integration/test_products_intel_two_engines.py`'s job,
+against a real Postgres, which calls every method for real — `/margin` taught
+that a method which parses can still be one PostgreSQL cannot execute, and
+that a fallback turns that into a silent success. That the router asks
+Postgres and nothing else since step 14's S14-05 is
+`tests/unit/test_read_routers_postgres_only.py`'s. Here: the holes and the ties.
 """
 from __future__ import annotations
 
 import ast
-import asyncio
 import re
-from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
-import pytest
-
-from core import pg_products_intel_read as reader
-from core.duckdb_store import DuckDBStore
-from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+from core.sql_dialect import POSTGRES, render_tables
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "products_intel.py"
-W = (date.today() - timedelta(days=30), date.today())
-TIMEOUT_S = 20
-
-CALLS = (
-    ("get_basket_summary", {}),
-    ("get_frequently_bought_together", {"limit": 5}),
-    ("get_basket_distribution", {}),
-    ("get_category_combinations", {"limit": 5}),
-    ("get_brand_affinity", {"limit": 5}),
-    ("get_product_momentum", {"limit": 3}),
-)
-
-
-class TestTheFlag:
-    def test_it_defaults_to_duckdb(self, monkeypatch):
-        monkeypatch.delenv("KS_READ_PRODUCTS_INTEL", raising=False)
-        assert reader.enabled() is False
-
-    def test_postgres_turns_it_on(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_PRODUCTS_INTEL", "postgres")
-        assert reader.enabled() is True
-
-    def test_a_typo_raises(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_PRODUCTS_INTEL", "postgress")
-        with pytest.raises(ValueError, match="KS_READ_PRODUCTS_INTEL"):
-            reader.enabled()
-
-
-class TestEveryMethodActuallyRuns:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,kwargs", CALLS, ids=[n for n, _ in CALLS])
-    async def test_it_returns_rather_than_raising_or_hanging(
-        self, tmp_path, monkeypatch, name, kwargs,
-    ):
-        monkeypatch.delenv("KS_READ_PRODUCTS_INTEL", raising=False)
-        store = DuckDBStore(db_path=tmp_path / f"pi-{name}.duckdb")
-        await store.connect()
-        try:
-            await asyncio.wait_for(
-                getattr(store, name)(*W, **kwargs), timeout=TIMEOUT_S)
-        finally:
-            await store.close()
 
 
 class TestTheRoutedBodies:
@@ -92,12 +45,11 @@ class TestTheRoutedBodies:
         for lineno, text in self._statements():
             assert "{order_lines}" in text, f"line {lineno}: no table hole"
 
-    def test_both_renderings_leave_no_hole(self):
+    def test_the_rendering_leaves_no_hole(self):
         for lineno, text in self._statements():
-            for dialect in (DUCKDB, POSTGRES):
-                rendered = render_tables(text, dialect)
-                assert "{" not in rendered and "}" not in rendered, (
-                    f"line {lineno} unrendered for {dialect.name}")
+            rendered = render_tables(text, POSTGRES)
+            assert "{" not in rendered and "}" not in rendered, (
+                f"line {lineno} unrendered for {POSTGRES.name}")
 
     def test_the_duckdb_only_gold_is_gone(self):
         """`gold_daily_products` exists only in DuckDB. The line level
@@ -177,37 +129,3 @@ class TestTheRoutedBodies:
             assert "self.connection()" not in body, f"{node.name} still opens DuckDB"
             assert "conn.execute" not in body, f"{node.name} bypasses the router"
 
-
-class TestItDoesNotTakeTheDuckDbLock:
-    @pytest.mark.asyncio
-    async def test_a_postgres_read_answers_while_the_store_lock_raises(
-        self, tmp_path, monkeypatch,
-    ):
-        monkeypatch.setenv("KS_READ_PRODUCTS_INTEL", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "pi.duckdb")
-        await store.connect()
-        try:
-            def boom(*_a, **_k):
-                raise AssertionError("the read reached for DuckDB")
-
-            with patch.object(type(store), "connection", boom), \
-                 patch("core.pg_products_intel_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await store.get_brand_affinity(*W)
-            assert "silver.order_lines" in fetch.await_args.args[0]
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_the_duckdb_path_still_uses_the_store(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("KS_READ_PRODUCTS_INTEL", raising=False)
-        store = DuckDBStore(db_path=tmp_path / "pi2.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_products_intel_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await store.get_brand_affinity(*W)
-            fetch.assert_not_awaited()
-        finally:
-            await store.close()

@@ -209,16 +209,18 @@ async def _both(store, monkeypatch, name, kwargs):
     merely calls the method twice can pass while Postgres never answers: the
     second call falls back and the two "engines" agree because they were the
     same engine. `get_margin_trend` shipped that way and the gate was green.
+
+    **The DuckDB leg is not all DuckDB since step 14's S14-05**: a
+    `category_id` case resolves its category tree through the filter bar's
+    router, which reads Postgres alone (`_category_ids`), in both legs. The
+    fixture seeds the same categories into both stores, so the trees are
+    equal, but a literal S14-06 records from this leg for such a case holds
+    DuckDB's measures over Postgres's tree.
     """
     monkeypatch.delenv("KS_READ_DASHBOARD", raising=False)
-    monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
     duck = await getattr(store, name)(*WINDOW, **kwargs)
 
     monkeypatch.setenv("KS_READ_DASHBOARD", "postgres")
-    # The category walk is filter chrome and rides the filter bar's flag; a
-    # `category_id` case would otherwise resolve its tree from DuckDB and trip
-    # the fatal fallback below for a reason that is not the one being tested.
-    monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
 
     def _no_duckdb(*_a, **_k):
         raise AssertionError(
@@ -229,7 +231,6 @@ async def _both(store, monkeypatch, name, kwargs):
     with patch.object(type(store), "connection", _no_duckdb):
         postgres = await getattr(store, name)(*WINDOW, **kwargs)
     monkeypatch.delenv("KS_READ_DASHBOARD", raising=False)
-    monkeypatch.delenv("KS_READ_LOOKUPS", raising=False)
     return duck, postgres
 
 
@@ -485,11 +486,13 @@ REVENUE_CALLS = (
     ("get_revenue_trend", {"brand": "BrandA", "include_comparison": False}),
 )
 
-_REVENUE_FLAGS = ("KS_READ_GOLD", "KS_READ_SILVER", "KS_READ_LOOKUPS")
+# `KS_READ_LOOKUPS` was the third until step 14's S14-05: the category tree
+# reads Postgres in both legs now (see `_both`).
+_REVENUE_FLAGS = ("KS_READ_GOLD", "KS_READ_SILVER")
 
 
 async def _both_revenue(store, monkeypatch, name, kwargs):
-    """`_both`, for the three flags these two methods read.
+    """`_both`, for the two flags these two methods read.
 
     Postgres leg with DuckDB made fatal, and for the same reason: `_pg_silver`
     returns None on any failure, so a broken Postgres body falls back and a
@@ -539,7 +542,6 @@ class TestTheSilverFlagIsTheSwitch:
         self, both_engines, monkeypatch, name,
     ):
         monkeypatch.setenv("KS_READ_GOLD", "postgres")
-        monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
         monkeypatch.delenv("KS_READ_SILVER", raising=False)
 
         calls = []

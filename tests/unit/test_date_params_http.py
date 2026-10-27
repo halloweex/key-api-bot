@@ -27,6 +27,7 @@ window's own edges, under every comparison. So is 29 February, which the
 marketing report and its CSV answered 500 until its year ago became the
 trend's. `parse_period` itself is tests/unit/test_filters_parse_period.py.
 """
+import os
 from datetime import date, timedelta
 
 import pytest
@@ -54,6 +55,47 @@ def _chains_on_duckdb(monkeypatch):
     from tests.conftest import route_chains_to_duckdb
 
     route_chains_to_duckdb(monkeypatch, pg_goals_write, pg_managers_write)
+
+
+# The routers step 14's S14-05 left on Postgres alone, by the module each
+# reads through, and the routes they answer. Those routes are answered by a
+# real Postgres here; without one they refuse, and say so as a skip.
+POSTGRES_ONLY = ("pg_traffic_read", "pg_margin_read", "pg_products_intel_read",
+                 "pg_reports_read", "pg_marketing_read", "pg_lookups_read")
+POSTGRES_ONLY_ROUTES = ("/api/traffic/", "/api/margin/", "/api/products/intel/",
+                        "/api/reports/", "/api/promocodes/analytics")
+DSN = os.getenv("KS_PG_DSN")
+
+
+@pytest.fixture(autouse=True)
+def _postgres_only_routers_on_their_own_connections(monkeypatch):
+    """The six read a live Postgres, one connection per statement on the
+    request's own loop: the client runs every request on a loop of its own,
+    and a pool would outlive the loop it was made on. What is read is
+    whatever the database holds — the question is the status, not the
+    numbers."""
+    if not DSN:
+        return
+
+    async def fetch(sql, params=()):
+        import asyncpg
+
+        from core.sql_dialect import numbered
+
+        conn = await asyncpg.connect(DSN)
+        try:
+            rows = await conn.fetch(numbered(sql), *params)
+        finally:
+            await conn.close()
+        return [tuple(r) for r in rows]
+
+    for module in POSTGRES_ONLY:
+        monkeypatch.setattr(f"core.{module}.fetch", fetch)
+
+
+def _needs_postgres(path: str) -> None:
+    if not DSN and path.startswith(POSTGRES_ONLY_ROUTES):
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
 
 
 DATED = sorted(
@@ -174,6 +216,7 @@ INSIDE = [
 @pytest.mark.parametrize("start, end", INSIDE)
 @pytest.mark.parametrize("endpoint", DATED, ids=lambda e: e.path)
 def test_dates_inside_the_window_are_answered(admin_client, endpoint, start, end):
+    _needs_postgres(endpoint.path)
     r = _get(admin_client, endpoint, start_date=start, end_date=end)
     assert r.status_code == 200, r.text
 
@@ -192,6 +235,7 @@ FEBRUARY_2024 = {"start_date": "2024-02-01", "end_date": "2024-02-29"}
 def test_the_marketing_report_takes_29_february_a_year_back_to_the_28th(admin_client):
     """The same dates a year back, as the trend's year ago has always taken
     them; the previous period is the 29 days before, as it was."""
+    _needs_postgres("/api/reports/marketing-summary")
     r = admin_client.get("/api/reports/marketing-summary", params=FEBRUARY_2024)
     assert r.status_code == 200, r.text
     body = r.json()
@@ -200,6 +244,7 @@ def test_the_marketing_report_takes_29_february_a_year_back_to_the_28th(admin_cl
 
 
 def test_the_marketing_csv_labels_29_february_a_year_back_as_the_28th(admin_client):
+    _needs_postgres("/api/reports/marketing-summary/export/csv")
     r = admin_client.get("/api/reports/marketing-summary/export/csv", params=FEBRUARY_2024)
     assert r.status_code == 200, r.text
     assert "2023-02-01 — 2023-02-28" in r.content.decode("utf-8-sig")

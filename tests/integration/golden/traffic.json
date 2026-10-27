@@ -1,0 +1,1078 @@
+{
+ "source": "DuckDB's answer to every call of tests/integration/test_traffic_two_engines.py's equality test, on that file's fixture pinned to 2026-09-15, recorded at step 14's S14-05 on the code before it (d6057d53) while the same run asserted Postgres answered each one equally. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it.",
+ "answers": {
+  "get_traffic_analytics{\"sales_type\": \"retail\"}": {
+   "period": {
+    "start": "2026-08-21",
+    "end": "2026-09-15"
+   },
+   "totals": {
+    "orders": 7,
+    "revenue": 5650.0
+   },
+   "summary": {
+    "paid": {
+     "orders": 5,
+     "revenue": 4900.0
+    },
+    "paid_confirmed": {
+     "orders": 4,
+     "revenue": 2900.0
+    },
+    "paid_likely": {
+     "orders": 1,
+     "revenue": 2000.0
+    },
+    "organic": {
+     "orders": 2,
+     "revenue": 750.0
+    },
+    "manager": {
+     "orders": 0,
+     "revenue": 0.0
+    },
+    "pixel_only": {
+     "orders": 0,
+     "revenue": 0.0
+    },
+    "unknown": {
+     "orders": 0,
+     "revenue": 0.0
+    }
+   },
+   "by_platform": {
+    "facebook": {
+     "orders": 3,
+     "revenue": 2400.0
+    },
+    "tiktok": {
+     "orders": 1,
+     "revenue": 2000.0
+    },
+    "google_ads": {
+     "orders": 1,
+     "revenue": 500.0
+    },
+    "email": {
+     "orders": 1,
+     "revenue": 450.0
+    },
+    "telegram": {
+     "orders": 1,
+     "revenue": 300.0
+    }
+   },
+   "by_traffic_type": {
+    "paid_confirmed": {
+     "orders": 4,
+     "revenue": 2900.0
+    },
+    "paid_likely": {
+     "orders": 1,
+     "revenue": 2000.0
+    },
+    "organic": {
+     "orders": 2,
+     "revenue": 750.0
+    }
+   },
+   "new_customers": {
+    "total": 7,
+    "summary": {
+     "paid": 5,
+     "paid_confirmed": 4,
+     "paid_likely": 1,
+     "organic": 2,
+     "manager": 0,
+     "pixel_only": 0,
+     "unknown": 0
+    },
+    "by_platform": {
+     "google_ads": 1,
+     "facebook": 3,
+     "tiktok": 1,
+     "email": 1,
+     "telegram": 1
+    },
+    "by_traffic_type": {
+     "paid_confirmed": 4,
+     "paid_likely": 1,
+     "organic": 2
+    }
+   }
+  },
+  "get_traffic_analytics{\"source_id\": 1}": {
+   "period": {
+    "start": "2026-08-21",
+    "end": "2026-09-15"
+   },
+   "totals": {
+    "orders": 4,
+    "revenue": 4400.0
+   },
+   "summary": {
+    "paid": {
+     "orders": 4,
+     "revenue": 4400.0
+    },
+    "paid_confirmed": {
+     "orders": 3,
+     "revenue": 2400.0
+    },
+    "paid_likely": {
+     "orders": 1,
+     "revenue": 2000.0
+    },
+    "organic": {
+     "orders": 0,
+     "revenue": 0
+    },
+    "manager": {
+     "orders": 0,
+     "revenue": 0.0
+    },
+    "pixel_only": {
+     "orders": 0,
+     "revenue": 0.0
+    },
+    "unknown": {
+     "orders": 0,
+     "revenue": 0.0
+    }
+   },
+   "by_platform": {
+    "facebook": {
+     "orders": 3,
+     "revenue": 2400.0
+    },
+    "tiktok": {
+     "orders": 1,
+     "revenue": 2000.0
+    }
+   },
+   "by_traffic_type": {
+    "paid_confirmed": {
+     "orders": 3,
+     "revenue": 2400.0
+    },
+    "paid_likely": {
+     "orders": 1,
+     "revenue": 2000.0
+    }
+   },
+   "new_customers": {
+    "total": 4,
+    "summary": {
+     "paid": 4,
+     "paid_confirmed": 3,
+     "paid_likely": 1,
+     "organic": 0,
+     "manager": 0,
+     "pixel_only": 0,
+     "unknown": 0
+    },
+    "by_platform": {
+     "facebook": 3,
+     "tiktok": 1
+    },
+    "by_traffic_type": {
+     "paid_confirmed": 3,
+     "paid_likely": 1
+    }
+   }
+  },
+  "get_traffic_analytics{}": {
+   "period": {
+    "start": "2026-08-21",
+    "end": "2026-09-15"
+   },
+   "totals": {
+    "orders": 7,
+    "revenue": 5650.0
+   },
+   "summary": {
+    "paid": {
+     "orders": 5,
+     "revenue": 4900.0
+    },
+    "paid_confirmed": {
+     "orders": 4,
+     "revenue": 2900.0
+    },
+    "paid_likely": {
+     "orders": 1,
+     "revenue": 2000.0
+    },
+    "organic": {
+     "orders": 2,
+     "revenue": 750.0
+    },
+    "manager": {
+     "orders": 0,
+     "revenue": 0.0
+    },
+    "pixel_only": {
+     "orders": 0,
+     "revenue": 0.0
+    },
+    "unknown": {
+     "orders": 0,
+     "revenue": 0.0
+    }
+   },
+   "by_platform": {
+    "facebook": {
+     "orders": 3,
+     "revenue": 2400.0
+    },
+    "tiktok": {
+     "orders": 1,
+     "revenue": 2000.0
+    },
+    "google_ads": {
+     "orders": 1,
+     "revenue": 500.0
+    },
+    "email": {
+     "orders": 1,
+     "revenue": 450.0
+    },
+    "telegram": {
+     "orders": 1,
+     "revenue": 300.0
+    }
+   },
+   "by_traffic_type": {
+    "paid_confirmed": {
+     "orders": 4,
+     "revenue": 2900.0
+    },
+    "paid_likely": {
+     "orders": 1,
+     "revenue": 2000.0
+    },
+    "organic": {
+     "orders": 2,
+     "revenue": 750.0
+    }
+   },
+   "new_customers": {
+    "total": 7,
+    "summary": {
+     "paid": 5,
+     "paid_confirmed": 4,
+     "paid_likely": 1,
+     "organic": 2,
+     "manager": 0,
+     "pixel_only": 0,
+     "unknown": 0
+    },
+    "by_platform": {
+     "google_ads": 1,
+     "facebook": 3,
+     "email": 1,
+     "telegram": 1,
+     "tiktok": 1
+    },
+    "by_traffic_type": {
+     "paid_confirmed": 4,
+     "organic": 2,
+     "paid_likely": 1
+    }
+   }
+  },
+  "get_traffic_organic{\"sales_type\": \"retail\"}": {
+   "period": {
+    "start": "2026-08-21",
+    "end": "2026-09-15"
+   },
+   "previous_period": {
+    "start": "2026-07-26",
+    "end": "2026-08-20"
+   },
+   "totals": {
+    "orders": 2,
+    "revenue": 750.0,
+    "new_customers": 2
+   },
+   "previous_totals": {
+    "orders": 0,
+    "revenue": 0.0
+   },
+   "channels": [
+    {
+     "channel": "email_campaigns",
+     "orders": 1,
+     "revenue": 450.0,
+     "new_customers": 1,
+     "previous": {
+      "orders": 0,
+      "revenue": 0.0
+     },
+     "details": [
+      {
+       "source": "klaviyo",
+       "medium": "klaviyo",
+       "campaign": "[07/28/26] Campaign #12: Beauty roulette",
+       "content": "",
+       "orders": 1,
+       "revenue": 450.0
+      }
+     ],
+     "details_total": 1
+    },
+    {
+     "channel": "telegram",
+     "orders": 1,
+     "revenue": 300.0,
+     "new_customers": 1,
+     "previous": {
+      "orders": 0,
+      "revenue": 0.0
+     },
+     "details": [
+      {
+       "source": "",
+       "medium": "",
+       "campaign": "",
+       "content": "",
+       "orders": 1,
+       "revenue": 300.0
+      }
+     ],
+     "details_total": 1
+    }
+   ]
+  },
+  "get_traffic_organic{\"source_id\": 2}": {
+   "period": {
+    "start": "2026-08-21",
+    "end": "2026-09-15"
+   },
+   "previous_period": {
+    "start": "2026-07-26",
+    "end": "2026-08-20"
+   },
+   "totals": {
+    "orders": 1,
+    "revenue": 300.0,
+    "new_customers": 1
+   },
+   "previous_totals": {
+    "orders": 0,
+    "revenue": 0.0
+   },
+   "channels": [
+    {
+     "channel": "telegram",
+     "orders": 1,
+     "revenue": 300.0,
+     "new_customers": 1,
+     "previous": {
+      "orders": 0,
+      "revenue": 0.0
+     },
+     "details": [
+      {
+       "source": "",
+       "medium": "",
+       "campaign": "",
+       "content": "",
+       "orders": 1,
+       "revenue": 300.0
+      }
+     ],
+     "details_total": 1
+    }
+   ]
+  },
+  "get_traffic_organic{}": {
+   "period": {
+    "start": "2026-08-21",
+    "end": "2026-09-15"
+   },
+   "previous_period": {
+    "start": "2026-07-26",
+    "end": "2026-08-20"
+   },
+   "totals": {
+    "orders": 2,
+    "revenue": 750.0,
+    "new_customers": 2
+   },
+   "previous_totals": {
+    "orders": 0,
+    "revenue": 0.0
+   },
+   "channels": [
+    {
+     "channel": "email_campaigns",
+     "orders": 1,
+     "revenue": 450.0,
+     "new_customers": 1,
+     "previous": {
+      "orders": 0,
+      "revenue": 0.0
+     },
+     "details": [
+      {
+       "source": "klaviyo",
+       "medium": "klaviyo",
+       "campaign": "[07/28/26] Campaign #12: Beauty roulette",
+       "content": "",
+       "orders": 1,
+       "revenue": 450.0
+      }
+     ],
+     "details_total": 1
+    },
+    {
+     "channel": "telegram",
+     "orders": 1,
+     "revenue": 300.0,
+     "new_customers": 1,
+     "previous": {
+      "orders": 0,
+      "revenue": 0.0
+     },
+     "details": [
+      {
+       "source": "",
+       "medium": "",
+       "campaign": "",
+       "content": "",
+       "orders": 1,
+       "revenue": 300.0
+      }
+     ],
+     "details_total": 1
+    }
+   ]
+  },
+  "get_traffic_roas{\"sales_type\": \"retail\"}": {
+   "blended": {
+    "revenue": 5650.0,
+    "spend": 750.0,
+    "roas": 7.53
+   },
+   "by_platform": {
+    "facebook": {
+     "paid_revenue": 2400.0,
+     "spend": 500.0,
+     "roas": 4.8
+    },
+    "google": {
+     "paid_revenue": 500.0,
+     "spend": 0,
+     "roas": null
+    },
+    "tiktok": {
+     "paid_revenue": 2000.0,
+     "spend": 250.0,
+     "roas": 8.0
+    }
+   },
+   "bonus_tier": "plus_30",
+   "has_spend_data": true
+  },
+  "get_traffic_roas{}": {
+   "blended": {
+    "revenue": 5650.0,
+    "spend": 750.0,
+    "roas": 7.53
+   },
+   "by_platform": {
+    "facebook": {
+     "paid_revenue": 2400.0,
+     "spend": 500.0,
+     "roas": 4.8
+    },
+    "google": {
+     "paid_revenue": 500.0,
+     "spend": 0,
+     "roas": null
+    },
+    "tiktok": {
+     "paid_revenue": 2000.0,
+     "spend": 250.0,
+     "roas": 8.0
+    }
+   },
+   "bonus_tier": "plus_30",
+   "has_spend_data": true
+  },
+  "get_traffic_transactions{\"limit\": 2}": {
+   "transactions": [
+    {
+     "id": 1,
+     "date": "2026-09-13",
+     "amount": 1000.0,
+     "source": "Instagram",
+     "traffic_type": "paid_confirmed",
+     "platform": "facebook",
+     "evidence": [
+      {
+       "field": "fbclid",
+       "value": "abc123",
+       "reason": "Facebook click ID"
+      },
+      {
+       "field": "utm_source",
+       "value": "fbads"
+      },
+      {
+       "field": "utm_medium",
+       "value": "paid"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "spring"
+      }
+     ]
+    },
+    {
+     "id": 2,
+     "date": "2026-09-12",
+     "amount": 2000.0,
+     "source": "Instagram",
+     "traffic_type": "paid_likely",
+     "platform": "tiktok",
+     "evidence": [
+      {
+       "field": "utm_source",
+       "value": "tiktok"
+      },
+      {
+       "field": "utm_medium",
+       "value": "cpc"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "summer"
+      }
+     ]
+    }
+   ],
+   "total": 7,
+   "limit": 2,
+   "offset": 0
+  },
+  "get_traffic_transactions{\"platform\": \"facebook\"}": {
+   "transactions": [
+    {
+     "id": 1,
+     "date": "2026-09-13",
+     "amount": 1000.0,
+     "source": "Instagram",
+     "traffic_type": "paid_confirmed",
+     "platform": "facebook",
+     "evidence": [
+      {
+       "field": "fbclid",
+       "value": "abc123",
+       "reason": "Facebook click ID"
+      },
+      {
+       "field": "utm_source",
+       "value": "fbads"
+      },
+      {
+       "field": "utm_medium",
+       "value": "paid"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "spring"
+      }
+     ]
+    },
+    {
+     "id": 5,
+     "date": "2026-09-09",
+     "amount": 700.0,
+     "source": "Instagram",
+     "traffic_type": "paid_confirmed",
+     "platform": "facebook",
+     "evidence": [
+      {
+       "field": "utm_source",
+       "value": "fbads"
+      },
+      {
+       "field": "utm_medium",
+       "value": "paid"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "alpha"
+      }
+     ]
+    },
+    {
+     "id": 7,
+     "date": "2026-09-07",
+     "amount": 700.0,
+     "source": "Instagram",
+     "traffic_type": "paid_confirmed",
+     "platform": "facebook",
+     "evidence": [
+      {
+       "field": "utm_source",
+       "value": "fbads"
+      },
+      {
+       "field": "utm_medium",
+       "value": "paid"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "beta"
+      }
+     ]
+    }
+   ],
+   "total": 3,
+   "limit": 50,
+   "offset": 0
+  },
+  "get_traffic_transactions{\"traffic_type\": \"organic\"}": {
+   "transactions": [
+    {
+     "id": 3,
+     "date": "2026-09-11",
+     "amount": 300.0,
+     "source": "Telegram",
+     "traffic_type": "organic",
+     "platform": "telegram",
+     "evidence": []
+    },
+    {
+     "id": 9,
+     "date": "2026-09-05",
+     "amount": 450.0,
+     "source": "Shopify",
+     "traffic_type": "organic",
+     "platform": "email",
+     "evidence": [
+      {
+       "field": "utm_source",
+       "value": "klaviyo"
+      },
+      {
+       "field": "utm_medium",
+       "value": "klaviyo"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "[07/28/26] Campaign #12: Beauty roulette"
+      }
+     ]
+    }
+   ],
+   "total": 2,
+   "limit": 50,
+   "offset": 0
+  },
+  "get_traffic_transactions{}": {
+   "transactions": [
+    {
+     "id": 1,
+     "date": "2026-09-13",
+     "amount": 1000.0,
+     "source": "Instagram",
+     "traffic_type": "paid_confirmed",
+     "platform": "facebook",
+     "evidence": [
+      {
+       "field": "fbclid",
+       "value": "abc123",
+       "reason": "Facebook click ID"
+      },
+      {
+       "field": "utm_source",
+       "value": "fbads"
+      },
+      {
+       "field": "utm_medium",
+       "value": "paid"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "spring"
+      }
+     ]
+    },
+    {
+     "id": 2,
+     "date": "2026-09-12",
+     "amount": 2000.0,
+     "source": "Instagram",
+     "traffic_type": "paid_likely",
+     "platform": "tiktok",
+     "evidence": [
+      {
+       "field": "utm_source",
+       "value": "tiktok"
+      },
+      {
+       "field": "utm_medium",
+       "value": "cpc"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "summer"
+      }
+     ]
+    },
+    {
+     "id": 3,
+     "date": "2026-09-11",
+     "amount": 300.0,
+     "source": "Telegram",
+     "traffic_type": "organic",
+     "platform": "telegram",
+     "evidence": []
+    },
+    {
+     "id": 4,
+     "date": "2026-09-10",
+     "amount": 500.0,
+     "source": "Shopify",
+     "traffic_type": "paid_confirmed",
+     "platform": "google",
+     "evidence": [
+      {
+       "field": "utm_source",
+       "value": "google"
+      },
+      {
+       "field": "utm_medium",
+       "value": "cpc"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "12345"
+      }
+     ]
+    },
+    {
+     "id": 5,
+     "date": "2026-09-09",
+     "amount": 700.0,
+     "source": "Instagram",
+     "traffic_type": "paid_confirmed",
+     "platform": "facebook",
+     "evidence": [
+      {
+       "field": "utm_source",
+       "value": "fbads"
+      },
+      {
+       "field": "utm_medium",
+       "value": "paid"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "alpha"
+      }
+     ]
+    },
+    {
+     "id": 7,
+     "date": "2026-09-07",
+     "amount": 700.0,
+     "source": "Instagram",
+     "traffic_type": "paid_confirmed",
+     "platform": "facebook",
+     "evidence": [
+      {
+       "field": "utm_source",
+       "value": "fbads"
+      },
+      {
+       "field": "utm_medium",
+       "value": "paid"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "beta"
+      }
+     ]
+    },
+    {
+     "id": 9,
+     "date": "2026-09-05",
+     "amount": 450.0,
+     "source": "Shopify",
+     "traffic_type": "organic",
+     "platform": "email",
+     "evidence": [
+      {
+       "field": "utm_source",
+       "value": "klaviyo"
+      },
+      {
+       "field": "utm_medium",
+       "value": "klaviyo"
+      },
+      {
+       "field": "utm_campaign",
+       "value": "[07/28/26] Campaign #12: Beauty roulette"
+      }
+     ]
+    }
+   ],
+   "total": 7,
+   "limit": 50,
+   "offset": 0
+  },
+  "get_traffic_trend{\"source_id\": 2}": [
+   {
+    "date": "2026-09-11",
+    "paid_orders": 0,
+    "paid_revenue": 0.0,
+    "organic_orders": 1,
+    "organic_revenue": 300.0,
+    "other_orders": 0,
+    "other_revenue": 0.0
+   }
+  ],
+  "get_traffic_trend{}": [
+   {
+    "date": "2026-09-05",
+    "paid_orders": 0,
+    "paid_revenue": 0.0,
+    "organic_orders": 1,
+    "organic_revenue": 450.0,
+    "other_orders": 0,
+    "other_revenue": 0.0
+   },
+   {
+    "date": "2026-09-07",
+    "paid_orders": 1,
+    "paid_revenue": 700.0,
+    "organic_orders": 0,
+    "organic_revenue": 0.0,
+    "other_orders": 0,
+    "other_revenue": 0.0
+   },
+   {
+    "date": "2026-09-09",
+    "paid_orders": 1,
+    "paid_revenue": 700.0,
+    "organic_orders": 0,
+    "organic_revenue": 0.0,
+    "other_orders": 0,
+    "other_revenue": 0.0
+   },
+   {
+    "date": "2026-09-10",
+    "paid_orders": 1,
+    "paid_revenue": 500.0,
+    "organic_orders": 0,
+    "organic_revenue": 0.0,
+    "other_orders": 0,
+    "other_revenue": 0.0
+   },
+   {
+    "date": "2026-09-11",
+    "paid_orders": 0,
+    "paid_revenue": 0.0,
+    "organic_orders": 1,
+    "organic_revenue": 300.0,
+    "other_orders": 0,
+    "other_revenue": 0.0
+   },
+   {
+    "date": "2026-09-12",
+    "paid_orders": 1,
+    "paid_revenue": 2000.0,
+    "organic_orders": 0,
+    "organic_revenue": 0.0,
+    "other_orders": 0,
+    "other_revenue": 0.0
+   },
+   {
+    "date": "2026-09-13",
+    "paid_orders": 1,
+    "paid_revenue": 1000.0,
+    "organic_orders": 0,
+    "organic_revenue": 0.0,
+    "other_orders": 0,
+    "other_revenue": 0.0
+   }
+  ],
+  "get_traffic_utm_campaigns{\"limit\": 2, \"offset\": 2}": {
+   "campaigns": [
+    {
+     "campaign": "alpha",
+     "utm_source": "fbads",
+     "platform": "facebook",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 700.0
+    },
+    {
+     "campaign": "beta",
+     "utm_source": "fbads",
+     "platform": "facebook",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 700.0
+    }
+   ],
+   "total": 7,
+   "limit": 2,
+   "offset": 2
+  },
+  "get_traffic_utm_campaigns{\"limit\": 2}": {
+   "campaigns": [
+    {
+     "campaign": "summer",
+     "utm_source": "tiktok",
+     "platform": "tiktok",
+     "traffic_type": "paid_likely",
+     "orders": 1,
+     "revenue": 2000.0
+    },
+    {
+     "campaign": "spring",
+     "utm_source": "fbads",
+     "platform": "facebook",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 1000.0
+    }
+   ],
+   "total": 7,
+   "limit": 2,
+   "offset": 0
+  },
+  "get_traffic_utm_campaigns{\"sort_by\": \"orders\", \"sort_dir\": \"asc\"}": {
+   "campaigns": [
+    {
+     "campaign": "summer",
+     "utm_source": "tiktok",
+     "platform": "tiktok",
+     "traffic_type": "paid_likely",
+     "orders": 1,
+     "revenue": 2000.0
+    },
+    {
+     "campaign": "spring",
+     "utm_source": "fbads",
+     "platform": "facebook",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 1000.0
+    },
+    {
+     "campaign": "alpha",
+     "utm_source": "fbads",
+     "platform": "facebook",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 700.0
+    },
+    {
+     "campaign": "beta",
+     "utm_source": "fbads",
+     "platform": "facebook",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 700.0
+    },
+    {
+     "campaign": "12345",
+     "utm_source": "google",
+     "platform": "google",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 500.0
+    },
+    {
+     "campaign": "[07/28/26] Campaign #12: Beauty roulette",
+     "utm_source": "klaviyo",
+     "platform": "email",
+     "traffic_type": "organic",
+     "orders": 1,
+     "revenue": 450.0
+    },
+    {
+     "campaign": "",
+     "utm_source": null,
+     "platform": "telegram",
+     "traffic_type": "organic",
+     "orders": 1,
+     "revenue": 300.0
+    }
+   ],
+   "total": 7,
+   "limit": 50,
+   "offset": 0
+  },
+  "get_traffic_utm_campaigns{}": {
+   "campaigns": [
+    {
+     "campaign": "summer",
+     "utm_source": "tiktok",
+     "platform": "tiktok",
+     "traffic_type": "paid_likely",
+     "orders": 1,
+     "revenue": 2000.0
+    },
+    {
+     "campaign": "spring",
+     "utm_source": "fbads",
+     "platform": "facebook",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 1000.0
+    },
+    {
+     "campaign": "alpha",
+     "utm_source": "fbads",
+     "platform": "facebook",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 700.0
+    },
+    {
+     "campaign": "beta",
+     "utm_source": "fbads",
+     "platform": "facebook",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 700.0
+    },
+    {
+     "campaign": "12345",
+     "utm_source": "google",
+     "platform": "google",
+     "traffic_type": "paid_confirmed",
+     "orders": 1,
+     "revenue": 500.0
+    },
+    {
+     "campaign": "[07/28/26] Campaign #12: Beauty roulette",
+     "utm_source": "klaviyo",
+     "platform": "email",
+     "traffic_type": "organic",
+     "orders": 1,
+     "revenue": 450.0
+    },
+    {
+     "campaign": "",
+     "utm_source": null,
+     "platform": "telegram",
+     "traffic_type": "organic",
+     "orders": 1,
+     "revenue": 300.0
+    }
+   ],
+   "total": 7,
+   "limit": 50,
+   "offset": 0
+  }
+ }
+}

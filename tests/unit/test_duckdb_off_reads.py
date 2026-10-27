@@ -395,47 +395,50 @@ class TestTheExpensesHistoryGate:
 # ─── read_fallback itself ──────────────────────────────────────────────────
 
 class TestTheRule:
+    # Shown on `/inventory`'s switch, one still read: `/traffic`'s, the
+    # example until step 14's S14-05, is read no longer, and its router asks
+    # `no_address` nothing (tests/unit/test_read_routers_postgres_only.py).
     @pytest.mark.parametrize("value", [None, "duckdb", " DuckDB "],
                              ids=["unset", "duckdb", "spaced"])
     def test_under_off_a_switch_left_at_duckdb_is_refused_by_name(
         self, value, fresh_read_fallback, duckdb_off, monkeypatch, caplog,  # noqa: F811
     ):
-        from core import pg_traffic_read
+        from core import pg_inventory_read
 
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
         if value is None:
-            monkeypatch.delenv(pg_traffic_read.ENV, raising=False)
+            monkeypatch.delenv(pg_inventory_read.ENV, raising=False)
         else:
-            monkeypatch.setenv(pg_traffic_read.ENV, value)
+            monkeypatch.setenv(pg_inventory_read.ENV, value)
         read_fallback.configure_mode()
         with caplog.at_level(logging.ERROR, logger="core.read_fallback"), \
                 pytest.raises(read_fallback.ReadUnavailable) as raised:
-            read_fallback.no_address("traffic", pg_traffic_read)
-        assert raised.value.surface == "traffic"
-        assert "KS_READ_TRAFFIC=duckdb while KS_DUCKDB=off" in caplog.text
+            read_fallback.no_address("inventory", pg_inventory_read)
+        assert raised.value.surface == "inventory"
+        assert "KS_READ_INVENTORY=duckdb while KS_DUCKDB=off" in caplog.text
         assert "falling back to DuckDB" not in caplog.text
 
     def test_under_off_a_switch_on_its_engine_passes(
         self, fresh_read_fallback, duckdb_off, monkeypatch,  # noqa: F811
     ):
-        from core import pg_traffic_read
+        from core import pg_inventory_read
 
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-        monkeypatch.setenv(pg_traffic_read.ENV, "postgres")
+        monkeypatch.setenv(pg_inventory_read.ENV, "postgres")
         read_fallback.configure_mode()
-        read_fallback.no_address("traffic", pg_traffic_read)
+        read_fallback.no_address("inventory", pg_inventory_read)
         assert read_fallback.refusals() == {}
 
     @pytest.mark.parametrize("fallback", ["duckdb", "off"])
     def test_under_on_a_switch_left_at_duckdb_is_routing(
         self, fallback, fresh_read_fallback, monkeypatch,  # noqa: F811
     ):
-        from core import pg_traffic_read
+        from core import pg_inventory_read
 
         monkeypatch.setenv("KS_READ_FALLBACK", fallback)
-        monkeypatch.setenv(pg_traffic_read.ENV, "duckdb")
+        monkeypatch.setenv(pg_inventory_read.ENV, "duckdb")
         read_fallback.configure_mode()
-        read_fallback.no_address("traffic", pg_traffic_read)
+        read_fallback.no_address("inventory", pg_inventory_read)
         assert read_fallback.refusals() == {}
 
 

@@ -1,0 +1,159 @@
+{
+ "source": "DuckDB's answer to every call of tests/integration/test_products_intel_two_engines.py's equality test, on that file's fixture pinned to 2026-09-15, recorded at step 14's S14-05 on the code before it (d6057d53) while the same run asserted Postgres answered each one equally. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it.",
+ "answers": {
+  "get_basket_distribution{}": [
+   {
+    "bucket": "1 item",
+    "orders": 1,
+    "revenue": 400.0,
+    "aov": 400.0
+   },
+   {
+    "bucket": "2 items",
+    "orders": 3,
+    "revenue": 2900.0,
+    "aov": 967.0
+   },
+   {
+    "bucket": "3 items",
+    "orders": 1,
+    "revenue": 1500.0,
+    "aov": 1500.0
+   }
+  ],
+  "get_basket_summary{\"sales_type\": \"all\"}": {
+   "avgBasketSize": 2.0,
+   "multiItemPct": 80.0,
+   "multiItemOrders": 4,
+   "totalOrders": 5,
+   "aovUplift": 2.8,
+   "multiAov": 1100.0,
+   "singleAov": 400.0,
+   "topPair": "Serum + Lipstick",
+   "topPairCount": 3
+  },
+  "get_basket_summary{}": {
+   "avgBasketSize": 2.0,
+   "multiItemPct": 80.0,
+   "multiItemOrders": 4,
+   "totalOrders": 5,
+   "aovUplift": 2.8,
+   "multiAov": 1100.0,
+   "singleAov": 400.0,
+   "topPair": "Serum + Lipstick",
+   "topPairCount": 3
+  },
+  "get_brand_affinity{\"limit\": 10}": [
+   {
+    "brandA": "BrandA",
+    "brandB": "BrandB",
+    "coOccurrence": 3,
+    "productPairs": 0
+   }
+  ],
+  "get_brand_affinity{\"limit\": 1}": [
+   {
+    "brandA": "BrandA",
+    "brandB": "BrandB",
+    "coOccurrence": 3,
+    "productPairs": 0
+   }
+  ],
+  "get_category_combinations{\"limit\": 10}": [
+   {
+    "categoryA": "Care",
+    "categoryB": "Makeup",
+    "coOccurrence": 3
+   }
+  ],
+  "get_category_combinations{\"limit\": 1}": [
+   {
+    "categoryA": "Care",
+    "categoryB": "Makeup",
+    "coOccurrence": 3
+   }
+  ],
+  "get_frequently_bought_together{\"limit\": 10}": [
+   {
+    "productA": {
+     "id": 100,
+     "name": "Serum",
+     "orders": 4
+    },
+    "productB": {
+     "id": 200,
+     "name": "Lipstick",
+     "orders": 3
+    },
+    "coOccurrence": 3,
+    "support": 0.6,
+    "confidenceAtoB": 0.75,
+    "confidenceBtoA": 1.0,
+    "lift": 1.25,
+    "totalOrders": 5
+   },
+   {
+    "productA": {
+     "id": 100,
+     "name": "Serum",
+     "orders": 4
+    },
+    "productB": {
+     "id": 300,
+     "name": "Cream",
+     "orders": 2
+    },
+    "coOccurrence": 2,
+    "support": 0.4,
+    "confidenceAtoB": 0.5,
+    "confidenceBtoA": 1.0,
+    "lift": 1.25,
+    "totalOrders": 5
+   }
+  ],
+  "get_frequently_bought_together{\"limit\": 1}": [
+   {
+    "productA": {
+     "id": 100,
+     "name": "Serum",
+     "orders": 4
+    },
+    "productB": {
+     "id": 200,
+     "name": "Lipstick",
+     "orders": 3
+    },
+    "coOccurrence": 3,
+    "support": 0.6,
+    "confidenceAtoB": 0.75,
+    "confidenceBtoA": 1.0,
+    "lift": 1.25,
+    "totalOrders": 5
+   }
+  ],
+  "get_product_momentum{\"limit\": 5}": {
+   "gainers": [
+    {
+     "productId": 100,
+     "productName": "Serum",
+     "currentRevenue": 2000.0,
+     "prevRevenue": 1500.0,
+     "currentQty": 4,
+     "prevQty": 3,
+     "growthPct": 33.3
+    }
+   ],
+   "losers": [
+    {
+     "productId": 100,
+     "productName": "Serum (promo)",
+     "currentRevenue": 500.0,
+     "prevRevenue": 1500.0,
+     "currentQty": 1,
+     "prevQty": 3,
+     "growthPct": -66.7
+    }
+   ]
+  }
+ }
+}

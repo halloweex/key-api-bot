@@ -6,6 +6,14 @@ filters were narrowed. That is why they share one flag: they are one surface,
 they fail together, and rolling one back without the others would leave a
 filter bar half on each engine with nothing on screen saying so.
 
+NO FALLBACK SINCE STEP 14 (S14-05)
+
+The four dropdowns read Postgres. The flag that chose the engine
+(`KS_READ_LOOKUPS`) chooses nothing now: the router asks Postgres and nothing
+else, and a failure — a lost DSN line included — is refused as a 503 naming
+`lookups` (`read_fallback.refuse`), which is what `KS_READ_FALLBACK=off` made
+of it since 2026-10-09. The paragraphs below are the history of the port.
+
 WHY THIS IS THE FIRST THING TO MOVE, AND NOT THE LAST
 
 Every other port took a tab off DuckDB and left these behind, so a page could
@@ -16,7 +24,7 @@ store lock**, the same lock a warehouse rebuild holds every two minutes. There
 is no cache above them: `web/routes/api/analytics.py` calls the store
 directly.
 
-WHY THIS FALLS BACK
+WHY IT FELL BACK, UNTIL S14-05
 
 Nothing diverges. Both engines read the same catalogue — `bronze.categories`
 and `bronze.products` are the same parsed tuple `core/landing_rows.py` handed
@@ -61,35 +69,9 @@ migration step is the smaller blast radius; the extraction is its own change.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_LOOKUPS"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    """Whether the filter lookups should ask Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. A typo in the variable
-    deciding which engine answers should stop the read loudly rather than
-    quietly serve the other store.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all. Without a DSN there is nothing to ask,
-    and the flag alone must not turn a working filter bar into an error."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:

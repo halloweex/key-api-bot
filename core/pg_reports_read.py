@@ -8,6 +8,14 @@ DuckDB uses (`core.sql_dialect.order_lines_select`). So there is nothing to
 migrate and nothing to replicate; what is left is choosing which engine
 answers.
 
+NO FALLBACK SINCE STEP 14 (S14-05)
+
+`/reports` reads Postgres. The flag that chose the engine (`KS_READ_REPORTS`)
+chooses nothing now: the router asks Postgres and nothing else, and a failure —
+a lost DSN line included — is refused as a 503 naming `reports`
+(`read_fallback.refuse`), which is what `KS_READ_FALLBACK=off` made of it
+since 2026-10-09. The paragraphs below are the history of the port.
+
 WHY NOT CLICKHOUSE
 
 `silver.orders` is there, and `gold.daily_revenue` is derived there — but the
@@ -15,7 +23,7 @@ WHY NOT CLICKHOUSE
 line items to ClickHouse is a new layer, not a flag; the same reason `/sms`
 stayed on Postgres, and it is written down in `core/pg_sms_read.py` too.
 
-WHY THIS FALLS BACK
+WHY IT FELL BACK, UNTIL S14-05
 
 Nothing diverges: the tab writes nothing, both engines read the same Silver,
 and a fault costs the engine rather than the page. Same answer as
@@ -43,35 +51,9 @@ of touching three live tabs to do it. Filed rather than done here.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_REPORTS"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    """Whether the report queries should ask Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. A typo in the variable
-    deciding which engine answers should stop the read loudly rather than
-    quietly serve the other store.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all. Without a DSN there is nothing to ask,
-    and the flag alone must not turn a working tab into an error."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:

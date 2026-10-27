@@ -33,50 +33,29 @@ class TrafficMixin:
     async def _traffic_run(
         self, sql: str, params: "list | None" = None, *, mode: str = "all",
     ):
-        """Run one traffic statement against whichever engine the flag names.
+        """Run one traffic statement against Postgres.
 
         The bodies below carry `{silver_orders}`, `{order_utm}`,
         `{gold_daily_revenue}`, `{gold_revenue_rollup}` and
-        `{manual_expenses}` holes; `render_tables` fills them for the engine
-        that is about to answer. One body, two engines — and the fill happens
-        *inside* this method rather than at the call site, because a caller
-        that picks the fragment from the flag renders the Postgres shape into
-        the DuckDB fallback, which is how `/marketing` was broken for an hour.
+        `{manual_expenses}` holes; `render_tables` fills them for Postgres
+        here rather than at the call site.
+
+        One path since step 14's S14-05: the Postgres read, and on any
+        failure a refusal — the 503 naming `traffic` that `fall_back` gave
+        under `KS_READ_FALLBACK=off`, production's mode since 2026-10-09.
+        `KS_READ_TRAFFIC` is not read here, and nothing here reaches for
+        DuckDB; without `KS_PG_DSN` the pool raises and that is the refusal.
         """
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+        from core.sql_dialect import POSTGRES, render_tables
 
         from core import pg_traffic_read
 
         params = list(params or [])
-        read_fallback.no_address("traffic", pg_traffic_read)
-        if pg_traffic_read.enabled() and pg_traffic_read.available():
-            try:
-                rows = await pg_traffic_read.fetch(
-                    render_tables(sql, POSTGRES), params,
-                )
-                return (rows[0] if rows else None) if mode == "one" else rows
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("traffic", exc)
-
-        # `_fetch_one`/`_fetch_all`, not a bare `conn.execute` under
-        # `self.connection()`. They take the store lock themselves — so this
-        # must not be wrapped in one, the lock is not reentrant and a nested
-        # acquisition hangs rather than raises — and they add the two things
-        # this tab is the only repository to have ever had: the query runs in
-        # a thread so the event loop keeps answering, and it is bounded by
-        # DEFAULT_QUERY_TIMEOUT, on whose expiry they call `conn.interrupt()`
-        # and wait for the thread to come off the connection before raising.
-        #
-        # The first cut of this router called `conn.execute` directly, which
-        # is what the other four ported tabs do — but they never had the
-        # offloading to lose, and this one did. Without it the fallback path
-        # blocks the whole application for the length of a DuckDB query and
-        # can hold the global store lock without bound, which is worst
-        # exactly when it is reached: Postgres already being down.
-        duck = render_tables(sql, DUCKDB)
-        if mode == "one":
-            return await self._fetch_one(duck, params)
-        return await self._fetch_all(duck, params)
+        try:
+            rows = await pg_traffic_read.fetch(render_tables(sql, POSTGRES), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("traffic", exc)
+        return (rows[0] if rows else None) if mode == "one" else rows
 
     # The two expressions that decide what a chart calls an order, repeated
     # verbatim in five places below because a GROUP BY cannot name the alias

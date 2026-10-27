@@ -1,0 +1,70 @@
+{
+ "source": "DuckDB's answer to every call of tests/integration/test_lookups_two_engines.py's equality test, on that file's fixture pinned to 2026-09-15, recorded at step 14's S14-05 on the code before it (d6057d53) while the same run asserted Postgres answered each one equally. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it.",
+ "answers": {
+  "get_brands[]": [
+   {
+    "name": "   "
+   },
+   {
+    "name": "A'pieu"
+   },
+   {
+    "name": "ANUA"
+   },
+   {
+    "name": "Abib"
+   },
+   {
+    "name": "abib"
+   },
+   {
+    "name": "Ünique"
+   },
+   {
+    "name": "Ампула"
+   },
+   {
+    "name": "Unknown"
+   }
+  ],
+  "get_categories[]": [
+   {
+    "id": 1,
+    "name": "Care"
+   },
+   {
+    "id": 4,
+    "name": "Makeup"
+   }
+  ],
+  "get_child_categories[1]": [
+   {
+    "id": 3,
+    "name": "Ampoules"
+   },
+   {
+    "id": 2,
+    "name": "Serums"
+   }
+  ],
+  "get_child_categories[2]": [
+   {
+    "id": 5,
+    "name": "Night serums"
+   }
+  ],
+  "get_child_categories[4]": [],
+  "get_child_categories[99999]": [],
+  "get_promocodes[]": [
+   {
+    "name": "SUMMER"
+   },
+   {
+    "name": "summer"
+   },
+   {
+    "name": "ЗНИЖКА"
+   }
+  ]
+ }
+}
