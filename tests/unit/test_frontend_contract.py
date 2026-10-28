@@ -38,6 +38,33 @@ def test_what_the_margin_page_sends_is_what_its_harness_sends():
     assert c.endpoints == MARGIN_ENDPOINTS
 
 
+PRODUCTS_ENDPOINTS = tuple(
+    f"/api/products/intel/{name}"
+    for name in ("summary", "pairs", "basket-distribution", "category-combos",
+                 "brand-affinity", "momentum")
+)
+
+
+def test_what_the_products_page_sends_is_what_its_harness_sends():
+    c = fc.products()
+    assert c.params == MARGIN_PARAMS, (
+        "the /products page sends a different set of parameters now: teach "
+        "tests/integration/test_rust_wave1_products.py and the Rust port first"
+    )
+    assert c.endpoints == PRODUCTS_ENDPOINTS
+    # `useProductPairs` adds the product a pair names, and nothing else does.
+    assert c.extras == {"/api/products/intel/pairs": ("product_id",)}
+    assert fc.query(c, period="week", sales_type="retail", brand="X",
+                    endpoint="/api/products/intel/pairs", extra={"product_id": 42}) == (
+        "period=week&sales_type=retail&brand=X&product_id=42")
+    assert fc.query(c, period="week", sales_type="retail",
+                    endpoint="/api/products/intel/pairs", extra={"product_id": None}) == (
+        "period=week&sales_type=retail")
+    with pytest.raises(fc.FrontendShapeError):
+        fc.query(c, period="week", sales_type="retail",
+                 endpoint="/api/products/intel/summary", extra={"product_id": 42})
+
+
 def test_the_value_domains_are_the_frontends_types():
     assert fc.periods() == (
         "today", "yesterday", "week", "last_week", "month", "last_month",
