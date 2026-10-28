@@ -18,8 +18,9 @@ needs the live API, touched these methods before.
 Since step 14's S14-05 the category tree and the report read Postgres alone,
 so the rows are seeded into Bronze and derived by Postgres (`tests/
 integration/pg_tab_seed.py`) where they used to be written into DuckDB, and
-every method is read the way production reads it — the dashboard's reads
-through their `KS_READ_*` switches at `postgres`. Skipped without `KS_PG_DSN`.
+every method is read the way production reads it — since S14-06 the
+dashboard's reads ask Postgres whatever their old `KS_READ_*` switches say.
+Skipped without `KS_PG_DSN`.
 """
 from __future__ import annotations
 
@@ -59,8 +60,6 @@ async def _populate(conn, pool):
 
 @pytest_asyncio.fixture
 async def revenue(tmp_path, monkeypatch):
-    for switch in ("KS_READ_GOLD", "KS_READ_SILVER", "KS_READ_DASHBOARD"):
-        monkeypatch.setenv(switch, "postgres")
     async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _populate):
         yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the dashboard")
 

@@ -14,8 +14,8 @@ the `UPPER(s.promocode)` binder error in #124. They call one helper now.
 Since step 14's S14-05 the filter's list reads Postgres alone, so the goods
 are seeded into Bronze and derived by Postgres (`tests/integration/
 pg_tab_seed.py`) where they used to be written into DuckDB, and the trend is
-read the way production reads it, from Postgres' Silver
-(`KS_READ_SILVER=postgres`). Those tests skip without `KS_PG_DSN`.
+read the way production reads it, from Postgres' Silver — whatever
+`KS_READ_SILVER` says since S14-06. Those tests skip without `KS_PG_DSN`.
 """
 from __future__ import annotations
 
@@ -64,7 +64,6 @@ def _populate(*, with_unbranded=True):
 async def goods(tmp_path, monkeypatch):
     """Every product, the unbranded two included, in Postgres; the trend read
     from Postgres' Silver, as in production."""
-    monkeypatch.setenv("KS_READ_SILVER", "postgres")
     async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _populate()):
         yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the filter bar")
 
