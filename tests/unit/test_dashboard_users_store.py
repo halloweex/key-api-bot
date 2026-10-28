@@ -246,23 +246,21 @@ class TestOneBodyTwoEngines:
 
 class TestNothingGoesRoundTheRouter:
     def test_no_access_method_opens_the_store_itself(self):
-        """A method left on `self.connection()` keeps working on DuckDB and
-        silently ignores the switch — the half-migrated state that makes an
+        """A method on `self.connection()` reads DuckDB — a list nobody has
+        written since 2026-09-07 — the half-migrated state that makes an
         authorisation bug invisible.
 
         The four matrix methods were the standing exception until 2026-09-08,
         excused because they are cached per role. Per-user tabs put a
         permission dependency on ~120 of the 140 endpoints, so every cache
-        miss took the store lock on an authorisation path. The exception is
-        gone and this list is now just the two routers."""
+        miss took the store lock on an authorisation path. The two routers
+        were the last to hold a DuckDB tail, and step 14's S14-08 took it
+        away: nothing in the file may open the store now, routers included."""
         source = REPOSITORY.read_text(encoding="utf-8")
         tree = ast.parse(source)
-        allowed = {"_users_run", "_perms_run"}
         offenders = []
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if node.name in allowed:
                 continue
             body = ast.get_source_segment(source, node) or ""
             if "self.connection()" in body:
@@ -407,20 +405,25 @@ class TestTheRoleMatrixLeftDuckDB:
         assert seen, "nothing reached Postgres"
         assert all("app.role_permissions" in sql for sql in seen), seen
 
-    def test_the_two_tables_move_together(self):
-        """One variable answers "where does access live". Splitting them would
-        let an approval and the permissions behind it disagree about which
-        database is authoritative."""
+    def test_the_two_tables_live_in_postgres_together(self):
+        """"Where does access live" has one answer: both routers render into
+        `app.*` and ask nothing. `KS_USER_STORE` chose for both until step
+        14 (a constant since S14-00); a router that asked again, or kept a
+        branch of its own, would let an approval and the permissions behind
+        it disagree about which database is authoritative."""
         source = REPOSITORY.read_text(encoding="utf-8")
         tree = ast.parse(source)
-        for name in ("_users_run", "_perms_run"):
-            body = ast.get_source_segment(source, next(
-                n for n in ast.walk(tree)
-                if isinstance(n, ast.AsyncFunctionDef) and n.name == name
-            )) or ""
-            assert "user_store_is_postgres" in body, (
-                f"{name} chooses its engine some other way"
-            )
+        for name, table in (("_users_run", "TABLE"),
+                            ("_perms_run", "PERMISSIONS_TABLE")):
+            fn = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+            names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+            assert table in names, f"{name} no longer renders {table}"
+            assert "user_store_is_postgres" not in names, (
+                f"{name} chooses its engine again")
+            attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+            assert "connection" not in attrs, (
+                f"{name} reaches for the DuckDB store: there is one store to run on")
 
     @pytest.mark.asyncio
     async def test_seeding_is_one_statement(self, tmp_path, monkeypatch):
@@ -430,16 +433,17 @@ class TestTheRoleMatrixLeftDuckDB:
         A statement per row meant 48 acquisitions of DuckDB's store lock where
         the single-connection version it replaced took one — and under Postgres
         48 × (require_revision + insert). Measured with two concurrent callers
-        on a cold table before this was fixed: 93 statements for 48 rows.
+        on a cold table before this was fixed: 93 statements for 48 rows. On
+        Postgres, the matrix's only store since step 14's S14-08 (this ran on
+        DuckDB until then); skipped without `KS_PG_DSN`.
         """
-        # DuckDB is the engine here; the count is the statement's, not the
-        # store's (since step 14's S14-00 the user list's store is Postgres).
-        from tests.conftest import user_store_on_duckdb
+        from tests.integration import pg_sms_seed
 
-        user_store_on_duckdb(monkeypatch)
-        store = DuckDBStore(db_path=tmp_path / "seed.duckdb")
-        await store.connect()
-        try:
+        if not pg_sms_seed.DSN:
+            pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+        async with pg_sms_seed.on_postgres(
+                monkeypatch, pg_sms_seed.ACCESS_TABLES, what="the access path"):
+            store = pg_sms_seed.store(tmp_path, "seed.duckdb")
             calls = []
             original = store._perms_run
 
@@ -464,8 +468,6 @@ class TestTheRoleMatrixLeftDuckDB:
             calls.clear()
             await store.seed_default_permissions()
             assert not [sql for sql in calls if "INSERT" in sql.upper()]
-        finally:
-            await store.close()
 
     def test_the_migration_and_the_code_agree_on_the_table(self):
         migration = (MIGRATION.parent / "0022_role_permissions.py").read_text(
