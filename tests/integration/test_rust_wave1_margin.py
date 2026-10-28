@@ -233,7 +233,9 @@ async def test_the_contract_answers_byte_for_byte(pair):
 
     lookups = await _lookups(pair.python)
     REPORT.data["lookups"] = lookups
-    assert all(lookups.values()), lookups
+    # Two values at least per filter: a seed that offers one shrinks the
+    # contract without a word (the first seed's promocodes did).
+    assert all(len(values) >= 2 for values in lookups.values()), lookups
     rows, with_rows = [], 0
     for path, query in _contract(lookups):
         py, rs = await pair.ask(path, query)
