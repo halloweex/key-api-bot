@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.300
+
+- S14-00: every test starts with no SyncService singleton
+- Step 14 S14-00: every mode and verdict is the value production publishes
+- test: the journal readers' Kyiv rendering follows the day's offset
+- test: read job cadences at fixed instants, not the wall clock
+- SMS audience tests read today when they run, not at import
+
+
 ## 3.0.299
 
 - /tg-bot: where newcomers drop off, and after which press people leave
