@@ -1,51 +1,54 @@
-"""The audience query means the same thing in both engines.
+"""The audience query, and the short `/sms` statements, answer in Postgres what
+they answered in DuckDB.
 
 `tests/unit/test_sms_segments_dialect.py` proves the two renderings are *one
 text*. That is necessary and not sufficient: identical SQL can still mean
 different things where the engines' semantics differ — integer division, NULL
 ordering, how a window function breaks a tie, what `ROUND` does at .005.
 
-So this runs the real thing. The same synthetic customers go into a DuckDB
-store and a live PostgreSQL, both renderings execute, and the rosters are
-compared row by row. Skipped without `KS_PG_DSN`, the same contract
-`test_bot_database.py` has with its Postgres arm.
+So this ran the real thing on both: the same synthetic customers in a DuckDB
+store and a live PostgreSQL, both renderings executed, the rosters compared
+row by row.
+
+ONE ENGINE SINCE STEP 14 (S14-08)
+
+`/sms` is Postgres's alone. Every comparison is now with a literal
+(`tests/integration/golden/sms_segments.json`): DuckDB's answer on this
+fixture, recorded while this file still asserted Postgres answered the same
+(rule 9 of the step-14 plan). The fixture's dates are written as they stood on
+the day of the recording, `RECORDED_ON`, and move with the calendar — the
+query counts recency from Kyiv's today — so the literal holds on any day; its
+own dates are written relative to today (`pg_sms_seed.relative`).
 
 The fixture is small and deliberately awkward, because a roster that agrees on
 easy data proves nothing. It carries a product name long enough to be
 truncated, two buyers sharing one phone number (only the higher-value one may
 survive), an opted-out customer, a return, an order on a retired source, and a
 b2b order that must be invisible unless `sales_type=all` asks for it.
+
+Skipped without `KS_PG_DSN`, which CI always sets and fails on skipping.
 """
 from __future__ import annotations
 
-import os
-from datetime import date, datetime, timezone
-
-from unittest.mock import AsyncMock, patch
+import asyncio
+from datetime import date, datetime, time, timezone
 
 import pytest
 import pytest_asyncio
 
-from core.duckdb_store import DuckDBStore
 from core.repositories.customers import DlrEventRebound, SmsAudienceFilters
-from core.sql_dialect import DUCKDB, POSTGRES, sms_segments_select
-
-
-@pytest.fixture(autouse=True)
-def _sms_store_follows_env(monkeypatch):
-    """Since step 14's S14-00 the store switch decides nothing; this module's
-    two engines are chosen as before it (`tests.conftest.sms_store_follows_env`)."""
-    from tests.conftest import sms_store_follows_env
-
-    sms_store_follows_env(monkeypatch)
-
-
-asyncpg = pytest.importorskip("asyncpg")
-
-DSN = os.getenv("KS_PG_DSN")
-pytestmark = pytest.mark.skipif(
-    not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
+from core.sql_dialect import POSTGRES, numbered, sms_segments_select
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import (
+    golden, kyiv_today, needs_postgres, relative, same_numbers, shifted,
 )
+
+pytestmark = needs_postgres
+
+GOLDEN = golden("sms_segments")
+# The Kyiv day the literals were recorded on. Every date below is written as
+# it stood then and seeded `today − RECORDED_ON` days later (`_day`).
+RECORDED_ON = date(2026, 10, 28)
 
 LONG = "Очищувальна пінка з екстрактом зеленого чаю та центелою азійською 150мл"
 
@@ -108,16 +111,25 @@ CASES = [
 ]
 
 
-def _render(dialect, filters, ltv_column, sales_type, tiers, grouping):
+def _day(text: str) -> date:
+    """A fixture date, as far back from today as it stood from RECORDED_ON."""
+    return shifted(date.fromisoformat(text), RECORDED_ON)
+
+
+def _instant(text: str, hour: int) -> datetime:
+    return datetime.combine(_day(text), time(hour), timezone.utc)
+
+
+def _render(filters, ltv_column, sales_type, tiers, grouping):
     tier_case = f"""CASE
         WHEN c.{ltv_column} >= ? THEN 'VIP'
         WHEN c.orders >= ? OR c.{ltv_column} >= ? THEN 'CORE'
         WHEN c.recency <= ? THEN 'REACTIVATION' END"""
     filter_sql, filter_params = filters.predicate(
-        ltv_column, sales_type, dialect.order_lines,
+        ltv_column, sales_type, POSTGRES.order_lines,
     )
     sql = sms_segments_select(
-        dialect,
+        POSTGRES,
         ltv_column=ltv_column,
         sales_type_filter="" if sales_type == "all" else "AND l.sales_type = ?",
         tier_case=tier_case,
@@ -133,28 +145,12 @@ def _render(dialect, filters, ltv_column, sales_type, tiers, grouping):
     params += [5000.0, 2, 2000.0, 120, 270]
     params += filter_params
     params += list(tiers)
-    return sql, params
-
-
-def _numbered(sql: str) -> str:
-    """`?` placeholders renumbered for asyncpg, which wants `$1 … $n`.
-
-    Positional in both drivers, so the order the caller built them in is the
-    order they bind in — no mapping to keep in step.
-    """
-    out, n = [], 0
-    for char in sql:
-        if char == "?":
-            n += 1
-            out.append(f"${n}")
-        else:
-            out.append(char)
-    return "".join(out)
+    return numbered(sql), params
 
 
 def _comparable(rows):
-    """Money as float at two decimals: DuckDB hands back DECIMAL, asyncpg
-    Decimal, and the roster is the thing being compared, not the type."""
+    """Money as float at two decimals — the form the rows were compared in
+    while there were two engines, and recorded in."""
     out = []
     for row in rows:
         out.append(tuple(
@@ -163,44 +159,12 @@ def _comparable(rows):
     return out
 
 
-async def _seed_duckdb(store):
-    async with store.connection() as conn:
-        for pid, brand, sku, cat in PRODUCTS:
-            conn.execute("INSERT INTO products (id, name, brand, sku, category_id)"
-                         " VALUES (?,?,?,?,?)", [pid, f"p{pid}", brand, sku, cat])
-        for cid, name, parent in CATEGORIES:
-            conn.execute("INSERT INTO categories (id, name, parent_id)"
-                         " VALUES (?,?,?)", [cid, name, parent])
-        for oid, sku, cost in STOCKS:
-            conn.execute("INSERT INTO offer_stocks (id, sku, purchased_price)"
-                         " VALUES (?,?,?)", [oid, sku, cost])
-        for bid, name, city, phone in BUYERS:
-            conn.execute("INSERT INTO buyers (id, full_name, city, phone)"
-                         " VALUES (?,?,?,?)", [bid, name, city, phone])
-        for bid, channel, phone in OPTOUTS:
-            conn.execute("INSERT INTO marketing_optouts (buyer_id, channel, phone)"
-                         " VALUES (?,?,?)", [bid, channel, phone])
-        for oid, buyer, day, total, stype, ret, active, src, promo in ORDERS:
-            conn.execute(
-                "INSERT INTO silver_orders (id, source_id, status_id, grand_total,"
-                " ordered_at, buyer_id, manager_id, order_date, is_return,"
-                " sales_type, is_active_source, source_name, is_new_customer,"
-                " buyer_first_order_date, promocode)"
-                " VALUES (?,?,1,?,?,?,NULL,?,?,?,?,?,FALSE,?,?)",
-                [oid, src, total, f"{day} 10:00:00+00", buyer, day, ret, stype,
-                 active, f"src{src}", day, promo])
-        for lid, oid, pid, name, qty, price in LINES:
-            conn.execute("INSERT INTO order_products (id, order_id, product_id,"
-                         " name, quantity, price_sold) VALUES (?,?,?,?,?,?)",
-                         [lid, oid, pid, name, qty, price])
+def _now(value):
+    """`value` with its dates written against today, as the literals are."""
+    return relative(value, kyiv_today())
 
 
-async def _seed_postgres(conn):
-    await conn.execute(
-        "TRUNCATE silver.orders, bronze.order_products, bronze.products,"
-        " bronze.categories, bronze.buyers, bronze.offer_stocks,"
-        " app.marketing_optouts, app.sms_campaigns, app.sms_campaign_members,"
-        " app.sms_audience_presets, app.sms_dlr_events")
+async def _seed(conn):
     await conn.executemany(
         "INSERT INTO bronze.categories (id, name, parent_id) VALUES ($1,$2,$3)",
         CATEGORIES)
@@ -223,10 +187,8 @@ async def _seed_postgres(conn):
         " is_active_source, source_name, is_new_customer,"
         " buyer_first_order_date, promocode)"
         " VALUES ($1,$2,1,$3,$4,$5,NULL,$6,$7,$8,$9,$10,FALSE,$11,$12)",
-        [(o, src, total,
-          datetime.fromisoformat(f"{day} 10:00:00+00:00"), buyer,
-          date.fromisoformat(day), ret, stype, active, f"src{src}",
-          date.fromisoformat(day), promo)
+        [(o, src, total, _instant(day, 10), buyer, _day(day), ret, stype,
+          active, f"src{src}", _day(day), promo)
          for o, buyer, day, total, stype, ret, active, src, promo in ORDERS])
     await conn.executemany(
         "INSERT INTO bronze.order_products (id, order_id, product_id, name,"
@@ -234,17 +196,14 @@ async def _seed_postgres(conn):
 
 
 @pytest_asyncio.fixture
-async def engines(tmp_path):
-    store = DuckDBStore(db_path=tmp_path / "segments.duckdb")
-    await store.connect()
-    conn = await asyncpg.connect(DSN)
-    try:
-        await _seed_duckdb(store)
-        await _seed_postgres(conn)
-        yield store, conn
-    finally:
-        await conn.close()
-        await store.close()
+async def engine(tmp_path, monkeypatch):
+    """The repository on Postgres, the fixture seeded, its DuckDB connection
+    a trap; and the pool, for the statements the tests run themselves. A real
+    pool: the claim's race needs two callers that can genuinely race."""
+    async with pg_sms_seed.on_postgres(monkeypatch) as pool:
+        async with pool.acquire() as conn:
+            await _seed(conn)
+        yield pg_sms_seed.store(tmp_path, "segments.duckdb"), pool
 
 
 @pytest.mark.asyncio
@@ -252,34 +211,29 @@ async def engines(tmp_path):
     "label,filters,ltv_column,sales_type,tiers,grouping", CASES,
     ids=[c[0] for c in CASES],
 )
-async def test_both_engines_return_the_same_roster(
-    engines, label, filters, ltv_column, sales_type, tiers, grouping,
+async def test_the_roster_is_the_one_duckdb_returned(
+    engine, label, filters, ltv_column, sales_type, tiers, grouping,
 ):
-    store, conn = engines
+    _store, pool = engine
+    sql, params = _render(filters, ltv_column, sales_type, tiers, grouping)
 
-    duck_sql, params = _render(DUCKDB, filters, ltv_column, sales_type, tiers, grouping)
-    pg_sql, pg_params = _render(POSTGRES, filters, ltv_column, sales_type, tiers,
-                                grouping)
+    async with pool.acquire() as conn:
+        rows = [tuple(r) for r in await conn.fetch(sql, *params)]
 
-    async with store.connection() as duck:
-        duck_rows = duck.execute(duck_sql, params).fetchall()
-    pg_rows = [tuple(r) for r in await conn.fetch(_numbered(pg_sql), *pg_params)]
-
-    assert _comparable(duck_rows) == _comparable(pg_rows), (
-        f"the two engines disagree about the {label} audience"
+    assert _now(_comparable(rows)) == GOLDEN[f"roster:{label}"], (
+        f"Postgres disagrees with DuckDB's {label} audience"
     )
 
 
 @pytest.mark.asyncio
-async def test_the_fixture_actually_exercises_the_exclusions(engines):
+async def test_the_fixture_actually_exercises_the_exclusions(engine):
     """A roster that agrees on easy data proves nothing, so this asserts the
     awkward rows really are being excluded — otherwise the agreement above
-    could be two engines both returning everybody."""
-    store, _conn = engines
-    sql, params = _render(DUCKDB, SmsAudienceFilters(), "revenue_ltv", "retail",
-                          (), "single")
-    async with store.connection() as duck:
-        rows = duck.execute(sql, params).fetchall()
+    could be both engines returning everybody."""
+    _store, pool = engine
+    sql, params = _render(SmsAudienceFilters(), "revenue_ltv", "retail", (), "single")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
 
     selected = {r[0] for r in rows if r[0] is not None}
     assert 4 not in selected, "an opted-out customer was messaged"
@@ -292,64 +246,27 @@ async def test_the_fixture_actually_exercises_the_exclusions(engines):
 
 
 @pytest.mark.asyncio
-async def test_the_whole_result_matches_through_the_store(engines, monkeypatch):
-    """The end-to-end shape, not just the rows.
-
-    Above, both renderings are executed side by side. This drives the real
-    `get_sms_segments` twice — once per engine, chosen by `KS_SMS_STORE` — and
-    compares what the API would actually return: the level summaries, the
-    funnel, the customer rows and the arm each customer landed in.
+async def test_the_whole_result_through_the_store(engine):
+    """The end-to-end shape, not just the rows: the real `get_sms_segments` —
+    the level summaries, the funnel, the customer rows and the arm each
+    customer landed in.
 
     The arms are the reason this is worth running separately. They are decided
-    in Python now (`core.sms_holdout`) precisely so the engines cannot
-    disagree, and an assertion that never looked at them would not notice if
-    that stopped being true.
+    in Python (`core.sms_holdout`) precisely so the engines could not disagree,
+    and an assertion that never looked at them would not notice if that
+    stopped being true.
     """
-    store, conn = engines
+    store, _pool = engine
 
-    monkeypatch.delenv("KS_SMS_STORE", raising=False)
-    duck = await store.get_sms_segments(
+    postgres = await store.get_sms_segments(
         grouping="single", include_customers=True, campaign="aug-compare",
     )
 
-    monkeypatch.setenv("KS_SMS_STORE", "postgres")
-    with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
-         patch("core.pg.require_revision", new=AsyncMock()):
-        postgres = await store.get_sms_segments(
-            grouping="single", include_customers=True, campaign="aug-compare",
-        )
-
-    assert duck["funnel"] == postgres["funnel"]
-    assert duck["segments"] == postgres["segments"]
-    assert duck["totals"] == postgres["totals"]
-    assert [c["buyerId"] for c in duck["customers"]] == \
-           [c["buyerId"] for c in postgres["customers"]]
-    assert [c["assignment"] for c in duck["customers"]] == \
-           [c["assignment"] for c in postgres["customers"]]
-    assert duck["customers"] == postgres["customers"]
-
-
-class _PoolOf:
-    """The one connection the fixture already opened, shaped like a pool."""
-
-    def __init__(self, conn):
-        self._conn = conn
-
-    def acquire(self):
-        conn = self._conn
-
-        class _Ctx:
-            async def __aenter__(self):
-                return conn
-
-            async def __aexit__(self, *exc):
-                return False
-
-        return _Ctx()
+    assert _now(postgres) == GOLDEN["whole_result"]
 
 
 class TestThePortedStatements:
-    """The short statements, run against both stores and compared.
+    """The short statements, held to what DuckDB answered.
 
     They carry few rules, which is why they share one text rather than earning
     a dialect — but "few" is not "none": the campaign list counts arms and
@@ -357,116 +274,65 @@ class TestThePortedStatements:
     way, so it is worth executing rather than eyeballing.
     """
 
-    @staticmethod
-    async def _both(store, conn, call, monkeypatch):
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
-        duck = await call()
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
-             patch("core.pg.require_revision", new=AsyncMock()):
-            postgres = await call()
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
-        return duck, postgres
-
     @pytest.mark.asyncio
-    async def test_a_saved_preset_reads_back_the_same_from_either_store(
-        self, engines, monkeypatch,
-    ):
-        store, conn = engines
+    async def test_a_saved_preset_reads_back_as_it_did(self, engine):
+        store, _pool = engine
         criteria = {"grouping": "single", "brands": ["Cosrx"], "city": "Київ"}
 
-        # Written to each store in turn, then read back from each.
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
         await store.save_sms_audience_preset("осінь", criteria, created_by=7)
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
-             patch("core.pg.require_revision", new=AsyncMock()):
-            await store.save_sms_audience_preset("осінь", criteria, created_by=7)
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        listed = await store.list_sms_audience_presets()
 
-        duck, postgres = await self._both(
-            store, conn, store.list_sms_audience_presets, monkeypatch,
-        )
-        # `createdAt` is each store's own clock and must not be compared.
-        strip = lambda rows: [   # noqa: E731
+        # `createdAt` is the store's own clock and is not compared.
+        stripped = [
             {k: v for k, v in row.items() if k not in ("createdAt", "updatedAt")}
-            for row in rows
+            for row in listed
         ]
-        assert strip(duck) == strip(postgres)
-        saved = [r for r in duck if not r["builtin"]]
+        assert _now(stripped) == GOLDEN["presets"]
+        saved = [r for r in listed if not r["builtin"]]
         assert saved and saved[0]["criteria"] == criteria
 
     @pytest.mark.asyncio
-    async def test_an_optout_upserts_the_same_way_in_both(self, engines, monkeypatch):
-        store, conn = engines
-
-        for flag in (None, "postgres"):
-            if flag is None:
-                monkeypatch.delenv("KS_SMS_STORE", raising=False)
-                first = await store.add_marketing_optout(77, phone=None)
-                second = await store.add_marketing_optout(77, phone="380509999999")
-            else:
-                monkeypatch.setenv("KS_SMS_STORE", flag)
-                with patch("core.pg.get_pool",
-                           new=AsyncMock(return_value=_PoolOf(conn))), \
-                     patch("core.pg.require_revision", new=AsyncMock()):
-                    first = await store.add_marketing_optout(77, phone=None)
-                    second = await store.add_marketing_optout(77, phone="380509999999")
-            # The refusal usually arrives before the number does; the repeat
-            # only ever fills a phone that was missing.
-            assert first["buyerId"] == 77
-            assert second["totalOptouts"] == first["totalOptouts"]
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+    async def test_an_optout_upserts(self, engine):
+        store, _pool = engine
+        first = await store.add_marketing_optout(77, phone=None)
+        second = await store.add_marketing_optout(77, phone="380509999999")
+        # The refusal usually arrives before the number does; the repeat
+        # only ever fills a phone that was missing.
+        assert first["buyerId"] == 77
+        assert second["totalOptouts"] == first["totalOptouts"]
 
     @pytest.mark.asyncio
-    async def test_the_campaign_list_counts_the_same(self, engines, monkeypatch):
+    async def test_the_campaign_list_counts_as_it_did(self, engine):
         """`GROUP BY ALL` was DuckDB-only and had to be spelled out. The arm
         and delivery counters are what would break if the grouping list drifted
         from the projection."""
-        store, conn = engines
-        # `exported_at` is set explicitly rather than left to each store's
-        # `now()`: two independently stamped defaults differ by construction,
-        # and excluding the column would stop it being compared at all.
-        exported = datetime.fromisoformat("2026-08-20 09:00:00+00:00")
-        rows = [
-            ("aug", "revenue", "retail", 10, "{}", None, exported),
-        ]
-        async with store.connection() as duck:
-            for c, basis, stype, pct, crit, promo, when in rows:
-                duck.execute(
-                    "INSERT INTO sms_campaigns (campaign, ltv_basis, sales_type,"
-                    " holdout_pct, criteria, promocode, exported_at)"
-                    " VALUES (?,?,?,?,?,?,?)",
-                    [c, basis, stype, pct, crit, promo, when])
-            for buyer, arm, delivered in ((1, "target", True), (2, "target", False),
-                                          (3, "holdout", None)):
-                duck.execute(
-                    "INSERT INTO sms_campaign_members (campaign, buyer_id, phone,"
-                    " tier, assignment, orders_at_export, delivered)"
-                    " VALUES ('aug',?,?,'VIP',?,1,?)",
-                    [buyer, f"38050000000{buyer}", arm, delivered])
-        await conn.executemany(
-            "INSERT INTO app.sms_campaigns (campaign, ltv_basis, sales_type,"
-            " holdout_pct, criteria, promocode, exported_at)"
-            " VALUES ($1,$2,$3,$4,$5,$6,$7)", rows)
-        await conn.executemany(
-            "INSERT INTO app.sms_campaign_members (campaign, buyer_id, phone,"
-            " tier, assignment, orders_at_export, delivered)"
-            " VALUES ('aug',$1,$2,'VIP',$3,1,$4)",
-            [(1, "380500000001", "target", True), (2, "380500000002", "target", False),
-             (3, "380500000003", "holdout", None)])
+        store, pool = engine
+        # `exported_at` is set explicitly rather than left to `now()`, so the
+        # column is compared with the rest.
+        exported = _instant("2026-08-20", 9)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO app.sms_campaigns (campaign, ltv_basis, sales_type,"
+                " holdout_pct, criteria, promocode, exported_at)"
+                " VALUES ('aug', 'revenue', 'retail', 10, '{}', NULL, $1)", exported)
+            await conn.executemany(
+                "INSERT INTO app.sms_campaign_members (campaign, buyer_id, phone,"
+                " tier, assignment, orders_at_export, delivered)"
+                " VALUES ('aug',$1,$2,'VIP',$3,1,$4)",
+                [(1, "380500000001", "target", True),
+                 (2, "380500000002", "target", False),
+                 (3, "380500000003", "holdout", None)])
 
-        duck_rows, pg_rows = await self._both(
-            store, conn, store.list_sms_campaigns, monkeypatch,
-        )
-        assert duck_rows == pg_rows
-        assert duck_rows[0]["members"] == 3
-        assert duck_rows[0]["target"] == 2 and duck_rows[0]["holdout"] == 1
-        assert duck_rows[0]["delivered"] == 1 and duck_rows[0]["undelivered"] == 1
+        rows = await store.list_sms_campaigns()
+
+        assert _now(rows) == GOLDEN["campaign_list"]
+        assert rows[0]["members"] == 3
+        assert rows[0]["target"] == 2 and rows[0]["holdout"] == 1
+        assert rows[0]["delivered"] == 1 and rows[0]["undelivered"] == 1
 
 
 class TestTheClaimIsAtomic:
-    """A campaign may be claimed once, on either engine.
+    """A campaign may be claimed once.
 
     This is the guard behind a real incident: a roster of 5,550 went out twice
     because a client-side timeout made the operator press send again while the
@@ -474,53 +340,30 @@ class TestTheClaimIsAtomic:
     safe only because DuckDB admits one writer and serialised the pair. A
     connection pool gives no such thing, so the claim became one conditional
     UPDATE — and the point of this test is that two callers racing on the
-    *pooled* engine still produce exactly one winner.
+    pooled engine still produce exactly one winner.
     """
 
     @staticmethod
-    async def _frozen(store, conn):
-        async with store.connection() as duck:
-            duck.execute(
-                "INSERT INTO sms_campaigns (campaign, ltv_basis, sales_type,"
+    async def _frozen(pool):
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO app.sms_campaigns (campaign, ltv_basis, sales_type,"
                 " holdout_pct, criteria) VALUES ('race','revenue','retail',10,'{}')")
-            duck.execute(
-                "INSERT INTO sms_campaign_members (campaign, buyer_id, phone,"
+            await conn.execute(
+                "INSERT INTO app.sms_campaign_members (campaign, buyer_id, phone,"
                 " tier, assignment, orders_at_export)"
                 " VALUES ('race',1,'380500000001','VIP','target',1)")
-        await conn.execute(
-            "INSERT INTO app.sms_campaigns (campaign, ltv_basis, sales_type,"
-            " holdout_pct, criteria) VALUES ('race','revenue','retail',10,'{}')")
-        await conn.execute(
-            "INSERT INTO app.sms_campaign_members (campaign, buyer_id, phone,"
-            " tier, assignment, orders_at_export)"
-            " VALUES ('race',1,'380500000001','VIP','target',1)")
 
     @pytest.mark.asyncio
-    async def test_two_racing_claims_produce_one_winner_on_postgres(
-        self, engines, monkeypatch,
-    ):
-        import asyncio
+    async def test_two_racing_claims_produce_one_winner(self, engine):
+        store, pool = engine
+        await self._frozen(pool)
 
-        store, conn = engines
-        await self._frozen(store, conn)
-
-        # A real pool, not the single-connection stand-in the other tests use:
-        # asyncpg forbids two queries on one connection, so a shared one would
-        # make the loser fail for the wrong reason and prove nothing about the
-        # claim. Two callers must be able to genuinely race.
-        pool = await asyncpg.create_pool(DSN, min_size=2, max_size=4)
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
-        try:
-            with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
-                 patch("core.pg.require_revision", new=AsyncMock()):
-                results = await asyncio.gather(
-                    store.get_sms_campaign_targets("race"),
-                    store.get_sms_campaign_targets("race"),
-                    return_exceptions=True,
-                )
-        finally:
-            await pool.close()
-            monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        results = await asyncio.gather(
+            store.get_sms_campaign_targets("race"),
+            store.get_sms_campaign_targets("race"),
+            return_exceptions=True,
+        )
 
         won = [r for r in results if not isinstance(r, Exception)]
         lost = [r for r in results if isinstance(r, ValueError)]
@@ -530,10 +373,9 @@ class TestTheClaimIsAtomic:
         assert won[0] == [{"buyerId": 1, "phone": "380500000001", "tier": "VIP"}]
 
     @pytest.mark.asyncio
-    async def test_the_same_holds_on_duckdb(self, engines, monkeypatch):
-        store, conn = engines
-        await self._frozen(store, conn)
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+    async def test_a_claim_holds_and_a_release_hands_it_back(self, engine):
+        store, pool = engine
+        await self._frozen(pool)
 
         first = await store.get_sms_campaign_targets("race")
         assert first == [{"buyerId": 1, "phone": "380500000001", "tier": "VIP"}]
@@ -546,18 +388,17 @@ class TestTheClaimIsAtomic:
 
     @pytest.mark.asyncio
     async def test_an_unknown_campaign_says_so_rather_than_claiming_nothing(
-        self, engines, monkeypatch,
+        self, engine,
     ):
         """The conditional UPDATE matches no row for a campaign that does not
         exist *and* for one already claimed. The two need different words."""
-        store, conn = engines
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        store, _pool = engine
         with pytest.raises(ValueError, match="not frozen"):
             await store.get_sms_campaign_targets("nope")
 
 
 class TestTheRosterAndTheDeliveryBinding:
-    """The two write paths that carry real rules, on both engines."""
+    """The two write paths that carry real rules."""
 
     ROSTER = [
         {"buyerId": 1, "phone": "380500000001", "tier": "VIP",
@@ -568,133 +409,73 @@ class TestTheRosterAndTheDeliveryBinding:
          "marginLtv": 3000.0, "recencyDays": 30},
     ]
 
-    @staticmethod
-    def _pg(conn):
-        return patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn)))
-
     @pytest.mark.asyncio
-    async def test_a_frozen_roster_is_identical_in_both(self, engines, monkeypatch):
-        store, conn = engines
+    async def test_a_frozen_roster_is_the_one_duckdb_froze(self, engine):
+        store, _pool = engine
         criteria = {"grouping": "single", "maxRecencyDays": 270}
 
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
-        duck = await store.freeze_sms_campaign(
+        postgres = await store.freeze_sms_campaign(
             "aug", self.ROSTER, criteria, "revenue", "retail", 10)
 
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
-        with self._pg(conn), patch("core.pg.require_revision", new=AsyncMock()):
-            postgres = await store.freeze_sms_campaign(
-                "aug", self.ROSTER, criteria, "revenue", "retail", 10)
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
-
-        assert duck == postgres
-        assert duck["totals"] == {"customers": 2, "target": 1, "holdout": 1}
+        assert _now(postgres) == GOLDEN["frozen_roster"]
+        assert postgres["totals"] == {"customers": 2, "target": 1, "holdout": 1}
 
     @pytest.mark.asyncio
-    async def test_re_freezing_is_refused_the_same_way(self, engines, monkeypatch):
+    async def test_re_freezing_is_refused(self, engine):
         """A roster that could be quietly rewritten after the send is a control
         group that cannot be trusted."""
-        store, conn = engines
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        store, _pool = engine
         await store.freeze_sms_campaign(
             "aug", self.ROSTER, {}, "revenue", "retail", 10)
-
         with pytest.raises(ValueError, match="already frozen"):
             await store.freeze_sms_campaign(
                 "aug", self.ROSTER, {}, "revenue", "retail", 10)
 
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
-        with self._pg(conn), patch("core.pg.require_revision", new=AsyncMock()):
-            await store.freeze_sms_campaign(
-                "aug", self.ROSTER, {}, "revenue", "retail", 10)
-            with pytest.raises(ValueError, match="already frozen"):
-                await store.freeze_sms_campaign(
-                    "aug", self.ROSTER, {}, "revenue", "retail", 10)
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
-
     @pytest.mark.asyncio
-    async def test_the_delivery_binding_holds_on_postgres_too(
-        self, engines, monkeypatch,
-    ):
-        """The security control, on the engine it is moving to: one captured
-        (id, signature) pair must not be re-pointable at another recipient."""
-        store, conn = engines
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
-        try:
-            with self._pg(conn), patch("core.pg.require_revision", new=AsyncMock()):
-                await store.freeze_sms_campaign(
-                    "aug", self.ROSTER, {}, "revenue", "retail", 10)
-                await store.record_sms_send(
-                    "aug", accepted={1: "msg-aaa", 2: "msg-bbb"},
-                    stoplisted=[], failed={})
+    async def test_the_delivery_binding_holds(self, engine):
+        """The security control: one captured (id, signature) pair must not be
+        re-pointable at another recipient."""
+        store, _pool = engine
+        await store.freeze_sms_campaign(
+            "aug", self.ROSTER, {}, "revenue", "retail", 10)
+        await store.record_sms_send(
+            "aug", accepted={1: "msg-aaa", 2: "msg-bbb"},
+            stoplisted=[], failed={})
 
-                known = await store.record_sms_delivery(
-                    message_id="msg-aaa", status="DELIVRD", delivered=True,
-                    delivered_at=None, event_id="evt-1")
-                assert known is True
+        known = await store.record_sms_delivery(
+            message_id="msg-aaa", status="DELIVRD", delivered=True,
+            delivered_at=None, event_id="evt-1")
+        assert known is True
 
-                # The same event id, now naming somebody else's message.
-                with pytest.raises(DlrEventRebound):
-                    await store.record_sms_delivery(
-                        message_id="msg-bbb", status="REJECTD", delivered=False,
-                        delivered_at=None, event_id="evt-1")
-        finally:
-            monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        # The same event id, now naming somebody else's message.
+        with pytest.raises(DlrEventRebound):
+            await store.record_sms_delivery(
+                message_id="msg-bbb", status="REJECTD", delivered=False,
+                delivered_at=None, event_id="evt-1")
 
     @pytest.mark.asyncio
     async def test_a_send_marks_everyone_the_gateway_never_answered_for(
-        self, engines, monkeypatch,
+        self, engine,
     ):
         """A send that dies partway leaves targets behind, and they must not
         sit in the arm unable to respond to a message they never got."""
-        store, conn = engines
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
-        try:
-            with self._pg(conn), patch("core.pg.require_revision", new=AsyncMock()):
-                await store.freeze_sms_campaign(
-                    "aug", self.ROSTER, {}, "revenue", "retail", 10)
-                out = await store.record_sms_send(
-                    "aug", accepted={}, stoplisted=[], failed={})
-            assert out["notSent"] == 1        # the one target, never answered for
-        finally:
-            monkeypatch.delenv("KS_SMS_STORE", raising=False)
-
-
-def _same_numbers(a, b, *, tol=1e-6, path="result"):
-    """Compare two result trees, allowing floats to differ by a hair.
-
-    Not laxity — the documented behaviour of two engines summing the same rows.
-    Revenue here is a pro-rata allocation summed per buyer, float addition is
-    not associative, and the two databases return rows in different orders, so
-    the last bit disagrees: `6433.333333333334` against `6433.333333333333`.
-    The Gold reconciliation carries the same tolerance for the same reason —
-    exact equality there would buy a daily discrepancy of two nanohryvnia.
-
-    Everything that is not a float is still compared exactly, which is what
-    keeps counts, arms and delivery states honest.
-    """
-    if isinstance(a, dict) and isinstance(b, dict):
-        assert a.keys() == b.keys(), f"{path}: different keys"
-        for key in a:
-            _same_numbers(a[key], b[key], tol=tol, path=f"{path}.{key}")
-    elif isinstance(a, list) and isinstance(b, list):
-        assert len(a) == len(b), f"{path}: {len(a)} vs {len(b)} items"
-        for i, (x, y) in enumerate(zip(a, b)):
-            _same_numbers(x, y, tol=tol, path=f"{path}[{i}]")
-    elif isinstance(a, float) or isinstance(b, float):
-        assert a == pytest.approx(b, abs=tol), f"{path}: {a} vs {b}"
-    else:
-        assert a == b, f"{path}: {a!r} vs {b!r}"
-
+        store, _pool = engine
+        await store.freeze_sms_campaign(
+            "aug", self.ROSTER, {}, "revenue", "retail", 10)
+        out = await store.record_sms_send(
+            "aug", accepted={}, stoplisted=[], failed={})
+        assert out["notSent"] == 1        # the one target, never answered for
 
 
 class TestTheResultsMeasurement:
     """The last path, and the one whose numbers a decision rests on.
 
     A campaign's verdict is the target arm against the holdout, so a
-    measurement that differs by engine is worse than one that is merely wrong:
-    it would change its mind about whether the send worked, depending on which
-    store answered.
+    measurement that differed by engine was worse than one merely wrong: it
+    would have changed its mind about whether the send worked, depending on
+    which store answered. Held to DuckDB's measurement within a hair
+    (`pg_sms_seed.same_numbers`: revenue is a pro-rata allocation summed in an
+    order of the engine's choosing).
     """
 
     ROSTER = [
@@ -711,15 +492,12 @@ class TestTheResultsMeasurement:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("delivered_only", (False, True), ids=["all", "delivered"])
-    async def test_both_engines_measure_the_campaign_the_same(
-        self, engines, monkeypatch, delivered_only,
+    async def test_the_campaign_is_measured_as_duckdb_measured_it(
+        self, engine, delivered_only,
     ):
-        store, conn = engines
-        sent = datetime.fromisoformat("2026-07-01 08:00:00+00:00")
+        store, _pool = engine
+        sent = _instant("2026-07-01", 8)
 
-        # The same campaign in both stores, sent at the same instant, so the
-        # attribution window opens on the same moment.
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
         await store.freeze_sms_campaign(
             "res", self.ROSTER, {}, "revenue", "retail", 33, promocode="AUG")
         await store.record_sms_send(
@@ -728,45 +506,18 @@ class TestTheResultsMeasurement:
         await store.record_sms_delivery(
             message_id="m-1", status="DELIVRD", delivered=True,
             delivered_at=None, event_id="e-1")
-
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
-             patch("core.pg.require_revision", new=AsyncMock()):
-            monkeypatch.setenv("KS_SMS_STORE", "postgres")
-            await store.freeze_sms_campaign(
-                "res", self.ROSTER, {}, "revenue", "retail", 33, promocode="AUG")
-            await store.record_sms_send(
-                "res", accepted={1: "m-1", 3: "m-3"}, stoplisted=[], failed={},
-                sent_at=sent)
-            await store.record_sms_delivery(
-                message_id="m-1", status="DELIVRD", delivered=True,
-                delivered_at=None, event_id="e-1")
-            postgres = await store.get_sms_campaign_results(
-                "res", window_days=90, delivered_only=delivered_only)
-
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
-        duck = await store.get_sms_campaign_results(
+        postgres = await store.get_sms_campaign_results(
             "res", window_days=90, delivered_only=delivered_only)
 
-        _same_numbers(duck, postgres)
+        recorded = GOLDEN[f"results:{'delivered' if delivered_only else 'all'}"]
+        same_numbers(recorded, _now(postgres))
 
     @pytest.mark.asyncio
-    async def test_an_unsent_campaign_refuses_on_both(self, engines, monkeypatch):
+    async def test_an_unsent_campaign_refuses(self, engine):
         """Without a send date the window would start anywhere, and a result
         measured over an arbitrary window is a result invented."""
-        store, conn = engines
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
+        store, _pool = engine
         await store.freeze_sms_campaign(
             "unsent", self.ROSTER, {}, "revenue", "retail", 10)
         with pytest.raises(ValueError, match="no send date"):
             await store.get_sms_campaign_results("unsent")
-
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
-        try:
-            with patch("core.pg.get_pool", new=AsyncMock(return_value=_PoolOf(conn))), \
-                 patch("core.pg.require_revision", new=AsyncMock()):
-                await store.freeze_sms_campaign(
-                    "unsent", self.ROSTER, {}, "revenue", "retail", 10)
-                with pytest.raises(ValueError, match="no send date"):
-                    await store.get_sms_campaign_results("unsent")
-        finally:
-            monkeypatch.delenv("KS_SMS_STORE", raising=False)
