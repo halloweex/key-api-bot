@@ -280,9 +280,10 @@ class TestTheEvaluator:
     def test_the_goal_history_is_no_precondition_any_more(self, value):
         """Chain 7b-4 deleted the DN-12 bridge: no goal calculator reads
         DuckDB's orders, managers or manager_classifications under any value
-        of the retired `KS_GOALS_HISTORY` — a value other than silver refuses
-        every goal history read, and the canary pages it
-        (`goals_history_mode_invalid`), so step 13 has nothing to wait for.
+        of the retired `KS_GOALS_HISTORY` — until step 14's S14-07 a value
+        other than silver refused every goal history read and the canary
+        paged it (`goals_history_mode_invalid`); since then nothing reads it
+        — so step 13 has nothing to wait for.
         What makes the goal history Postgres' is `reader:KS_READ_GOALS` and
         `read_fallback_off`, both still here. Mutation: put `goals_bridge`
         back in `PRECONDITIONS` — `bridge`, unset or a typo is unmet again."""

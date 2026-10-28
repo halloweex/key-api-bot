@@ -327,10 +327,17 @@ class TestNoAddress:
         `no_address` any more, and `core.pg.dsn()` refusing to guess a
         database is the failure their router refuses — the same 503 naming
         the surface, with the DSN named in the log beside it."""
-        from core import pg
+        from core import pg, pg_expenses_read
 
         monkeypatch.delenv("KS_PG_DSN", raising=False)
         monkeypatch.setattr(pg, "_pool", None)
+        # The expenses' history latch, as `stores` leaves it: never asked. A
+        # test before this one may have left it within its recheck window,
+        # where it answers without asking the pool (since S14-07 that is
+        # the explicit "no history" refusal, not the DSN's).
+        monkeypatch.setattr(pg_expenses_read, "_backfilled", False)
+        monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
+        monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
         _switches(monkeypatch, case.env)
         _mode(monkeypatch, "off")
 
