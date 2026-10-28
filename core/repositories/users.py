@@ -321,8 +321,9 @@ class UsersMixin:
 
         The web container's half of the decision the bot makes from a Telegram
         keyboard. Same statement — `core/dashboard_access.GRANT_ACCESS` — run
-        through whichever store `KS_USER_STORE` names, because a grant written
-        two ways drifts the first time one of them learns something.
+        through `_users_run` against `app.dashboard_users` (it followed
+        `KS_USER_STORE` until step 14's S14-08), because a grant written two
+        ways drifts the first time one of them learns something.
 
         Not `create_user` followed by `update_user_status`: between two
         statements the person is approved carrying the previous tab set, and
