@@ -1,5 +1,12 @@
 """Which buyers the hourly sync fetches, decided from Postgres.
 
+ONE ENGINE SINCE STEP 14 (S14-07)
+
+`DuckDBStore.get_missing_buyer_ids` selects from Postgres and nowhere else,
+as it has since chain 4 wrote the buyers there. A failure — a lost DSN line
+included — is contained by its caller, as below. `KS_READ_BUYER_SYNC`
+chooses nothing now.
+
 `get_missing_buyer_ids` picks the buyers KeyCRM should be asked for: ids that
 orders reference and `buyers` does not hold, or holds without a name. It reads
 `silver_orders LEFT JOIN buyers` in DuckDB — so its answer is downstream of
@@ -14,7 +21,7 @@ one thing Postgres sees that DuckDB cannot: a buyer DuckDB stored and the mirror
 failed to ship stays "missing" here, so the next hour fetches it again and the
 mirror gets another try. From DuckDB that buyer looked done for good.
 
-WHY A FLAG OF ITS OWN, AND NO FALLBACK
+WHY A FLAG OF ITS OWN, UNTIL S14-07, AND NO FALLBACK
 
 The flag ships off, for every port's reason: compare on live data before moving.
 There is no fallback because a fallback's answer is exactly the frozen one this
@@ -28,29 +35,9 @@ tick names it and skips the step, and the manual route answers 503 (DN-20c).
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_BUYER_SYNC"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    """Whether the buyer selection should ask Postgres. Unknown values raise."""
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:

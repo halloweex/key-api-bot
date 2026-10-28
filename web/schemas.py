@@ -305,16 +305,6 @@ class HealthResponse(BaseModel):
             "canary (DN-19)."
         ),
     )
-    goals_history: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "Which orders the goal calculators count (chain 7b): `mode` is "
-            "silver — Silver is the only history since chain 7b-4 retired "
-            "KS_GOALS_HISTORY — or null with `error` when the variable holds "
-            "anything but unset or silver (bridge included), and then every "
-            "goal history read raises. Judged by the canary."
-        ),
-    )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(
         None,
         description=(

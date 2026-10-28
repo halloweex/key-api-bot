@@ -16,6 +16,16 @@ can re-derive a number a human typed.
 
 `get_expense_types` is the sixth and reads the dictionary alone.
 
+NO FALLBACK SINCE STEP 14 (S14-07)
+
+`/expenses` reads Postgres. The flag that chose the engine (`KS_READ_EXPENSES`)
+chooses nothing now: `_expenses_run` asks Postgres and nothing else, and a
+failure — a lost DSN line included — is refused as a 503 naming `expenses`
+(`read_fallback.refuse`), which is what `KS_READ_FALLBACK=off` made of it since
+2026-10-09. So is a statement that reads `{expenses}` while `backfilled()` says
+the history is not across: a NULL `meta.mirror_state.backfilled_at` leaves no
+engine that could answer it. The paragraphs below are the history of the port.
+
 WHAT THE PORT CHANGED IN BOTH ENGINES
 
 The two summary methods joined `expenses` to *raw* `orders` and then narrowed
@@ -34,7 +44,7 @@ real defect (#101 gave source 5 its own `sales_type` while the filter, knowing
 only about managers, still counted those 176 orders as retail); reading the
 column directly is the same fix taken one step further.
 
-WHY THIS FALLS BACK
+WHY IT FELL BACK, UNTIL S14-07
 
 Nothing diverges: the reads write nothing, and every table is one Postgres
 receives from KeyCRM in the same call DuckDB does or replicates from what
@@ -52,35 +62,9 @@ immediately, the way an admin UTM reparse ships immediately — see
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_EXPENSES"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    """Whether the expense queries should ask Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. A typo in the variable
-    deciding which engine answers should stop the read loudly rather than
-    quietly serve the other store.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all. Without a DSN there is nothing to ask,
-    and the flag alone must not turn a working tab into an error."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 # Whether `bronze.expenses` has had its history carried across. A one-way
@@ -91,7 +75,7 @@ _checked_at: float = 0.0
 _RECHECK_S = 60.0
 # The failure the last check ended in, or None. While the recheck window
 # holds, every call answers the question that check could not, so every one
-# of them is served by DuckDB because of it — and is counted as such.
+# of them is refused because of it — and is counted as such.
 _check_failed: "BaseException | None" = None
 
 
@@ -117,6 +101,11 @@ async def backfilled() -> bool:
 
     Cheap: false is re-checked at most once a minute, and true is remembered
     for the life of the process.
+
+    A watermark it cannot read is refused here, a 503 naming `expenses`: this
+    read is not going to succeed either. Until step 14's S14-07 that was
+    `read_fallback.fall_back`, which refused under `KS_READ_FALLBACK=off`;
+    it is `refuse` now, the same count, line and cause.
     """
     global _backfilled, _checked_at, _check_failed
     import time as _time
@@ -128,44 +117,37 @@ async def backfilled() -> bool:
     now = _time.monotonic()
     if now - _checked_at < _RECHECK_S:
         if _check_failed is not None:
-            read_fallback.fall_back("expenses", _check_failed)
+            raise read_fallback.refuse("expenses", _check_failed)
         return False
     _checked_at = now
 
     try:
         from core.pg import get_pool
-        from core.pg_expense_backfill import EXPENSES_TABLE
 
         pool = await get_pool()
         async with pool.acquire() as conn:
+            # The table's name written out (step 14, S14-07), not imported
+            # from `core.pg_expense_backfill`, which goes with the backfills
+            # in S14-13: an import failing here would be refused like any
+            # other failure, and /expenses would answer 503 on every start.
             done = await conn.fetchval(
                 "SELECT backfilled_at IS NOT NULL FROM meta.mirror_state "
                 "WHERE table_name = $1",
-                EXPENSES_TABLE,
+                "bronze.expenses",
             )
-    except Exception as exc:  # noqa: BLE001
-        # Unreachable Postgres answers the question by itself: this read is
-        # not going to succeed either, so say no and let DuckDB serve — which
-        # is a fallback like any router's, and counted as one. It used to log
-        # under words of its own ("cannot read the backfill watermark") that
-        # no grep for "falling back to DuckDB" could find (DN-20a).
+    except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+        # It used to log under words of its own ("cannot read the backfill
+        # watermark") that no grep for "falling back to DuckDB" could find
+        # (DN-20a); then it was a counted fallback; now it is the refusal.
         _check_failed = exc
-        read_fallback.fall_back("expenses", exc)
-        return False
+        raise read_fallback.refuse("expenses", exc)
 
     _check_failed = None
     _backfilled = bool(done)
     if not _backfilled:
-        from core import duckdb_switch
-
         logger.warning(
-            "expenses: %s has no completed backfill, so history is missing — "
-            "%s. The hourly ids-diff sets this on its own.",
-            EXPENSES_TABLE,
-            # Under KS_DUCKDB=off the caller refuses instead (stage 5, PR-8).
-            "refused, KS_DUCKDB=off" if duckdb_switch.is_off()
-            else "serving from DuckDB",
-        )
+            "expenses: bronze.expenses has no completed backfill, so history "
+            "is missing — refused. The hourly ids-diff sets this on its own.")
     return _backfilled
 
 

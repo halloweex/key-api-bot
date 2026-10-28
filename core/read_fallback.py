@@ -291,12 +291,14 @@ def misconfigured() -> List[str]:
 
 
 # Surfaces only one engine besides DuckDB can answer, and the switch that must
-# name it: under `off` that engine answers them or nobody does (`no_engine`).
-# Today the cohorts alone (`CustomersMixin._analytics_rows`); a test holds this
-# row to `core.ch_cohorts`' own gate, so the two cannot drift.
-ENGINE_ONLY: Dict[str, "tuple[str, str]"] = {
-    "cohorts": ("KS_READ_COHORTS", "clickhouse"),
-}
+# name it: under `off` that engine answered them or nobody did (`no_engine`).
+# Empty since step 14's S14-07. Its one row was the cohorts
+# (`"cohorts": ("KS_READ_COHORTS", "clickhouse")`), and
+# `CustomersMixin._analytics_rows` asks ClickHouse whatever `KS_READ_COHORTS`
+# says now — and refuses its failure, an address missing included — so no
+# switch routes them anywhere. Kept, empty, with `no_engine_routes`, until
+# S14-16 takes the `no_engine` field off `/api/health`.
+ENGINE_ONLY: Dict[str, "tuple[str, str]"] = {}
 
 
 def no_engine_routes() -> List[str]:

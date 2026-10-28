@@ -3789,10 +3789,9 @@ class BackgroundScheduler:
             # (c)): DuckDB's one connection as always, or Postgres — counting
             # a spooled week as sent and adopting a row only DuckDB holds.
             # `warehouse_max_date` and `build_report` stay outside any store
-            # block: both are routed by KS_READ_WEEKLY, and the DuckDB side of
-            # that router takes `store.connection()` itself. The store lock is
-            # not reentrant — a nested acquisition hangs rather than raises,
-            # which on a weekly job means a scheduler thread parked forever.
+            # block: until step 14's S14-07 both were routed by KS_READ_WEEKLY,
+            # and the DuckDB side of that router took `store.connection()`
+            # itself. They read Postgres alone now.
             if await report_ledger.already_sent(
                     store, report_ledger.WEEKLY, week_start, sales_type):
                 logger.debug("Weekly report for %s already sent", week)

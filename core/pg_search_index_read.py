@@ -1,5 +1,14 @@
 """The Meilisearch index, built from Postgres.
 
+ONE ENGINE SINCE STEP 14 (S14-07)
+
+`SyncService.sync_to_meilisearch` builds the index from Postgres and nowhere
+else, under `WATERMARK_KEY` alone: DuckDB's frames and its own watermark key,
+`meilisearch` (`last_sync_meilisearch`, a DuckDB clock), went with S14-07.
+`KS_READ_SEARCH_INDEX` chooses nothing now. A refusal still passes to the
+caller, which skips the step; any other failure is logged and the index waits
+for the next tick, as before.
+
 `SyncService.sync_to_meilisearch` reads DuckDB `buyers`, `silver_orders` and
 `products` and writes nothing back to DuckDB — its only output is the external
 search index. That makes it a genuine read, and the last one stage 1's "16 of
@@ -58,8 +67,6 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-ENV = "KS_READ_SEARCH_INDEX"
-_VALID = ("duckdb", "postgres")
 WATERMARK_KEY = "meilisearch_pg"
 
 
@@ -100,24 +107,6 @@ _DTYPES = {
         "price": "float64", "category_id": "Int32", "category_name": "str",
     },
 }
-
-
-def enabled() -> bool:
-    """Whether the search index should be built from Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 def normalise(rows, kind: str):
