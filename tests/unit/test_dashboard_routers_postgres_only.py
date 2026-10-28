@@ -46,7 +46,7 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
-from typing import List, Set
+from typing import List, Optional, Set
 from unittest.mock import AsyncMock
 
 import pytest
@@ -124,6 +124,7 @@ def store(tmp_path, monkeypatch):
 PRODUCTION_TREES = ("core", "web", "bot", "scripts", "deploy")
 CHAIN_5 = "core.pg_managers_write"
 QUESTION = "reads_the_chain"
+SHORT = CHAIN_5.rsplit(".", 1)[-1]
 
 
 def _absolute(node: ast.ImportFrom, relpath: str) -> str:
@@ -137,32 +138,48 @@ def _absolute(node: ast.ImportFrom, relpath: str) -> str:
     return ".".join(package + ([node.module] if node.module else []))
 
 
-def _dotted(node: ast.AST) -> str:
-    parts = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-        return ".".join(reversed(parts))
-    return ""
-
-
 def asks_the_managers_chain(source: str, relpath: str) -> List[int]:
     """The lines of `source` that refer to `core.pg_managers_write.reads_the_chain`,
-    called or not: by attribute on any name the file binds to the module
-    (`from core import`, `import … as`, a relative import,
-    `importlib.import_module` with the name written out), dotted in full, by
-    name from any import of it (aliased, relative or `*`), the import itself,
-    and `getattr` with the name written out. File-wide, so an import inside a
-    function counts everywhere, and a local that shadows the alias reads as
-    asking: too strict, never too lenient. A name computed at run time is not
-    seen."""
+    called or not.
+
+    The module is: the name `pg_managers_write` however it was bound — an
+    import, `sys.modules`, a parameter, a `for` target — and any attribute of
+    that name (`core.pg_managers_write`, `self.pg_managers_write`); any name an
+    import binds to it (`from core import … as`, `import … as`, a relative
+    import); a call or a subscript with the module's name written out
+    (`importlib.import_module`, `__import__`, `sys.modules[…]`,
+    `sys.modules.get`); and any name assigned one of these (`=`, an annotated
+    assignment, `:=`), to a fixed point. The question is its attribute on the
+    module, a name from any import of it (aliased, relative or `*`), the
+    import itself, and `getattr` with the name written out.
+
+    File-wide, so an import inside a function counts everywhere, and a local
+    that shadows an alias reads as asking: too strict, never too lenient. Not
+    seen: the module under another name no assignment gives it (a parameter
+    or a `for` target named otherwise, a container, `vars()` or `__dict__`),
+    and a name computed at run time."""
     tree = ast.parse(source)
     own = relpath == CHAIN_5.replace(".", "/") + ".py"
-    modules: Set[str] = set()
+    modules: Set[str] = {SHORT}
     names: Set[str] = {QUESTION} if own else set()
     lines: List[int] = []
+
+    def names_it(node: Optional[ast.AST]) -> bool:
+        return (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and node.value.split(".")[-1] == SHORT)
+
+    def is_chain_5(node: Optional[ast.AST]) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in modules
+        if isinstance(node, ast.Attribute):
+            return node.attr == SHORT
+        if isinstance(node, ast.Call):
+            return any(names_it(a) for a in node.args) or any(
+                names_it(k.value) for k in node.keywords)
+        if isinstance(node, ast.Subscript):
+            return names_it(node.slice)
+        return False
+
     for n in ast.walk(tree):
         if isinstance(n, ast.ImportFrom):
             module = _absolute(n, relpath)
@@ -176,15 +193,18 @@ def asks_the_managers_chain(source: str, relpath: str) -> List[int]:
             for a in n.names:
                 if a.name == CHAIN_5 and a.asname:
                     modules.add(a.asname)
-        elif (isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
-              and _dotted(n.value.func).split(".")[-1] == "import_module"
-              and n.value.args and isinstance(n.value.args[0], ast.Constant)
-              and n.value.args[0].value == CHAIN_5):
-            modules |= {t.id for t in n.targets if isinstance(t, ast.Name)}
 
-    def is_chain_5(node: ast.AST) -> bool:
-        return ((isinstance(node, ast.Name) and node.id in modules)
-                or _dotted(node) == CHAIN_5)
+    while True:
+        bound = set(modules)
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Assign) and is_chain_5(n.value):
+                bound |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+            elif (isinstance(n, (ast.AnnAssign, ast.NamedExpr))
+                  and isinstance(n.target, ast.Name) and is_chain_5(n.value)):
+                bound.add(n.target.id)
+        if bound == modules:
+            break
+        modules = bound
 
     for n in ast.walk(tree):
         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in names:
@@ -249,9 +269,10 @@ class TestTheSwitchIsNotRead:
         """`_dashboard_run` asked `pg_managers_write.reads_the_chain` for the
         returns list's `{managers}` join until S14-06; with one path, the
         question decides nothing, and nothing web, the bot or a host tool
-        runs refers to it — by attribute, by name, under an alias or through
-        `getattr` (`asks_the_managers_chain`). The tests are not walked: the
-        parity pin asks every chain's `reads_the_chain` on purpose."""
+        runs refers to it — by attribute, by name, under an alias, through
+        `getattr`, `sys.modules` or `import_module` (`asks_the_managers_chain`,
+        whose docstring lists what it cannot see). The tests are not walked:
+        the parity pin asks every chain's `reads_the_chain` on purpose."""
         found = []
         for top in PRODUCTION_TREES:
             for path in sorted((ROOT / top).rglob("*.py")):
@@ -309,11 +330,90 @@ class TestTheSwitchIsNotRead:
                      "m5 = importlib.import_module('core.pg_managers_write')\n"
                      "def f(sql):\n    return m5.reads_the_chain(sql)\n",
                      id="import_module"),
+        # The second review: the pre-review walk caught the first of these by
+        # its bare name, and the name-resolving one passed all of them.
+        pytest.param("core/repositories/revenue.py",
+                     "def f(sql):\n"
+                     "    import sys\n    import core.pg_managers_write\n"
+                     "    pg_managers_write = sys.modules['core.pg_managers_write']\n"
+                     "    if pg_managers_write.reads_the_chain(sql):\n        pass\n",
+                     id="sys_modules_under_its_own_name"),
+        pytest.param("core/repositories/revenue.py",
+                     "def f(pg_managers_write, sql):\n"
+                     "    return pg_managers_write.reads_the_chain(sql)\n",
+                     id="a_parameter_under_its_own_name"),
+        pytest.param("core/repositories/revenue.py",
+                     "def f(modules, sql):\n"
+                     "    for pg_managers_write in modules:\n"
+                     "        pg_managers_write.reads_the_chain(sql)\n",
+                     id="a_for_target_under_its_own_name"),
+        pytest.param("core/repositories/revenue.py",
+                     "import importlib, types\n"
+                     "def f(sql):\n"
+                     "    m5: types.ModuleType = importlib.import_module("
+                     "'core.pg_managers_write')\n"
+                     "    return m5.reads_the_chain(sql)\n",
+                     id="an_annotated_assignment"),
+        pytest.param("core/repositories/revenue.py",
+                     "import importlib\n"
+                     "def f(sql):\n"
+                     "    return importlib.import_module("
+                     "'core.pg_managers_write').reads_the_chain(sql)\n",
+                     id="import_module_inline"),
+        pytest.param("core/repositories/revenue.py",
+                     "from importlib import import_module\n"
+                     "def f(sql):\n"
+                     "    return import_module('.pg_managers_write', 'core')"
+                     ".reads_the_chain(sql)\n",
+                     id="import_module_relative"),
+        pytest.param("core/repositories/revenue.py",
+                     "import sys\n"
+                     "def f(sql):\n"
+                     "    return sys.modules['core.pg_managers_write']"
+                     ".reads_the_chain(sql)\n",
+                     id="sys_modules_inline"),
+        pytest.param("core/repositories/revenue.py",
+                     "import sys\n"
+                     "def f(sql):\n"
+                     "    return sys.modules.get('core.pg_managers_write')"
+                     ".reads_the_chain(sql)\n",
+                     id="sys_modules_get"),
+        pytest.param("core/repositories/revenue.py",
+                     "def f(sql):\n"
+                     "    return __import__('core.pg_managers_write', "
+                     "fromlist=['reads_the_chain']).reads_the_chain(sql)\n",
+                     id="dunder_import"),
+        pytest.param("core/repositories/revenue.py",
+                     "def f(sql):\n"
+                     "    return __import__('core').pg_managers_write"
+                     ".reads_the_chain(sql)\n",
+                     id="dunder_import_of_the_package"),
+        pytest.param("core/repositories/revenue.py",
+                     "import sys\n"
+                     "def f(sql):\n"
+                     "    return getattr(sys.modules['core.pg_managers_write'], "
+                     "'reads_the_chain')(sql)\n",
+                     id="getattr_over_sys_modules"),
+        pytest.param("core/repositories/revenue.py",
+                     "import sys\n"
+                     "def f(sql):\n"
+                     "    if (m5 := sys.modules['core.pg_managers_write']):\n"
+                     "        return m5.reads_the_chain(sql)\n",
+                     id="a_walrus"),
+        pytest.param("core/repositories/revenue.py",
+                     "import importlib\n"
+                     "def f(sql):\n"
+                     "    m6 = m5\n"
+                     "    return m6.reads_the_chain(sql)\n"
+                     "m5 = importlib.import_module('core.pg_managers_write')\n",
+                     id="an_alias_of_an_alias_defined_later"),
     ])
     def test_the_walk_sees_every_way_of_asking(self, relpath, source):
         """Each form a router could ask in, the review's by-name one first
         (`from core.pg_managers_write import reads_the_chain` inside
-        `_dashboard_run`, which the attribute-only walk passed)."""
+        `_dashboard_run`, which the attribute-only walk passed), then the
+        second review's: the module bound or reached by its name written out,
+        which the name-resolving walk passed."""
         assert asks_the_managers_chain(source, relpath)
 
     @pytest.mark.parametrize("relpath,source", [
@@ -336,6 +436,17 @@ class TestTheSwitchIsNotRead:
                      "    '''used to ask `pg_managers_write.reads_the_chain`'''\n"
                      "    return pg_managers_write.reads_postgres()\n",
                      id="a_docstring_and_another_question"),
+        pytest.param("core/repositories/goals.py",
+                     "import importlib, sys\n"
+                     "def f(sql):\n"
+                     "    return (sys.modules['core.pg_goals_write'].reads_the_chain(sql)\n"
+                     "            or importlib.import_module('core.pg_forecast_write')"
+                     ".reads_the_chain(sql))\n",
+                     id="another_chain_by_its_name_written_out"),
+        pytest.param("core/pg_derivation.py",
+                     "SIGNALLERS = {'core.pg_managers_write': 'set_manager_retail_status'}\n"
+                     "def f(m):\n    return m.reads_the_chain\n",
+                     id="the_module_named_in_data_and_another_name_asked"),
     ])
     def test_the_walk_passes_what_is_not_asking_it(self, relpath, source):
         assert not asks_the_managers_chain(source, relpath)
