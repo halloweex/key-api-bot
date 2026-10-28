@@ -119,7 +119,11 @@ Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) inside
 its transaction. From the first catalogue written here only
 `scripts/chain_copy_back.py catalogue` moves the writes back to DuckDB.
 
-A PRECONDITION THE FLAG ENFORCES
+A PRECONDITION THE FLAG ENFORCES — UNTIL S14-00
+
+Since step 14's S14-00 the chain writes Postgres whatever its flag says and
+asks no precondition (`writes_postgres`, `unmet_precondition`, `mode` are
+constants). What follows is the history.
 
 Nearly every reader on the dashboard joins the catalogue — directly, or
 through `silver_order_lines` — and each can still read DuckDB, whose catalogue
@@ -385,45 +389,12 @@ def env_writes_postgres() -> bool:
 
 
 def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_CATALOGUE=postgres` must not move the writes yet, or None:
-    the lock-out (`chain_latch.lockout_unmet`), then the readers.
-
-    Never raises and never asks Postgres: `/api/health` reads it through the
-    registry, and must still answer with Postgres down. Names flags, never
-    their values — that endpoint is public. A flag nobody can parse is unmet."""
-    reasons = [why for why in (chain_latch.lockout_unmet(LOCKOUT_REVISION),
-                               _readers_unmet()) if why]
-    return "; ".join(reasons) if reasons else None
-
-
-def _readers_unmet() -> Optional[str]:
-    from core import pg_inventory_write, read_fallback, warehouse_cutover
-
-    lagging: List[str] = []
-    try:
-        if not pg_inventory_write.writes_postgres():
-            lagging.append(f"{pg_inventory_write.WRITE_ENV} is not postgres "
-                           "(DuckDB's SKU status joins DuckDB's products)")
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        lagging.append(f"{pg_inventory_write.WRITE_ENV} is not understood "
-                       f"({type(exc).__name__})")
-    try:
-        if not read_fallback.refusing():
-            lagging.append(f"{read_fallback.ENV} is not off (a failed read is "
-                           "answered from DuckDB's catalogue)")
-    except Exception as exc:  # noqa: BLE001
-        lagging.append(f"{read_fallback.ENV} could not be read ({type(exc).__name__})")
-    try:
-        readers = warehouse_cutover.readers_not_on_postgres(os.environ)
-        if readers:
-            lagging.append(", ".join(readers) + " not postgres")
-    except Exception as exc:  # noqa: BLE001
-        lagging.append(f"the warehouse readers could not be read ({type(exc).__name__})")
-    if not lagging:
-        return None
-    return ("; ".join(lagging) + ", so a reader still shows DuckDB's catalogue, "
-            "which stops changing the moment this chain writes Postgres; move "
-            "every reader first")
+    """None, a constant since step 14's S14-00: the chain writes Postgres
+    whatever its flag says, and nothing it waited on is asked any more —
+    production met every clause, and the readers it named read Postgres.
+    Kept for the registry's `unmet_precondition` field, which keeps its shape
+    until S14-11."""
+    return None
 
 
 def _warn_unmet(reason: str) -> None:
@@ -436,32 +407,20 @@ def _warn_unmet(reason: str) -> None:
 
 
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
-    read. Unlatched, the flag moves the writes only once `unmet_precondition()`
-    holds. Raises on a flag nobody can read while unlatched; `mode()` is the
-    question that never raises.
+    """Whether this chain writes Postgres — the one answer every caller reads:
+    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
+    nor a precondition routes any more; the first write in a process still
+    takes the latch (decision 3), which the images before step 14 route by.
+    Last consumers:
+    the products step, `full_sync` and the registry — S14-09.
     """
-    if chain_latch.latched(CHAIN):
-        return True
-    if not env_writes_postgres():
-        return False
-    unmet = unmet_precondition()
-    if unmet:
-        _warn_unmet(unmet)
-        return False
     return True
 
 
 def mode() -> Optional[str]:
-    """Where this chain's writes go: "postgres", "duckdb", or None when
-    `KS_WRITE_CATALOGUE` is not understood and no latch overrides it — the
-    registry's answer (`write_chains.chain_modes`). Never raises; the sync
-    asks this before it decides which path the catalogue takes."""
-    from core import write_chains
-
-    return write_chains.chain_modes()[CHAIN]["mode"]
+    """Where this chain's writes go: "postgres", a constant since step 14's
+    S14-00 — never None, since no flag is read for it."""
+    return "postgres"
 
 
 def _latch() -> str:

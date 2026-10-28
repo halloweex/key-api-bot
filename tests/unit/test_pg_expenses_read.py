@@ -383,15 +383,6 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
             assert await r.backfilled() is True
         assert conn.fetchval.await_count == 1, "a settled latch was re-read"
 
-    @pytest.mark.asyncio
-    async def test_an_unreachable_postgres_answers_no(self):
-        """That read is not going to succeed either, so DuckDB serves."""
-        from core import pg_expenses_read as r
-
-        with patch("core.pg.get_pool",
-                   new=AsyncMock(side_effect=RuntimeError("pg is down"))):
-            assert await r.backfilled() is False
-
 
 class TestItDoesNotTakeTheDuckDbLock:
     @pytest.mark.asyncio
@@ -427,16 +418,3 @@ class TestItDoesNotTakeTheDuckDbLock:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_a_postgres_fault_falls_back_to_duckdb(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "ex3.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_expenses_read.fetch",
-                       new=AsyncMock(side_effect=RuntimeError("pg is down"))):
-                out = await store.get_expense_types()
-            assert out == []
-        finally:
-            await store.close()

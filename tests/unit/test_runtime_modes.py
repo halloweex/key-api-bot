@@ -5,13 +5,17 @@ the boot sync before it starts the scheduler — so the boot's orders landed in
 Postgres while `owns()` still answered False, and every mark was skipped in
 silence. What is pinned here is the order of calls at each entry point, read
 out of the code, because no running test could see a boot.
+
+Since step 14's S14-00 the modes `configure_modes()` reaches are constants —
+production's values — so what they answer is held by
+`tests/unit/test_step14_prod_parity.py`; this keeps the order of the calls,
+which still decides when the switch and the latch are read.
 """
 from __future__ import annotations
 
 import ast
 import pathlib
 
-import pytest
 
 from core import pg_derivation
 from core.runtime_modes import configure_modes
@@ -36,30 +40,27 @@ def _calls(node: ast.AST, name: str) -> list:
             if isinstance(n, ast.Call) and _called_name(n) == name]
 
 
-@pytest.fixture
-def restore_mode():
-    before = (pg_derivation._mode, pg_derivation._mode_error)
-    yield
-    pg_derivation._mode, pg_derivation._mode_error = before
-
-
 class TestConfigureModes:
-    def test_it_sets_the_derivation_mode_and_a_second_call_changes_nothing(
-        self, monkeypatch, restore_mode,
+    def test_it_answers_productions_modes_and_a_second_call_changes_nothing(
+        self, monkeypatch,
     ):
-        monkeypatch.setenv(pg_derivation.ENV, "own")
-        first = configure_modes()
-        second = configure_modes()
-        assert first == second
-        assert first[pg_derivation.ENV] == "own"
+        """S14-00: whatever the environment says — here nothing at all — web's
+        two calls answer production's modes, and the same twice."""
+        for name in ("KS_DUCKDB", "KS_PG_DERIVE", "KS_READ_FALLBACK", "KS_UTM_PARSE",
+                     "KS_WRITE_WAREHOUSE"):
+            monkeypatch.delenv(name, raising=False)
+        first = configure_modes(web=True)
+        second = configure_modes(web=True)
+        assert first == second == {
+            "KS_DUCKDB": "off", "KS_PG_DERIVE": "own", "KS_READ_FALLBACK": "off",
+            "KS_UTM_PARSE": "postgres", "KS_WRITE_WAREHOUSE": "postgres"}
         assert pg_derivation.owns() and pg_derivation.mode_error() is None
 
-    def test_unset_is_piggyback(self, monkeypatch, restore_mode):
-        monkeypatch.setenv(pg_derivation.ENV, "own")
-        configure_modes()
-        monkeypatch.delenv(pg_derivation.ENV)
-        assert configure_modes()[pg_derivation.ENV] == "piggyback"
-        assert not pg_derivation.owns()
+    def test_a_script_still_reads_ks_duckdb(self, monkeypatch):
+        """Not web: the variable decides as before — the archive tools in the
+        pinned image are run with `-e KS_DUCKDB=on`."""
+        monkeypatch.delenv("KS_DUCKDB", raising=False)
+        assert configure_modes()["KS_DUCKDB"] == "on"
 
     def test_it_reaches_every_cached_mode_in_core(self):
         """Walks `core/` for modules defining `configure_mode` rather than

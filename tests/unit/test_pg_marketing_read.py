@@ -29,6 +29,21 @@ from core import pg_marketing_read
 from core.duckdb_store import DuckDBStore
 from core.sql_dialect import DUCKDB, POSTGRES, marketing_period_measures
 
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is the KS_READ_MARKETING read switch (S14-05); the
+    target line is chain 7a's table, whose reads follow the chain to
+    Postgres once it writes there. So this module keeps DuckDB as the
+    chains' store (`tests.conftest.route_chains_to_duckdb`) until their
+    DuckDB branches go."""
+    from core import pg_goals_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_goals_write)
+
+
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
 WINDOW = (date.today() - timedelta(days=30), date.today())
@@ -167,20 +182,6 @@ class TestNothingGoesRoundTheRouter:
         await store.connect()
         try:
             await asyncio.wait_for(getattr(store, name)(*WINDOW), timeout=TIMEOUT_S)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_postgres_fault_falls_back_to_duckdb(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KS_READ_MARKETING", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "m.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_marketing_read.fetch",
-                       new=AsyncMock(side_effect=RuntimeError("pg is down"))):
-                out = await store.get_marketing_report_by_dates(*WINDOW)
-            assert out["general_sales"]["current"]["revenue"] == 0
         finally:
             await store.close()
 

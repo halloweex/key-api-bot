@@ -151,7 +151,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -161,14 +160,21 @@ from core.utm_classify import utm_columns
 
 logger = logging.getLogger(__name__)
 
-# ─── Who writes silver.order_utm: DuckDB's copy, or Postgres' own parse ──────
+# ─── Who writes silver.order_utm: Postgres' own parse — S14-00's constant ───
+#
+# `KS_UTM_PARSE` chose between DuckDB's copy shipped to Postgres (`duckdb`)
+# and Postgres' own parse (`postgres`, which needs `KS_PG_DERIVE=own`).
+# Production has parsed in Postgres since step 13; since step 14's S14-00 the
+# mode is `postgres` whatever the variable says, and `mode_error()` is None.
 
 ENV = "KS_UTM_PARSE"
 DUCKDB = "duckdb"
 POSTGRES = "postgres"
 _VALID = (DUCKDB, POSTGRES)
 
-_mode: Optional[str] = None
+# The cache the mode used to live in. Read by nothing since S14-00; kept, at
+# the constant, for the fixtures that save and restore it until S14-15.
+_mode: Optional[str] = POSTGRES
 _mode_error: Optional[str] = None
 
 # The age `/api/health` declares for this table's watermark under `postgres`,
@@ -182,44 +188,27 @@ MAX_AGE_S = DERIVED_MAX_AGE_S
 
 
 def configure_mode() -> str:
-    """Read `KS_UTM_PARSE` once. Never raises. Called by `configure_modes()`,
-    after `pg_derivation.configure_mode()`, whose answer it depends on."""
-    global _mode, _mode_error
-    from core import pg_derivation
-
-    value = os.getenv(ENV, DUCKDB).strip().lower() or DUCKDB
-    if value not in _VALID:
-        error: Optional[str] = (f"{ENV}={value!r} is not one of {_VALID}; "
-                                f"running as {DUCKDB!r}")
-    elif value == POSTGRES and not pg_derivation.owns():
-        error = (f"{ENV}={POSTGRES!r} needs {pg_derivation.ENV}="
-                 f"{pg_derivation.OWN!r}, and it is {pg_derivation.mode()!r}; "
-                 f"running as {DUCKDB!r}")
-    else:
-        error = None
-    # Logged when it changes, not on every call: web's startup and the
-    # scheduler both configure, and one ERROR per cause is what a reader of
-    # the log can use.
-    if error and error != _mode_error:
-        logger.error(error)
-    _mode = DUCKDB if error else value
-    _mode_error = error
-    return _mode
+    """`postgres`, whatever `KS_UTM_PARSE` says (S14-00). Reads nothing."""
+    return POSTGRES
 
 
 def mode() -> str:
-    """The configured mode; `duckdb` until `configure_mode` has run."""
-    return _mode or DUCKDB
+    """`postgres`, a constant since S14-00."""
+    return POSTGRES
 
 
 def mode_error() -> Optional[str]:
-    return _mode_error
+    """None: since S14-00 no value of `KS_UTM_PARSE` is read, so none is an
+    error. The canary's `utm_parse_mode_invalid` goes with the block."""
+    return None
 
 
 def parses_in_postgres() -> bool:
-    """Postgres parses the table and nothing ships it. Reads the cache, never
-    the environment."""
-    return _mode == POSTGRES
+    """Postgres parses the table and nothing ships it: True, a constant since
+    S14-00. Last consumers: the UTM doors' router, the DuckDB tick's ship and
+    `/api/health`'s mirror list — they go in S14-15."""
+    return True
+
 
 # `int.from_bytes(b"ks:utm", "big")`. One key for every UTM parse in every
 # process, and for nothing else: an advisory lock is a number, and a number

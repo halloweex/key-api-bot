@@ -312,3 +312,68 @@ class TestPredictionServiceInit:
         from core.prediction_service import PredictionService
         svc = PredictionService()
         assert svc._clip_ratio == 1.0
+
+
+# ---------------------------------------------------------------------------
+# predict_range stops at the horizon
+# ---------------------------------------------------------------------------
+
+class TestPredictRangeStopsAtTheHorizon:
+    """`/api/revenue/trend?include_forecast=true` predicts a custom range's
+    future days through `predict_range`: one feature rebuild per day, on the
+    one ML thread training and the forecast job wait for too. Unbounded, a
+    range ending years ahead held that thread for tens of seconds (two years
+    12.7 s, eight 70.5 s, measured). It stops at FORECAST_HORIZON_DAYS, where
+    the dashboard's date picker already stops."""
+
+    TODAY = date(2026, 10, 21)
+
+    @pytest.fixture
+    def service(self, monkeypatch):
+        import core.prediction_service as ps
+
+        asked = {}
+
+        def predict(model, history, future_dates, dow_corrections, clip_ratio):
+            asked["dates"] = list(future_dates)
+            return [{"date": d.isoformat(), "predicted_revenue": 1.0} for d in future_dates]
+
+        async def store():
+            return object()
+
+        async def history(store, sales_type, days_back, exclude_today=True):
+            return pd.DataFrame()
+
+        monkeypatch.setattr(ps, "_today_kyiv", lambda: self.TODAY)
+        monkeypatch.setattr(ps, "_predict_future", predict)
+        monkeypatch.setattr("core.duckdb_store.get_store", store)
+        svc = ps.PredictionService()
+        svc._model = object()
+        monkeypatch.setattr(svc, "_query_daily_revenue", history)
+        return svc, asked
+
+    def _days(self, first: int, last: int):
+        return [self.TODAY + timedelta(days=i) for i in range(first, last + 1)]
+
+    @pytest.mark.asyncio
+    async def test_a_range_past_the_horizon_is_cut_at_it(self, service):
+        from core.prediction_service import FORECAST_HORIZON_DAYS
+
+        svc, asked = service
+        out = await svc.predict_range(self.TODAY - timedelta(days=5),
+                                      self.TODAY + timedelta(days=400))
+        assert asked["dates"] == self._days(0, FORECAST_HORIZON_DAYS)
+        assert len(out["daily_predictions"]) == FORECAST_HORIZON_DAYS + 1
+
+    @pytest.mark.asyncio
+    async def test_inside_the_horizon_nothing_changes(self, service):
+        svc, asked = service
+        await svc.predict_range(self.TODAY - timedelta(days=3), self.TODAY + timedelta(days=6))
+        assert asked["dates"] == self._days(0, 6)
+
+    @pytest.mark.asyncio
+    async def test_a_range_wholly_past_the_horizon_predicts_nothing(self, service):
+        svc, asked = service
+        assert await svc.predict_range(self.TODAY + timedelta(days=100),
+                                       self.TODAY + timedelta(days=130)) is None
+        assert "dates" not in asked

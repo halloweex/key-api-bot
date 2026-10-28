@@ -3,8 +3,9 @@
 `core.pg_buyer_rows._write_buyer_rows` is what the landing mirror runs now and
 what chain 4's writer will run. These pin what both depend on:
 
-- the mirror still writes exactly the rows the shared parse produced, and
-  stamps its watermarks as before;
+- the core writes exactly the rows the shared parse produced (the mirror,
+  whose stamps were pinned here too, stands down for chain 4's tables since
+  step 14's S14-00);
 - an UPDATE moves `mirrored_at`, which is how the search index finds a changed
   buyer (`pg_search_index_read.high_watermark`/`buyers_frame`) — nothing
   tested that before;
@@ -23,7 +24,6 @@ database is shared with the rest of the suite.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -121,39 +121,44 @@ async def _requested(pool):
             "SELECT requested FROM meta.derivation_signal WHERE layer = 'warehouse'")
 
 
-@pytest.mark.asyncio
-async def test_the_mirror_writes_exactly_the_parsed_rows_and_stamps_as_before(pg):
-    from core.pg_buyers import mirror_buyers
+async def _written(pool, batch):
+    """The batch through the one writer of buyer rows, as chain 4's writer
+    runs it: parsed once, on the caller's transaction. Since step 14's S14-00
+    the landing mirror stands down for chain 4's tables, so it is no longer
+    the way in; what it stamped went with it."""
+    from core.pg_buyer_rows import _write_buyer_rows
 
-    batch = [_buyer(1), _buyer(2, phones=["+380500000009", "+380500000010"]), _buyer(3, phones=[])]
     parsed = parse_buyers(batch)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await _write_buyer_rows(conn, parsed.rows, parsed.contacts)
+    return parsed
+
+
+@pytest.mark.asyncio
+async def test_the_core_writes_exactly_the_parsed_rows(pg):
+    batch = [_buyer(1), _buyer(2, phones=["+380500000009", "+380500000010"]), _buyer(3, phones=[])]
     ids = [b.id for b in batch]
 
-    result = await mirror_buyers(batch)
+    parsed = await _written(pg, batch)
 
-    assert result.get("error") is None and result["rows"] == 3, result
     stored = await _buyers(pg, ids)
     for row in parsed.rows:
         assert tuple(stored[row.id][c] for c in BUYER_COLUMNS) == tuple(row), row.id
     expected = sorted(tuple(c) for _id, cs in parsed.contacts for c in cs)
     assert await _contacts(pg, ids) == expected
-    state = await _state(pg)
-    assert state["bronze.buyers"]["last_rows"] == 3
-    assert state["bronze.buyer_contacts"]["last_rows"] == len(expected)
-    assert state["bronze.buyers"]["failures_since_ok"] == 0
 
 
 @pytest.mark.asyncio
 async def test_an_update_moves_mirrored_at_and_the_search_index_sees_it(pg):
     from core import pg_search_index_read
-    from core.pg_buyers import mirror_buyers
 
-    await mirror_buyers([_buyer(4)])
+    await _written(pg, [_buyer(4)])
     first = (await _buyers(pg, [BASE + 4]))[BASE + 4]["mirrored_at"]
     since = await pg_search_index_read.high_watermark()
     assert since >= first
 
-    await mirror_buyers([_buyer(4, name="Покупець Перейменований")])
+    await _written(pg, [_buyer(4, name="Покупець Перейменований")])
 
     stored = (await _buyers(pg, [BASE + 4]))[BASE + 4]
     assert stored["full_name"] == "Покупець Перейменований"
@@ -164,10 +169,8 @@ async def test_an_update_moves_mirrored_at_and_the_search_index_sees_it(pg):
 
 @pytest.mark.asyncio
 async def test_a_shrunk_contact_list_shrinks(pg):
-    from core.pg_buyers import mirror_buyers
-
-    await mirror_buyers([_buyer(5, phones=["+380501", "+380502", "+380503"])])
-    await mirror_buyers([_buyer(5, phones=["+380501", "+380503"])])
+    await _written(pg, [_buyer(5, phones=["+380501", "+380502", "+380503"])])
+    await _written(pg, [_buyer(5, phones=["+380501", "+380503"])])
 
     phones = [c[2] for c in await _contacts(pg, [BASE + 5]) if c[1] == "phone"]
     assert phones == ["+380501", "+380503"]
@@ -182,16 +185,13 @@ async def test_a_contact_list_that_empties_empties(pg):
     under `if buyer_contacts:` passed the whole suite while Postgres kept a
     number KeyCRM no longer serves, for the mirror, the reship and chain 4's
     writer alike — all three run this function. Mutation killed: that move."""
-    from core.pg_buyers import mirror_buyers
-
-    await mirror_buyers([_buyer(11, phones=["+380511"], emails=[])])
+    await _written(pg, [_buyer(11, phones=["+380511"], emails=[])])
     assert [c[2] for c in await _contacts(pg, [BASE + 11])] == ["+380511"]
 
     emptied = _buyer(11, phones=[], emails=[])
     assert parse_buyers([emptied]).contacts == [(BASE + 11, [])]
-    result = await mirror_buyers([emptied])
+    await _written(pg, [emptied])
 
-    assert result.get("error") is None, result
     assert await _contacts(pg, [BASE + 11]) == []
     assert set(await _buyers(pg, [BASE + 11])) == {BASE + 11}
 

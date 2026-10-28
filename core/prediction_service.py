@@ -1267,10 +1267,21 @@ class PredictionService:
         end_date: date,
         sales_type: str = "retail",
     ) -> Optional[Dict[str, Any]]:
-        """Generate predictions for an arbitrary future date range on-the-fly.
+        """Generate predictions for a future date range on-the-fly, up to
+        FORECAST_HORIZON_DAYS ahead.
 
         Returns forecast dict compatible with get_forecast() response,
         or None if model is not ready or no future dates in range.
+
+        **Never past the horizon** (2026-10-21). Every day is predicted after
+        a feature rebuild over all the days before it, on the one ML thread
+        that training and the forecast job wait for too. Measured with the
+        model stubbed out: 61 days cost 0.9 s, two years 12.7 s, eight years
+        70.5 s — each day dearer than the one before, so a range ending in
+        2262, pandas' last date, would hold the thread for hours (not run).
+        The horizon is what `predict_month` stores and `get_forecast` serves,
+        and the dashboard's date picker stops at its `forecast_end`, so the
+        cut changes nothing the page can ask for.
         """
         if not self.is_ready:
             return None
@@ -1278,12 +1289,13 @@ class PredictionService:
         today = _today_kyiv()
         # Include today (partial day) for stacked actual + remaining
         pred_start = max(start_date, today)
-        if pred_start > end_date:
+        pred_end = min(end_date, today + timedelta(days=FORECAST_HORIZON_DAYS))
+        if pred_start > pred_end:
             return None
 
         future_dates = []
         d = pred_start
-        while d <= end_date:
+        while d <= pred_end:
             future_dates.append(d)
             d += timedelta(days=1)
 

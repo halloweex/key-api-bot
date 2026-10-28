@@ -64,7 +64,11 @@ nothing written, leaving copy-back as the only way back and
 until 2026-09-25; every chain now latches inside the acquire, and
 `tests/unit/test_chain_latch.py` holds each registered chain to it.
 
-A PRECONDITION THE FLAG ENFORCES
+A PRECONDITION THE FLAG ENFORCES — UNTIL S14-00
+
+Since step 14's S14-00 the chain writes Postgres whatever its flag says and
+asks no precondition (`writes_postgres`, `unmet_precondition` are
+constants). What follows is the history.
 
 Everything that reads the dictionary reads it through `_expenses_run`, which
 asks Postgres only under `KS_READ_EXPENSES=postgres`. With that flag off the
@@ -146,38 +150,22 @@ def env_writes_postgres() -> bool:
 
 
 def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_EXPENSE_TYPES=postgres` must not move the writes yet, or
-    None. Never raises: a read flag nobody can parse is unmet, because nobody
-    can then say the readers follow the writes. `core.write_chains` asks this
-    too, so the registry and `writes_postgres()` give one answer."""
-    from core import pg_expenses_read
-
-    try:
-        if pg_expenses_read.enabled():
-            return None
-        why = f"{pg_expenses_read.ENV} is not postgres"
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        why = f"{pg_expenses_read.ENV} is not understood ({exc})"
-    return (f"{why}, so every reader of the dictionary reads DuckDB's copy and a "
-            f"type written to Postgres alone would show on /expenses as Other; "
-            f"set {pg_expenses_read.ENV}=postgres first")
+    """None, a constant since step 14's S14-00: the chain writes Postgres
+    whatever its flag says, and nothing it waited on is asked any more —
+    production met every clause, and the readers it named read Postgres.
+    Kept for the registry's `unmet_precondition` field, which keeps its shape
+    until S14-11."""
+    return None
 
 
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
-    read. See `core/chain_latch.py`. Unlatched, the flag moves the writes only
-    once `unmet_precondition()` holds — until then the chain runs as duckdb.
+    """Whether this chain writes Postgres — the one answer every caller reads:
+    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
+    nor a precondition routes any more; the first write in a process still
+    takes the latch (decision 3), which the images before step 14 route by.
+    Last consumers:
+    the repository's writer, `full_sync` and the registry — S14-09.
     """
-    if chain_latch.latched(CHAIN):
-        return True
-    if not env_writes_postgres():
-        return False
-    unmet = unmet_precondition()
-    if unmet:
-        logger.warning("%s=postgres, but the chain stays on DuckDB: %s", WRITE_ENV, unmet)
-        return False
     return True
 
 

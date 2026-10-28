@@ -18,18 +18,19 @@ mirror would have created and then reported.
 **Line items are replaced, not upserted.** Their ids are `order_id * 1000 +
 position`, so an order dropping from three items to two leaves `…002` behind
 under a plain upsert.
+
+Since step 14's S14-00 chain 3 writes the orders, a constant, so the sync's
+mirror stands down: what the sync ships, and the kill switch, went with it.
+The shared rows and the write statement are chain 3's writer's too, and stay.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core import pg_landing
-from core.duckdb_store import DuckDBStore
 from core.landing_rows import (
     LINE_ITEM_ID_STRIDE,
     ORDER_COLUMNS,
@@ -169,15 +170,6 @@ class TestTheMirrorNeverRaises:
         assert pg_landing.health()["failures"] == {}
 
     @pytest.mark.asyncio
-    async def test_the_kill_switch_skips_without_touching_postgres(self, monkeypatch):
-        monkeypatch.setenv(pg_landing.MIRROR_ENV, "0")
-        rows = landed_orders([_payload(1)])
-        with patch("core.pg_landing.write_orders", new=AsyncMock()) as w:
-            outcomes = await pg_landing.mirror_orders(rows.orders, rows.products)
-        w.assert_not_called()
-        assert all(o.skipped for o in outcomes)
-
-    @pytest.mark.asyncio
     async def test_nothing_to_ship_does_not_move_the_watermark(self):
         """A watermark is a claim about a shipment; an empty one made none."""
         with patch("core.pg_landing.write_orders", new=AsyncMock()) as w:
@@ -197,87 +189,3 @@ class TestTheMirrorNeverRaises:
         assert [o.table for o in outcomes] == ["bronze.orders"]
 
 
-class TestWhatTheSyncActuallyShips:
-    """The integration that matters: DuckDB decides, the mirror obeys."""
-
-    async def _store(self, tmp_path: Path) -> DuckDBStore:
-        store = DuckDBStore(db_path=tmp_path / "orders.duckdb")
-        await store.connect()
-        return store
-
-    @pytest.mark.asyncio
-    async def test_a_first_sync_ships_everything_it_wrote(self, tmp_path):
-        store = await self._store(tmp_path)
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()) as m:
-            await store.upsert_orders([_payload(1), _payload(2)])
-
-        orders, products = m.call_args.args
-        assert sorted(o.id for o in orders) == [1, 2]
-        assert len(products) == 4
-        assert m.call_args.kwargs["replace_products"] is True
-
-    @pytest.mark.asyncio
-    async def test_a_resync_of_unchanged_orders_ships_nothing(self, tmp_path):
-        """The whole reason the mirror takes `updated_ids` and not the page."""
-        store = await self._store(tmp_path)
-        payloads = [_payload(1), _payload(2)]
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-            await store.upsert_orders(payloads)
-
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()) as m:
-            await store.upsert_orders(payloads)
-        m.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_only_the_order_that_moved_is_shipped(self, tmp_path):
-        store = await self._store(tmp_path)
-        later = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-            await store.upsert_orders([_payload(1), _payload(2)])
-
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()) as m:
-            await store.upsert_orders(
-                [_payload(1), _payload(2, total="999.00", updated_at=later)]
-            )
-
-        orders, products = m.call_args.args
-        assert [o.id for o in orders] == [2]
-        assert {p.order_id for p in products} == {2}
-
-    @pytest.mark.asyncio
-    async def test_a_status_refresh_ships_headers_and_says_so(self, tmp_path):
-        store = await self._store(tmp_path)
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-            await store.upsert_orders([_payload(1)])
-
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()) as m:
-            await store.upsert_orders(
-                [_payload(1)], force_update=True, skip_products=True,
-            )
-
-        orders, products = m.call_args.args
-        assert [o.id for o in orders] == [1]
-        assert products == []
-        assert m.call_args.kwargs["replace_products"] is False
-
-    @pytest.mark.asyncio
-    async def test_duckdb_still_holds_what_it_always_held(self, tmp_path):
-        """The parse moved out of this function; the rows must not have."""
-        store = await self._store(tmp_path)
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-            await store.upsert_orders([_payload(7, total="250.50", products=3)])
-
-        async with store.connection() as conn:
-            row = conn.execute(
-                "SELECT id, source_id, status_id, status_group_id, grand_total, "
-                "buyer_id, manager_id FROM orders WHERE id = 7"
-            ).fetchone()
-            items = conn.execute(
-                "SELECT id, order_id, product_id, name, quantity, price_sold "
-                "FROM order_products WHERE order_id = 7 ORDER BY id"
-            ).fetchall()
-
-        assert row == (7, 1, 12, 4, Decimal("250.50"), 507, 4)
-        assert [i[0] for i in items] == [7000, 7001, 7002]
-        assert items[1][3] == "Товар 1"
-        assert items[2][4] == 3

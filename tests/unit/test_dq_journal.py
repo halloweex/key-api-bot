@@ -231,59 +231,6 @@ class TestTheOneDoor:
 # ─── duckdb: the default, byte for byte ──────────────────────────────────────
 
 
-class TestUnderDuckdbNothingChanged:
-    @pytest.mark.asyncio
-    async def test_one_connection_the_same_rows_and_no_postgres(
-            self, flag, store, monkeypatch):
-        """Mutation: the router reaches for a pool under `duckdb`, or opens a
-        second connection — every check job would then depend on Postgres
-        whose flag nobody switched."""
-        flag(None)
-        pool = _no_postgres(monkeypatch)
-        calls = _count_connections(store)
-        run_id = await dq_journal.journal_run(store, **_kwargs())
-        assert calls == [1] and not pool.await_count
-        async with store.connection() as conn:
-            run = fetch_latest_run(conn, layer="integrity")
-            n_issues = conn.execute("SELECT COUNT(*) FROM data_quality_issues "
-                                    "WHERE run_id = ?", [run_id]).fetchone()[0]
-            n_diffs = conn.execute("SELECT COUNT(*) FROM data_quality_diffs "
-                                   "WHERE run_id = ?", [run_id]).fetchone()[0]
-        assert run["run_id"] == run_id and run["status"] == "CRITICAL"
-        assert (n_issues, n_diffs) == (1, 1)
-        assert not chain.chain_latch.marker_path(chain.CHAIN).exists()
-
-    @pytest.mark.asyncio
-    async def test_the_beat_is_written_where_it_always_was(self, flag, store, monkeypatch):
-        flag(None)
-        _no_postgres(monkeypatch)
-        await dq_journal.mark_digest_sent(store, NOW.isoformat())
-        async with store.connection() as conn:
-            row = conn.execute("SELECT value FROM sync_metadata WHERE key = ?",
-                               [dq_journal.DIGEST_MARKER_KEY]).fetchone()
-        assert row[0] == NOW.isoformat()
-
-    @pytest.mark.asyncio
-    async def test_the_digest_reads_duckdb_on_one_connection(self, flag, store, monkeypatch):
-        flag(None)
-        _no_postgres(monkeypatch)
-        await dq_journal.journal_run(store, **_kwargs())
-        calls = _count_connections(store)
-        last, sections = await dq_journal.digest_inputs(store, ("integrity",), NOW)
-        assert calls == [1] and last is None
-        assert sections[0].run["layer"] == "integrity"
-        assert [i["check_name"] for i in sections[0].issues] == ["pk_uniqueness_orders"]
-
-    def test_a_typo_refuses_the_write_and_keeps_the_reads(self, flag):
-        """OD-18 (a) for the writer; chain 7a's rule for the readers — a flag
-        about writes must not take every layer age down. Mutation: let the
-        readers raise on the typo."""
-        flag("postgrse")
-        with pytest.raises(RuntimeError):
-            dq_journal.writes_postgres()
-        assert dq_journal.reads_postgres() is False
-
-
 # ─── postgres: the writer, then the shadow ───────────────────────────────────
 
 
@@ -493,15 +440,6 @@ class TestReadersFollowTheWriter:
         assert ages["integrity"] == {"last_success_at": "pg", "age_seconds": 7}
 
     @pytest.mark.asyncio
-    async def test_under_duckdb_the_canary_keeps_duckdbs_ages(self, flag, pg_journal):
-        from web.routes.api import health
-
-        flag(None)
-        mine = {"integrity": {"age_seconds": 999}}
-        assert await health._journal_ages(mine) is mine
-        assert pg_journal["reads"] == 0
-
-    @pytest.mark.asyncio
     async def test_a_latched_chain_reads_postgres_whatever_the_flag(
             self, flag, store, pg_journal):
         flag("duckdb")
@@ -697,27 +635,6 @@ class TestTheRunIdLock:
 # ─── Chain 1's preflight, once the journal is written directly ───────────────
 
 
-class TestChainOnesPreflight:
-    @pytest.mark.asyncio
-    async def test_a_direct_journal_is_not_gated_on_its_stood_down_copy(
-            self, flag, monkeypatch):
-        """The hourly copy stands down with the chain, so its `last_ok_at`
-        freezes and would refuse chain 1's flip for ever. Mutation: keep the
-        copy's reasons whatever chain 9 says."""
-        from tests.unit import test_inventory_preflip as pre
-
-        monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
-        facts = pre._facts()
-        facts["marks"]["app.data_quality_runs"] = pre._mark(600)
-        flag(None)
-        blocked = await pre._ask(facts)
-        assert any("quality journal" in r for r in blocked["reasons"])
-        flag("postgres")
-        direct = await pre._ask(facts)
-        assert direct["ok"] is True, direct["reasons"]
-        assert direct["journal_copy_age_s"] is None
-
-
 # ─── The standing watch ──────────────────────────────────────────────────────
 
 
@@ -783,26 +700,6 @@ class TestOneFindingPerKey:
         assert first.severity is Severity.CRITICAL and first.count == 3
         assert first.sample_ids == (1, 2, 3)
         assert first.description == "journal blind\nwatchdogs blind"
-
-    @pytest.mark.asyncio
-    async def test_duckdb_is_handed_one_row_per_key(self, flag, store, monkeypatch):
-        """Through the door under `duckdb`, the default. Mutation: drop the
-        fold from `journal_run` — DuckDB takes both rows, and the hourly full
-        replace of `app.data_quality_issues` fails on the primary key from then
-        on (`tests/integration/test_dq_journal_pg.py` runs that copy)."""
-        flag(None)
-        _no_postgres(monkeypatch)
-        run_id = await dq_journal.journal_run(
-            store, **_kwargs(issues=[_twin(text="x"), _twin(text="y")]))
-        async with store.connection() as conn:
-            rows = conn.execute(
-                "SELECT check_name, table_name, count, description FROM "
-                "data_quality_issues WHERE run_id = ?", [run_id]).fetchall()
-            run = conn.execute(
-                "SELECT integrity_issues_count FROM data_quality_runs "
-                "WHERE run_id = ?", [run_id]).fetchone()
-        assert rows == [("chain_invariants_unwatched", "(write chains)", 2, "x\ny")]
-        assert run == (1,)
 
     @pytest.mark.asyncio
     async def test_postgres_is_handed_one_row_per_key(self, flag, store, monkeypatch):

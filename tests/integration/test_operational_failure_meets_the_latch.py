@@ -113,9 +113,13 @@ async def test_a_failure_after_the_owner_rows_leaves_the_owned_watermark_alone(s
     assert "UniqueViolation" in failed["error"], failed
 
     states = await _states(pool)
-    for table in _shipped():
-        if table == EXPENSES:
-            continue
+    # What the run was copying: since step 14's S14-00 every chain's tables
+    # stand down, so DuckDB's history tables — never the owned one.
+    from core.write_chains import stood_down_tables
+
+    copying = [t for t in _shipped() if t not in stood_down_tables()]
+    assert copying and EXPENSES not in copying
+    for table in copying:
         assert "duplicate key" in (states[table]["last_error"] or ""), table
     # The owned table: untouched, and its watermark still says what to do.
     assert states[EXPENSES] == before

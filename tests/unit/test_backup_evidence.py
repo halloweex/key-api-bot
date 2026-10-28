@@ -1,4 +1,6 @@
-"""Chain 3's backup evidence, read from the markers the deploy scripts leave.
+"""The backup evidence, read from the markers the deploy scripts leave —
+chain 3's precondition until step 14's S14-00, the canary's
+`backup_evidence_stale` since.
 
 Each test names the mutation it exists to fail on.
 """
@@ -160,3 +162,116 @@ def test_the_route_returns_it():
              if isinstance(k, ast.Constant)}
     value = pairs.get("backups")
     assert isinstance(value, ast.Call) and getattr(value.func, "id", None) == "_backups"
+
+
+# ─── The canary judges it (step 14's S14-00) ─────────────────────────────────
+#
+# Until S14-00 the two drills were judged by chain 3's precondition alone,
+# which paged `write_chain_precondition_unmet`; the precondition is gone, so
+# the canary reads the published block itself, at this module's limits.
+
+def _block(pitr=45.7, remote=46.0, offsite=22.7):
+    """H0's ages: what production published on 2026-10-21."""
+    return {"backups": {"pitr_drill_age_h": pitr, "remote_restore_age_h": remote,
+                        "pg_offsite_age_h": offsite}}
+
+
+def test_the_canary_is_quiet_on_productions_ages():
+    """Mutation: a limit in days compared against hours, or any stale rule
+    that fires on fresh evidence."""
+    from bot import canary
+
+    assert canary.check_backup_evidence(_block()) == []
+    edge = _block(pitr=ev.DRILL_MAX_AGE_H, remote=ev.DRILL_MAX_AGE_H,
+                  offsite=ev.OFFSITE_MAX_AGE_H)
+    assert canary.check_backup_evidence(edge) == []
+
+
+@pytest.mark.parametrize("field,age,script", [
+    ("pitr", ev.DRILL_MAX_AGE_H + 1, "deploy/pg_pitr_drill.sh"),
+    ("remote", ev.DRILL_MAX_AGE_H + 1, "deploy/pg_restore_drill.sh --from-remote"),
+    ("offsite", ev.OFFSITE_MAX_AGE_H + 1, "deploy/pg_offsite.sh"),
+])
+def test_the_canary_warns_on_each_stale_marker_and_names_its_script(field, age, script):
+    """Mutation: drop one of the three markers from `BACKUP_EVIDENCE`, or
+    judge one at the other's limit (the shipment's 36 h is not a drill's
+    eight days)."""
+    from bot import canary
+
+    ((key, message),) = canary.check_backup_evidence(_block(**{field: age}))
+    assert key == "backup_evidence_stale"
+    assert script in message and f"{age:.1f} h old" in message
+
+
+def test_an_age_just_past_its_limit_reads_as_past_it():
+    """192.01 h used to read "192 h old, limit 192 h", which looks fresh."""
+    from bot import canary
+
+    ((_, message),) = canary.check_backup_evidence(
+        _block(remote=ev.DRILL_MAX_AGE_H + 0.01))
+    assert f"over its {ev.DRILL_MAX_AGE_H} h limit" in message
+
+
+def test_the_canary_warns_on_a_marker_that_never_passed():
+    """A null age is a marker that does not exist: the script has never
+    passed on this host. Mutation: read None as fresh."""
+    from bot import canary
+
+    ((key, message),) = canary.check_backup_evidence(_block(remote=None))
+    assert key == "backup_evidence_stale" and "never passed" in message
+    assert "pg_restore_drill.sh --from-remote" in message
+
+
+def test_the_canary_judges_nothing_it_was_not_given():
+    """No block, or one that is not an object — an older web, or `_backups()`
+    answering None because the directory could not be read — says nothing
+    about the drills. Mutation: page a missing block."""
+    from bot import canary
+
+    assert canary.check_backup_evidence({}) == []
+    assert canary.check_backup_evidence(None) == []
+    assert canary.check_backup_evidence({"backups": None}) == []
+    assert canary.check_backup_evidence({"backups": {}}) == []
+
+
+def test_a_probe_that_read_no_block_holds_the_page():
+    """`resolve_group` clears every delivered key a probe did not report, and
+    a probe that read no `backups` block cannot say the drills ran: the
+    drills are weekly, so a blind probe announcing them resolved would page
+    the same stale marker again as a new incident. Mutation: drop the key
+    from `unjudged_keys`."""
+    from bot import canary
+
+    assert "backup_evidence_stale" in canary.unjudged_keys({})
+    assert "backup_evidence_stale" in canary.unjudged_keys({"backups": None})
+    assert "backup_evidence_stale" not in canary.unjudged_keys(_block())
+
+
+@pytest.mark.asyncio
+async def test_the_probe_warns_on_it():
+    """Through `run_canary`, the probe the bot runs every 15 min, on an
+    otherwise healthy payload. Mutation: drop `check_backup_evidence` from
+    the probe — the function above would still answer, and a drill that
+    quietly stopped running would be seen by nobody."""
+    from unittest.mock import patch
+
+    import httpx
+
+    from bot import canary
+    from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
+
+    payload = {**_healthy_payload(), **_block(pitr=9 * 24)}
+    future = datetime.now(timezone.utc) + timedelta(days=60)
+    cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
+    async with _mock_transport(lambda request: httpx.Response(200, json=payload)) as client:
+        with patch.object(canary, "_fetch_peer_cert", return_value=cert):
+            result = await canary.run_canary(DASHBOARD, client=client)
+    assert "backup_evidence_stale" in result.failure_keys
+    assert result.severity == "warn"
+    assert "pg_pitr_drill.sh" in canary.format_alert(result, DASHBOARD)
+
+    fresh = {**_healthy_payload(), **_block()}
+    async with _mock_transport(lambda request: httpx.Response(200, json=fresh)) as client:
+        with patch.object(canary, "_fetch_peer_cert", return_value=cert):
+            result = await canary.run_canary(DASHBOARD, client=client)
+    assert "backup_evidence_stale" not in result.failure_keys

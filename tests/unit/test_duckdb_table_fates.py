@@ -46,7 +46,7 @@ import duckdb_table_fates_check as check  # noqa: E402
 
 from core import duckdb_table_fates as fates_mod  # noqa: E402
 from core.duckdb_table_fates import (  # noqa: E402
-    ARCHIVE_ONLY, COMPUTED, DERIVED, EXPORTED, FATES, IRREPLACEABLE, MOVED,
+    ARCHIVE_ONLY, COMPUTED, DERIVED, EXPORTED, FATES, IRREPLACEABLE,
     NONE, NOT_A_TABLE, RETIRED, SCHEMA, SCRATCH, SKIPPED, STORE_SWITCHES,
     TABLE, VIEW,
 )
@@ -715,16 +715,15 @@ def _render_for_duckdb(router: str, sql: str) -> List[str]:
         else:
             await getattr(DuckDBStore, router)(store, sql, [], mode="none")
 
-    saved = {k: os.environ.get(k) for k in (fates_mod.SMS_STORE, fates_mod.USER_STORE)}
-    os.environ.update({fates_mod.SMS_STORE: "duckdb", fates_mod.USER_STORE: "duckdb"})
-    try:
+    # The routers' DuckDB branch. Until step 14's S14-00 the two variables
+    # chose it; since then both stores are Postgres, a constant, so the
+    # predicates are answered here (S14-08 takes the branches away).
+    from unittest.mock import patch
+
+    with patch("core.pg_sms.sms_store_is_postgres", lambda: False), \
+            patch("core.repositories.customers.sms_store_is_postgres", lambda: False), \
+            patch("core.pg_dashboard_users.user_store_is_postgres", lambda: False):
         asyncio.run(run())
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
     return [s for s in store.conn.sql
             if s.strip().upper() not in ("BEGIN TRANSACTION", "COMMIT", "ROLLBACK")]
 
@@ -1526,11 +1525,6 @@ class TestTheChains:
         assert not unknown, unknown
         assert set(STORE_SWITCHES) <= set(seen), "a store switch nobody reads"
 
-    @pytest.mark.usefixtures("every_switch_at_its_default")
-    def test_every_store_switch_has_a_reader(self):
-        for switch in STORE_SWITCHES:
-            assert fates_mod._store_switch_writes_duckdb(switch) is True, switch
-
 
 # ─── 4b. the store switches, read off the code ───────────────────────────────
 
@@ -1707,23 +1701,24 @@ class TestDuckdbWritten:
     def test_it_answers_for_every_entry(self):
         assert set(fates_mod.duckdb_written()) == set(FATES)
 
-    def test_with_every_switch_off(self, writes):
-        """With every switch at duckdb, DuckDB writes exactly the schema
-        tables some DuckDB statement in the code writes — read off the code,
-        not off `kind`. The first form pinned `schema_migrations` as not
-        written because its fate is "retired", while `_record_migration`
-        writes it on every connect that applies a step (review, finding 6).
-        Mutation: `duckdb_written` answering False for RETIRED again."""
-        written = fates_mod.duckdb_written()
-        by_code = writes.written()
-        assert "schema_migrations" in by_code  # the family
-        wrong = {}
-        for name, fate in FATES.items():
-            expected = (fate.object == TABLE and fate.ddl == SCHEMA
-                        and name in by_code)
-            if written[name] is not expected:
-                wrong[name] = (written[name], expected)
-        assert not wrong, f"duckdb_written() against the code's writers: {wrong}"
+    @pytest.mark.parametrize("value", [None, "duckdb", "postgres", "junk"])
+    def test_web_writes_nothing_in_the_file_whatever_the_switches_say(
+            self, monkeypatch, value):
+        """Since step 14's S14-00 web runs KS_DUCKDB=off and every switch is a
+        constant: whatever any variable says, web writes no table in the
+        file. (The tests of each switch moving its own tables went with the
+        switches.) Mutation: let a switch route a table back to DuckDB."""
+        from core.runtime_modes import configure_modes
+        from core.write_chains import WRITE_CHAINS
+
+        for env in [*(c.WRITE_ENV for c in WRITE_CHAINS), *STORE_SWITCHES,
+                    "KS_DUCKDB"]:
+            if value is None:
+                monkeypatch.delenv(env, raising=False)
+            else:
+                monkeypatch.setenv(env, value)
+        configure_modes(web=True)
+        assert set(fates_mod.duckdb_written().values()) == {False}
 
     def test_the_warehouse_is_unknown_where_its_mode_was_never_configured(
             self, monkeypatch):
@@ -1740,19 +1735,6 @@ class TestDuckdbWritten:
         assert moved and {written[n] for n in moved} == {None}
         assert all(written[n] is not None for n in FATES if n not in moved
                    and FATES[n].switch not in _chain_switches())
-
-    @pytest.mark.parametrize("switch", ["KS_SMS_STORE", "KS_USER_STORE"])
-    def test_a_store_switch_moves_its_tables_and_no_others(self, switch, monkeypatch):
-        before = fates_mod.duckdb_written()
-        monkeypatch.setenv(switch, "postgres")
-        after = fates_mod.duckdb_written()
-        moved = set(fates_mod.tables_by_switch(switch))
-        assert moved
-        for name in FATES:
-            assert after[name] == (False if name in moved else before[name]), name
-        monkeypatch.setenv(switch, "postgress")
-        unread = fates_mod.duckdb_written()
-        assert {unread[n] for n in moved} == {None}
 
     def test_the_warehouse_switch(self, monkeypatch):
         from core import warehouse_cutover as wc
@@ -1842,13 +1824,6 @@ class TestDuckdbWritten:
         for chain in shadow:
             tables = fates_mod.tables_by_switch(chain.WRITE_ENV)
             assert tables and set(tables) <= by_code, (chain.WRITE_ENV, tables)
-
-    def test_a_chain_flag_nobody_can_read_is_unknown(self, monkeypatch):
-        for env in _chain_switches():
-            monkeypatch.setenv(env, "postgress")
-            written = fates_mod.duckdb_written()
-            assert {written[n] for n in fates_mod.tables_by_switch(env)} == {None}, env
-            monkeypatch.setenv(env, "duckdb")
 
 
 # ─── 6. the host check ───────────────────────────────────────────────────────

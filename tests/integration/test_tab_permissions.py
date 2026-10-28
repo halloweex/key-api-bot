@@ -45,6 +45,7 @@ TAB_ENDPOINTS = {
     "reports": "/api/reports/summary",
     "marketing": "/api/reports/marketing-summary",
     "margin": "/api/margin/overview",
+    "tgbot": "/api/tg-bot/activity",
     "expenses": "/api/expenses/summary",
     "sms": "/api/customers/sms-segments",
 }
@@ -183,7 +184,14 @@ class TestNoOverrideChangesNothing:
     def test_a_plain_viewer_still_reaches_every_standard_tab(
         self, client, monkeypatch, key,
     ):
+        from core import pg_goals_write
+        from tests.conftest import route_chains_to_duckdb
+
         headers = _login(monkeypatch, allowed_features=None)
+        # The gate is the subject, not the data: /marketing's target line is
+        # chain 7a's table, which since step 14's S14-00 is read from Postgres
+        # whatever the flag says, and there is no Postgres behind this client.
+        route_chains_to_duckdb(monkeypatch, pg_goals_write)
         assert client.get(TAB_ENDPOINTS[key], headers=headers).status_code != 403
 
     @pytest.mark.parametrize("key", ["margin", "sms", "expenses"])

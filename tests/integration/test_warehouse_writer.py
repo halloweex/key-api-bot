@@ -14,10 +14,10 @@ What is proven, per the plan's DN-29 test list:
 - under postgres the boot — both paths — and three sync ticks leave
   `warehouse_dirty` exactly as it was and never call `refresh_warehouse_layers`,
   while `meta.derivation_runs` grows by one a tick;
-- back under duckdb a full DuckDB rebuild is owed and the checks are held
-  until a full tick validates;
-- a missing precondition keeps the mode duckdb and says so on `/api/health`;
 - the `warehouse` group is resolved once across two restarts.
+
+Since step 14's S14-00 the mode is a constant, so the way back under duckdb
+and a missing precondition keeping duckdb — the verdict — went with it.
 
 What is not: a kill in the middle of a rebuild. That is the gate-stack
 rehearsal on the production backups, run on the host, not here.
@@ -286,9 +286,15 @@ class TestUnderPostgres:
         assert wc.writes_postgres(), wc.status()
         assert world.refreshed == []
         assert await world.dirty() is None, "the boot marked a warehouse nobody derives"
+        # The orders are chain 3's since step 14's S14-00: Postgres holds
+        # them, and DuckDB holds neither them nor a Silver of them.
         async with world.store.connection() as conn:
-            assert conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == len(IDS)
+            assert conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0] == 0
             assert conn.execute("SELECT COUNT(*) FROM silver_orders").fetchone()[0] == 0
+        async with world.pool.acquire() as conn:
+            assert await conn.fetchval(
+                "SELECT COUNT(*) FROM bronze.orders WHERE id = ANY($1::int[])",
+                list(IDS)) == len(IDS)
         requested, built = await world.signal()
         assert requested > built, "the boot's orders reached Postgres unmarked"
         assert (await world.writer())["writer"] == "postgres"
@@ -299,8 +305,9 @@ class TestUnderPostgres:
     ):
         from core.scheduler import BackgroundScheduler
 
-        # A populated DuckDB, and an id list pending when the switch came.
-        await world.store.upsert_orders([_payload(oid) for oid in IDS])
+        # A populated store — Postgres, chain 3's since S14-00, which is what
+        # the boot asks — and an id list pending in DuckDB when the switch came.
+        await world.service._upsert_orders_with_expenses([_payload(oid) for oid in IDS])
         async with world.store.connection() as conn:
             conn.execute("INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)"
                          " VALUES ('warehouse_dirty', '[980001, 980002]', CURRENT_TIMESTAMP)")
@@ -346,170 +353,3 @@ class TestUnderPostgres:
         assert (await world.writer())["resolved"] is True
 
 
-class TestTheWayBack:
-    @pytest.mark.asyncio
-    async def test_a_full_rebuild_is_owed_and_the_checks_are_held_until_it_validates(
-        self, world, monkeypatch,
-    ):
-        from core import warehouse_cutover as wc
-        from core.scheduler import BackgroundScheduler
-
-        await world.boot()                      # under postgres: DuckDB frozen
-        assert (await world.writer())["writer"] == "postgres"
-
-        world.restart()
-        monkeypatch.delenv(wc.ENV)
-        world.orders = [_payload(oid, status_id=7, minutes=9) for oid in IDS]
-        await world.boot()
-
-        assert not wc.writes_postgres()
-        assert (await world.dirty())[0] == "full"
-        assert wc.held() and wc.stood_down_duckdb_checks() == wc.STOOD_DOWN_WHEN_POSTGRES
-        assert wc.warehouse_checks_stand_down(), "the mirror comparisons would run on stale Silver"
-        assert wc.reclassify_needed(), "DuckDB's silver_order_utm is empty"
-        assert (await world.writer())["writer"] == "postgres"
-
-        result = await BackgroundScheduler()._run_warehouse_refresh()
-        assert result["validation_passed"] is True, result
-        assert world.refreshed == ["dirty_flag"]
-        assert not wc.held() and wc.stood_down_duckdb_checks() == frozenset()
-        assert not wc.reclassify_needed(), "the full tick parsed the verdicts back"
-        assert (await world.writer())["writer"] == "duckdb"
-        async with world.store.connection() as conn:
-            assert conn.execute(
-                "SELECT COUNT(*) FROM silver_orders WHERE status_id = 7").fetchone()[0] == len(IDS)
-
-        # And a later start under duckdb owes nothing more.
-        world.restart()
-        await world.boot()
-        assert not wc.held()
-
-
-class TestAMissingPrecondition:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("done", [False, None], ids=["not_backfilled", "no_row"])
-    async def test_expenses_without_their_history_keep_duckdb(self, world, done):
-        """`_expenses_run` routes the /expenses history statements on this
-        row whatever KS_READ_EXPENSES says, so the switch waits for it — read
-        for real, at the start on the cutover's own connection and on the
-        status page through the pool."""
-        from bot.canary import check_warehouse_preconditions
-        from core import warehouse_cutover as wc
-        from web.routes.api.health import _warehouse_writer_mode
-
-        await _expenses_history(world.pool, done)
-        await world.boot()
-
-        assert wc.mode() == wc.DUCKDB and wc.duckdb_derives()
-        block = _warehouse_writer_mode()
-        assert block["preconditions_unmet"] == ["expenses_backfilled"]
-        (unmet,) = wc.preconditions_unmet()
-        assert ("backfilled_at is NULL for bronze.expenses" if done is False
-                else "no row for bronze.expenses") in unmet.detail
-        assert [k for k, _ in check_warehouse_preconditions(
-            {"warehouse_writer_mode": block})] == ["warehouse_preconditions_unmet"]
-        ready = await wc.readiness()
-        assert [u["key"] for u in ready["unmet"]] == ["expenses_backfilled"]
-
-        await _expenses_history(world.pool, True)
-        ready = await wc.readiness()
-        assert ready["unmet"] == [] and ready["mode"] == "duckdb"
-
-    @pytest.mark.asyncio
-    async def test_a_revision_this_build_does_not_require_keeps_duckdb(
-        self, world, monkeypatch,
-    ):
-        """The revision is read for real, on the cutover's own connection."""
-        import core.pg
-
-        from bot.canary import check_warehouse_preconditions
-        from core import warehouse_cutover as wc
-        from web.routes.api.health import _warehouse_writer_mode
-
-        # The database is at whatever this build requires — the head CI
-        # migrated to — so the detail is checked against that, not a number
-        # that moves with every revision.
-        was = core.pg.REQUIRED_REVISION
-        monkeypatch.setattr(core.pg, "REQUIRED_REVISION", "9999_not_this_one")
-        await world.boot()
-
-        assert wc.mode() == wc.DUCKDB and wc.duckdb_derives()
-        block = _warehouse_writer_mode()
-        assert block["preconditions_unmet"] == ["pg_revision"]
-        (unmet,) = wc.preconditions_unmet()
-        assert repr(was) in unmet.detail and "9999_not_this_one" in unmet.detail
-        assert [k for k, _ in check_warehouse_preconditions(
-            {"warehouse_writer_mode": block})] == ["warehouse_preconditions_unmet"]
-        # DuckDB derived its boot, as it always has, and nothing was recorded.
-        assert world.refreshed == ["full_sync"]
-        assert await world.writer() is None
-        assert _warehouse_resolves(world.resolve) == []
-
-    @pytest.mark.asyncio
-    async def test_a_postgres_that_does_not_answer_keeps_duckdb(self, world, monkeypatch):
-        from core import warehouse_cutover as wc
-
-        monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://ks_app:x@127.0.0.1:9/ks")
-        from core.runtime_modes import configure_modes
-
-        configure_modes()
-        assert wc.mode() == wc.DUCKDB
-        (unmet,) = wc.preconditions_unmet()
-        assert unmet.key == "pg_revision" and "127.0.0.1" not in unmet.detail
-
-    @pytest.mark.asyncio
-    async def test_a_postgres_that_answers_on_the_second_ask_switches(
-        self, world, monkeypatch,
-    ):
-        """After a flip a start that runs as duckdb is the way back. A first
-        read refused — Postgres still coming up beside web — is asked again,
-        and the second, real read decides."""
-        from core import warehouse_cutover as wc
-
-        real = wc._revision_on_its_own_connection
-        asks = []
-
-        async def refused_once(dsn):
-            asks.append(dsn)
-            if len(asks) == 1:
-                raise ConnectionRefusedError("still starting")
-            return await real(dsn)
-
-        monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
-        monkeypatch.setattr(wc, "_revision_on_its_own_connection", refused_once)
-        from core.runtime_modes import configure_modes
-
-        configure_modes()
-        assert len(asks) == 2
-        assert wc.mode() == wc.POSTGRES and wc.preconditions_unmet() == ()
-
-    @pytest.mark.asyncio
-    async def test_a_connection_lost_during_the_read_is_asked_again(
-        self, world, monkeypatch,
-    ):
-        """Connected, then lost in the middle of the SELECT — a backend
-        terminated, a server restarting. That is a read that failed, not a
-        database never migrated: it used to be taken for the second, never
-        asked again, and after a flip that start was the way back."""
-        from core import warehouse_cutover as wc
-        from core.runtime_modes import configure_modes
-
-        real = asyncpg.connection.Connection.fetchval
-        reads = []
-
-        async def lost_once(self, *args, **kwargs):
-            reads.append(args[:1])
-            if len(reads) == 1:
-                raise asyncpg.ConnectionDoesNotExistError(
-                    "connection was closed in the middle of operation")
-            return await real(self, *args, **kwargs)
-
-        monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
-        with patch.object(asyncpg.connection.Connection, "fetchval", lost_once):
-            configure_modes()
-        # The revision twice; the expenses history once, after the answer.
-        history = (wc._EXPENSES_HISTORY_SQL,)
-        assert len([r for r in reads if r != history]) == 2, reads
-        assert reads[-1] == history and reads.count(history) == 1, reads
-        assert wc.mode() == wc.POSTGRES, wc.preconditions_unmet()

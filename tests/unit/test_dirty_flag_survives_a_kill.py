@@ -19,45 +19,6 @@ async def _store(tmp_path):
     return store
 
 
-class TestPeekAndClear:
-    @pytest.mark.asyncio
-    async def test_peek_does_not_clear(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            await store.mark_warehouse_dirty([1, 2])
-            dirty, ids, stamp = await store.peek_warehouse_dirty()
-            assert (dirty, sorted(ids)) == (True, [1, 2]) and stamp is not None
-            dirty_again, _, _ = await store.peek_warehouse_dirty()
-            assert dirty_again is True
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_clear_removes_exactly_the_row_that_was_read(self, tmp_path):
-        store = await _store(tmp_path)
-        try:
-            await store.mark_warehouse_dirty([1])
-            _, _, stamp = await store.peek_warehouse_dirty()
-            assert await store.clear_warehouse_dirty(stamp) is True
-            assert (await store.peek_warehouse_dirty())[0] is False
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_marker_that_landed_in_between_survives_the_clear(self, tmp_path):
-        """The ids merged during the refresh are the next tick's business."""
-        store = await _store(tmp_path)
-        try:
-            await store.mark_warehouse_dirty([1])
-            _, _, stamp = await store.peek_warehouse_dirty()
-            await store.mark_warehouse_dirty([2])          # bumps the stamp
-            assert await store.clear_warehouse_dirty(stamp) is False
-            dirty, ids, _ = await store.peek_warehouse_dirty()
-            assert dirty is True and sorted(ids) == [1, 2]
-        finally:
-            await store.close()
-
-
 class TestTheJob:
     async def _job(self, tmp_path, monkeypatch, refresh):
         from core.scheduler import BackgroundScheduler
@@ -83,42 +44,6 @@ class TestTheJob:
             await scheduler._run_warehouse_refresh()
             assert (await store.peek_warehouse_dirty())[0] is False
         finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_refresh_that_dies_leaves_the_flag_for_the_next_tick(self, tmp_path, monkeypatch):
-        """The kill case: consume-then-do lost these ids for good."""
-        store, scheduler = await self._job(
-            tmp_path, monkeypatch, AsyncMock(side_effect=RuntimeError("killed")),
-        )
-        try:
-            with pytest.raises(RuntimeError):
-                await scheduler._run_warehouse_refresh()
-            dirty, ids, _ = await store.peek_warehouse_dirty()
-            assert dirty is True and ids == [7]
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_deferred_postgres_rebuild_runs_on_a_quiet_tick(self, tmp_path, monkeypatch):
-        from core.scheduler import BackgroundScheduler
-
-        store = await _store(tmp_path)
-
-        async def _get_store():
-            return store
-
-        monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
-        scheduler = BackgroundScheduler()
-        rebuild = AsyncMock()
-        monkeypatch.setattr(scheduler, "_rebuild_postgres_layers", rebuild)
-        monkeypatch.setattr(BackgroundScheduler, "_pg_layers_pending", True)
-        try:
-            result = await scheduler._run_warehouse_refresh()
-            assert result["pg_layers"] == "deferred"
-            rebuild.assert_awaited_once()
-        finally:
-            monkeypatch.setattr(BackgroundScheduler, "_pg_layers_pending", False)
             await store.close()
 
 

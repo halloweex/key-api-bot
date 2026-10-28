@@ -92,17 +92,16 @@ def env_writes_postgres() -> bool:
 
 
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
+    """Whether this chain writes Postgres — the one answer every caller reads:
+    True, a constant since step 14's S14-00.
 
-    The latch outranks the flag (OD-19 (a)): once an expense has been written
-    to Postgres, setting the variable back to `duckdb` must not start a second
-    writer beside the first. It also outranks a value nobody can read, so a
-    latched chain keeps routing to the store that holds its rows while the typo
-    is published, paged and stamped — see `core/chain_latch.py`.
+    Neither the flag nor the latch routes any more. The first write still
+    takes the latch (`_latch`, decision 3): an image from before step 14,
+    the rollback target, routes by the marker, and this chain has not written yet in
+    production. Last consumers: the repository's three expense writers, the
+    registry and the hourly copy — they go in S14-11.
     """
-    if chain_latch.latched(CHAIN):
-        return True
-    return env_writes_postgres()
+    return True
 
 
 def _latch() -> str:

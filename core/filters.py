@@ -8,8 +8,37 @@ from datetime import date, datetime, timedelta
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from core.exceptions import ValidationError
+from core.validators import validate_date_string
+
 # DuckDB stores dates in Kyiv timezone, so all period calculations must use it
 _KYIV_TZ = ZoneInfo("Europe/Kyiv")
+
+# The longest range explicit dates may ask for, both ends counted: ten years
+# and a week. Four endpoints build one list entry per day of the range in
+# Python — /api/revenue/trend (twice, with its comparison), /api/expenses/summary,
+# /api/expenses/profit and /api/customers/insights — so an unbounded range was
+# a request for millions of entries, built synchronously on web's event loop.
+# Measured on a throwaway store (Python 3.14, 2026-10-21): 0002-01-01 to
+# 9999-12-30 cost the trend 6.8 s, 95 MB of JSON and +376 MB of memory, and
+# each of the other three 5.5-6.2 s; ten years cost each of them 0.02 s and
+# 0.1 MB. Ten years is longer than the store's whole history, so the cap
+# refuses nothing a person asks for. Over it is a 400 naming `date_range`.
+MAX_RANGE_DAYS = 3660
+
+# The dates an explicit date may name, both ends included (owner's decision,
+# 2026-10-22). Python's calendar stops at 0001-01-01 and 9999-12-31, and the
+# routes do arithmetic beside it: the four per-day loops step one day past the
+# end, and the comparison windows reach a year, a month or a whole range back
+# — or, for a range that runs backwards, forward by its length. Measured on
+# Python 3.14 against every dated route (2026-10-22): `end_date=9999-12-31`
+# answered 500 on four of them, a start in year 1 and a backwards range from
+# 9999 on five. Inside this window every date they derive falls between
+# 1989-12-24 and 2199-12-30. A date outside it is a 400 naming its field; 1999
+# and 2100 answered zeros before. The dashboard's own picker reaches neither
+# end in practice, and the store's whole history lies inside the window.
+EARLIEST_DATE = date(2000, 1, 1)
+LATEST_DATE = date(2099, 12, 31)
 
 
 @dataclass
@@ -62,6 +91,28 @@ def parse_period(
 
     Returns:
         DateRange with start and end dates
+
+    Raises:
+        ValidationError: `start_date` or `end_date` that is not a date or
+            falls outside EARLIEST_DATE..LATEST_DATE, or a range over
+            MAX_RANGE_DAYS (`date_range`). Routes answer it 400.
+
+    The explicit dates are read by `validate_date_string`, which is the same
+    `strptime("%Y-%m-%d")` they always went through. So every form it forgives
+    is still accepted and comes back zero-padded — `2026-1-5`, `2026-01- 5`, a
+    year in Arabic-Indic digits — and that is a decision, not an oversight
+    (2026-10-21): refusing them would turn requests that answer today into
+    400s for no gain anyone can name. What it refuses — a day that does not
+    exist, a two-digit year, a time after the date — used to escape as a bare
+    ValueError and answer 500.
+
+    Each date is read and then held to the window, the start before the end,
+    so the first wrong date is the one named; the range is counted after both.
+    A forgiven form outside the window is named as it was written.
+
+    Unchanged, also on purpose: a date without its pair is ignored, a known
+    period shortcut wins over the dates, and a range whose start is after its
+    end is accepted and covers no days.
 
     Examples:
         >>> parse_period("today")
@@ -118,12 +169,31 @@ def parse_period(
 
     # Handle explicit dates
     if start_date and end_date:
-        start = datetime.strptime(start_date, "%Y-%m-%d").date()
-        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        start = _read_date(start_date, "start_date")
+        end = _read_date(end_date, "end_date")
+        days = (end - start).days + 1
+        if days > MAX_RANGE_DAYS:
+            raise ValidationError(
+                "date_range", f"Date range cannot exceed {MAX_RANGE_DAYS} days",
+                f"{days} days",
+            )
         return DateRange(start, end)
 
     # Default to today
     return DateRange(today, today)
+
+
+def _read_date(raw: str, field: str) -> date:
+    """One explicit date, read and then held to EARLIEST_DATE..LATEST_DATE."""
+    value = validate_date_string(raw, field)
+    if not EARLIEST_DATE <= value <= LATEST_DATE:
+        raise ValidationError(
+            field,
+            f"Date must be between {EARLIEST_DATE.isoformat()} "
+            f"and {LATEST_DATE.isoformat()}",
+            raw,
+        )
+    return value
 
 
 def get_period_label(period: str) -> str:

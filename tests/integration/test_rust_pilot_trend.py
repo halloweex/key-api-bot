@@ -93,15 +93,24 @@ RANGES = (
     ("2026-01-10", "2026-01-05"),            # reversed: no days, a forward window
     ("2025-01-01", "2025-12-31"),            # a year
     ("2023-12-01", "2027-01-31"),            # everything
+    ("2016-01-01", "2026-01-07"),            # 3 660 days, the longest range allowed
+    ("2000-01-01", "2000-01-31"), ("2099-12-01", "2099-12-31"),   # the window's ends
+    ("2028-02-29", "2028-02-29"),            # a leap day ahead answers (#314)
     ("2026-1-5", "2026-01- 9"),              # padding strptime forgives
     ("２０２６-01-01", "2026-01-1٥"),           # Unicode digits where `\\d` reads them
 )
-# 500s (Python raises), and the fallbacks to "today" for a missing date.
+# 400s since #308 and #314 — a date that does not parse, one outside
+# 2000-01-01..2099-12-31, a range over 3 660 days; the first two were 500s
+# before — and the fallbacks to "today" for a missing date.
 UNPARSEABLE = (
     ("2026-02-30", "2026-03-01"), ("2026-13-01", "2026-12-01"), ("26-01-01", "2026-01-02"),
     ("2026-01-01T00:00", "2026-01-02"), ("٢٠٢٦-٠١-٠٥", "2026-01-06"),
-    ("0001-01-01", "0001-01-05"),            # the comparison window leaves year 1
-    ("9999-12-30", "9999-12-31"),            # the day loop steps past 9999
+    ("0001-01-01", "0001-01-05"),            # year 1: outside the window
+    ("9999-12-30", "9999-12-31"),            # year 9999: outside it too
+    ("9999-12-31", "bogus"),                 # the start is named first
+    ("1999-12-31", "2000-01-01"), ("2099-12-31", "2100-01-01"),   # one day out
+    ("1999-1-5", "2000-01-01"),              # a forgiven form, named as written
+    ("2016-01-01", "2026-01-08"),            # 3 661 days, one over the cap
     ("2026-01-01", ""), ("", "2026-01-01"),
 )
 RAW = (
@@ -346,7 +355,9 @@ async def test_every_answer_is_the_same(services):
         f"{len(mismatches)} of {len(cases)} requests answered differently; first: "
         + json.dumps(mismatches[:5], ensure_ascii=False, indent=1))
     # The matrix reached every kind of answer it claims to, and real numbers.
-    assert {200, 400, 422, 500} <= set(statuses), statuses
+    # No 500 is required any more: since #308 and #314 every date the matrix
+    # once broke the route with is a 400.
+    assert {200, 400, 422} <= set(statuses), statuses
     assert nonzero > 1000, nonzero
     # And Python answered from Postgres: no DuckDB open, nothing fell back.
     assert duckdb_switch.opened() == {}

@@ -59,7 +59,11 @@ where they are written. One difference from 7a: `reads_postgres` honours the
 precondition, or a flagged-but-held chain would send reads to a Postgres the
 hourly copy is still filling while the writes go to DuckDB.
 
-A PRECONDITION THE FLAG ENFORCES
+A PRECONDITION THE FLAG ENFORCES — UNTIL S14-00
+
+Since step 14's S14-00 the chain writes Postgres whatever its flag says and
+asks no precondition (`writes_postgres`, `unmet_precondition`, `reads_postgres` are
+constants). What follows is the history.
 
 `unmet_precondition()` — chain 6a's arrangement. The calculators' inputs must
 already be Postgres, or the chain would store, in the only copy left, numbers
@@ -99,7 +103,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date, datetime
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from core import chain_latch
 
@@ -178,104 +182,36 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
-def _unmet_clauses() -> List[str]:
-    """One sentence per unmet clause, names only — the block is public."""
-    from core import pg_forecast_read, pg_goals_read, read_fallback
-
-    unmet: List[str] = []
-    try:
-        pg_goals_read.history_mode()    # `silver`, or it raises (chain 7b-4)
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        unmet.append(f"{pg_goals_read.HISTORY_ENV} is not understood ({exc})")
-    try:
-        if not pg_goals_read.enabled():
-            unmet.append(f"{pg_goals_read.ENV} is not postgres")
-        elif not pg_goals_read.available():
-            unmet.append(f"{pg_goals_read.ENV}=postgres but KS_PG_DSN is not set")
-    except Exception as exc:  # noqa: BLE001
-        unmet.append(f"{pg_goals_read.ENV} is not understood ({exc})")
-    # The mode this process was configured with, not the live environment: the
-    # process refuses (or falls back) by the configured value.
-    if read_fallback.mode_error():
-        unmet.append(f"{read_fallback.ENV} is not understood")
-    elif read_fallback.mode() != read_fallback.OFF:
-        unmet.append(f"{read_fallback.ENV} is not {read_fallback.OFF} "
-                     f"(as configured at start)")
-    try:
-        if not pg_forecast_read.enabled():
-            unmet.append(f"{pg_forecast_read.ENV} is not postgres")
-        elif not pg_forecast_read.available():
-            unmet.append(f"{pg_forecast_read.ENV}=postgres but KS_PG_DSN is not set")
-    except Exception as exc:  # noqa: BLE001
-        unmet.append(f"{pg_forecast_read.ENV} is not understood ({exc})")
-    return unmet
-
-
 def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_FORECAST=postgres` must not move the writes yet, or None.
-
-    Never raises and never asks Postgres: `/api/health` reads it through the
-    registry and must answer with Postgres down. A flag nobody can parse is
-    unmet, because nobody can then say where the inputs come from. The
-    lock-out (`chain_latch.lockout_unmet`) comes first."""
-    reasons = [why for why in (chain_latch.lockout_unmet(LOCKOUT_REVISION),
-                               _inputs_unmet()) if why]
-    return "; ".join(reasons) if reasons else None
-
-
-def _inputs_unmet() -> Optional[str]:
-    try:
-        unmet = _unmet_clauses()
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        unmet = [f"the inputs could not be read ({exc})"]
-    if not unmet:
-        return None
-    return ("; ".join(unmet) + ", so the goal and forecast calculators could "
-            "read DuckDB while their results are stored in the only copy left; "
-            "move the inputs to Postgres first")
+    """None, a constant since step 14's S14-00: the chain writes Postgres
+    whatever its flag says, and nothing it waited on is asked any more —
+    production met every clause, and the readers it named read Postgres.
+    Kept for the registry's `unmet_precondition` field, which keeps its shape
+    until S14-11."""
+    return None
 
 
 def _routes_postgres(*, log: bool) -> bool:
-    """Latch, then flag, then precondition. Raises on an unreadable flag of an
-    unlatched chain."""
-    if chain_latch.latched(CHAIN):
-        return True
-    if not env_writes_postgres():
-        return False
-    unmet = unmet_precondition()
-    if unmet:
-        if log:
-            logger.warning("%s=postgres, but the chain stays on DuckDB: %s",
-                           WRITE_ENV, unmet)
-        return False
+    """True, a constant since step 14's S14-00 (`log` is kept for the two
+    callers below, and says nothing now)."""
     return True
 
 
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and a value nobody can read.
-    Unlatched, the flag moves the writes only once `unmet_precondition()`
-    holds. Raises on a flag nobody can read while unlatched.
+    """Whether this chain writes Postgres — the one answer every caller reads:
+    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
+    nor a precondition routes any more; the first write in a process still
+    takes the latch (decision 3), which the images before step 14 route by.
+    Last consumers:
+    `persist_goal_tables`, `store_predictions` and the registry — S14-11.
     """
-    return _routes_postgres(log=True)
+    return True
 
 
 def reads_postgres() -> bool:
     """Whether a read of this chain's tables must ask Postgres, whatever the
-    page's own read flag says — `writes_postgres()` applied to reads.
-
-    Two differences. An unreadable flag on a chain that never wrote here
-    hands the choice back to today's engines instead of raising (7a's rule:
-    the writers refuse and the tables stand down, so neither copy moves).
-    And no WARNING here: this is asked on every page view.
-    """
-    if chain_latch.latched(CHAIN):
-        return True
-    try:
-        return _routes_postgres(log=False)
-    except RuntimeError:
-        return False
+    page's own read flag says: True, a constant since S14-00."""
+    return True
 
 
 def reads_the_chain(sql: str) -> bool:

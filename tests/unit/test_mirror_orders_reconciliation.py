@@ -16,27 +16,24 @@ And the gate: `backfilled_at`. `last_ok_at` licenses a tolerance of zero for
 the catalogue because a catalogue mirror ships the whole table. The orders
 mirror ships a delta, so until history has been carried across, every order
 older than the mirror looks exactly like a lost one.
+
+Since step 14's S14-00 chain 3 writes the orders, a constant, so DuckDB holds
+none to fingerprint and the comparison stands down: the tests that wrote
+orders into DuckDB — the fingerprint against its definition and the backfill
+gate — went with that path. The pure parts stay until S14-12.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
-import pytest
-
-from core.duckdb_store import DuckDBStore
 from core.mirror_reconciliation import (
-    BUCKET_SIZE,
     ORDER_TABLES,
     _Divergence,
     compare_bucket,
     disagreeing_buckets,
     duckdb_fingerprint_sql,
-    fingerprints,
     postgres_fingerprint_sql,
-    reconcile_orders,
 )
 
 ORDERS, LINE_ITEMS = ORDER_TABLES
@@ -75,81 +72,7 @@ def _epoch_us(value):
 _BUCKET_COLUMN = {"bronze.orders": "id", "bronze.order_products": "order_id"}
 
 
-def python_fingerprint(spec, rows):
-    """The fingerprint's definition, in Python, owing nothing to either SQL.
-
-    `rows` is {id: tuple in spec.columns order}. Buckets come from the same
-    column the SQL groups on.
-    """
-    bucket_at = spec.columns.index(_BUCKET_COLUMN[spec.pg_table])
-    out = {}
-    for row in rows.values():
-        bucket = int(row[bucket_at]) // BUCKET_SIZE
-        acc = out.setdefault(bucket, [0] + [Decimal(0)] * len(spec.fields))
-        acc[0] += 1
-        for n, (column, kind) in enumerate(spec.fields, start=1):
-            value = row[spec.columns.index(column)]
-            if kind == "ts":
-                acc[n] += _epoch_us(value)
-            elif kind == "text":
-                acc[n] += len(value or "")
-            else:
-                acc[n] += Decimal(str(value or 0))
-    return {b: tuple(v) for b, v in out.items()}
-
-
-async def _store(tmp_path: Path, ids, **kw) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "recon.duckdb")
-    await store.connect()
-    with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-        await store.upsert_orders([_payload(i, **kw) for i in ids])
-    # `synced_at` defaults to the wall clock, and the grace window is measured
-    # against it. Pinning it a day before `NOW` keeps every row out of the
-    # in-flight window no matter what time the suite runs at.
-    async with store.connection() as conn:
-        conn.execute("UPDATE orders SET synced_at = ?", [NOW - timedelta(days=1)])
-    return store
-
-
-def _read_dk(store_conn, spec):
-    """Both stores' shared columns, as the mirror would have shipped them."""
-    from core.mirror_reconciliation import _normalise_row
-
-    cols = ", ".join(spec.columns)
-    rows = store_conn.execute(f"SELECT {cols} FROM {spec.dk_table}").fetchall()
-    return {int(r[0]): _normalise_row(r, spec.columns, spec.numeric) for r in rows}
-
-
 class TestTheFingerprint:
-    @pytest.mark.asyncio
-    async def test_duckdb_agrees_with_the_definition(self, tmp_path):
-        """If the SQL and the definition part company, the check stops
-        checking and says nothing."""
-        store = await _store(tmp_path, [1, 2, 1500, 1501], comment="utm_source=ig")
-        async with store.connection() as conn:
-            for spec in ORDER_TABLES:
-                assert fingerprints(conn, spec) == python_fingerprint(
-                    spec, _read_dk(conn, spec)
-                )
-
-    @pytest.mark.asyncio
-    async def test_it_buckets_by_a_thousand_ids(self, tmp_path):
-        store = await _store(tmp_path, [1, 999, 1000, 2500])
-        async with store.connection() as conn:
-            print_ = fingerprints(conn, ORDERS)
-        assert sorted(print_) == [0, 1, 2]
-        assert print_[0][0] == 2      # ids 1 and 999
-        assert print_[1][0] == 1
-        assert print_[2][0] == 1
-
-    @pytest.mark.asyncio
-    async def test_line_items_bucket_by_their_order(self, tmp_path):
-        """So an order and its items always land in the same bucket."""
-        store = await _store(tmp_path, [1, 1500])
-        async with store.connection() as conn:
-            print_ = fingerprints(conn, LINE_ITEMS)
-        assert sorted(print_) == [0, 1]
-
     def test_the_two_dialects_ask_the_same_question(self):
         dk, pg = duckdb_fingerprint_sql(ORDERS), postgres_fingerprint_sql(ORDERS)
         # One COUNT and one SUM per column, on both sides.
@@ -227,132 +150,6 @@ class TestTheDrillDown:
         compare_bucket(ORDERS, dk, {1: NOW - timedelta(days=1)}, pg, found,
                        now=NOW, grace_minutes=15)
         assert set(found.offenders) == {"status_id", "status_group_id"}
-
-
-class TestTheBackfillGate:
-    """`last_ok_at` cannot license a tolerance of zero for a delta mirror."""
-
-    def _pg_side(self, dk_conn, *, drop=()):
-        rows = {
-            spec.pg_table: _read_dk(dk_conn, spec) for spec in ORDER_TABLES
-        }
-        for spec_table, ids in drop:
-            for i in ids:
-                rows[spec_table].pop(i, None)
-        return rows
-
-    async def _run(self, store, *, watermarks, pg_rows, **kw):
-        async def _fp(pool, spec):
-            return python_fingerprint(spec, pg_rows[spec.pg_table])
-
-        async def _bucket(pool, spec, bucket):
-            at = spec.columns.index(_BUCKET_COLUMN[spec.pg_table])
-            return {
-                i: r for i, r in pg_rows[spec.pg_table].items()
-                if int(r[at]) // BUCKET_SIZE == bucket
-            }
-
-        # No owner rows: nothing here has handed an order table to a write
-        # chain (DN-22a), and the pool is an opaque stand-in.
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=object())), \
-             patch("core.pg.require_revision", new=AsyncMock()), \
-             patch("core.chain_latch.read_owners", new=AsyncMock(return_value={})), \
-             patch("core.mirror_reconciliation.fetch_watermarks",
-                   new=AsyncMock(return_value=watermarks)), \
-             patch("core.mirror_reconciliation.pg_fingerprints", new=_fp), \
-             patch("core.mirror_reconciliation._read_pg_bucket", new=_bucket):
-            return await reconcile_orders(store, now=NOW, **kw)
-
-    def _marks(self, *, backfilled=True):
-        stamp = NOW - timedelta(hours=2)
-        return {
-            spec.pg_table: {
-                "table_name": spec.pg_table, "last_ok_at": stamp,
-                "last_attempted_at": stamp, "failures_since_ok": 0,
-                "last_error": None, "last_rows": 1,
-                "backfilled_at": stamp if backfilled else None,
-            }
-            for spec in ORDER_TABLES
-        }
-
-    @pytest.mark.asyncio
-    async def test_without_a_backfill_it_reports_the_gap_not_the_rows(self, tmp_path):
-        """Otherwise the first run files 46,000 CRITICALs for a job nobody ran."""
-        store = await _store(tmp_path, list(range(1, 30)))
-        async with store.connection() as conn:
-            pg_rows = self._pg_side(conn, drop=[("bronze.orders", range(1, 25))])
-
-        issues = await self._run(
-            store, watermarks=self._marks(backfilled=False), pg_rows=pg_rows,
-        )
-        names = {i.check_name for i in issues}
-        assert "mirror_backfill_pending" in names
-        assert "mirror_missing_rows" not in names
-        pending = next(i for i in issues if i.check_name == "mirror_backfill_pending")
-        assert pending.count == 24
-
-    @pytest.mark.asyncio
-    async def test_with_a_backfill_two_identical_stores_are_silent(self, tmp_path):
-        store = await _store(tmp_path, list(range(1, 30)))
-        async with store.connection() as conn:
-            pg_rows = self._pg_side(conn)
-
-        assert await self._run(
-            store, watermarks=self._marks(), pg_rows=pg_rows,
-        ) == []
-
-    @pytest.mark.asyncio
-    async def test_with_a_backfill_a_lost_order_is_critical(self, tmp_path):
-        store = await _store(tmp_path, list(range(1, 30)))
-        async with store.connection() as conn:
-            pg_rows = self._pg_side(conn, drop=[("bronze.orders", [17])])
-
-        issues = await self._run(store, watermarks=self._marks(), pg_rows=pg_rows)
-        found = next(i for i in issues if i.check_name == "mirror_missing_rows")
-        assert found.table_name == "bronze.orders"
-        assert found.sample_ids == (17,)
-
-    @pytest.mark.asyncio
-    async def test_a_dropped_line_item_is_found_too(self, tmp_path):
-        """The failure a plain upsert would have left behind, in reverse."""
-        store = await _store(tmp_path, [1, 2, 3])
-        async with store.connection() as conn:
-            pg_rows = self._pg_side(conn, drop=[("bronze.order_products", [2001])])
-
-        issues = await self._run(store, watermarks=self._marks(), pg_rows=pg_rows)
-        found = next(
-            i for i in issues
-            if i.check_name == "mirror_missing_rows"
-            and i.table_name == "bronze.order_products"
-        )
-        assert found.sample_ids == (2001,)
-
-    @pytest.mark.asyncio
-    async def test_a_whole_table_apart_is_one_finding_not_a_scan(self, tmp_path):
-        store = await _store(tmp_path, [i * 1000 for i in range(1, 8)])
-        async with store.connection() as conn:
-            pg_rows = self._pg_side(conn)
-        pg_rows["bronze.orders"] = {}
-
-        issues = await self._run(
-            store, watermarks=self._marks(), pg_rows=pg_rows, max_buckets=2,
-        )
-        found = next(i for i in issues if i.check_name == "mirror_buckets_disagree")
-        assert found.count == 7
-        assert found.severity.value == "CRITICAL"
-
-    @pytest.mark.asyncio
-    async def test_a_failing_mirror_is_reported_before_any_of_this(self, tmp_path):
-        store = await _store(tmp_path, [1])
-        async with store.connection() as conn:
-            pg_rows = self._pg_side(conn)
-        marks = self._marks()
-        marks["bronze.orders"]["failures_since_ok"] = 4
-        marks["bronze.orders"]["last_error"] = "UniqueViolationError"
-
-        issues = await self._run(store, watermarks=marks, pg_rows=pg_rows)
-        found = next(i for i in issues if i.check_name == "mirror_failing")
-        assert found.count == 4 and "UniqueViolation" in found.description
 
 
 class TestTheGateIsActuallyReadable:

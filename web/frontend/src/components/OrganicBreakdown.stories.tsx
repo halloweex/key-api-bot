@@ -14,13 +14,18 @@ import type {
 // not production's numbers: Direct about two thirds of organic, the profile
 // link a fifth, email split between automated letters and newsletters.
 
+// One GA4-shaped row: source / medium, campaign, content, orders, revenue.
+type Row = [string, string, string, string, number, number]
+
+const UNTAGGED = (orders: number, revenue: number): Row => ['', '', '', '', orders, revenue]
+
 function channel(
   key: OrganicChannel['channel'],
   orders: number,
   revenue: number,
   newCustomers: number,
   previous: [number, number],
-  details: Array<[string, number, number]> = [],
+  details: Row[] = [],
   detailsTotal = details.length,
 ): OrganicChannel {
   return {
@@ -29,28 +34,33 @@ function channel(
     revenue,
     new_customers: newCustomers,
     previous: { orders: previous[0], revenue: previous[1] },
-    details: details.map(([label, o, r]) => ({ label, orders: o, revenue: r })),
+    details: details.map(([source, medium, campaign, content, o, r]) => (
+      { source, medium, campaign, content, orders: o, revenue: r })),
     details_total: detailsTotal,
   }
 }
 
 const CHANNELS: OrganicChannel[] = [
-  channel('instagram_direct', 510, 1_520_000, 160, [470, 1_390_000]),
+  channel('instagram_direct', 510, 1_520_000, 160, [470, 1_390_000],
+    [UNTAGGED(510, 1_520_000)]),
   channel('instagram_site', 195, 520_000, 82, [210, 560_000],
-    [['link_in_bio', 192, 512_000], ['23_06_catalog_clients', 3, 8_000]]),
-  channel('telegram', 35, 115_000, 11, [31, 98_000]),
+    [['ig', 'social', '', 'link_in_bio', 192, 512_000],
+     ['ig', 'social', '23_06_catalog_clients', 'link_in_bio', 3, 8_000]]),
+  channel('telegram', 35, 115_000, 11, [31, 98_000], [UNTAGGED(35, 115_000)]),
   channel('email_flows', 44, 112_000, 26, [38, 96_000],
-    [['Welcome Email 1a: Welcome & Gift Reveal (Vt8RBn)', 18, 41_000],
-     ['Cart Abandon Email 1: Quick Cart Reminder (TeZB9D)', 7, 21_000],
-     ['rivo-loyalty-points-earned-email', 5, 12_000],
-     ['', 3, 6_000]], 14),
-  channel('google_organic', 33, 55_000, 22, [29, 48_000]),
+    [['klaviyo', 'email', 'Welcome Email 1a: Welcome & Gift Reveal (Vt8RBn)', '', 18, 41_000],
+     ['klaviyo', 'email', 'Cart Abandon Email 1: Quick Cart Reminder (TeZB9D)', '', 7, 21_000],
+     ['rivo', 'email', 'rivo-loyalty-points-earned-email', '', 5, 12_000],
+     ['klaviyo', '', '()', '', 3, 6_000]], 14),
+  channel('google_organic', 33, 55_000, 22, [29, 48_000],
+    [['google', 'product_sync', 'sag_organic', 'sag_organic', 33, 55_000]]),
   channel('email_campaigns', 14, 38_000, 3, [9, 22_000],
-    [['[10/06/26] Campaign #3: [PR] Тиждень Wellage', 6, 17_000],
-     ['[09/12/26] Campaign #6: [SP] 5 помилок при переході на осінній догляд', 4, 11_000]], 5),
+    [['klaviyo', 'klaviyo', '[10/06/26] Campaign #3: [PR] Тиждень Wellage', '', 6, 17_000],
+     ['klaviyo', 'klaviyo', '[09/12/26] Campaign #6: [SP] 5 помилок при переході на осінній догляд', '', 4, 11_000]], 5),
   channel('instagram_stories', 9, 18_000, 6, [0, 0],
-    [['stories_tanya_pads', 6, 12_000], ['stories_anna15', 3, 6_000]]),
-  channel('ai', 3, 6_500, 2, [2, 4_100], [['chatgpt.com', 3, 6_500]]),
+    [['instagram', 'stories_tanya_pads', 'tanya10', '', 6, 12_000],
+     ['instagram', 'stories_anna15', '', '', 3, 6_000]]),
+  channel('ai', 3, 6_500, 2, [2, 4_100], [['chatgpt.com', '', '', '', 3, 6_500]]),
 ]
 
 function organic(channels: OrganicChannel[]): TrafficOrganicResponse {

@@ -72,6 +72,11 @@ class Feature(str, Enum):
     PRODUCTS = "products"
     MARKETING = "marketing"
     MARGIN = "margin"
+    # The customer Telegram bot's activity (/tg-bot): counts only, asked of the
+    # bot itself (web/services/tg_bot_service.py). Admin-only from 2026-10-25
+    # until the same day, when the owner opened it to the marketers; a tab is
+    # how "the marketers" is said here.
+    TGBOT = "tgbot"
 
 
 class Action(str, Enum):
@@ -217,6 +222,7 @@ TAB_FEATURES: tuple = (
     Feature.MARGIN,
     Feature.EXPENSES,
     Feature.SMS,
+    Feature.TGBOT,
 )
 
 TAB_FEATURE_KEYS: tuple = tuple(f.value for f in TAB_FEATURES)
@@ -250,12 +256,13 @@ ACCESS_PRESETS: Dict[str, tuple] = {
     "marketer": (
         Feature.DASHBOARD.value, Feature.PRODUCTS.value, Feature.TRAFFIC.value,
         Feature.INVENTORY.value, Feature.REPORTS.value, Feature.MARKETING.value,
-        Feature.SMS.value,
+        Feature.SMS.value, Feature.TGBOT.value,
     ),
     "marketing": (
         Feature.MARKETING.value,
         Feature.TRAFFIC.value,
         Feature.REPORTS.value,
+        Feature.TGBOT.value,
     ),
 }
 
@@ -373,6 +380,7 @@ def get_all_features() -> list:
         {"key": Feature.MARGIN.value, "name": "Margin", "description": "Cost price and profit", "tab": True, "path": "/margin"},
         {"key": Feature.EXPENSES.value, "name": "Manual Expenses", "description": "View and manage expenses", "tab": True, "path": None},
         {"key": Feature.SMS.value, "name": "SMS Campaigns", "description": "Segment, export and send SMS campaigns", "tab": True, "path": "/sms"},
+        {"key": Feature.TGBOT.value, "name": "Telegram Bot", "description": "Customer bot: users, registrations, retention", "tab": True, "path": "/tg-bot"},
         {"key": Feature.ANALYTICS.value, "name": "Analytics", "description": "Advanced analytics", "tab": False, "path": None},
         {"key": Feature.CUSTOMERS.value, "name": "Customer Insights", "description": "Customer data", "tab": False, "path": None},
         {"key": Feature.USER_MANAGEMENT.value, "name": "User Management", "description": "Manage users", "tab": False, "path": "/admin/users"},

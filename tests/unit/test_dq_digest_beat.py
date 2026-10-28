@@ -30,6 +30,20 @@ from core.duckdb_store import DuckDBStore
 from core.scheduler import DQ_DIGEST_LAST_SENT_KEY, BackgroundScheduler
 
 
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is the digest's beat and what it restates, not where
+    the quality journal lives, and it was written against DuckDB's. So
+    this module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_dq_journal_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
+
+
 def _issue(count: int, severity=Severity.WARN):
     return IntegrityIssue(
         check_name="headline_vs_line_items", table_name="silver_orders",

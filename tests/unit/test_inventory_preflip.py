@@ -1,7 +1,10 @@
 """Chain 1's pre-flip hardening (DN-24), the parts that need no database.
 
-KS_WRITE_INVENTORY stays off; every guard here is about what happens the day
-it is switched on. The same properties against a real Postgres are in
+Chain 1 was flipped on 2026-09-30, and since step 14's S14-00 it writes
+Postgres whatever its flag says, so the preflight answers "already writes
+Postgres" before it asks anything: the tests of what it asked, and of the
+DuckDB path beside the Postgres one, went with that. The chain lock and the
+Postgres step path stay. The same properties against a real Postgres are in
 `tests/integration/test_inventory_preflip.py`.
 """
 from __future__ import annotations
@@ -179,115 +182,7 @@ async def _ask(facts=None, **kw):
 
 
 class TestPreflight:
-    @pytest.mark.asyncio
-    async def test_a_ready_chain_is_ok(self, flag_off):
-        result = await _ask()
-        assert result["ok"] is True and result["reasons"] == []
-        assert result["temporary"] is True
-        assert set(result["replicated"]) == set(pg_inventory_write.CHAIN_TABLES)
-        assert result["operational_run"] == {
-            "run_id": 700, "age_s": 9000, "failed": False, "raised": [],
-            "findings": 0}
-        assert result["notes"] == []
 
-    @pytest.mark.asyncio
-    async def test_no_temporary_privilege_is_not_ok_and_says_the_grant(self, flag_off):
-        result = await _ask(_facts(temporary=False))
-        assert result["ok"] is False and result["temporary"] is False
-        (reason,) = result["reasons"]
-        assert "GRANT TEMPORARY ON DATABASE ks TO ks_app" in reason
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("mark, words", [
-        (_mark(50), "last copied 50 min ago (limit 50)"),
-        (_mark(10, failures=2), "failing (2 in a row)"),
-        (_mark(None), "never been copied"),
-        (None, "never been copied"),
-    ])
-    async def test_a_table_not_copied_within_50_minutes_is_not_ok(self, flag_off, mark, words):
-        facts = _facts()
-        if mark is None:
-            del facts["marks"]["app.stock_movements"]
-        else:
-            facts["marks"]["app.stock_movements"] = mark
-        result = await _ask(facts)
-        assert result["ok"] is False
-        (reason,) = result["reasons"]
-        assert "app.stock_movements" in reason
-        assert words in reason
-
-    @pytest.mark.asyncio
-    async def test_49_minutes_is_inside_the_limit(self, flag_off):
-        facts = _facts()
-        facts["marks"]["bronze.offers"] = _mark(49)
-        assert (await _ask(facts))["ok"] is True
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("mark, words", [
-        (_mark(75), "75 min old (limit 75)"),
-        (_mark(5, failures=1), "failing (1 in a row)"),
-        (_mark(None), "never been copied"),
-    ])
-    async def test_a_stale_journal_copy_cannot_vouch_for_no_findings(self, flag_off, mark, words):
-        facts = _facts()
-        facts["marks"]["app.data_quality_runs"] = mark
-        result = await _ask(facts)
-        assert result["ok"] is False
-        (reason,) = result["reasons"]
-        assert "quality journal" in reason and words in reason
-
-    @pytest.mark.asyncio
-    async def test_no_operational_run_is_not_ok(self, flag_off):
-        result = await _ask(_facts(run=None))
-        assert result["ok"] is False and result["operational_run"] is None
-        assert result["reasons"] == ["no mirror_landing run in the quality journal"]
-
-    @pytest.mark.asyncio
-    async def test_a_verdict_older_than_the_canarys_limit_is_not_todays(self, flag_off):
-        run = {"run_id": 700, "started_at": NOW - timedelta(hours=30), "error_message": None}
-        result = await _ask(_facts(run=run))
-        assert result["ok"] is False
-        assert "30 h old (limit 30)" in result["reasons"][0]
-
-    @pytest.mark.asyncio
-    async def test_a_failure_it_cannot_read_counts_as_uncompared(self, flag_off):
-        """Not in the job's "<n> check(s) raised — ..." shape, so nothing says
-        chain 1's comparison ran: blocked, and says so rather than guessing."""
-        run = {"run_id": 701, "started_at": NOW - timedelta(hours=1),
-               "error_message": "SchemaVersionError: revision mismatch"}
-        result = await _ask(_facts(run=run))
-        assert result["ok"] is False and result["operational_run"]["failed"] is True
-        assert result["operational_run"]["raised"] is None
-        (reason,) = result["reasons"]
-        assert "does not say which check raised" in reason
-        assert "SchemaVersionError" not in reason       # the journal's text stays in the journal
-
-    @pytest.mark.asyncio
-    async def test_an_open_finding_on_the_chain_is_not_ok_and_is_named(self, flag_off):
-        findings = [{"check_name": "mirror_buckets_disagree", "table_name": "app.stock_movements"}]
-        result = await _ask(_facts(findings=findings))
-        assert result["ok"] is False and result["operational_run"]["findings"] == 1
-        (reason,) = result["reasons"]
-        assert "mirror_buckets_disagree on app.stock_movements" in reason
-
-    @pytest.mark.asyncio
-    async def test_many_findings_are_counted_not_all_named(self, flag_off):
-        findings = [{"check_name": f"c{i}", "table_name": "bronze.offers"} for i in range(8)]
-        (reason,) = (await _ask(_facts(findings=findings)))["reasons"]
-        assert reason.startswith("8 open finding(s)") and reason.endswith("and 3 more")
-        assert "c5" not in reason
-
-    @pytest.mark.asyncio
-    async def test_every_reason_is_reported_not_just_the_first(self, flag_off):
-        facts = _facts(temporary=False, run=None)
-        facts["marks"]["app.inventory_history"] = _mark(90)
-        assert len((await _ask(facts))["reasons"]) == 3
-
-    @pytest.mark.asyncio
-    async def test_an_unreadable_postgres_is_named_by_class_only(self, flag_off):
-        result = await _ask(error=OSError("could not connect to 10.0.0.7:5432 as ks_app"))
-        assert result["ok"] is False
-        assert result["reasons"] == ["Postgres could not be read (OSError)"]
 
     @pytest.mark.asyncio
     async def test_once_the_chain_writes_postgres_it_is_not_the_question(self, flag_off):
@@ -304,12 +199,6 @@ class TestPreflight:
         pool = _Pool(_facts())
         assert (await pg_inventory_write.preflight(pool, now=NOW))["ok"] is None
 
-    @pytest.mark.asyncio
-    async def test_a_misspelt_flag_is_still_judged(self, flag_off):
-        """Not "writes Postgres": the chain is stood down, nothing is copied,
-        and the checks are what say so."""
-        flag_off.setenv("KS_WRITE_INVENTORY", "postgrse")
-        assert (await _ask())["ok"] is True
 
     def test_the_verdict_age_is_the_canarys_own_limit(self):
         from bot import canary
@@ -336,59 +225,7 @@ async def _job_error_message(outcomes):
 
 
 class TestWhichFailureCounts:
-    @pytest.mark.asyncio
-    async def test_another_store_raising_does_not_block_and_is_noted(self, flag_off):
-        """SMS reset by its peer at 07:30, after chain 1's tables were compared
-        and came back clean. The run is failed for the watchdog; it is not an
-        uncompared chain, and the note says which check it was."""
-        message = await _job_error_message(
-            {"reconcile_sms": ConnectionResetError("reset by peer")})
-        result = await _ask(_facts(run=_failed_run(message)))
-        assert result["reasons"] == [] and result["ok"] is True
-        assert result["operational_run"]["failed"] is True
-        assert result["operational_run"]["raised"] == ["reconcile_sms"]
-        (note,) = result["notes"]
-        assert "failed in reconcile_sms" in note and "(reconcile_operational) completed" in note
-        assert "reset by peer" not in note and "ConnectionResetError" not in note
 
-    @pytest.mark.asyncio
-    async def test_chain_1s_own_comparison_raising_blocks(self, flag_off):
-        message = await _job_error_message({
-            "reconcile_operational": OSError("connection refused"),
-            "reconcile_sms": ConnectionResetError("reset by peer"),
-        })
-        result = await _ask(_facts(run=_failed_run(message)))
-        assert result["ok"] is False and result["notes"] == []
-        (reason,) = result["reasons"]
-        assert reason == ("the latest mirror_landing run (702) failed in "
-                          "reconcile_operational, so chain 1's tables were not compared")
-
-    @pytest.mark.asyncio
-    async def test_an_entry_behind_text_that_ends_like_an_entry_is_still_read(self, flag_off):
-        """Gold's exception text ends in " | step: Failed:", which reads as an
-        entry of its own. Had that match taken the space after it, the real
-        separator in front of `reconcile_operational` would be one space short,
-        its entry unread, and the count still satisfied by the fake one: a pass
-        for a chain that was never compared."""
-        message = await _job_error_message({
-            "reconcile_gold": RuntimeError("upstream | step: Failed:"),
-            "reconcile_operational": OSError("connection refused"),
-        })
-        result = await _ask(_facts(run=_failed_run(message)))
-        assert result["ok"] is False
-        assert "failed in reconcile_operational" in result["reasons"][0]
-
-    @pytest.mark.asyncio
-    async def test_a_failure_between_checks_blocks(self, flag_off):
-        """`setup`: an import between two checks raised and skipped every check
-        after it, chain 1's possibly among them. The job writes it only from a
-        failed import, so the message is written here in its format and the
-        prefix is pinned in the job below."""
-        message = "1 check(s) raised — setup: ImportError: cannot import name"
-        result = await _ask(_facts(run=_failed_run(message)))
-        assert result["ok"] is False
-        (reason,) = result["reasons"]
-        assert "failed between its checks" in reason
 
     def test_the_job_calls_a_failure_between_checks_setup(self):
         """The one entry the job writes outside `check()`. Parsed, not grepped:
@@ -407,14 +244,6 @@ class TestWhichFailureCounts:
             and isinstance(node.args[0].values[0], ast.Constant)
         }
         assert prefixes == {"setup: "}
-
-    @pytest.mark.asyncio
-    async def test_a_message_naming_fewer_entries_than_it_counts_is_not_trusted(
-            self, flag_off):
-        message = "2 check(s) raised — reconcile_sms: ConnectionResetError: reset"
-        result = await _ask(_facts(run=_failed_run(message)))
-        assert result["ok"] is False and result["operational_run"]["raised"] is None
-        assert "does not say which check raised" in result["reasons"][0]
 
 
 # ─── /api/health publishes it ────────────────────────────────────────────────
@@ -446,7 +275,7 @@ class TestHealthPublishesThePreflight:
         assert block["pg_inventory_write"]["preflight"]["ok"] is False
         assert "preflight" not in block["pg_expenses_write"]
         # The local half is untouched: the canary still reads `error` and `mismatch` there.
-        assert block["pg_inventory_write"]["mode"] == "duckdb"
+        assert block["pg_inventory_write"]["mode"] == "postgres"     # S14-00
         assert block["pg_inventory_write"]["mismatch"] is False
 
     @pytest.mark.asyncio
@@ -661,33 +490,6 @@ class TestTheStockStepOnPostgres:
             on_postgres, offers_due=False, stocks_due=False)
         await service.incremental_sync()
         assert calls == [] and service.inventory_step_health()["last_ok_at"] is None
-
-
-class TestTheDuckDBPathIsUnchanged:
-    @pytest.mark.asyncio
-    async def test_a_raising_rebuild_still_leaves_the_tick(self, monkeypatch):
-        """Production today. DN-24 changes nothing here, the escape included."""
-        monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
-        service, store, _client, calls = _tick_service(monkeypatch)
-        store.refresh_sku_inventory_status.side_effect = RuntimeError("boom")
-
-        with pytest.raises(RuntimeError, match="boom"):
-            await service.incremental_sync()
-        # ...and the DuckDB path still stamps straight after the upsert.
-        assert _stock_watermark_moved(calls)
-        assert service.inventory_step_health()["failures_since_ok"] == 0
-
-    def test_a_misspelt_flag_takes_the_path_it_always_took(self, monkeypatch):
-        """Where the chain's own watermark read raises on it (DN-01)."""
-        monkeypatch.setenv("KS_WRITE_INVENTORY", "postgrse")
-        assert sync_mod._inventory_writes_postgres() is False
-
-    def test_a_latched_chain_takes_the_postgres_path_whatever_the_flag(self, monkeypatch):
-        from core import chain_latch
-
-        monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
-        chain_latch.latch("pg_inventory_write")
-        assert sync_mod._inventory_writes_postgres() is True
 
 
 class TestHealthPublishesTheSyncStep:

@@ -13,6 +13,15 @@ import pytest
 
 from core.duckdb_store import DuckDBStore
 
+
+@pytest.fixture(autouse=True)
+def _users_on_duckdb(monkeypatch):
+    """This module's user list is DuckDB's, as it was before step 14's S14-00
+    made its store a constant (`tests.conftest.user_store_on_duckdb`)."""
+    from tests.conftest import user_store_on_duckdb
+
+    user_store_on_duckdb(monkeypatch)
+
 REPO = Path(__file__).resolve().parents[2]
 
 

@@ -6,8 +6,13 @@ chain 6 moves the catalogue's writes to Postgres, a human carries it with
 `POST /api/mirror/backfill/catalogue`. What is pinned here needs no database:
 the selection rule, which is the daily comparison's own, and the route's and
 the function's refusals, on the recording pool `test_write_chains` built for
-every other backfill route. The rows themselves land in
-`tests/integration/test_catalogue_writer.py` (`TestTheWayThereAndBack`).
+every other backfill route.
+
+Since step 14's S14-00 chain 6 writes the catalogue whatever its flag says,
+so the carry refuses on the local answer every time — production's state
+since the flip. The tests of a carry that runs (the dry run, the carry, the
+pre-flip refusals on an owner row or the mirror off) went with that path,
+as did `TestTheWayThereAndBack` in `tests/integration/test_catalogue_writer.py`.
 """
 from __future__ import annotations
 
@@ -71,13 +76,6 @@ class _NoStore:
 
 class TestTheCarryRefusesBeforeItReads:
     @pytest.mark.asyncio
-    async def test_with_the_mirror_off_it_asks_postgres_nothing(self, flags, pool):
-        flags.setenv(pg_landing.MIRROR_ENV, "0")
-        with pytest.raises(pg_landing.CatalogueCarryRefused, match="KS_MIRROR_LANDING"):
-            await pg_landing.carry_retired_catalogue(_NoStore(), dry_run=False)
-        _never_reached_postgres(pool)
-
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("table", [PRODUCTS, CATEGORIES])
     async def test_a_chain_on_either_table_refuses_on_the_local_answer(
             self, flags, pool, landing_chain, table):
@@ -85,19 +83,6 @@ class TestTheCarryRefusesBeforeItReads:
         with pytest.raises(pg_landing.CatalogueCarryRefused, match=table):
             await pg_landing.carry_retired_catalogue(_NoStore(), dry_run=False)
         _never_reached_postgres(pool)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("table", [PRODUCTS, CATEGORIES])
-    async def test_an_owner_row_alone_refuses_after_the_owner_read(
-            self, flags, pool, landing_chain, table):
-        """The marker lost, the flag back at duckdb: only the owner row says
-        the catalogue changed hands, and the carry holds a pool — DN-06."""
-        landing_chain(tables=(table,), env=lambda: False)
-        pool.owner_rows = {table: "2026-09-20T08:00:00+00:00"}
-        with pytest.raises(pg_landing.CatalogueCarryRefused, match=table):
-            await pg_landing.carry_retired_catalogue(_NoStore(), dry_run=False)
-        assert pool.only_asked_who_owns()
-        assert not pool.wrote(PRODUCTS) and not pool.wrote(CATEGORIES)
 
     @pytest.mark.asyncio
     async def test_an_owner_row_no_chain_here_declares_still_refuses(self, flags, pool):
@@ -132,19 +117,6 @@ class TestTheRoute:
         assert [e.methods for e in found] == [frozenset({"POST"})]
         assert require_admin in found[0].dependencies
 
-    def test_a_dry_run_by_default(self, flags, pool, carry):
-        res = self._post(flags)
-        assert res.status_code == 200, res.json()
-        assert res.json()["status"] == "dry_run"
-        assert carry.await_args.kwargs == {"dry_run": True}
-        assert pool.only_asked_who_owns()
-
-    def test_dry_run_false_carries(self, flags, pool, carry):
-        res = self._post(flags, "?dry_run=false")
-        assert res.status_code == 200, res.json()
-        assert res.json()["status"] == "success"
-        assert carry.await_args.kwargs == {"dry_run": False}
-
     @pytest.mark.parametrize("table", [PRODUCTS, CATEGORIES])
     def test_409_on_the_chain_and_postgres_is_not_asked(
             self, flags, pool, landing_chain, carry, table):
@@ -155,43 +127,4 @@ class TestTheRoute:
         carry.assert_not_called()
         _never_reached_postgres(pool)
 
-    def test_409_on_the_owner_row_when_the_marker_is_lost(
-            self, flags, pool, landing_chain, carry):
-        landing_chain(tables=(PRODUCTS,), env=lambda: False)
-        pool.owner_rows = {PRODUCTS: "2026-09-20T08:00:00+00:00"}
-        res = self._post(flags, "?dry_run=false")
-        assert res.status_code == 409, res.json()
-        carry.assert_not_called()
-        assert pool.only_asked_who_owns()
 
-    def test_an_unreadable_owner_row_is_a_503(self, flags, pool, carry):
-        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
-        res = self._post(flags, "?dry_run=false")
-        assert res.status_code == 503, res.json()
-        assert "unreadable" in res.json()["detail"]
-        carry.assert_not_called()
-
-    def test_a_schema_behind_the_code_is_a_503_before_the_owner_read(
-            self, flags, pool, carry):
-        from core import pg
-
-        pg.require_revision.side_effect = pg.SchemaVersionError(
-            "database at 0031, code wants 0033")
-        res = self._post(flags)
-        assert res.status_code == 503, res.json()
-        assert "SchemaVersionError" in res.json()["detail"]
-        assert pool.sql == [] and pool.acquired == 0
-        carry.assert_not_called()
-
-    def test_the_mirror_off_is_a_409_and_postgres_is_not_asked(self, flags, pool, carry):
-        flags.setenv(pg_landing.MIRROR_ENV, "0")
-        res = self._post(flags, "?dry_run=false")
-        assert res.status_code == 409
-        assert res.json() == {"detail": "KS_MIRROR_LANDING is off; nothing was carried"}
-        carry.assert_not_called()
-        _never_reached_postgres(pool)
-
-    def test_a_refusal_the_carry_itself_finds_is_a_409(self, flags, pool, carry):
-        carry.side_effect = pg_landing.CatalogueCarryRefused("stood down: x")
-        res = self._post(flags, "?dry_run=false")
-        assert res.status_code == 409 and res.json()["detail"] == "stood down: x"

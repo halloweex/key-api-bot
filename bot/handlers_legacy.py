@@ -2077,7 +2077,7 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text(
             f"✅ {t('settings.language_set', chosen, name=LANGUAGE_NAMES[chosen])}\n\n"
             f"⚙️ <b>{t('settings.title', chosen)}</b>",
-            reply_markup=Keyboards.settings_menu(prefs, chosen, lang=_lang(update)),
+            reply_markup=Keyboards.settings_menu(prefs, chosen),
             parse_mode="HTML"
         )
     elif action == "settings_timezone":

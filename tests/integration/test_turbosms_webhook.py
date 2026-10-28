@@ -15,6 +15,16 @@ from web.main import app
 from web.routes.api import webhooks
 from web.routes.auth import PUBLIC_API_PATHS
 
+
+@pytest.fixture(autouse=True)
+def _sms_store_follows_env(monkeypatch):
+    """Since step 14's S14-00 the store switch decides nothing; this module's
+    two engines are chosen as before it (`tests.conftest.sms_store_follows_env`)."""
+    from tests.conftest import sms_store_follows_env
+
+    sms_store_follows_env(monkeypatch)
+
+
 PATH = "/api/webhooks/turbosms"
 SECRET = "s3cret"
 

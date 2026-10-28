@@ -306,21 +306,16 @@ async def _record_failure(error: str) -> None:
 
 
 def sms_store_is_postgres() -> bool:
-    """Which store answers `/sms`.
+    """Which store answers `/sms`: Postgres, a constant since step 14's
+    S14-00 — production since 2026-09-06, with no way back.
 
-    `KS_BOT_STORE`'s rule, for `KS_BOT_STORE`'s reason: an unknown value
-    raises rather than falling back. A typo in the one variable deciding where
-    six thousand names and phone numbers are read from should stop the
-    container, not quietly point it at the copy that is about to go stale.
+    `KS_SMS_STORE` is read for nothing, so no value of it can stop the
+    container. Last consumers: `core/repositories/customers.py`,
+    `core/mirror_reconciliation.py`, `core/duckdb_table_fates.py`; the
+    DuckDB branches go in S14-08. Until S14-00 an unknown value raised —
+    `KS_BOT_STORE`'s rule.
     """
-    import os
-
-    value = os.getenv("KS_SMS_STORE", "duckdb").strip().lower()
-    if value not in ("duckdb", "postgres"):
-        raise ValueError(
-            f"KS_SMS_STORE must be 'duckdb' or 'postgres', got {value!r}"
-        )
-    return value == "postgres"
+    return True
 
 
 # The names still answered by DuckDB alone. Empty: every path `/sms` uses now

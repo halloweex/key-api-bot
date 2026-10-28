@@ -10,6 +10,12 @@ Against a real Postgres the writer is proved in
 `tests/integration/test_orders_chain_writer.py`.
 
 Each test names the mutation it exists to fail on.
+
+Since step 14's S14-00 the chain writes Postgres whatever its flag says, with
+no precondition and no start hold, so the tests of the flag off, of a typo,
+of each precondition and of the hold went with them; the preflight answers
+"already writes Postgres". What stays is the writer, its decision, what
+Postgres would refuse, the routing and the order step's containment.
 """
 from __future__ import annotations
 
@@ -55,10 +61,8 @@ def flags(monkeypatch):
 
 @pytest.fixture
 def met(flags):
-    """Every precondition held: the chain moves on its flag alone."""
-    for name in ("_step13_unmet", "_chain1_unmet", "_landing_pages_unmet"):
-        flags.setattr(pow_, name, lambda: None)
-    flags.setattr(pow_, "_backup_unmet", lambda: [])
+    """Every precondition held. Since step 14's S14-00 there is none to hold:
+    the chain writes Postgres whatever its flag says."""
     return flags
 
 
@@ -66,189 +70,12 @@ def met(flags):
 
 
 class TestTheFlag:
-    def test_off_by_default_is_duckdb(self, flags):
-        assert pow_.env_writes_postgres() is False
-        assert pow_.writes_postgres() is False
-        assert pow_.mode() == "duckdb"
-
-    def test_a_typo_raises_in_the_writer_and_is_no_mode(self, flags):
-        """OD-18 (a): a value nobody can read stops this chain and nothing
-        else. Mutation: read an unknown value as duckdb."""
-        flags.setenv("KS_WRITE_ORDERS", "postgrse")
-        with pytest.raises(RuntimeError, match="postgrse"):
-            pow_.writes_postgres()
-        assert pow_.mode() is None
-        assert write_chains.chain_modes()["pg_orders_write"]["error"]
-
-    def test_the_flag_moves_the_writes_only_with_every_precondition(self, met):
-        met.setenv("KS_WRITE_ORDERS", "postgres")
-        assert pow_.writes_postgres() is True and pow_.mode() == "postgres"
-        met.setattr(pow_, "_step13_unmet", lambda: "step13: not in force")
-        assert pow_.writes_postgres() is False and pow_.mode() == "duckdb"
-
-    def test_the_latch_outranks_an_unmet_precondition(self, flags):
-        """OD-19 (a): a latched chain keeps writing Postgres — a stale drill
-        is no reason to start a second writer in DuckDB."""
-        chain_latch.latch(pow_.CHAIN)
-        assert pow_.writes_postgres() is True
-        assert pow_.unmet_precondition()            # still published
-        assert write_chains.chain_modes()[pow_.CHAIN]["unmet_precondition"]
-
-    def test_a_precondition_that_comes_good_mid_process_does_not_flip(self, met):
-        """The chain-3 review: with the flag set while the PITR drill marker
-        was stale, the Monday drill's fresh marker flipped a RUNNING web on
-        its next write — no stopped window, no `--handover`. Held is held
-        until the process ends, in the writer and in the registry alike.
-        Mutation: answer the live preconditions alone (drop `_held`)."""
-        met.setenv("KS_WRITE_ORDERS", "postgres")
-        met.setattr(pow_, "_backup_unmet", lambda: ["pitr_drill: 9 days old"])
-        assert pow_.writes_postgres() is False
-        met.setattr(pow_, "_backup_unmet", lambda: [])         # 08:44, the drill passed
-        assert pow_.writes_postgres() is False
-        assert pow_.mode() == "duckdb"
-        why = pow_.unmet_precondition()
-        assert why.startswith(pow_.HELD_KEY) and "pitr_drill" in why
-        assert "--handover" in why
-        assert write_chains.chain_modes()[pow_.CHAIN]["unmet_precondition"] == why
-        met.setattr(pow_, "_held", None)                         # a restart
-        assert pow_.writes_postgres() is True
-
-    def test_the_start_takes_the_verdict_before_any_consumer_asks(self, met):
-        """A precondition unmet when the process starts holds it, even if it
-        comes good before the first write asks. Mutation: drop
-        `settle_hold()` from `configure_modes()`."""
-        from core.runtime_modes import configure_modes
-
-        met.setenv("KS_WRITE_ORDERS", "postgres")
-        met.setattr(pow_, "_backup_unmet", lambda: ["remote_restore: never"])
-        configure_modes()
-        met.setattr(pow_, "_backup_unmet", lambda: [])
-        assert pow_.writes_postgres() is False
-        assert pow_.unmet_precondition().startswith(pow_.HELD_KEY)
-
-    @pytest.fixture
-    def step13_ready(self, flags):
-        """Every chain-3 precondition but step 13's met, and step 13's own
-        switch ready: `KS_WRITE_WAREHOUSE=postgres` with nothing unmet and a
-        Postgres that answered. `_step13_unmet` is the real one, and so is
-        step 13's start — the path under test."""
-        from core import warehouse_cutover
-
-        for name in ("_chain1_unmet", "_landing_pages_unmet"):
-            flags.setattr(pow_, name, lambda: None)
-        flags.setattr(pow_, "_backup_unmet", lambda: [])
-        flags.setattr(warehouse_cutover, "_read_postgres_in_a_worker",
-                      lambda env: {"revision": "head", "revision_error": None,
-                                   "unread": False})
-        flags.setattr(warehouse_cutover, "evaluate_preconditions", lambda env, facts: [])
-        flags.setenv("KS_WRITE_WAREHOUSE", "postgres")
-        flags.setenv("KS_WRITE_ORDERS", "postgres")
-        return flags
-
-    def test_step_13s_own_start_does_not_hold_it(self, step13_ready):
-        """Step 13's start gathered the DN-12 goal bridge's owners, and that
-        asked this chain for its mode — before step 13 had decided, so
-        `step13` read unmet and the hold remembered it: every start that
-        found step 13 in force held chain 3 until the process ended (the
-        batch-E review). Chain 7b-4 deleted the bridge and the start no
-        longer asks; the start still flips. Mutation: walk the chains' modes
-        in step 13's `_local_facts` again — chain 3 is asked undecided."""
-        from core import warehouse_cutover
-        from core.runtime_modes import configure_modes
-
-        asked_undecided = []
-        real = pow_._step13_unmet
-
-        def spy():
-            asked_undecided.append(not warehouse_cutover.verdict_reached())
-            return real()
-
-        step13_ready.setattr(pow_, "_step13_unmet", spy)
-        configure_modes()
-        assert not any(asked_undecided), "step 13's start asked chain 3 again"
-        assert warehouse_cutover.writes_postgres() is True
-        assert pow_._held is None
-        assert pow_.unmet_precondition() is None
-        assert pow_.writes_postgres() is True and pow_.mode() == "postgres"
-
-    def test_an_ask_before_step_13s_verdict_is_not_held(self, step13_ready):
-        """The guard the batch-E review added outlives the bridge: whoever
-        asks before `configure_mode` has decided reads `step13` unmet, and
-        that means "not decided yet" — never a hold. Mutation: hold on
-        `step13` whether or not step 13 has reached its verdict."""
-        from core import warehouse_cutover
-        from core.runtime_modes import configure_modes
-
-        step13_ready.setattr(warehouse_cutover, "_mode", None)
-        assert not warehouse_cutover.verdict_reached()
-        assert pow_.unmet_precondition().startswith("step13: ")
-        assert pow_._held is None
-        configure_modes()
-        assert warehouse_cutover.writes_postgres() is True
-        assert pow_._held is None
-        assert pow_.writes_postgres() is True and pow_.mode() == "postgres"
-
-    def test_chain_5_is_not_held_through_it_either(self, step13_ready):
-        """Chain 5's precondition is chain 3's mode, and chain 5 was a bridge
-        owner too: asked during step 13's start it asked chain 3, which held.
-        Mutation: hold on `step13` whatever its verdict."""
-        from core import pg_managers_write, read_fallback
-        from core.runtime_modes import configure_modes
-
-        step13_ready.setenv(pg_managers_write.WRITE_ENV, "postgres")
-        step13_ready.setattr(read_fallback, "refusing", lambda: True)
-        configure_modes()
-        assert pow_._held is None
-        assert pg_managers_write.unmet_precondition() is None
-        assert pg_managers_write.mode() == "postgres"
-
-    def test_a_step_13_that_decided_duckdb_still_holds_it(self, step13_ready):
-        """The verdict reached and against: that is a fact of the start, and
-        held. Mutation: never hold on `step13`."""
-        from core import warehouse_cutover
-        from core.runtime_modes import configure_modes
-
-        step13_ready.setenv("KS_WRITE_WAREHOUSE", "duckdb")
-        configure_modes()
-        assert warehouse_cutover.verdict_reached() and not warehouse_cutover.writes_postgres()
-        assert pow_._held is not None and pow_._held[1].startswith("step13: ")
-        assert pow_.writes_postgres() is False
-
-    def test_with_the_flag_off_the_start_reads_nothing_and_holds_nothing(self, flags):
-        """Production today: the start verdict costs nothing and records
-        nothing, so a later process — the only place a flag can change —
-        decides for itself. Mutation: record the hold whatever the flag."""
-        def boom():
-            raise AssertionError("read with the flag off")
-
-        live = pow_._live_unmet
-        flags.setattr(pow_, "_live_unmet", boom)
-        assert pow_.settle_hold() is None and pow_._held is None
-        flags.setattr(pow_, "_live_unmet", live)
-        assert pow_.unmet_precondition()                # unmet today, flag off
-        assert pow_._held is None
-
     def test_a_latched_chain_is_never_held(self, met):
         """The latch outranks the hold as it outranks every precondition."""
         met.setenv("KS_WRITE_ORDERS", "postgres")
         met.setattr(pow_, "_held", ("2026-10-01T08:00:00+00:00", "pitr_drill: old"))
         chain_latch.latch(pow_.CHAIN)
         assert pow_.writes_postgres() is True and pow_.mode() == "postgres"
-
-    @pytest.mark.parametrize("state", ["off", "flag", "latched", "typo", "held"])
-    def test_mode_is_the_registry_s_answer_in_every_state(self, met, state):
-        """`mode()` and `chain_modes()` are one answer. Mutation: compute
-        `mode()` from the environment alone."""
-        if state == "flag":
-            met.setenv("KS_WRITE_ORDERS", "postgres")
-        elif state == "latched":
-            chain_latch.latch(pow_.CHAIN)
-        elif state == "typo":
-            met.setenv("KS_WRITE_ORDERS", "pg")
-        elif state == "held":
-            met.setenv("KS_WRITE_ORDERS", "postgres")
-            met.setattr(pow_, "_chain1_unmet", lambda: "chain1: not postgres")
-        assert pow_.mode() == write_chains.chain_modes()[pow_.CHAIN]["mode"]
 
 
 class TestTheDeclaration:
@@ -280,114 +107,8 @@ class TestTheDeclaration:
         assert resolve_chain("orders") is pow_
         assert write_chains.chain_for_sync_key("last_sync_orders") is pow_
 
-    def test_with_the_flag_off_nothing_stands_down(self, flags):
-        """Production's state after this merges: registered, off, and the
-        order shippers still ship."""
-        from core.pg_landing import order_tables_stood_down
-
-        assert order_tables_stood_down() == frozenset()
-        assert not write_chains.stood_down_tables() & set(pow_.CHAIN_TABLES)
-        assert "last_sync_orders" not in write_chains.stood_down_sync_keys()
-
 
 # ─── G2: the preconditions ───────────────────────────────────────────────────
-
-
-class TestThePreconditions:
-    def test_all_met_is_none(self, met):
-        assert pow_.unmet_precondition() is None
-
-    @pytest.mark.parametrize("name,key", [
-        ("_step13_unmet", "step13"), ("_chain1_unmet", "chain1"),
-        ("_landing_pages_unmet", "landing_pages_clear"),
-    ])
-    def test_each_one_unmet_alone_is_named(self, met, name, key):
-        """Mutation: drop any one check from `unmet_precondition` — its row
-        here fails."""
-        met.setattr(pow_, name, lambda: f"{key}: unmet in this test")
-        assert pow_.unmet_precondition().startswith(key)
-
-    def test_the_backup_evidence_is_named(self, met):
-        met.setattr(pow_, "_backup_unmet", lambda: ["pitr_drill: never", "pg_offsite: old"])
-        assert pow_.unmet_precondition() == "pitr_drill: never; pg_offsite: old"
-
-    def test_a_fact_that_cannot_be_read_is_unmet(self, met):
-        def broken():
-            raise OSError("marker directory gone")
-
-        met.setattr(pow_, "_step13_unmet", broken)
-        assert "could not be read" in pow_.unmet_precondition()
-
-    def test_it_asks_postgres_nothing(self, flags, tmp_path):
-        """`/api/health` reads it through the registry and must answer with
-        Postgres down. Mutation: read an owner row or a run journal here."""
-        with patch("core.pg.get_pool", new=AsyncMock(side_effect=AssertionError("asked"))):
-            assert pow_.unmet_precondition()   # unmet today, and answered
-
-    def test_the_goal_bridge_is_no_precondition_any_more(self, met):
-        """Chain 7b-4 deleted the DN-12 bridge: no goal calculator reads
-        DuckDB `orders`, so nothing about the goals holds this chain — the
-        goal history is Silver's, and `step13` (still here) makes it
-        Postgres'. Mutations: restore `_goals_bridge_unmet` (it is named
-        here), or put a `goals_bridge` row back among the checks
-        `_live_unmet` walks (it is unmet again, here)."""
-        from core.repositories import goals
-
-        assert not hasattr(pow_, "_goals_bridge_unmet")
-        assert not hasattr(goals, "SALES_TYPE_BRIDGE_TABLES")
-        assert pow_.unmet_precondition() is None
-        assert [key for key, _why in pow_._live_unmet()] == []
-        met.setattr(pow_, "_step13_unmet", lambda: "step13: unmet in this test")
-        assert [key for key, _why in pow_._live_unmet()] == ["step13"]
-
-    def test_step13_is_the_cutover_s_cached_verdict(self, flags):
-        from core import warehouse_cutover
-
-        flags.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
-        assert pow_._step13_unmet().startswith("step13")
-        flags.setattr(warehouse_cutover, "_mode", warehouse_cutover.POSTGRES)
-        assert pow_._step13_unmet() is None
-
-    def test_chain1_is_its_own_answer(self, flags):
-        assert pow_._chain1_unmet().startswith("chain1")
-        flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        assert pow_._chain1_unmet() is None
-        flags.setenv("KS_WRITE_INVENTORY", "pg")
-        assert "not understood" in pow_._chain1_unmet()
-
-    @pytest.mark.parametrize("delivered,blocked", [
-        ({}, False),
-        ({"fk_orphan_order_products_order_id": "dq:integrity"}, True),
-        ({"status_group_vs_return_list": "dq:integrity"}, True),
-        ({"order_versions_stalled": "dq:mirror_landing"}, False),
-        ({"recon_missing": "dq:reconciliation"}, True),
-    ])
-    def test_a_page_the_flip_retires_holds_it(self, flags, delivered, blocked):
-        """The first run after the flip would announce such a page resolved
-        with no check looking — step 13's `retired_conditions_clear`, for
-        landing. Mutation: read `retired_conditions` as guard names (the
-        bare checks' names are their own conditions, `status_group_agreement`
-        reports under another)."""
-        with patch("core.alerting.delivered_conditions", return_value=delivered):
-            why = pow_._landing_pages_unmet()
-        assert bool(why) is blocked
-        if blocked:
-            assert why.startswith("landing_pages_clear")
-
-    def test_the_backup_evidence_is_the_marker_files(self, flags, tmp_path):
-        from core import backup_evidence
-
-        flags.setattr(backup_evidence, "DB_DIR", tmp_path)
-        keys = sorted(line.split(":", 1)[0] for line in pow_._backup_unmet())
-        assert keys == ["pg_offsite", "pitr_drill", "remote_restore"]
-
-    def test_the_unmet_warning_is_rate_limited(self, flags, caplog):
-        """The order step asks every minute. Mutation: warn on every call."""
-        flags.setenv("KS_WRITE_ORDERS", "postgres")
-        with caplog.at_level("WARNING", logger="core.pg_orders_write"):
-            for _ in range(5):
-                assert pow_.writes_postgres() is False
-        assert len([r for r in caplog.records if "stays on DuckDB" in r.message]) == 1
 
 
 # ─── G3: the decision is DuckDB's ────────────────────────────────────────────
@@ -413,7 +134,14 @@ class TestTheDecisionIsDuckDBs:
     INCOMING = [T0, None]
 
     @pytest.mark.asyncio
-    async def test_on_a_grid(self, duck):
+    async def test_on_a_grid(self, duck, monkeypatch):
+        # DuckDB's own upsert is the reference, so chain 3 is routed back to
+        # it for this test: since step 14's S14-00 it writes Postgres, a
+        # constant, and DuckDB's writer refuses. The grid is the evidence the
+        # chain's decider is DuckDB's, until S14-09 makes it a literal.
+        from tests.conftest import route_chains_to_duckdb
+
+        route_chains_to_duckdb(monkeypatch, pow_)
         cases = list(itertools.product(range(len(self.STORED)), range(len(self.INCOMING)),
                                        [False, True], [False, True]))
         for n, (si, ii, force, skip) in enumerate(cases):
@@ -593,13 +321,6 @@ class TestTheSelectionsFollow:
         assert await getattr(duck, method)(*args) == answer
         read.assert_awaited_once()
 
-    @pytest.mark.asyncio
-    async def test_off_they_read_duckdb(self, flags, duck):
-        await duck.upsert_orders([_payload(5), _payload(9, products=0)])
-        assert await duck.find_order_id_gaps(10) == [6, 7, 8]
-        assert await duck.find_halfwritten_orders(10) == [9]
-        assert await duck.halfwritten_among([5, 9]) == [9]
-        assert await duck.orders_held() == 2
 
     @pytest.mark.asyncio
     async def test_the_boot_does_not_pull_730_days_over_an_empty_duckdb(self, met, monkeypatch):
@@ -688,12 +409,6 @@ class TestTheOrderStepIsContained:
         svc.sync_missing_buyers.assert_not_awaited()
         assert svc.orders_step.consecutive_failures == 0
 
-    @pytest.mark.asyncio
-    async def test_on_duckdb_a_failure_leaves_the_tick_as_it_always_has(self, flags, monkeypatch):
-        svc = _tick_service(monkeypatch, _quiet_store())
-        svc._orders_step = AsyncMock(side_effect=RuntimeError("duckdb"))
-        with pytest.raises(RuntimeError):
-            await svc.incremental_sync()
 
     @pytest.mark.asyncio
     async def test_a_success_clears_the_streak(self, met, monkeypatch):
@@ -722,6 +437,16 @@ class TestTheOrderStepIsContained:
         svc = _tick_service(monkeypatch, store)
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(svc._orders_step(MagicMock(), {}), 5)
+
+
+async def _duckdbs_own_stamp(store, key: str, value) -> None:
+    """The stamp DuckDB's `sync_metadata` froze at the flip, written as the
+    flag off wrote it. Since step 14's S14-00 `set_last_sync_time` writes a
+    chain's key to Postgres whatever the flag says, so it is written here."""
+    async with store.connection() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP)", [f"last_sync_{key}", value.isoformat()])
 
 
 class TestTheFirstTickAfterTheFlip:
@@ -760,7 +485,7 @@ class TestTheFirstTickAfterTheFlip:
         from core.sync_service import SyncService
 
         frozen = datetime.now(UTC).replace(microsecond=0) - timedelta(days=3)
-        await duck.set_last_sync_time("orders", frozen)         # flag off: DuckDB's
+        await _duckdbs_own_stamp(duck, "orders", frozen)
         met.setenv("KS_WRITE_ORDERS", "postgres")
         monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
         asked = self._recording_fetch(monkeypatch)
@@ -779,7 +504,7 @@ class TestTheFirstTickAfterTheFlip:
 
         frozen = datetime.now(UTC).replace(microsecond=0) - timedelta(days=3)
         live = frozen + timedelta(days=2, hours=23)
-        await duck.set_last_sync_time("orders", frozen)
+        await _duckdbs_own_stamp(duck, "orders", frozen)
         met.setenv("KS_WRITE_ORDERS", "postgres")
         monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=live))
         asked = self._recording_fetch(monkeypatch)
@@ -796,7 +521,7 @@ class TestTheFirstTickAfterTheFlip:
         from core import pg_chain_watermarks, pg_inventory_write
 
         assert not getattr(pg_inventory_write, "CHAIN_WATERMARK_INHERITS_DUCKDB", False)
-        await duck.set_last_sync_time("offers", datetime.now(UTC) - timedelta(minutes=5))
+        await _duckdbs_own_stamp(duck, "offers", datetime.now(UTC) - timedelta(minutes=5))
         flags.setenv("KS_WRITE_INVENTORY", "postgres")
         assert pg_inventory_write.writes_postgres()
         monkeypatch.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
@@ -822,7 +547,7 @@ class TestTheSearchCursorMovesWithTheChain:
         from core.pg_search_index_read import WATERMARK_KEY
 
         frozen = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=2)
-        await duck.set_last_sync_time(WATERMARK_KEY, frozen)    # flag off: DuckDB's
+        await _duckdbs_own_stamp(duck, WATERMARK_KEY, frozen)
         met.setenv("KS_WRITE_ORDERS", "postgres")
         written = {}
 
@@ -866,10 +591,13 @@ class TestTheSearchCursorMovesWithTheChain:
                     [f"last_sync_{key}", (now - timedelta(minutes=5)).isoformat()])
             issues = dq._freshness_check(conn, now)            # no chain_watermarks
         (unwatched,) = [i for i in issues if i.check_name == "sync_watermarks_unwatched"]
-        assert unwatched.count == 1
+        # Since S14-00 every chain's keys are moved, so every one with a
+        # threshold is named — the search cursor still never is.
         assert "orders" in unwatched.description
         assert "meilisearch" not in unwatched.description
-        assert dq.unverified_conditions([], [unwatched]) == ["freshness_orders"]
+        conditions = dq.unverified_conditions([], [unwatched])
+        assert "freshness_orders" in conditions
+        assert not [c for c in conditions if "meilisearch" in c]
 
 
 class TestTheTickSaysWhenItWaitsForTheHeavyLock:
@@ -1017,88 +745,7 @@ class TestTheCanary:
 
 
 class TestThePreflight:
-    @pytest.mark.asyncio
-    async def test_before_the_flip_it_names_every_precondition(self, flags):
-        """The registry asks the preconditions only under the flag; an operator
-        about to flip needs them before. Mutation: return early on the flag."""
-        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("no pg"))):
-            out = await pow_.preflight()
-        assert out["ok"] is False
-        keys = {r.split(":", 1)[0] for r in out["reasons"]}
-        assert {"step13", "chain1", "postgres"} <= keys
-        assert "goals_bridge" not in keys
 
-    @pytest.mark.asyncio
-    async def test_each_precondition_is_one_reason(self, flags):
-        """The real chain 3, flag off, nothing stood in but the backup
-        markers: one reason per precondition, in order, and no goal bridge
-        among them since chain 7b-4. (Its reason carried its lever after a
-        "; ", and the preflight used to split the joined answer on it —
-        `/api/health` published "port chain 7b first (OD-14)" as a
-        precondition of its own, batch-E review; the test below holds the
-        reasons that still carry one.) Mutation: publish the joined
-        `unmet_precondition()` as one reason."""
-        flags.setattr(pow_, "_backup_unmet", lambda: ["pitr_drill: never"])
-        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("no pg"))):
-            out = await pow_.preflight()
-        assert [r.split(":", 1)[0] for r in out["reasons"]] == [
-            "step13", "chain1", "pitr_drill", "postgres"]
-
-    @pytest.mark.asyncio
-    async def test_a_retired_page_and_the_hold_are_one_reason_each(self, flags):
-        """`landing_pages_clear` carries its lever after a "; ", and the hold
-        quotes every reason it held on, joined. Mutation: as above."""
-        from core import alerting
-
-        met = flags
-        for name in ("_step13_unmet", "_chain1_unmet"):
-            met.setattr(pow_, name, lambda: None)
-        met.setattr(pow_, "_backup_unmet", lambda: [])
-        # The real check, over a delivered page a stood-down check reported.
-        met.setattr(alerting, "delivered_conditions",
-                    lambda: {sorted(pow_.retired_conditions())[0]: "dq:integrity"})
-        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("no pg"))):
-            out = await pow_.preflight()
-        assert [r.split(":", 1)[0] for r in out["reasons"]] == [
-            "landing_pages_clear", "postgres"]
-        met.setenv("KS_WRITE_ORDERS", "postgres")
-        met.setattr(pow_, "_backup_unmet", lambda: ["pitr_drill: old", "pg_offsite: old"])
-        assert pow_.writes_postgres() is False                  # held, on three
-        met.setattr(pow_, "_landing_pages_unmet", lambda: None)
-        met.setattr(pow_, "_backup_unmet", lambda: [])
-        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("no pg"))):
-            out = await pow_.preflight()
-        assert [r.split(":", 1)[0] for r in out["reasons"]] == [pow_.HELD_KEY, "postgres"]
-        assert "pitr_drill: old; pg_offsite: old" in out["reasons"][0]
-
-    @pytest.mark.asyncio
-    async def test_it_asks_postgres_for_the_landing_it_inherits(self, met):
-        class _Conn:
-            async def fetch(self, sql, tables):
-                assert "meta.mirror_state" in sql
-                return [{"table_name": "bronze.orders", "backfilled_at": T0,
-                         "failures_since_ok": 0},
-                        {"table_name": "bronze.expenses", "backfilled_at": T0,
-                         "failures_since_ok": 2}]
-
-        class _Acquire:
-            async def __aenter__(self):
-                return _Conn()
-
-            async def __aexit__(self, *a):
-                return False
-
-        class _Pool:
-            def acquire(self, timeout=None):
-                return _Acquire()
-
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=_Pool())), \
-                patch("core.pg.require_revision", new=AsyncMock()):
-            out = await pow_.preflight()
-        assert out["ok"] is False
-        assert any(r.startswith("backfill: bronze.order_products") for r in out["reasons"])
-        assert any(r.startswith("mirror: bronze.expenses") for r in out["reasons"])
-        assert not any("bronze.orders " in r for r in out["reasons"])
 
     @pytest.mark.asyncio
     async def test_once_the_chain_writes_postgres_the_question_is_over(self, flags):
@@ -1125,14 +772,28 @@ class TestThePreflight:
         """Each preflight is bounded at `_PREFLIGHT_TIMEOUT_S` (5 s). Asked one
         after the other, a hung Postgres cost 10 s — the canary's whole
         `HEALTH_TIMEOUT_S` — before anything else `/api/health` builds (the
-        chain-3 review). Mutation: await the two in turn."""
-        import time
+        chain-3 review). Mutation: await the two in turn.
 
+        Judged by order, not by the clock: both must be asked before the
+        first bound expires. A stopwatch round the block measured everything
+        else it builds too, and a CI runner once took 1.30 s against a limit
+        of 0.85 — more than two bounds in a row would have cost."""
         from core import pg_inventory_write
         from web.routes.api import health
 
+        seen = []
+
         async def hang():
+            seen.append("asked")
             await asyncio.sleep(3600)
+
+        bounded = health._bounded_preflight
+
+        async def bounded_and_seen(preflight):
+            answer = await bounded(preflight)
+            if preflight is hang:          # it never answers: the bound expired
+                seen.append("bound expired")
+            return answer
 
         bound = 0.5
         health._preflight_cache.update(data=None, expires_at=0)
@@ -1140,14 +801,14 @@ class TestThePreflight:
         try:
             with patch.object(pg_inventory_write, "preflight", hang), \
                     patch.object(pow_, "preflight", hang), \
+                    patch.object(health, "_bounded_preflight", bounded_and_seen), \
                     patch.object(health, "_PREFLIGHT_TIMEOUT_S", bound):
-                started = time.monotonic()
                 block = await health._write_chains_block()
-                took = time.monotonic() - started
         finally:
             health._preflight_cache.update(data=None, expires_at=0)
             health._orders_preflight_cache.update(data=None, expires_at=0)
-        assert took < 1.7 * bound, f"{took:.2f} s for two preflights bounded at {bound} s"
+        assert seen == ["asked", "asked", "bound expired", "bound expired"], (
+            f"the second preflight was not asked before the first bound expired: {seen}")
         for chain in (pg_inventory_write.CHAIN, pow_.CHAIN):
             assert block[chain]["preflight"]["ok"] is False
             assert "did not answer" in block[chain]["preflight"]["reasons"][0]
@@ -1159,19 +820,26 @@ class TestThePreflight:
         "5 s" answer came after 60 s for chain 3 and 30 s for chain 1, and
         each held its cache lock — and every later /api/health — meanwhile
         (batch-E review). A hang that cancels promptly, as above, cannot see
-        it. Mutation: a bare `asyncio.wait_for(preflight(), bound)`."""
-        import time
+        it. Mutation: a bare `asyncio.wait_for(preflight(), bound)`.
 
+        Judged by order, not by the clock: the cancel request is answered
+        only after the block has answered, so the block must answer while
+        every cut read is still unwinding — and every one must then unwind.
+        It was `took < 1.7 × bound`, a margin of 0.21 s for whatever else the
+        block builds, the margin a CI runner overran in the test above."""
         from core import pg_inventory_write, pg_managers_write
         from web.routes.api import health
 
-        bound, unwind = 0.3, 2.0
+        bound = 0.3
+        cancel_answered = asyncio.Event()
+        unwound = []
 
         async def cancel_hangs():
             try:
                 await asyncio.sleep(3600)
             except asyncio.CancelledError:
-                await asyncio.sleep(unwind)        # the cancel request, unanswered
+                await cancel_answered.wait()        # the cancel request, unanswered
+                unwound.append("unwound")
                 raise
 
         caches = (health._preflight_cache, health._orders_preflight_cache,
@@ -1183,14 +851,24 @@ class TestThePreflight:
                     patch.object(pow_, "preflight", cancel_hangs), \
                     patch.object(pg_managers_write, "preflight", cancel_hangs), \
                     patch.object(health, "_PREFLIGHT_TIMEOUT_S", bound):
-                started = time.monotonic()
-                block = await health._write_chains_block()
-                took = time.monotonic() - started
-                await asyncio.sleep(unwind + 0.2)    # let the left-behind reads end
+                # Not a limit on the answer: a block that waits for the
+                # unwind waits for ever, and this turns that into a failure.
+                try:
+                    block = await asyncio.wait_for(health._write_chains_block(), 10)
+                except asyncio.TimeoutError:
+                    pytest.fail("the answer waited for the cut reads to unwind")
+                unwound_at_answer = list(unwound)
+                cancel_answered.set()
+                for _ in range(200):                 # let the left-behind reads end
+                    if len(unwound) == 3:
+                        break
+                    await asyncio.sleep(0.01)
         finally:
+            cancel_answered.set()
             for cache in caches:
                 cache.update(data=None, expires_at=0)
-        assert took < 1.7 * bound, f"{took:.2f} s for preflights bounded at {bound} s"
+        assert unwound_at_answer == [], "the answer waited for a cut read to unwind"
+        assert unwound == ["unwound"] * 3, "a read cut at the bound was not cancelled"
         for chain in (pg_inventory_write.CHAIN, pow_.CHAIN, pg_managers_write.CHAIN):
             assert "did not answer" in block[chain]["preflight"]["reasons"][0]
 

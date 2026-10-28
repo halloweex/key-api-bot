@@ -168,6 +168,7 @@ KNOWN_SALES_TYPES = ("retail", "b2b", "internal")
 | `/api/reconcile` | Run `dq_reconciliation` over any window now, all three stores (POST, admin) |
 | `/api/jobs` | Scheduler jobs with live next_run and history |
 | `/api/jobs/{job_id}/trigger` | Run a job now (POST, admin) |
+| `/api/tg-bot/activity` | The customer Telegram bot's activity — daily/weekly active, new, registrations, WAU/MAU, activation, the entry funnel and the press table (which button people leave after) — for page `/tg-bot` (tab `tgbot`: admins and the marketing presets). `days` ∈ 30/90/180. Asked of ks-tg-bot's `GET /internal/activity` at `KS_TG_BOT_URL` (default `http://ks-tg-bot:8081`, the shared `key-api-bot_default` network) with bearer `KS_TG_BOT_TOKEN`; counts only, no customer data. Unset token → 503 "not configured". Last good answer kept 120 s per window and served `stale: true` while the bot is unreachable — `web/services/tg_bot_service.py` |
 
 **Retired by the owner's decision OD-10 (2026-09-30)**, and kept retired by
 `tests/unit/test_od10_retired_doors.py`: `GET /api/buyers/{id}`,
@@ -180,6 +181,33 @@ catch-all used to serve those the shell with a 200, which a script reads as
 success.
 
 **Query params**: `period` (today/yesterday/week/last_week/month/last_month) or `start_date` + `end_date`, `category_id`, `brand`, `sales_type`
+
+`start_date` and `end_date` are read by `strptime("%Y-%m-%d")` in
+`core/filters.parse_period`, and only as a pair: one alone is ignored, and a
+known `period` wins over both. The forms `strptime` forgives (`2026-1-5`,
+`2026-01- 5`) stay accepted — decided 2026-10-21, refusing them would only
+turn working requests into errors. A date it refuses is a 400 naming the field;
+it was a 500 until then. Each date must also lie in 2000-01-01..2099-12-31
+(`EARLIEST_DATE`, `LATEST_DATE`, the owner's decision of 2026-10-22), the
+start judged before the end, or it is a 400 naming its field: `Date must be
+between 2000-01-01 and 2099-12-31`. Python's calendar ends at 0001-01-01 and
+9999-12-31, and eight routes stepped off it and answered 500 —
+`end_date=9999-12-31` under the per-day loops, a start in year 1 under a
+comparison, a backwards range whose previous period runs past 9999-12-31 —
+while a date beyond the window answered zeros everywhere else. Inside it every
+date a route derives lies between 1989-12-24 and 2199-12-30, which
+`tests/unit/test_filters_parse_period.py` holds the comparison windows to.
+29 February is an ordinary date: a year back from it is 28 February, by
+`RevenueMixin._comparison_window`, which the marketing report shares with the
+trend since its own `date.replace(year=…)` answered 500 on a range starting or
+ending there. A range longer than `MAX_RANGE_DAYS` (3 660 days,
+ten years and a week) is a 400 naming `date_range`: four endpoints build one
+list entry per day of the range on web's event loop — the trend, its
+comparison, expenses summary and profit, customer insights — and
+0002-01-01..9999-12-30 cost the trend 6.8 s and 95 MB of JSON. The trend's
+`include_forecast` predicts at most `FORECAST_HORIZON_DAYS` (60) ahead, where
+the date picker stops; eight years ahead had held the single ML thread for
+70 s.
 
 ## DuckDB Schema
 
@@ -260,6 +288,42 @@ ssh <vps>                       # host and user: private notes
 cd /opt/key-api-bot
 docker compose pull && docker compose up -d
 ```
+
+### Before any rollback to an image from before step 14
+
+Every image built before S14-00 routes by the latch, the flags and the
+step-13 and `KS_DUCKDB=off` verdicts: 3.0.292 up to the one production runs
+when S14-00 deploys (3.0.298 on 2026-10-25), and every one of them requires
+revision `0035_batch_e_chains`. Every step-14 image routes by none of them
+(S14-00). **The target is `rollback-step14`, the last image before step 14,
+pinned at S14-00's deploy** (the plan's H1; 3.0.292 is kept as
+`rollback-step14-3.0.292`), or, for a later step-14 PR, the image before it
+(`:s14-NN`, H8, which needs none of what follows). Not 3.0.292 by number:
+the images after it carry fixes a rollback to it would undo, among them
+`/api/health`'s `sync` block and the web memory watchdog's alerts (3.0.293),
+a malformed dashboard date or an over-long range answered 400 (3.0.295), the
+customer bot's page and its `tgbot` tab (3.0.296, 3.0.298), and a dashboard
+date outside 2000-01-01..2099-12-31 answered 400 and a marketing report on
+29 February answered rather than a 500 (3.0.297). Before tagging
+`rollback-step14` back to `latest`:
+
+1. **Markers against owner rows.** `ls data/write-chain-owners/` and, as
+   `ks_readonly`, `SELECT key, updated_at FROM meta.chain_watermarks WHERE key
+   LIKE 'owner:%'`: every chain with owner rows has its marker. An image from
+   before step 14 routes a chain whose marker is lost by its flag and its
+   preconditions, and an unmet one sends its writes to DuckDB. Restore the
+   marker (its content is the latch's ISO time from the owner row) or do not
+   roll back.
+2. **`.env` by exact names** (the plan's H3): every one at production's value
+   — that image reads them all again, and for many an absent value means
+   `duckdb` (`KS_USER_STORE` absent is a 401 for everybody).
+3. **`meta.alembic_version`** is the revision that image requires
+   (`0035_batch_e_chains` for every image built before S14-00), or roll back
+   to the last image that requires the one there instead.
+
+Fast: `docker tag …:rollback-step14 …:latest` for web, bot and migrate, then
+`docker compose up -d` without `pull`. Proper: `git revert` the PR and let CI
+deploy.
 
 ## Docker Commands
 
@@ -356,6 +420,52 @@ PYTHONPATH=. python tests/test_data_consistency.py 2025-12-07
 # Force resync DuckDB
 python scripts/force_resync.py --days 365
 ```
+
+### Type checking
+
+`basedpyright` is CI's second job (`typecheck`), beside the suite. It covers
+`core web bot scripts deploy migrations`, everything the pyflakes guard walks
+except `tests/`. It runs in `standard` mode and models Python 3.14 on Linux
+(`pyrightconfig.json`). It fails on any error or warning that is not in
+`.basedpyright/baseline.json`, and on a baseline that still lists a finding the
+code no longer has. **The baseline only shrinks.**
+
+pyflakes sees a name nobody defined; this sees a call that cannot succeed, on
+lines no test runs. Its first run (2026-10-21) found 1 122 findings, and five
+of them were three live defects:
+
+- the web memory watchdog had raised AttributeError on every alert since
+  2026-09-14;
+- a language chosen in the bot's settings had been stored and never confirmed
+  since #76;
+- `/api/health` had published `sync: null` since 2026-02-12.
+
+The other 1 117 are the baseline. Most of them are:
+
+- python-telegram-bot's Optional attributes;
+- DuckDB rows typed `tuple | None`;
+- values the code knows are set and the checker cannot see;
+- third-party stubs.
+
+One is a latent defect in code nothing calls (`MeiliClient.get_stats` calls
+`.get` on a pydantic model).
+
+Run it the way CI does. The findings depend on the installed packages' own
+annotations, and the laptop's fastapi and pandas are not production's:
+
+```bash
+docker run --rm -v "$PWD:/w" -w /w python:3.14-slim sh -c \
+  'pip install -q -r requirements-dev.lock && basedpyright'
+```
+
+The baseline matches a finding by file, rule and column span, not by line.
+Moving code leaves it alone, but editing the expression a baselined finding
+sits on changes its span, and the finding then reads as new. When that
+happens, fix it, or rewrite the baseline with `basedpyright --writebaseline`
+in the same container, so that the moved entry shows in the diff. Rewrite the
+baseline in the same commit as any fix that removes a finding, or the job
+fails on the leftover. A basedpyright bump is a commit of its own, with the
+baseline rewritten beside it.
 
 ## Caching
 
@@ -725,8 +835,14 @@ inside it.**
 
 - `TAB_FEATURES` (`core/permissions.py`) is the grantable list, in the
   sidebar's order: dashboard, products, traffic, inventory, reports,
-  marketing, margin, expenses, sms. The admin checklist, the bot's keyboard
+  marketing, margin, expenses, sms, tgbot. The admin checklist, the bot's keyboard
   and the route table are all built from it, so a new tab is added once.
+- `tgbot` (/tg-bot, the customer Telegram bot's activity) was admin-only on
+  the day it shipped, 2026-10-25, and the owner opened it to the marketers the
+  same day. It sits in the `marketer` and `marketing` presets and in no role's
+  `DEFAULT_TABS`: a viewer with no override does not see it. Accounts that
+  already held a preset kept their stored list, so the one marketer then
+  approved (the `marketer` preset, editor) was given the tab by hand.
 - `user_management` is deliberately **not** in it. The admin pages stay on the
   admin role: a checkbox that hands somebody the access system itself would
   make every other rule here advisory. `analytics` and `customers` are absent
@@ -2082,6 +2198,15 @@ DuckDB integrity checks over the order tables (`ORDER_LANDING_CHECKS`) join
 The standing watch adds `chain_expense_orphans` (an expense with no order past
 a day) and a NULL `checked_at` in the misses.
 
+**Since step 14's S14-00 none of these is asked** — the chain writes
+Postgres, a constant, and the start hold is gone. **The backup evidence is
+judged by the canary instead: `backup_evidence_stale` (WARN)** reads
+`/api/health`'s `backups` at `core/backup_evidence.py`'s limits — a PITR or
+off-site restore drill older than 8 days, an off-site shipment older than
+36 h, or a marker that was never written — and names the script that writes
+it. Until then only this precondition judged the two drills, and
+`deploy/offsite_check.sh` reads the shipment's marker alone. History below.
+
 **Preconditions, every one read locally** (`unmet_precondition()`, published
 through the registry, `write_chain_precondition_unmet` on the canary):
 `step13` (Postgres alone derives the warehouse), `chain1` (DuckDB's SKU rebuild
@@ -2127,7 +2252,9 @@ DuckDB holds under any refreshed order read as a basket the chain shrank and
 Postgres's line items of its order carry a stamp from after the latch. A
 basket the chain emptied leaves no line to date and is refused, knowingly too
 strict, with the per-id decision named. No allocator to carry. Proved against
-a real Postgres in `tests/integration/test_chain_copy_back_orders.py`.
+a real Postgres in `tests/integration/test_chain_copy_back_orders.py` until
+step 14's S14-00, which deleted it: every case set up the pre-flip state
+through DuckDB's order writer, which nothing routes to any more.
 **Soak checks O1–O5**: the hourly copy of the misses and the two ids-diffs
 stood down (no `last_ok_at` or failure on the misses, no `backfilled_at` on
 the bronze three, after the owner rows — else `SOAK_ORDERS_FLIP_AT`, else a
@@ -3325,8 +3452,17 @@ Google. Канал — `core.utm_classify.organic_channel`, одиннадцат
 
 У каждого канала: заказы, выручка, новые клиенты (множествами, по причине
 абзаца выше), те же цифры за предыдущий период равной длины
-(`_comparison_window`) и до 20 имён внутри — письмо, метка сторис, сайт —
-`details_total` говорит, сколько их было всего. Канал, продававший только в
+(`_comparison_window`) и до 20 строк внутри **в форме отчёта GA4 «Привлечение
+трафика»** — `source / medium`, под ним кампания и `utm_content`
+(`organic_detail`; source и medium в нижнем регистре, кампания как написана);
+`details_total` говорит, сколько их было всего. Заказ совсем без меток — своя
+строка «без UTM-міток», а не пропуск: для Direct эта строка и есть ответ на
+«что входит». Под названием канала — его группа в словаре GA4 (Organic Social,
+Email, Organic Shopping, Referral; «поза сайтом» для заказов менеджера, которых
+GA4 не видит), и подсказка «?» — таблица «канал → какие source / medium → группа».
+Это **название, а не обещание**: сам GA4 раскладывает сырые метки по своим
+правилам (`klaviyo / klaviyo` у него Unassigned), и подсказка это говорит.
+Канал, продававший только в
 прошлом периоде, остаётся в списке с нулями: это строка, которая нужна больше
 всех. Итог блока равен карточке «Органічний» (тест держит). Метки сравниваются в
 нижнем регистре **в Python, не в SQL**: `LOWER` в PostgreSQL зависит от
@@ -3595,6 +3731,15 @@ non-HTTP consumers and the assistant's routes alone, and each required to
 exist.
 
 ### A write flag is no longer a rollback
+
+**Since step 14's S14-00 nothing routes by a flag, a latch or a
+precondition: every chain writes Postgres, a constant** (`writes_postgres()`,
+`mode()`, `unmet_precondition()` and the registry's `mode` and
+`unmet_precondition`). A first write still takes the marker and the owner
+rows (decision 3), because an image from before step 14 — the rollback
+target, see "Before any rollback to an image from before step 14" — routes
+by them; `/api/health` still publishes `env`, `error`, `latched` and `mismatch`.
+History below.
 
 Stage 4 moves WRITES chain by chain, and each chain is chosen by a `KS_WRITE_*`
 variable — `KS_WRITE_EXPENSES` (chain 8, on since 2026-09-17), `KS_WRITE_INVENTORY`
@@ -3978,6 +4123,15 @@ bounded at 5 s, and publishes the answer.
   included.
 
 ### Step 13: the switch, thrown on 2026-10-09 (DN-28, DN-29)
+
+**Since step 14's S14-00 the mode is a constant, `postgres`**: no
+precondition is evaluated at the start and Postgres is not asked there;
+`KS_WRITE_WAREHOUSE` is read only to be published, and `KS_PG_DERIVE`,
+`KS_UTM_PARSE`, `KS_READ_FALLBACK`, `KS_DQ_PG_WAREHOUSE`, `KS_MIRROR_LANDING`
+and `KS_GOALS_HISTORY` are constants too (`own`, `postgres`, `off`, `on`, on,
+`silver`) — production's values, held by `tests/unit/test_step14_prod_parity.py`.
+`/api/warehouse/status` still reports the preconditions until S14-15. History
+below.
 
 `KS_WRITE_WAREHOUSE` names who derives Silver, Gold and the UTM verdicts:
 `duckdb` (default) or `postgres`. It is read in `configure_modes()`, before
@@ -4598,6 +4752,13 @@ the record, or the record `duckdb` since after it, the way back it fed done —
 and is only removed again: merging it once more used to start a second full
 DuckDB rebuild on every restart.
 
+**Since step 14's S14-00 web runs `off` whatever `KS_DUCKDB` says** —
+`core/duckdb_off.py` and its verdict are gone, one WARNING names a value
+that is not `off`, and `held_back` is published as `[]`. Scripts and host
+tools still read the variable. The tripwire (`guard`, `open_file`,
+`opened_while_off`, `duckdb_opened_while_off`) stays until S14-18. History
+below.
+
 **Off is a claim checked at web's start** (PR-2, `core/duckdb_off.py`,
 OD-S5-1 (a)): step 13 **in force** — `postgres` with every precondition met,
 not a way back that latched chains 3 and 5 refused, which stays `postgres`
@@ -4784,6 +4945,14 @@ the repository runs any of it: every step is a person's, on the host, as
 root, in `/opt/key-api-bot`. `KS_DUCKDB=off` in production needs the owner's
 own "yes", separate from every merge (decision of 10.10.2026).
 
+**Since step 14's S14-00 web ignores `KS_DUCKDB`**: a step-14 web runs `off`
+whatever `.env` says, publishes `held_back: []`, and never registers
+`db_backup` or `duckdb_checkpoint`; `core/duckdb_off.py` and
+`chains_keeping_sync_metadata()` are gone. What follows is the runbook as
+the week was started, under an image from before step 14. Its host half
+still holds — the host scripts read `.env`, so the line stays
+`KS_DUCKDB=off` — and its way back is not a way back any more (below).
+
 **What PR-10 changed on the host**, which is what makes the order below safe:
 
 - `scripts/weekly_compact.sh` and `deploy/daily_offsite.sh` read `KS_DUCKDB`
@@ -4846,7 +5015,10 @@ the harmless direction, and their line says which line to write.
    `ark_ship.sh`.
 3. The parallel period done: `deploy/stage4_soak.sh` P3 covered (336 h from
    the last flip), no FAIL in P1–P3 or F1.
-4. What web's verdict will check at its start (`core/duckdb_off.py`), read
+4. *History since S14-00: a step-14 web checks none of this, and
+   `core/duckdb_off.py` and `chains_keeping_sync_metadata()` are deleted —
+   `chain_transfer._carried_keys` names the same chains' keys.* What web's
+   verdict would check at its start (`core/duckdb_off.py`), read
    beforehand so the start is not the first time anybody asks: `/api/health`
    `write_chains` with every chain's `mode` `postgres` — by its latch or by
    its flag — and no `mismatch` and no `unmet_precondition`; `latched: true`
@@ -4938,6 +5110,20 @@ the harmless direction, and their line says which line to write.
 
 **The way back**, whenever the week has to end early or a hold cannot be
 cleared:
+
+**Since step 14's S14-00 this is not the way back on its own, and done on a
+step-14 image it does harm.** `KS_DUCKDB=on` changes nothing in a step-14
+web: it runs `off` whatever `.env` says, so step 2 reads `mode: off` and
+`db_backup` and `duckdb_checkpoint` never register again. The host scripts
+read `.env`, though: with it saying `on` and step 3's cron lines back, the
+compaction stops web, the bot and Meilisearch every Sunday and rewrites the
+frozen file — the hourly hash of which step 14's last stage relies on — the
+nightly snapshot refuses a stale backup every night ("Daily snapshot
+FAILED"), and `offsite_check.sh` pages the DuckDB copy stale. So on a
+step-14 image leave `.env` at `KS_DUCKDB=off` and do not re-add those two
+cron lines. The way back is a rollback to an image from before step 14
+first ("Before any rollback to an image from before step 14", under
+Deployment); the steps below are that image's.
 
 1. Copy `.env` the same way, make the line `KS_DUCKDB=on` (or delete it), and
    `docker compose up -d web bot`.

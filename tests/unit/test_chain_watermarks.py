@@ -60,43 +60,39 @@ def _names(issues):
     return sorted(i.check_name for i in issues)
 
 
+def _moved(now, **overrides):
+    """Every watermark a chain has moved to Postgres, fresh — since step 14's
+    S14-00 that is every chain's, a constant — with the ones a test is about
+    set (or, as None, left out)."""
+    from core.write_chains import stood_down_sync_keys
+
+    fresh = (now - timedelta(minutes=20)).isoformat()
+    out = {key: fresh for key in stood_down_sync_keys()}
+    for key, value in overrides.items():
+        if value is None:
+            out.pop(key, None)
+        else:
+            out[key] = value
+    return out
+
+
 class TestWhichKeysHaveMoved:
-    def test_none_while_every_chain_writes_duckdb(self, flags):
+    def test_the_inventory_chain_takes_its_two(self, flags):
+        """Since step 14's S14-00 every chain's keys have moved, a constant;
+        chain 1's two are among them whatever its flag says."""
         from core.write_chains import stood_down_sync_keys
-        assert stood_down_sync_keys() == frozenset()
-
-    def test_the_inventory_chain_takes_exactly_its_two(self, flags):
-        from core.write_chains import stood_down_sync_keys
-        flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        assert stood_down_sync_keys() == frozenset({"last_sync_offers", "last_sync_stocks"})
-
-    def test_a_chain_with_no_watermarks_moves_none(self, flags):
-        from core.write_chains import stood_down_sync_keys
-        flags.setenv("KS_WRITE_EXPENSES", "postgres")
-        assert stood_down_sync_keys() == frozenset()
+        assert stood_down_sync_keys() >= frozenset({"last_sync_offers", "last_sync_stocks"})
 
 
 class TestTheFreshnessCheckFollowsTheWatermarks:
-    @pytest.mark.asyncio
-    async def test_without_the_flag_a_stale_duckdb_stamp_is_still_a_stall(
-        self, flags, frozen_duckdb,
-    ):
-        """The control: DuckDB still owns the keys, so 60 h is a real stall."""
-        store, now = frozen_duckdb
-        async with store.connection() as conn:
-            issues = _freshness_check(conn, now)
-        assert _names(issues) == ["freshness_offers", "freshness_stocks"]
-
     @pytest.mark.asyncio
     async def test_under_the_flag_the_frozen_copy_is_not_judged(
         self, flags, frozen_duckdb,
     ):
         store, now = frozen_duckdb
         flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        fresh = (now - timedelta(minutes=20)).isoformat()
         async with store.connection() as conn:
-            issues = _freshness_check(conn, now, chain_watermarks={
-                "last_sync_offers": fresh, "last_sync_stocks": fresh})
+            issues = _freshness_check(conn, now, chain_watermarks=_moved(now))
         assert issues == []
 
     @pytest.mark.asyncio
@@ -108,9 +104,8 @@ class TestTheFreshnessCheckFollowsTheWatermarks:
         store, now = frozen_duckdb
         flags.setenv("KS_WRITE_INVENTORY", "postgres")
         async with store.connection() as conn:
-            issues = _freshness_check(conn, now, chain_watermarks={
-                "last_sync_offers": (now - timedelta(hours=50)).isoformat(),
-                "last_sync_stocks": (now - timedelta(minutes=20)).isoformat()})
+            issues = _freshness_check(conn, now, chain_watermarks=_moved(
+                now, last_sync_offers=(now - timedelta(hours=50)).isoformat()))
         assert _names(issues) == ["freshness_offers"]
         assert issues[0].count == 50
 
@@ -122,8 +117,8 @@ class TestTheFreshnessCheckFollowsTheWatermarks:
         store, now = frozen_duckdb
         flags.setenv("KS_WRITE_INVENTORY", "postgres")
         async with store.connection() as conn:
-            issues = _freshness_check(conn, now, chain_watermarks={
-                "last_sync_offers": (now - timedelta(minutes=20)).isoformat()})
+            issues = _freshness_check(conn, now, chain_watermarks=_moved(
+                now, last_sync_stocks=None))
         assert _names(issues) == ["freshness_stocks"]
         assert "meta.chain_watermarks" in issues[0].description
 
@@ -141,8 +136,8 @@ class TestTheFreshnessCheckFollowsTheWatermarks:
         async with store.connection() as conn:
             conn.execute("UPDATE sync_metadata SET value = ? WHERE key = 'last_sync_stocks'",
                          [(now - timedelta(minutes=5)).isoformat()])
-            issues = _freshness_check(conn, now, chain_watermarks={
-                "last_sync_offers": (now - timedelta(minutes=20)).isoformat()})
+            issues = _freshness_check(conn, now, chain_watermarks=_moved(
+                now, last_sync_stocks=None))
         assert _names(issues) == ["freshness_stocks"]
         assert "never synced" in issues[0].description
 

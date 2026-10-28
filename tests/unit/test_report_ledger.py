@@ -144,32 +144,6 @@ class TestTheOneDoor:
 # ─── duckdb: the default, byte for byte ──────────────────────────────────────
 
 
-class TestUnderDuckdbNothingChanged:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("ledger,chain,table", LEDGERS)
-    async def test_gate_and_record_are_the_old_statements(
-            self, flags, store, ledger, chain, table):
-        pool = AsyncMock(side_effect=AssertionError("asked for a pool"))
-        flags.setattr("core.pg.get_pool", pool)
-        assert await report_ledger.already_sent(store, ledger, WEEK, "retail") is False
-        assert await report_ledger.mark_sent(store, ledger, WEEK, "retail", 10.0, 3) == "recorded"
-        assert await report_ledger.already_sent(store, ledger, WEEK, "retail") is True
-        (row,) = await _duck(store, table)
-        assert row[:4] == (WEEK, "retail", Decimal("10.00"), 3)
-        assert row[4] is not None                        # CURRENT_TIMESTAMP, as always
-        assert not pool.await_count
-        assert not chain.chain_latch.marker_path(chain.CHAIN).exists()
-
-    @pytest.mark.asyncio
-    async def test_a_typo_refuses_the_gate_so_nothing_is_sent(self, flags, store):
-        """OD-18 (a). Mutation: let the gate read DuckDB on a typo — an
-        unreadable flag would then send from a store that may not be the
-        ledger's writer any more."""
-        flags.setenv(pg_weekly_ledger_write.WRITE_ENV, "postgrse")
-        with pytest.raises(RuntimeError):
-            await report_ledger.already_sent(store, report_ledger.WEEKLY, WEEK, "retail")
-
-
 # ─── postgres: at least once, never twice ────────────────────────────────────
 
 
@@ -472,31 +446,6 @@ class TestASpoolOutlivesItsFlag:
     alone and the week went out a second time."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("ledger,chain,table", LEDGERS)
-    async def test_the_flag_put_back_unlatched_still_counts_it(
-            self, flags, store, ledger, chain, table):
-        """The review's second reproduction, needing no Postgres. Mutation:
-        drop the spool branch from the `duckdb` gate — it answers False and
-        the job sends the week again."""
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        flags.setattr(chain, "find_sent", AsyncMock(return_value=None))
-        flags.setattr(chain, "_pool", AsyncMock(side_effect=ConnectionRefusedError()))
-        assert await report_ledger.already_sent(store, ledger, WEEK, "retail") is False
-        assert await report_ledger.mark_sent(store, ledger, WEEK, "retail", 20.0, 2) == "pending"
-        assert not chain.chain_latch.latched(chain.CHAIN)
-        spooled_at = report_ledger._spooled(chain.CHAIN)[0]["sent_at"]
-
-        flags.setenv(chain.WRITE_ENV, "duckdb")
-        pool = AsyncMock(side_effect=AssertionError("asked for a pool"))
-        flags.setattr("core.pg.get_pool", pool)
-        assert await report_ledger.already_sent(store, ledger, WEEK, "retail") is True
-        (row,) = await _duck(store, table)
-        assert row == (WEEK, "retail", Decimal("20.00"), 2, spooled_at)
-        assert not report_ledger.is_spooled(chain.CHAIN, WEEK, "retail")
-        assert chain.pending()["count"] == 0
-        assert not pool.await_count
-
-    @pytest.mark.asyncio
     async def test_a_spool_duckdb_cannot_take_still_counts_as_sent(
             self, flags, store, monkeypatch):
         """Mutation: count the week only once it has landed — a DuckDB that
@@ -520,24 +469,6 @@ class TestASpoolOutlivesItsFlag:
         assert path.exists() and await _duck(store, "traffic_report_sends") == []
         assert chain.pending() == {"count": 1, "weeks": ["2026-09-21__retail"],
                                    "unreadable": ["2026-09-21__retail"]}
-
-    @pytest.mark.asyncio
-    async def test_other_weeks_of_the_spool_land_too(self, flags, store):
-        """The gate for one week lands the whole spool, so a week nobody asks
-        about again still reaches the ledger and the canary's page clears.
-        Two of them, so a drain that stops after its first landing is told
-        apart from one that lands everything. Mutation: land only one entry
-        per gate (`_spooled(...)[-1:]` in `land_in_duckdb`)."""
-        chain = pg_weekly_ledger_write
-        earlier = WEEK - timedelta(days=7)
-        earliest = WEEK - timedelta(days=14)
-        for week in (earliest, earlier):
-            report_ledger.spool(chain.CHAIN, week, "retail", Decimal("3.00"), 1,
-                                datetime.now(timezone.utc))
-        assert not await report_ledger.already_sent(store, report_ledger.WEEKLY, WEEK, "retail")
-        assert sorted(r[0] for r in await _duck(store, "weekly_report_sends")) == [
-            earliest, earlier]
-        assert chain.pending()["count"] == 0
 
     @pytest.mark.asyncio
     async def test_through_the_job_the_week_goes_out_once(self, flags, tmp_path, monkeypatch):

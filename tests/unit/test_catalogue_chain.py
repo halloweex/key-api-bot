@@ -8,6 +8,10 @@ DuckDB until its readers have moved, that a fault in it costs the catalogue
 and not the tick or the full sync it rides in, that only the two
 full-catalogue sync sites reach the writer, and that the standing watch, the
 registry and the copy-back all see it.
+
+Since step 14's S14-00 the chain writes Postgres whatever its flag says and
+asks no precondition, so the tests of the flag off, of a typo and of the
+hold on DuckDB went with them.
 """
 from __future__ import annotations
 
@@ -75,6 +79,14 @@ def flagged_alone(flags):
     paths and only the catalogue's moves."""
     flags.setenv(chain.WRITE_ENV, "postgres")
     flags.setattr(chain, "unmet_precondition", lambda: None)
+    # Since step 14's S14-00 every chain writes Postgres, a constant; the
+    # tick's other steps are faked here, and keep the DuckDB paths the store
+    # under the test answers.
+    from core import pg_buyers_write, pg_inventory_write, pg_managers_write, pg_orders_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(flags, pg_orders_write, pg_managers_write, pg_buyers_write,
+                           pg_inventory_write)
     return flags
 
 
@@ -134,31 +146,6 @@ class TestTheRepositoryRoutes:
         assert rows[0].brand == "COSRX" and rows[0].price == 250
         assert rows[1].brand is None and rows[1].price == 410.5
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("method,payload", [
-        ("upsert_products", PRODUCTS), ("upsert_categories", CATEGORIES)])
-    async def test_with_the_flag_off_the_postgres_writer_is_never_called(
-            self, flags, method, payload):
-        from core.duckdb_store import DuckDBStore
-
-        store = _Recorder()
-        writer = AsyncMock(side_effect=AssertionError("Postgres written with the flag off"))
-        with patch.object(chain, method, new=writer):
-            assert await getattr(DuckDBStore, method)(store, payload) == len(payload)
-        assert [v for v, _ in store.statements].count("INSERT") == len(payload)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("method,payload", [
-        ("upsert_products", PRODUCTS), ("upsert_categories", CATEGORIES)])
-    async def test_held_by_its_precondition_it_writes_duckdb(self, flags, method, payload):
-        """The flag alone moves nothing: chain 1 is off here."""
-        from core.duckdb_store import DuckDBStore
-
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        store = _Recorder()
-        writer = AsyncMock(side_effect=AssertionError("written while held"))
-        with patch.object(chain, method, new=writer):
-            assert await getattr(DuckDBStore, method)(store, payload) == len(payload)
 
     @pytest.mark.asyncio
     async def test_an_empty_payload_writes_nowhere_latches_nothing_stamps_nothing(
@@ -174,15 +161,7 @@ class TestTheRepositoryRoutes:
 
 
 class TestTheFlag:
-    def test_off_by_default(self, flags):
-        assert chain.writes_postgres() is False
-        assert chain.mode() == "duckdb"
 
-    def test_an_unknown_value_raises_and_mode_does_not(self, flags):
-        flags.setenv(chain.WRITE_ENV, "postgrse")
-        with pytest.raises(RuntimeError, match=chain.WRITE_ENV):
-            chain.writes_postgres()
-        assert chain.mode() is None
 
     def test_the_latch_outranks_it(self, flags):
         chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
@@ -195,97 +174,8 @@ class TestTheFlag:
         flags.setenv(chain.WRITE_ENV, "yes")
         assert chain.writes_postgres() is True
 
-    @pytest.mark.parametrize("env,met_,latched,expected", [
-        (None, False, False, "duckdb"),
-        ("postgres", True, False, "postgres"),
-        ("postgres", False, False, "duckdb"),
-        ("postgrse", True, False, None),
-        ("duckdb", False, True, "postgres"),
-    ])
-    def test_mode_is_the_registrys_answer(self, flags, env, met_, latched, expected):
-        if env:
-            flags.setenv(chain.WRITE_ENV, env)
-        if met_:
-            flags.setattr(chain, "unmet_precondition", lambda: None)
-        if latched:
-            chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        assert chain.mode() == expected
-        assert write_chains.chain_modes()[chain.CHAIN]["mode"] == expected
-
 
 # ─── the precondition (T-3) ──────────────────────────────────────────────────
-
-
-class TestThePrecondition:
-    def test_all_met_is_none(self, met):
-        assert chain.unmet_precondition() is None
-
-    def test_chain_1_on_duckdb_is_named(self, met):
-        met.setenv("KS_WRITE_INVENTORY", "duckdb")
-        assert "KS_WRITE_INVENTORY is not postgres" in chain.unmet_precondition()
-
-    def test_a_chain_1_typo_is_unmet_and_named_without_its_value(self, met):
-        met.setenv("KS_WRITE_INVENTORY", "s3cr3t-typo")
-        why = chain.unmet_precondition()
-        assert "KS_WRITE_INVENTORY is not understood" in why
-        assert "s3cr3t-typo" not in why, "the public endpoint must not quote a value"
-
-    def test_chain_1_latched_counts_as_moved(self, met):
-        met.setenv("KS_WRITE_INVENTORY", "duckdb")
-        chain_latch.latch("pg_inventory_write", "KS_WRITE_INVENTORY")
-        assert chain.unmet_precondition() is None
-
-    def test_the_fallback_still_answering_from_duckdb_is_named(self, met):
-        met.setattr(read_fallback, "_mode", "duckdb")
-        assert "KS_READ_FALLBACK is not off" in chain.unmet_precondition()
-
-    @pytest.mark.parametrize("reader", warehouse_cutover.WAREHOUSE_READERS)
-    def test_every_warehouse_reader_left_on_duckdb_is_named(self, met, reader):
-        """Parametrised over the switch's own list, which a walk of every
-        `KS_READ_*` name in the tree keeps complete — never a hand-typed
-        subset."""
-        met.setenv(reader, "duckdb")
-        why = chain.unmet_precondition()
-        assert why and reader in why
-
-    @pytest.mark.parametrize("reader", warehouse_cutover.WAREHOUSE_READERS[:2])
-    def test_a_reader_typo_is_unmet(self, met, reader):
-        met.setenv(reader, "postgress")
-        assert reader in chain.unmet_precondition()
-
-    def test_it_asks_postgres_nothing(self, met):
-        met.setenv("KS_WRITE_INVENTORY", "duckdb")
-        with patch("core.pg.get_pool", new=AsyncMock(side_effect=AssertionError("pool"))):
-            assert chain.unmet_precondition()
-
-    def test_held_on_duckdb_while_unmet_and_published(self, flags):
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        state = write_chains.chain_modes()[chain.CHAIN]
-        assert state["mode"] == "duckdb"
-        assert "KS_WRITE_INVENTORY" in state["unmet_precondition"]
-        assert chain.writes_postgres() is False
-
-    def test_latched_and_unmet_keeps_writing_postgres_and_says_so(self, flags):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        state = write_chains.chain_modes()[chain.CHAIN]
-        assert state["mode"] == "postgres" and state["unmet_precondition"]
-
-    def test_the_warning_is_logged_once_an_hour_per_reason(self, flags, caplog):
-        """The tick reads the products watermark every minute; chain 6a's
-        warn-per-call would log once a minute while the chain is held."""
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        with caplog.at_level("WARNING", logger=chain.__name__):
-            for _ in range(5):
-                assert chain.writes_postgres() is False
-        assert len([r for r in caplog.records if "stays on DuckDB" in r.message]) == 1
-
-    def test_it_reads_the_switchs_one_helper(self, met, monkeypatch):
-        """`readers_not_on_postgres` is what the switch files as `reader:*`;
-        the chain reads it rather than a list of its own."""
-        monkeypatch.setattr(warehouse_cutover, "readers_not_on_postgres",
-                            lambda env: ("KS_READ_SOMETHING_NEW",))
-        assert "KS_READ_SOMETHING_NEW" in chain.unmet_precondition()
 
 
 # ─── the registry (T-4, T-5) ─────────────────────────────────────────────────
@@ -298,10 +188,6 @@ class TestTheRegistrySeesIt:
         assert chain in write_chains.WRITE_CHAINS
         assert write_chains.chain_name(chain) == chain.CHAIN
 
-    def test_the_tables_stand_down_under_the_flag_and_only_then(self, met):
-        assert not set(chain.CHAIN_TABLES) & write_chains.stood_down_tables()
-        met.setenv(chain.WRITE_ENV, "postgres")
-        assert set(chain.CHAIN_TABLES) <= write_chains.stood_down_tables()
 
     def test_the_watermarks_are_this_chains_and_move_with_it(self, met):
         for key in chain.CHAIN_SYNC_KEYS:
@@ -309,19 +195,6 @@ class TestTheRegistrySeesIt:
         met.setenv(chain.WRITE_ENV, "postgres")
         assert set(chain.CHAIN_SYNC_KEYS) <= write_chains.stood_down_sync_keys()
 
-    def test_a_typo_stands_down_only_its_own_tables(self, flags):
-        flags.setenv(chain.WRITE_ENV, "yes")
-        tables, errors = write_chains.stood_down_tables_checked()
-        assert tables == frozenset(chain.CHAIN_TABLES)
-        assert list(errors) == [chain.CHAIN]
-
-    def test_the_order_paths_never_ask_it(self, flags):
-        from core.pg_landing import ORDER_UNIT
-
-        flags.setenv(chain.WRITE_ENV, "postgrse")
-        with patch.object(chain, "env_writes_postgres",
-                          side_effect=AssertionError("asked about the orders")):
-            assert write_chains.stood_down_among(ORDER_UNIT) == frozenset()
 
     def test_each_table_is_a_unit_of_its_own(self):
         """`_mirror` ships each alone, so neither drags another table down."""
@@ -613,20 +486,6 @@ class TestFullSyncContainsThisChainOnly:
         assert "postgrse" in stats["categories_error"] and "postgrse" in stats["products_error"]
         assert store.stamped == ["expense_types", "orders"]
 
-    @pytest.mark.asyncio
-    async def test_with_the_flag_off_a_failure_raises_exactly_as_it_always_has(self, flags):
-        store = _SyncStore(products=RuntimeError("duckdb said no"))
-        with pytest.raises(RuntimeError, match="duckdb said no"):
-            await _full_sync(store)
-        assert store.stamped == ["categories", "expense_types"]
-
-    @pytest.mark.asyncio
-    async def test_with_the_flag_off_a_categories_failure_raises_too(self, flags):
-        store = _SyncStore(categories=RuntimeError("duckdb said no to categories"))
-        with pytest.raises(RuntimeError, match="categories"):
-            await _full_sync(store)
-        assert store.stamped == []
-
 
 # ─── the incremental tick survives the chain (T-9) ──────────────────────────
 
@@ -681,21 +540,6 @@ def _rest_of_the_tick_ran(svc):
 
 
 class TestTheTickSurvivesTheChain:
-    @pytest.mark.asyncio
-    async def test_a_typo_costs_the_products_step_and_nothing_else(
-            self, flags, monkeypatch, real_store):
-        flags.setenv(chain.WRITE_ENV, "postgrse")
-        svc, endpoints, writer = _tick(monkeypatch, real_store)
-
-        stats = await svc.incremental_sync()
-
-        _rest_of_the_tick_ran(svc)
-        assert "products" not in endpoints, "KeyCRM was asked for a catalogue nobody can write"
-        writer.assert_not_called()
-        assert all(isinstance(v, int) for v in stats.values()), stats
-        step = svc.catalogue_step
-        assert (step.failures_since_ok, step.last_error) == (1, "RuntimeError")
-        assert svc._catalogue_retry_in() is not None
 
     @pytest.mark.asyncio
     async def test_postgres_down_at_the_watermark_costs_the_step_alone(
@@ -834,38 +678,6 @@ class TestTheTickSurvivesTheChain:
         with patch("core.pg_chain_watermarks.get_value", new=AsyncMock(return_value=recent)):
             await svc.incremental_sync()
         assert endpoints == [] and not writer.await_count
-        assert svc.catalogue_step.failures_since_ok == 0
-
-    @pytest.mark.asyncio
-    async def test_with_the_flag_off_the_read_is_duckdbs_after_the_order_step(
-            self, flags, monkeypatch, real_store):
-        """With the flag off the products watermark is DuckDB's, read in the
-        tick as it always was, and nothing reaches the chain's writer. Since
-        chain 3 the order step comes first in the tick — its watermark, its
-        fetch, its write — so nothing is read ahead of the orders under
-        either chain (chain 6's rule for its own Postgres read, and chain 3's
-        `TestAdjacentMarks`); before chain 3 this read came between the orders
-        watermark and the fetch."""
-        svc, endpoints, writer = _tick(monkeypatch, real_store)
-        asked = []
-        real = real_store.get_last_sync_time
-
-        async def spy(key="orders"):
-            asked.append(key)
-            return await real(key)
-
-        monkeypatch.setattr(real_store, "get_last_sync_time", spy)
-        order_fetch = svc._fetch_orders_with_date_filter
-
-        async def fetch(*a, **kw):
-            asked.append("<orders fetched>")
-            return await order_fetch(*a, **kw)
-
-        svc._fetch_orders_with_date_filter = fetch
-        await svc.incremental_sync()
-        assert asked[:3] == ["orders", "<orders fetched>", "products"]
-        assert endpoints == ["products"]
-        writer.assert_not_called()      # DuckDB wrote it
         assert svc.catalogue_step.failures_since_ok == 0
 
 
@@ -1196,7 +1008,7 @@ class TestHealthPublishesTheStep:
         # Each chain reads its own recorder: chain 1's stays clean.
         assert block["pg_inventory_write"]["sync_step"]["failures_since_ok"] == 0
         # The registry's half is untouched: the canary reads `mode` and `error` there.
-        assert block[chain.CHAIN]["mode"] == "duckdb"
+        assert block[chain.CHAIN]["mode"] == "postgres"          # S14-00
         assert "preflight" not in block[chain.CHAIN]
 
     @pytest.mark.asyncio

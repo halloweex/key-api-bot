@@ -10,6 +10,12 @@ What is pinned here, each with the mutation it must kill:
 
 Everything that needs Postgres is in
 `tests/integration/test_managers_chain_writer.py`.
+
+Since step 14's S14-00 the chain writes Postgres whatever its flag says and
+asks no precondition, and step 13's way back is not this code's: the tests
+of the flag, of each precondition, of the preflight before the flip and of
+the refused way back went with them, as did those of DuckDB's own stats and
+boot seed.
 """
 from __future__ import annotations
 
@@ -96,47 +102,6 @@ class TestTheStatsBody:
         sql = sql_dialect.manager_stats_sql(dialect)
         assert sql.count("timezone('Europe/Kyiv', ordered_at)") == 2
         assert "DATE(ordered_at)" not in sql and "ordered_at::date" not in sql
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("session_tz", ["UTC", "Europe/Kyiv"])
-    async def test_duckdb_stores_kyiv_dates_whatever_its_timezone(self, tmp_path, session_tz):
-        """Orders at 22:30 UTC on 28.02 and 21:15 UTC on 31.07 are Kyiv's 01.03
-        and 01.08 (chain 5's design, M3). Under `TZ=Europe/Kyiv` — production —
-        the old spelling gave the same answer, so production does not move;
-        under UTC it gave 28.02 and 31.07."""
-        from core.duckdb_store import DuckDBStore
-
-        store = DuckDBStore(db_path=tmp_path / "stats.duckdb")
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                conn.execute(f"SET TimeZone = '{session_tz}'")
-                conn.execute("INSERT INTO managers (id, name) VALUES (7, 'M')")
-                conn.execute(
-                    "INSERT INTO orders (id, source_id, status_id, grand_total, "
-                    "ordered_at, manager_id) VALUES "
-                    "(1, 1, 1, 10, TIMESTAMPTZ '2026-02-28 22:30:00+00', 7), "
-                    "(2, 1, 1, 10, TIMESTAMPTZ '2026-07-31 21:15:00+00', 7)")
-            from unittest.mock import AsyncMock, patch
-
-            with patch("core.pg_replication.replicate_managers", new=AsyncMock()):
-                await store.update_manager_stats()
-            async with store.connection() as conn:
-                row = conn.execute(
-                    "SELECT first_order_date, last_order_date, order_count "
-                    "FROM managers WHERE id = 7").fetchone()
-                old = conn.execute(
-                    "SELECT MIN(DATE(ordered_at)), MAX(DATE(ordered_at)) FROM orders"
-                ).fetchone()
-        finally:
-            await store.close()
-        assert row == (date(2026, 3, 1), date(2026, 8, 1), 2)
-        if session_tz == "Europe/Kyiv":
-            assert old == (date(2026, 3, 1), date(2026, 8, 1)), (
-                "production's answer must not move")
-        else:
-            assert old == (date(2026, 2, 28), date(2026, 7, 31)), (
-                "the case the old spelling got wrong")
 
 
 # ─── The copy-back's fourth source ──────────────────────────────────────────
@@ -469,88 +434,15 @@ def flags(monkeypatch):
     return monkeypatch
 
 
-class _Chain3:
-    """`core.pg_orders_write` as far as chain 5 asks it: `mode()`."""
-
-    WRITE_ENV = "KS_WRITE_ORDERS"
-
-    def __init__(self, mode="postgres", raises=None):
-        self._mode, self._raises = mode, raises
-
-    def mode(self):
-        if self._raises:
-            raise self._raises
-        return self._mode
-
-
-# Where the stand-in goes: a name of its own, never `core.pg_orders_write`.
-# Chain 3 is in the tree, and its own `mode()` reads its module back out of
-# `sys.modules` (`pg_orders_write._self`), so a stand-in at chain 3's name would
-# answer for the REAL chain everywhere else in the process — the tick's order
-# step asks `pg_orders_write.mode()` too, and got this object. Chain 5 asks
-# chain 3 by the name in `_CHAIN3`, read when it asks, so pointing that at the
-# stand-in fakes exactly what chain 5 asks and nothing chain 3 asks of itself.
-_CHAIN3_STAND_IN = "tests.unit._chain3_as_chain5_asks_it"
-
-
-def _stand_in_chain3(mp, value) -> None:
-    """Chain 3 as chain 5 sees it: `value` is a `_Chain3`, or None for a
-    build without chain 3."""
-    import sys
-
-    from core import pg_managers_write
-
-    mp.setattr(pg_managers_write, "_CHAIN3", _CHAIN3_STAND_IN)
-    mp.setitem(sys.modules, _CHAIN3_STAND_IN, value)
-
-
 @pytest.fixture
 def every_precondition_met(flags):
-    """The three facts chain 5 waits on, each made true at its source — so a
-    test that then breaks one exercises the real check, not a stub of it.
-    Chain 3's answer is the one stand-in, at the name chain 5 asks
-    (`_stand_in_chain3`); `TestTheRealChain3` asks the real one. (The goal
-    bridge was a fourth, until chain 7b-4 deleted it.)"""
-    from core import read_fallback, warehouse_cutover
-
-    flags.setattr(warehouse_cutover, "_mode", "postgres")
-    _stand_in_chain3(flags, _Chain3())
-    flags.setattr(read_fallback, "refusing", lambda: True)
+    """The facts chain 5 waited on. Since step 14's S14-00 it waits on none:
+    it writes Postgres whatever its flag says."""
     return flags
 
 
 class TestTheFlag:
-    def test_off_by_default_and_registered_standing_nothing_down(self, flags):
-        """Mutation: default to postgres — production would move at deploy."""
-        from core import pg_managers_write, write_chains
 
-        assert pg_managers_write.env_writes_postgres() is False
-        assert pg_managers_write.mode() == "duckdb"
-        assert pg_managers_write in write_chains.WRITE_CHAINS
-        state = write_chains.chain_modes()["pg_managers_write"]
-        assert (state["mode"], state["error"], state["latched"]) == ("duckdb", None, False)
-        assert not set(pg_managers_write.CHAIN_TABLES) & write_chains.stood_down_tables()
-        assert write_chains.chain_for_sync_key("last_sync_managers") is pg_managers_write
-
-    def test_a_typo_stops_this_chain_and_nothing_else(self, flags):
-        """DN-01. Mutation: swallow the typo as duckdb — the writers would go
-        on writing DuckDB, and the replica would ship over nothing."""
-        from core import pg_managers_write, write_chains
-
-        flags.setenv(pg_managers_write.WRITE_ENV, "postgress")
-        with pytest.raises(RuntimeError, match=pg_managers_write.WRITE_ENV):
-            pg_managers_write.env_writes_postgres()
-        with pytest.raises(RuntimeError):
-            pg_managers_write.writes_postgres()
-        modes = write_chains.chain_modes()
-        assert modes["pg_managers_write"]["mode"] is None
-        assert "postgress" in modes["pg_managers_write"]["error"]
-        assert set(pg_managers_write.CHAIN_TABLES) <= write_chains.stood_down_tables()
-        assert all(state["mode"] == "duckdb" for name, state in modes.items()
-                   if name != "pg_managers_write")
-        assert pg_managers_write.mode() is None
-        # Reads hand the choice back: neither copy moves on a typo.
-        assert pg_managers_write.reads_postgres() is False
 
     def test_the_latch_outranks_any_flag(self, flags):
         from core import chain_latch, pg_managers_write
@@ -560,171 +452,6 @@ class TestTheFlag:
         assert pg_managers_write.writes_postgres() is True
         assert pg_managers_write.mode() == "postgres"
         assert pg_managers_write.reads_postgres() is True
-
-
-class TestThePreconditions:
-    def test_today_every_one_is_unmet(self, flags):
-        from core import pg_managers_write
-
-        unmet = pg_managers_write.unmet_precondition()
-        for key in ("step13", "chain3", "read_fallback_off"):
-            assert key in unmet, key
-        assert "goals_bridge" not in unmet
-
-    def test_the_goal_bridge_is_no_precondition_any_more(self, every_precondition_met):
-        """Chain 7b-4 deleted the DN-12 bridge: no goal calculator reads
-        DuckDB's `managers` or `manager_classifications`, so nothing about the
-        goals holds this chain — the goal history is Silver's, and step 13
-        (a precondition here) is what makes it Postgres'. Mutation: put
-        `goals_bridge` back in `_CHECKS`, answering as it did — this chain
-        declares two tables the bridge read."""
-        from core import chain_latch, pg_managers_write
-
-        # The lockout (revision 0035) is no condition of the goals: it holds
-        # every batch-E chain alike until no older image can start.
-        assert [key for key, _check in pg_managers_write._CHECKS] == [
-            chain_latch.LOCKOUT_KEY, "step13", "chain3", "read_fallback_off"]
-        assert not hasattr(pg_managers_write, "_goals_bridge_unmet")
-        assert pg_managers_write.unmet_precondition() is None
-        every_precondition_met.setenv(pg_managers_write.WRITE_ENV, "postgres")
-        assert pg_managers_write.mode() == "postgres"
-
-    def test_with_all_three_met_the_flag_moves_the_writes(self, every_precondition_met):
-        from core import pg_managers_write
-
-        assert pg_managers_write.unmet_precondition() is None
-        every_precondition_met.setenv(pg_managers_write.WRITE_ENV, "postgres")
-        assert pg_managers_write.writes_postgres() is True
-        assert pg_managers_write.mode() == "postgres"
-        assert pg_managers_write.reads_postgres() is True
-
-    @pytest.mark.parametrize("broken", ["step13", "chain3", "read_fallback_off"])
-    def test_any_one_unmet_holds_the_flag_on_duckdb(self, every_precondition_met, broken):
-        """Mutation: remove any one of the three checks."""
-        from core import pg_managers_write, read_fallback, warehouse_cutover
-
-        env = every_precondition_met
-        if broken == "step13":
-            env.setattr(warehouse_cutover, "_mode", "duckdb")
-        elif broken == "chain3":
-            _stand_in_chain3(env, _Chain3("duckdb"))
-        else:
-            env.setattr(read_fallback, "refusing", lambda: False)
-        env.setenv(pg_managers_write.WRITE_ENV, "postgres")
-
-        assert pg_managers_write.unmet_precondition().startswith(broken)
-        assert pg_managers_write.writes_postgres() is False
-        assert pg_managers_write.mode() == "duckdb"
-        # And reads stay with the rows: a held flag writes DuckDB.
-        assert pg_managers_write.reads_postgres() is False
-
-    def test_a_build_without_chain_3_is_unmet_not_an_import_error(self, every_precondition_met):
-        """Mutation: treat a missing chain 3 as met."""
-        from core import pg_managers_write
-
-        _stand_in_chain3(every_precondition_met, None)
-        unmet = pg_managers_write.unmet_precondition()
-        assert unmet == ("chain3: the orders chain is not in this build, and "
-                         "update_manager_stats reads the orders it would freeze")
-
-    def test_a_check_that_raises_is_unmet_and_nothing_escapes(self, every_precondition_met):
-        """Mutation: let a raise propagate — the registry would read the whole
-        question as unreadable, and `/api/health` would publish nothing."""
-        from core import pg_managers_write, warehouse_cutover
-
-        env = every_precondition_met
-
-        def boom():
-            raise RuntimeError("cache unreadable")
-
-        env.setattr(warehouse_cutover, "writes_postgres", boom)
-        _stand_in_chain3(env, _Chain3(raises=OSError("nope")))
-        unmet = pg_managers_write.unmet_precondition()
-        assert "step13: could not be read (RuntimeError)" in unmet
-        assert "chain3: could not be read (OSError)" in unmet
-
-    def test_it_never_asks_postgres(self, flags):
-        """/api/health asks it through the registry with Postgres down."""
-        from unittest.mock import AsyncMock, patch
-
-        from core import pg_managers_write
-
-        with patch("core.pg.get_pool", new=AsyncMock(side_effect=AssertionError)):
-            pg_managers_write.unmet_precondition()
-
-
-class TestTheRealChain3:
-    """Chain 3 is in the tree: what chain 5 asks is the registered module,
-    and its answer is the registry's. The tests above stand chain 3 in;
-    these do not."""
-
-    @pytest.fixture
-    def others_met(self, flags):
-        from core import read_fallback, warehouse_cutover
-
-        flags.setattr(warehouse_cutover, "_mode", "postgres")
-        flags.setattr(read_fallback, "refusing", lambda: True)
-        flags.delenv("KS_WRITE_ORDERS", raising=False)
-        return flags
-
-    def test_chain_5_asks_the_registered_chain_3(self):
-        import importlib
-
-        from core import pg_managers_write, pg_orders_write, write_chains
-
-        assert importlib.import_module(pg_managers_write._CHAIN3) is pg_orders_write
-        assert pg_orders_write in write_chains.WRITE_CHAINS
-
-    def test_chain_3_on_duckdb_holds_chain_5_and_is_one_reason(self, others_met):
-        """Mutation: a `; ` inside the reason — `preflight` splits on it, and
-        published a lever as a precondition of its own."""
-        from core import pg_managers_write
-
-        unmet = pg_managers_write.unmet_precondition()
-        assert unmet.startswith("chain3: ") and "KS_WRITE_ORDERS runs as duckdb" in unmet
-        assert unmet.split("; ") == [unmet]
-        others_met.setenv(pg_managers_write.WRITE_ENV, "postgres")
-        assert pg_managers_write.mode() == "duckdb"
-
-    def test_chain_3_latched_meets_it(self, others_met):
-        from core import chain_latch, pg_managers_write, pg_orders_write
-
-        chain_latch.latch(pg_orders_write.CHAIN)
-        assert pg_orders_write.mode() == "postgres"
-        assert pg_managers_write.unmet_precondition() is None
-
-    @pytest.mark.asyncio
-    async def test_the_preflight_names_each_precondition_once(self, flags, monkeypatch):
-        """Every reason is one entry, with the real chain 3 answering."""
-        from unittest.mock import AsyncMock
-
-        from core import pg_managers_write
-
-        monkeypatch.setattr("core.pg.get_pool",
-                            AsyncMock(side_effect=AssertionError("Postgres was asked")))
-        out = await pg_managers_write.preflight()
-        assert [r.split(":")[0] for r in out["reasons"]] == [
-            "step13", "chain3", "read_fallback_off"]
-
-    @pytest.mark.asyncio
-    async def test_a_reason_with_a_semicolon_is_still_one(self, flags, monkeypatch):
-        """Structurally, not by every reason's wording: chain 3's goal-bridge
-        reason carried a "; " and its preflight published the lever after it
-        as a precondition of its own (batch-E review). That reason went with
-        the bridge (chain 7b-4); the next one with a "; " must not repeat it.
-        Mutation: split the joined `unmet_precondition()` on "; " again."""
-        from unittest.mock import AsyncMock
-
-        from core import pg_managers_write
-
-        monkeypatch.setattr("core.pg.get_pool",
-                            AsyncMock(side_effect=AssertionError("Postgres was asked")))
-        monkeypatch.setattr(pg_managers_write, "_CHECKS", (
-            ("step13", lambda: "step13: not in force; flip step 13 first"),
-            ("chain3", lambda: "chain3: on duckdb")))
-        out = await pg_managers_write.preflight()
-        assert out["reasons"] == ["step13: not in force; flip step 13 first",
-                                  "chain3: on duckdb"]
 
 
 # ─── The writers, as code ───────────────────────────────────────────────────
@@ -1066,43 +793,6 @@ class TestAClassificationThatCannotLand:
 # ─── DuckDB stands down where the chain took over ───────────────────────────
 
 
-class TestTheBootSeedStandsDownOnTheLatch:
-    @pytest.mark.asyncio
-    async def test_a_latched_chain_leaves_duckdbs_intervals_alone(self, tmp_path):
-        """H3: a baseline seeded in DuckDB after the latch is a key only
-        DuckDB holds, which the copy-back refuses on. Mutation: drop the guard."""
-        from unittest.mock import AsyncMock, patch
-
-        from core import chain_latch
-        from core.duckdb_store import DuckDBStore
-
-        path = tmp_path / "seed.duckdb"
-        store = DuckDBStore(db_path=path)
-        await store.connect()
-        with patch("core.pg_replication.replicate_managers", new=AsyncMock()):
-            await store.upsert_managers([{"id": 1, "name": "A"}, {"id": 4, "name": "B"}])
-        await store.close()
-
-        chain_latch.latch("pg_managers_write")
-        store = DuckDBStore(db_path=path)
-        await store.connect()                 # _m0006 runs here
-        async with store.connection() as conn:
-            latched = conn.execute(
-                "SELECT COUNT(*) FROM manager_classifications").fetchone()[0]
-        await store.close()
-        assert latched == 0
-
-        chain_latch.release("pg_managers_write")
-        store = DuckDBStore(db_path=path)
-        await store.connect()
-        async with store.connection() as conn:
-            seeded = conn.execute(
-                "SELECT manager_id, is_retail FROM manager_classifications "
-                "ORDER BY manager_id").fetchall()
-        await store.close()
-        assert seeded == [(1, False), (4, True)]
-
-
 class TestTheStoreRoutes:
     @pytest.mark.asyncio
     async def test_get_all_managers_reads_postgres_under_the_chain_and_never_duckdb(self, flags):
@@ -1203,6 +893,13 @@ def _tick(monkeypatch, *, upsert=None, managers_due=True):
     svc._fetch_orders_with_date_filter = AsyncMock(return_value=[])
     svc.sync_offers = AsyncMock(return_value=5)
     svc.sync_stocks = AsyncMock(return_value=7)
+    # Since step 14's S14-00 every chain writes Postgres, a constant; the
+    # tick's other steps are faked on the store here, and keep its paths.
+    from core import pg_buyers_write, pg_catalogue_write, pg_inventory_write, pg_orders_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_orders_write, pg_buyers_write,
+                           pg_inventory_write, pg_catalogue_write)
     return svc, store
 
 
@@ -1263,27 +960,6 @@ class TestTheManagersStep:
         svc.sync_offers.assert_awaited()
         assert svc.managers_step_health()["last_error"] == "ConnectionError"
 
-    @pytest.mark.asyncio
-    async def test_a_typo_is_contained_without_asking_keycrm(self, monkeypatch, flags):
-        """The chain's own getter raises on its typo (DN-01); the tick goes on."""
-        from core import pg_managers_write
-
-        flags.setenv(pg_managers_write.WRITE_ENV, "postgress")
-        svc, store = _tick(monkeypatch)
-        others = store.get_last_sync_time.side_effect
-
-        async def getter(key):
-            if key == "managers":
-                pg_managers_write.writes_postgres()      # raises, as the store's does
-            return others(key)
-
-        from unittest.mock import AsyncMock
-
-        store.get_last_sync_time = AsyncMock(side_effect=getter)
-        await svc.incremental_sync()
-        store.upsert_managers.assert_not_awaited()
-        svc.sync_offers.assert_awaited()
-        assert svc.managers_step_health()["last_error"] == "RuntimeError"
 
     @pytest.mark.asyncio
     async def test_a_success_under_the_chain_stamps_and_is_published(
@@ -1313,19 +989,6 @@ class TestTheManagersStep:
         assert await svc.sync_managers() == 0
         assert not _stamped(store)
         assert svc.managers_step_health()["last_error"] == "OSError"
-
-    @pytest.mark.asyncio
-    async def test_on_duckdb_a_failure_escapes_exactly_as_before(self, monkeypatch, flags):
-        """Mutation: apply the containment in duckdb mode — production's
-        behaviour would change with the flag off."""
-        from unittest.mock import AsyncMock
-
-        svc, store = _tick(monkeypatch,
-                           upsert=AsyncMock(side_effect=RuntimeError("duckdb gone")))
-        with pytest.raises(RuntimeError, match="duckdb gone"):
-            await svc.sync_managers()
-        assert svc.managers_step_health()["failures_since_ok"] == 0
-        assert not _stamped(store)
 
 
 # ─── Every read of the two tables follows the chain ─────────────────────────
@@ -1501,15 +1164,6 @@ def route(monkeypatch, flags):
 class TestTheRoute:
     PATH = "/api/managers/34/retail-status?is_retail=true"
 
-    def test_a_typo_is_409_and_nothing_is_written(self, route, flags):
-        """Mutation: let it through — it would be a 500, or written to DuckDB."""
-        from core import pg_managers_write
-
-        flags.setenv(pg_managers_write.WRITE_ENV, "postgress")
-        store = _RouteStore()
-        res = route(store).post(self.PATH)
-        assert res.status_code == 409 and pg_managers_write.WRITE_ENV in res.json()["detail"]
-        assert store.set_calls == []
 
     def test_a_backdate_is_409_naming_the_latest_change(self, route, flags):
         from core import chain_latch, pg_managers_write
@@ -1532,10 +1186,6 @@ class TestTheRoute:
         assert res.status_code == 503 and "OSError" in res.json()["detail"]
         assert "connection refused" not in res.text
 
-    def test_on_duckdb_a_failure_is_what_it_always_was(self, route, flags):
-        store = _RouteStore(RuntimeError("duckdb broke"))
-        with pytest.raises(RuntimeError, match="duckdb broke"):
-            route(store).post(self.PATH)
 
     def test_under_the_chain_the_replica_says_it_stood_down(self, route, flags, monkeypatch):
         from core import chain_latch, pg_managers_write
@@ -1630,88 +1280,8 @@ _CLEAN_SHAPE = {"managers": 40, "intervals": 44, "unclassified": [], "open_wrong
                 "broken": [], "disagree": [], "set_at_null": 0, "orphans": []}
 
 
-class _PreflightConn(_PgConn):
-    def __init__(self, marks, shape):
-        super().__init__()
-        self.marks, self.shape = marks, shape
-
-    async def fetch(self, sql, *args, **kw):
-        self.calls.append((sql, args))
-        return self.marks
-
-    async def fetchrow(self, sql, *args, **kw):
-        self.calls.append((sql, args))
-        return self.shape
-
-
-def _fresh(table):
-    return {"table_name": table, "failures_since_ok": 0, "age_s": 3600.0}
-
-
 class TestThePreflight:
-    @pytest.mark.asyncio
-    async def test_today_it_names_the_preconditions(self, flags, monkeypatch):
-        from unittest.mock import AsyncMock
 
-        from core import pg_managers_write
-
-        conn = _PreflightConn([_fresh(t) for t in pg_managers_write.CHAIN_TABLES],
-                              dict(_CLEAN_SHAPE))
-        monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=_PgPool(conn)))
-        monkeypatch.setattr("core.pg.require_revision", AsyncMock())
-        out = await pg_managers_write.preflight()
-        assert out["ok"] is False
-        assert [r.split(":")[0] for r in out["reasons"]] == [
-            "step13", "chain3", "read_fallback_off"]
-        # It only reads.
-        assert not [c for c in conn.calls if c[0] in ("BEGIN", "COMMIT")]
-
-    @pytest.mark.asyncio
-    async def test_met_fresh_and_clean_is_ok(self, every_precondition_met, monkeypatch):
-        from unittest.mock import AsyncMock
-
-        from core import pg_managers_write
-
-        conn = _PreflightConn([_fresh(t) for t in pg_managers_write.CHAIN_TABLES],
-                              dict(_CLEAN_SHAPE))
-        monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=_PgPool(conn)))
-        monkeypatch.setattr("core.pg.require_revision", AsyncMock())
-        assert await pg_managers_write.preflight() == {"ok": True, "reasons": []}
-
-    @pytest.mark.asyncio
-    async def test_a_stale_failing_copy_and_a_bad_shape_are_each_named(
-            self, every_precondition_met, monkeypatch):
-        from unittest.mock import AsyncMock
-
-        from core import pg_managers_write
-
-        marks = [{"table_name": "bronze.managers", "failures_since_ok": 2, "age_s": 60.0},
-                 {"table_name": "app.manager_classifications", "failures_since_ok": 0,
-                  "age_s": 30 * 3600.0}]
-        shape = dict(_CLEAN_SHAPE, unclassified=[5], open_wrong=[4, 7], broken=[2],
-                     disagree=[6], set_at_null=1)
-        conn = _PreflightConn(marks, shape)
-        monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=_PgPool(conn)))
-        monkeypatch.setattr("core.pg.require_revision", AsyncMock())
-        reasons = (await pg_managers_write.preflight())["reasons"]
-        text = "\n".join(reasons)
-        assert "bronze.managers is failing (2 in a row)" in text
-        assert "app.manager_classifications was last copied 30 h ago" in text
-        for fragment in ("no interval", "exactly one open", "overlap or leave a gap",
-                         "disagrees", "no set_at"):
-            assert fragment in text, fragment
-
-    @pytest.mark.asyncio
-    async def test_a_postgres_error_is_named_by_class_only(self, every_precondition_met,
-                                                           monkeypatch):
-        from unittest.mock import AsyncMock
-
-        from core import pg_managers_write
-
-        monkeypatch.setattr("core.pg.get_pool", AsyncMock(
-            side_effect=OSError("password authentication failed for user x")))
-        out = await pg_managers_write.preflight()
-        assert out == {"ok": False, "reasons": ["postgres: OSError"]}
 
     @pytest.mark.asyncio
     async def test_the_question_is_over_once_the_chain_writes_postgres(self, flags):
@@ -1745,7 +1315,7 @@ class TestHealthPublishesIt:
         entry = block["pg_managers_write"]
         assert entry["preflight"] == {"ok": False, "reasons": ["step13: x"]}
         assert entry["sync_step"] == {"failures_since_ok": 0}
-        assert entry["mode"] == "duckdb" and entry["unmet_precondition"] is None
+        assert entry["mode"] == "postgres" and entry["unmet_precondition"] is None
         assert block["pg_inventory_write"]["preflight"]["ok"] is True
         assert "preflight" not in block["pg_goals_write"]
 
@@ -1778,377 +1348,6 @@ class TestHealthPublishesIt:
 
 
 # ─── The review of chain 5 (2026-10-08) ─────────────────────────────────────
-
-
-class TestStep13sWayBackIsRefusedWhileTheChainIsLatched:
-    """H1. After a flip any start that would run as duckdb is step 13's way
-    back — an operator's unset, a typo, or a precondition unmet at the start —
-    and the full DuckDB rebuild it owes would derive `sales_type` from the
-    classification this chain froze at its latch. Refused: the start stays
-    postgres (`warehouse_cutover`, THE WAY BACK, REFUSED)."""
-
-    @pytest.fixture
-    def cutover(self, flags):
-        from core import warehouse_cutover as wc
-
-        # A start that read nothing of Postgres: `pg_revision` and the rest
-        # unmet whatever the environment says.
-        flags.setattr(wc, "_gather_facts_blocking",
-                      lambda env: wc.Facts(required_revision="x"))
-        flags.delenv(wc.ENV, raising=False)
-        return flags
-
-    def test_a_start_with_a_precondition_unmet_stays_postgres(self, cutover):
-        """The review's reproduction. Mutation: drop the refusal from the
-        unmet branch of `configure_mode` — DuckDB derives again."""
-        from core import chain_latch, pg_managers_write
-        from core import warehouse_cutover as wc
-
-        chain_latch.latch(pg_managers_write.CHAIN)
-        cutover.setenv(wc.ENV, "postgres")
-        cutover.delenv("KS_CH_URL", raising=False)
-        assert wc.configure_mode() == "postgres"
-        assert not wc.duckdb_derives()
-        assert wc.way_back_refused() == ("pg_managers_write",)
-        # What is unmet is still published, beside the refusal.
-        assert "ch_url" in {u.key for u in wc.preconditions_unmet()}
-        assert "step13" not in (pg_managers_write.unmet_precondition() or "")
-
-    @pytest.mark.parametrize("value", [None, "duckdb", "postgrse"])
-    def test_an_operators_way_back_is_refused_too(self, cutover, value):
-        """Unset, `duckdb`, or a value this build does not understand.
-        Mutation: drop the refusal from the `value != postgres` branch."""
-        from core import chain_latch, pg_managers_write
-        from core import warehouse_cutover as wc
-
-        chain_latch.latch(pg_managers_write.CHAIN)
-        if value is not None:
-            cutover.setenv(wc.ENV, value)
-        assert wc.configure_mode() == "postgres"
-        assert not wc.duckdb_derives()
-        assert wc.way_back_refused() == ("pg_managers_write",)
-        if value == "postgrse":
-            assert "running as 'postgres'" in wc.mode_error()
-
-    @pytest.mark.parametrize("latched", [
-        ("pg_orders_write",), ("pg_managers_write", "pg_orders_write")])
-    @pytest.mark.parametrize("value", [None, "duckdb", "postgres"])
-    def test_chain_3_refuses_it_too_and_both_are_named(self, cutover, latched, value):
-        """Chain 3 in the tree: DuckDB derives Silver from the orders, so its
-        latch refuses the way back exactly as chain 5's does, alone or beside
-        it, and the refusal names every chain holding a source. Mutation: drop
-        the order tables from `DUCKDB_DERIVATION_SOURCES`, or stop at the
-        first latched chain."""
-        from core import chain_latch
-        from core import warehouse_cutover as wc
-
-        for name in latched:
-            chain_latch.latch(name)
-        if value is not None:
-            cutover.setenv(wc.ENV, value)
-        assert wc.configure_mode() == "postgres"
-        assert not wc.duckdb_derives()
-        assert wc.way_back_refused() == latched
-
-    @pytest.mark.parametrize("value", [None, "duckdb", "postgres", "postgrse"])
-    def test_with_nothing_latched_nothing_moves(self, cutover, value):
-        """Production today: nothing latched, so every value runs as it did —
-        `postgres` with a precondition unmet included."""
-        from core import warehouse_cutover as wc
-
-        if value is not None:
-            cutover.setenv(wc.ENV, value)
-        assert wc.configure_mode() == "duckdb"
-        assert wc.duckdb_derives()
-        assert wc.way_back_refused() == ()
-        if value == "postgrse":
-            assert "running as 'duckdb'" in wc.mode_error()
-
-    def test_only_a_chain_over_what_duckdb_derives_from_refuses_it(self, cutover):
-        """Chain 4 latches without step 13, and DuckDB's Silver reads none of
-        the buyers. Mutation: refuse on any latched chain, or on every
-        `pg_derivation.SOURCE_TABLES` table (`bronze.buyers` is one)."""
-        from core import chain_latch, write_chains
-        from core import warehouse_cutover as wc
-
-        others = [c for c in write_chains.WRITE_CHAINS
-                  if not set(c.CHAIN_TABLES) & set(wc.DUCKDB_DERIVATION_SOURCES)]
-        assert "pg_buyers_write" in {write_chains.chain_name(c) for c in others}
-        for chain in others:
-            chain_latch.latch(write_chains.chain_name(chain))
-        assert wc.configure_mode() == "duckdb"
-        assert wc.way_back_refused() == ()
-
-    def test_every_chain_over_those_tables_holds_itself_behind_step_13(self, flags):
-        """The refusal reads a latch as "step 13 was flipped". That holds only
-        of a chain that cannot latch while DuckDB derives — chain 5 and chain
-        3, both walked here. Mutation: drop `step13` from chain 5's checks, or
-        from chain 3's."""
-        from core import warehouse_cutover as wc
-        from core import write_chains
-
-        flags.setattr(wc, "_mode", "duckdb")
-        declaring = [c for c in write_chains.WRITE_CHAINS
-                     if set(c.CHAIN_TABLES) & set(wc.DUCKDB_DERIVATION_SOURCES)]
-        assert declaring, "nothing declares a table DuckDB derives from"
-        for chain in declaring:
-            flags.setenv(chain.WRITE_ENV, "postgres")
-            assert "step13" in (chain.unmet_precondition() or ""), chain.__name__
-            name = write_chains.chain_name(chain)
-            assert write_chains.chain_modes()[name]["mode"] == "duckdb", name
-
-    def test_the_full_rebuild_is_not_owed_and_nothing_is_held(self, cutover, tmp_path):
-        """What the refusal is for: no DuckDB rebuild over the frozen
-        classification. Mutation: drop the refusal — the start marks the
-        warehouse dirty in full and holds the checks for it."""
-        import asyncio
-        import json
-
-        from core import chain_latch, pg_managers_write
-        from core import warehouse_cutover as wc
-        from tests.unit.test_warehouse_writer import _metadata, _seed, _store
-
-        store = _store(tmp_path)
-        try:
-            _seed(store, **{wc.WRITER_KEY: {
-                "writer": "postgres", "since": "2026-10-01T00:00:00+00:00",
-                "resolved": True}})
-            chain_latch.latch(pg_managers_write.CHAIN)
-            assert wc.configure_mode() == "postgres"
-            asyncio.run(wc.settle_writer(store))
-            assert not wc.held()
-            assert _metadata(store, "warehouse_dirty") is None
-            assert json.loads(_metadata(store, wc.WRITER_KEY)[0])["writer"] == "postgres"
-        finally:
-            asyncio.run(store.close())
-
-    def test_a_registry_that_cannot_be_read_refuses_nothing(self, cutover, caplog):
-        """`configure_mode` never raises, and an unreadable latch must not
-        stop DuckDB deriving on a deployment that never flipped. Mutation:
-        let the error through."""
-        from core import chain_latch
-        from core import warehouse_cutover as wc
-
-        def boom(chain):
-            raise OSError("marker directory unreadable")
-
-        cutover.setattr(chain_latch, "latched", boom)
-        assert wc.configure_mode() == "duckdb"
-        assert wc.way_back_refused() == ()
-        assert "could not be read" in caplog.text
-
-    def test_health_publishes_it_and_the_canary_judges_it(self, cutover):
-        """Mutation: leave `way_back_refused` out of the health block — the
-        canary would page "ran as duckdb", which it did not."""
-        from bot import canary
-        from core import chain_latch, pg_managers_write
-        from core import warehouse_cutover as wc
-        from core.alerting import Kind, spec_for
-        from web.routes.api import health
-
-        chain_latch.latch(pg_managers_write.CHAIN)
-        cutover.setenv(wc.ENV, "postgres")
-        wc.configure_mode()
-        block = health._warehouse_writer_mode()
-        assert block["mode"] == "postgres"
-        assert block["way_back_refused"] == ["pg_managers_write"]
-        assert wc.status()["way_back_refused"] == ["pg_managers_write"]
-        payload = {"warehouse_writer_mode": block}
-        ((key, message),) = canary.check_warehouse_way_back_refused(payload)
-        assert key == "warehouse_way_back_refused"
-        assert "pg_managers_write" in message and "pg_revision" in message
-        assert canary.check_warehouse_preconditions(payload) == []
-        assert spec_for(key).kind is Kind.CONDITION
-        # An older web, or a start that refused nothing.
-        assert canary.check_warehouse_way_back_refused({}) == []
-        unrefused = dict(block, way_back_refused=[])
-        assert canary.check_warehouse_way_back_refused(
-            {"warehouse_writer_mode": unrefused}) == []
-        assert [k for k, _ in canary.check_warehouse_preconditions(
-            {"warehouse_writer_mode": unrefused})] == ["warehouse_preconditions_unmet"]
-
-    @pytest.mark.parametrize("derive, says", [
-        ("own", "; Postgres derives"),
-        ("piggyback", "; NOTHING derives (KS_PG_DERIVE=piggyback, not own)"),
-        (None, None),
-    ])
-    def test_the_page_says_whether_anything_derives(self, cutover, caplog, derive, says):
-        """Postgres derives on its own signal only under KS_PG_DERIVE=own; under
-        `piggyback` its rebuild rides the DuckDB tick a `postgres` start does
-        not run, so a refusal leaves nothing deriving. The page must not say
-        "Postgres still derives" then — and an unset KS_WRITE_WAREHOUSE
-        evaluates no precondition, so it reads the `derivation` block.
-        Mutation: drop the clause, or the log's half of it."""
-        import logging
-
-        from bot import canary
-        from core import chain_latch, pg_derivation, pg_managers_write
-        from core import warehouse_cutover as wc
-        from web.routes.api import health
-
-        cutover.setattr(pg_derivation, "_mode", derive)
-        chain_latch.latch(pg_managers_write.CHAIN)
-        with caplog.at_level(logging.CRITICAL, logger=wc.__name__):
-            assert wc.configure_mode() == "postgres"      # unset: the operator's way back
-        assert ("NOTHING derives" in caplog.text) is (derive != "own")
-        payload = {"warehouse_writer_mode": health._warehouse_writer_mode()}
-        if derive is not None:
-            payload["derivation"] = health._derivation_mode()
-        ((_key, message),) = canary.check_warehouse_way_back_refused(payload)
-        if says is None:
-            # An older web's payload: no claim either way.
-            assert message.endswith("own what DuckDB derives from"), message
-        else:
-            assert message.endswith(says), message
-        assert "unless KS_PG_DERIVE=own" in dict(canary._ACTIONS)["warehouse_way_back_refused"]
-
-    @pytest.mark.asyncio
-    async def test_the_canary_pages_it_with_its_own_lever_and_title(self):
-        from datetime import timedelta
-        from unittest.mock import patch
-
-        import httpx
-
-        from bot import canary
-        from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
-
-        payload = _healthy_payload()
-        payload["warehouse_writer_mode"] = {
-            "mode": "postgres", "value": "duckdb", "error": None,
-            "preconditions_unmet": [], "held": False, "held_for_s": None,
-            "reclassify_needed": False, "way_back_refused": ["pg_managers_write"]}
-
-        def handler(request):
-            return httpx.Response(200, json=payload)
-
-        future = datetime.now(timezone.utc) + timedelta(days=60)
-        cert = {"notAfter": future.strftime("%b %d %H:%M:%S %Y GMT")}
-        async with _mock_transport(handler) as client:
-            with patch.object(canary, "_fetch_peer_cert", return_value=cert):
-                result = await canary.run_canary(DASHBOARD, client=client)
-        assert result.severity == "critical"
-        assert result.failure_keys == ["warehouse_way_back_refused"]
-        assert "chain_copy_back" in canary._what_to_do(result)
-        assert canary._title(result) == "Warehouse way back refused"
-
-
-class TestTheStatsWaitForTheOrders:
-    """The ways back run chain 5's before chain 3's. Between the two DuckDB
-    writes the managers again while chain 3 still owns the orders, and
-    DuckDB's `orders` stopped at chain 3's latch."""
-
-    @staticmethod
-    def _orders_chain():
-        import types
-
-        chain = types.ModuleType("core.pg_chain_orders_write")
-        chain.WRITE_ENV = "KS_WRITE_CHAIN_ORDERS"
-        chain.CHAIN_TABLES = ("bronze.orders", "bronze.order_products")
-        chain.env_writes_postgres = lambda: True
-        return chain
-
-    @pytest.mark.asyncio
-    async def test_they_hold_rather_than_go_backwards_and_nothing_is_shipped(
-            self, flags, tmp_path):
-        """Mutation: drop the guard in `update_manager_stats` — the review's
-        reproduction: Postgres held 2026-10-06 and 500 orders, and after the
-        recompute 2026-09-01 and 1."""
-        from unittest.mock import AsyncMock, patch
-
-        from core import write_chains
-        from core.duckdb_store import DuckDBStore
-
-        store = DuckDBStore(db_path=tmp_path / "stats.duckdb")
-        await store.connect()
-
-        async def stats():
-            async with store.connection() as conn:
-                return conn.execute(
-                    "SELECT first_order_date, last_order_date, order_count "
-                    "FROM managers WHERE id = 34").fetchone()
-        try:
-            async with store.connection() as conn:
-                conn.execute(
-                    "INSERT INTO managers (id, name, first_order_date, last_order_date, "
-                    "order_count) VALUES (34, 'M', DATE '2025-01-01', DATE '2026-10-06', 500)")
-                conn.execute(
-                    "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at, "
-                    "created_at, updated_at, manager_id) VALUES (980000001, 1, 1, 100, "
-                    "TIMESTAMPTZ '2026-09-01 10:00:00+00', TIMESTAMPTZ '2026-09-01 10:00:00+00', "
-                    "TIMESTAMPTZ '2026-09-01 10:00:00+00', 34)")
-            registered = write_chains.WRITE_CHAINS
-            replica = AsyncMock()
-            with patch("core.pg_replication.replicate_managers", new=replica):
-                flags.setattr(write_chains, "WRITE_CHAINS",
-                              registered + (self._orders_chain(),))
-                assert await store.update_manager_stats() == 0
-                assert await stats() == (date(2025, 1, 1), date(2026, 10, 6), 500)
-                replica.assert_not_awaited()
-
-                # The control: with nobody owning the orders, they are counted.
-                flags.setattr(write_chains, "WRITE_CHAINS", registered)
-                assert await store.update_manager_stats() == 1
-                assert await stats() == (date(2026, 9, 1), date(2026, 9, 1), 1)
-                replica.assert_awaited_once()
-        finally:
-            await store.close()
-
-
-class TestTheReviewsSmallerGuards:
-    @pytest.mark.parametrize("key", ["step13", "chain3", "read_fallback_off"])
-    def test_a_check_that_raises_is_keyed_by_its_precondition(
-            self, every_precondition_met, key):
-        """Every reason starts with the precondition's name, an unreadable one
-        too. Mutation: derive the key from the function's name —
-        `_read_fallback_unmet` read as "read_fallback"."""
-        from core import pg_managers_write, read_fallback, warehouse_cutover
-
-        def boom(*_a):
-            raise OSError("unreadable")
-
-        env = every_precondition_met
-        if key == "step13":
-            env.setattr(warehouse_cutover, "writes_postgres", boom)
-        elif key == "chain3":
-            _stand_in_chain3(env, _Chain3(raises=OSError("x")))
-        else:
-            env.setattr(read_fallback, "refusing", boom)
-        assert pg_managers_write.unmet_precondition() == f"{key}: could not be read (OSError)"
-
-    @pytest.mark.asyncio
-    async def test_an_empty_managers_table_is_a_reason_before_the_flip(
-            self, every_precondition_met, monkeypatch):
-        """A flip over an empty `bronze.managers` sends every manager's orders
-        to `internal`. Mutation: drop the reason."""
-        from unittest.mock import AsyncMock
-
-        from core import pg_managers_write
-
-        conn = _PreflightConn([_fresh(t) for t in pg_managers_write.CHAIN_TABLES],
-                              dict(_CLEAN_SHAPE, managers=0, intervals=0))
-        monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=_PgPool(conn)))
-        monkeypatch.setattr("core.pg.require_revision", AsyncMock())
-        assert await pg_managers_write.preflight() == {
-            "ok": False, "reasons": ["shape: bronze.managers is empty"]}
-
-    @pytest.mark.asyncio
-    async def test_while_a_precondition_is_unmet_postgres_is_not_asked(self, flags,
-                                                                       monkeypatch):
-        """The default build: chain 3 on DuckDB, so the flag cannot move the
-        writes, and `/api/health` asks Postgres nothing on this chain's behalf
-        once a minute. Mutation: ask anyway (the review: a default-on change
-        not gated by KS_WRITE_MANAGERS)."""
-        from unittest.mock import AsyncMock
-
-        from core import pg_managers_write
-
-        get_pool = AsyncMock(side_effect=AssertionError("Postgres was asked"))
-        monkeypatch.setattr("core.pg.get_pool", get_pool)
-        out = await pg_managers_write.preflight()
-        assert out["ok"] is False
-        assert [r.split(":")[0] for r in out["reasons"]] == [
-            "step13", "chain3", "read_fallback_off"]
-        get_pool.assert_not_awaited()
 
 
 class TestTheRouteAnswersWhatHappened:

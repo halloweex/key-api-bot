@@ -172,52 +172,6 @@ class TestThePreviewIsReadOnly:
             assert isinstance(kw.get("readonly"), ast.Constant) and kw["readonly"].value is True
 
 
-class TestTheWritePathWhenTheFileIsHeld:
-    def test_the_lock_is_recognised_and_other_io_errors_are_not(self):
-        assert script.held_by_another_process(duckdb.IOException(LOCKED))
-        assert not script.held_by_another_process(
-            duckdb.IOException("IO Error: No space left on device"))
-        assert not script.held_by_another_process(RuntimeError(LOCKED))
-
-    @pytest.mark.asyncio
-    async def test_it_exits_2_and_derives_nothing(self, monkeypatch, capsys):
-        from core import duckdb_store
-
-        monkeypatch.setattr(duckdb_store, "get_store",
-                            AsyncMock(side_effect=duckdb.IOException(LOCKED)))
-        derive = AsyncMock()
-        monkeypatch.setattr(script, "derive_gender", derive)
-
-        assert await script.main(rebuild_all=True, dry_run=False, use_duckdb=False) == 2
-        derive.assert_not_called()
-        err = capsys.readouterr().err
-        assert "Nothing was written" in err
-        assert "replicate_operational/trigger" in err
-        assert "--dry-run" in err
-
-    @pytest.mark.asyncio
-    async def test_the_duckdb_preview_refuses_the_same_way(self, monkeypatch):
-        from core import duckdb_store
-
-        monkeypatch.setattr(duckdb_store, "get_store",
-                            AsyncMock(side_effect=duckdb.IOException(LOCKED)))
-        assert await script.main(rebuild_all=False, dry_run=True, use_duckdb=True) == 2
-
-    @pytest.mark.asyncio
-    async def test_any_other_io_error_is_not_dressed_up_as_a_lock(self, monkeypatch):
-        from core import duckdb_store
-
-        monkeypatch.setattr(duckdb_store, "get_store", AsyncMock(
-            side_effect=duckdb.IOException("IO Error: No space left on device")))
-        with pytest.raises(duckdb.IOException):
-            await script.main(rebuild_all=False, dry_run=False, use_duckdb=False)
-
-    @pytest.mark.asyncio
-    async def test_a_preview_without_a_dsn_says_so(self, monkeypatch):
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        assert await script.main(rebuild_all=False, dry_run=True, use_duckdb=False) == 3
-
-
 class TestTheWritePathUnderChain4:
     """With `KS_WRITE_BUYERS` moving the buyers, the verdicts are Postgres's
     and DuckDB's copy has stopped — but a script may take the chain's first

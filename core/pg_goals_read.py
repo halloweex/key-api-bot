@@ -153,15 +153,18 @@ def history_mode_of(raw: Optional[str]) -> str:
 
 
 def history_mode() -> str:
-    """`silver`, which is every history read's answer since chain 7b-4 — or
-    a raise, for any `KS_GOALS_HISTORY` but unset or `silver`. Read at every
-    history read, never at import."""
-    return history_mode_of(os.getenv(HISTORY_ENV))
+    """`silver`, which is every history read's answer since chain 7b-4 —
+    whatever `KS_GOALS_HISTORY` says, since step 14's S14-00: production
+    keeps `silver` in `.env` for the images before step 14, and this code
+    reads the
+    variable for nothing, so no value of it can refuse a read. The canary's
+    `goals_history_mode_invalid` goes with the block (S14-07)."""
+    return SILVER
 
 
 def history_state() -> dict:
-    """`KS_GOALS_HISTORY` as a history read would take it now: `mode`
-    (`silver`), or None and the `error` that read would raise. Never raises.
+    """`KS_GOALS_HISTORY` as a history read would take it now: since S14-00
+    always `mode` `silver` and no `error`. Never raises.
 
     The raise is at the read, so a refused value stops every read of the
     calculators' history — the dashboard's goal widget (`/goals/smart`), the

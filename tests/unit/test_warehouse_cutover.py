@@ -3,6 +3,10 @@ precondition evaluator. The switch those feed is DN-29's, and its own tests are
 in `tests/unit/test_warehouse_writer.py`; what is pinned here of it is that
 `postgres` with a precondition unmet still runs as `duckdb`.
 
+Since step 14's S14-00 the mode is a constant, `postgres`, and every test of
+the mode's choosing went with it; the evaluator stays as the status page's
+report until S14-15.
+
 The integrity plumbing the stand-down feeds — the scan skipping the checks and
 the twins standing in — is in `tests/unit/test_pg_warehouse_dq.py`; the
 Postgres-only Gold check is in `tests/unit/test_pg_gold.py` and
@@ -46,57 +50,10 @@ def postgres_writer(monkeypatch):
 
 
 class TestTheMode:
-    def test_unset_is_duckdb(self, fresh, monkeypatch):
-        monkeypatch.delenv(wc.ENV, raising=False)
-        assert fresh.configure_mode() == "duckdb"
-        assert fresh.mode_error() is None and not fresh.writes_postgres()
 
-    def test_before_configure_it_is_duckdb(self, fresh):
-        assert fresh.mode() == "duckdb" and not fresh.writes_postgres()
-
-    def test_an_unknown_value_runs_as_duckdb_and_publishes_the_error(
-        self, fresh, monkeypatch, caplog,
-    ):
-        monkeypatch.setenv(wc.ENV, "postgress")
-        with caplog.at_level(logging.ERROR, logger="core.warehouse_cutover"):
-            assert fresh.configure_mode() == "duckdb"
-            fresh.configure_mode()
-        assert "postgress" in fresh.mode_error()
-        assert fresh.status()["error"] == fresh.mode_error()
-        # web's startup and the scheduler both configure: one ERROR per cause.
-        assert caplog.text.count("postgress") == 1
-
-    def test_postgres_with_its_preconditions_unmet_runs_as_duckdb(
-        self, fresh, monkeypatch, caplog,
-    ):
-        """OD-09 (b): nothing in this environment is met, so the value is
-        read, the verdict published, and DuckDB goes on deriving with every
-        check up — the other half of a switch never reached."""
-        monkeypatch.setenv(wc.ENV, " Postgres ")
-        with caplog.at_level(logging.WARNING, logger="core.warehouse_cutover"):
-            assert fresh.configure_mode() == "duckdb"
-        assert fresh.value() == "postgres" and fresh.mode_error() is None
-        assert not fresh.writes_postgres() and fresh.duckdb_derives()
-        assert fresh.stood_down_duckdb_checks() == frozenset()
-        assert "precondition(s) of the switch are unmet" in caplog.text
-        status = fresh.status()
-        assert (status["value"], status["mode"], status["switch_built"]) == (
-            "postgres", "duckdb", True)
-        assert "pg_derive_own" in {u["key"] for u in status["preconditions_unmet"]}
 
     def test_this_build_carries_the_switch(self):
         assert wc.SWITCH_BUILT is True
-
-    def test_configure_modes_reads_it_before_the_boot_sync(self, fresh, monkeypatch):
-        """Read where every cached mode is read (DN-05b), so DN-29 finds it
-        set before `init_and_sync` runs. The walk in `test_runtime_modes.py`
-        fails as well if the call is dropped."""
-        from core.runtime_modes import configure_modes
-
-        monkeypatch.setenv(wc.ENV, "nope")
-        modes = configure_modes()
-        assert modes[wc.ENV] == "duckdb"
-        assert fresh.value() == "nope" and fresh.mode_error()
 
 
 # ─── Where a typo is seen ────────────────────────────────────────────────────
@@ -108,35 +65,6 @@ class TestAnUnknownValueIsSeen:
     the admin status page, which nothing watches: in this build a typo costs
     nothing, and the first time it would is the DN-29 flip."""
 
-    def test_health_publishes_the_value_the_mode_and_the_error(self, fresh, monkeypatch):
-        from web.routes.api.health import _warehouse_writer_mode
-
-        monkeypatch.setenv(wc.ENV, "postgress")
-        fresh.configure_mode()
-        block = _warehouse_writer_mode()
-        assert (block["mode"], block["value"]) == ("duckdb", "postgress")
-        assert "KS_WRITE_WAREHOUSE='postgress'" in block["error"]
-
-    def test_the_public_endpoint_carries_it_through_its_response_model(
-        self, fresh, monkeypatch,
-    ):
-        """Through the app: `/api/health` declares a response model, and a key
-        the model does not name is dropped on the way out without a word."""
-        from fastapi.testclient import TestClient
-
-        from web.main import app
-        from web.ratelimit import limiter
-
-        monkeypatch.setenv(wc.ENV, "postgress")
-        fresh.configure_mode()
-        limiter.reset()
-        try:
-            body = TestClient(app).get("/api/health").json()
-        finally:
-            limiter.reset()
-        block = body["warehouse_writer_mode"]
-        assert (block["mode"], block["value"]) == ("duckdb", "postgress")
-        assert "KS_WRITE_WAREHOUSE='postgress'" in block["error"]
 
     def test_the_canary_warns_on_an_error_and_is_quiet_otherwise(self):
         from bot.canary import check_warehouse_writer_mode
@@ -186,14 +114,7 @@ class TestAnUnknownValueIsSeen:
 
 
 class TestWhatStandsDown:
-    def test_nothing_while_duckdb_derives(self, fresh):
-        assert wc.stood_down_duckdb_checks() == frozenset()
 
-    def test_the_five_silver_and_gold_checks_under_postgres(self, postgres_writer):
-        assert wc.stood_down_duckdb_checks() == wc.STOOD_DOWN_WHEN_POSTGRES
-        assert wc.STOOD_DOWN_WHEN_POSTGRES == {
-            "silver_arc", "attribution_coverage", "gold_cell_values",
-            "headline_vs_line_items", "goods_shipped_without_sale"}
 
     def test_each_is_a_name_the_scan_guards_a_check_under(self):
         """A name the scan does not guard under would stand nothing down."""
@@ -283,7 +204,10 @@ def _breaking(key: str):
 
 
 KEYS = [key for key, _ in wc.PRECONDITIONS]
-
+# Since step 14's S14-00 `pg_landing.mirror_on` is True for any value, so the
+# landing mirror's precondition can no longer be unmet; the evaluator stays,
+# as `/api/warehouse/status`'s report, until S14-15.
+BREAKABLE = [key for key in KEYS if key != "mirror_landing"]
 
 
 class TestTheEvaluator:
@@ -293,7 +217,7 @@ class TestTheEvaluator:
     def test_the_keys_are_unique(self):
         assert len(KEYS) == len(set(KEYS))
 
-    @pytest.mark.parametrize("key", KEYS)
+    @pytest.mark.parametrize("key", BREAKABLE)
     def test_each_unmet_on_its_own_is_named_and_nothing_else(self, key):
         env, facts = _breaking(key)
         unmet = wc.evaluate_preconditions(env, facts)
@@ -324,7 +248,7 @@ class TestTheEvaluator:
             revision="0000_somebody_elses", required_revision=REQUIRED_REVISION,
             expenses_backfilled=False,
             open_retired=None, open_retired_error="x", od10_doors=A_DOOR))
-        assert [u.key for u in unmet] == KEYS
+        assert [u.key for u in unmet] == BREAKABLE
 
     def test_it_reads_values_as_the_modules_do(self):
         env = {**MET_ENV, "KS_PG_DERIVE": " OWN ", "KS_READ_GOLD": "Postgres"}
@@ -407,23 +331,6 @@ class TestTheModesAreReadAsTheirOwnModulesReadThem:
         assert wc.PG_TWINS == pg_warehouse_dq.ENV and "on" in pg_warehouse_dq._VALID
         assert dict(wc.PRECONDITIONS)["read_fallback_off"] == f"{read_fallback.ENV}=off"
 
-    @pytest.mark.parametrize("value", [None, "off", " OFF ", "Off", "duckdb", "",
-                                       "of", "0"])
-    def test_read_fallback_off_is_met_exactly_when_dn20c_refuses(self, value,
-                                                                  monkeypatch):
-        from core import read_fallback
-
-        env = dict(MET_ENV)
-        if value is None:
-            env.pop(read_fallback.ENV)
-            monkeypatch.delenv(read_fallback.ENV, raising=False)
-        else:
-            env[read_fallback.ENV] = value
-            monkeypatch.setenv(read_fallback.ENV, value)
-        met = "read_fallback_off" not in [
-            u.key for u in wc.evaluate_preconditions(env, MET_FACTS)]
-        assert met is (read_fallback.configure_mode() == read_fallback.OFF)
-
 
 class TestEveryReadSwitchIsDecided:
     """A read switch added later must be put on the list or excluded by name —
@@ -493,15 +400,16 @@ class TestEveryReadSwitchIsDecided:
     def test_it_walks_web_and_bot_as_well_as_core(self):
         assert set(self.ROOTS) == {"core", "web", "bot"}
         declared = self._declared()
-        # `bot/main.py` reads both stores inline, beside the modules in `core/`
-        # that declare them.
+        # `bot/main.py` reads the bot's store inline, beside the module in
+        # `core/` that declares it. (It read `KS_USER_STORE` too until S14-00
+        # made the user list's store a constant.)
         assert "bot/main.py" in declared["KS_BOT_STORE"]
-        assert "bot/main.py" in declared["KS_USER_STORE"]
 
-    def test_the_sms_store_is_found_where_the_sms_tab_reads_it(self):
-        """Inline `os.getenv("KS_SMS_STORE", ...)` in `core/pg_sms.py` — the
-        shape the first walk could not see — and on the list."""
-        assert "core/pg_sms.py" in self._declared()["KS_SMS_STORE"]
+    def test_the_sms_store_is_found_and_on_the_list(self):
+        """`core/pg_sms.py` read it inline until S14-00 made the SMS store a
+        constant; the name is still declared (the table-fates manifest) and
+        still on the list the report reads."""
+        assert self._declared()["KS_SMS_STORE"]
         assert "KS_SMS_STORE" in wc.WAREHOUSE_READERS
 
     def test_the_list_names_only_switches_that_exist(self):
@@ -562,18 +470,6 @@ class TestAPageUnderARetiredCheckHoldsTheSwitch:
                    if c.args and c.args[0] == "dq:integrity"]
         return set(call.kwargs["still_firing"])
 
-    def test_they_are_exactly_what_the_stand_down_stops_holding(self, tmp_path, monkeypatch):
-        """The review's reproduction as the definition: a raised check's
-        conditions are held, a stood-down one's are not, and the difference is
-        the set the precondition reads."""
-        from core.data_quality import GUARDED_CHECK_CONDITIONS
-
-        held_when_raised = self._still_firing(tmp_path, monkeypatch, wc.DUCKDB)
-        held_when_stood_down = self._still_firing(tmp_path, monkeypatch, wc.POSTGRES)
-        integrity = {c for guard in wc.STOOD_DOWN_WHEN_POSTGRES
-                     for c in GUARDED_CHECK_CONDITIONS[guard]}
-        assert held_when_raised - held_when_stood_down == integrity
-        assert integrity <= wc.retired_conditions()
 
     @staticmethod
     def _unmet(**delivered):
@@ -808,12 +704,13 @@ class TestReadiness:
                    AsyncMock(return_value=REQUIRED_REVISION)):
             body = asyncio.run(wc.readiness({**MET_ENV, "KS_UTM_PARSE": "duckdb"}))
         assert body["variable"] == "KS_WRITE_WAREHOUSE"
+        # Since S14-00 an unmet item is a report: the mode is `postgres`.
         assert (body["value"], body["mode"], body["switch_built"]) == (
-            "postgres", "duckdb", True)
+            "postgres", "postgres", True)
         assert body["preconditions_met"] is False
         assert [u["key"] for u in body["unmet"]] == ["utm_parse_postgres"]
         assert body["preconditions"] == KEYS
-        assert body["stood_down_duckdb_checks"] == []
+        assert body["stood_down_duckdb_checks"] == sorted(wc.stood_down_duckdb_checks())
 
     def test_all_met_says_so_and_a_readiness_switches_nothing(self, fresh):
         fresh.configure_mode()
@@ -821,7 +718,7 @@ class TestReadiness:
                    AsyncMock(return_value=REQUIRED_REVISION)):
             body = asyncio.run(wc.readiness(MET_ENV))
         assert body["preconditions_met"] is True and body["unmet"] == []
-        assert body["mode"] == "duckdb" and not wc.writes_postgres()
+        assert body["mode"] == "postgres" and wc.writes_postgres()     # S14-00
 
     def test_the_dsn_is_never_published(self, fresh):
         with patch("core.pg.current_revision",

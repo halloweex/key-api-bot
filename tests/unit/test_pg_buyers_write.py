@@ -3,34 +3,25 @@
 The writers themselves are exercised against a live Postgres in
 `tests/integration/test_buyers_chain_writer.py` and, for the latch, in
 `tests/integration/test_latch_waits_for_a_connection.py`. This file pins the
-decision every consumer reads — the flag, the latch, the three readers that
-must follow the writes — and what is refused before the latch.
+decision every consumer reads — since step 14's S14-00 a constant, Postgres,
+whatever the flag, the latch or the readers say — and what is refused before
+the latch.
 """
 from __future__ import annotations
 
-import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from core import chain_latch, pg_buyers_write as chain, write_chains
 from core import pg_chain_invariants as inv
 
-READERS = ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD")
-
-
 @pytest.fixture
 def flags(monkeypatch):
-    """No flag of this chain's and every reader of the buyers on postgres —
-    production's readers on 2026-09-25 — so a test moves exactly what it
-    means to."""
+    """No flag of this chain's, so a test moves exactly what it means to."""
     monkeypatch.delenv(chain.WRITE_ENV, raising=False)
-    for env in READERS:
-        monkeypatch.setenv(env, "postgres")
-    chain._unmet_warned.clear()
     return monkeypatch
 
 
@@ -77,153 +68,24 @@ class TestTheShape:
                 and CONFIDENCE_LADDER == ("certain", "high", "medium"))
 
 
-class TestTheFlag:
-    def test_the_default_is_duckdb(self, flags):
-        assert chain.writes_postgres() is False
-        assert _mode() == "duckdb"
-
-    def test_postgres_with_every_reader_following(self, flags):
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        assert chain.unmet_precondition() is None
-        assert chain.writes_postgres() is True
-        assert _mode() == "postgres"
-
-    def test_a_typo_raises_in_the_writer_and_is_none_in_the_registry(self, flags):
-        flags.setenv(chain.WRITE_ENV, "postgre")
-        with pytest.raises(RuntimeError, match="KS_WRITE_BUYERS"):
-            chain.writes_postgres()
-        assert chain.mode() is None
-        assert "KS_WRITE_BUYERS" in write_chains.chain_modes()[chain.CHAIN]["error"]
-
-    @pytest.mark.parametrize("value", [None, "duckdb", "postgre"])
-    def test_the_latch_outranks_the_flag(self, flags, value):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        if value is None:
-            flags.delenv(chain.WRITE_ENV, raising=False)
-        else:
-            flags.setenv(chain.WRITE_ENV, value)
-        assert chain.writes_postgres() is True
-        assert chain.mode() == "postgres"
+class TestTheConstant:
+    """Since step 14's S14-00 the chain writes Postgres whatever its flag, its
+    latch or the buyers' readers say — production's answer on 2026-10-21. The
+    tests of the flag, the latch outranking it and the readers' precondition
+    went with that routing."""
 
     @pytest.mark.parametrize("write", [None, "duckdb", "postgres", "postgre"])
-    @pytest.mark.parametrize("lagging", [None, *READERS])
     @pytest.mark.parametrize("latched", [False, True])
-    def test_mode_is_the_registrys_answer_in_every_state(
-            self, flags, write, lagging, latched):
-        """`mode()` is what the buyer selection, the gender rider and the
-        stats branch on, and `writes_postgres()` is what the writer branches
-        on; a state where they differ is the selection reading one store while
-        the writes go to the other."""
-        if write is None:
-            flags.delenv(chain.WRITE_ENV, raising=False)
-        else:
+    def test_postgres_in_every_state(self, flags, write, latched):
+        if write is not None:
             flags.setenv(chain.WRITE_ENV, write)
-        if lagging:
-            flags.setenv(lagging, "duckdb")
+        flags.setenv("KS_SMS_STORE", "duckdb")
         if latched:
             chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        assert chain.mode() == _mode()
-        try:
-            answer = "postgres" if chain.writes_postgres() else "duckdb"
-        except RuntimeError:
-            answer = None
-        assert chain.mode() == answer
-
-
-class TestTheReadersComeFirst:
-    """DN-27's rule, which DN-26 made generic: an unlatched chain whose readers
-    still read DuckDB runs as duckdb, whatever its flag says."""
-
-    @pytest.mark.parametrize("reader", READERS)
-    @pytest.mark.parametrize("value", ["duckdb", "yes"])
-    def test_each_reader_holds_the_chain_on_duckdb(self, flags, reader, value):
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        flags.setenv(reader, value)
-        state = write_chains.chain_modes()[chain.CHAIN]
-        assert chain.writes_postgres() is False
-        assert state["mode"] == "duckdb" and state["error"] is None
-        assert reader in state["unmet_precondition"]
-        # The shippers keep shipping what DuckDB still writes.
-        assert not set(chain.CHAIN_TABLES) & write_chains.stood_down_tables()
-        assert "last_sync_buyers" not in write_chains.stood_down_sync_keys()
-
-    def test_an_unset_reader_is_duckdb_and_unmet(self, flags):
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        flags.delenv("KS_SMS_STORE", raising=False)
-        assert "KS_SMS_STORE is not postgres" in chain.unmet_precondition()
-
-    def test_it_never_asks_postgres(self, flags, monkeypatch):
-        """`/api/health` reads this through the registry and must answer with
-        Postgres down."""
-        from unittest.mock import AsyncMock
-
-        monkeypatch.setattr("core.pg.get_pool",
-                            AsyncMock(side_effect=AssertionError("asked Postgres")))
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        flags.setenv("KS_READ_DASHBOARD", "duckdb")
-        assert chain.unmet_precondition()
-
-    def test_each_reader_is_the_parser_of_the_flag_it_names(self):
-        """The list is what whoever removes a reader must change in the same
-        commit (should `KS_READ_SEARCH_INDEX` be retired, plan rev2 §5.4): a parser
-        that no longer exists fails here, not by holding the chain on DuckDB
-        for good behind a warning."""
-        import ast
-        import importlib
-        import inspect
-        import textwrap
-
-        assert [r[0] for r in chain.READERS] == list(READERS)
-        for name, module, parser in chain.READERS:
-            mod = importlib.import_module(module)
-            fn = getattr(mod, parser)
-            assert callable(fn), (module, parser)
-            if hasattr(mod, "ENV"):
-                assert mod.ENV == name, (module, mod.ENV)
-            else:
-                strings = {n.value for n in ast.walk(ast.parse(
-                    textwrap.dedent(inspect.getsource(fn))))
-                    if isinstance(n, ast.Constant) and isinstance(n.value, str)}
-                assert name in strings, f"{module}.{parser} does not read {name}"
-
-    def test_a_reader_that_is_gone_holds_the_chain_and_says_so(self, flags, monkeypatch):
-        """Not a raise out of the whole question: one reader unmet, named."""
-        monkeypatch.setattr(chain, "READERS", chain.READERS[:1] + (
-            ("KS_READ_SEARCH_INDEX", "core.no_such_module", "enabled"),))
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        state = write_chains.chain_modes()[chain.CHAIN]
-        assert state["mode"] == "duckdb"
-        assert "KS_READ_SEARCH_INDEX is not understood" in state["unmet_precondition"]
-        assert "could not be read" not in state["unmet_precondition"]
-
-    def test_a_latched_chain_keeps_writing_and_says_its_readers_lag(self, flags):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        flags.setenv("KS_READ_SEARCH_INDEX", "duckdb")
-        state = write_chains.chain_modes()[chain.CHAIN]
-        assert chain.writes_postgres() is True and state["mode"] == "postgres"
-        assert "KS_READ_SEARCH_INDEX" in state["unmet_precondition"]
-
-    def test_the_warning_is_not_a_line_a_minute(self, flags, caplog):
-        """The buyers step reads `last_sync_buyers` through this every tick;
-        chain 6a's warn-per-call would be a line a minute for as long as the
-        readers lag (the plan critic's a3)."""
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        flags.setenv("KS_READ_DASHBOARD", "duckdb")
-        with caplog.at_level(logging.WARNING, logger=chain.__name__):
-            for _ in range(5):
-                assert chain.writes_postgres() is False
-        warned = [r for r in caplog.records if "stays on DuckDB" in r.message]
-        assert len(warned) == 1
-
-    def test_a_different_reason_is_said_at_once(self, flags, caplog):
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        flags.setenv("KS_READ_DASHBOARD", "duckdb")
-        with caplog.at_level(logging.WARNING, logger=chain.__name__):
-            chain.writes_postgres()
-            flags.setenv("KS_SMS_STORE", "duckdb")
-            chain.writes_postgres()
-        assert len([r for r in caplog.records if "stays on DuckDB" in r.message]) == 2
+        assert chain.writes_postgres() is True
+        assert chain.mode() == "postgres" == _mode()
+        assert chain.unmet_precondition() is None
+        assert not hasattr(chain, "READERS")
 
 
 def _row(**kw):
@@ -343,24 +205,14 @@ class TestTheCompletenessCheckFollowsTheChain:
     flag, which the chain does not consult (the plan critic's b2)."""
 
     @pytest.mark.asyncio
-    async def test_mirror_off_and_chain_off_asks_nothing(self, flags, monkeypatch):
+    async def test_mirror_off_still_asks(self, flags, monkeypatch):
+        """The chain writes Postgres whatever its flag says (S14-00), and the
+        landing mirror's flag is read for nothing."""
         from unittest.mock import AsyncMock
 
         from core.mirror_reconciliation import reconcile_buyer_completeness
 
         monkeypatch.setenv("KS_MIRROR_LANDING", "0")
-        monkeypatch.setattr("core.pg.get_pool",
-                            AsyncMock(side_effect=AssertionError("asked Postgres")))
-        assert await reconcile_buyer_completeness() == []
-
-    @pytest.mark.asyncio
-    async def test_mirror_off_and_chain_on_still_asks(self, flags, monkeypatch):
-        from unittest.mock import AsyncMock
-
-        from core.mirror_reconciliation import reconcile_buyer_completeness
-
-        monkeypatch.setenv("KS_MIRROR_LANDING", "0")
-        flags.setenv(chain.WRITE_ENV, "postgres")
         asked = AsyncMock(side_effect=RuntimeError("reached Postgres"))
         monkeypatch.setattr("core.pg.get_pool", asked)
         with pytest.raises(RuntimeError, match="reached Postgres"):
@@ -382,18 +234,6 @@ class TestTheHealthBlockCarriesAClockThatSurvivesARestart:
         monkeypatch.setattr(pg_buyer_sync_read, "watermark_age_s", AsyncMock(return_value=12_000))
         block = await health._buyer_sync_block()
         assert block == {"last_ok_age_s": 60, "watermark_age_s": 12_000}
-
-    @pytest.mark.asyncio
-    async def test_on_duckdb_it_asks_postgres_nothing(self, flags, monkeypatch):
-        from unittest.mock import AsyncMock
-
-        from core import pg_buyer_sync_read
-        from web.routes.api import health
-
-        monkeypatch.setattr(health, "_buyer_sync", lambda: {"last_ok_age_s": 60})
-        monkeypatch.setattr(pg_buyer_sync_read, "watermark_age_s",
-                            AsyncMock(side_effect=AssertionError("asked Postgres")))
-        assert await health._buyer_sync_block() == {"last_ok_age_s": 60}
 
     @pytest.mark.asyncio
     async def test_an_unreadable_store_publishes_none(self, flags, monkeypatch):
@@ -447,30 +287,12 @@ class TestTheHourlyRiderDerivesWhereTheChainWrites:
         return store, duck, pg
 
     @pytest.mark.asyncio
-    async def test_on_duckdb_it_derives_in_duckdb(self, flags):
-        store, duck, pg = await self._run()
-        duck.assert_awaited_once_with(store)
-        pg.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_flagged_with_its_readers_it_derives_in_postgres(self, flags):
-        flags.setenv(chain.WRITE_ENV, "postgres")
+    @pytest.mark.parametrize("write", [None, "duckdb", "postgres"])
+    async def test_it_derives_in_postgres_whatever_the_flag(self, flags, write):
+        """Since S14-00 the chain is Postgres, a constant: the rider never
+        derives in DuckDB any more."""
+        if write is not None:
+            flags.setenv(chain.WRITE_ENV, write)
         _store, duck, pg = await self._run()
         pg.assert_awaited_once_with()
         duck.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_latched_with_the_flag_back_it_still_derives_in_postgres(self, flags):
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        flags.setenv(chain.WRITE_ENV, "duckdb")
-        _store, duck, pg = await self._run()
-        pg.assert_awaited_once_with()
-        duck.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_held_by_a_reader_it_derives_in_duckdb(self, flags):
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        flags.setenv("KS_SMS_STORE", "duckdb")
-        store, duck, pg = await self._run()
-        duck.assert_awaited_once_with(store)
-        pg.assert_not_awaited()

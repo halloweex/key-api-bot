@@ -29,6 +29,21 @@ import pytest
 
 from core.data_quality import IntegrityIssue, Severity
 
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is what the mirror-landing and reconciliation jobs
+    file, not where the quality journal lives, and it reads the journal
+    back from DuckDB. So this module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_dq_journal_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
+
+
 # Every check, in the order the job runs it. `reconcile_mirror` is the landing
 # comparison; the rest are named as they are imported.
 CHECKS_BY_MODULE = {
@@ -171,14 +186,16 @@ class TestOneRaisingCheckSilencesNothing:
 
     @pytest.mark.asyncio
     async def test_the_run_is_still_failed_and_names_every_check_that_raised(self):
+        # Two checks production still asks: since step 14's S14-00 Silver's
+        # and Gold's comparisons stand down for good.
         persisted, _, _ = await _run({
-            "reconcile_silver": RuntimeError("silver.orders is gone"),
-            "reconcile_gold": ValueError("gold.daily_revenue is gone"),
+            "reconcile_orders": RuntimeError("bronze.orders is gone"),
+            "pg_gold_internal_check": ValueError("gold.daily_revenue is gone"),
         })
         message = persisted["error_message"]
         assert message and message.startswith("2 check(s) raised")
-        assert "reconcile_silver: RuntimeError" in message
-        assert "reconcile_gold: ValueError" in message
+        assert "reconcile_orders: RuntimeError" in message
+        assert "pg_gold_internal_check: ValueError" in message
 
     @pytest.mark.asyncio
     async def test_a_critical_from_a_completed_check_still_pages(self):
@@ -237,16 +254,6 @@ class TestTheGoldRollUpStandsAloneUnderPostgres:
     exactly the seventeen it ran before."""
 
     @pytest.mark.asyncio
-    async def test_while_duckdb_derives_it_is_not_asked(self, monkeypatch):
-        from core import warehouse_cutover
-
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
-        mocks = {}
-        await _run({}, mocks=mocks)
-        mocks["pg_gold_internal_check"].assert_not_awaited()
-        mocks["reconcile_gold"].assert_awaited_once()
-
-    @pytest.mark.asyncio
     async def test_under_postgres_it_is_asked_once_and_its_finding_pages(
         self, monkeypatch,
     ):
@@ -288,17 +295,6 @@ class TestTheRunSaysWhichChecksItAsked:
     a reader outside the process has."""
 
     @pytest.mark.asyncio
-    async def test_while_duckdb_derives_it_names_the_three_comparisons(self, monkeypatch):
-        from core import warehouse_cutover
-
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
-        returned = []
-        await _run({}, returned=returned)
-        asked = returned[0]["checks_run"]
-        assert asked == [c for c in check_order() if c != "pg_gold_internal_check"]
-        assert set(warehouse_cutover.RETIRED_COMPARISONS) <= set(asked)
-
-    @pytest.mark.asyncio
     async def test_under_postgres_it_names_the_internal_check_and_none_retired(
         self, monkeypatch,
     ):
@@ -315,12 +311,9 @@ class TestTheRunSaysWhichChecksItAsked:
 
     @pytest.mark.asyncio
     async def test_a_check_that_raised_was_still_asked(self, monkeypatch):
-        from core import warehouse_cutover
-
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
         returned = []
-        await _run({"reconcile_gold": ValueError("boom")}, returned=returned)
-        assert "reconcile_gold" in returned[0]["checks_run"]
+        await _run({"pg_gold_internal_check": ValueError("boom")}, returned=returned)
+        assert "pg_gold_internal_check" in returned[0]["checks_run"]
 
     def test_it_is_on_the_completion_line(self):
         """`extra=result` is how the formatter puts it on the line; a key a

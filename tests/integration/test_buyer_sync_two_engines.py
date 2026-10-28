@@ -82,8 +82,14 @@ async def both_engines(tmp_path, monkeypatch):
 
 
 async def _both(store, env, limit):
+    from core import pg_buyers_write
+    from tests.conftest import chains_on_duckdb
+
     env.delenv("KS_READ_BUYER_SYNC", raising=False)
-    duck = await store.get_missing_buyer_ids(limit)
+    # Since step 14's S14-00 chain 4 writes Postgres whatever its flag says,
+    # and its selection follows it there; DuckDB's is asked on purpose.
+    with chains_on_duckdb(pg_buyers_write):
+        duck = await store.get_missing_buyer_ids(limit)
     env.setenv("KS_READ_BUYER_SYNC", "postgres")
 
     def _no_duckdb(*_a, **_k):

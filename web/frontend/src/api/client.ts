@@ -76,6 +76,7 @@ import type {
   MarginAlertItem,
   SmsSegmentsResponse,
   SmsCampaignsResponse,
+  TgBotActivityResponse,
   SmsCampaignResultsResponse,
   SmsSendResult,
   SmsTestSendResult,
@@ -845,6 +846,10 @@ export const api = {
 
   getMarginAlerts: (params: string, options?: FetchOptions) =>
     fetchApi<MarginAlertItem[]>('/margin/alerts', params, options),
+
+  // Telegram bot activity (admin)
+  getTgBotActivity: (days: number, options?: FetchOptions) =>
+    fetchApi<TgBotActivityResponse>('/tg-bot/activity', `days=${days}`, options),
 
   // SMS campaigns
   getSmsSegments: (params: string, options?: FetchOptions) =>

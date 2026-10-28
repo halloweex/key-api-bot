@@ -48,7 +48,8 @@ def main() -> None:
     # off-site at its start (after the second Ark is off-site), and under a
     # web running `off` db_backup is not registered (stage 5, PR-7), so
     # tonight's source would be stale. Not under a web held back on `on`
-    # (core/duckdb_off.py): it writes the file and takes its backups, and this
+    # (core/duckdb_off.py, an image before step 14; a step-14 web runs off
+    # whatever .env says): it writes the file and takes its backups, and this
     # sidecar, which reads `.env` and not web's verdict, is refused all the
     # same — so the line says the week has started only for a web that runs
     # off. Said in a line a person can act on, not a traceback.

@@ -39,8 +39,8 @@ import pytest
 
 from core import duckdb_switch
 from tests.unit.test_duckdb_off_sweep import (
-    FLAVOR_ENV, LIVES, NOT_SCHEDULED, OFFLINES, OUT_ENV, STEP_TIMEOUT_S, FrozenFile,
-    apply_target_state, name_the_key, optional_variants, variant_key,
+    FLAVOR_ENV, LIVES, NOT_SCHEDULED, OFFLINES, OUT_ENV, STEP_TIMEOUT_S, UNLATCHED,
+    FrozenFile, apply_target_state, name_the_key, optional_variants, variant_key,
 )
 from tests.unit.test_read_fallback_sites import fresh_read_fallback  # noqa: F401 — fixture
 
@@ -549,7 +549,8 @@ def state(canonical_postgres, monkeypatch, tmp_path, fresh_read_fallback):  # no
         for chain in WRITE_CHAINS:
             chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
         asyncio.run(_seed_live_facts(os.environ["KS_PG_DSN"]))
-    apply_target_state(monkeypatch, tmp_path, live=PG_LIVE)
+    apply_target_state(monkeypatch, tmp_path, live=PG_LIVE,
+                       markers=FLAVOR not in UNLATCHED)
     # A refusal under `get_last_sync_time` is recorded with its key.
     name_the_key(monkeypatch)
     import core.duckdb_store as store_module
