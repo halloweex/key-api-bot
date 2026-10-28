@@ -1,15 +1,16 @@
-"""The dashboard's user list, on whichever store owns it.
+"""The dashboard's user list and role matrix, in Postgres.
 
-`KS_USER_STORE` (duckdb | postgres, a typo raises) decides. The bodies below
-are one text with two holes — `{users}` for the table and `{self}` for the name
-`ON CONFLICT DO UPDATE` may use to reach the existing row, which Postgres
-insists be unqualified. Everything else is spelled portably, so the table names
-stay the only difference and `core/pg_dashboard_users.py` carries the reason
-the writer moved rather than a replica being read.
+`KS_USER_STORE` chose the engine until step 14: production has read
+`postgres` since 2026-09-07, a constant since S14-00, and S14-08 took the
+DuckDB tails away. The bodies below are one text with two holes — `{users}`
+for the table and `{self}` for the name `ON CONFLICT DO UPDATE` may use to
+reach the existing row, which Postgres insists be unqualified.
+`core/pg_dashboard_users.py` carries the reason the writer moved rather than
+a replica being read.
 
-The permissions matrix at the bottom of this file has **not** moved. It is read
-once per role and cached in-process (`core/permissions._permissions_cache`), so
-it is not on the request path the switch exists to clear.
+The permissions matrix at the bottom of this file followed the list into
+Postgres (revision 0022). It is read once per role and cached in-process
+(`core/permissions._permissions_cache`).
 """
 from __future__ import annotations
 
@@ -22,61 +23,47 @@ logger = logging.getLogger(__name__)
 
 MAX_DENIAL_COUNT = 5
 
-# Where the role matrix lives when `KS_USER_STORE=postgres`. The user list is
-# `core.pg_dashboard_users.TABLE`; these two move together, so one variable
-# still answers "where does access live".
+# Where the role matrix lives. The user list is `core.pg_dashboard_users.TABLE`;
+# the two moved together, so "where does access live" has one answer.
 PERMISSIONS_TABLE = "app.role_permissions"
 
 
 class UsersMixin:
 
-    # ─── which store answers ──────────────────────────────────────────────
+    # ─── the store that answers: Postgres ─────────────────────────────────
     #
-    # Chosen before any connection is taken, `/inventory`'s §34 invariant: a
-    # read bound for Postgres must not first queue behind DuckDB's single
-    # writer, or the switch has moved the bottleneck instead of leaving it.
-    #
-    # **Never call these from inside `self.connection()`.** The store lock is
-    # not reentrant and the deadlock does not raise — it simply never returns.
+    # `app.dashboard_users` and `app.role_permissions`, since 2026-09-07 and
+    # 2026-09-08 (`KS_USER_STORE=postgres`, a constant since step 14's
+    # S14-00). The DuckDB tails of both routers went in S14-08; neither takes
+    # the store's own connection, `/inventory`'s §34 invariant, so an
+    # authorisation check never queues behind a warehouse rebuild.
 
     async def _users_run(self, sql: str, params: Optional[Sequence[Any]] = None,
                          *, mode: str = "all"):
-        """Run one statement against the store that owns the user list."""
-        from core.pg_dashboard_users import user_store_is_postgres
+        """Run one statement against the dashboard's user list in Postgres."""
+        from core.pg_dashboard_users import (
+            TABLE, execute, fetch_row, fetch_rows,
+        )
+        from core.sql_dialect import numbered
 
         params = list(params or [])
-        if user_store_is_postgres():
-            from core.pg_dashboard_users import (
-                TABLE, execute, fetch_row, fetch_rows,
-            )
-            from core.sql_dialect import numbered
-
-            rendered = numbered(
-                sql.format(users=TABLE, self=TABLE.split(".")[-1])
-            )
-            if mode == "all":
-                return await fetch_rows(rendered, params)
-            if mode == "one":
-                return await fetch_row(rendered, params)
-            await execute(rendered, params)
-            return None
-
-        rendered = sql.format(users="users", self="users")
-        async with self.connection() as conn:
-            cursor = conn.execute(rendered, params)
-            if mode == "all":
-                return cursor.fetchall()
-            if mode == "one":
-                return cursor.fetchone()
-            return None
+        rendered = numbered(
+            sql.format(users=TABLE, self=TABLE.split(".")[-1])
+        )
+        if mode == "all":
+            return await fetch_rows(rendered, params)
+        if mode == "one":
+            return await fetch_row(rendered, params)
+        await execute(rendered, params)
+        return None
 
     async def _perms_run(self, sql: str, params: Optional[Sequence[Any]] = None,
                          *, mode: str = "all"):
-        """Run one statement against the store that owns the role matrix.
+        """Run one statement against the role matrix in Postgres.
 
-        The matrix follows the user list — same `KS_USER_STORE`, same reason:
-        an approval and the permissions behind it must not disagree about
-        which database is authoritative.
+        The matrix follows the user list — same store, same reason: an
+        approval and the permissions behind it must not disagree about which
+        database is authoritative.
 
         It used to stay in DuckDB because it is read once per role and cached.
         Per-user tabs put a permission dependency on roughly 120 of the 140
@@ -86,31 +73,19 @@ class UsersMixin:
         SMS tab went from 124 req/s to 38. An authorization check is the one
         read that must never queue behind a rebuild.
         """
-        from core.pg_dashboard_users import user_store_is_postgres
+        from core.pg_dashboard_users import execute, fetch_row, fetch_rows
+        from core.sql_dialect import numbered
 
         params = list(params or [])
-        if user_store_is_postgres():
-            from core.pg_dashboard_users import execute, fetch_row, fetch_rows
-            from core.sql_dialect import numbered
-
-            rendered = numbered(
-                sql.format(perms=PERMISSIONS_TABLE, self="role_permissions")
-            )
-            if mode == "all":
-                return await fetch_rows(rendered, params)
-            if mode == "one":
-                return await fetch_row(rendered, params)
-            await execute(rendered, params)
-            return None
-
-        rendered = sql.format(perms="role_permissions", self="role_permissions")
-        async with self.connection() as conn:
-            cursor = conn.execute(rendered, params)
-            if mode == "all":
-                return cursor.fetchall()
-            if mode == "one":
-                return cursor.fetchone()
-            return None
+        rendered = numbered(
+            sql.format(perms=PERMISSIONS_TABLE, self="role_permissions")
+        )
+        if mode == "all":
+            return await fetch_rows(rendered, params)
+        if mode == "one":
+            return await fetch_row(rendered, params)
+        await execute(rendered, params)
+        return None
 
     @staticmethod
     def _stamp(value) -> Optional[str]:

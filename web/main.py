@@ -309,8 +309,8 @@ async def startup_event():
     #
     # The write fills NULLs only, so this is a no-op on every boot after the
     # first, and it can never overwrite a campaign the app recorded itself.
-    # Through the SMS router (`_sms_run`), so under KS_SMS_STORE=postgres it
-    # writes Postgres whatever KS_DUCKDB says; the store is only its host.
+    # Through the SMS router (`_sms_run`), so it writes Postgres whatever
+    # KS_DUCKDB says; the store is only its host.
     if store is not None:
         try:
             restored = await store.backfill_sms_campaign_record(

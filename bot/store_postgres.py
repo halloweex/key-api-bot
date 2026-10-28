@@ -572,11 +572,13 @@ class PostgresDashboardTabs:
     side only (that it must not demote an admin, say) is exactly the drift that
     would not be noticed until somebody lost access.
 
-    `available()` asks two questions, and both have to be yes. This adapter
-    exists, so the bot's own state is in Postgres; and `KS_USER_STORE` must say
-    the *dashboard* reads Postgres too. They are separate variables set in the
-    same `.env`, and if they ever disagree, a tab set written here would be
-    written to a table nothing reads — access granted, and invisible.
+    `available()` is yes. This adapter exists only under `KS_BOT_STORE=postgres`
+    (`core.bot_store.get_bot_store`), so the bot's own state is in Postgres;
+    and the dashboard's list is always there — `KS_USER_STORE=postgres` since
+    2026-09-07, and since step 14's S14-08 the web container has no other store
+    to read it from. Until then this also asked `KS_USER_STORE`, because a tab
+    set written here while the dashboard read DuckDB would have gone to a table
+    nothing reads — access granted, and invisible.
     """
 
     def __init__(self, run, pool):
@@ -597,16 +599,9 @@ class PostgresDashboardTabs:
         return numbered(statement.format(users=TABLE, self=TABLE.split(".")[-1]))
 
     def available(self) -> bool:
-        from core.pg_dashboard_users import user_store_is_postgres
-
-        try:
-            return user_store_is_postgres()
-        except ValueError:
-            # A typo in KS_USER_STORE. It stops the *web* container, which is
-            # right there and is where the value matters. Here it must not stop
-            # an admin approving somebody, so it means "cannot reach it".
-            logger.exception("KS_USER_STORE is not a store this code knows")
-            return False
+        # What `KS_BOT_STORE` answered by choosing this adapter; nothing else
+        # is asked (step 14's S14-08).
+        return True
 
     def get(self, user_id: int) -> Optional[Dict[str, Any]]:
         return self._run(self._get(user_id))

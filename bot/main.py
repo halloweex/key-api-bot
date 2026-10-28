@@ -278,38 +278,28 @@ def create_conversation_handler() -> ConversationHandler:
 
 
 def _warn_if_tab_access_is_off() -> None:
-    """Say loudly when the bot cannot enforce the tab set it is supposed to.
+    """Say when the bot cannot enforce the tab set it is supposed to.
 
     `may_use` is permissive where it cannot know — the right answer for a
     missing row or an unreachable store, and a silent no-op when the *reason*
-    is configuration. `KS_BOT_STORE` and `KS_USER_STORE` are separate variables
-    in the same .env, and if the second is not `postgres` the bot cannot read
-    the dashboard's list at all: every narrowed account quietly gets every
-    report again, and nothing says so.
+    is configuration. Under `KS_BOT_STORE` other than `postgres` the bot holds
+    no way to the dashboard's list at all (`NoDashboardTabs`), so every
+    narrowed account quietly gets every report again, and this says so.
+
+    It also logged an ERROR when `KS_BOT_STORE=postgres` met a `KS_USER_STORE`
+    that was not: the bot would have written tab sets to a table the dashboard
+    did not read. Since step 14 the dashboard's list is in Postgres whatever
+    that variable says (a constant since S14-00), so the disagreement cannot
+    happen and the branch went with the routing in S14-08.
 
     Logged, not raised. The bot still works and still guards approval; what is
     lost is one layer, and taking a working bot down over a dashboard setting
-    would be the wrong trade. But it is an ERROR, because somebody has to see
-    it.
+    would be the wrong trade.
     """
     import os
 
     bot_store = os.getenv("KS_BOT_STORE", "sqlite").strip().lower()
-    # Postgres whatever `KS_USER_STORE` says since step 14's S14-00
-    # (`core.pg_dashboard_users.user_store_is_postgres`, a constant), so the
-    # disagreement below can no longer happen; it goes with the variable
-    # (S14-08). Not imported: no module under `bot/` but the store's adapter
-    # reaches for `core.pg*` (`tests/unit/test_pg_bot_state.py`).
-    user_store = "postgres"
-    if bot_store == "postgres" and user_store != "postgres":
-        logger.error(
-            "KS_BOT_STORE=postgres but KS_USER_STORE=%r: the bot cannot read "
-            "the dashboard's tab sets, so every approved account will receive "
-            "every report regardless of the tabs it was given. Set "
-            "KS_USER_STORE=postgres, or expect no tab enforcement in the bot.",
-            user_store,
-        )
-    elif bot_store != "postgres":
+    if bot_store != "postgres":
         logger.info(
             "KS_BOT_STORE=%r — tab enforcement in the bot is off by design on "
             "this engine; the dashboard's list lives in a file this process "
