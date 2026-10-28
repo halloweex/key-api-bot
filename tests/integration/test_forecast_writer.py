@@ -26,10 +26,9 @@ to stay true around it:
   would strand;
 - the standing watch reads what it judges.
 
-The inputs are a three-year history seeded in DuckDB and its Silver copied
-into `silver.orders`, so the calculators read Postgres Silver as they do in
-production (`KS_READ_GOALS=postgres`; `KS_GOALS_HISTORY=silver`, which since
-chain 7b-4 reads as unset does).
+The inputs are a three-year history seeded in Postgres' Bronze, from which
+Postgres derives Silver, so the calculators read Postgres Silver as they do
+in production — the only place they read since step 14's S14-07.
 
 Skipped without `KS_PG_DSN`. Run with `TZ=UTC` like every two-engine test.
 
@@ -95,31 +94,37 @@ async def _clean(pool):
 
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
-    """A real DuckDB holding the history, its Silver in Postgres, and every
-    precondition of the chain met — the flag itself left unset."""
-    from core.duckdb_store import DuckDBStore
-    from tests.integration.test_goals_history_two_engines import _copy_silver
-    from tests.unit.test_goals_off_duckdb_silver import _seed_history
+    """A real, empty DuckDB beside a Postgres holding the history — Bronze
+    seeded, Silver and Gold derived from it, the production path — so the
+    calculators read Postgres Silver as they do in production.
 
-    monkeypatch.setenv("KS_PG_DSN", DSN)
-    monkeypatch.setenv("KS_GOALS_HISTORY", "silver")
-    monkeypatch.setenv("KS_READ_GOALS", "postgres")
-    monkeypatch.setenv("KS_READ_FORECAST_INPUT", "postgres")
+    Since step 14's S14-07 every goal read is Postgres' whatever any flag
+    says; the history used to be seeded in DuckDB and its Silver copied
+    across. DuckDB is here for what must not reach it and, through
+    `chains_on_duckdb`, for the branch that still writes it."""
+    from core.duckdb_store import DuckDBStore
+    from tests.integration.pg_tab_seed import tab_in_postgres
+    from tests.unit.test_goals_off_duckdb_silver import _seed_history_pg
+
     monkeypatch.setenv("KS_READ_FALLBACK", "off")
     monkeypatch.setattr(read_fallback, "_mode", read_fallback.OFF)
     monkeypatch.setattr(read_fallback, "_mode_error", None)
     store = DuckDBStore(db_path=tmp_path / "forecast.duckdb")
     await store.connect()
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
-    await _clean(pool)
-    await _seed_history(store)
-    assert await _copy_silver(pool, store) > 1500
-    with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
-            patch("core.pg.require_revision", new=AsyncMock()):
-        yield store, pool, monkeypatch
-    await _clean(pool)
-    await pool.close()
-    await store.close()
+
+    async def populate(conn, pool):
+        await _clean(pool)
+        await _seed_history_pg(conn, pool)
+
+    try:
+        async with tab_in_postgres(DSN, monkeypatch, populate) as pool:
+            async with pool.acquire() as conn:
+                assert await conn.fetchval("SELECT COUNT(*) FROM silver.orders") > 1500
+            with patch("core.pg.require_revision", new=AsyncMock()):
+                yield store, pool, monkeypatch
+            await _clean(pool)
+    finally:
+        await store.close()
 
 
 def _flag(env):
