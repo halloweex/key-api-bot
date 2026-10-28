@@ -279,19 +279,25 @@ OLD_SHAPE = {"fall_back", "no_address", "no_engine", "enabled", "available"}
 BROAD = {"Exception", "BaseException"}
 
 
+# The engines a router reaches: Postgres' modules, and since step 14's
+# S14-07 ClickHouse's, whose cohort reader is the cohorts' one engine.
+ENGINE_PREFIXES = ("pg_", "ch_")
+
+
 def _engine_aliases(tree: ast.AST) -> Set[str]:
-    """Every name the file binds to a `core.pg_*` module, at the top or
-    inside a function: `from core import pg_traffic_read`, `import
-    core.pg_x as y`."""
+    """Every name the file binds to a `core.pg_*` or `core.ch_*` module, at
+    the top or inside a function: `from core import pg_traffic_read`,
+    `import core.pg_x as y`."""
     found = set()
     for n in ast.walk(tree):
         if isinstance(n, ast.ImportFrom) and n.module == "core":
             for a in n.names:
-                if a.name.startswith("pg_"):
+                if a.name.startswith(ENGINE_PREFIXES):
                     found.add(a.asname or a.name)
         elif isinstance(n, ast.Import):
             for a in n.names:
-                if a.name.startswith("core.pg_") and a.asname:
+                if (a.name.startswith(tuple(f"core.{p}" for p in ENGINE_PREFIXES))
+                        and a.asname):
                     found.add(a.asname)
     return found
 
@@ -437,8 +443,9 @@ def walk_source(source: str, relpath: str, switches: Set[str]) -> List[Site]:
             reached = {_call_name(n) for n in _own_nodes(fn)
                        if isinstance(n, ast.Call)}
             if reached & TAIL_READS and not refuses:
-                # A tail routed by a chain's own question — `_sms_run`,
-                # `_goal_tables_run` — is a shape of its own until its PR.
+                # A tail routed by a chain's own question — `_sms_run` — is a
+                # shape of its own until its PR (`_goal_tables_run` was the
+                # other until step 14's S14-07, and refuses now).
                 continue
             ok = (all(_refused_where_it_fails(c, fn, parent) for c in calls)
                   and not reached & TAIL_READS and not reached & OLD_SHAPE)
@@ -493,6 +500,13 @@ class TestTheWalk:
             ("core/repositories/revenue.py", "_pg_gold_series"),
             ("core/repositories/revenue.py", "_pg_silver"),
             ("core/repositories/revenue.py", "get_manager_sales_365d"),
+            # The third set, step 14's S14-07: `/expenses`, `/inventory`,
+            # `/goals` and the cohorts, whose engine is ClickHouse.
+            ("core/repositories/expenses.py", "_expenses_run"),
+            ("core/repositories/inventory.py", "_inventory_batch"),
+            ("core/repositories/goals.py", "_goals_run"),
+            ("core/repositories/goals.py", "_goal_tables_run"),
+            ("core/repositories/customers.py", "_analytics_rows"),
         } <= collapsed, sorted(collapsed)
 
     def test_the_dashboard_file_holds_no_gate_and_no_handler(self, sites):
@@ -509,33 +523,30 @@ class TestTheWalk:
                    and s.function == "backfilled" for s in sites)
 
     def test_it_is_looking(self, sites):
-        """Floors, not a list: the walk found the gates and the handlers it
-        exists for. Twenty gates and seventeen handlers when it was written;
-        twenty-three gates once the two Gold readers took the shape (DN-20b),
-        and every gate is also an address site. The dashboard's six gates —
-        its router, the two Gold readers, the Silver helper and the two
-        inline in `get_summary_stats` and `get_revenue_trend` — left with
-        their switches in step 14's S14-06 (rule 5 holds them now)."""
+        """Floors, not a list. Twenty gates and seventeen handlers when it
+        was written; the six routers of step 14's S14-05 and the dashboard's
+        six gates (S14-06) left rules 2 to 4 for rule 5 with their switches,
+        and the last — `/expenses`, `/inventory`, `/goals`, the cohorts, the
+        training frame, the weekly report, the assistant, the buyer-sync
+        selection and the search index — with S14-07. No gate is left, and
+        none may come back: rule 4's address question has no caller. What
+        rule 3 still finds is the handlers around the engines in the reader
+        modules (`backfilled()` among them), and rule 5 holds every router."""
         gates = {(s.path, s.function) for s in sites if s.rule == "gate"}
-        assert gates == {(s.path, s.function) for s in sites
-                         if s.rule == "address"}
+        assert gates == set(), sorted(gates)
+        assert {s for s in sites if s.rule == "address"} == set()
         handlers = [s for s in sites if s.rule == "handler"]
-        assert len(gates) >= 10, sorted(gates)
-        # Fourteen since step 14's S14-05, whose six routers left rule 3 for
-        # rule 5 with their switches (`test_the_routers_with_no_tail_...`);
-        # ten since S14-06, whose dashboard handlers did the same.
-        assert len(handlers) >= 9, handlers
-        assert {"core/repositories", "core/chat_tools.py",
-                "core/sync_service.py"} <= {
-            p if not p.startswith("core/repositories/") else "core/repositories"
-            for p, _ in gates}
+        assert len(handlers) >= 1, handlers
+        refusing = {(s.path, s.function) for s in sites if s.rule == "refuse"}
+        assert len(refusing) >= 16, sorted(refusing)
 
     def test_the_read_switches_are_found_not_listed(self):
+        """No module of `core/` is a read switch any more: the last
+        (`pg_expenses_read`, `pg_inventory_read`, `ch_cohorts` and the five
+        readers with no fallback) lost theirs in step 14's S14-07. Mutation:
+        put `ENV` and `enabled` back on any of them."""
         switches = read_switch_modules()
-        # `pg_gold_read` was the example until step 14's S14-06 took its
-        # switch; `pg_inventory_read` still reads one.
-        assert {"pg_expenses_read", "pg_inventory_read", "ch_cohorts"} <= switches
-        assert not switches & {"pg_gold_read", "pg_silver_read", "pg_dashboard_read"}
+        assert switches == set(), switches
         assert "read_fallback" not in switches
         assert "pg_sms_read" not in switches, (
             "the SMS tab fails closed on its own switch; it has no ENV here")
@@ -878,20 +889,18 @@ class TestMisconfiguredReads:
         fresh_read_fallback.configure_mode()
         assert fresh_read_fallback.misconfigured() == []
 
-    def test_every_read_switch_in_the_code_is_covered(self, fresh_read_fallback, monkeypatch):
-        """The check scans the environment by prefix, so a switch added later
-        is covered the day it is set. Shown against every switch the walk
-        finds, so the prefix and the modules cannot drift apart."""
-        import importlib
-
+    def test_every_read_switch_set_is_covered(self, fresh_read_fallback, monkeypatch):
+        """The check scans the environment by prefix, so any switch set is
+        covered, a retired one included — production's `.env` keeps them
+        for the images before step 14. No module reads one since step 14's
+        S14-07 (`TestTheWalk.test_the_read_switches_are_found_not_listed`),
+        so the names are written out here; `misconfigured` goes in S14-16."""
         monkeypatch.delenv("KS_PG_DSN", raising=False)
         monkeypatch.delenv("KS_CH_URL", raising=False)
-        envs = {}
-        for name in read_switch_modules():
-            module = importlib.import_module(f"core.{name}")
-            engine = "clickhouse" if name.startswith("ch_") else "postgres"
-            envs[module.ENV] = engine
-            monkeypatch.setenv(module.ENV, engine)
+        envs = {"KS_READ_EXPENSES": "postgres", "KS_READ_INVENTORY": "postgres",
+                "KS_READ_GOALS": "postgres", "KS_READ_COHORTS": "clickhouse"}
+        for name, engine in envs.items():
+            monkeypatch.setenv(name, engine)
         fresh_read_fallback.configure_mode()
         published = {line.split("=", 1)[0] for line in fresh_read_fallback.misconfigured()}
         assert published == set(envs)
@@ -901,16 +910,15 @@ class TestMisconfiguredReads:
     ):
         """What is published under `misconfigured` and what `no_address`
         refuses are one rule, so under `off` the two lists are the same list
-        — shown for every switch the walk finds, Postgres and ClickHouse."""
-        import importlib
-
+        — shown on stand-in switches, Postgres and ClickHouse, since no
+        module of `core/` carries one after step 14's S14-07. Both go in
+        S14-16."""
         monkeypatch.delenv("KS_PG_DSN", raising=False)
         monkeypatch.delenv("KS_CH_URL", raising=False)
         modules = []
-        for name in sorted(read_switch_modules()):
-            module = importlib.import_module(f"core.{name}")
-            monkeypatch.setenv(module.ENV, "clickhouse" if name.startswith("ch_")
-                               else "postgres")
+        for name, engine in (("standin_pg", "postgres"), ("standin_ch", "clickhouse")):
+            module = type(name, (), {"ENV": f"KS_READ_{name.upper()}", "__name__": name})
+            monkeypatch.setenv(module.ENV, engine)
             modules.append(module)
         monkeypatch.setenv("KS_READ_FALLBACK", "off")
         with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
@@ -925,50 +933,50 @@ class TestMisconfiguredReads:
 
 class TestNoAddress:
     """`no_address`: refused under `off` only, and only for a switch naming an
-    engine this process has no address for (DN-20b)."""
+    engine this process has no address for (DN-20b). No reader calls it
+    since step 14's S14-07 — `/inventory`'s and the cohorts' switches were
+    the last read — so it is held on stand-ins until S14-16 removes it."""
 
+    PG = type("standin_pg", (), {"ENV": "KS_READ_STANDIN_PG"})
+    CH = type("standin_ch", (), {"ENV": "KS_READ_STANDIN_CH"})
 
     def test_under_off_only_the_unaddressed_switch_is_refused(
         self, fresh_read_fallback, monkeypatch, caplog,
     ):
-        # A switch still read: `KS_READ_TRAFFIC` is not, since step 14's
-        # S14-05, and its router refuses a failure without asking this.
-        from core import ch_cohorts, pg_inventory_read
-
         monkeypatch.delenv("KS_PG_DSN", raising=False)
         monkeypatch.delenv("KS_CH_URL", raising=False)
         monkeypatch.setenv("KS_READ_FALLBACK", "off")
         fresh_read_fallback.configure_mode()
 
         # Unset, or naming DuckDB: routing, never refused here.
-        fresh_read_fallback.no_address("inventory", pg_inventory_read)
-        monkeypatch.setenv("KS_READ_INVENTORY", "duckdb")
-        fresh_read_fallback.no_address("inventory", pg_inventory_read)
+        fresh_read_fallback.no_address("standin", self.PG)
+        monkeypatch.setenv(self.PG.ENV, "duckdb")
+        fresh_read_fallback.no_address("standin", self.PG)
         assert fresh_read_fallback.refusals() == {}
 
         # Naming Postgres with no DSN: refused, and the log says which switch.
-        monkeypatch.setenv("KS_READ_INVENTORY", "postgres")
+        monkeypatch.setenv(self.PG.ENV, "postgres")
         with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
             with pytest.raises(fresh_read_fallback.ReadUnavailable) as raised:
-                fresh_read_fallback.no_address("inventory", pg_inventory_read)
-        assert raised.value.surface == "inventory"
-        assert "KS_READ_INVENTORY=postgres without KS_PG_DSN" in caplog.text
+                fresh_read_fallback.no_address("standin", self.PG)
+        assert raised.value.surface == "standin"
+        assert "KS_READ_STANDIN_PG=postgres without KS_PG_DSN" in caplog.text
         assert "falling back to DuckDB" not in caplog.text
         assert ": None" not in caplog.text
-        assert fresh_read_fallback.refusals()["inventory"]["count"] == 1
+        assert fresh_read_fallback.refusals()["standin"]["count"] == 1
 
         # With the address the gate will ask Postgres: nothing to refuse.
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        fresh_read_fallback.no_address("inventory", pg_inventory_read)
-        assert fresh_read_fallback.refusals()["inventory"]["count"] == 1
+        fresh_read_fallback.no_address("standin", self.PG)
+        assert fresh_read_fallback.refusals()["standin"]["count"] == 1
 
         # ClickHouse by its own address.
-        monkeypatch.setenv("KS_READ_COHORTS", "clickhouse")
+        monkeypatch.setenv(self.CH.ENV, "clickhouse")
         with pytest.raises(fresh_read_fallback.ReadUnavailable):
-            fresh_read_fallback.no_address("cohorts", ch_cohorts)
+            fresh_read_fallback.no_address("standin_ch", self.CH)
         monkeypatch.setenv("KS_CH_URL", "http://ch:8123")
-        fresh_read_fallback.no_address("cohorts", ch_cohorts)
-        assert fresh_read_fallback.refusals()["cohorts"]["count"] == 1
+        fresh_read_fallback.no_address("standin_ch", self.CH)
+        assert fresh_read_fallback.refusals()["standin_ch"]["count"] == 1
 
 
 # ─── backfilled(): the site nobody's grep found ────────────────────────────
@@ -1107,12 +1115,12 @@ class TestThroughTheApp:
     def test_nothing_fell_back_is_an_empty_block(self, admin_client, fresh_read_fallback):
         health = admin_client.get("/api/health").json()
         assert health["read_fallbacks"] == {}
-        # `fresh_read_fallback` unsets every KS_READ_*, so the cohorts are on
-        # DuckDB here — the route `off` refuses, published as such. Since step
-        # 14's S14-00 the mode is `off` whatever KS_READ_FALLBACK says, so the
-        # block carries its refusals too.
+        # `fresh_read_fallback` unsets every KS_READ_*. Until step 14's S14-07
+        # that left the cohorts on DuckDB — a route `off` refused, published
+        # under `no_engine`; they ask ClickHouse whatever the switch says
+        # now, so nothing is published. Since S14-00 the mode is `off`
+        # whatever KS_READ_FALLBACK says, so the block carries its refusals.
         assert health["read_fallback_mode"] == {
             "mode": "off", "error": None, "misconfigured": [], "refused": {},
-            "no_engine": ["cohorts: KS_READ_COHORTS=duckdb, and only clickhouse "
-                          "may answer it under KS_READ_FALLBACK=off"]}
+            "no_engine": []}
 

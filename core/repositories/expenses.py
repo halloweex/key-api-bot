@@ -43,11 +43,15 @@ class ExpensesMixin:
         from core import pg_expenses_read
 
         params = list(params or [])
-        if "{expenses}" in sql and not await pg_expenses_read.backfilled():
-            raise read_fallback.refuse("expenses", LookupError(
-                "bronze.expenses holds no backfilled history in Postgres"))
         try:
+            if "{expenses}" in sql and not await pg_expenses_read.backfilled():
+                raise read_fallback.refuse("expenses", LookupError(
+                    "bronze.expenses holds no backfilled history in Postgres"))
             rows = await pg_expenses_read.fetch(render_tables(sql, POSTGRES), params)
+        except read_fallback.ReadUnavailable:
+            # Already refused — by the gate above, or by `backfilled()`
+            # when it could not read the watermark — and counted once.
+            raise
         except Exception as exc:  # noqa: BLE001 — every failure is the refusal
             raise read_fallback.refuse("expenses", exc)
         return (rows[0] if rows else None) if mode == "one" else rows
