@@ -17,7 +17,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 
 use crate::params::{self, FieldError};
-use crate::period::{self, Raised};
+use crate::period::{self, Raised, Refused};
 use crate::pyrt::{PyNum, py_sum, round_float, round_num};
 use crate::validate;
 
@@ -66,6 +66,17 @@ pub enum Failure {
 impl From<Raised> for Failure {
     fn from(raised: Raised) -> Self {
         Failure::Raised(raised.0)
+    }
+}
+
+/// `parse_period` sits inside the route's `try` since #308: its
+/// `ValidationError` is the route's 400 like any validator's.
+impl From<Refused> for Failure {
+    fn from(refused: Refused) -> Self {
+        match refused {
+            Refused::Invalid(detail) => Failure::BadRequest(detail),
+            Refused::Raised(raised) => raised.into(),
+        }
     }
 }
 
