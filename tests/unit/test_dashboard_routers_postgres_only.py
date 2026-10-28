@@ -38,6 +38,7 @@ rule 5.
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import logging
 import os
@@ -45,6 +46,7 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+from typing import List, Set
 from unittest.mock import AsyncMock
 
 import pytest
@@ -118,6 +120,85 @@ def store(tmp_path, monkeypatch):
     assert not (tmp_path / "never.duckdb").exists()
 
 
+# The trees web, the bot and the host tools run from.
+PRODUCTION_TREES = ("core", "web", "bot", "scripts", "deploy")
+CHAIN_5 = "core.pg_managers_write"
+QUESTION = "reads_the_chain"
+
+
+def _absolute(node: ast.ImportFrom, relpath: str) -> str:
+    """The module an `ImportFrom` names, relative ones resolved against the
+    file's own package (`from .. import x` in `core/repositories/`)."""
+    if not node.level:
+        return node.module or ""
+    package = relpath[:-len(".py")].split("/")[:-1]
+    if node.level > 1:
+        package = package[:-(node.level - 1)]
+    return ".".join(package + ([node.module] if node.module else []))
+
+
+def _dotted(node: ast.AST) -> str:
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return ""
+
+
+def asks_the_managers_chain(source: str, relpath: str) -> List[int]:
+    """The lines of `source` that refer to `core.pg_managers_write.reads_the_chain`,
+    called or not: by attribute on any name the file binds to the module
+    (`from core import`, `import … as`, a relative import,
+    `importlib.import_module` with the name written out), dotted in full, by
+    name from any import of it (aliased, relative or `*`), the import itself,
+    and `getattr` with the name written out. File-wide, so an import inside a
+    function counts everywhere, and a local that shadows the alias reads as
+    asking: too strict, never too lenient. A name computed at run time is not
+    seen."""
+    tree = ast.parse(source)
+    own = relpath == CHAIN_5.replace(".", "/") + ".py"
+    modules: Set[str] = set()
+    names: Set[str] = {QUESTION} if own else set()
+    lines: List[int] = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            module = _absolute(n, relpath)
+            for a in n.names:
+                if f"{module}.{a.name}" == CHAIN_5:
+                    modules.add(a.asname or a.name)
+                elif module == CHAIN_5 and a.name in (QUESTION, "*"):
+                    names.add(a.asname or QUESTION)
+                    lines.append(n.lineno)
+        elif isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name == CHAIN_5 and a.asname:
+                    modules.add(a.asname)
+        elif (isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+              and _dotted(n.value.func).split(".")[-1] == "import_module"
+              and n.value.args and isinstance(n.value.args[0], ast.Constant)
+              and n.value.args[0].value == CHAIN_5):
+            modules |= {t.id for t in n.targets if isinstance(t, ast.Name)}
+
+    def is_chain_5(node: ast.AST) -> bool:
+        return ((isinstance(node, ast.Name) and node.id in modules)
+                or _dotted(node) == CHAIN_5)
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load) and n.id in names:
+            lines.append(n.lineno)
+        elif isinstance(n, ast.Attribute) and n.attr == QUESTION and is_chain_5(n.value):
+            lines.append(n.lineno)
+        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+              and n.func.id == "getattr" and len(n.args) >= 2
+              and is_chain_5(n.args[0]) and isinstance(n.args[1], ast.Constant)
+              and n.args[1].value == QUESTION):
+            lines.append(n.lineno)
+    return sorted(set(lines))
+
+
 def _set(monkeypatch, switch, value):
     if value is None:
         monkeypatch.delenv(switch, raising=False)
@@ -167,17 +248,97 @@ class TestTheSwitchIsNotRead:
     def test_no_dashboard_reader_asks_the_managers_chain(self):
         """`_dashboard_run` asked `pg_managers_write.reads_the_chain` for the
         returns list's `{managers}` join until S14-06; with one path, the
-        question decides nothing, and no router in the repository asks it."""
-        import ast
+        question decides nothing, and nothing web, the bot or a host tool
+        runs refers to it — by attribute, by name, under an alias or through
+        `getattr` (`asks_the_managers_chain`). The tests are not walked: the
+        parity pin asks every chain's `reads_the_chain` on purpose."""
+        found = []
+        for top in PRODUCTION_TREES:
+            for path in sorted((ROOT / top).rglob("*.py")):
+                if "frontend" in path.parts or "node_modules" in path.parts:
+                    continue
+                relpath = path.relative_to(ROOT).as_posix()
+                found += [f"{relpath}:{line}" for line in asks_the_managers_chain(
+                    path.read_text(encoding="utf-8"), relpath)]
+        assert not found, found
 
-        for path in (ROOT / "core").rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                     and isinstance(n.func, ast.Attribute)
-                     and n.func.attr == "reads_the_chain"
-                     and isinstance(n.func.value, ast.Name)
-                     and n.func.value.id == "pg_managers_write"]
-            assert not calls, path
+    @pytest.mark.parametrize("relpath,source", [
+        pytest.param("core/repositories/revenue.py",
+                     "from core import pg_managers_write\n"
+                     "def f(sql):\n    return pg_managers_write.reads_the_chain(sql)\n",
+                     id="attribute"),
+        pytest.param("core/repositories/revenue.py",
+                     "def f(sql):\n"
+                     "    from core.pg_managers_write import reads_the_chain\n"
+                     "    if reads_the_chain(sql):\n        return 1\n",
+                     id="by_name"),
+        pytest.param("web/routes/api/admin.py",
+                     "from core.pg_managers_write import reads_the_chain as chained\n"
+                     "def f(sql):\n    return chained(sql)\n",
+                     id="by_name_aliased"),
+        pytest.param("core/repositories/revenue.py",
+                     "from core import pg_managers_write as m5\n"
+                     "def f(sql):\n    return m5.reads_the_chain(sql)\n",
+                     id="module_aliased"),
+        pytest.param("bot/handlers_legacy.py",
+                     "import core.pg_managers_write as m5\n"
+                     "ask = m5.reads_the_chain\n",
+                     id="import_as_handed_on"),
+        pytest.param("scripts/x.py",
+                     "import core.pg_managers_write\n"
+                     "def f(sql):\n    return core.pg_managers_write.reads_the_chain(sql)\n",
+                     id="dotted"),
+        pytest.param("core/repositories/revenue.py",
+                     "from .. import pg_managers_write\n"
+                     "def f(sql):\n    return pg_managers_write.reads_the_chain(sql)\n",
+                     id="relative_module"),
+        pytest.param("core/x.py",
+                     "from .pg_managers_write import reads_the_chain\n",
+                     id="relative_name"),
+        pytest.param("deploy/x.py",
+                     "from core.pg_managers_write import *\n"
+                     "def f(sql):\n    return reads_the_chain(sql)\n",
+                     id="star"),
+        pytest.param("core/repositories/revenue.py",
+                     "from core import pg_managers_write\n"
+                     "def f(sql):\n"
+                     "    return getattr(pg_managers_write, 'reads_the_chain')(sql)\n",
+                     id="getattr"),
+        pytest.param("core/repositories/revenue.py",
+                     "import importlib\n"
+                     "m5 = importlib.import_module('core.pg_managers_write')\n"
+                     "def f(sql):\n    return m5.reads_the_chain(sql)\n",
+                     id="import_module"),
+    ])
+    def test_the_walk_sees_every_way_of_asking(self, relpath, source):
+        """Each form a router could ask in, the review's by-name one first
+        (`from core.pg_managers_write import reads_the_chain` inside
+        `_dashboard_run`, which the attribute-only walk passed)."""
+        assert asks_the_managers_chain(source, relpath)
+
+    @pytest.mark.parametrize("relpath,source", [
+        pytest.param("core/repositories/goals.py",
+                     "from core import pg_forecast_write, pg_goals_write\n"
+                     "def f(sql):\n"
+                     "    return (pg_goals_write.reads_the_chain(sql)\n"
+                     "            or pg_forecast_write.reads_the_chain(sql))\n",
+                     id="the_goal_chains"),
+        pytest.param("core/x.py",
+                     "from core.pg_goals_write import reads_the_chain\n"
+                     "def f(sql):\n    return reads_the_chain(sql)\n",
+                     id="another_chain_by_name"),
+        pytest.param("core/pg_managers_write.py",
+                     "def reads_the_chain(sql):\n    return True\n",
+                     id="its_own_definition"),
+        pytest.param("core/repositories/revenue.py",
+                     "from core import pg_managers_write\n"
+                     "def f():\n"
+                     "    '''used to ask `pg_managers_write.reads_the_chain`'''\n"
+                     "    return pg_managers_write.reads_postgres()\n",
+                     id="a_docstring_and_another_question"),
+    ])
+    def test_the_walk_passes_what_is_not_asking_it(self, relpath, source):
+        assert not asks_the_managers_chain(source, relpath)
 
 
 class TestAFailureIsTheRefusalOffMade:
