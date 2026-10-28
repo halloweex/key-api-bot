@@ -38,6 +38,7 @@ import sys
 import zlib
 from pathlib import Path
 from typing import Any, List
+from unittest.mock import patch
 from urllib.parse import unquote
 
 HERE = Path(__file__).resolve().parent
@@ -367,9 +368,8 @@ def _itsd_cases(rng: random.Random):
         def time() -> float:
             return float(NOW)
 
-    real = timed.time
-    timed.time = Clock
-    try:
+    # The module `time` itsdangerous imported, by name: it is no export.
+    with patch.object(timed, "time", Clock):
         for cookie in _itsd_inputs(rng):
             try:
                 value = serializer.loads(cookie, max_age=MAX_AGE)
@@ -385,8 +385,6 @@ def _itsd_cases(rng: random.Random):
             except Exception:                   # noqa: BLE001 — `_resolve_session` catches none
                 out = {"err": "raised"}
             yield {"kind": "itsd", "in": cookie, **out}
-    finally:
-        timed.time = real
 
 
 def main() -> None:

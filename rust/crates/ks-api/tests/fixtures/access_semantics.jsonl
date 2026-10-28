@@ -4244,6 +4244,15 @@
 {"kind": "route", "pattern": "^/api/sync/stats$", "in": "/api/sync/stats\n\n", "out": null}
 {"kind": "route", "pattern": "^/api/sync/stats$", "in": "/api/sync/stats/", "out": null}
 {"kind": "route", "pattern": "^/api/sync/stats$", "in": "/api/sync/statsx", "out": null}
+{"kind": "route", "pattern": "^/api/tg\\-bot/activity$", "in": "\n/api/tg-bot/activity", "out": null}
+{"kind": "route", "pattern": "^/api/tg\\-bot/activity$", "in": "/\napi/tg-bot/activity", "out": null}
+{"kind": "route", "pattern": "^/api/tg\\-bot/activity$", "in": "/API/TG-BOT/ACTIVITY", "out": null}
+{"kind": "route", "pattern": "^/api/tg\\-bot/activity$", "in": "/api/tg-bot/activit", "out": null}
+{"kind": "route", "pattern": "^/api/tg\\-bot/activity$", "in": "/api/tg-bot/activity", "out": {}}
+{"kind": "route", "pattern": "^/api/tg\\-bot/activity$", "in": "/api/tg-bot/activity\n", "out": {}}
+{"kind": "route", "pattern": "^/api/tg\\-bot/activity$", "in": "/api/tg-bot/activity\n\n", "out": null}
+{"kind": "route", "pattern": "^/api/tg\\-bot/activity$", "in": "/api/tg-bot/activity/", "out": null}
+{"kind": "route", "pattern": "^/api/tg\\-bot/activity$", "in": "/api/tg-bot/activityx", "out": null}
 {"kind": "route", "pattern": "^/api/traffic/analytics$", "in": "\n/api/traffic/analytics", "out": null}
 {"kind": "route", "pattern": "^/api/traffic/analytics$", "in": "/\napi/traffic/analytics", "out": null}
 {"kind": "route", "pattern": "^/api/traffic/analytics$", "in": "/API/TRAFFIC/ANALYTICS", "out": null}
