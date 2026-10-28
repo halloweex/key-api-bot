@@ -57,7 +57,6 @@ from core.duckdb_constants import (
     KNOWN_SALES_TYPES,
     RETAIL_MANAGER_IDS,
 )
-from core.duckdb_store import DuckDBStore
 from core.models import OrderStatus
 from tests.integration.pg_tab_seed import (
     derive, seed, store_that_never_reaches_duckdb, tab_in_postgres,
@@ -159,16 +158,6 @@ EXPECTED = {
 }
 
 
-@pytest_asyncio.fixture
-async def store(tmp_path):
-    s = DuckDBStore(db_path=tmp_path / "goals.duckdb")
-    await s.connect()
-    try:
-        yield s
-    finally:
-        await s.close()
-
-
 # ─── Three years of history, for the calculators ───────────────────────────
 
 # Production's shape: the first order is 2023-12-02, so there are two full
@@ -201,29 +190,8 @@ def _history_rows():
     return rows
 
 
-async def _seed_history(store) -> None:
-    async with store.connection() as conn:
-        conn.execute("DELETE FROM manager_classifications")
-        conn.execute("DELETE FROM managers")
-        conn.executemany(
-            "INSERT INTO managers (id, name, is_retail) VALUES (?, 'm', ?)",
-            [(RETAIL, True), (B2B_MANAGER_ID, False)])
-        conn.executemany(
-            "INSERT INTO manager_classifications "
-            "(manager_id, is_retail, valid_from, valid_to) VALUES (?, ?, ?, NULL)",
-            [(RETAIL, True, date(1970, 1, 1)), (B2B_MANAGER_ID, False, date(1970, 1, 1))])
-        conn.executemany(
-            "INSERT INTO orders (id, source_id, status_id, grand_total, "
-            "ordered_at, buyer_id, manager_id) VALUES (?, ?, ?, ?, ?, 1, ?)",
-            _history_rows())
-        conn.execute("DELETE FROM seasonal_indices")
-        conn.execute("DELETE FROM weekly_patterns")
-        conn.execute("DELETE FROM growth_metrics")
-    await store.refresh_warehouse_layers(trigger="manual")
-
-
 async def _seed_history_pg(conn, pool) -> None:
-    """The same history in Postgres, as the sync lands it: Bronze orders, the
+    """The history in Postgres, as the sync lands it: Bronze orders, the
     two managers and their classification — Postgres derives Silver and Gold
     itself (`tests.integration.pg_tab_seed.derive`), the production path."""
     await conn.execute("DELETE FROM app.manager_classifications")
