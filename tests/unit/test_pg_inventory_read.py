@@ -277,7 +277,8 @@ class TestTheHelperIsNeverCalledUnderTheLock:
     def test_every_view_reader_goes_through_the_helper(self):
         """A method left on `conn.execute` against a view would keep working
         on DuckDB and silently ignore the flag — the half-switched state
-        `refuse_while_unported` exists to prevent on the `/sms` side."""
+        `refuse_while_unported` existed to prevent on the `/sms` side, until
+        step 14's S14-08 left `/sms` without a DuckDB branch to half-switch."""
         source = Path("core/repositories/inventory.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         stragglers = []

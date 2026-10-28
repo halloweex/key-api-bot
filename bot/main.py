@@ -302,8 +302,8 @@ def _warn_if_tab_access_is_off() -> None:
     if bot_store != "postgres":
         logger.info(
             "KS_BOT_STORE=%r — tab enforcement in the bot is off by design on "
-            "this engine; the dashboard's list lives in a file this process "
-            "cannot open.", bot_store,
+            "this engine; the dashboard's list is in Postgres, which this "
+            "process's store does not reach.", bot_store,
         )
 
 
