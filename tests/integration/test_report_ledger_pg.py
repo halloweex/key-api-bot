@@ -4,7 +4,10 @@
   upsert rewrites a week as DuckDB's `INSERT OR REPLACE` does;
 - the gate reads Postgres, drains a spool into it, and adopts a row only
   DuckDB holds;
-- the daily comparison is silent on an honest shadow and names a failed one;
+- the daily comparison was silent on an honest shadow and named a failed one
+  (since step 14's S14-00 the comparison no longer compares a shadow —
+  `compared_in_shadow()` is empty, as it has been in production under
+  `KS_DUCKDB=off` — and its test went with it);
 - the standing watch reads a missing week and a NULL `sent_at`;
 - the way back carries a Postgres-only week into DuckDB and releases.
 """
@@ -117,26 +120,6 @@ class TestTheGate:
         assert await report_ledger.already_sent(store, report_ledger.TRAFFIC, WEEK, "retail")
         pg, dk = await _both(store, pool, chain)
         assert pg == dk
-
-
-class TestTheShadowIsCompared:
-    @pytest.mark.asyncio
-    async def test_honest_then_failed(self, stores):
-        from core.mirror_reconciliation import reconcile_operational
-
-        store, pool, env = stores
-        chain = pg_weekly_ledger_write
-        env.setenv(chain.WRITE_ENV, "postgres")
-        went_out = datetime.now(timezone.utc) - timedelta(hours=5)
-        report_ledger.spool(chain.CHAIN, WEEK, "retail", Decimal("5.00"), 1, went_out)
-        await report_ledger.drain(store, report_ledger.WEEKLY)
-        assert [i for i in await reconcile_operational(store)
-                if i.table_name == chain.TABLE] == []
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM weekly_report_sends")
-        found = {i.check_name for i in await reconcile_operational(store)
-                 if i.table_name == chain.TABLE}
-        assert found == {"shadow_missing_in_duckdb"}
 
 
 class TestTheStandingWatch:

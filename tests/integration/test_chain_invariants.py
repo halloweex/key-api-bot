@@ -159,6 +159,15 @@ async def latched(monkeypatch):
             f'{{"chain": "{chain}", "latched_at": "{latched_at.isoformat()}"}}',
             encoding="utf-8")
     chain_latch.load()
+    # The three chains this module seeds, watched alone: since step 14's
+    # S14-00 every chain is watched, and the others' empty tables would be
+    # findings beside these.
+    from core import pg_chain_invariants
+
+    every = pg_chain_invariants.watched_chains
+    monkeypatch.setattr(pg_chain_invariants, "watched_chains", lambda: {
+        name: at for name, at in every().items()
+        if name in ("pg_expenses_write", "pg_inventory_write", "pg_goals_write")})
 
     async with pool.acquire() as conn:
         await _seed_healthy(conn, latched_at, today)

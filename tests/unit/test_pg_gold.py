@@ -117,8 +117,6 @@ def _duckdb_gold(conn):
     }
 
 
-
-
 def _stored(value):
     """What lands in the column, not what the projection returned.
 
@@ -605,13 +603,14 @@ class TestTheRollUpCheckStandsAlone:
         assert "gold_rollup_mismatch" not in _names(
             compare_gold({}, {}, rollup, fine, rollup_internal=False))
 
-    @pytest.mark.parametrize("writer, asked_inside", [("duckdb", True), ("postgres", False)])
+    @pytest.mark.parametrize("writer, asked_inside", [("postgres", False)])
     def test_reconcile_gold_leaves_it_out_exactly_when_it_stands_alone(
         self, monkeypatch, writer, asked_inside,
     ):
-        """Once a run, never twice and never not at all: `reconcile_gold`
-        asks it while DuckDB derives, the standalone check while Postgres
-        does, on the one predicate."""
+        """Once a run, never twice and never not at all: the standalone check
+        asks it while Postgres derives, on the one predicate. (`reconcile_gold`
+        asked it while DuckDB derived; since step 14's S14-00 that is no state
+        this code reaches.)"""
         import asyncio
         from contextlib import asynccontextmanager
         from unittest.mock import MagicMock
@@ -642,85 +641,6 @@ class TestTheRollUpCheckStandsAlone:
 
 
 # ── the hook ─────────────────────────────────────────────────────────────────
-
-
-class TestTheRefreshHook:
-    def _scheduler(self):
-        from core.scheduler import BackgroundScheduler
-
-        BackgroundScheduler._pg_silver_last_at = None
-        return BackgroundScheduler()
-
-    @pytest.mark.asyncio
-    async def test_gold_is_rebuilt_after_silver(self, monkeypatch):
-        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
-        order = []
-        # The витрина is patched too, and it was the gap: unpatched it raises
-        # `KS_PG_DSN is not set` and aborts the tick — which this test did not
-        # notice, because the abort happened after the two steps it asserted.
-        # Every step of the sequence has to run for the sequence to be tested.
-        with patch("core.mirror_reconciliation.configured", return_value=True), \
-             patch("core.pg_vitrina.rebuild_customer_profile",
-                   new=AsyncMock(side_effect=lambda: order.append("vitrina") or {})), \
-             patch("core.pg_order_utm.ship_order_utm",
-                   new=AsyncMock(side_effect=lambda _s: order.append("utm") or {})), \
-             patch("core.pg_silver.rebuild_silver",
-                   new=AsyncMock(side_effect=lambda: order.append("silver") or {})), \
-             patch("core.pg_gold.rebuild_gold",
-                   new=AsyncMock(side_effect=lambda: order.append("gold") or {})):
-            await self._scheduler()._rebuild_postgres_layers({"status": "success"})
-        # Silver, then Gold, then the витрина — each reads what the one before
-        # it wrote. The UTM ship is last on purpose: nothing here derives from
-        # it, so a shipping fault must not cost the revenue Gold that
-        # `/summary` and `/marketing` read (revision 0018).
-        assert order == ["silver", "gold", "vitrina", "utm"]
-
-    @pytest.mark.asyncio
-    async def test_a_failed_silver_leaves_gold_alone(self, monkeypatch):
-        """A Gold rebuilt over a stale Silver would stamp a fresh watermark on
-        a stale answer, and that reads clean."""
-        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
-        with patch("core.mirror_reconciliation.configured", return_value=True), \
-             patch("core.pg_silver.rebuild_silver",
-                   side_effect=RuntimeError("postgres is down")), \
-             patch("core.pg_gold.rebuild_gold", new=AsyncMock()) as gold:
-            await self._scheduler()._rebuild_postgres_layers({"status": "success"})
-        gold.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_a_failed_duckdb_refresh_leaves_both_alone(self, monkeypatch):
-        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
-        with patch("core.mirror_reconciliation.configured", return_value=True), \
-             patch("core.pg_silver.rebuild_silver", new=AsyncMock()) as silver, \
-             patch("core.pg_gold.rebuild_gold", new=AsyncMock()) as gold:
-            await self._scheduler()._rebuild_postgres_layers({"status": "error"})
-        silver.assert_not_called()
-        gold.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_a_gold_fault_cannot_break_the_refresh(self, monkeypatch):
-        """Rule 8: DuckDB is what the business looks at."""
-        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "0")
-        with patch("core.mirror_reconciliation.configured", return_value=True), \
-             patch("core.pg_silver.rebuild_silver", new=AsyncMock(return_value={})), \
-             patch("core.pg_gold.rebuild_gold",
-                   side_effect=RuntimeError("gold is down")):
-            await self._scheduler()._rebuild_postgres_layers({"status": "success"})
-
-    @pytest.mark.asyncio
-    async def test_one_floor_covers_both_layers(self, monkeypatch):
-        monkeypatch.setenv("KS_PG_SILVER_INTERVAL_S", "600")
-        scheduler = self._scheduler()
-        with patch("core.mirror_reconciliation.configured", return_value=True), \
-             patch("core.pg_vitrina.rebuild_customer_profile",
-                   new=AsyncMock(return_value={})), \
-             patch("core.pg_order_utm.ship_order_utm", new=AsyncMock(return_value={})), \
-             patch("core.pg_silver.rebuild_silver", new=AsyncMock(return_value={})), \
-             patch("core.pg_gold.rebuild_gold",
-                   new=AsyncMock(return_value={})) as gold:
-            await scheduler._rebuild_postgres_layers({"status": "success"})
-            await scheduler._rebuild_postgres_layers({"status": "success"})
-        assert gold.await_count == 1
 
 
 class TestTheJobRunsIt:

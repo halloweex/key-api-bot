@@ -551,62 +551,22 @@ def fresh_read_fallback(monkeypatch):
     from core import pg_derivation
 
     before = (read_fallback._mode, read_fallback._mode_error,
-              list(read_fallback._misconfigured), list(read_fallback._unreported))
+              list(read_fallback._misconfigured), list(read_fallback._unreported),
+              read_fallback._configured)
     derivation = (pg_derivation._mode, pg_derivation._mode_error)
     for name in [n for n in __import__("os").environ if n.startswith("KS_READ_")]:
         monkeypatch.delenv(name, raising=False)
     read_fallback._mode, read_fallback._mode_error = None, None
     read_fallback._misconfigured = []
     read_fallback._unreported = []
+    read_fallback._configured = False
     read_fallback.reset_counts()
     yield read_fallback
     pg_derivation._mode, pg_derivation._mode_error = derivation
     read_fallback._mode, read_fallback._mode_error = before[0], before[1]
     read_fallback._misconfigured, read_fallback._unreported = before[2], before[3]
+    read_fallback._configured = before[4]
     read_fallback.reset_counts()
-
-
-class TestTheMode:
-    def test_unset_is_duckdb(self, fresh_read_fallback):
-        assert fresh_read_fallback.configure_mode() == "duckdb"
-        assert fresh_read_fallback.mode_error() is None
-
-    def test_off_is_read_and_refuses(self, fresh_read_fallback, monkeypatch, caplog):
-        """DN-20b: under `off` a fallback is refused, not served — and the
-        start says so. What the refusal looks like is
-        `tests/unit/test_read_fallback_http.py`'s business."""
-        monkeypatch.setenv("KS_READ_FALLBACK", "off")
-        with caplog.at_level(logging.WARNING, logger="core.read_fallback"):
-            assert fresh_read_fallback.configure_mode() == "off"
-        assert "refused rather than answered from DuckDB" in caplog.text
-        with pytest.raises(fresh_read_fallback.ReadUnavailable):
-            fresh_read_fallback.fall_back("dashboard", RuntimeError("down"))
-        assert fresh_read_fallback.counts() == {}
-        assert fresh_read_fallback.refusals()["dashboard"]["count"] == 1
-
-    def test_an_unknown_value_runs_as_duckdb_and_never_raises(
-        self, fresh_read_fallback, monkeypatch, caplog,
-    ):
-        monkeypatch.setenv("KS_READ_FALLBACK", "of")
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            assert fresh_read_fallback.configure_mode() == "duckdb"
-        assert "KS_READ_FALLBACK='of'" in fresh_read_fallback.mode_error()
-        assert fresh_read_fallback.mode() == "duckdb"
-        assert caplog.text.count("KS_READ_FALLBACK='of'") == 1
-        # web's startup and the scheduler both configure: one ERROR per cause.
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            fresh_read_fallback.configure_mode()
-        assert caplog.text.count("KS_READ_FALLBACK='of'") == 1
-
-    def test_configure_modes_reads_it(self, fresh_read_fallback, monkeypatch):
-        """A cached mode is read in `configure_modes`, which web's startup
-        calls before the boot sync — never at scheduler start (DN-05b)."""
-        from core.runtime_modes import configure_modes
-
-        monkeypatch.setenv("KS_READ_FALLBACK", "nope")
-        modes = configure_modes()
-        assert modes["KS_READ_FALLBACK"] == "duckdb"
-        assert fresh_read_fallback.mode_error()
 
 
 class TestMisconfiguredReads:
@@ -640,9 +600,11 @@ class TestMisconfiguredReads:
             fresh_read_fallback.configure_mode()
             fresh_read_fallback.report_misconfigured()
         lines = [r.getMessage() for r in caplog.records if "KS_READ_GOLD" in r.getMessage()]
+        # Refused: since step 14's S14-00 the mode is `off` whatever
+        # KS_READ_FALLBACK says, and the line says what this process does.
         assert lines == ["KS_READ_GOLD=postgres without KS_PG_DSN — every read "
-                         "behind it is served from DuckDB. Set the address or "
-                         "unset the flag."], lines
+                         "behind it is refused (KS_READ_FALLBACK=off). Set the "
+                         "address or unset the flag."], lines
 
     def test_clickhouse_needs_its_url(self, fresh_read_fallback, monkeypatch):
         monkeypatch.delenv("KS_CH_URL", raising=False)
@@ -708,22 +670,6 @@ class TestNoAddress:
     """`no_address`: refused under `off` only, and only for a switch naming an
     engine this process has no address for (DN-20b)."""
 
-    def test_under_duckdb_it_does_nothing_and_reads_nothing(
-        self, fresh_read_fallback, monkeypatch,
-    ):
-        from core import pg_traffic_read
-
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
-        fresh_read_fallback.configure_mode()
-
-        def boom(name):
-            raise AssertionError("the environment is read under duckdb")
-
-        monkeypatch.setattr(fresh_read_fallback, "_unaddressed", boom)
-        fresh_read_fallback.no_address("traffic", pg_traffic_read)
-        assert fresh_read_fallback.refusals() == {}
-        assert fresh_read_fallback.counts() == {}
 
     def test_under_off_only_the_unaddressed_switch_is_refused(
         self, fresh_read_fallback, monkeypatch, caplog,
@@ -766,26 +712,6 @@ class TestNoAddress:
         assert fresh_read_fallback.refusals()["cohorts"]["count"] == 1
 
 
-class TestTheCounter:
-    def test_it_counts_per_surface_and_logs_the_phrase(self, fresh_read_fallback, caplog):
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            fresh_read_fallback.fall_back("goals", RuntimeError("pg down"))
-            fresh_read_fallback.fall_back("goals", RuntimeError("pg down"))
-            fresh_read_fallback.fall_back("traffic", None)
-        counts = fresh_read_fallback.counts()
-        assert counts["goals"]["count"] == 2 and counts["traffic"]["count"] == 1
-        assert counts["goals"]["last_at"].endswith("+00:00")
-        # The soak grep reads this phrase; the surface and the cause beside it.
-        assert caplog.text.count("falling back to DuckDB") == 3
-        assert "goals" in caplog.text and "pg down" in caplog.text
-
-    def test_counts_is_a_copy(self, fresh_read_fallback):
-        fresh_read_fallback.fall_back("x", None)
-        snapshot = fresh_read_fallback.counts()
-        snapshot["x"]["count"] = 99
-        assert fresh_read_fallback.counts()["x"]["count"] == 1
-
-
 # ─── backfilled(): the site nobody's grep found ────────────────────────────
 
 class TestBackfilledCounts:
@@ -798,21 +724,6 @@ class TestBackfilledCounts:
         yield r
         r._backfilled, r._checked_at, r._check_failed = before
 
-    @pytest.mark.asyncio
-    async def test_an_unreadable_watermark_is_a_counted_fallback(self, _fresh):
-        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("refused"))):
-            assert await _fresh.backfilled() is False
-        assert read_fallback.counts()["expenses"]["count"] == 1
-
-    @pytest.mark.asyncio
-    async def test_the_recheck_window_after_a_failure_counts_every_answer(self, _fresh):
-        """Inside the minute after a failed check every call is served by
-        DuckDB because of that failure — each one is counted."""
-        with patch("core.pg.get_pool", new=AsyncMock(side_effect=OSError("refused"))):
-            await _fresh.backfilled()
-            await _fresh.backfilled()
-            await _fresh.backfilled()
-        assert read_fallback.counts()["expenses"]["count"] == 3
 
     @pytest.mark.asyncio
     async def test_no_history_yet_is_routing_not_a_fallback(self, _fresh):
@@ -952,64 +863,16 @@ def _seed_gold(day: date, revenue: float, orders: int) -> None:
 
 
 class TestThroughTheApp:
-    def test_a_raising_pool_serves_duckdb_and_counts_one_dashboard_fallback(
-        self, admin_client, fresh_read_fallback, monkeypatch,
-    ):
-        day = date.today() - timedelta(days=3)
-        _seed_gold(day, 4321.5, 7)
-        monkeypatch.setenv("KS_READ_GOLD", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-        monkeypatch.setattr("core.pg.get_pool",
-                            AsyncMock(side_effect=OSError("connection refused")))
-
-        body = admin_client.get(
-            "/api/summary", params={"start_date": day.isoformat(),
-                                    "end_date": day.isoformat()}).json()
-        assert body["totalRevenue"] == 4321.5 and body["totalOrders"] == 7
-
-        health = admin_client.get("/api/health").json()
-        assert health["read_fallbacks"]["dashboard"]["count"] == 1
-        assert health["read_fallbacks"]["dashboard"]["last_at"]
-        assert "connection refused" not in str(health["read_fallbacks"]), (
-            "/api/health is public; the error text stays in the log")
 
     def test_nothing_fell_back_is_an_empty_block(self, admin_client, fresh_read_fallback):
         health = admin_client.get("/api/health").json()
         assert health["read_fallbacks"] == {}
         # `fresh_read_fallback` unsets every KS_READ_*, so the cohorts are on
-        # DuckDB here — the route `off` would refuse, published as such.
+        # DuckDB here — the route `off` refuses, published as such. Since step
+        # 14's S14-00 the mode is `off` whatever KS_READ_FALLBACK says, so the
+        # block carries its refusals too.
         assert health["read_fallback_mode"] == {
-            "mode": "duckdb", "error": None, "misconfigured": [],
+            "mode": "off", "error": None, "misconfigured": [], "refused": {},
             "no_engine": ["cohorts: KS_READ_COHORTS=duckdb, and only clickhouse "
                           "may answer it under KS_READ_FALLBACK=off"]}
 
-    def test_an_unknown_value_starts_web_and_is_published(
-        self, admin_client, fresh_read_fallback, monkeypatch,
-    ):
-        """The startup itself, with what it would do to the world stubbed:
-        a typo in KS_READ_FALLBACK must not be able to stop order intake.
-        Then /api/health, which is where the canary reads it."""
-        import web.main as main
-
-        monkeypatch.setenv("KS_READ_FALLBACK", "offf")
-        store = MagicMock()
-        store.get_stats = AsyncMock(return_value={
-            "orders": 1, "products": 1, "categories": 1, "db_size_mb": 1})
-        store.backfill_sms_campaign_record = AsyncMock(return_value=False)
-        prediction = MagicMock(is_ready=True)
-        monkeypatch.setattr(main, "validate_config", MagicMock())
-        monkeypatch.setattr(main, "init_database", MagicMock())
-        monkeypatch.setattr(main, "init_and_sync", AsyncMock())
-        monkeypatch.setattr(main, "get_store", AsyncMock(return_value=store))
-        monkeypatch.setattr(main, "start_scheduler", AsyncMock())
-        monkeypatch.setattr(main, "_register_event_handlers", MagicMock())
-        monkeypatch.setattr("core.prediction_service.get_prediction_service",
-                            MagicMock(return_value=prediction))
-
-        asyncio.run(main.startup_event())
-        main.init_and_sync.assert_awaited_once()  # it got past the modes
-
-        assert fresh_read_fallback.mode() == "duckdb"
-        published = admin_client.get("/api/health").json()["read_fallback_mode"]
-        assert published["mode"] == "duckdb"
-        assert "KS_READ_FALLBACK='offf'" in published["error"]

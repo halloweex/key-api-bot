@@ -3706,16 +3706,6 @@
                 }
             }
         ],
-        "./core/duckdb_off.py": [
-            {
-                "code": "reportArgumentType",
-                "range": {
-                    "startColumn": 45,
-                    "endColumn": 51,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./core/duckdb_store.py": [
             {
                 "code": "reportUndefinedVariable",
@@ -4562,14 +4552,6 @@
         ],
         "./core/pg_buyers_write.py": [
             {
-                "code": "reportReturnType",
-                "range": {
-                    "startColumn": 11,
-                    "endColumn": 52,
-                    "lineCount": 1
-                }
-            },
-            {
                 "code": "reportArgumentType",
                 "range": {
                     "startColumn": 27,
@@ -4595,14 +4577,6 @@
             }
         ],
         "./core/pg_catalogue_write.py": [
-            {
-                "code": "reportReturnType",
-                "range": {
-                    "startColumn": 11,
-                    "endColumn": 52,
-                    "lineCount": 1
-                }
-            },
             {
                 "code": "reportAssignmentType",
                 "range": {
@@ -5012,16 +4986,6 @@
                 }
             }
         ],
-        "./core/pg_managers_write.py": [
-            {
-                "code": "reportReturnType",
-                "range": {
-                    "startColumn": 11,
-                    "endColumn": 53,
-                    "lineCount": 1
-                }
-            }
-        ],
         "./core/pg_operational.py": [
             {
                 "code": "reportUndefinedVariable",
@@ -5033,14 +4997,6 @@
             }
         ],
         "./core/pg_orders_write.py": [
-            {
-                "code": "reportReturnType",
-                "range": {
-                    "startColumn": 11,
-                    "endColumn": 53,
-                    "lineCount": 1
-                }
-            },
             {
                 "code": "reportArgumentType",
                 "range": {

@@ -34,7 +34,6 @@ from core import alert_archive
 from core.alerting import REGISTRY, Kind, spec_for
 from tests.unit.test_canary import DASHBOARD, _healthy_payload, _mock_transport
 from tests.unit.test_read_fallback_sites import (  # noqa: F401  (fixtures)
-    _seed_gold,
     admin_client,
     fresh_read_fallback,
 )
@@ -260,58 +259,6 @@ class TestWhatWebPublishes:
         assert canary.read_fallbacks_clean(health) is True
         assert canary.web_uptime_s(health) == health["uptime_seconds"]
 
-    def test_a_switch_without_its_address_pages_and_is_not_clean(
-        self, admin_client, fresh_read_fallback, monkeypatch,
-    ):
-        """The review's case: KS_CH_URL lost while cohorts read ClickHouse.
-        Every cohort read is served from DuckDB and nothing counts one, so
-        `read_fallbacks` stays empty; the watch must not call that clean."""
-        monkeypatch.setenv("KS_READ_COHORTS", "clickhouse")
-        monkeypatch.delenv("KS_CH_URL", raising=False)
-        fresh_read_fallback.configure_mode()
-
-        health = admin_client.get("/api/health").json()
-        assert health["read_fallbacks"] == {}
-        assert canary.check_read_fallbacks(health) == []
-        [(key, message)] = canary.check_read_routes(health)
-        assert key == "read_routed_to_duckdb"
-        assert message == (canary.READ_ROUTED_LINE
-                           + "KS_READ_COHORTS=clickhouse without KS_CH_URL")
-        assert canary.read_fallbacks_clean(health) is False
-
-    def test_cohorts_not_on_clickhouse_page_and_are_not_clean(
-        self, admin_client, fresh_read_fallback, monkeypatch,
-    ):
-        """No address is missing, and `off` still refuses every cohort read:
-        they have no Postgres body. Nothing but `no_engine` says so."""
-        fresh_read_fallback.configure_mode()
-        health = admin_client.get("/api/health").json()
-        assert health["read_fallback_mode"]["misconfigured"] == []
-        assert health["read_fallback_mode"]["no_engine"] == [
-            "cohorts: KS_READ_COHORTS=duckdb, and only clickhouse may answer it "
-            "under KS_READ_FALLBACK=off"]
-        assert [k for k, _ in canary.check_read_routes(health)] == [
-            "read_routed_to_duckdb"]
-        assert canary.read_fallbacks_clean(health) is False
-
-    def test_a_counted_fallback_pages_naming_the_surface(
-        self, admin_client, fresh_read_fallback, monkeypatch,
-    ):
-        day = date.today() - timedelta(days=3)
-        _seed_gold(day, 100.0, 1)
-        monkeypatch.setenv("KS_READ_GOLD", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-        monkeypatch.setattr("core.pg.get_pool",
-                            AsyncMock(side_effect=OSError("connection refused")))
-        admin_client.get("/api/summary", params={"start_date": day.isoformat(),
-                                                 "end_date": day.isoformat()})
-
-        health = admin_client.get("/api/health").json()
-        [(key, message)] = canary.check_read_fallbacks(health)
-        assert key == "read_fallback_used"
-        last = health["read_fallbacks"]["dashboard"]["last_at"]
-        assert f"dashboard ×1 (last {last})" in message
-        assert canary.read_fallbacks_clean(health) is False
 
     def test_a_refusal_under_off_is_read_refused_and_the_week_stays_clean(
         self, admin_client, fresh_read_fallback, monkeypatch,
@@ -601,13 +548,16 @@ class TestUnjudgedKeys:
     _CHAIN4 = {"buyer_sync": {"last_ok_age_s": 60},
                "write_chains": {canary.BUYER_CHAIN: {"mode": "duckdb"},
                                 canary.ORDERS_CHAIN: {"mode": "duckdb"}}}
-    _SWITCH = {"duckdb_switch": {"mode": "on", "opened_while_off": {}}}
+    # The switch block, and since S14-00 the backup evidence's.
+    _SWITCH = {"duckdb_switch": {"mode": "on", "opened_while_off": {}},
+               "backups": {"pitr_drill_age_h": 1.0}}
 
     def test_no_payload_judges_none_of_them(self):
         assert canary.unjudged_keys(None) == [
             "read_fallback_used", "read_routed_to_duckdb", "read_refused",
             "buyer_sync_stalled", "buyer_sync_stalled_chain",
-            "duckdb_opened_while_off", "duckdb_off_held_back", "orders_sync_failing"]
+            "duckdb_opened_while_off", "duckdb_off_held_back", "orders_sync_failing",
+            "backup_evidence_stale"]
 
     def test_a_payload_with_every_block_judges_all_of_them(self):
         payload = {"read_fallbacks": {}, "read_fallback_mode": {"mode": "duckdb"},
@@ -627,12 +577,15 @@ class TestUnjudgedKeys:
                                      "write_chains": self._CHAIN4["write_chains"]}) == [
             "buyer_sync_stalled", "buyer_sync_stalled_chain"], "no step block"
         assert canary.unjudged_keys({"read_fallbacks": {}, "read_fallback_mode": {},
-                                     **self._CHAIN4}) == [
+                                     "backups": {}, **self._CHAIN4}) == [
             "duckdb_opened_while_off", "duckdb_off_held_back"], "no switch block"
+        assert canary.unjudged_keys({"read_fallbacks": {}, "read_fallback_mode": {},
+                                     "duckdb_switch": {}, **self._CHAIN4}) == [
+            "backup_evidence_stale"], "no backups block"
 
     def test_only_the_od07_keys_and_the_buyers_steps_are_ever_held(self):
         """Every other payload-derived key keeps today's behaviour; each held
-        key is one a check emits."""
+        key is one a check emits (and, since S14-00, the backup evidence's)."""
         emitted = {k for k, _ in canary.check_read_fallbacks(
             {"read_fallbacks": {"a": _entry(1)}})}
         emitted |= {k for k, _ in canary.check_read_routes(
@@ -652,6 +605,8 @@ class TestUnjudgedKeys:
         emitted |= {k for k, _ in canary.check_orders_sync_chain(
             {"write_chains": {canary.ORDERS_CHAIN: {
                 "mode": "postgres", "sync_step": {"consecutive_failures": 9}}}})}
+        emitted |= {k for k, _ in canary.check_backup_evidence(
+            {"backups": {"pitr_drill_age_h": None}})}
         assert set(canary.unjudged_keys(None)) == emitted
 
     @pytest.mark.parametrize("entry, held", [

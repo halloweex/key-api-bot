@@ -19,6 +19,15 @@ from core.repositories.customers import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _sms_on_duckdb(monkeypatch):
+    """This module's engine is DuckDB, as it was before step 14's S14-00 made
+    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
+    from tests.conftest import sms_store_on_duckdb
+
+    sms_store_on_duckdb(monkeypatch)
+
+
 async def _store(tmp_path: Path) -> DuckDBStore:
     store = DuckDBStore(db_path=tmp_path / "filters.duckdb")
     await store.connect()

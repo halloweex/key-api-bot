@@ -47,7 +47,7 @@ _NO_TABLE = object()
 
 def _scheduler_with(
     monkeypatch, ages, known=("dq_reconciliation", "dq_integrity_check"),
-    inventory_today=_NO_TABLE,
+    inventory_today=_NO_TABLE, writes_layers=("reconciliation_pg",),
 ):
     scheduler = BackgroundScheduler()
     scheduler._scheduler = _FakeScheduler(known)
@@ -85,14 +85,36 @@ def _scheduler_with(
     monkeypatch.setattr(
         "core.data_quality.fetch_last_success_ages", lambda conn, *a, **k: ages,
     )
+    # Since step 14's S14-00 the journal's and the snapshot's chains (9 and 1)
+    # write Postgres, a constant, so the catch-up reads both facts there: the
+    # same ages, and today's snapshot — a Postgres fault reads as taken.
+    async def _ages_pg(*a, **k):
+        return ages
+
+    async def _snapshot_pg():
+        if inventory_today is _NO_TABLE:
+            return ()
+        return (1,) if inventory_today else None
+
+    monkeypatch.setattr("core.dq_journal.last_success_ages_pg", _ages_pg)
+    monkeypatch.setattr("core.scheduler._inventory_snapshot_taken_today_pg", _snapshot_pg)
+    # And DuckDB's arm of the reconciliation stands down (chain 3, a constant):
+    # the Postgres arm's age decides, on a host that writes it. None leaves
+    # the real answer, read off the environment, to a caller that sets it.
+    if writes_layers is not None:
+        monkeypatch.setattr("core.scheduler._writes_layer",
+                            lambda layer: layer in writes_layers)
     return scheduler
 
 
 def _ages(recon_s, integrity_s):
+    """The reconciliation's age on both its DuckDB arm — stood down since
+    S14-00, so never the one that decides — and its Postgres arm."""
     def entry(age):
         return {"last_success_at": None if age is None else "2026-08-08T05:00:00+03:00",
                 "age_seconds": age}
-    return {"reconciliation": entry(recon_s), "integrity": entry(integrity_s)}
+    return {"reconciliation": entry(recon_s), "reconciliation_pg": entry(recon_s),
+            "integrity": entry(integrity_s)}
 
 
 class TestCatchUp:
@@ -394,6 +416,8 @@ class TestUnderDuckdbOffPostgresIsAskedFirst:
         from core.scheduler import BackgroundScheduler
 
         self._postgres(monkeypatch, _ages(30 * 3600, 3600), snapshot_taken=False)
+        monkeypatch.setattr("core.scheduler._writes_layer",
+                            lambda layer: layer == "reconciliation_pg")
         scheduler = BackgroundScheduler()
         scheduler._scheduler = _FakeScheduler(
             ("dq_reconciliation", "dq_integrity_check", "inventory_snapshot"))

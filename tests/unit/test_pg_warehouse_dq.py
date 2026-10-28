@@ -20,6 +20,21 @@ from core.pg_warehouse_dq import (
     SilverArc, Unwatched, Watermark,
 )
 
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is the Postgres twins; the integrity job's run record
+    it reads back is written to the quality journal, kept in DuckDB here.
+    So this module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_dq_journal_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
+
+
 WM = Watermark(today=date(2026, 9, 17), in_flight=2, backfilled=True,
                landing_age_s=120, landing_failures=0)
 ARC_CLEAN = SilverArc(0, 0, 0.0, None, (), 0, 0.0, ())
@@ -48,18 +63,9 @@ def _duck(name, count, severity=Severity.WARN):
 
 
 class TestTheFlag:
-    def test_default_off(self, monkeypatch):
-        monkeypatch.delenv(twins.ENV, raising=False)
-        assert twins.flag() == (False, None)
-
     def test_on(self, monkeypatch):
         monkeypatch.setenv(twins.ENV, "on")
         assert twins.flag() == (True, None)
-
-    def test_a_typo_is_off_with_an_error(self, monkeypatch):
-        monkeypatch.setenv(twins.ENV, "yes")
-        enabled, error = twins.flag()
-        assert enabled is False and "yes" in error
 
 
 class TestTheWindows:
@@ -1156,13 +1162,6 @@ class TestTheScanSkipsWhatStandsDown:
         _issues, raised, called = self._scan(conn, monkeypatch)
         assert called == [] and "headline_vs_line_items" not in raised
 
-    def test_while_duckdb_derives_it_runs_as_before(self, conn, monkeypatch):
-        from core import warehouse_cutover as wc
-
-        monkeypatch.setattr(wc, "_mode", wc.DUCKDB)
-        _issues, raised, called = self._scan(conn, monkeypatch)
-        assert called == [True] and "headline_vs_line_items" in raised
-
 
 class TestTheJobUnderTheStandDown:
     """The integrity job end to end on a real (empty) DuckDB, the twins' facts
@@ -1222,19 +1221,6 @@ class TestTheJobUnderTheStandDown:
             assert persisted[name]["count"] == record["standalone"][name]
         assert not set(wc.STOOD_DOWN_WHEN_POSTGRES) & set(record["duckdb"]["looked"])
 
-    def test_while_duckdb_derives_they_compare_as_before(self, job, monkeypatch):
-        """The same facts against DuckDB's own count — zero, on an empty file —
-        disagree beyond the orders in flight, and the twins file nothing of
-        their own. Production today, unchanged."""
-        from core import warehouse_cutover as wc
-
-        monkeypatch.setattr(wc, "_mode", wc.DUCKDB)
-        persisted, record = self._run(*job)
-        assert "pg_headline_vs_line_items" not in persisted
-        assert "pg_goods_shipped_without_sale" not in persisted
-        assert persisted["pg_line_items_disagree"]["count"] == 2
-        assert {"headline_vs_line_items", "goods_shipped_without_sale"} <= set(
-            record["duckdb"]["looked"])
 
     # The five DuckDB checks the switch stands down, by the function the scan
     # calls for each guard name.
@@ -1272,11 +1258,3 @@ class TestTheJobUnderTheStandDown:
         assert called == []
         assert "integrity_check_raised" not in persisted
 
-    def test_while_duckdb_derives_the_job_runs_all_five(self, job, monkeypatch):
-        from core import warehouse_cutover as wc
-
-        monkeypatch.setattr(wc, "_mode", wc.DUCKDB)
-        called = self._frozen(monkeypatch)
-        persisted, _record = self._run(*job)
-        assert sorted(called) == sorted(self.STOOD_DOWN_FUNCTIONS)
-        assert persisted["integrity_check_raised"]["count"] == 5

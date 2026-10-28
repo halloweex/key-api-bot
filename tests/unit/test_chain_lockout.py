@@ -14,8 +14,10 @@ hand-kept sets.
 Now every chain registered from #280 on names its lock-out
 (`LOCKOUT_REVISION`), and:
 
-- its flag moves nothing while this build requires an earlier revision — the
-  chain runs as duckdb and `/api/health` names `lockout`;
+- its flag moved nothing while this build required an earlier revision — the
+  chain ran as duckdb and `/api/health` named `lockout`. Since step 14's
+  S14-00 every chain writes Postgres, a constant, and the tests of that hold
+  went with it;
 - its writers ask `require_revision()` before the latch, so the database is at
   that revision too when the chain first writes Postgres;
 - the revision it names really does know the chain: as of it, every table the
@@ -158,56 +160,6 @@ class TestTheWritersAskTheRevisionBeforeTheLatch:
             first_latch = min(c.lineno for c in calls(func, "_latch"))
             pools = [c.lineno for c in calls(func, "_pool")]
             assert pools and min(pools) < first_latch, f"{name}.{func.name}"
-
-
-class TestAFlipWaitsForTheLockout:
-    @pytest.mark.parametrize("name", _ruled())
-    def test_before_the_lockout_is_required_the_flag_moves_nothing(self, name, flags):
-        """#280's build, in this code: the chain registered, its lock-out not
-        yet required. Before the fix every one of the eight wrote Postgres
-        here, and the first write latched it. Kills: a chain whose routing
-        does not ask the lock-out — writer, registry or reader."""
-        chain = _chains()[name]
-        flags.setattr(pg, "REQUIRED_REVISION", _before(chain.LOCKOUT_REVISION))
-        flags.setenv(chain.WRITE_ENV, "postgres")
-
-        assert chain.writes_postgres() is False
-        state = write_chains.chain_modes()[name]
-        assert state["mode"] == "duckdb", state
-        assert "lockout:" in (state["unmet_precondition"] or ""), state
-        assert "lockout:" in (chain.unmet_precondition() or "")
-        if hasattr(chain, "reads_postgres"):
-            assert chain.reads_postgres() is False
-
-    @pytest.mark.parametrize("name", _ruled())
-    def test_once_it_is_required_the_lockout_is_no_reason(self, name, flags):
-        """The build that requires it — this one, for the eight. Kills: a
-        lock-out that holds a chain whose lock is already in force. A shadow
-        chain has no other precondition, so it moves."""
-        chain = _chains()[name]
-        flags.setattr(pg, "REQUIRED_REVISION", chain.LOCKOUT_REVISION)
-        flags.setenv(chain.WRITE_ENV, "postgres")
-
-        assert "lockout:" not in (chain.unmet_precondition() or "")
-        if write_chains.is_shadow(chain):
-            assert chain.writes_postgres() is True
-            assert write_chains.chain_modes()[name]["mode"] == "postgres"
-
-    @pytest.mark.parametrize("name", _ruled())
-    def test_a_latched_chain_is_not_held_by_it(self, name, flags):
-        """OD-19 (a): once a chain has written Postgres the latch outranks
-        every precondition — routing it back to DuckDB would start a second
-        writer. The reason is still published. Kills: a lock-out that
-        outranks the latch."""
-        chain = _chains()[name]
-        flags.setattr(pg, "REQUIRED_REVISION", _before(chain.LOCKOUT_REVISION))
-        flags.setenv(chain.WRITE_ENV, "postgres")
-        chain_latch.latch(name, chain.WRITE_ENV)
-
-        assert chain.writes_postgres() is True
-        state = write_chains.chain_modes()[name]
-        assert state["mode"] == "postgres"
-        assert "lockout:" in (state["unmet_precondition"] or ""), state
 
 
 class TestLockoutUnmet:

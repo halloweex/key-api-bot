@@ -123,54 +123,33 @@ def chain_name(chain: ModuleType) -> str:
 def _chain_state(chain: ModuleType) -> Dict[str, Optional[object]]:
     """One chain's entry in `chain_modes()`. Never raises.
 
-    Separate so a question about particular tables can ask only the chains
-    that declare them (`stood_down_among`) and still reach the verdict through
-    the same lines as every other consumer — one rule, whichever door."""
+    **Since step 14's S14-00 `mode` is "postgres" and `unmet_precondition`
+    None for every chain**, whatever its flag says: every chain writes
+    Postgres, and nothing routes by the flag, the latch or a precondition.
+    `env`, `error`, `latched`, `latched_at` and `mismatch` are published as
+    before — they now say whether a rollback to an image from before step
+    14, which still routes by them, would find the chain where it is; the canary's
+    `write_chain_flag_*` keys keep judging them until S14-11."""
     from core import chain_latch
 
     name = chain_name(chain)
-    # The environment on its own, so the published error survives the latch
-    # answering over it.
+    # The environment on its own, so the published error survives.
     try:
         env_mode, error = (
             "postgres" if chain.env_writes_postgres() else "duckdb"), None
     except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
         env_mode, error = None, str(exc)
     since = chain_latch.latched_at(name)
-    # A chain may name something that must hold before its flag can move the
-    # writes (`unmet_precondition()`, chain 6a's read flag). Asked only where
-    # it could matter — the flag says postgres, or the latch already has —
-    # and unmet, it holds an unlatched chain on DuckDB: every consumer here
-    # then reads "duckdb", so the writer, the sync key, the shipper and the
-    # comparison stay together on the store that is still read. A latched
-    # chain keeps writing Postgres (OD-19 (a)); what is unmet is published
-    # either way, and the canary warns on it.
-    unmet = (_unmet_precondition(chain)
-             if since or env_mode == "postgres" else None)
-    effective = "duckdb" if (env_mode == "postgres" and unmet) else env_mode
     return {
         "env": chain.WRITE_ENV,
-        "mode": "postgres" if (since or effective == "postgres") else effective,
+        "mode": "postgres",
         "error": error,
         "latched": since is not None,
         "latched_at": since,
         "mismatch": since is not None and env_mode != "postgres",
-        "unmet_precondition": unmet,
+        "unmet_precondition": None,
         "shadow": is_shadow(chain),
     }
-
-
-def _unmet_precondition(chain: ModuleType) -> Optional[str]:
-    """What the chain says must hold before its writes move, when it does not;
-    None when it holds or the chain names nothing. Never raises — a check that
-    cannot answer is itself unmet, since nobody can say the readers follow."""
-    check = getattr(chain, "unmet_precondition", None)
-    if check is None:
-        return None
-    try:
-        return check()
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        return f"the precondition could not be read: {exc}"
 
 
 def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
@@ -181,11 +160,11 @@ def chain_modes() -> Dict[str, Dict[str, Optional[object]]]:
     feeding DuckDB after it moves (OD-02 (c), `is_shadow`), whatever `mode`
     says.
 
-    `mode` is where the chain's writes actually go — "postgres", "duckdb", or
-    None when the environment was not understood and no latch overrides it.
-    `unmet_precondition` is a chain's own condition for moving (`_chain_state`
-    has the rule): unmet under a postgres flag, `mode` is "duckdb" until it
-    holds, unless the chain is latched.
+    `mode` is where the chain's writes actually go — "postgres" for every
+    chain since step 14's S14-00 — and `unmet_precondition` None
+    (`_chain_state`). Until then `mode` was "postgres", "duckdb", or None for
+    a flag nobody could read, and an unmet precondition held an unlatched
+    chain on DuckDB.
     `mismatch` is the state DN-06 exists to make visible: the chain has already
     written Postgres, so it keeps writing Postgres (OD-19 (a)), while its
     variable says something else. Both halves are published, because a latched
@@ -248,32 +227,14 @@ def shadow_chains() -> Tuple[ModuleType, ...]:
 
 
 def compared_in_shadow() -> FrozenSet[str]:
-    """Tables of shadow chains whose writes go to Postgres. Never raises.
-
-    The hourly copy stands them down — they are in `stood_down_tables()` like
-    any moved chain's — and the daily comparison keeps them, facing
-    Postgres→DuckDB. Only `mode == "postgres"`: a chain whose flag nobody can
-    read and that is not latched writes nowhere (its writers raise), so there
-    is no shadow to compare and it stands down with `write_chain_flag_invalid`
-    paging, the frozen chains' answer. A chain held only by owner rows — its
-    marker lost — follows its flag again, is not here, and stays stood down
-    with `chain_latch_disagrees` paging.
-
-    Empty under KS_DUCKDB=off (stage 5, PR-4): the shadow write stands down
-    there (`core.shadow_writes.into_duckdb`), so DuckDB is no longer a copy of
-    anything and the tables stand down like a frozen chain's — the comparison
-    does not open the file to read them. Local state, no I/O.
+    """Tables of shadow chains the daily comparison still compares facing
+    Postgres→DuckDB: none, a constant since step 14's S14-00. Under
+    `KS_DUCKDB=off` — production since 2026-10-16, and web always since
+    S14-00 — the shadow write stands down, so DuckDB is no longer a copy of
+    anything and the comparison does not open the file to read them. Last
+    consumers: `reconcile_operational` and the table-fates manifest — S14-10.
     """
-    from core import duckdb_switch
-
-    if duckdb_switch.is_off():
-        return frozenset()
-    return frozenset(
-        table
-        for chain in WRITE_CHAINS if is_shadow(chain)
-        and _chain_state(chain)["mode"] == "postgres"
-        for table in chain.CHAIN_TABLES
-    )
+    return frozenset()
 
 
 def mismatched_chains() -> Dict[str, str]:

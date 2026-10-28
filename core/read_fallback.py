@@ -15,6 +15,13 @@ one in-process counter per surface, and `/api/health` publishes the counters
 under `read_fallbacks`. `tests/unit/test_read_fallback_sites.py` walks `core/`
 and `web/` for the shapes a fallback takes rather than trusting a list.
 
+**Since step 14's S14-00 the mode is `off`, whatever `KS_READ_FALLBACK`
+says** — production's value since 2026-10-09. `refusing()` is True,
+`mode()` is `off` and `mode_error()` None, so every `fall_back` is a
+refusal; the counters, `misconfigured` and `no_engine` are still published
+in their shape, and the fallback branches go in S14-16. What follows is the
+history of the two modes.
+
 UNDER `off`, A FALLBACK IS REFUSED (DN-20b)
 
 `KS_READ_FALLBACK` is `duckdb`, the default, or `off`. Under `duckdb`,
@@ -158,8 +165,14 @@ _NEEDS = {
     "clickhouse": "KS_CH_URL",
 }
 
-_mode: Optional[str] = None
+# The cache the mode used to live in. Since step 14's S14-00 the mode is `off`
+# whatever `KS_READ_FALLBACK` says — a read whose engine fails is refused, as
+# production has refused since 2026-10-09 — and nothing reads this; kept, at
+# the constant, for the fixtures that save and restore it until S14-16.
+_mode: Optional[str] = OFF
 _mode_error: Optional[str] = None
+# Whether this process has configured the mode, so the line below is said once.
+_configured = False
 _misconfigured: List[str] = []
 # Causes `configure_mode(report=False)` found new and nobody has logged yet:
 # `configure_modes()` logs them after stage 5's verdict, which decides what
@@ -216,32 +229,19 @@ def _misconfigured_reads() -> List[str]:
 
 
 def configure_mode(*, report: bool = True) -> str:
-    """Read `KS_READ_FALLBACK` once, and look for read switches that cannot
-    reach their engine. Never raises. Called by `configure_modes()`, with
-    `report=False`: the line a misconfigured switch is logged with is then
-    left to `report_misconfigured`, which that function calls last."""
-    global _mode, _mode_error, _misconfigured, _unreported
-    previous = _mode
-    value = os.getenv(ENV, DUCKDB).strip().lower() or DUCKDB
-    if value in _VALID:
-        error = None
-        _mode = value
-    else:
-        _mode = DUCKDB
-        error = (f"{ENV}={value!r} is not one of {_VALID}; "
-                 f"running as {DUCKDB!r}")
-    # Logged when it changes, not on every call: web's startup and the
-    # scheduler both configure, and one ERROR per cause is what a reader of
-    # the log can use.
-    if error and error != _mode_error:
-        logger.error(error)
-    _mode_error = error
-    if _mode == OFF and previous != OFF:
+    """`off`, whatever `KS_READ_FALLBACK` says (S14-00), and look for read
+    switches that cannot reach their engine. Never raises. Called by
+    `configure_modes()`, with `report=False`: the line a misconfigured switch
+    is logged with is then left to `report_misconfigured`, which that
+    function calls last."""
+    global _misconfigured, _unreported, _configured
+    if not _configured:
         logger.warning(
-            "%s=off: a read whose engine fails is refused rather than "
-            "answered from DuckDB — an HTTP route answers 503 naming the "
-            "surface. Refusals are published under read_fallback_mode.refused",
-            ENV)
+            "%s=off since step 14's S14-00, whatever the variable says: a read "
+            "whose engine fails is refused rather than answered from DuckDB — "
+            "an HTTP route answers 503 naming the surface. Refusals are "
+            "published under read_fallback_mode.refused", ENV)
+        _configured = True
 
     misconfigured = _misconfigured_reads()
     # New since the last configure, as before — or found new by one whose
@@ -251,7 +251,7 @@ def configure_mode(*, report: bool = True) -> str:
     _misconfigured = misconfigured
     if report:
         report_misconfigured()
-    return _mode
+    return OFF
 
 
 def report_misconfigured() -> None:
@@ -259,17 +259,11 @@ def report_misconfigured() -> None:
     once per cause, saying what this process does with the reads behind it:
     refused, or served from DuckDB. Never raises.
 
-    Which of the two is `refusing()`, and in web that answer is not final
-    when this mode is configured. `KS_DUCKDB=off` makes it hold, and stage
-    5's verdict (`core.duckdb_off.settle()`) comes last in
-    `configure_modes()`, after step 13's verdict and chain 3's hold, which
-    it reads. A verdict that holds web back runs it `on`, and those reads
-    are then served from DuckDB. Logged at the configure, the line said
-    "refused (KS_DUCKDB=off)", and nothing corrected it: the scheduler's
-    configure finds the cause already logged. So `configure_modes()`
-    configures this mode with `report=False` and reports after the verdict
-    (integration of PR-8 with PR-2). The mode itself is still cached at
-    its place in that order; only the line waits."""
+    Which of the two is `refusing()` — since S14-00 always refused. Until
+    then the answer was not final when this mode was configured: stage 5's
+    verdict on `KS_DUCKDB=off` came last in `configure_modes()` and could hold
+    web on `on`, so the line waited for it. It still comes last; nothing is
+    left to wait for."""
     global _unreported
     for line in _unreported:
         logger.error(
@@ -281,12 +275,14 @@ def report_misconfigured() -> None:
 
 
 def mode() -> str:
-    """The configured mode; `duckdb` until `configure_mode` has run."""
-    return _mode or DUCKDB
+    """`off`, a constant since S14-00."""
+    return OFF
 
 
 def mode_error() -> Optional[str]:
-    return _mode_error
+    """None: since S14-00 no value of `KS_READ_FALLBACK` is read, so none is
+    an error. The canary's `read_fallback_mode_invalid` goes with the block."""
+    return None
 
 
 def misconfigured() -> List[str]:
@@ -321,27 +317,17 @@ def no_engine_routes() -> List[str]:
 
 def refusing() -> bool:
     """Whether a read that would be answered by DuckDB is refused instead:
-    under `KS_READ_FALLBACK=off`, and under `KS_DUCKDB=off` whatever that
-    says — the file a fallback would read is switched off (stage 5, PR-8).
-    `mode()` stays what was configured; this is the answer to act on."""
-    if mode() == OFF:
-        return True
-    from core import duckdb_switch
-
-    return duckdb_switch.is_off()
+    True, a constant since S14-00 — production has refused since 2026-10-09
+    (`KS_READ_FALLBACK=off`), and web never opens the file. Last consumers:
+    `fall_back`, `no_engine`, `no_address` and chain 6's precondition; the
+    fallback branches go in S14-16."""
+    return True
 
 
 def _refusal_cause() -> str:
-    """The variable that makes `refusing()` hold, as a log line names it:
-    `KS_READ_FALLBACK=off` first, which refuses in either mode and is the
-    only cause under `KS_DUCKDB=on` — so a line there reads as it always
-    has — and otherwise `KS_DUCKDB=off` (stage 5, PR-8). Only asked once
-    `refusing()` holds."""
-    if mode() == OFF:
-        return f"{ENV}={OFF}"
-    from core import duckdb_switch
-
-    return f"{duckdb_switch.ENV}={duckdb_switch.OFF}"
+    """The variable a log line names as what refused: `KS_READ_FALLBACK=off`,
+    production's value and, since S14-00, the only answer."""
+    return f"{ENV}={OFF}"
 
 
 def _names_duckdb(name: str) -> bool:

@@ -66,18 +66,19 @@ def env_writes_postgres() -> bool:
 
 
 def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_WEEKLY_LEDGER=postgres` must not move the writes yet, or None:
-    the lock-out alone (`chain_latch.lockout_unmet`). Never raises and
-    never asks Postgres."""
-    return chain_latch.lockout_unmet(LOCKOUT_REVISION)
+    """None, a constant since step 14's S14-00: the chain writes Postgres
+    whatever its flag says, and the lock-out it waited on is not asked any
+    more — production requires 0035 and has latched the chain. Kept for the
+    registry's `unmet_precondition` field until S14-11."""
+    return None
 
 
 def writes_postgres() -> bool:
-    """The latch outranks the flag, and the flag moves the writes only
-    once `unmet_precondition()` holds."""
-    if chain_latch.latched(CHAIN):
-        return True
-    return env_writes_postgres() and unmet_precondition() is None
+    """True, a constant since step 14's S14-00: neither the flag, nor the
+    latch, nor the lock-out routes any more; the first write in a process
+    still takes the latch (decision 3). Last consumers: the weekly report's
+    ledger gate and the registry — S14-10."""
+    return True
 
 
 def pending() -> Dict[str, Any]:

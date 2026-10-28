@@ -22,12 +22,16 @@ the fallback walk finds, at the engine it names; every chain in
 `postgres`; every precondition of step 13 met (`MET_ENV`, which
 `tests/unit/test_warehouse_writer.py` keeps true); `KS_READ_FALLBACK=off`;
 and `KS_DUCKDB=off`. It is applied through the real `configure_modes()` as web
-calls it, so off's own coherence verdict (`core/duckdb_off.py`, PR-2) is
-reached too, and `assert_target_state` then asks every cached verdict whether
-it got there — off's last, which must hold: a held-back process runs `on`, and
-the sweep would be measuring a web that opens the file on purpose. A registry
-that grows a precondition this state does not meet fails here, naming it,
-rather than sweeping a different state in silence.
+calls it, and `assert_target_state` then asks every cached answer whether it
+got there. Since step 14's S14-00 those answers are constants — web runs off
+whatever `KS_DUCKDB` says, and off's verdict (`core/duckdb_off.py`) is gone —
+so the state is no longer what makes them hold; the sweep still sets it,
+production's own, so it measures the web production runs.
+
+**And with no chain latched** (`down-unlatched`, S14-00): the same state
+with no marker on disk — the chains route by nothing now, so a lost
+`data/write-chain-owners` must change no path, and the sweep must reach
+exactly the same nothing.
 
 FOUR FLAVOURS: POSTGRES, AND THE WORLD OUTSIDE
 
@@ -88,7 +92,6 @@ import types
 import typing
 from pathlib import Path
 from typing import Dict, FrozenSet, Optional, Tuple
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -104,8 +107,12 @@ OUT_ENV = "KS_SWEEP_OUT"
 # TurboSMS — answering or refusing (`duckdb_off_sweep_world.py`).
 DOWN, LIVE = "down", "live"
 DOWN_OFFLINE, LIVE_OFFLINE = "down-offline", "live-offline"
-FLAVORS = (DOWN, LIVE, DOWN_OFFLINE, LIVE_OFFLINE)
-DOWNS, LIVES = frozenset({DOWN, DOWN_OFFLINE}), frozenset({LIVE, LIVE_OFFLINE})
+# Postgres refusing, the world answering, and no chain marker on disk (S14-00).
+DOWN_UNLATCHED = "down-unlatched"
+FLAVORS = (DOWN, LIVE, DOWN_OFFLINE, LIVE_OFFLINE, DOWN_UNLATCHED)
+DOWNS = frozenset({DOWN, DOWN_OFFLINE, DOWN_UNLATCHED})
+LIVES = frozenset({LIVE, LIVE_OFFLINE})
+UNLATCHED = frozenset({DOWN_UNLATCHED})
 OFFLINES = frozenset({DOWN_OFFLINE, LIVE_OFFLINE})
 EVERY_FLAVOR = frozenset(FLAVORS)
 STEP_TIMEOUT_S = 60
@@ -202,18 +209,19 @@ KNOWN_FALSE_SUCCESS: Dict[str, str] = {
 
 # ─── The state ───────────────────────────────────────────────────────────────
 
-def apply_target_state(monkeypatch, tmp_path, *, live: bool,
+def apply_target_state(monkeypatch, tmp_path, *, live: bool, markers: bool = True,
                        breaking: Optional[Dict[str, str]] = None) -> None:
     """Set the state production will be in for the week of silence, and read
-    it the way web's startup does. `live` reads step 13's Postgres facts from
-    the database at `KS_PG_DSN`; otherwise they are answered as met.
+    it the way web's startup does. `live` points `KS_PG_DSN` at the database
+    the sweep seeded. `markers` latches every chain, as production's are —
+    or leaves `data/write-chain-owners` empty, which since S14-00 must change
+    nothing.
 
     `breaking` sets variables over that state just before it is read, and
     then nothing is asserted about it: the caller judges what the start
     made of the state with one thing wrong."""
     from core import chain_latch, warehouse_cutover as wc
     from core.duckdb_table_fates import STORE_SWITCHES
-    from core.pg import REQUIRED_REVISION
     from core.runtime_modes import configure_modes
     from core.write_chains import WRITE_CHAINS, chain_name
     from tests.unit.test_read_fallback_http import _every_switch_on
@@ -232,24 +240,15 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool,
     monkeypatch.setenv("KS_BOT_STORE", "postgres")
     for chain in WRITE_CHAINS:
         monkeypatch.setenv(chain.WRITE_ENV, "postgres")
-        chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
+        if markers:
+            chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
     monkeypatch.setenv(duckdb_switch.ENV, "off")
     data = tmp_path / "data"
     monkeypatch.setattr("core.duckdb_store.DB_DIR", data)
     monkeypatch.setattr("core.duckdb_store.DB_PATH", data / "analytics.duckdb")
     monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (0.0, 0.0))
-    if not live:
-        monkeypatch.setattr(wc, "_revision_on_its_own_connection",
-                            AsyncMock(return_value=REQUIRED_REVISION))
-        monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection",
-                            AsyncMock(return_value=True))
-        monkeypatch.setattr(wc, "_expenses_backfilled", AsyncMock(return_value=True))
-        # Off's two Postgres facts, as production's copy holds them (design
-        # 4.1): step 13's record resolved, and copied after the last latch.
-        from core import duckdb_off
-
-        monkeypatch.setattr(duckdb_off, "_frozen_facts_on_its_own_connection",
-                            AsyncMock(return_value=frozen_facts_met()))
+    # Since S14-00 nothing at the start asks Postgres — not step 13's revision,
+    # not off's frozen facts — so nothing here stands in for them.
     # The process-wide caches the modes are read into, put back afterwards.
     from core import pg_derivation, pg_utm_parse
 
@@ -262,32 +261,18 @@ def apply_target_state(monkeypatch, tmp_path, *, live: bool,
         monkeypatch.setenv(name, value)
     configure_modes(web=True)
     if breaking is None:
-        assert_target_state()
+        assert_target_state(markers=markers)
 
 
-# What `core.duckdb_off` reads from Postgres when off's verdict is met.
+# Step 13's record as production's copy holds it: what the live flavour seeds.
 WRITER_RESOLVED = {"writer": "postgres", "since": "2026-10-01T06:00:00+00:00",
                    "resolved": True, "resolved_at": "2026-10-01T06:00:01+00:00"}
 
 
-def frozen_facts_met() -> dict:
-    """Step 13's record resolved, an owner row for every table of every
-    chain, and the copy shipped an hour after them."""
-    from datetime import datetime, timedelta, timezone
-
-    from core.write_chains import WRITE_CHAINS
-
-    now = datetime.now(timezone.utc)
-    return {"writer": dict(WRITER_RESOLVED), "copied_at": now,
-            "owners": {table: now - timedelta(hours=1)
-                       for chain in WRITE_CHAINS for table in chain.CHAIN_TABLES}}
-
-
-def assert_target_state() -> None:
-    """Every cached verdict says the state was reached — and if one does not,
-    which, rather than a sweep of some other state. Off's own verdict last:
-    it reads the others, and a held-back web names them by key."""
-    from core import duckdb_off, pg_orders_write, read_fallback, warehouse_cutover as wc
+def assert_target_state(*, markers: bool = True) -> None:
+    """Every cached answer says the state was reached — and if one does not,
+    which, rather than a sweep of some other state."""
+    from core import pg_orders_write, read_fallback, warehouse_cutover as wc
     from core.write_chains import chain_modes
 
     assert duckdb_switch.value() == "off" and duckdb_switch.mode_error() is None
@@ -295,16 +280,12 @@ def assert_target_state() -> None:
     assert wc.writes_postgres() and not unmet, f"step 13 unmet: {unmet}"
     assert read_fallback.mode() == "off"
     assert read_fallback.misconfigured() == [] and read_fallback.no_engine_routes() == []
-    # Latched, so writing Postgres whatever else holds (OD-19 (a)). What a
-    # latched chain still publishes as unmet — chain 3's host backup evidence
-    # on a machine with no PITR drill — is a page, not a route.
     not_moved = {name: state for name, state in chain_modes().items()
-                 if state["mode"] != "postgres" or not state["latched"]
+                 if state["mode"] != "postgres" or state["latched"] != markers
                  or state["mismatch"] or state["error"]}
     assert not not_moved, not_moved
     assert pg_orders_write.mode() == "postgres", "chain 3 held on DuckDB"
-    assert duckdb_switch.held_back() == (), (
-        f"off held back: {[(u.key, u.detail) for u in duckdb_off.unmet()]}")
+    assert duckdb_switch.held_back() == ()
     assert duckdb_switch.is_off()
 
 
@@ -482,17 +463,18 @@ class TestTheState:
 
         assert all(chain_latch.latched(chain_name(c)) for c in WRITE_CHAINS)
 
-    def test_a_registry_the_state_does_not_meet_fails_by_name(
+    def test_with_no_marker_the_state_is_the_same_but_the_latch(
         self, monkeypatch, tmp_path, fresh_read_fallback,  # noqa: F811
     ):
-        """The self-check is the reason the state can be derived: a new
-        precondition the state does not meet is named, not swept past.
-        Mutation: drop `assert_target_state()` from `apply_target_state`."""
-        from core import warehouse_cutover as wc
+        """S14-00: the chains route by nothing, so with no marker on disk every
+        answer is production's but `latched`. Mutation: route a chain by its
+        latch again."""
+        from core import chain_latch
+        from core.write_chains import WRITE_CHAINS, chain_name
 
-        monkeypatch.setattr(wc, "OD10_DOORS", (("web.routes.api.x", "door"),))
-        with pytest.raises(AssertionError, match="od10_doors"):
-            apply_target_state(monkeypatch, tmp_path, live=False)
+        apply_target_state(monkeypatch, tmp_path, live=False, markers=False)
+        assert not any(chain_latch.latched(chain_name(c)) for c in WRITE_CHAINS)
+        assert duckdb_switch.opened() == {}
 
 
 # ─── The sweep ───────────────────────────────────────────────────────────────
@@ -567,8 +549,13 @@ def live_offline(tmp_path_factory):
     return _live(LIVE_OFFLINE, tmp_path_factory)
 
 
+@pytest.fixture(scope="module")
+def down_unlatched(tmp_path_factory):
+    return run_sweep(DOWN_UNLATCHED, SWEEPS, tmp_path_factory.mktemp(DOWN_UNLATCHED))
+
+
 FIXTURE_OF = {DOWN: "down", LIVE: "live", DOWN_OFFLINE: "down_offline",
-              LIVE_OFFLINE: "live_offline"}
+              LIVE_OFFLINE: "live_offline", DOWN_UNLATCHED: "down_unlatched"}
 
 
 def swept(request, flavor: str) -> Dict[str, dict]:
@@ -905,6 +892,33 @@ class TestTheSweepUnderARefusingPostgres:
         result = run[ROUTES]
         for path in ("/api/health", "/api/health/detailed", "/api/duckdb/stats"):
             assert result["routes"][path] == 200, path
+        assert result["health"] == {
+            "status": "healthy", "degraded_by": [],
+            "duckdb": "off", "migrations": {"status": "off"}}
+
+
+class TestTheSweepWithNoChainLatched:
+    """S14-00's variant: Postgres refusing, the world answering, and not one
+    chain marker on disk. The chains route by nothing since S14-00, so a lost
+    `data/write-chain-owners` reaches for the file exactly as often as
+    production's eleven markers do — never."""
+
+    @pytest.fixture
+    def run(self, down_unlatched):
+        return down_unlatched
+
+    @pytest.mark.parametrize("sweep", SWEEPS)
+    def test_each_sweep_reaches_exactly_the_known_residual(self, run, sweep):
+        _judge(DOWN_UNLATCHED, sweep, run[sweep])
+
+    def test_every_job_was_run(self, run):
+        result = run[PROCESS]
+        _judge_the_jobs(result)
+        _judge_the_run(result)
+
+    def test_health_says_off_and_is_healthy(self, run):
+        result = run[ROUTES]
+        assert result["routes"]["/api/health"] == 200
         assert result["health"] == {
             "status": "healthy", "degraded_by": [],
             "duckdb": "off", "migrations": {"status": "off"}}
@@ -1275,8 +1289,11 @@ class TestTheInstruments:
         name_the_key(monkeypatch)
         store = DuckDBStore()
 
+        # Two keys no write chain owns: since step 14's S14-00 every chain's
+        # keys are read from Postgres, a constant, so only a key nobody
+        # declared still reaches for DuckDB's `sync_metadata`.
         async def tick():
-            for key in ("orders", "products"):
+            for key in ("meilisearch", "unclaimed"):
                 with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
                     await asyncio.ensure_future(store.get_last_sync_time(key))
             async with store.connection():  # no watermark in hand: unnamed
@@ -1285,8 +1302,8 @@ class TestTheInstruments:
         with pytest.raises(duckdb_switch.DuckDBOpenedWhileOff):
             asyncio.run(tick())
         assert sorted(duckdb_switch.opened()) == [
-            "core.duckdb_store:get_last_sync_time (task) [last_sync_orders]",
-            "core.duckdb_store:get_last_sync_time (task) [last_sync_products]",
+            "core.duckdb_store:get_last_sync_time (task) [last_sync_meilisearch]",
+            "core.duckdb_store:get_last_sync_time (task) [last_sync_unclaimed]",
             f"{__name__}:tick",
         ]
         assert not duckdb_off.exists()

@@ -284,6 +284,9 @@ async def test_a_suite_collected_before_midnight_still_finds_the_92nd_day(
 ):
     """Collected yesterday at 23:59, run today: buyer 12 is exactly 92 days
     back from the store's today, and stays in the 92-day window."""
+    from tests.conftest import sms_store_on_duckdb
+
+    sms_store_on_duckdb(monkeypatch)   # DuckDB is this test's engine (S14-00)
     yesterday = datetime.now(KYIV).date() - timedelta(days=1)
     clock = _Clock(datetime.combine(yesterday, time(23, 59), KYIV))
     fx = _load(FIXTURE, clock, monkeypatch)          # collection

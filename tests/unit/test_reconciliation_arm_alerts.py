@@ -19,6 +19,21 @@ import pytest
 from core.data_quality import IntegrityIssue, Severity
 from core.scheduler import BackgroundScheduler
 
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is what the reconciliation job sends and keeps; the
+    runs it reads back are written to the quality journal, kept in DuckDB
+    here. So this module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_dq_journal_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
+
+
 AS_OF = datetime(2026, 9, 18, 2, 30, tzinfo=timezone.utc)
 START, END = date(2026, 6, 20), date(2026, 9, 18)
 
@@ -126,101 +141,3 @@ async def test_a_critical_on_postgres_does_not_cost_the_clickhouse_verdict():
     assert sent == ["reconciliation_pg", "reconciliation_ch"]
 
 
-@pytest.mark.parametrize("raising,other", [
-    ("_persist_postgres_reconciliation", "_persist_ch_reconciliation"),
-    ("_persist_ch_reconciliation", "_persist_postgres_reconciliation"),
-])
-@pytest.mark.asyncio
-async def test_an_arm_that_raises_does_not_cost_the_duckdb_verdict(raising, other):
-    """The call site promised this in a comment and nothing kept it.
-
-    Drives the real job with either arm throwing: the DuckDB layer must still
-    repair, page and resolve, and the other arm must still be judged."""
-    from core.data_quality import Discrepancy, DiscrepancyClass
-
-    missing = Discrepancy(
-        month="2026-09", source_id=4, diff_class=DiscrepancyClass.MISSING_IN_DK,
-        field="orders", dk_value=0, kc_value=1, severity=Severity.CRITICAL,
-        order_ids=(601,),
-    )
-    sync = AsyncMock()
-    sync.repair_orders = AsyncMock(return_value={"repaired": 1, "remaining": 0})
-
-    sched = BackgroundScheduler()
-    sched._send_dq_alert_throttled = AsyncMock()
-    sched._resolve_dq_layer = AsyncMock()
-    sched._reconcile_postgres = AsyncMock(return_value=_critical())
-    sched._reconcile_clickhouse = AsyncMock(return_value=_critical())
-    setattr(sched, raising, AsyncMock(side_effect=NameError("run_id")))
-    setattr(sched, other, AsyncMock())
-
-    with patch("core.reconciliation_io.keycrm_orders_in_window",
-               new=AsyncMock(return_value=({}, 0, set()))), \
-         patch("core.reconciliation_io.duckdb_orders_in_window",
-               return_value={}), \
-         patch("core.data_quality.classify_discrepancies",
-               return_value=[missing]), \
-         patch("core.data_quality.classify_order_discrepancies",
-               return_value=[]), \
-         patch("core.data_quality.persist_run", return_value=7), \
-         patch("core.data_quality.machine_attempts_note", return_value=None), \
-         patch("core.sync_service.get_sync_service",
-               new=AsyncMock(return_value=sync)), \
-         patch("core.duckdb_store.get_store",
-               new=AsyncMock(return_value=_Store())):
-        result = await sched._run_dq_reconciliation()
-
-    assert result["error"] is None
-    getattr(sched, other).assert_awaited_once()
-    sync.repair_orders.assert_awaited_once()
-    sent = [c.args[0] for c in sched._send_dq_alert_throttled.await_args_list]
-    assert sent == ["reconciliation"]
-    resolved = [c.args[0] for c in sched._resolve_dq_layer.await_args_list]
-    assert resolved == ["reconciliation"]
-
-
-@pytest.mark.asyncio
-async def test_an_order_keycrm_has_and_duckdb_lacks_is_fetched_back():
-    """Step 5, which had never run: `DiscrepancyClass` and `get_sync_service`
-    were both unimported in this function from the day the repair was added
-    (#43). Any discrepancy at all raised NameError in the comprehension, and
-    the one production run that found one (21.08, a WARN) ended there —
-    persisted, never resolved."""
-    from core.data_quality import Discrepancy, DiscrepancyClass
-
-    missing = Discrepancy(
-        month="2026-09", source_id=4, diff_class=DiscrepancyClass.MISSING_IN_DK,
-        field="orders", dk_value=0, kc_value=2, severity=Severity.CRITICAL,
-        order_ids=(501, 502),
-    )
-    sync = AsyncMock()
-    sync.repair_orders = AsyncMock(return_value={"repaired": 2, "remaining": 0})
-
-    sched = BackgroundScheduler()
-    sched._send_dq_alert_throttled = AsyncMock()
-    sched._resolve_dq_layer = AsyncMock()
-    sched._reconcile_postgres = AsyncMock(return_value=None)
-    sched._reconcile_clickhouse = AsyncMock(return_value=None)
-
-    with patch("core.reconciliation_io.keycrm_orders_in_window",
-               new=AsyncMock(return_value=({}, 0, set()))), \
-         patch("core.reconciliation_io.duckdb_orders_in_window",
-               return_value={}), \
-         patch("core.data_quality.classify_discrepancies",
-               return_value=[missing]), \
-         patch("core.data_quality.classify_order_discrepancies",
-               return_value=[]), \
-         patch("core.data_quality.persist_run", return_value=8), \
-         patch("core.data_quality.machine_attempts_note", return_value=None), \
-         patch("core.sync_service.get_sync_service",
-               new=AsyncMock(return_value=sync)), \
-         patch("core.duckdb_store.get_store",
-               new=AsyncMock(return_value=_Store())):
-        result = await sched._run_dq_reconciliation()
-
-    sync.repair_orders.assert_awaited_once()
-    assert sync.repair_orders.await_args.args[0] == [501, 502]
-    assert result["repair"] == {"repaired": 2, "remaining": 0}
-    msg = sched._send_dq_alert_throttled.await_args.args[1]
-    assert "Re-fetched 2 order(s) by id" in msg
-    sched._resolve_dq_layer.assert_awaited_once()

@@ -46,29 +46,6 @@ REPOSITORY = REPO / "core" / "repositories" / "users.py"
 # ─── the switch ──────────────────────────────────────────────────────────────
 
 
-class TestTheSwitch:
-    def test_unset_means_duckdb(self, monkeypatch):
-        monkeypatch.delenv("KS_USER_STORE", raising=False)
-        assert duf.user_store_is_postgres() is False
-
-    @pytest.mark.parametrize("value,expected", (("duckdb", False), ("postgres", True)))
-    def test_it_says_what_it_is_told(self, monkeypatch, value, expected):
-        monkeypatch.setenv("KS_USER_STORE", value)
-        assert duf.user_store_is_postgres() is expected
-
-    def test_a_typo_stops_the_read(self, monkeypatch):
-        """`KS_BOT_STORE`'s rule, and it bites hardest here: the variable
-        decides where *authorisation* is read from, so a typo must stop the
-        container rather than quietly pick the copy that is going stale."""
-        monkeypatch.setenv("KS_USER_STORE", "postgress")
-        with pytest.raises(ValueError, match="KS_USER_STORE"):
-            duf.user_store_is_postgres()
-
-    def test_an_empty_value_is_the_default(self, monkeypatch):
-        monkeypatch.setenv("KS_USER_STORE", "   ")
-        assert duf.user_store_is_postgres() is False
-
-
 # ─── the copy, and when it must not run ──────────────────────────────────────
 
 
@@ -446,7 +423,7 @@ class TestTheRoleMatrixLeftDuckDB:
             )
 
     @pytest.mark.asyncio
-    async def test_seeding_is_one_statement(self, tmp_path):
+    async def test_seeding_is_one_statement(self, tmp_path, monkeypatch):
         """It runs on the request path of the first authorization check after
         every restart, and there is a pair per (level, feature).
 
@@ -455,6 +432,11 @@ class TestTheRoleMatrixLeftDuckDB:
         48 × (require_revision + insert). Measured with two concurrent callers
         on a cold table before this was fixed: 93 statements for 48 rows.
         """
+        # DuckDB is the engine here; the count is the statement's, not the
+        # store's (since step 14's S14-00 the user list's store is Postgres).
+        from tests.conftest import user_store_on_duckdb
+
+        user_store_on_duckdb(monkeypatch)
         store = DuckDBStore(db_path=tmp_path / "seed.duckdb")
         await store.connect()
         try:

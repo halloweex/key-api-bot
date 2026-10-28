@@ -84,7 +84,12 @@ does not spend the rollback: the refusal check above, and the derivation's
 read of what is pending — an hourly run with nothing to decide latches
 nothing.
 
-A PRECONDITION THE FLAG ENFORCES
+A PRECONDITION THE FLAG ENFORCED — UNTIL S14-00
+
+Since step 14's S14-00 the chain writes Postgres whatever its flag says and
+asks no precondition (`writes_postgres`, `mode`, `unmet_precondition` are
+constants; the readers' list `READERS` is gone with it). What follows is the
+history.
 
 Three readers show buyers on screen: the SMS audience (`KS_SMS_STORE`), the
 search index (`KS_READ_SEARCH_INDEX`) and the dashboard's buyer reads
@@ -194,43 +199,13 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
-# The readers of the buyers that can still read DuckDB: `(flag, module,
-# parser)`. Imported and looked up when asked, inside that reader's own
-# `try`, so a module or a parser that is gone — should the search index's
-# DuckDB twin and `KS_READ_SEARCH_INDEX` be retired (plan rev2 §5.4, which
-# OD-10's #271 did not do) — makes that one reader unmet and says why, rather than raising out of the whole
-# question, which the registry would read as "could not be read" and hold the
-# chain on DuckDB for good. `tests/unit/test_pg_buyers_write.py` requires each
-# entry to exist and to be the parser of the flag it names, so whoever removes
-# one changes this list in the same commit.
-READERS: Tuple[Tuple[str, str, str], ...] = (
-    ("KS_SMS_STORE", "core.pg_sms", "sms_store_is_postgres"),
-    ("KS_READ_SEARCH_INDEX", "core.pg_search_index_read", "enabled"),
-    ("KS_READ_DASHBOARD", "core.pg_dashboard_read", "enabled"),
-)
-
-
 def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_BUYERS=postgres` must not move the writes yet, or None.
-
-    Never raises and never asks Postgres: `/api/health` reads it through the
-    registry, and must still answer with Postgres down. A reader flag nobody
-    can parse is unmet, because nobody can then say that reader follows the
-    writes; so is a reader whose parser cannot be found."""
-    import importlib
-
-    lagging: List[str] = []
-    for name, module, parser in READERS:
-        try:
-            if not getattr(importlib.import_module(module), parser)():
-                lagging.append(f"{name} is not postgres")
-        except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-            lagging.append(f"{name} is not understood ({exc})")
-    if not lagging:
-        return None
-    return ("; ".join(lagging) + ", so that reader shows DuckDB's buyers, which "
-            "stop changing the moment this chain writes Postgres; set every "
-            "buyer reader to postgres first")
+    """None, a constant since step 14's S14-00: the chain writes Postgres
+    whatever its flag says, and nothing it waited on is asked any more —
+    production met every clause, and the readers it named read Postgres.
+    Kept for the registry's `unmet_precondition` field, which keeps its shape
+    until S14-11."""
+    return None
 
 
 def _warn_unmet(reason: str) -> None:
@@ -243,34 +218,20 @@ def _warn_unmet(reason: str) -> None:
 
 
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
-    read. Unlatched, the flag moves the writes only once `unmet_precondition()`
-    holds — until then the chain runs as duckdb. Raises on a flag nobody can
-    read while unlatched; `mode()` is the question that never raises.
+    """Whether this chain writes Postgres — the one answer every caller reads:
+    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
+    nor a precondition routes any more; the first write in a process still
+    takes the latch (decision 3), which the images before step 14 route by.
+    Last consumers:
+    the buyers step, the gender rider and the registry — S14-11.
     """
-    if chain_latch.latched(CHAIN):
-        return True
-    if not env_writes_postgres():
-        return False
-    unmet = unmet_precondition()
-    if unmet:
-        _warn_unmet(unmet)
-        return False
     return True
 
 
 def mode() -> Optional[str]:
-    """Where this chain's writes go: "postgres", "duckdb", or None when
-    `KS_WRITE_BUYERS` is not understood and no latch overrides it.
-
-    The registry's answer (`write_chains.chain_modes`), for the callers that
-    must decide without raising — the buyer selection, the gender rider, the
-    stats, a route that must refuse before it starts. Never raises."""
-    from core import write_chains
-
-    return write_chains.chain_modes()[CHAIN]["mode"]
+    """Where this chain's writes go: "postgres", a constant since step 14's
+    S14-00 — never None, since no flag is read for it."""
+    return "postgres"
 
 
 def _latch() -> str:

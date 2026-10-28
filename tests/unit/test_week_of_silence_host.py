@@ -291,7 +291,14 @@ class TestTheReader:
         _, _, note = _read(tmp_path, "KS_DUCKDB:off\n")
         assert "docker run --env-file skips" in note and "run on" in note, note
         _, _, note = _read(tmp_path, "KS_DUCKDB=off\nKS_DUCKDB:on\n")
-        assert "web runs on" in note and "would be refused" in note, note
+        assert "runs web on" in note and "would be refused" in note, note
+        # Since step 14's S14-00 a step-14 web runs off whatever `.env` says,
+        # so neither sentence may offer `on` as a lever for it: only an image
+        # from before step 14 is held back, or runs on.
+        assert "a step-14 web runs off whatever it says" in note, note
+        assert "KS_DUCKDB=off or KS_DUCKDB=on" not in note, note
+        assert "only ever non-empty from an image before step 14" in note, note
+        assert "on that image, set KS_DUCKDB=on" in note, note
 
     def test_a_value_is_quoted_back_bounded_and_printable(self, tmp_path):
         """The value is quoted in log lines; `.env` is not a file to echo.
@@ -469,15 +476,43 @@ class TestTheRunbook:
         start back. The first runbook asked for a marker per chain, which six
         chains can rightly lack. Mutation: name another chain as needing a
         latch, or go back to "a marker per chain"."""
-        from core.duckdb_off import chains_keeping_sync_metadata
+        # `core/duckdb_off.py` is gone (step 14's S14-00); its question was
+        # the copy-back's own helper, asked here directly.
+        from core.chain_transfer import _carried_keys
         from core.write_chains import WRITE_CHAINS, chain_name
 
         item = self._item("Preconditions", 4)
         assert "a marker per chain" not in item
         assert "`mode` `postgres`" in item and "by its latch or by its flag" in item
         latched = set(re.findall(r"`(pg_\w+_write)`", item))
-        assert latched == {chain_name(c) for c in chains_keeping_sync_metadata()}, latched
+        keeping = {chain_name(c) for c in WRITE_CHAINS if _carried_keys(c)}
+        assert latched == keeping, latched
         assert latched < {chain_name(c) for c in WRITE_CHAINS}
+
+    def test_the_way_back_on_a_step_14_image_is_the_image_rollback(self):
+        """Since step 14's S14-00 web runs off whatever `.env` says, so the
+        way back as written — `KS_DUCKDB=on`, expect `mode: on`, re-add the
+        compaction and the snapshot — changes nothing in web and re-arms the
+        host scripts, which read `.env`: a Sunday stop and a rewrite of the
+        frozen file, a nightly "Daily snapshot FAILED", a stale off-site page.
+        The runbook says so before its steps, and names the rollback section
+        that exists. Mutation: drop the S14-00 paragraph, or rename the
+        Deployment section without the runbook."""
+        text = _runbook()
+        block = text[text.index("**The way back**"):]
+        first_step = block.index("\n1. ")
+        warning = " ".join(block[:first_step].split())
+        assert "Since step 14's S14-00" in warning, warning
+        assert "`KS_DUCKDB=on` changes nothing in a step-14 web" in warning
+        assert "do not re-add those two cron lines" in warning
+        section = "Before any rollback to an image from before step 14"
+        assert f'"{section}"' in warning
+        whole = (REPO / ".claude" / "CLAUDE.md").read_text(encoding="utf-8")
+        assert f"\n### {section}\n" in whole
+        # And the section's opening says the web half is history.
+        opening = " ".join(text[:text.index("**What PR-10 changed")].split())
+        assert "a step-14 web runs `off` whatever `.env` says" in opening
+        assert "History since S14-00" in self._item("Preconditions", 4)
 
     def test_web_waits_for_the_freeze_not_the_upload(self):
         """deploy/ark_ship.sh prints SOURCE RELEASED once nothing after it

@@ -134,24 +134,6 @@ class TestItDoesNotTakeTheDuckDbLock:
             monkeypatch.undo()
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_the_duckdb_path_still_uses_the_store(self, tmp_path, monkeypatch):
-        """The mirror image, so the test above cannot pass by the routing
-        being broken in both directions."""
-        from core.duckdb_store import DuckDBStore
-
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
-        store = DuckDBStore(db_path=tmp_path / "used.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_sms_read.fetch_segments",
-                       new=AsyncMock()) as fetch:
-                result = await store.get_sms_segments(grouping="single")
-            assert fetch.await_count == 0
-            assert result["funnel"][0] == {"stage": "customers", "remaining": 0}
-        finally:
-            await store.close()
-
 
 class TestTheSwitchIsWhole:
     """Nothing is left half-switched, and the guard that proved it still works.
@@ -203,12 +185,6 @@ class TestTheSwitchIsWhole:
         monkeypatch.setenv("KS_SMS_STORE", "postgres")
         with pytest.raises(NotImplementedError, match="KS_SMS_STORE"):
             pg_sms.refuse_while_unported("some_future_half_ported_thing")
-
-    def test_it_stays_silent_on_the_default_engine(self, monkeypatch):
-        from core import pg_sms
-
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
-        pg_sms.refuse_while_unported("anything")
 
 
 class TestTheDeliveryWriteEscapesTheStoreLock:

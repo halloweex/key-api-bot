@@ -7,6 +7,10 @@ flag and its four preconditions, the refusals taken before the latch, the
 repository's routing, the one-statement read of the three goal tables, and the
 scheduler slots the standing watch judges staleness by. The SQL itself is
 proved against a real Postgres in `tests/integration/test_forecast_writer.py`.
+
+Since step 14's S14-00 the chain writes and reads Postgres whatever its flag
+says and asks no precondition, so the tests of the flag, of each precondition
+and of the hold on today's engines went with them.
 """
 from __future__ import annotations
 
@@ -98,127 +102,7 @@ def _state():
     return write_chains.chain_modes()[chain.CHAIN]
 
 
-class TestTheFlag:
-    @pytest.mark.parametrize("value, expected", [
-        (None, False), ("duckdb", False), ("postgres", True), (" Postgres ", True)])
-    def test_what_it_says(self, ready, value, expected):
-        if value is not None:
-            ready.setenv(chain.WRITE_ENV, value)
-        assert chain.env_writes_postgres() is expected
-        assert chain.writes_postgres() is expected
-
-    def test_a_value_nobody_can_read_stops_the_writers_and_stands_the_tables_down(
-            self, ready):
-        ready.setenv(chain.WRITE_ENV, "postgre")
-        with pytest.raises(RuntimeError, match=chain.WRITE_ENV):
-            chain.writes_postgres()
-        # The reads hand the choice back to today's engines (7a's rule) …
-        assert chain.reads_postgres() is False
-        # … and the registry stands the four tables down, so neither copy moves.
-        state = _state()
-        assert state["mode"] is None and chain.WRITE_ENV in state["error"]
-        tables, errors = write_chains.stood_down_tables_checked()
-        assert set(chain.CHAIN_TABLES) <= tables and chain.CHAIN in errors
-
-    def test_off_by_default_moves_nothing(self, ready):
-        assert _state()["mode"] == "duckdb"
-        tables, _ = write_chains.stood_down_tables_checked()
-        assert not set(chain.CHAIN_TABLES) & tables
-
-
-class TestThePreconditions:
-    """`unmet_precondition()` — chain 6a's arrangement. Unmet and unlatched,
-    the chain runs as duckdb for every consumer, whatever the flag says."""
-
-    def test_all_four_met_moves_the_writes(self, ready):
-        ready.setenv(chain.WRITE_ENV, "postgres")
-        assert chain.unmet_precondition() is None
-        assert chain.writes_postgres() is True and chain.reads_postgres() is True
-        state = _state()
-        assert state["mode"] == "postgres" and state["unmet_precondition"] is None
-        tables, _ = write_chains.stood_down_tables_checked()
-        assert set(chain.CHAIN_TABLES) <= tables
-
-    @pytest.mark.parametrize("take_away, names", [
-        # 1. KS_GOALS_HISTORY understood. Since chain 7b-4 unset and silver
-        # both read Silver; the retired `bridge` and a typo refuse every
-        # history read, so a recalculation could store nothing.
-        (lambda m: m.setenv("KS_GOALS_HISTORY", "bridge"), "KS_GOALS_HISTORY"),
-        (lambda m: m.setenv("KS_GOALS_HISTORY", "silvr"), "KS_GOALS_HISTORY"),
-        # 2. …and Postgres' Silver.
-        (lambda m: m.setenv("KS_READ_GOALS", "duckdb"), "KS_READ_GOALS"),
-        (lambda m: m.setenv("KS_READ_GOALS", "postgress"), "KS_READ_GOALS"),
-        # 3. The configured fallback mode, not the environment.
-        (lambda m: m.setattr(read_fallback, "_mode", read_fallback.DUCKDB),
-         "KS_READ_FALLBACK"),
-        (lambda m: m.setattr(read_fallback, "_mode_error", "nonsense"),
-         "KS_READ_FALLBACK"),
-        # 4. The training frame, beyond the brief (OQ-1 of the design).
-        (lambda m: m.setenv("KS_READ_FORECAST_INPUT", "duckdb"),
-         "KS_READ_FORECAST_INPUT"),
-        (lambda m: m.setenv("KS_READ_FORECAST_INPUT", "ch"),
-         "KS_READ_FORECAST_INPUT"),
-    ])
-    def test_each_clause_alone_holds_the_chain_on_duckdb(self, ready, take_away, names):
-        ready.setenv(chain.WRITE_ENV, "postgres")
-        take_away(ready)
-        unmet = chain.unmet_precondition()
-        assert unmet and names in unmet
-        others = {"KS_GOALS_HISTORY", "KS_READ_GOALS", "KS_READ_FALLBACK",
-                  "KS_READ_FORECAST_INPUT"} - {names}
-        for other in others:
-            assert other not in unmet, (other, unmet)
-        assert chain.writes_postgres() is False
-        assert chain.reads_postgres() is False
-        state = _state()
-        assert state["mode"] == "duckdb" and state["unmet_precondition"] == unmet
-        tables, _ = write_chains.stood_down_tables_checked()
-        assert not set(chain.CHAIN_TABLES) & tables
-
-    def test_an_unset_history_is_met(self, ready):
-        """Chain 7b-4 retired `KS_GOALS_HISTORY`: unset reads Silver, as
-        `silver` does, so it holds nothing. Mutation: keep the clause at
-        `== silver` on the raw variable — unset would hold the chain."""
-        ready.setenv(chain.WRITE_ENV, "postgres")
-        ready.delenv("KS_GOALS_HISTORY")
-        assert chain.unmet_precondition() is None
-        assert chain.writes_postgres() is True
-
-    def test_the_environment_saying_off_is_not_the_configured_mode(self, ready):
-        """The process refuses by the mode it was configured with. Reading the
-        live variable here would call a process that still falls back
-        'ready'."""
-        ready.setattr(read_fallback, "_mode", None)          # never configured
-        assert "KS_READ_FALLBACK" in chain.unmet_precondition()
-
-    def test_no_dsn_is_unmet_twice(self, ready):
-        ready.delenv("KS_PG_DSN")
-        unmet = chain.unmet_precondition()
-        assert "KS_READ_GOALS=postgres but KS_PG_DSN" in unmet
-        assert "KS_READ_FORECAST_INPUT=postgres but KS_PG_DSN" in unmet
-
-    def test_unmet_says_names_only(self, ready):
-        """The block is public: it names variables, never a value or a DSN."""
-        ready.delenv("KS_PG_DSN")
-        assert DSN not in (chain.unmet_precondition() or "")
-
-    def test_a_check_that_raises_is_unmet_not_a_raise(self, ready):
-        ready.setenv(chain.WRITE_ENV, "postgres")
-        with patch.object(chain, "_unmet_clauses", side_effect=ImportError("gone")):
-            assert "could not be read" in chain.unmet_precondition()
-            assert chain.writes_postgres() is False
-
-
 class TestTheLatchOutranks:
-    def test_every_precondition_unmet_and_the_latch_still_writes_postgres(self, ready):
-        for env in ("KS_GOALS_HISTORY", "KS_READ_GOALS", "KS_READ_FORECAST_INPUT"):
-            ready.setenv(env, "duckdb" if env != "KS_GOALS_HISTORY" else "bridge")
-        chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
-        assert chain.writes_postgres() is True and chain.reads_postgres() is True
-        state = _state()
-        assert state["mode"] == "postgres" and state["latched"] is True
-        assert state["mismatch"] is True            # the flag says duckdb
-        assert state["unmet_precondition"]          # and says why it worries
 
     @pytest.mark.parametrize("value", ["duckdb", "postgre", None])
     def test_any_flag_once_latched(self, ready, value):
@@ -243,17 +127,6 @@ class TestReadsTheChain:
         chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
         assert chain.reads_the_chain(sql) is False
 
-    @pytest.mark.parametrize("hole", chain.TABLE_HOLES)
-    def test_flagged_but_held_keeps_todays_engine(self, ready, hole):
-        """7a's `reads_postgres` copied verbatim would send these to a Postgres
-        the hourly copy is still filling while the writes go to DuckDB."""
-        ready.setenv(chain.WRITE_ENV, "postgres")
-        ready.setenv("KS_GOALS_HISTORY", "bridge")
-        assert chain.reads_the_chain(f"SELECT * FROM {hole}") is False
-
-    @pytest.mark.parametrize("hole", chain.TABLE_HOLES)
-    def test_off_keeps_todays_engine(self, ready, hole):
-        assert chain.reads_the_chain(f"SELECT * FROM {hole}") is False
 
     @pytest.mark.parametrize("table", chain.CHAIN_TABLES)
     def test_each_table_the_chain_owns_follows_once_latched(self, ready, table):
@@ -586,12 +459,11 @@ class TestTheWatchIsRegistered:
 
     def test_flagged_with_its_preconditions_it_is_watched(self, ready):
         ready.setenv(chain.WRITE_ENV, "postgres")
-        assert inv.watched_chains() == {chain.CHAIN: None}
+        # Since step 14's S14-00 every chain writes Postgres, so every chain
+        # is watched; this one among them, not latched here.
+        watched = inv.watched_chains()
+        assert chain.CHAIN in watched and watched[chain.CHAIN] is None
 
-    def test_flagged_but_held_it_is_not(self, ready):
-        ready.setenv(chain.WRITE_ENV, "postgres")
-        ready.setenv("KS_GOALS_HISTORY", "bridge")
-        assert inv.watched_chains() == {}
 
     def test_read_facts_reads_the_four_tables_with_the_stamp(self, ready):
         """One statement, today's Kyiv date as its parameter, and the latch
@@ -646,6 +518,9 @@ class TestTheWatchIsRegistered:
         stamp = _aware(2026, 10, 8, 9, 0)
         ready.setenv(chain.WRITE_ENV, "postgres")
         chain_latch.latch(chain.CHAIN, chain.WRITE_ENV)
+        # This chain's read alone: since S14-00 every chain is watched, and
+        # the others' reads are their own tests'.
+        ready.setattr(inv, "watched_chains", lambda: {chain.CHAIN: stamp.isoformat()})
         ready.setattr(chain_latch, "latched_at", lambda name: stamp.isoformat()
                       if name == chain.CHAIN else None)
         with patch("core.pg.require_revision", new=AsyncMock()):
@@ -732,31 +607,6 @@ class TestTheRepositoryRoutes:
         assert now is NOW
         assert _goal_rows(path) == before
 
-    def test_off_the_writer_is_not_called_and_duckdb_is_written(self, ready, tmp_path):
-        path = tmp_path / "g.duckdb"
-        writer = AsyncMock(side_effect=AssertionError("routed while off"))
-        with patch.object(chain, "persist_goal_tables", new=writer):
-            _with_store(path, lambda s: s._persist_goal_tables(TABLES, NOW))
-        rows = _goal_rows(path)
-        assert [r[0] for r in rows["seasonal_indices"]] == [1, 2]
-        assert len(rows["weekly_patterns"]) == 2 and rows["growth_metrics"]
-
-    def test_flagged_but_held_writes_duckdb(self, ready, tmp_path):
-        ready.setenv(chain.WRITE_ENV, "postgres")
-        ready.setattr(read_fallback, "_mode", read_fallback.DUCKDB)
-        path = tmp_path / "g.duckdb"
-        writer = AsyncMock(side_effect=AssertionError("routed while held"))
-        with patch.object(chain, "persist_goal_tables", new=writer):
-            _with_store(path, lambda s: s._persist_goal_tables(TABLES, NOW))
-        assert len(_goal_rows(path)["seasonal_indices"]) == 2
-
-    def test_a_flag_nobody_can_read_writes_neither_store(self, ready, tmp_path):
-        ready.setenv(chain.WRITE_ENV, "postgre")
-        path = tmp_path / "g.duckdb"
-        before = _goal_rows(path)
-        with pytest.raises(RuntimeError, match=chain.WRITE_ENV):
-            _with_store(path, lambda s: s._persist_goal_tables(TABLES, NOW))
-        assert _goal_rows(path) == before
 
     PREDICTIONS = [{"date": "2026-10-07", "predicted_revenue": 1000.0},
                    {"date": "2026-10-08", "predicted_revenue": 1100.0}]
@@ -778,13 +628,6 @@ class TestTheRepositoryRoutes:
         assert created_at.tzinfo is not None and created_at >= before
         assert _goal_rows(path)["revenue_predictions"] == []
 
-    def test_off_the_forecast_goes_to_duckdb(self, ready, tmp_path):
-        path = tmp_path / "p.duckdb"
-        writer = AsyncMock(side_effect=AssertionError("routed while off"))
-        with patch.object(chain, "store_predictions", new=writer):
-            _with_store(path, lambda s: s.store_predictions(
-                self.PREDICTIONS, "retail", self.METRICS))
-        assert len(_goal_rows(path)["revenue_predictions"]) == 2
 
     def test_nothing_to_store_asks_no_chain(self, ready, tmp_path):
         ready.setenv(chain.WRITE_ENV, "postgre")      # would raise if asked
@@ -1010,23 +853,6 @@ class TestAFailedChainReadIsRefused:
         result = _forecast(fetch)
         assert result and result["predicted_remaining"] == 1234.0
         assert read_fallback.refusals() == {}
-
-    def test_under_duckdb_a_latched_chain_still_refuses_and_says_so(self, latched):
-        """A latched chain whose precondition has lapsed — a restart with
-        `KS_READ_FALLBACK` back at duckdb. DuckDB has nothing to answer with but
-        the pre-flip copy, so the read is refused all the same, and
-        /api/health publishes the refusal under duckdb too, where the block
-        used to carry none (the canary's `read_refused` reads it there)."""
-        from web.routes.api.health import _read_fallback_mode
-
-        latched.setattr(read_fallback, "_mode", read_fallback.DUCKDB)
-        assert _read_fallback_mode().get("refused") is None
-        with pytest.raises(read_fallback.ReadUnavailable):
-            _forecast(_failing_on("revenue_predictions"))
-        assert read_fallback.counts() == {}
-        block = _read_fallback_mode()
-        assert block["mode"] == "duckdb"
-        assert block["refused"]["goals"]["count"] == 1
 
 
 class TestTheForecastRouteUnderTheChain:

@@ -28,51 +28,45 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# ─── Who derives: DuckDB's tick (piggyback) or Postgres' own signal (own) ─────
+# ─── Who derives: Postgres' own signal (own) — a constant since S14-00 ──────
 #
-# Read ONCE, when the scheduler starts, and cached. Never parsed on the write
-# path: the marks ride inside `write_orders`' transaction, and a typo evaluated
-# there must not be able to reach the archive of order versions. An unknown
-# value therefore does not raise the way `KS_BOT_STORE` does — it falls back to
-# `piggyback`, today's behaviour, logs at ERROR, publishes the error in
-# `/api/health` under `derivation`, and the canary pages on it. Refusing to
-# start would take the dashboard down over a derivation setting; falling back
-# silently would let an operator believe a soak was running that was not.
+# `KS_PG_DERIVE` chose between `piggyback` (the Postgres rebuild rode DuckDB's
+# warehouse tick) and `own` (Postgres derives on its own signal). Step 13 made
+# `own` a precondition and production has run it since; DuckDB has no tick
+# left to ride. Since step 14's S14-00 the mode is `own` whatever the variable
+# says: `configure_mode()` reads nothing, `mode()` is `own`, `owns()` True,
+# and `mode_error()` None — so `/api/health`'s `derivation` block keeps its
+# shape until S14-15 removes the variable's last trace.
 ENV = "KS_PG_DERIVE"
 PIGGYBACK = "piggyback"
 OWN = "own"
 _VALID = (PIGGYBACK, OWN)
 
-_mode: Optional[str] = None
+# The cache the mode used to live in. Read by nothing since S14-00; kept, at
+# the constant, for the fixtures that save and restore it until S14-15.
+_mode: Optional[str] = OWN
 _mode_error: Optional[str] = None
 
 
 def configure_mode() -> str:
-    """Read `KS_PG_DERIVE` once. Called by the scheduler at start."""
-    global _mode, _mode_error
-    value = os.getenv(ENV, PIGGYBACK).strip().lower() or PIGGYBACK
-    if value in _VALID:
-        _mode, _mode_error = value, None
-    else:
-        _mode = PIGGYBACK
-        _mode_error = (f"{ENV}={value!r} is not one of {_VALID}; "
-                       f"falling back to {PIGGYBACK!r}")
-        logger.error(_mode_error)
-    return _mode
+    """`own`, whatever `KS_PG_DERIVE` says (S14-00). Reads nothing."""
+    return OWN
 
 
 def mode() -> str:
-    """The configured mode; `piggyback` until `configure_mode` has run."""
-    return _mode or PIGGYBACK
+    """`own`, a constant since S14-00."""
+    return OWN
 
 
 def mode_error() -> Optional[str]:
-    return _mode_error
+    """None: since S14-00 no value of `KS_PG_DERIVE` is an error, because none
+    is read. The canary's `derivation_mode_invalid` goes with the block."""
+    return None
 
 
 def owns() -> bool:
-    """Postgres derives on its own signal. Reads the cache, never the env."""
-    return _mode == OWN
+    """Postgres derives on its own signal: True, a constant since S14-00."""
+    return True
 
 
 # ─── Signal reads that failed, in a row — this process only (DN-05a) ─────────

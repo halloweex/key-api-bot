@@ -92,22 +92,6 @@ class TestTheReadSwitch:
         assert out is None
         fetch.assert_not_awaited()
 
-    @pytest.mark.asyncio
-    async def test_a_failed_read_falls_back_not_down(self, monkeypatch):
-        from core.duckdb_store import DuckDBStore
-
-        monkeypatch.setenv(pg_gold_read.ENV, "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x")
-        monkeypatch.setattr(
-            pg_gold_read, "fetch_series",
-            AsyncMock(side_effect=RuntimeError("pool exhausted")),
-        )
-        mixin = DuckDBStore.__new__(DuckDBStore)
-        out = await mixin._pg_gold_series(
-            date(2026, 8, 1), date(2026, 8, 27), "retail", None,
-        )
-        assert out is None  # DuckDB serves the request; the log said why
-
 
 class TestTheBuyerConversions:
     def test_birthday_string_becomes_a_date(self):
@@ -162,114 +146,6 @@ class TestOneBodyTwoEngines:
         normal = " ".join(frozen.group(1).split())
         rendered = " ".join(order_lines_select(POSTGRES).split())
         assert normal == rendered
-
-
-class TestTheHourlyIdsDiff:
-    """The buyers backfill runs every hour, not once: the sync is a delta and
-    never re-fetches an existing buyer, so a row lost from Postgres after a
-    one-shot backfill would have had no repair path, ever — the audit's
-    finding. The diff ships nothing when nothing is missing."""
-
-    @staticmethod
-    def _pool(had_history):
-        class _Ctx:
-            async def __aenter__(self):
-                conn = AsyncMock()
-                conn.fetchval = AsyncMock(return_value=had_history)
-                return conn
-
-            async def __aexit__(self, *a):
-                return False
-
-        class _Pool:
-            def acquire(self):
-                return _Ctx()
-
-        return _Pool()
-
-    @pytest.mark.asyncio
-    async def test_runs_the_diff_every_tick(self, monkeypatch):
-        from core import pg_buyers
-        import core.pg as pg
-        import core.pg_landing as pg_landing
-
-        monkeypatch.setattr(pg_landing, "enabled", lambda: True)
-        monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=self._pool(True)))
-        # DN-22b: the diff checks the revision before it reads the owner rows.
-        monkeypatch.setattr(pg, "require_revision", AsyncMock())
-        ran = AsyncMock(return_value={"shipped": 0, "missing_was": 0})
-        monkeypatch.setattr(pg_buyers, "backfill_buyers", ran)
-
-        out = await pg_buyers.hourly_ids_diff(store=object())
-        assert out == {"shipped": 0, "missing_was": 0}
-        ran.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_first_fill_is_initialisation_not_a_heal(self, monkeypatch):
-        from core import pg_buyers
-        import core.pg as pg
-        import core.pg_landing as pg_landing
-
-        monkeypatch.setattr(pg_landing, "enabled", lambda: True)
-        monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=self._pool(None)))
-        # DN-22b: the diff checks the revision before it reads the owner rows.
-        monkeypatch.setattr(pg, "require_revision", AsyncMock())
-        monkeypatch.setattr(
-            pg_buyers, "backfill_buyers",
-            AsyncMock(return_value={"shipped": 20060, "missing_was": 20060}),
-        )
-        pg_buyers.last_heal.clear()
-
-        await pg_buyers.hourly_ids_diff(store=object())
-        # The fill ran: an empty `last_heal` is only a verdict if it did —
-        # an error path leaves it empty too.
-        pg_buyers.backfill_buyers.assert_awaited_once()
-        assert not pg_buyers.last_heal  # первый налив — не «лечение»
-
-    @pytest.mark.asyncio
-    async def test_a_later_diff_that_ships_is_a_heal(self, monkeypatch):
-        from core import pg_buyers
-        import core.pg as pg
-        import core.pg_landing as pg_landing
-
-        monkeypatch.setattr(pg_landing, "enabled", lambda: True)
-        monkeypatch.setattr(pg, "get_pool", AsyncMock(return_value=self._pool(True)))
-        # DN-22b: the diff checks the revision before it reads the owner rows.
-        monkeypatch.setattr(pg, "require_revision", AsyncMock())
-        monkeypatch.setattr(
-            pg_buyers, "backfill_buyers",
-            AsyncMock(return_value={"shipped": 3, "missing_was": 3}),
-        )
-        pg_buyers.last_heal.clear()
-
-        await pg_buyers.hourly_ids_diff(store=object())
-        assert pg_buyers.last_heal["shipped"] == 3
-
-    @pytest.mark.asyncio
-    async def test_stands_down_without_a_dsn(self, monkeypatch):
-        from core import pg_buyers
-        import core.pg_landing as pg_landing
-
-        monkeypatch.setattr(pg_landing, "enabled", lambda: False)
-        ran = AsyncMock()
-        monkeypatch.setattr(pg_buyers, "backfill_buyers", ran)
-
-        out = await pg_buyers.hourly_ids_diff(store=object())
-        assert "skipped" in out
-        ran.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_a_failure_is_returned_not_raised(self, monkeypatch):
-        from core import pg_buyers
-        import core.pg_landing as pg_landing
-
-        monkeypatch.setattr(pg_landing, "enabled", lambda: True)
-        monkeypatch.setattr(
-            pg_buyers, "backfill_buyers",
-            AsyncMock(side_effect=RuntimeError("pg down")),
-        )
-        out = await pg_buyers.hourly_ids_diff(store=object())
-        assert "error" in out
 
 
 class TestTheLockIsNeverHeldAcrossTheNetwork:

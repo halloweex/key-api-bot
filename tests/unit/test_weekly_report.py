@@ -36,6 +36,19 @@ from core.weekly_report import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is the report and its delivery, not where the send
+    ledger lives, and it was written against DuckDB. So this module keeps
+    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
+    until their DuckDB branches go."""
+    from core import pg_weekly_ledger_write, pg_traffic_ledger_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_weekly_ledger_write, pg_traffic_ledger_write)
+
+
 def _report(**overrides) -> WeeklyReport:
     """A report with plausible defaults; override what a test is about."""
     base = dict(

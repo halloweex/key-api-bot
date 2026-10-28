@@ -1812,13 +1812,14 @@ ORDER_LANDING_CHECKS: FrozenSet[str] = frozenset({
 # and the condition's, so this set is also what such a page is held under:
 # a page of theirs delivered before the switch has no check left to clear it
 # (the `off` verdict's `retired_pages_clear`, PR-2, read through
-# `core.duckdb_off.retired_conditions`). It is exactly the scan's bare
+# `core.duckdb_off.retired_conditions` — the images before step 14's; S14-00
+# deleted that module and its verdict). It is exactly the scan's bare
 # `_pk_uniqueness_check` calls, the ones no chain's stand-down hands on as a
 # lambda — a test reads it out of `check_internal_integrity` by that rule, the
-# one the verdict reads its retired conditions by, so wrapping the three again
-# would empty the verdict's set while this one stood. One list for both, held
-# to the scan by `tests/unit/test_duckdb_off_jobs.py` and
-# `tests/unit/test_duckdb_off_verdict.py`. Every other check over DuckDB
+# one the verdict read its retired conditions by, so wrapping the three again
+# would have emptied the verdict's set while this one stood. Held to the scan
+# by `tests/unit/test_duckdb_off_jobs.py`, and to the set the images before
+# step 14 compute, as a literal, by `tests/unit/test_rollback_condition_names.py`. Every other check over DuckDB
 # already stands down in the target state — Silver, Gold and UTM with step 13,
 # the order tables with chain 3 — and the freshness check and the snapshot
 # continuity read Postgres; the integrity job hands the scan a connection that
@@ -2468,6 +2469,10 @@ REMEDIATION: Tuple[Tuple[str, str], ...] = (
      "The Postgres twins did not read bronze.orders: read the reason in the finding"),
     ("pg_twin_pairing", "A record, not a fault: parse the JSON to compare the two engines"),
     ("status_group_vs_return_list", "The source's status group wins over the legacy list"),
+    # The canary's, not a check's: a backup marker past its limit (S14-00).
+    ("backup_evidence_stale",
+     "On the host run the script named: deploy/pg_pitr_drill.sh, "
+     "deploy/pg_restore_drill.sh --from-remote or deploy/pg_offsite.sh"),
     ("inventory_snapshot_gaps", "A missed day is gone for good; check the snapshot job"),
     ("ch_reconcile_pending", "Wait for a fresh ch_sync — never reconcile a lagging copy"),
     # OD-08 (a). The generic `gold_` line would send the reader to a rebuild,

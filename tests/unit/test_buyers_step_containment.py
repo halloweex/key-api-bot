@@ -70,6 +70,9 @@ def _service(monkeypatch, *, upsert=None, getter=None):
     svc._fetch_orders_with_date_filter = AsyncMock(return_value=[])
     svc.sync_offers = AsyncMock(return_value=5)
     svc.sync_stocks = AsyncMock(return_value=7)
+    # Offers and stocks are chain 1's step since step 14's S14-00 (a
+    # constant): the Postgres one, which the tick reaches after the buyers.
+    svc._inventory_step_postgres = AsyncMock()
     return svc, store, client
 
 
@@ -92,9 +95,7 @@ class TestAFailedWriteIsContained:
 
         stats = await svc.incremental_sync()      # does not raise
 
-        svc.sync_offers.assert_awaited_once()
-        svc.sync_stocks.assert_awaited_once()
-        store.refresh_sku_inventory_status.assert_awaited_once()
+        svc._inventory_step_postgres.assert_awaited_once()
         assert not _buyers_stamped(store), "a failed step moved its watermark"
         # The `finally` sums this dict: a string in it would be a TypeError
         # that loses the tick's completion event as well.
@@ -116,7 +117,7 @@ class TestAFailedWriteIsContained:
         assert "buyers" not in asked, "the retry window let the getter through"
         assert store.get_missing_buyer_ids.await_count == 1
         assert client.fetch_buyers_by_ids.await_count == 1
-        svc.sync_offers.assert_awaited()          # the rest of the tick ran
+        svc._inventory_step_postgres.assert_awaited()   # the rest of the tick ran
 
     @pytest.mark.asyncio
     async def test_after_the_window_it_retries_and_a_success_closes_it(
@@ -270,8 +271,7 @@ class TestAFailedGetterIsContained:
         svc, store, _ = _service(monkeypatch, getter=AsyncMock(side_effect=last))
         await svc.incremental_sync()
 
-        svc.sync_offers.assert_awaited_once()
-        svc.sync_stocks.assert_awaited_once()
+        svc._inventory_step_postgres.assert_awaited_once()
         store.get_missing_buyer_ids.assert_not_awaited()
         assert svc.buyer_sync_state.last_error_class == "OSError"
 
@@ -290,7 +290,7 @@ class TestAFailedGetterIsContained:
 
         svc, _, _ = _service(monkeypatch, getter=AsyncMock(side_effect=last))
         await asyncio.wait_for(svc.incremental_sync(), 5)
-        svc.sync_offers.assert_awaited_once()
+        svc._inventory_step_postgres.assert_awaited_once()
         assert svc.buyer_sync_state.last_error_class == "TimeoutError"
 
 
@@ -321,7 +321,7 @@ class TestAGetterThatUnwindsSlowly:
         await svc.incremental_sync()
         assert time.monotonic() - started < 1.5
         assert svc.buyer_sync_state.last_error_class == "TimeoutError"
-        svc.sync_offers.assert_awaited_once()
+        svc._inventory_step_postgres.assert_awaited_once()
 
 
 class TestTheStepItself:
@@ -386,6 +386,7 @@ class TestTheBootPath:
         svc, store, _ = _service(
             monkeypatch, upsert=AsyncMock(side_effect=RuntimeError("store gone")))
         store.get_stats = AsyncMock(return_value={"orders": 10, "products": 5})
+        store.orders_held = AsyncMock(return_value=10)      # chain 3's store
         svc.sync_to_meilisearch = AsyncMock(return_value={})
         monkeypatch.setattr(mod, "get_store", AsyncMock(return_value=store))
         monkeypatch.setattr(mod, "_sync_service", svc)
@@ -500,8 +501,7 @@ class TestARefusedReadIsAnsweredByTheCaller:
         svc, store, _ = self._refusing(monkeypatch)
         with caplog.at_level(logging.WARNING):
             stats = await svc.incremental_sync()      # does not raise
-        svc.sync_offers.assert_awaited_once()
-        svc.sync_stocks.assert_awaited_once()
+        svc._inventory_step_postgres.assert_awaited_once()
         assert all(isinstance(v, int) for v in stats.values()), stats
         assert "refused read answered by incremental_sync (buyer_sync)" in caplog.text
         # Recorded once, by the step — not a second time by the tick.

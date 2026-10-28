@@ -48,6 +48,21 @@ import pytest
 from core import pg_goals_read
 from core.duckdb_store import DuckDBStore
 
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is the KS_READ_GOALS read switch (S14-07), which the
+    goal and forecast tables answer only while their chains are on DuckDB.
+    So this module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_goals_write, pg_forecast_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_goals_write, pg_forecast_write)
+
+
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "goals.py"
 TIMEOUT_S = 20
@@ -366,20 +381,6 @@ class TestItDoesNotTakeTheDuckDbLock:
                        new=AsyncMock(return_value=[])) as fetch:
                 await store.get_historical_revenue("weekly")
             fetch.assert_not_awaited()
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_postgres_fault_falls_back_to_duckdb(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KS_READ_GOALS", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "g-fallback.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_goals_read.fetch",
-                       new=AsyncMock(side_effect=RuntimeError("pg is down"))):
-                out = await store.get_historical_revenue("weekly")
-            assert out["periodType"] == "weekly"    # answered, not raised
         finally:
             await store.close()
 

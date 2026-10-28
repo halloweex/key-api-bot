@@ -35,6 +35,15 @@ from core.sql_dialect import DUCKDB, TODAY_IN_KYIV, sms_segments_select
 from tests import sms_audience_fixture as fx
 
 
+@pytest.fixture(autouse=True)
+def _sms_on_duckdb(monkeypatch):
+    """This module's engine is DuckDB, as it was before step 14's S14-00 made
+    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
+    from tests.conftest import sms_store_on_duckdb
+
+    sms_store_on_duckdb(monkeypatch)
+
+
 def group_a(window: int = 365) -> SmsAudienceGroup:
     """Two or more orders since `fx.period_from()`. A function where B is a
     constant because it carries a date, and a date built at import is the

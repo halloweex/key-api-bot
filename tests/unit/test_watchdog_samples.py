@@ -55,13 +55,6 @@ MEM = {"working_set": 600 * 1024 * 1024, "page_cache": 100 * 1024 * 1024,
        "limit": 1024 * 1024 * 1024, "oom_kills": 0}
 
 
-def _no_postgres(monkeypatch):
-    boom = AsyncMock(side_effect=AssertionError("the duckdb branch asked for a pool"))
-    monkeypatch.setattr("core.pg.get_pool", boom)
-    monkeypatch.setattr("core.pg.require_revision", boom)
-    return boom
-
-
 def _record(store, events):
     real = store.connection
 
@@ -145,43 +138,6 @@ class TestTheOneDoor:
 
 
 # ─── duckdb: the default, byte for byte ──────────────────────────────────────
-
-
-class TestUnderDuckdbNothingChanged:
-    @pytest.mark.asyncio
-    async def test_the_disk_tick_is_one_connection_and_no_postgres(
-            self, flag, store, monkeypatch):
-        flag(None)
-        pool = _no_postgres(monkeypatch)
-        events = []
-        _record(store, events)
-        reads = await watchdog_samples.disk_tick(store, _sample(), {"duckdb": 5})
-        assert events == ["duckdb"] and not pool.await_count
-        assert reads["persisted"] is True and reads["history"] is None
-        assert await _count(store, "disk_samples") == 1
-        assert await _count(store, "data_dir_samples") == 1
-
-    @pytest.mark.asyncio
-    async def test_a_duckdb_failure_still_propagates_from_the_disk_tick(
-            self, flag, store, monkeypatch):
-        """Today's behaviour, byte for byte: the disk job never caught it.
-        Mutation: catch it under duckdb too."""
-        flag(None)
-        monkeypatch.setattr("core.disk_monitor.insert_sample",
-                            lambda conn, s: (_ for _ in ()).throw(RuntimeError("full")))
-        with pytest.raises(RuntimeError, match="full"):
-            await watchdog_samples.disk_tick(store, _sample(), {})
-
-    @pytest.mark.asyncio
-    async def test_the_memory_tick_is_one_connection_and_no_postgres(
-            self, flag, store, monkeypatch):
-        flag(None)
-        pool = _no_postgres(monkeypatch)
-        first = await watchdog_samples.memory_tick(store, MEM)
-        second = await watchdog_samples.memory_tick(store, MEM)
-        assert not pool.await_count
-        assert first["last"] is None and second["last"]["oom_kills"] == 0
-        assert second["peak_24h"] == pytest.approx(600.0)
 
 
 # ─── postgres: the tick, then the shadow ─────────────────────────────────────
@@ -302,15 +258,6 @@ class TestUnderPostgres:
         assert await watchdog_samples.memory_tick(store, MEM) == watchdog_samples.EMPTY_MEMORY
         assert await _count(store, "disk_samples") == 0
         assert await _count(store, "memory_samples") == 0
-
-    @pytest.mark.asyncio
-    async def test_a_typo_persists_nowhere_and_judges_anyway(self, flag, store, monkeypatch):
-        flag("postgrse")
-        pool = _no_postgres(monkeypatch)
-        assert await watchdog_samples.disk_tick(store, _sample(), {}) == \
-            watchdog_samples.EMPTY_DISK
-        assert await watchdog_samples.memory_tick(store, MEM) == watchdog_samples.EMPTY_MEMORY
-        assert not pool.await_count and await _count(store, "disk_samples") == 0
 
     @pytest.mark.asyncio
     async def test_the_capacity_page_goes_out_with_postgres_down(

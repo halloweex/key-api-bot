@@ -32,6 +32,11 @@ What is proved here, without a database server (the two-engine half is in
     answer.
 
 Each guard names the mutation that bites it.
+
+Since step 14's S14-00 `KS_GOALS_HISTORY` is read for nothing: every value
+reads Silver, nothing refuses and nothing is published as its error. The
+tests of the retired switch's refusal, of its being seen and of what it
+stopped went with it (T13 keeps only that unset and `silver` read Silver).
 """
 from __future__ import annotations
 
@@ -318,6 +323,16 @@ class TestNoGoalReadNamesABridgeTable:
     that read. Mutation M13: put the last-year read (or any one history read)
     back on `orders o`, and it raises here, named."""
 
+    @pytest.fixture(autouse=True)
+    def _goal_tables_in_the_store(self, monkeypatch):
+        """The property is the statements', not the goal tables' store: since
+        step 14's S14-00 chains 7a and 7b-3 write Postgres, a constant, and
+        here their tables stay in the DuckDB store under the test."""
+        from core import pg_forecast_write, pg_goals_write
+        from tests.conftest import route_chains_to_duckdb
+
+        route_chains_to_duckdb(monkeypatch, pg_goals_write, pg_forecast_write)
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("mode", [None, "silver"])
     @pytest.mark.parametrize("sales_type", ["retail", "b2b", "all"])
@@ -424,35 +439,6 @@ class TestTheSwitch:
         _history(monkeypatch, raw)
         assert pg_goals_read.history_mode() == "silver"
 
-    @pytest.mark.parametrize("raw", ["bridge", "BRIDGE", " Bridge "])
-    def test_the_bridge_is_refused_and_named_deleted(self, monkeypatch, raw):
-        """The value the old default and the old rollback named. Mutation:
-        read it as Silver (the obvious "compatible" answer) — this passes no
-        longer, and a configuration nobody can satisfy reads as if it held."""
-        _history(monkeypatch, raw)
-        with pytest.raises(ValueError, match="KS_GOALS_HISTORY='bridge'") as raised:
-            pg_goals_read.history_mode()
-        assert "deleted (chain 7b-4)" in str(raised.value)
-
-    @pytest.mark.parametrize("value", ["bridge", "silvr"])
-    def test_the_refusal_says_set_it_to_silver_never_remove_it(self, monkeypatch, value):
-        """Unset reads Silver on this build and `bridge` on every image from
-        before 7b-4 — so a production `.env` that lost the line would, on an
-        image rollback, read the goals out of DuckDB's frozen orders and
-        classification, and after step 13 hold its `goals_bridge`, which
-        runs the start as the way back. The message names the one value
-        every image reads as Silver. Mutation: "Remove the variable" back."""
-        _history(monkeypatch, value)
-        with pytest.raises(ValueError) as raised:
-            pg_goals_read.history_mode()
-        message = str(raised.value)
-        assert f"Set it to {pg_goals_read.SILVER!r}" in message, message
-        assert "remove" not in message.lower(), message
-
-    def test_a_typo_raises_naming_the_variable(self, monkeypatch):
-        _history(monkeypatch, "silvr")
-        with pytest.raises(ValueError, match="KS_GOALS_HISTORY='silvr'"):
-            pg_goals_read.history_mode()
 
     def test_nothing_but_silver_is_a_history(self):
         """The bridge's name survives only as the refusal's: no mode answers
@@ -504,66 +490,6 @@ async def _tables(store):
                 for t in ("seasonal_indices", "growth_metrics", "weekly_patterns")}
 
 
-class TestARefusedValueStopsEveryHistoryRead:
-    """Mutation M16: run a refused value — the retired `bridge` or a typo — as
-    Silver, and every one of these answers instead of refusing."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", ["silvr", "bridge"])
-    @pytest.mark.parametrize("name,args,kwargs", HISTORY_CALLS,
-                             ids=[c[0] for c in HISTORY_CALLS])
-    async def test_kS_GOALS_HISTORY(self, store, monkeypatch, name, args, kwargs, value):
-        await _seed_history(store)
-        await store.recalculate_goal_tables(include_weekly=True)
-        before = await _tables(store)
-        _history(monkeypatch, value)
-        with pytest.raises(ValueError, match=f"KS_GOALS_HISTORY='{value}'"):
-            await asyncio.wait_for(getattr(store, name)(*args, **kwargs), TIMEOUT_S)
-        assert await _tables(store) == before, "a refused computation wrote"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("value", ["silvr", "bridge"])
-    async def test_the_monday_job_fails_with_nothing_written(
-        self, store, monkeypatch, value,
-    ):
-        from core.scheduler import BackgroundScheduler
-
-        await _seed_history(store)
-        await store.recalculate_goal_tables(include_weekly=False)
-        before = await _tables(store)
-        _history(monkeypatch, value)
-
-        async def _get_store():
-            return store
-
-        monkeypatch.setattr("core.duckdb_store.get_store", _get_store)
-        with pytest.raises(ValueError, match="KS_GOALS_HISTORY"):
-            await BackgroundScheduler()._run_seasonality_calc()
-        assert await _tables(store) == before
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,args,kwargs", HISTORY_CALLS,
-                             ids=[c[0] for c in HISTORY_CALLS])
-    async def test_the_engine_flags_typo_too(
-        self, tmp_path, monkeypatch, name, args, kwargs,
-    ):
-        """They ask `KS_READ_GOALS`, through `_goals_run`, so its typo stops
-        them as it stops every other goal read
-        (`tests/unit/test_pg_goals_read.py::TestATypoStopsEveryRead`)."""
-        from core.duckdb_store import DuckDBStore
-
-        _history(monkeypatch, None)
-        monkeypatch.setenv("KS_READ_GOALS", "postgress")
-        store = DuckDBStore(db_path=tmp_path / f"typo-{name}.duckdb")
-        await store.connect()
-        try:
-            with pytest.raises(ValueError, match="KS_READ_GOALS"):
-                await asyncio.wait_for(
-                    getattr(store, name)(*args, **kwargs), TIMEOUT_S)
-        finally:
-            await store.close()
-
-
 class TestARefusalIsSeen:
     """The raise is where it belongs — at the read — but on its own it reached
     nobody: a 500 on the goal widget and the other calculator routes
@@ -588,37 +514,6 @@ class TestARefusalIsSeen:
         _history(monkeypatch, raw)
         assert _goals_history() == {"mode": "silver", "error": None}
 
-    @pytest.mark.parametrize("value", ["silvr", "bridge"])
-    def test_health_publishes_the_error_a_read_would_raise(self, monkeypatch, value):
-        from web.routes.api.health import _goals_history
-
-        _history(monkeypatch, value)
-        block = _goals_history()
-        assert block["mode"] is None
-        with pytest.raises(ValueError) as raised:
-            pg_goals_read.history_mode()
-        assert block["error"] == str(raised.value)
-        assert f"KS_GOALS_HISTORY='{value}'" in block["error"]
-
-    def test_the_public_endpoint_carries_it_through_its_response_model(
-        self, monkeypatch,
-    ):
-        """`/api/health` declares a response model, and a key the model does
-        not name is dropped on the way out without a word."""
-        from fastapi.testclient import TestClient
-
-        from web.main import app
-        from web.ratelimit import limiter
-
-        _history(monkeypatch, "bridge")
-        limiter.reset()
-        try:
-            body = TestClient(app).get("/api/health").json()
-        finally:
-            limiter.reset()
-        block = body["goals_history"]
-        assert block["mode"] is None
-        assert "KS_GOALS_HISTORY='bridge'" in block["error"]
 
     def test_the_canary_pages_an_error_and_is_quiet_otherwise(self):
         from bot.canary import check_goals_history_mode
@@ -695,60 +590,3 @@ def _goal_routes():
             for method in e.methods if method not in ("HEAD", "OPTIONS")}
 
 
-class TestWhatARefusalStops:
-    """The docs said a refused `KS_GOALS_HISTORY` failed "the goal widget,
-    `/goals/*`, the POST and the Monday job" (review of 7b-4); three goal
-    routes never read the calculators' history and answer — from Silver,
-    which is not a silent substitute there, since it is all they ever read.
-    The split is pinned here so the docs cannot drift from it again.
-    Mutation: a calculator read added to `get_goals`, or the refusal taken
-    out of one calculator — a route changes column."""
-
-    def test_every_goal_route_is_on_one_list(self):
-        """Read off the app, so a goal route added tomorrow must be put on a
-        list — and in the docs — the day it is registered."""
-        assert _goal_routes() == REFUSED_ROUTES | ANSWERED_ROUTES
-        assert not REFUSED_ROUTES & ANSWERED_ROUTES
-
-    @pytest.mark.parametrize("value", [None, "bridge"])
-    def test_which_answer_and_which_refuse(self, monkeypatch, value):
-        import time
-
-        from fastapi.testclient import TestClient
-
-        from core.permissions import ADMIN_USER_IDS
-        from web.main import app
-        from web.ratelimit import limiter
-        from web.routes.auth import (
-            SESSION_COOKIE,
-            create_session_data,
-            session_serializer,
-        )
-
-        admin = sorted(ADMIN_USER_IDS)[0]
-
-        async def _resolve(session):
-            return {"user_id": admin, "role": "admin"}
-
-        monkeypatch.setattr("web.routes.auth._resolve_session", _resolve)
-        monkeypatch.delenv("KS_WRITE_GOALS", raising=False)
-        _history(monkeypatch, value)
-        client = TestClient(app, raise_server_exceptions=False)
-        client.cookies.set(SESSION_COOKIE, session_serializer.dumps(create_session_data(
-            {"id": str(admin), "first_name": "T", "last_name": "U", "username": "t",
-             "auth_date": str(int(time.time()))}, role="admin")))
-
-        statuses = {}
-        try:
-            for method, path in sorted(REFUSED_ROUTES | ANSWERED_ROUTES):
-                url, params = _ROUTE_REQUESTS.get(path, (path, {}))
-                params = {**params, **_ROUTE_PARAMS.get((method, path), {})}
-                limiter.reset()
-                statuses[(method, path)] = client.request(
-                    method, url, params=params).status_code
-        finally:
-            limiter.reset()
-
-        refused = 500 if value == "bridge" else 200
-        assert statuses == {**{r: refused for r in REFUSED_ROUTES},
-                            **{r: 200 for r in ANSWERED_ROUTES}}, statuses

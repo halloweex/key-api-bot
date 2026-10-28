@@ -34,7 +34,6 @@ between engines and changes neither.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -55,22 +54,19 @@ _VALID = ("duckdb", "postgres")
 
 
 def user_store_is_postgres() -> bool:
-    """Which store owns the dashboard's user list.
+    """Which store owns the dashboard's user list: Postgres, a constant since
+    step 14's S14-00 — production since 2026-09-07, with no way back (the
+    DuckDB copy is long stale).
 
-    An unknown value raises — `KS_BOT_STORE`'s rule, and it matters more here
-    than anywhere it has been applied before: a typo in the variable that
-    decides where *authorisation* is read from must stop the container, not
-    quietly point it at a copy that is about to go stale and start answering
-    "approved" for someone who is not.
+    `KS_USER_STORE` is read for nothing, so no value of it can stop the
+    container. Production keeps `postgres` in `.env` for the images before
+    step 14, which read an absent value as `duckdb` — a 401 for everybody. Last consumers:
+    `bot/store_postgres.py`, `core/repositories/users.py`,
+    `core/mirror_reconciliation.py`, `core/duckdb_table_fates.py`; the
+    DuckDB branches go in S14-08. Until S14-00 an unknown value raised —
+    `KS_BOT_STORE`'s rule.
     """
-    value = os.getenv(_ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{_ENV}={value!r} — unknown store. Expected one of {_VALID}; a "
-            f"typo in the variable that decides who may open the dashboard "
-            f"must stop the container rather than pick a store for you."
-        )
-    return value == "postgres"
+    return True
 
 
 # ─── the pool, thinly ────────────────────────────────────────────────────────

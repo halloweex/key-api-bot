@@ -12,8 +12,9 @@ the current head: it answers, nothing is refused, nothing falls back, and the
 pool is actually reached. The dashboard's summary is seeded differently in
 the two stores, so the number itself says which one answered. Then the same
 pool is closed — an outage asyncpg reports on its own, not a mock's
-exception — and each router refuses, naming its surface; under `duckdb` the
-same outage is answered by DuckDB, as before this change.
+exception — and each router refuses, naming its surface. (Under `duckdb`
+the same outage was answered by DuckDB; since step 14's S14-00 the mode is
+`off` whatever the variable says.)
 
 Cohorts are ClickHouse's and CI has no ClickHouse; their refusal is unit-tested.
 """
@@ -173,10 +174,17 @@ class TestOffReadsAWorkingPostgres:
         assert summary["totalOrders"] == 3
 
 
+# The goal amounts are chain 7a's table, and since step 14's S14-00 the chain
+# writes Postgres whatever its flag says — as production's flag has said since
+# chain 7a shipped — so their reads follow the chain and an outage there
+# raises rather than refuses (`tests/integration/test_goals_writer.py`).
+REFUSED_READS = [r for r in READS if r[1] != "get_goals"]
+
+
 class TestAnOutage:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("surface,method,args", READS,
-                             ids=[m for _s, m, _a in READS])
+    @pytest.mark.parametrize("surface,method,args", REFUSED_READS,
+                             ids=[m for _s, m, _a in REFUSED_READS])
     async def test_under_off_it_is_refused_naming_the_surface(
         self, stores, surface, method, args,
     ):
@@ -190,13 +198,3 @@ class TestAnOutage:
         assert read_fallback.counts() == {}
         assert read_fallback.refusals()[surface]["count"] >= 1
 
-    @pytest.mark.asyncio
-    async def test_under_duckdb_the_same_outage_is_answered_by_duckdb(self, stores):
-        store, pool, _get_pool, env = stores
-        _mode(env, "duckdb")
-        await pool.close()
-
-        summary = await store.get_summary_stats(DAY, DAY)
-        assert summary["totalRevenue"] == DUCK_REVENUE
-        assert read_fallback.counts()["dashboard"]["count"] == 1
-        assert read_fallback.refusals() == {}
