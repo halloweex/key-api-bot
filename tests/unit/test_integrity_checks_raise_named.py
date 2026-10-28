@@ -15,7 +15,7 @@ import textwrap
 import pytest
 import pytest_asyncio
 
-from core.data_quality import Severity, check_internal_integrity
+from core.data_quality import check_internal_integrity
 from core.duckdb_store import DuckDBStore
 
 
@@ -36,35 +36,6 @@ class TestARaisingCheckIsNamed:
     async def test_a_clean_database_raises_nothing(self, store):
         async with store.connection() as conn:
             assert _raised(check_internal_integrity(conn)) == []
-
-    @pytest.mark.asyncio
-    async def test_a_lost_table_is_reported_by_the_check_that_needed_it(self, store):
-        async with store.connection() as conn:
-            conn.execute("DROP TABLE silver_order_utm")
-            issues = check_internal_integrity(conn)
-        found = _raised(issues)
-        assert len(found) == 1
-        assert found[0].severity == Severity.WARN
-        assert found[0].count == 1
-        assert "attribution_coverage" in found[0].description
-
-    @pytest.mark.asyncio
-    async def test_every_raising_check_is_counted_and_the_rest_still_run(self, store):
-        async with store.connection() as conn:
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, grand_total, ordered_at,"
-                " created_at, updated_at) VALUES (1, 99, 12, 100,"
-                " '2026-09-01 10:00:00+03', '2026-09-01 10:00:00+03',"
-                " '2026-09-01 10:00:00+03')")
-            conn.execute("DROP TABLE silver_order_utm")
-            conn.execute("DROP TABLE gold_daily_revenue")
-            issues = check_internal_integrity(conn)
-        found = _raised(issues)
-        assert len(found) == 1 and found[0].count == 2
-        assert "attribution_coverage" in found[0].description
-        assert "gold_cell_values" in found[0].description
-        # The checks that did not raise are still in the run.
-        assert "value_domain_orders_source_id" in {i.check_name for i in issues}
 
 
 class TestTheGuardHasOneHome:

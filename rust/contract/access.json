@@ -27,7 +27,8 @@
     "traffic",
     "products",
     "marketing",
-    "margin"
+    "margin",
+    "tgbot"
   ],
   "tab_features": [
     "dashboard",
@@ -38,7 +39,8 @@
     "marketing",
     "margin",
     "expenses",
-    "sms"
+    "sms",
+    "tgbot"
   ],
   "role_permissions": {
     "admin": {
@@ -101,6 +103,11 @@
         "delete",
         "edit",
         "view"
+      ],
+      "tgbot": [
+        "delete",
+        "edit",
+        "view"
       ]
     },
     "editor": {
@@ -148,6 +155,10 @@
       "margin": [
         "edit",
         "view"
+      ],
+      "tgbot": [
+        "edit",
+        "view"
       ]
     },
     "viewer": {
@@ -183,6 +194,9 @@
         "view"
       ],
       "margin": [
+        "view"
+      ],
+      "tgbot": [
         "view"
       ]
     }
@@ -347,6 +361,7 @@
     {"kind": "api", "path": "/api/me", "pattern": "^/api/me$", "methods": ["GET"], "endpoint": "web.routes.api.me.get_current_user_info", "body": false, "dependencies": [{"gate": "api_gate"}, {"gate": "require_user"}], "rate_limits": []},
     {"kind": "api", "path": "/api/me/preferences", "pattern": "^/api/me/preferences$", "methods": ["PATCH"], "endpoint": "web.routes.api.me.update_preferences", "body": false, "dependencies": [{"gate": "api_gate"}, {"gate": "require_user"}], "rate_limits": []},
     {"kind": "api", "path": "/api/me/send-file", "pattern": "^/api/me/send\\-file$", "methods": ["POST"], "endpoint": "web.routes.api.me.send_file_to_my_chat", "body": true, "dependencies": [{"gate": "api_gate"}, {"gate": "require_user"}], "rate_limits": [{"limit": "10 per 1 minute", "amount": 10, "expiry_s": 60, "scope": "web.routes.api.me.send_file_to_my_chat"}]},
+    {"kind": "api", "path": "/api/tg-bot/activity", "pattern": "^/api/tg\\-bot/activity$", "methods": ["GET"], "endpoint": "web.routes.api.tg_bot.get_tg_bot_activity", "body": false, "dependencies": [{"gate": "api_gate"}, {"gate": "require_permission", "feature": "tgbot", "action": "view"}], "rate_limits": [{"limit": "30 per 1 minute", "amount": 30, "expiry_s": 60, "scope": "web.routes.api.tg_bot.get_tg_bot_activity"}]},
     {"kind": "api", "path": "/api/webhooks/turbosms", "pattern": "^/api/webhooks/turbosms$", "methods": ["POST"], "endpoint": "web.routes.api.webhooks.turbosms_delivery_report", "body": false, "dependencies": [{"gate": "api_gate"}], "rate_limits": [{"limit": "12000 per 1 minute", "amount": 12000, "expiry_s": 60, "scope": "web.routes.api.webhooks.turbosms_delivery_report"}]},
     {"kind": "websocket", "path": "/ws/dashboard"},
     {"kind": "websocket", "path": "/ws/admin"},

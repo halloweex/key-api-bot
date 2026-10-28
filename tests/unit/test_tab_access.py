@@ -347,6 +347,14 @@ class TestTheSharedSqlRuns:
     otherwise surface as an admin tapping Approve and getting nothing.
     """
 
+    @pytest.fixture(autouse=True)
+    def _users_on_duckdb(self, monkeypatch):
+        """DuckDB is the engine here, as before step 14's S14-00 made the
+        user list's store a constant (`tests.conftest.user_store_on_duckdb`)."""
+        from tests.conftest import user_store_on_duckdb
+
+        user_store_on_duckdb(monkeypatch)
+
     async def _store(self, tmp_path):
         from core.duckdb_store import DuckDBStore
 
@@ -828,17 +836,6 @@ class TestTheBotSaysWhenItCannotEnforce:
     every report again.
     """
 
-    def test_a_mismatch_is_an_error(self, monkeypatch, caplog):
-        import logging
-
-        import bot.main as main
-
-        monkeypatch.setenv("KS_BOT_STORE", "postgres")
-        monkeypatch.setenv("KS_USER_STORE", "duckdb")
-        with caplog.at_level(logging.ERROR):
-            main._warn_if_tab_access_is_off()
-        assert any("cannot read the dashboard's tab sets" in r.message
-                   for r in caplog.records), caplog.text
 
     def test_agreement_is_silent(self, monkeypatch, caplog):
         import logging

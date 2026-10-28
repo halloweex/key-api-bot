@@ -80,27 +80,6 @@ class TestTheStoreRoutesThroughTheRegistry:
         await store.set_last_sync_time("stocks", first + timedelta(hours=1))
         assert await store.get_last_sync_time("stocks") == first + timedelta(hours=1)
 
-    @pytest.mark.asyncio
-    async def test_under_the_flag_a_key_the_chain_does_not_own_stays_on_duckdb(
-        self, pg_only,
-    ):
-        store, pool, env = pg_only
-        env.setenv("KS_WRITE_INVENTORY", "postgres")
-        with pytest.raises(AssertionError, match="reached DuckDB"):
-            await store.set_last_sync_time("orders", datetime.now(timezone.utc))
-        with pytest.raises(AssertionError, match="reached DuckDB"):
-            await store.get_last_sync_time("orders")
-        assert await _stored(pool) == {}
-
-    @pytest.mark.asyncio
-    async def test_without_the_flag_the_chain_keys_stay_on_duckdb(self, pg_only):
-        store, pool, _env = pg_only
-        with pytest.raises(AssertionError, match="reached DuckDB"):
-            await store.set_last_sync_time("offers", datetime.now(timezone.utc))
-        with pytest.raises(AssertionError, match="reached DuckDB"):
-            await store.get_last_sync_time("offers")
-        assert await _stored(pool) == {}
-
 
 class TestTheHourlyReplaceCannotRollItBack:
     """`app.sync_metadata` is full-replaced out of DuckDB every hour. The first
@@ -142,9 +121,15 @@ class TestTheHourlyReplaceCannotRollItBack:
         frozen = now - timedelta(hours=60)
         fresh = now - timedelta(minutes=10)
 
-        # Before the switch: DuckDB owns both keys, and they stop here.
-        await store.set_last_sync_time("offers", frozen)
-        await store.set_last_sync_time("stocks", frozen)
+        # Before the switch: DuckDB owns both keys, and they stop here. Since
+        # S14-00 the chain writes Postgres whatever its flag says, so DuckDB's
+        # frozen stamps are written there on purpose.
+        from core import pg_inventory_write
+        from tests.conftest import chains_on_duckdb
+
+        with chains_on_duckdb(pg_inventory_write):
+            await store.set_last_sync_time("offers", frozen)
+            await store.set_last_sync_time("stocks", frozen)
 
         env.setenv("KS_WRITE_INVENTORY", "postgres")
         await store.set_last_sync_time("offers", fresh)

@@ -16,17 +16,83 @@ three states.
 """
 from __future__ import annotations
 
+import asyncio
 import types
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core import chain_latch, write_chains
+from core import chain_latch, pg_operational, write_chains
 from core.duckdb_store import DuckDBStore
-from core.pg_operational import _tables_to_ship
-from tests.unit.test_pg_operational_merged_failure import (  # noqa: F401 — fixture
-    STAMP, _Conn, _Pool, _run, no_flags,
-)
+from core.pg_operational import _tables_to_ship, replicate_operational
+from core.write_chains import WRITE_CHAINS
+
+STAMP = "2026-09-18T08:00:00+00:00"
+
+
+# The stamps are still written in production since step 14's S14-00: the
+# latch, the owner rows and the flag are published as they were, and a
+# rollback to an image from before step 14 routes by them. These helpers lived in
+# `test_pg_operational_merged_failure.py` until S14-00 removed the tests
+# there that compared the two sides of the owner-row read.
+class _Conn:
+    def __init__(self, fail_at):
+        self.fail_at = fail_at
+        self.touched = []
+
+    async def fetchval(self, sql, *args):
+        if self.fail_at == "watermark":
+            raise RuntimeError("failed after the owner rows: watermark")
+        return None
+
+    @asynccontextmanager
+    async def _tx(self):
+        yield
+
+    def transaction(self):
+        return self._tx()
+
+    async def execute(self, sql, *args):
+        self.touched.append(sql)
+        if self.fail_at == "write":
+            raise RuntimeError("failed after the owner rows: write")
+
+    async def executemany(self, sql, rows):
+        self.touched.append(sql)
+        if self.fail_at == "write":
+            raise RuntimeError("failed after the owner rows: write")
+
+
+class _Pool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    @asynccontextmanager
+    async def _acq(self):
+        yield self.conn
+
+    def acquire(self):
+        return self._acq()
+
+
+@pytest.fixture
+def no_flags(monkeypatch):
+    """No KS_WRITE_* set; the conftest has pointed the markers at tmp_path, so
+    nothing is latched locally — the marker-lost state when owner rows exist."""
+    for chain in WRITE_CHAINS:
+        monkeypatch.delenv(chain.WRITE_ENV, raising=False)
+    monkeypatch.setattr(pg_operational, "OPERATIONAL_REPLICATION_LOCK", asyncio.Lock())
+    return monkeypatch
+
+
+async def _run(store, pool, owners, stamps):
+    with patch("core.mirror_reconciliation.configured", return_value=True), \
+         patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
+         patch("core.pg.require_revision", new=AsyncMock()), \
+         patch("core.chain_latch.read_owners", new=AsyncMock(return_value=owners)), \
+         patch("core.pg_landing._record_failure", new=stamps):
+        return await replicate_operational(store)
 
 BUYERS = "bronze.buyers"
 CONTACTS = "bronze.buyer_contacts"

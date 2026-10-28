@@ -9,6 +9,21 @@ import pytest
 
 from core.duckdb_store import DuckDBStore
 
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. The
+    header-only refresh's deferral is pinned here on DuckDB's order
+    writer, as chain 3's decider is in tests/unit/test_pg_orders_write.py.
+    So this module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_orders_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_orders_write)
+
+
 WHEN = "2026-08-20T12:00:00+00:00"
 
 

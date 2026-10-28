@@ -295,7 +295,12 @@ def _warn_if_tab_access_is_off() -> None:
     import os
 
     bot_store = os.getenv("KS_BOT_STORE", "sqlite").strip().lower()
-    user_store = os.getenv("KS_USER_STORE", "duckdb").strip().lower()
+    # Postgres whatever `KS_USER_STORE` says since step 14's S14-00
+    # (`core.pg_dashboard_users.user_store_is_postgres`, a constant), so the
+    # disagreement below can no longer happen; it goes with the variable
+    # (S14-08). Not imported: no module under `bot/` but the store's adapter
+    # reaches for `core.pg*` (`tests/unit/test_pg_bot_state.py`).
+    user_store = "postgres"
     if bot_store == "postgres" and user_store != "postgres":
         logger.error(
             "KS_BOT_STORE=postgres but KS_USER_STORE=%r: the bot cannot read "

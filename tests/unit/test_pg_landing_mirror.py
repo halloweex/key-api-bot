@@ -14,6 +14,11 @@ with the real initdb scripts, revision 0002 applied as `ks_app`:
 
 What the suite pins is the behaviour that has no server: the flag, the
 statement, and that every path returns an outcome instead of throwing.
+
+Since step 14's S14-00 the flag is a constant (on) and every table the mirror
+ships is a write chain's, so it stands down for all of them; the tests of the
+kill switch, of a failure becoming an outcome, of the failure counts and of
+the parse through the mirror went with that path (S14-13 deletes the mirror).
 """
 from __future__ import annotations
 
@@ -24,11 +29,9 @@ import pytest
 from core import pg_landing
 from core.pg_landing import (
     MIRROR_ENV,
-    MirrorOutcome,
     enabled,
     health,
     mirror_categories,
-    mirror_products,
     reset_health,
 )
 
@@ -47,20 +50,6 @@ class TestTheKillSwitch:
         any environment and was then blamed for the dashboard's latency."""
         monkeypatch.delenv(MIRROR_ENV, raising=False)
         assert enabled() is True
-
-    @pytest.mark.parametrize("value", ["0", "false", "FALSE", "no", ""])
-    def test_it_can_be_turned_off_in_one_deploy(self, monkeypatch, value):
-        monkeypatch.setenv(MIRROR_ENV, value)
-        assert enabled() is False
-
-    @pytest.mark.asyncio
-    async def test_off_means_postgres_is_not_touched(self, monkeypatch):
-        monkeypatch.setenv(MIRROR_ENV, "0")
-        with patch("core.pg.get_pool", new=AsyncMock()) as pool:
-            out = await mirror_categories([{"id": 1, "name": "Care"}])
-        pool.assert_not_awaited()
-        assert out.ok is False and out.attempted is False
-        assert MIRROR_ENV in out.skipped
 
 
 class TestTheStatement:
@@ -85,22 +74,6 @@ class TestTheStatement:
 class TestItNeverRaises:
     """The property the failure policy is built on. Charter rule 8: a Postgres
     fault must not be able to stop a sync of the store the business reads."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("boom", [
-        ConnectionRefusedError("no route"),
-        RuntimeError("KS_PG_DSN is not set"),
-        Exception("something nobody predicted"),
-    ])
-    async def test_any_failure_becomes_an_outcome(self, monkeypatch, boom):
-        monkeypatch.setenv(MIRROR_ENV, "1")
-        with patch("core.pg_landing._write", side_effect=boom), \
-             patch("core.pg_landing._record_failure", new=AsyncMock()):
-            out = await mirror_products([{"id": 1, "name": "X"}])
-        assert isinstance(out, MirrorOutcome)
-        assert out.ok is False
-        assert out.attempted is True
-        assert str(boom)[:10] in out.error
 
     @pytest.mark.asyncio
     async def test_a_failure_to_record_the_failure_is_also_swallowed(self, monkeypatch):
@@ -138,79 +111,10 @@ class TestItNeverRaises:
 
 
 class TestFailuresAreVisible:
-    @pytest.mark.asyncio
-    async def test_they_are_counted_per_table(self, monkeypatch):
-        monkeypatch.setenv(MIRROR_ENV, "1")
-        with patch("core.pg_landing._write", side_effect=RuntimeError("nope")), \
-             patch("core.pg_landing._record_failure", new=AsyncMock()):
-            await mirror_categories([{"id": 1, "name": "X"}])
-            await mirror_categories([{"id": 1, "name": "X"}])
-            await mirror_products([{"id": 1, "name": "Y"}])
-        assert health()["failures"] == {
-            "bronze.categories": 2, "bronze.products": 1,
-        }
-
-    @pytest.mark.asyncio
-    async def test_a_success_clears_the_count(self, monkeypatch):
-        monkeypatch.setenv(MIRROR_ENV, "1")
-        with patch("core.pg_landing._write", side_effect=RuntimeError("nope")), \
-             patch("core.pg_landing._record_failure", new=AsyncMock()):
-            await mirror_categories([{"id": 1, "name": "X"}])
-        assert health()["failures"]["bronze.categories"] == 1
-
-        with patch("core.pg_landing._write", new=AsyncMock()):
-            out = await mirror_categories([{"id": 1, "name": "X"}])
-        assert out.ok is True
-        assert health()["failures"] == {}
-
-    @pytest.mark.asyncio
-    async def test_the_error_is_logged_at_error_not_debug(self, monkeypatch, caplog):
-        """The 2026-08-09 shape: an ALTER failed inside try/except with a
-        DEBUG log, and a one-off became a rebuild every two minutes."""
-        monkeypatch.setenv(MIRROR_ENV, "1")
-        with patch("core.pg_landing._write", side_effect=RuntimeError("nope")), \
-             patch("core.pg_landing._record_failure", new=AsyncMock()):
-            with caplog.at_level("ERROR", logger="core.pg_landing"):
-                await mirror_products([{"id": 1, "name": "X"}])
-        assert any(r.levelname == "ERROR" for r in caplog.records)
-
     def test_health_is_readable_with_postgres_down(self):
         """It is process-local on purpose — the durable record is the
         watermark, and the watermark is unreachable exactly when it matters."""
         assert set(health()) == {"enabled", "failures", "last_error"}
-
-
-class TestItReadsThePayloadThroughTheSharedParser:
-    @pytest.mark.asyncio
-    async def test_brand_comes_from_landing_rows(self, monkeypatch):
-        """Not a second reading. Rule 1 — and brand is the column the owner's
-        supplier figures are built on."""
-        monkeypatch.setenv(MIRROR_ENV, "1")
-        captured = {}
-
-        async def _capture(table, columns, rows):
-            captured["table"], captured["cols"], captured["rows"] = table, columns, rows
-
-        with patch("core.pg_landing._write", new=_capture):
-            await mirror_products([{
-                "id": 100, "name": "Serum", "min_price": 0, "price": 700.0,
-                "custom_fields": [{"uuid": "CT_1001", "value": ["NEOGEN", "ANUA"]}],
-            }])
-
-        assert captured["table"] == "bronze.products"
-        assert captured["cols"] == ("id", "name", "category_id", "brand", "sku", "price")
-        # `value[0]` and `min_price or price`, exactly as DuckDB gets them.
-        assert captured["rows"] == [(100, "Serum", None, "NEOGEN", None, 700.0)]
-
-    @pytest.mark.asyncio
-    async def test_an_empty_payload_still_moves_the_watermark(self, monkeypatch):
-        """A sync that found nothing is a successful sync, and a watermark
-        that stops moving on quiet days reads as a stalled mirror."""
-        monkeypatch.setenv(MIRROR_ENV, "1")
-        with patch("core.pg_landing._write", new=AsyncMock()) as w:
-            out = await mirror_categories([])
-        assert out.ok is True and out.rows == 0
-        w.assert_awaited_once()
 
 
 class TestTheSyncCallsIt:

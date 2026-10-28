@@ -10,6 +10,15 @@ import pytest
 
 from core.duckdb_store import DuckDBStore
 
+
+@pytest.fixture(autouse=True)
+def _sms_on_duckdb(monkeypatch):
+    """This module's engine is DuckDB, as it was before step 14's S14-00 made
+    `/sms`'s store a constant (`tests.conftest.sms_store_on_duckdb`)."""
+    from tests.conftest import sms_store_on_duckdb
+
+    sms_store_on_duckdb(monkeypatch)
+
 SENT = datetime(2026, 8, 1, 10, 0)
 SENT_DATE = date(2026, 8, 1)
 

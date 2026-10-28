@@ -69,13 +69,12 @@ async def _clean(pool):
 
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
-    """A DuckDB holding three orders with no comment, mirrored into Postgres.
-
-    `KS_PG_DERIVE=own` throughout, because one of the things under test is
-    that the ship owes Postgres a rebuild — the helper goes through
-    `write_orders`, so it inherits the mark, and a helper that wrote the rows
-    by some other route would leave Silver describing the previous comment.
-    """
+    """Postgres holding three orders with no comment, written by the sync's
+    one order call site — chain 3's writer, which since step 14's S14-00 is
+    the only one. (Until then DuckDB held them and `ship_orders_by_id`
+    carried them across; that ship stands down under the chain, and its tests
+    went with it. Chain 3's own restore, `restore_manager_comments`, is
+    proved in `tests/integration/test_orders_chain_writer.py`.)"""
     from core import pg_derivation
 
     monkeypatch.setenv("KS_PG_DSN", DSN)
@@ -91,15 +90,10 @@ async def stores(tmp_path, monkeypatch):
 
     with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
          patch("core.pg.require_revision", new=AsyncMock()):
-        # DuckDB first, with the mirror stubbed: the seeding of Postgres is
-        # the next line, and doing it through the helper keeps this test's
-        # starting state built the same way production's is.
-        with patch("core.pg_landing.mirror_orders", new=AsyncMock()):
-            await store.upsert_orders([_payload(i) for i in IDS])
-        from core.pg_backfill import ship_orders_by_id
-        from core.pg_order_versions import CHANGE
+        from core.sync_service import SyncService
 
-        await ship_orders_by_id(store, IDS, version_kind=CHANGE)
+        await SyncService(store)._upsert_orders_with_expenses(
+            [_payload(i) for i in IDS])
         yield store, pool
 
     await _clean(pool)
@@ -108,131 +102,7 @@ async def stores(tmp_path, monkeypatch):
     pg_derivation._mode, pg_derivation._mode_error = before_mode
 
 
-async def _comments(pool):
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, manager_comment FROM bronze.orders "
-            "WHERE id = ANY($1::int[]) ORDER BY id", list(IDS))
-    return {int(r["id"]): r["manager_comment"] for r in rows}
-
-
-async def _versions(pool):
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT order_id, kind, manager_comment FROM app.order_versions "
-            "WHERE order_id = ANY($1::int[]) ORDER BY id", list(IDS))
-    return [(int(r["order_id"]), r["kind"], r["manager_comment"]) for r in rows]
-
-
-async def _restore_in_duckdb(store, mapping):
-    """What both backfills do to DuckDB: fill the NULLs, nothing else."""
-    async with store.connection() as conn:
-        for order_id, comment in mapping.items():
-            conn.execute(
-                "UPDATE orders SET manager_comment = ? "
-                "WHERE id = ? AND manager_comment IS NULL",
-                [comment, order_id],
-            )
-
-
 class TestTheRestoredCommentReachesPostgres:
-    @pytest.mark.asyncio
-    async def test_bronze_ends_up_holding_what_duckdb_holds(self, stores):
-        store, pool = stores
-        restored = {IDS[0]: "utm_source=fb|utm_campaign=spring",
-                    IDS[1]: "utm_source=tg"}
-        await _restore_in_duckdb(store, restored)
-
-        from core.pg_backfill import ship_orders_by_id
-        from core.pg_order_versions import BACKFILL
-
-        result = await ship_orders_by_id(
-            store, list(restored), version_kind=BACKFILL)
-
-        assert result["orders_shipped"] == 2
-        async with store.connection() as conn:
-            duck = {int(r[0]): r[1] for r in conn.execute(
-                "SELECT id, manager_comment FROM orders ORDER BY id").fetchall()}
-        assert await _comments(pool) == duck
-        assert duck[IDS[2]] is None, "the order nobody restored must stay NULL"
-
-    @pytest.mark.asyncio
-    async def test_one_backfill_version_per_order_that_actually_changed(self, stores):
-        store, pool = stores
-        await _restore_in_duckdb(store, {IDS[0]: "utm_source=fb"})
-
-        from core.pg_backfill import ship_orders_by_id
-        from core.pg_order_versions import BACKFILL
-
-        # All three ids offered, as the route offers whatever KeyCRM returned.
-        await ship_orders_by_id(store, IDS, version_kind=BACKFILL)
-
-        versions = await _versions(pool)
-        assert [(o, k) for o, k, _c in versions] == [
-            (IDS[0], "create"), (IDS[1], "create"), (IDS[2], "create"),
-            (IDS[0], BACKFILL),
-        ]
-        assert versions[-1][2] == "utm_source=fb"
-
-    @pytest.mark.asyncio
-    async def test_shipping_the_same_rows_again_writes_nothing(self, stores):
-        """The comparison does not change with the label: an order whose
-        header has not moved since its last version writes no row, however the
-        caller would have named one."""
-        store, pool = stores
-        await _restore_in_duckdb(store, {IDS[0]: "utm_source=fb"})
-
-        from core.pg_backfill import ship_orders_by_id
-        from core.pg_order_versions import BACKFILL
-
-        await ship_orders_by_id(store, IDS, version_kind=BACKFILL)
-        before = await _versions(pool)
-        await ship_orders_by_id(store, IDS, version_kind=BACKFILL)
-        assert await _versions(pool) == before
-
-    @pytest.mark.asyncio
-    async def test_it_owes_postgres_a_rebuild(self, stores):
-        """Silver reads `bronze.orders`, and `silver.order_utm` is parsed from
-        this very column. A ship that did not raise the signal would leave the
-        tab reading a classification of the comment it replaced."""
-        from core.pg_backfill import ship_orders_by_id
-        from core.pg_order_versions import BACKFILL
-
-        store, pool = stores
-        await _restore_in_duckdb(store, {IDS[0]: "utm_source=fb"})
-
-        async def requested():
-            async with pool.acquire() as conn:
-                return await conn.fetchval(
-                    "SELECT requested FROM meta.derivation_signal "
-                    "WHERE layer = 'warehouse'")
-
-        before = await requested()
-        await ship_orders_by_id(store, [IDS[0]], version_kind=BACKFILL)
-        assert await requested() == before + 1
-
-    @pytest.mark.asyncio
-    async def test_the_line_item_watermark_does_not_move(self, stores):
-        """Headers only. `skip_products=True` follows the same rule at 05:15:
-        stamping the line items as shipped here would tell the reconciliation
-        they are current when nothing looked at them."""
-        from core.pg_backfill import ship_orders_by_id
-        from core.pg_landing import ORDER_PRODUCTS_TABLE
-        from core.pg_order_versions import BACKFILL
-
-        store, pool = stores
-        await _restore_in_duckdb(store, {IDS[0]: "utm_source=fb"})
-
-        async def stamp():
-            async with pool.acquire() as conn:
-                return await conn.fetchval(
-                    "SELECT last_ok_at FROM meta.mirror_state WHERE table_name = $1",
-                    ORDER_PRODUCTS_TABLE)
-
-        before = await stamp()
-        await ship_orders_by_id(store, [IDS[0]], version_kind=BACKFILL)
-        assert await stamp() == before
-
     @pytest.mark.asyncio
     async def test_a_label_the_checks_do_not_know_is_refused(self, stores):
         """Before the transaction opens, so a typo cannot roll back a header

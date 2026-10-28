@@ -62,6 +62,7 @@ import type {
   MarginAlertItem,
   SmsSegmentsResponse,
   SmsCampaignsResponse,
+  TgBotActivityResponse,
   SmsCampaignResultsResponse,
   SmsSendResult,
   SmsTestSendResult,
@@ -1003,6 +1004,16 @@ export function useSmsAudienceCounts(
       : { status: 'loading' }
   }
   return out
+}
+
+// The bot is asked at most every two minutes by the server (its cache is for
+// the bot); asking more often here would only read that cache back.
+export function useTgBotActivity(days: number) {
+  return useQuery<TgBotActivityResponse>({
+    queryKey: ['tgBotActivity', days] as const,
+    queryFn: () => api.getTgBotActivity(days),
+    staleTime: CACHE_TTL.REALTIME,
+  })
 }
 
 export function useSmsCampaigns(enabled = true) {

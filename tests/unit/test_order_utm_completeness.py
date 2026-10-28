@@ -223,31 +223,6 @@ class TestTheReaderIsToldWhatToDo:
         called = _names_called(endpoint)
         assert {"refresh_utm_silver_layer", "reparse_router"} <= called
 
-    def test_the_warehouse_refresh_is_not_offered_because_it_does_not_ship_this(self):
-        """Under KS_UTM_PARSE=duckdb, the default these tests read: the lever
-        every Silver alert names rebuilds DuckDB, and under own derives
-        Postgres — and never calls the UTM ship. Offering it here would be a
-        lever that moves nothing on /traffic. Under postgres the derivation
-        ends with the parse, and the line does offer it — see
-        `TestUnderThePostgresParse`."""
-        from tests.routes_helper import find_endpoint
-        from web.main import app
-
-        endpoint = find_endpoint(app, "/api/warehouse/refresh", "POST").route.endpoint
-        assert not {"ship_order_utm", "ship_after_reparse",
-                    "reparse_router"} & _names_called(endpoint)
-        (line,) = remediation_for(["pg_order_utm_missing"])
-        assert "/api/warehouse/refresh" not in line
-
-    def test_the_cause_no_ship_can_reach_is_named_first(self):
-        """A comment Postgres keeps and DuckDB lost: the parser reads DuckDB,
-        so re-parsing and re-shipping cannot clear it, and a reader who tried
-        them first would conclude the check is broken."""
-        (line,) = remediation_for(["pg_order_utm_missing"])
-        comment = line.index("manager_comment")
-        assert comment < line.index("meta.mirror_state")
-        assert comment < line.index("/api/traffic/refresh")
-
     def test_each_page_tells_the_reader_the_comment_may_be_missing_in_duckdb(self):
         """The description is what the diagnostic agent and the digest read.
         It names the finding that shows the divergence, which must be a
@@ -268,83 +243,6 @@ class TestTheReaderIsToldWhatToDo:
     def test_each_name_reads_as_words_in_the_digest(self):
         for name in NAMES:
             assert name in HUMAN_CHECK_NAMES, name
-
-
-class TestTheBackfillIsNotTheCommentsLever:
-    """Why the line offers the copy in `bronze.orders` for a comment DuckDB
-    lost, and not `POST /api/traffic/backfill-utm`, held to the route's own
-    run rather than to a sentence about it.
-
-    After a purge, DuckDB's INSERT stored the NULL KeyCRM's payload carried.
-    The backfill re-fetches that same field from KeyCRM, skips an empty one,
-    and still ends green — so a reader who followed it would see success and
-    the same page next morning. The descriptions say so; if the route ever
-    learns to restore from `bronze.orders`, or to say it restored nothing,
-    this fails and they have to move with it.
-    """
-
-    def test_the_line_does_not_offer_it(self):
-        (line,) = remediation_for(["pg_order_utm_missing"])
-        assert "backfill-utm" not in line
-        assert "bronze.orders" in line
-        assert line.index("bronze.orders") < line.index("meta.mirror_state")
-
-    @pytest.mark.asyncio
-    async def test_a_comment_keycrm_serves_as_null_is_skipped_and_the_run_is_green(
-            self, tmp_path):
-        import asyncio
-        from unittest.mock import AsyncMock, MagicMock, patch
-
-        from core.duckdb_store import DuckDBStore
-        from web.routes.api import traffic
-
-        store = DuckDBStore(db_path=tmp_path / "purged.duckdb")
-        await store.connect()
-        async with store.connection() as conn:
-            # The order as a purge leaves it: re-inserted with the payload's
-            # NULL, while Postgres kept the comment.
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, grand_total,"
-                " ordered_at, buyer_id, manager_comment) VALUES"
-                " (7, 4, 1, 10.0, TIMESTAMPTZ '2030-06-01 10:00:00+00', 1, NULL)"
-            )
-
-        class _KeyCRM:
-            """Serves the order with the same NULL it served the sync."""
-
-            async def paginate(self, *_a, **_k):
-                yield [{"id": 7, "manager_comment": None}]
-
-        scheduler = MagicMock()
-        scheduler._heavy_job_lock = asyncio.Lock()
-        ship = AsyncMock(return_value={"orders_shipped": 0})
-        before = dict(traffic._backfill_status)
-        try:
-            with patch.object(traffic, "get_store", AsyncMock(return_value=store)), \
-                 patch("core.keycrm.get_async_client",
-                       AsyncMock(return_value=_KeyCRM())), \
-                 patch("core.scheduler.get_scheduler", return_value=scheduler), \
-                 patch("core.pg_backfill.ship_orders_by_id", new=ship), \
-                 patch.object(store, "refresh_utm_silver_layer",
-                              new=AsyncMock(return_value=[])), \
-                 patch.object(traffic, "reparse_router", new=AsyncMock()), \
-                 patch("asyncio.sleep", new=AsyncMock()):
-                # Bounded: the run takes a lock per chunk.
-                await asyncio.wait_for(traffic._run_backfill_inner(30), timeout=20)
-            result = dict(traffic._backfill_status["result"])
-            async with store.connection() as conn:
-                (stored,) = conn.execute(
-                    "SELECT manager_comment FROM orders WHERE id = 7").fetchone()
-        finally:
-            traffic._backfill_status.clear()
-            traffic._backfill_status.update(before)
-            await store.close()
-
-        assert stored is None, "the backfill restored a comment KeyCRM does not serve"
-        assert result["db_updated"] == 0
-        assert result["orders_remaining_null"] == 1
-        assert ship.await_count == 0
-        assert result["status"] == "success"
 
 
 class TestUnderThePostgresParse:

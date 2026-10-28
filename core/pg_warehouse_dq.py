@@ -190,15 +190,16 @@ PAIRING_VERSION = 2
 
 
 def flag() -> Tuple[bool, Optional[str]]:
-    """`(enabled, error)`. An unknown value is off, with the error to report.
+    """`(enabled, error)`: `(True, None)`, a constant since step 14's S14-00.
 
-    Not a raise, `KS_PG_DERIVE`'s rule: this decides whether a check runs, and
-    taking the integrity scan down over a typo would blind every other check.
+    `KS_DQ_PG_WAREHOUSE=on` has been production's value since step 13 made it
+    a precondition, and with DuckDB deriving nothing the twins are the only
+    checks of Silver, Gold and UTM — so no value of the variable may turn
+    them off. It is read for nothing; `pg_warehouse_dq_flag_invalid` has
+    nothing left to fire on and goes in S14-14. Until S14-00 an unknown value
+    was off with the error to report, `KS_PG_DERIVE`'s rule.
     """
-    value = os.getenv(ENV, "off").strip().lower() or "off"
-    if value in _VALID:
-        return value == "on", None
-    return False, f"{ENV}={value!r} is not one of {_VALID}; treated as off"
+    return True, None
 
 
 def floor_seconds() -> int:

@@ -86,7 +86,6 @@ async def _integrity(store):
 
 
 class TestTheOutageIsSeen:
-
     @pytest.mark.asyncio
     async def test_a_healthy_week_says_nothing(self, tmp_path):
         """June ran at 34% coverage for weeks. A check that fires there is a
@@ -137,7 +136,6 @@ class TestTheOutageIsSeen:
 
 
 class TestItRefusesToGuess:
-
     @pytest.mark.asyncio
     async def test_too_few_orders_says_nothing(self, tmp_path):
         """A quiet week must not read as an outage: three untagged orders out
@@ -175,18 +173,6 @@ class TestItRefusesToGuess:
 
 
 class TestItIsWiredIn:
-
-    @pytest.mark.asyncio
-    async def test_the_integrity_run_includes_it(self, tmp_path):
-        """A check nobody calls is a check that does not exist. This is the
-        job that runs four times a day and feeds the 09:00 digest."""
-        store = await _store(tmp_path)
-        nxt = await _week(store, days_ago=3, orders=100, tagged=4)
-        await _week(store, days_ago=20, orders=200, tagged=60, first_id=nxt)
-
-        names = {i.check_name for i in await _integrity(store)}
-        assert "attribution_coverage_website" in names
-
     def test_it_names_a_lever_that_is_not_in_this_repository(self):
         """`REMEDIATION` exists so a finding says what to do. The honest
         answer here is that the fix is on the website, and saying "run the
@@ -226,17 +212,3 @@ class TestWhatItMeasuredIsHandedOver:
         assert await _run(store, counts_out=measured) == []
         assert measured == {"orders": 12, "tagged": 3}
 
-    @pytest.mark.asyncio
-    async def test_the_scan_files_it_under_the_guards_name(self, tmp_path):
-        from core.data_quality import check_internal_integrity
-
-        store = await _store(tmp_path)
-        nxt = await _week(store, days_ago=3, orders=100, tagged=8)
-        await _week(store, days_ago=20, orders=200, tagged=60, first_id=nxt)
-
-        measured = {}
-        async with store.connection() as conn:
-            issues = check_internal_integrity(conn, pairing_out=measured)
-        assert "attribution_coverage_website" in {i.check_name for i in issues}
-        assert measured == {"attribution_coverage": {
-            "orders": 100, "tagged": 8, "base_orders": 200, "base_tagged": 60}}

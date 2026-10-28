@@ -14,6 +14,12 @@ here:
   so a later way back from step 13 still re-parses DuckDB's verdicts;
 - and under `on` with no marker, nothing a start does has changed.
 
+Since step 14's S14-00 web runs `off` whatever `KS_DUCKDB` says and step 13
+is a constant, so a start of web under `on`, and a process where DuckDB still
+derives, no longer exist: their tests went with them. The marker is still
+written under `off` — an image from before step 14, the rollback target,
+merges it on a start under `on` — and what web does under `off` is still held here.
+
 The design is `.planning/DUCKDB_EXIT_STAGE5_DECOUPLING.md`, sections 2.6 and
 PR-6.
 """
@@ -31,8 +37,7 @@ import pytest
 
 from core import duckdb_switch, warehouse_cutover as wc
 from tests.unit.test_warehouse_writer import (  # noqa: F401 — fixtures
-    _metadata, _one_utm_row, _other_modes_put_back, _restart, _store,
-    _unwrap, _utm_rows, _writer, met, met_env, postgres,
+    _other_modes_put_back, _restart, _store, _unwrap, met, met_env, postgres,
 )
 
 RESOLVED = {"writer": "postgres", "since": "2026-10-01T06:00:00+00:00",
@@ -176,17 +181,6 @@ class TestTheSettleUnderOff:
         _settle(_unconnected())
         assert wc._settled
 
-    def test_without_step_13_it_owes_duckdb_nothing_it_could_not_pay(
-        self, frozen, caplog,
-    ):
-        """KS_WRITE_WAREHOUSE not in force, a record saying postgres: under
-        `on` the way back — a dirty mark and an emptied UTM table in DuckDB.
-        Under off neither can be done, and off's coherence verdict (PR-2)
-        holds such a process on `on`; here it says so and touches nothing."""
-        assert wc.configure_mode() == wc.DUCKDB
-        _settle(_unconnected())
-        assert not wc.held() and duckdb_switch.opened() == {}
-        assert "cannot be settled without the file" in caplog.text
 
     def test_the_scheduler_hands_no_store_under_off(self, postgres, frozen, monkeypatch):
         """The scheduler's settle asks no store under off (PR-6). Mutation:
@@ -247,9 +241,6 @@ class TestTheDoorsUnderOff:
         router.assert_awaited_once_with(store, full=True, force=False)
         assert wc.utm_marker_stamp() is not None and duckdb_switch.opened() == {}
 
-    def test_no_note_while_duckdb_derives(self, frozen):
-        asyncio.run(wc.note_utm_reparsed_in_postgres(_unconnected()))
-        assert wc.utm_marker_stamp() is None and duckdb_switch.opened() == {}
 
     def test_a_second_note_keeps_the_later(self, postgres, frozen, monkeypatch):
         _write_marker("2026-10-12T09:00:00+00:00")
@@ -333,221 +324,6 @@ def _sync_metadata(store):
             return conn.execute(
                 "SELECT key, value, updated_at FROM sync_metadata ORDER BY key").fetchall()
     return asyncio.run(read())
-
-
-class TestTheFirstStartBackUnderOn:
-    def test_it_merges_the_marker_and_removes_it(self, tmp_path, postgres):
-        """The plan's proof. Mutation: drop `_merge_utm_marker` from
-        `settle_writer`."""
-        store = _record_under_postgres(tmp_path)
-        try:
-            _write_marker("2026-10-12T09:00:00+00:00")
-            resolve = AsyncMock(return_value=0)
-            with patch("core.alerting.resolve_group", resolve):
-                _settle(store)
-            assert _writer(store) == {**RESOLVED,
-                                      wc.UTM_REPARSED: "2026-10-12T09:00:00+00:00"}
-            assert not wc.UTM_MARKER.exists()
-            resolve.assert_not_awaited()
-        finally:
-            asyncio.run(store.close())
-
-    def test_then_the_way_back_empties_duckdbs_verdicts(self, tmp_path, monkeypatch):
-        """The merge is for this: a step-13 way back after a week under off,
-        in which a reclassify ran in Postgres alone, re-parses DuckDB's
-        verdicts rather than keeping the old rules' ones. Mutation: drop
-        `_merge_utm_marker` — the verdicts stay."""
-        store = _record_under_postgres(tmp_path)
-        try:
-            _one_utm_row(store)
-            _write_marker("2026-10-12T09:00:00+00:00")
-            assert wc.configure_mode() == wc.DUCKDB
-            _settle(store)
-            assert wc.held() and _utm_rows(store) == 0
-            assert _metadata(store, "warehouse_dirty")[0] == "full"
-            assert _writer(store)[wc.UTM_REPARSED] == "2026-10-12T09:00:00+00:00"
-            assert not wc.UTM_MARKER.exists()
-        finally:
-            asyncio.run(store.close())
-
-    def test_the_record_s_later_note_is_kept(self, tmp_path, postgres):
-        store = _record_under_postgres(
-            tmp_path, {**RESOLVED, wc.UTM_REPARSED: "2026-10-13T09:00:00+00:00"})
-        try:
-            _write_marker("2026-10-12T09:00:00+00:00")
-            with patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
-                _settle(store)
-            assert _writer(store)[wc.UTM_REPARSED] == "2026-10-13T09:00:00+00:00"
-            assert not wc.UTM_MARKER.exists()
-        finally:
-            asyncio.run(store.close())
-
-    def test_with_no_record_it_writes_the_one_a_note_would_have(self, tmp_path):
-        """No record in DuckDB beside a marker — a file older than step 13
-        put back. The cautious reading, `note_utm_reparsed_in_postgres`'s:
-        postgres unresolved, so the way back owes the rebuild and the
-        re-parse rather than skipping both."""
-        store = _store(tmp_path)
-        try:
-            _one_utm_row(store)
-            _write_marker("2026-10-12T09:00:00+00:00")
-            _settle(store)
-            record = _writer(store)
-            assert record["writer"] == "postgres" and record["resolved"] is False
-            assert record[wc.UTM_REPARSED] == "2026-10-12T09:00:00+00:00"
-            assert wc.held() and _utm_rows(store) == 0
-        finally:
-            asyncio.run(store.close())
-
-    def test_a_marker_the_removal_could_not_take_is_removed_by_the_next_start(
-        self, tmp_path, postgres, monkeypatch, caplog,
-    ):
-        store = _record_under_postgres(tmp_path)
-        try:
-            _write_marker("2026-10-12T09:00:00+00:00")
-            real_unlink = type(wc.UTM_MARKER).unlink
-
-            def refuse(self, *a, **k):
-                if self == wc.UTM_MARKER:
-                    raise PermissionError("read-only")
-                return real_unlink(self, *a, **k)
-
-            with patch.object(type(wc.UTM_MARKER), "unlink", refuse), \
-                 patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
-                _settle(store)
-            assert wc._settled and "finds it spent" in caplog.text
-            assert wc.UTM_MARKER.exists()
-            _restart()
-            wc.configure_mode()
-            with patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
-                _settle(store)
-            assert _writer(store)[wc.UTM_REPARSED] == "2026-10-12T09:00:00+00:00"
-            assert not wc.UTM_MARKER.exists()
-        finally:
-            asyncio.run(store.close())
-
-    def test_a_marker_it_already_merged_is_not_written_again(
-        self, tmp_path, postgres, monkeypatch,
-    ):
-        """Under `postgres` with the note already in the record — what a
-        removal that failed leaves — the start writes nothing and only tries
-        the removal again. Mutation: drop `_marker_spent`."""
-        store = _record_under_postgres(
-            tmp_path, {**RESOLVED, wc.UTM_REPARSED: "2026-10-12T09:00:00+00:00"})
-        try:
-            _write_marker("2026-10-12T09:00:00+00:00")
-            before = _sync_metadata(store)
-            with patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
-                _settle(store)
-            assert _sync_metadata(store) == before, "a spent note was written again"
-            assert not wc.UTM_MARKER.exists()
-        finally:
-            asyncio.run(store.close())
-
-    def test_a_marker_that_outlives_the_way_back_it_fed_starts_no_other(
-        self, tmp_path, monkeypatch, caplog,
-    ):
-        """Review of PR-6: the removal fails, the way back the merge fed
-        finishes — its full tick re-parsed every verdict and wrote `duckdb` —
-        and the next plain restart under `duckdb` found the marker again. It
-        used to rewrite the record as `postgres` unresolved, with a `since`
-        it made up, and take a second way back: a full DuckDB rebuild and an
-        emptied `silver_order_utm` on every restart for as long as the unlink
-        failed. A record that says `duckdb` since after the note has spent it.
-        Mutation: drop `_marker_spent`."""
-        store = _record_under_postgres(tmp_path)
-        try:
-            _write_marker("2026-10-12T09:00:00+00:00")
-            real_unlink = type(wc.UTM_MARKER).unlink
-
-            def refuse(self, *a, **k):
-                if self == wc.UTM_MARKER:
-                    raise PermissionError("read-only")
-                return real_unlink(self, *a, **k)
-
-            with patch.object(type(wc.UTM_MARKER), "unlink", refuse):
-                # The way back after a week under off: the note merged, the
-                # full rebuild marked, DuckDB's verdicts emptied.
-                assert wc.configure_mode() == wc.DUCKDB
-                _settle(store)
-                assert wc.held() and _utm_rows(store) == 0
-                assert asyncio.run(wc.note_refresh(
-                    store, silver_mode="full", validation_passed=True, utm_parsed=True))
-                done = _writer(store)
-                assert done["writer"] == "duckdb" and wc.UTM_MARKER.exists()
-                _one_utm_row(store)
-                assert asyncio.run(store.consume_warehouse_dirty()) == (True, None)
-                # A plain restart, still under duckdb.
-                _restart()
-                assert wc.configure_mode() == wc.DUCKDB
-                with caplog.at_level("WARNING", logger="core.warehouse_cutover"):
-                    _settle(store)
-            assert not wc.held(), "a second way back from a spent marker"
-            assert _writer(store) == done
-            assert _utm_rows(store) == 1
-            assert _metadata(store, "warehouse_dirty") is None
-            assert "already spent" in caplog.text
-            # The removal is tried again, and once it takes, the marker is gone.
-            _restart()
-            wc.configure_mode()
-            _settle(store)
-            assert not wc.UTM_MARKER.exists() and _writer(store) == done
-        finally:
-            asyncio.run(store.close())
-
-    def test_a_record_that_says_duckdb_from_before_the_note_still_merges_it(
-        self, tmp_path,
-    ):
-        """The cautious reading stands where the record cannot have seen the
-        note: `duckdb` since before it — a file older than the week put back.
-        The way back owes the rebuild and the re-parse."""
-        store = _record_under_postgres(
-            tmp_path, {"writer": "duckdb", "since": "2026-10-01T06:00:00+00:00"})
-        try:
-            _one_utm_row(store)
-            _write_marker("2026-10-12T09:00:00+00:00")
-            _settle(store)
-            record = _writer(store)
-            assert record["writer"] == "postgres" and record["resolved"] is False
-            assert record[wc.UTM_REPARSED] == "2026-10-12T09:00:00+00:00"
-            assert wc.held() and _utm_rows(store) == 0
-            assert not wc.UTM_MARKER.exists()
-        finally:
-            asyncio.run(store.close())
-
-
-class TestOnWithoutAMarkerIsUnchanged:
-    """`on` after no period under off: a stat of a file that is not there,
-    and nothing else new."""
-
-    def test_a_start_under_postgres_writes_what_it_always_did(self, tmp_path, postgres):
-        store = _record_under_postgres(tmp_path)
-        try:
-            before = _sync_metadata(store)
-            with patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
-                _settle(store)
-            assert _sync_metadata(store) == before, "a settled record was rewritten"
-            assert not wc.UTM_MARKER.exists()
-        finally:
-            asyncio.run(store.close())
-
-    def test_the_default_records_nothing_and_leaves_no_marker(self, tmp_path):
-        store = _store(tmp_path)
-        try:
-            _settle(store)
-            assert _writer(store) is None and not wc.UTM_MARKER.exists()
-            assert _sync_metadata(store) == []
-        finally:
-            asyncio.run(store.close())
-
-    def test_a_note_under_on_goes_into_the_record_as_before(self, tmp_path, postgres):
-        store = _record_under_postgres(tmp_path)
-        try:
-            asyncio.run(wc.note_utm_reparsed_in_postgres(store))
-            assert wc.UTM_REPARSED in _writer(store)
-            assert not wc.UTM_MARKER.exists()
-        finally:
-            asyncio.run(store.close())
 
 
 # ─── In the week's state ─────────────────────────────────────────────────────

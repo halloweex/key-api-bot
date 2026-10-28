@@ -22,6 +22,14 @@ to survive, and what has to stay true around it, is what these tests pin:
 
 Everything goes through the repository methods — the path both the POST and
 the DELETE (reset to auto) take — because the routing lives there.
+
+Since step 14's S14-00 the chain writes Postgres whatever its flag says, so
+the tests that needed the flag to route a write to DuckDB went with that
+path: the controls proving the hourly replace would otherwise wipe a goal,
+the typo refusing the write, the copy-back's round trip and the pre-flip
+handover. Where DuckDB must hold a value — the comparison of the two
+branches, the frozen copy a read must not show — it is written there on
+purpose (`tests.conftest.chains_on_duckdb`).
 """
 from __future__ import annotations
 
@@ -33,7 +41,8 @@ import pytest
 import pytest_asyncio
 
 from core import chain_latch, pg_goals_write
-from core.chain_transfer import CopyBackRefused, copy_back, handover_check
+from core.chain_transfer import CopyBackRefused, copy_back
+from tests.conftest import chains_on_duckdb
 
 DSN = os.getenv("KS_PG_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
@@ -203,10 +212,11 @@ class TestUnderTheFlag:
         monthly amount is therefore chosen off the suggestion."""
         store, pool, env = stores
 
-        await store.set_goal("monthly", 1_234_500.0, growth_factor=1.2)   # DuckDB
-        await store.reset_goal_to_auto("daily")
+        # The DuckDB branch, kept for this comparison until it goes (S14-11).
+        with chains_on_duckdb(pg_goals_write):
+            await store.set_goal("monthly", 1_234_500.0, growth_factor=1.2)
+            await store.reset_goal_to_auto("daily")
         duck = await _duck_goals(store)
-        env.setenv("KS_WRITE_GOALS", "postgres")
         await store.set_goal("monthly", 1_234_500.0, growth_factor=1.2)   # Postgres
         await store.reset_goal_to_auto("daily")
         pg = await _pg_goals(pool)
@@ -230,16 +240,6 @@ class TestUnderTheFlag:
         row = (await _pg_goals(pool))["daily"]
         assert row[2] is False and float(row[1]) == out["amount"]
         assert await _duck_goals(store) == {}
-
-    @pytest.mark.asyncio
-    async def test_an_unknown_value_refuses_the_write_in_both_stores(self, stores):
-        store, pool, env = stores
-        env.setenv("KS_WRITE_GOALS", "postgrse")
-
-        with pytest.raises(RuntimeError, match="KS_WRITE_GOALS"):
-            await store.set_goal("monthly", 1_000_000.0)
-        assert await _pg_goals(pool) == {} and await _duck_goals(store) == {}
-        assert not chain_latch.latched(CHAIN)
 
 
 class TestInputPostgresWouldRefuseNeverTakesTheLatch:
@@ -347,12 +347,11 @@ class TestTheReadsFollowTheChain:
     TYPED = 2_500_000.0
 
     async def _flip_after_a_shipped_goal(self, store, env):
-        from core.pg_operational import replicate_operational
-
-        await store.set_goal("monthly", self.PRE_FLIP)          # DuckDB
-        shipped = await replicate_operational(store)
-        assert shipped["replaced"][GOALS] == 1, shipped
-        env.setenv("KS_WRITE_GOALS", "postgres")
+        # Both stores hold the pre-flip goal, as the hourly copy left them
+        # before the flip; since S14-00 the DuckDB one is written on purpose.
+        with chains_on_duckdb(pg_goals_write):
+            await store.set_goal("monthly", self.PRE_FLIP)      # DuckDB
+        await store.set_goal("monthly", self.PRE_FLIP)          # Postgres
         await store.set_goal("monthly", self.TYPED)             # Postgres
         assert float((await _duck_goals(store))["monthly"][1]) == self.PRE_FLIP
 
@@ -378,21 +377,6 @@ class TestTheReadsFollowTheChain:
         report = await store.get_marketing_report(2026, 8)
 
         assert report["general_sales"]["monthly_goal"] == self.TYPED
-
-    @pytest.mark.asyncio
-    async def test_the_flag_still_decides_while_the_chain_writes_duckdb(self, stores):
-        """The control: without the chain, a goal read goes where the page's
-        flag says. Otherwise the two tests above could pass on a router that
-        sent every goal read to Postgres."""
-        from core import pg_goals_read
-
-        store, pool, env = stores
-        await store.set_goal("monthly", self.PRE_FLIP)          # DuckDB only
-        env.setenv("KS_READ_GOALS", "duckdb")
-        with patch.object(pg_goals_read, "fetch",
-                          new=AsyncMock(side_effect=AssertionError("asked PG"))):
-            assert (await store.get_goals())["monthly"]["amount"] == self.PRE_FLIP
-        assert await _pg_goals(pool) == {}
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("read_flag", ["postgres", "duckdb"])
@@ -466,25 +450,6 @@ class TestTheHourlyReplaceCannotRollItBack:
         goals = await store.get_goals()
         assert goals["monthly"]["amount"] == 2_000_000.0
 
-    @pytest.mark.asyncio
-    async def test_control_released_and_unflagged_the_same_replace_wipes_it(self, stores):
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        env.setenv("KS_WRITE_GOALS", "postgres")
-        await store.set_goal("monthly", 2_000_000.0)
-        env.delenv("KS_WRITE_GOALS")
-        chain_latch.release(CHAIN)
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
-
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        assert GOALS not in result.get("stood_down", [])
-        assert result["replaced"][GOALS] == 0
-        assert await _pg_goals(pool) == {}, "the replace out of an empty DuckDB did not run"
-
 
 class TestTheFlagGoesBackWithoutTheCopyBack:
     """OD-19 (a): once a goal has been written to Postgres, `KS_WRITE_GOALS`
@@ -528,43 +493,6 @@ class TestTheCopyBack:
     """DN-08's machinery, derived for this chain rather than written for it."""
 
     @pytest.mark.asyncio
-    async def test_the_goals_arrive_compare_at_zero_and_the_copy_resumes(self, stores):
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        env.setenv("KS_WRITE_GOALS", "postgres")
-        await store.set_goal("monthly", 1_750_000.0)
-        await store.set_goal("daily", 55_000.0)
-        typed = await _pg_goals(pool)
-
-        result = await copy_back(store, pg_goals_write, dry_run=False)
-
-        assert result["findings"] == [], result["findings"]
-        assert result["released"] is True
-        assert result["rows"] == {GOALS: 2}
-        assert result["sequences"] == {} and result["sync_keys"] == {}
-        assert await _duck_goals(store) == typed
-
-        # Both copies of the latch, and only on a clean comparison.
-        assert not chain_latch.latched(CHAIN)
-        assert await chain_latch.read_owners(pool) == {}
-
-        # The flag decides again, so the hourly copy resumes — and writes
-        # exactly what came back, which is the whole claim.
-        env.setenv("KS_WRITE_GOALS", "duckdb")
-        shipped = await replicate_operational(store)
-        assert "error" not in shipped, shipped
-        assert shipped["replaced"][GOALS] == 2
-        assert GOALS not in shipped.get("stood_down", [])
-        assert await _pg_goals(pool) == typed
-
-        # And the next goal is DuckDB's to write again.
-        await store.set_goal("weekly", 320_000.0)
-        assert set(await _duck_goals(store)) == {"daily", "monthly", "weekly"}
-        assert "weekly" not in await _pg_goals(pool)
-        assert not chain_latch.latched(CHAIN)
-
-    @pytest.mark.asyncio
     async def test_a_dry_run_writes_nothing_and_releases_nothing(self, stores):
         store, pool, env = stores
         env.setenv("KS_WRITE_GOALS", "postgres")
@@ -585,34 +513,3 @@ class TestTheCopyBack:
             await copy_back(store, pg_goals_write, dry_run=False)
 
 
-class TestTheHandoverBeforeAFlip:
-    """`--handover` is the gate: a goal typed in DuckDB after the last hourly
-    shipment would be stranded by the flip, because the replace stands down
-    the moment the chain routes to Postgres and this table has no backfill."""
-
-    @pytest.mark.asyncio
-    async def test_a_goal_only_duckdb_holds_fails_it(self, stores):
-        store, _pool, _env = stores
-        await store.set_goal("monthly", 1_100_000.0)     # DuckDB, flag off
-
-        issues = await handover_check(store, pg_goals_write)
-
-        assert [(i.check_name, i.severity.value, i.table_name, i.count)
-                for i in issues] == [
-            ("handover_rows_missing", "CRITICAL", GOALS, 1)]
-        # No sample: `IntegrityIssue.sample_ids` carries ints and this table is
-        # keyed on `period_type`, so the finding names the table and the count
-        # and the operator reads the three rows. Pinned so that a change to
-        # `_sample` that starts rendering text keys is noticed here.
-        assert issues[0].sample_ids == ()
-
-    @pytest.mark.asyncio
-    async def test_once_shipped_it_passes(self, stores):
-        from core.pg_operational import replicate_operational
-
-        store, _pool, _env = stores
-        await store.set_goal("monthly", 1_100_000.0)
-        shipped = await replicate_operational(store)
-        assert shipped["replaced"][GOALS] == 1
-
-        assert await handover_check(store, pg_goals_write) == []

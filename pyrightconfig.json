@@ -1,0 +1,31 @@
+// basedpyright — the `typecheck` job in .github/workflows/ci.yml.
+//
+// It fails on any finding that is not in .basedpyright/baseline.json, and on a
+// baseline that still lists findings the code no longer has. The baseline is
+// what let this start strict without fixing every old finding first; it may
+// only shrink. See "Type checking" in .claude/CLAUDE.md.
+//
+// Run it the way CI does — Python 3.14 with requirements-dev.lock installed —
+// because the findings depend on the installed packages' own types, and a
+// laptop's fastapi or pandas gives a different list:
+//
+//   docker run --rm -v "$PWD:/w" -w /w python:3.14-slim sh -c \
+//     'pip install -q -r requirements-dev.lock && basedpyright'
+{
+  // Everything the pyflakes guard walks except the suite: tests patch and
+  // fake on purpose, and that reads to a checker as a wrong type per line.
+  "include": ["core", "web", "bot", "scripts", "deploy", "migrations"],
+
+  // What the images and CI run (Dockerfile.web: python:3.14-slim, Linux).
+  "pythonVersion": "3.14",
+  "pythonPlatform": "Linux",
+
+  // `standard`, not `basic`: it costs 14 findings more (13 possibly-unbound
+  // names and one override). basedpyright's own default, `recommended`, found
+  // some 25 000 here on 2026-10-21 — twenty times as many.
+  "typeCheckingMode": "standard",
+
+  // A warning is a finding too: in this mode it is an import that resolves to
+  // stubs alone, which is an ImportError the day nothing guards it.
+  "failOnWarnings": true
+}

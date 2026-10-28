@@ -117,13 +117,17 @@ async def both_engines(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_one_awkward_batch_reads_back_equal_from_both_stores(both_engines):
-    from core.pg_buyers import mirror_buyers
+    from core import pg_buyers_write
+    from tests.conftest import chains_on_duckdb
 
     store, pool = both_engines
     # Neither writer may refuse the batch: that refusal was the whole bug.
+    # DuckDB's through its own branch, which since step 14's S14-00 nothing
+    # routes to but this; Postgres' through chain 4's writer, which took the
+    # mirror's place for these tables.
+    with chains_on_duckdb(pg_buyers_write):
+        assert await store.upsert_buyers(BATCH) == len(BATCH)
     assert await store.upsert_buyers(BATCH) == len(BATCH)
-    result = await mirror_buyers(BATCH)
-    assert result.get("error") is None, result
 
     cols = ", ".join(BUYER_COLUMNS)
     async with store.connection() as conn:

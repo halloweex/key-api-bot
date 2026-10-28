@@ -38,7 +38,6 @@ from core.pg_sms import (
     source_tables,
     read_full_replace,
     replicate_sms,
-    sms_store_is_postgres,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -440,23 +439,6 @@ class TestGuards:
 
         assert "offer_stocks" not in {dk for _pg, dk, _c, _o in SMS}
         assert "bronze.offer_stocks" in {pg for pg, _dk, _c, _o in OPERATIONAL}
-
-    def test_a_typo_in_the_store_variable_raises(self, monkeypatch):
-        """`KS_BOT_STORE`'s rule. Six thousand names and phone numbers are read
-        from whichever store this names; a typo must stop the container rather
-        than quietly select the copy that is about to go stale."""
-        monkeypatch.setenv("KS_SMS_STORE", "postgress")
-        with pytest.raises(ValueError, match="KS_SMS_STORE"):
-            sms_store_is_postgres()
-
-    @pytest.mark.parametrize("value,expected", (("duckdb", False), ("postgres", True)))
-    def test_the_default_is_duckdb(self, monkeypatch, value, expected):
-        monkeypatch.setenv("KS_SMS_STORE", value)
-        assert sms_store_is_postgres() is expected
-
-    def test_unset_means_duckdb(self, monkeypatch):
-        monkeypatch.delenv("KS_SMS_STORE", raising=False)
-        assert sms_store_is_postgres() is False
 
 
 class TestStatements:

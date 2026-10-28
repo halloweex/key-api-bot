@@ -128,23 +128,6 @@ class TestItDoesNotTakeTheDuckDbLock:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_a_postgres_fault_falls_back_to_duckdb(self, tmp_path, monkeypatch):
-        """A dark dropdown is not one tab going down, it is the filter bar on
-        all nine — so a fault must cost the engine, not the page."""
-        monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "l-fallback.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_lookups_read.fetch",
-                       new=AsyncMock(side_effect=RuntimeError("pg is down"))):
-                assert await store.get_categories() == []
-                assert await store.get_brands() == []
-                assert await store.get_promocodes() == []
-        finally:
-            await store.close()
-
 
 class TestEveryMethodReturns:
     """A nested acquisition of the store lock does not raise; it hangs. So the

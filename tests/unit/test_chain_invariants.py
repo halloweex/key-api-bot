@@ -1,6 +1,11 @@
 """The chain invariants without a database: who is watched, and where each
 threshold sits.
 
+Since step 14's S14-00 every registered chain writes Postgres, a constant, so
+every chain is watched on every run — production's state. A test about one
+chain's reader narrows the watch to that chain (`_watch_only`), so what it
+reads, and what it does not, is still that chain's alone.
+
 DN-07. The real-Postgres half is `tests/integration/test_chain_invariants.py`
 and it proves the SQL; this proves the things that have nothing to do with
 SQL — that a system with no moved chain asks Postgres nothing at all, that
@@ -34,6 +39,18 @@ def _latch(chain: str, stamp: datetime = UTC_NOW) -> None:
     chain_latch.load()
 
 
+def _watch_only(monkeypatch, *names: str) -> None:
+    """Narrow `watched_chains()` to `names`, each with its latch's stamp as
+    the registry publishes it — read when asked, so a test that latches after
+    this still brings its stamp."""
+    def watched():
+        return {name: (str(chain_latch.latched_at(name))
+                       if chain_latch.latched_at(name) else None)
+                for name in names}
+
+    monkeypatch.setattr(inv, "watched_chains", watched)
+
+
 class _RefusingPool:
     """A pool that fails the test if anything touches it."""
 
@@ -41,35 +58,14 @@ class _RefusingPool:
         raise AssertionError("read_facts opened a connection with no chain watched")
 
 
-class TestNothingIsReadWhileNothingHasMoved:
-    """No chain flagged and none latched. The check must cost a dictionary
-    lookup, not a connection — a check that opened one to find out it had
-    nothing to look at would put a Postgres failure on the path of a system
-    not using Postgres for these tables.
+class TestAForgottenPreReadIsBlindness:
+    """Since S14-00 every chain is watched on every run, so a caller that
+    brought no pre-read is always blind over tables nothing else checks. (The
+    early return for a system with nothing watched stays in the code until
+    S14-11, and no production state reaches it.)"""
 
-    This is NOT production's state, and the first draft of this class said it
-    was: production has `KS_WRITE_EXPENSES=postgres`, which is the class
-    below."""
-
-    @pytest.mark.asyncio
-    async def test_no_chain_watched_means_no_query_and_no_pool(self, monkeypatch):
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS"):
-            monkeypatch.delenv(env, raising=False)
-        get_pool = AsyncMock(side_effect=AssertionError("asked for a pool"))
-        with patch("core.pg.get_pool", new=get_pool):
-            facts = await inv.read_facts(pool=_RefusingPool())
-        get_pool.assert_not_awaited()
-        assert facts.watched == () and facts.whole is None
-        assert inv.check_chain_invariants(facts) == []
-
-    @pytest.mark.asyncio
-    async def test_a_forgotten_pre_read_is_not_silence_either(self, monkeypatch):
-        """`None` is the caller having brought nothing. With nothing watched it
-        is the same as clean; with a chain watched it is blindness over the one
-        set of tables nothing else checks."""
+    def test_it_is_unwatched(self, monkeypatch):
         monkeypatch.delenv("KS_WRITE_EXPENSES", raising=False)
-        assert inv.check_chain_invariants(None) == []
-        monkeypatch.setenv("KS_WRITE_EXPENSES", "postgres")
         issues = inv.check_chain_invariants(None)
         assert [i.check_name for i in issues] == [inv.UNWATCHED]
         assert "without a pre-read" in issues[0].description
@@ -191,22 +187,19 @@ class _Pool:
         return _Ctx(self.conn, self.raises)
 
 
-class TestProductionToday:
-    """`KS_WRITE_EXPENSES=postgres` live since 2026-09-17, no expense typed,
-    so chain 8 is flagged and not latched; `KS_WRITE_INVENTORY` is off.
-
-    The claim this pins is the corrected one: every integrity run takes a
-    connection and reads chain 8's allocator and NULL count — and nothing of
-    chain 1's — and a Postgres it cannot reach is one WARN."""
+class TestChain8Expenses:
+    """Chain 8: no expense typed in production, so it writes Postgres and is
+    not latched. With its watch alone, a run takes a connection and reads
+    chain 8's allocator and NULL count — and nothing of chain 1's — and a
+    Postgres it cannot reach is one WARN."""
 
     @pytest.fixture
     def production(self, monkeypatch):
-        monkeypatch.setenv("KS_WRITE_EXPENSES", "postgres")
-        monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
+        _watch_only(monkeypatch, "pg_expenses_write")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
 
     @pytest.mark.asyncio
-    async def test_chain_8_is_read_and_chain_1_is_not(self, production):
+    async def test_chain_8_reads_its_own_and_nothing_of_chain_1s(self, production):
         conn = _Recorder()
         with patch("core.pg.require_revision", new=AsyncMock()) as revision:
             facts = await inv.read_facts(pool=_Pool(conn))
@@ -299,9 +292,8 @@ class TestAChainWithNoInvariants:
         fake.env_writes_postgres = lambda: True
         monkeypatch.setattr(write_chains, "WRITE_CHAINS",
                             write_chains.WRITE_CHAINS + (fake,))
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS",
-                    "KS_WRITE_ORDERS", "KS_WRITE_MANAGERS"):
-            monkeypatch.delenv(env, raising=False)
+        assert "pg_unread_write" in inv.watched_chains()
+        _watch_only(monkeypatch, "pg_unread_write")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
         return "pg_unread_write"
 
@@ -348,14 +340,8 @@ class TestChain7aGoals:
 
     @pytest.fixture
     def flagged(self, monkeypatch):
-        monkeypatch.setenv("KS_WRITE_GOALS", "postgres")
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY",
-                    "KS_WRITE_EXPENSE_TYPES"):
-            monkeypatch.delenv(env, raising=False)
+        _watch_only(monkeypatch, "pg_goals_write")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-
-    def test_the_flag_alone_makes_it_watched(self, flagged):
-        assert inv.watched_chains() == {"pg_goals_write": None}
 
     @pytest.mark.asyncio
     async def test_it_reads_the_goals_table_and_nothing_else(self, flagged):
@@ -454,27 +440,10 @@ class TestChain4Buyers:
     (DuckDB's column is NOT NULL, so the copy-back could not carry it back),
     and every buyer's phone and email in its contact list."""
 
-    READERS = ("KS_SMS_STORE", "KS_READ_SEARCH_INDEX", "KS_READ_DASHBOARD")
-
     @pytest.fixture
     def flagged(self, monkeypatch):
-        monkeypatch.setenv("KS_WRITE_BUYERS", "postgres")
-        for env in self.READERS:
-            monkeypatch.setenv(env, "postgres")
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS",
-                    "KS_WRITE_EXPENSE_TYPES"):
-            monkeypatch.delenv(env, raising=False)
+        _watch_only(monkeypatch, "pg_buyers_write")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-
-    def test_the_flag_with_its_readers_makes_it_watched(self, flagged):
-        assert inv.watched_chains() == {"pg_buyers_write": None}
-
-    def test_a_flag_whose_readers_lag_is_not_watched(self, flagged, monkeypatch):
-        """Held on DuckDB by its precondition, the chain writes nothing here —
-        the registry's one answer, which this module reads and does not
-        re-derive."""
-        monkeypatch.setenv("KS_READ_DASHBOARD", "duckdb")
-        assert inv.watched_chains() == {}
 
     @pytest.mark.asyncio
     async def test_before_the_first_write_it_reads_no_orphans(self, flagged):
@@ -581,19 +550,8 @@ class TestChain3Orders:
 
     @pytest.fixture
     def flagged(self, monkeypatch):
-        from core import pg_orders_write
-
-        monkeypatch.setenv("KS_WRITE_ORDERS", "postgres")
-        # Its own preconditions are pinned in tests/unit/test_pg_orders_write.py;
-        # here the chain is simply one that moved.
-        monkeypatch.setattr(pg_orders_write, "unmet_precondition", lambda: None)
-        for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS",
-                    "KS_WRITE_EXPENSE_TYPES", "KS_WRITE_BUYERS"):
-            monkeypatch.delenv(env, raising=False)
+        _watch_only(monkeypatch, "pg_orders_write")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
-
-    def test_the_flag_makes_it_watched(self, flagged):
-        assert inv.watched_chains() == {"pg_orders_write": None}
 
     @pytest.mark.asyncio
     async def test_before_the_first_write_it_reads_no_orphans(self, flagged):
@@ -657,26 +615,28 @@ class TestChain3Orders:
 
 
 class TestWhoIsWatched:
-    def test_a_flagged_chain_is_watched(self, monkeypatch):
-        monkeypatch.setenv("KS_WRITE_EXPENSES", "postgres")
-        monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
-        assert inv.watched_chains() == {"pg_expenses_write": None}
+    @pytest.mark.parametrize("flag", [None, "duckdb", "postgres", "postgre"])
+    def test_every_chain_is_watched_whatever_its_flag(self, monkeypatch, flag):
+        """Since S14-00 every chain writes Postgres, so every chain's tables
+        are watched — a flag set back, or one nobody can read, unwatches
+        none. Mutation: read the flag here again."""
+        from core.write_chains import WRITE_CHAINS, chain_name
 
-    def test_a_latched_chain_is_watched_though_its_flag_says_duckdb(self, monkeypatch):
-        """The whole point of the latch: the writes are in Postgres whatever
-        the variable says, so the invariants over those rows must follow."""
+        for chain in WRITE_CHAINS:
+            if flag is None:
+                monkeypatch.delenv(chain.WRITE_ENV, raising=False)
+            else:
+                monkeypatch.setenv(chain.WRITE_ENV, flag)
+        assert inv.watched_chains() == {chain_name(c): None for c in WRITE_CHAINS}
+
+    def test_a_latched_chain_brings_its_stamp(self, monkeypatch):
+        """The latch no longer routes, but its stamp is still when the
+        since-the-handover invariants measure from."""
         monkeypatch.setenv("KS_WRITE_INVENTORY", "duckdb")
-        monkeypatch.delenv("KS_WRITE_EXPENSES", raising=False)
         _latch("pg_inventory_write")
-        assert inv.watched_chains() == {
-            "pg_inventory_write": UTC_NOW.isoformat()}
-
-    def test_a_flag_nobody_can_read_is_watched_rather_than_dropped(self, monkeypatch):
-        """DN-01 stands that chain down from the shipper and the comparison, so
-        it is exactly the chain whose tables nothing else is looking at."""
-        monkeypatch.setenv("KS_WRITE_EXPENSES", "postgre")
-        monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
-        assert list(inv.watched_chains()) == ["pg_expenses_write"]
+        watched = inv.watched_chains()
+        assert watched["pg_inventory_write"] == UTC_NOW.isoformat()
+        assert watched["pg_expenses_write"] is None
 
     def test_the_state_comes_from_write_chains_and_not_from_the_environment(self):
         """Reused, not re-derived — a second reading of `KS_WRITE_*` here is
@@ -720,8 +680,7 @@ class TestBlindnessIsReported:
         savepoint the failure aborts the transaction and every read after it
         comes back unwatched; with the failure re-raised instead of recorded,
         the whole run goes blind. Both leave the CRITICAL unfiled."""
-        monkeypatch.setenv("KS_WRITE_EXPENSES", "postgres")
-        monkeypatch.setenv("KS_WRITE_INVENTORY", "postgres")
+        _watch_only(monkeypatch, "pg_expenses_write", "pg_inventory_write")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
         conn = _Recorder(fail_on="manual_expenses", max_ids={"stock_movements": 1})
         with patch("core.pg.require_revision", new=AsyncMock()):
@@ -902,10 +861,9 @@ class TestTheWatermarks:
     async def test_an_unreadable_watermark_table_is_reported_not_silent(
         self, monkeypatch,
     ):
-        """Chain 1 flagged, so its two keys are read. An empty tuple from a
+        """Chain 1 watched, so its two keys are read. An empty tuple from a
         failed read looked exactly like a chain with no sync keys at all."""
-        monkeypatch.setenv("KS_WRITE_INVENTORY", "postgres")
-        monkeypatch.delenv("KS_WRITE_EXPENSES", raising=False)
+        _watch_only(monkeypatch, "pg_inventory_write")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://nobody@127.0.0.1:1/none")
         conn = _Recorder(fail_on="meta.chain_watermarks")
         with patch("core.pg.require_revision", new=AsyncMock()):
@@ -986,8 +944,14 @@ class TestTheJobWhenTheDuckDBHalfFails:
         from core.duckdb_store import DuckDBStore
         from core.scheduler import BackgroundScheduler
 
+        from core import pg_dq_journal_write
+        from tests.conftest import route_chains_to_duckdb
+
         for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_DQ_PG_WAREHOUSE"):
             monkeypatch.delenv(env, raising=False)
+        # The job's flow is the subject; the journal it persists to is read
+        # back from this DuckDB, chain 9's store until S14-10.
+        route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
         store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
         await store.connect()
         scheduler = BackgroundScheduler()

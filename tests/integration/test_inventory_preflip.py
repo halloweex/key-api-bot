@@ -6,9 +6,10 @@ the day it is switched on are shown here:
 * the 01:00 snapshot job takes no heavy lock, so two Postgres rebuilds can
   interleave — the second one's INSERT then collides with the first one's rows
   and the whole rebuild raises;
-* a missing TEMPORARY grant makes every status rebuild raise, and nothing said
-  so before the flip. The preflight now does, and here it reads the privilege,
-  the replication and the quality journal as the real schema holds them.
+* a missing TEMPORARY grant made every status rebuild raise, and nothing said
+  so before the flip. The preflight did, read here against the real schema,
+  until step 14's S14-00: the chain writes Postgres whatever its flag says,
+  so there is no flip left to ask about, and the preflight answers null.
 
 The third, a stock-step failure escaping the sync tick, needs no database and
 is in `tests/unit/test_inventory_preflip.py`.
@@ -17,8 +18,7 @@ The writers are called directly here, not through the repository: the property
 under test belongs to the Postgres transaction, and the route to it is pinned
 by `tests/integration/test_chain_latch.py`.
 
-Skipped without `KS_PG_DSN`, like every store test; the TEMPORARY case also
-needs `KS_PG_READONLY_DSN`, which CI provisions.
+Skipped without `KS_PG_DSN`, like every store test.
 """
 from __future__ import annotations
 
@@ -36,12 +36,7 @@ from core import pg_inventory_write
 asyncpg = pytest.importorskip("asyncpg")
 
 DSN = os.getenv("KS_PG_DSN")
-READONLY_DSN = os.getenv("KS_PG_READONLY_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
-# The sentence `.github/workflows/ci.yml` greps skip reasons for, so in CI the
-# read-only case runs or the job fails.
-PROVISIONED = ("needs a live PostgreSQL provisioned as .github/workflows/ci.yml "
-               "provisions it (KS_PG_READONLY_DSN)")
 
 # A day nothing else in the suite photographs, so the rows are ours to delete.
 DAY = date(2031, 1, 7)
@@ -194,157 +189,3 @@ class TestTheChainLock:
         assert sorted([first, second]) == [False, True]
         # The second read saw the first one's commit: it came after, not beside.
         assert reached == [None, 1]
-
-
-# ─── preflight() against the real schema ─────────────────────────────────────
-
-# Above anything the rest of the suite writes, so "the latest mirror_landing
-# run" is ours. The one before it is yesterday's, and exists so that "latest"
-# is a choice the preflight has to make rather than the only row there is.
-PREVIOUS_RUN_ID = 9_000_000_001
-RUN_ID = PREVIOUS_RUN_ID + 1
-JOURNAL = "app.data_quality_runs"
-
-
-async def _clean_journal(conn):
-    await conn.execute(
-        "DELETE FROM app.data_quality_issues WHERE run_id >= $1", PREVIOUS_RUN_ID)
-    await conn.execute(
-        "DELETE FROM app.data_quality_runs WHERE run_id >= $1", PREVIOUS_RUN_ID)
-    await conn.execute(
-        "DELETE FROM meta.mirror_state WHERE table_name = ANY($1::text[])",
-        [*pg_inventory_write.CHAIN_TABLES, JOURNAL])
-
-
-@pytest_asyncio.fixture
-async def ready(monkeypatch):
-    """Everything the flip needs, as production would hold it on flip day:
-    the six tables and the journal copied ten minutes ago, and this morning's
-    comparison clean for chain 1 — with one finding elsewhere, which must not
-    count. Yesterday's run failed in chain 1's own comparison and filed a lost
-    movement; it is superseded, and must not count either."""
-    monkeypatch.delenv("KS_WRITE_INVENTORY", raising=False)
-    p = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
-    async with p.acquire() as conn:
-        await _clean_journal(conn)
-        await conn.executemany(
-            "INSERT INTO meta.mirror_state (table_name, last_attempted_at, last_ok_at, "
-            "failures_since_ok, last_rows) VALUES ($1, now() - interval '10 minutes', "
-            "now() - interval '10 minutes', 0, 1)",
-            [(t,) for t in (*pg_inventory_write.CHAIN_TABLES, JOURNAL)])
-        await conn.execute(
-            "INSERT INTO app.data_quality_runs (run_id, started_at, ended_at, as_of, "
-            "window_start, window_end, layer, status, error_message) VALUES ($1, "
-            "now() - interval '26 hours', now() - interval '26 hours', now(), "
-            "current_date - 1, current_date - 1, 'mirror_landing', 'FAILED', $2)",
-            PREVIOUS_RUN_ID,
-            "1 check(s) raised — reconcile_operational: ConnectionResetError: reset")
-        await conn.execute(
-            "INSERT INTO app.data_quality_issues (run_id, check_name, table_name, severity, "
-            "count) VALUES ($1, 'mirror_rows_lost', 'app.stock_movements', 'CRITICAL', 1)",
-            PREVIOUS_RUN_ID)
-        await conn.execute(
-            "INSERT INTO app.data_quality_runs (run_id, started_at, ended_at, as_of, "
-            "window_start, window_end, layer, status) VALUES ($1, now() - interval '2 hours', "
-            "now() - interval '2 hours', now(), current_date, current_date, "
-            "'mirror_landing', 'WARN')", RUN_ID)
-        await conn.execute(
-            "INSERT INTO app.data_quality_issues (run_id, check_name, table_name, severity, "
-            "count) VALUES ($1, 'mirror_buckets_disagree', 'app.order_versions', 'CRITICAL', 1)",
-            RUN_ID)
-    yield p
-    async with p.acquire() as conn:
-        await _clean_journal(conn)
-    await p.close()
-
-
-async def _finding(pool, table, check="mirror_rows_lost"):
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO app.data_quality_issues (run_id, check_name, table_name, severity, "
-            "count) VALUES ($1, $2, $3, 'CRITICAL', 1)", RUN_ID, check, table)
-
-
-class TestPreflightOnTheRealSchema:
-    @pytest.mark.asyncio
-    async def test_a_ready_chain_is_ok_and_a_finding_elsewhere_does_not_count(self, ready):
-        result = await pg_inventory_write.preflight(ready)
-        assert result["reasons"] == [] and result["ok"] is True
-        assert result["temporary"] is True                      # initdb grants it to ks_app
-        assert result["operational_run"]["run_id"] == RUN_ID
-        assert result["operational_run"]["findings"] == 0
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("table, check", [
-        ("app.stock_movements", "mirror_buckets_disagree"),
-        ("bronze.offer_stocks", "mirror_rows_lost"),
-        ("pg_inventory_write", "chain_latch_disagrees"),     # filed against the chain
-    ])
-    async def test_an_open_finding_on_chain_1_is_not_ok(self, ready, table, check):
-        await _finding(ready, table, check)
-        result = await pg_inventory_write.preflight(ready)
-        assert result["ok"] is False
-        (reason,) = result["reasons"]
-        assert f"{check} on {table}" in reason
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("error_message, ok", [
-        pytest.param("1 check(s) raised — reconcile_sms: ConnectionResetError: "
-                     "reset by peer", True, id="another-store"),
-        pytest.param("2 check(s) raised — reconcile_operational: OSError: refused "
-                     "| reconcile_sms: ConnectionResetError: reset by peer", False,
-                     id="chain-1s-own-comparison"),
-    ])
-    async def test_a_failed_run_blocks_only_when_chain_1_went_uncompared(
-            self, ready, error_message, ok):
-        """This morning's run failed. When the check that raised is another
-        store's, chain 1's six tables were compared and came back clean, and
-        the run failing is a note; when it is `reconcile_operational`, they
-        were not compared at all."""
-        async with ready.acquire() as conn:
-            await conn.execute(
-                "UPDATE app.data_quality_runs SET status = 'FAILED', error_message = $2 "
-                "WHERE run_id = $1", RUN_ID, error_message)
-        result = await pg_inventory_write.preflight(ready)
-        assert result["ok"] is ok
-        assert result["operational_run"]["run_id"] == RUN_ID
-        assert result["operational_run"]["failed"] is True
-        if ok:
-            (note,) = result["notes"]
-            assert "failed in reconcile_sms" in note
-        else:
-            (reason,) = result["reasons"]
-            assert f"run ({RUN_ID}) failed in reconcile_operational" in reason
-
-    @pytest.mark.asyncio
-    async def test_a_copy_older_than_50_minutes_is_not_ok(self, ready):
-        """On the database's clock alone. `last_ok_at` is Postgres' `now()`,
-        and the preflight's default `now` is this process's: a container
-        clock a few hundred milliseconds ahead of the laptop's floors 51 min
-        to 50 (Docker Desktop, seen once). The limit is minutes; the test
-        was measuring the skew."""
-        async with ready.acquire() as conn:
-            await conn.execute(
-                "UPDATE meta.mirror_state SET last_ok_at = now() - interval '51 minutes' "
-                "WHERE table_name = 'app.inventory_sku_history'")
-            db_now = await conn.fetchval("SELECT now()")
-        (reason,) = (await pg_inventory_write.preflight(ready, now=db_now))["reasons"]
-        assert reason == "app.inventory_sku_history was last copied 51 min ago (limit 50)"
-
-    @pytest.mark.asyncio
-    @pytest.mark.skipif(not READONLY_DSN, reason=PROVISIONED)
-    async def test_without_the_temporary_privilege_it_is_not_ok(self, ready):
-        """A role that cannot create a temporary table — which is the state a
-        cluster older than initdb's GRANT is in. `ks_app` holds the grant and
-        cannot give it up (the database's owner granted it), so the role that
-        lacks it by design stands in: `ks_readonly`, which reads everything the
-        preflight reads and nothing else."""
-        readonly = await asyncpg.create_pool(READONLY_DSN, min_size=1, max_size=1)
-        try:
-            result = await pg_inventory_write.preflight(readonly)
-        finally:
-            await readonly.close()
-        assert result["ok"] is False and result["temporary"] is False
-        (reason,) = result["reasons"]
-        assert "ks_readonly cannot create a temporary table in ks" in reason
-        assert "GRANT TEMPORARY ON DATABASE ks TO ks_readonly" in reason

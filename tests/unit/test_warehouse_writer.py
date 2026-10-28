@@ -15,13 +15,21 @@ checks, the precondition evaluator — is DN-28's and is pinned in
 
 The same promises against a real Postgres and the real boot are in
 `tests/integration/test_warehouse_writer.py`.
+
+Since step 14's S14-00 the mode is a constant, `postgres`: no precondition
+is evaluated, no revision read at the start, and a process where DuckDB
+derives — the default, a typo, the way back and its hold — no longer exists.
+The tests of the verdict and of that DuckDB side went with it
+(`tests/unit/test_step14_prod_parity.py` holds the constants to what the
+code before S14-00 answered under production's environment). What stays is
+what Postgres-alone does: nothing of DuckDB's derivation runs, and the doors
+parse Postgres alone.
 """
 from __future__ import annotations
 
 import ast
 import asyncio
 import json
-import logging
 import pathlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -133,104 +141,7 @@ def _restart():
 
 
 class TestTheMode:
-    def test_every_precondition_met_is_postgres(self, postgres):
-        assert wc.writes_postgres() and not wc.duckdb_derives()
-        assert wc.preconditions_unmet() == ()
-        postgres.assert_awaited_once_with(MET_ENV["KS_PG_DSN"])
 
-    def test_one_unmet_runs_as_duckdb_and_names_it(self, met, monkeypatch, caplog):
-        """OD-09 (b): never a raise — web is the only syncer."""
-        monkeypatch.setenv(wc.ENV, "postgres")
-        monkeypatch.setenv("KS_UTM_PARSE", "duckdb")
-        with caplog.at_level(logging.CRITICAL, logger="core.warehouse_cutover"):
-            assert wc.configure_mode() == wc.DUCKDB
-        assert wc.duckdb_derives() and wc.stood_down_duckdb_checks() == frozenset()
-        assert [u.key for u in wc.preconditions_unmet()] == ["utm_parse_postgres"]
-        assert "utm_parse_postgres" in caplog.text
-
-    def test_a_revision_behind_the_build_runs_as_duckdb(self, met, monkeypatch):
-        monkeypatch.setenv(wc.ENV, "postgres")
-        met.return_value = "0032_manual_goal_ids"
-        assert wc.configure_mode() == wc.DUCKDB
-        assert [u.key for u in wc.preconditions_unmet()] == ["pg_revision"]
-
-    def test_a_revision_read_that_hangs_is_bounded_and_unmet(self, met, monkeypatch):
-        async def hang(_dsn):
-            await asyncio.sleep(10)
-
-        monkeypatch.setattr(wc, "_revision_on_its_own_connection", hang)
-        monkeypatch.setattr(wc, "REVISION_READ_TIMEOUT_S", 0.05)
-        monkeypatch.setenv(wc.ENV, "postgres")
-        assert wc.configure_mode() == wc.DUCKDB
-        (unmet,) = wc.preconditions_unmet()
-        assert unmet.key == "pg_revision" and "did not answer" in unmet.detail
-
-    def test_a_worker_that_outlives_the_bound_does_not_hold_the_caller(
-        self, met, monkeypatch,
-    ):
-        """What a name that does not resolve does: `asyncio.run` waits for the
-        resolver thread past the read's own bound. Modelled as a gather that
-        blocks its thread; the caller returns at twice the bound, unmet."""
-        import threading
-        import time
-
-        release = threading.Event()
-        asked = []
-
-        async def stuck(env, *, own_connection=False):
-            asked.append(own_connection)
-            release.wait(5)
-            return {"revision": REQUIRED_REVISION, "revision_error": None,
-                    "unread": False}
-
-        monkeypatch.setattr(wc, "_read_postgres", stuck)
-        monkeypatch.setattr(wc, "REVISION_READ_TIMEOUT_S", 0.05)
-        monkeypatch.setenv(wc.ENV, "postgres")
-        started = time.monotonic()
-        try:
-            assert wc.configure_mode() == wc.DUCKDB
-        finally:
-            release.set()
-        assert time.monotonic() - started < 2
-        # A worker left stuck is a read that failed, and is asked again.
-        assert asked == [True] * wc.REVISION_READ_ATTEMPTS
-        # Only what was not read: the registry and the Alert Gate are this
-        # process's own, read on the caller's thread, and nobody failed them.
-        assert [u.key for u in wc.preconditions_unmet()] == ["pg_revision"]
-
-    def test_a_read_that_failed_is_asked_again_before_the_verdict(self, met, monkeypatch):
-        """After a flip a start that runs as duckdb IS the way back — a full
-        DuckDB rebuild, a new `since`, the warehouse group closed again. A
-        Postgres a few seconds slower than web to come up must not cost that."""
-        met.side_effect = [OSError("refused"), asyncio.TimeoutError(), REQUIRED_REVISION]
-        monkeypatch.setenv(wc.ENV, "postgres")
-        assert wc.configure_mode() == wc.POSTGRES
-        assert met.await_count == 3 and wc.preconditions_unmet() == ()
-
-    def test_a_read_still_failing_after_the_last_ask_is_unmet(self, met, monkeypatch):
-        met.side_effect = OSError("refused")
-        monkeypatch.setenv(wc.ENV, "postgres")
-        assert wc.configure_mode() == wc.DUCKDB
-        assert met.await_count == wc.REVISION_READ_ATTEMPTS == 3
-        assert [u.key for u in wc.preconditions_unmet()] == ["pg_revision"]
-
-    def test_an_answer_is_not_asked_again(self, met, monkeypatch):
-        """A revision this build does not require is an answer; asking again
-        would only hold the start."""
-        met.return_value = "0032_manual_goal_ids"
-        monkeypatch.setenv(wc.ENV, "postgres")
-        assert wc.configure_mode() == wc.DUCKDB
-        met.assert_awaited_once()
-
-    def test_it_waits_between_asks_and_is_bounded(self, met, monkeypatch):
-        slept = []
-        monkeypatch.setattr("time.sleep", slept.append)
-        monkeypatch.setattr(wc, "REVISION_RETRY_DELAYS_S", (2.0, 5.0))
-        met.side_effect = OSError("refused")
-        monkeypatch.setenv(wc.ENV, "postgres")
-        wc.configure_mode()
-        assert slept == [2.0, 5.0]
-        assert wc.start_bound_s() == 3 * 2 * wc.REVISION_READ_TIMEOUT_S + 7.0 <= 40
 
     def test_it_can_be_configured_from_inside_a_running_loop(self, met, monkeypatch):
         """Where web calls it: `startup_event` is a coroutine. The revision is
@@ -242,20 +153,6 @@ class TestTheMode:
 
         assert asyncio.run(startup()) == wc.POSTGRES
 
-    def test_the_verdict_is_kept_for_the_process(self, postgres):
-        """web's startup and the scheduler both configure. A second read that
-        found Postgres slow must not hand a boot that ran under postgres a
-        scheduler that runs under duckdb."""
-        postgres.side_effect = OSError("gone")
-        assert wc.configure_mode() == wc.POSTGRES
-        assert wc.configure_mode() == wc.POSTGRES
-        postgres.assert_awaited_once()
-
-    def test_the_default_asks_nothing(self, met, monkeypatch):
-        monkeypatch.delenv(wc.ENV, raising=False)
-        assert wc.configure_mode() == wc.DUCKDB
-        met.assert_not_awaited()
-        assert wc.preconditions_unmet() == ()
 
     def test_configure_modes_reaches_it(self, met, monkeypatch):
         from core.runtime_modes import configure_modes
@@ -319,41 +216,11 @@ class TestTheExpensesHistory:
         monkeypatch.setattr(wc, "_expenses_backfilled_on_its_own_connection", read)
         return read
 
-    def test_no_backfill_runs_as_duckdb_and_names_it(self, met, monkeypatch):
-        read = self._history(monkeypatch, False)
-        assert wc.configure_mode() == wc.DUCKDB
-        assert [u.key for u in wc.preconditions_unmet()] == ["expenses_backfilled"]
-        read.assert_awaited_once_with(MET_ENV["KS_PG_DSN"])
-        met.assert_awaited_once()     # an answer is not asked again
 
     def test_a_backfill_is_postgres(self, monkeypatch):
         self._history(monkeypatch, True)
         assert wc.configure_mode() == wc.POSTGRES and wc.preconditions_unmet() == ()
 
-    def test_a_history_read_that_failed_is_asked_again_with_the_revision(
-        self, met, monkeypatch,
-    ):
-        """After a flip a start that runs as duckdb is the way back; a read
-        that failed is not an answer, whichever of the two it was."""
-        read = self._history(monkeypatch, OSError("refused"), True)
-        assert wc.configure_mode() == wc.POSTGRES, wc.preconditions_unmet()
-        assert read.await_count == 2 and met.await_count == 2
-
-    def test_still_failing_after_the_last_ask_is_unmet_by_its_class(self, monkeypatch):
-        self._history(monkeypatch, *(OSError("password for user ks_app")
-                                     for _ in range(wc.REVISION_READ_ATTEMPTS)))
-        assert wc.configure_mode() == wc.DUCKDB
-        (unmet,) = wc.preconditions_unmet()
-        assert unmet.key == "expenses_backfilled" and "OSError" in unmet.detail
-        assert "ks_app" not in unmet.detail
-
-    def test_a_revision_that_was_not_read_leaves_it_unasked(self, met, monkeypatch):
-        """A start that could not reach Postgres names `pg_revision` alone."""
-        read = self._history(monkeypatch, True)
-        met.side_effect = OSError("refused")
-        assert wc.configure_mode() == wc.DUCKDB
-        assert [u.key for u in wc.preconditions_unmet()] == ["pg_revision"]
-        read.assert_not_awaited()
 
     def test_the_two_reads_share_one_bound(self, met, monkeypatch):
         """The second read gets what the first left, never under a fifth of
@@ -391,32 +258,6 @@ class TestTheRevisionReadItself:
     def _asked_for(self, met_env, monkeypatch):
         monkeypatch.setenv(wc.ENV, "postgres")
 
-    def test_a_connection_lost_during_the_read_is_asked_again(self, monkeypatch):
-        conns = _connections(monkeypatch, _lost_mid_read(), REQUIRED_REVISION)
-        assert wc.configure_mode() == wc.POSTGRES, wc.preconditions_unmet()
-        assert [c.asked for c in conns] == [True, True]
-        assert all(c.closed for c in conns)
-
-    def test_lost_on_every_ask_is_unmet_by_its_class(self, monkeypatch):
-        _connections(monkeypatch, *(_lost_mid_read() for _ in range(wc.REVISION_READ_ATTEMPTS)))
-        assert wc.configure_mode() == wc.DUCKDB
-        (unmet,) = wc.preconditions_unmet()
-        assert unmet.key == "pg_revision"
-        assert "ConnectionDoesNotExistError" in unmet.detail
-        assert "no Alembic revision" not in unmet.detail
-
-    @pytest.mark.parametrize("answer", ["undefined_table", None], ids=["no_table", "empty"])
-    def test_a_database_never_migrated_is_an_answer_asked_once(self, monkeypatch, answer):
-        import asyncpg
-
-        if answer == "undefined_table":
-            answer = asyncpg.UndefinedTableError(
-                'relation "meta.alembic_version" does not exist')
-        conns = _connections(monkeypatch, answer, REQUIRED_REVISION)
-        assert wc.configure_mode() == wc.DUCKDB
-        assert [c.asked for c in conns] == [True, False]
-        (unmet,) = wc.preconditions_unmet()
-        assert "no Alembic revision" in unmet.detail
 
     def test_the_status_page_reads_it_strictly_too(self, monkeypatch):
         """The pool path: a lost connection is named by its class, not
@@ -437,18 +278,7 @@ class TestTheRevisionReadItself:
 
 
 class TestWhatStandsDown:
-    def test_under_postgres_the_checks_and_the_comparisons(self, postgres):
-        assert wc.warehouse_checks_stand_down()
-        assert wc.stood_down_duckdb_checks() == wc.STOOD_DOWN_WHEN_POSTGRES
 
-    def test_held_on_the_way_back_while_duckdb_derives(self, monkeypatch):
-        monkeypatch.setattr(wc, "_held", True)
-        assert wc.duckdb_derives() and wc.warehouse_checks_stand_down()
-        assert wc.stood_down_duckdb_checks() == wc.STOOD_DOWN_WHEN_POSTGRES
-
-    def test_the_default_stands_nothing_down(self):
-        assert wc.duckdb_derives() and not wc.warehouse_checks_stand_down()
-        assert wc.stood_down_duckdb_checks() == frozenset()
 
     def test_a_held_scan_skips_the_checks_over_frozen_tables(self, tmp_path, monkeypatch):
         from core import data_quality as dq
@@ -482,14 +312,6 @@ class TestTheDirtyMark:
         finally:
             asyncio.run(store.close())
 
-    def test_the_default_marks_as_before(self, tmp_path):
-        store = _store(tmp_path)
-        try:
-            asyncio.run(store.mark_warehouse_dirty([1, 2]))
-            assert json.loads(_metadata(store, "warehouse_dirty")[0]) == [1, 2]
-        finally:
-            asyncio.run(store.close())
-
 
 def _jobs():
     from core.scheduler import BackgroundScheduler
@@ -514,8 +336,6 @@ class TestTheScheduler:
         jobs = _jobs()
         assert "warehouse_refresh" not in jobs and "incremental_sync" in jobs
 
-    def test_the_default_registers_it(self):
-        assert "warehouse_refresh" in _jobs()
 
     def test_a_tick_that_finds_its_way_in_returns_before_the_peek(self, postgres):
         from core.scheduler import BackgroundScheduler
@@ -570,12 +390,6 @@ class TestTheMirrorLandingComparisons:
             mocks[name].assert_not_awaited()
         mocks["pg_gold_internal_check"].assert_awaited_once_with()
 
-    def test_the_default_compares(self):
-        mocks = self._run()
-        for name in self.COMPARED:
-            mocks[name].assert_awaited_once()
-        mocks["pg_gold_internal_check"].assert_not_awaited()
-
 
 # ─── The admin levers ────────────────────────────────────────────────────────
 
@@ -623,12 +437,6 @@ class TestTheAdminLevers:
         store.mark_warehouse_dirty.assert_not_awaited()
         assert result["status"] == "skipped"
         assert scheduler.derived == [("manual", True)]
-
-    def test_refresh_under_the_default_is_unchanged(self, monkeypatch):
-        monkeypatch.delenv("KS_PG_DERIVE", raising=False)
-        result, store, scheduler = self._call("refresh_warehouse")
-        store.refresh_warehouse_layers.assert_awaited_once_with(trigger="manual")
-        assert result == {"status": "success"} and scheduler.derived == []
 
 
 # ─── The sync paths ──────────────────────────────────────────────────────────
@@ -718,22 +526,17 @@ class TestTheSyncPaths:
         _sync(lambda: getattr(service, path)(**({"days_back": 1} if path != "sync_today" else {})))
         assert store.refreshed == []
 
-    @pytest.mark.parametrize("path, trigger", [
-        ("full_sync", "full_sync"), ("sync_today", "sync_today"),
-        ("refresh_order_statuses", "status_refresh")])
-    def test_the_default_refreshes_as_before(self, path, trigger):
-        store = _FullSyncStore()
-        service = _service(store, orders=[{"id": 1, "status_id": 1}])
-        _sync(lambda: getattr(service, path)(**({"days_back": 1} if path != "sync_today" else {})))
-        assert store.refreshed == [trigger]
 
-    def test_the_boot_settles_before_it_reads_or_syncs(self, monkeypatch):
+    def test_the_boot_settles_before_it_reads_or_syncs(self, monkeypatch, duckdb_off):
+        """Web's boot, which since S14-00 is always `KS_DUCKDB=off`: the
+        writer is settled before the orders held are asked and the sync
+        runs."""
         from core import sync_service as sync_module
 
         calls = []
         store = MagicMock()
-        store.get_stats = AsyncMock(side_effect=lambda: calls.append("stats") or {
-            "orders": 1, "products": 1})
+        store.get_stats = AsyncMock(side_effect=AssertionError("DuckDB's counts"))
+        store.orders_held = AsyncMock(side_effect=lambda: calls.append("held") or 1)
         store.refresh_sku_inventory_status = AsyncMock(return_value=0)
         service = MagicMock()
         service.incremental_sync = AsyncMock(side_effect=lambda: calls.append("sync"))
@@ -743,13 +546,14 @@ class TestTheSyncPaths:
         monkeypatch.setattr(wc, "settle_writer",
                             AsyncMock(side_effect=lambda s: calls.append("settle")))
         asyncio.run(sync_module.init_and_sync())
-        assert calls == ["settle", "stats", "sync"]
+        assert calls == ["settle", "held", "sync"]
 
-    def test_a_settle_that_raises_costs_the_boot_nothing(self, monkeypatch, caplog):
+    def test_a_settle_that_raises_costs_the_boot_nothing(self, monkeypatch, caplog, duckdb_off):
         from core import sync_service as sync_module
 
         store = MagicMock()
-        store.get_stats = AsyncMock(return_value={"orders": 1, "products": 1})
+        store.get_stats = AsyncMock(side_effect=AssertionError("DuckDB's counts"))
+        store.orders_held = AsyncMock(return_value=1)
         store.refresh_sku_inventory_status = AsyncMock(return_value=0)
         service = MagicMock()
         service.incremental_sync = AsyncMock()
@@ -960,33 +764,7 @@ def _writer(store):
 
 
 class TestTheRecordedWriter:
-    def test_the_default_records_nothing_and_marks_nothing(self, tmp_path):
-        store = _store(tmp_path)
-        try:
-            asyncio.run(wc.settle_writer(store))
-            assert _writer(store) is None
-            assert _metadata(store, "warehouse_dirty") is None
-            assert not wc.held()
-        finally:
-            asyncio.run(store.close())
 
-    @pytest.mark.parametrize("changed", [None, [1]], ids=["full", "incremental"])
-    def test_a_default_tick_records_nothing_either(self, tmp_path, changed):
-        """The default path writes no `warehouse_writer`, and every validated
-        full tick passes through `note_refresh`: its `if not _held` is what
-        keeps it so. Until now only the Postgres-backed integration test saw
-        that guard go."""
-        store = _store(tmp_path)
-        try:
-            asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
-            asyncio.run(wc.settle_writer(store))
-            result = asyncio.run(store.refresh_warehouse_layers(
-                trigger="dirty_flag", changed_order_ids=changed))
-            assert result["status"] == "success" and result["validation_passed"]
-            assert _writer(store) is None
-            assert not wc.held() and wc.status()["writer"] is None
-        finally:
-            asyncio.run(store.close())
 
     def test_the_first_start_under_postgres_records_it_and_closes_the_group(
         self, tmp_path, postgres,
@@ -1039,84 +817,6 @@ class TestTheRecordedWriter:
         finally:
             asyncio.run(store.close())
 
-    def test_the_writer_is_recorded_before_the_group_is_resolved(
-        self, tmp_path, postgres, monkeypatch,
-    ):
-        """A resolve that raises must still leave the way back armed: the
-        record is what a later start under duckdb reads to owe a full
-        rebuild, and DuckDB has stopped deriving from this start on."""
-        store = _store(tmp_path)
-        try:
-            with patch("core.alerting.resolve_group",
-                       AsyncMock(side_effect=RuntimeError("ledger gone"))):
-                asyncio.run(wc.settle_writer(store))
-            assert _writer(store) == {**_writer(store), "writer": "postgres",
-                                      "resolved": False}
-            _restart()
-            monkeypatch.delenv(wc.ENV)
-            wc.configure_mode()
-            asyncio.run(wc.settle_writer(store))
-            assert wc.held() and _metadata(store, "warehouse_dirty")[0] == "full"
-        finally:
-            asyncio.run(store.close())
-
-    def test_the_way_back_marks_a_full_rebuild_and_holds_the_checks(
-        self, tmp_path, postgres, monkeypatch,
-    ):
-        store = _store(tmp_path)
-        try:
-            with patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
-                asyncio.run(wc.settle_writer(store))
-            assert _writer(store)["writer"] == "postgres"
-
-            # The id list pending at the switch, abandoned as it stands.
-            async def seed():
-                async with store.connection() as conn:
-                    conn.execute("INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)"
-                                 " VALUES ('warehouse_dirty', '[7, 8]', CURRENT_TIMESTAMP)")
-            asyncio.run(seed())
-            _restart()
-            monkeypatch.delenv(wc.ENV)
-            assert wc.configure_mode() == wc.DUCKDB
-            asyncio.run(wc.settle_writer(store))
-            assert _metadata(store, "warehouse_dirty")[0] == "full"
-            assert wc.held() and wc.warehouse_checks_stand_down()
-            assert wc.reclassify_needed(), "silver_order_utm is empty"
-            assert _writer(store)["writer"] == "postgres", "released before a tick validated"
-        finally:
-            asyncio.run(store.close())
-
-    def test_a_non_empty_utm_table_needs_no_reclassify(self, tmp_path, monkeypatch):
-        store = _store(tmp_path)
-        try:
-            async def seed():
-                async with store.connection() as conn:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                        "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                        [wc.WRITER_KEY, json.dumps({"writer": "postgres", "resolved": True})])
-                    conn.execute("INSERT INTO silver_order_utm (order_id) VALUES (1)")
-            asyncio.run(seed())
-            asyncio.run(wc.settle_writer(store))
-            assert wc.held() and not wc.reclassify_needed()
-        finally:
-            asyncio.run(store.close())
-
-    def test_a_value_this_build_did_not_write_is_read_as_postgres(self, tmp_path, caplog):
-        """The cautious reading costs one full rebuild; the other skips one."""
-        store = _store(tmp_path)
-        try:
-            async def seed():
-                async with store.connection() as conn:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                        "VALUES (?, 'postgres', CURRENT_TIMESTAMP)", [wc.WRITER_KEY])
-            asyncio.run(seed())
-            asyncio.run(wc.settle_writer(store))
-            assert wc.held() and _metadata(store, "warehouse_dirty")[0] == "full"
-            assert "did not write" in caplog.text
-        finally:
-            asyncio.run(store.close())
 
     def test_settling_twice_in_one_process_does_it_once(self):
         store = MagicMock()
@@ -1155,107 +855,6 @@ def _held_store(tmp_path):
     return store
 
 
-class TestTheHoldEndsOnAValidatedFullTick:
-    @pytest.fixture
-    def held_store(self, tmp_path):
-        store = _held_store(tmp_path)
-        yield store
-        asyncio.run(store.close())
-
-    def test_a_full_tick_that_validates_releases_it(self, held_store):
-        result = asyncio.run(held_store.refresh_warehouse_layers(trigger="dirty_flag"))
-        assert result["validation_passed"] is True
-        assert not wc.held() and not wc.warehouse_checks_stand_down()
-        assert _writer(held_store)["writer"] == "duckdb"
-        assert not wc.reclassify_needed(), "the tick's own parse refilled the verdicts"
-
-    def test_an_incremental_tick_does_not(self, held_store):
-        """Only a full rebuild answers for the whole of a Silver as old as the
-        switch; an incremental one rewrites the orders it was handed."""
-        asyncio.run(held_store.refresh_warehouse_layers(trigger="manual"))
-        assert not wc.held()   # Silver is populated now
-
-        async def seed():
-            async with held_store.connection() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                    [wc.WRITER_KEY, json.dumps({"writer": "postgres", "resolved": True})])
-        asyncio.run(seed())
-        _restart()
-        asyncio.run(wc.settle_writer(held_store))
-        assert wc.held()
-        result = asyncio.run(held_store.refresh_warehouse_layers(
-            trigger="dirty_flag", changed_order_ids=[1]))
-        assert result["validation_passed"] is True
-        assert wc.held() and _writer(held_store)["writer"] == "postgres"
-
-    def test_a_tick_that_fails_validation_does_not(self, held_store):
-        released = asyncio.run(wc.note_refresh(
-            held_store, silver_mode="full", validation_passed=False, utm_parsed=True))
-        assert released is False and wc.held()
-
-    def test_a_full_tick_whose_utm_parse_raised_does_not(self, held_store, monkeypatch):
-        """R1-3: the tick swallows the parse's error and still reports a
-        validated success — and `attribution_coverage` and
-        `reconcile_order_utm` read the table that parse left behind."""
-        monkeypatch.setattr(type(held_store), "_parse_utm_into_silver",
-                            AsyncMock(side_effect=RuntimeError("parse broke")))
-        result = asyncio.run(held_store.refresh_warehouse_layers(trigger="dirty_flag"))
-        assert result["status"] == "success" and result["validation_passed"] is True
-        assert wc.held() and wc.warehouse_checks_stand_down()
-        assert _writer(held_store)["writer"] == "postgres"
-
-    def test_then_the_next_tick_whose_parse_finishes_does(self, held_store, monkeypatch):
-        """Without a second full rebuild: the parse reads landing, not Silver,
-        and a full rebuild every two minutes while the parser keeps failing
-        is the cost that would buy nothing."""
-        parse = type(held_store)._parse_utm_into_silver
-        monkeypatch.setattr(type(held_store), "_parse_utm_into_silver",
-                            AsyncMock(side_effect=RuntimeError("parse broke")))
-        asyncio.run(held_store.refresh_warehouse_layers(trigger="dirty_flag"))
-        assert wc.held()
-        monkeypatch.setattr(type(held_store), "_parse_utm_into_silver", parse)
-        result = asyncio.run(held_store.refresh_warehouse_layers(
-            trigger="dirty_flag", changed_order_ids=[1]))
-        assert result["validation_passed"] is True
-        assert not wc.held() and _writer(held_store)["writer"] == "duckdb"
-
-    def test_a_parse_before_the_full_tick_is_not_enough(self, held_store):
-        assert not asyncio.run(wc.note_refresh(
-            held_store, silver_mode="incremental", validation_passed=True,
-            utm_parsed=True))
-        assert not asyncio.run(wc.note_refresh(
-            held_store, silver_mode="full", validation_passed=True, utm_parsed=False))
-        assert wc.held()
-        assert asyncio.run(wc.note_refresh(
-            held_store, silver_mode="incremental", validation_passed=True,
-            utm_parsed=True))
-        assert not wc.held()
-
-    def test_the_releasing_tick_must_validate_too(self, held_store):
-        asyncio.run(wc.note_refresh(
-            held_store, silver_mode="full", validation_passed=True, utm_parsed=False))
-        assert not asyncio.run(wc.note_refresh(
-            held_store, silver_mode="incremental", validation_passed=False,
-            utm_parsed=True))
-        assert wc.held()
-
-    def test_a_new_hold_starts_both_halves_again(self, held_store, monkeypatch):
-        """A settle that re-arms the hold owes a full tick of its own — here
-        one asked again in the same process, which is what a settle that
-        raised half-way gets: the id list it marked is the one it owes."""
-        asyncio.run(wc.note_refresh(
-            held_store, silver_mode="full", validation_passed=True, utm_parsed=False))
-        monkeypatch.setattr(wc, "_settled", False)
-        asyncio.run(wc.settle_writer(held_store))
-        assert wc.held()
-        assert not asyncio.run(wc.note_refresh(
-            held_store, silver_mode="incremental", validation_passed=True,
-            utm_parsed=True))
-        assert wc.held()
-
-
 class TestAHoldThatDoesNotEndIsSaid:
     """A way back ends in its first full tick. When the DuckDB UTM parse keeps
     raising — the tick logs it at WARNING and still reports a validated
@@ -1268,61 +867,6 @@ class TestAHoldThatDoesNotEndIsSaid:
 
         return _warehouse_writer_mode()
 
-    def test_a_parse_that_keeps_raising_is_warned_on(self, tmp_path, monkeypatch):
-        from datetime import datetime, timedelta, timezone
-
-        from bot import canary
-
-        store = _held_store(tmp_path)
-        try:
-            monkeypatch.setattr(type(store), "_parse_utm_into_silver",
-                                AsyncMock(side_effect=RuntimeError("parse broke")))
-            for changed in (None, [1], [2]):
-                result = asyncio.run(store.refresh_warehouse_layers(
-                    trigger="dirty_flag", changed_order_ids=changed))
-                assert result["status"] == "success" and result["validation_passed"]
-            assert wc.held()
-            block = self._block()
-            assert isinstance(block["held_for_s"], int) and block["held_for_s"] < 60
-            assert canary.check_warehouse_hold({"warehouse_writer_mode": block}) == []
-
-            monkeypatch.setattr(wc, "_held_since",
-                                datetime.now(timezone.utc) - timedelta(hours=3))
-            ((key, message),) = canary.check_warehouse_hold(
-                {"warehouse_writer_mode": self._block()})
-            assert key == "warehouse_hold_stuck" and "3h" in message
-            assert wc.status()["held_since"]
-        finally:
-            asyncio.run(store.close())
-
-    def test_the_release_clears_the_age(self, tmp_path):
-        store = _held_store(tmp_path)
-        try:
-            assert self._block()["held_for_s"] is not None
-            asyncio.run(store.refresh_warehouse_layers(trigger="dirty_flag"))
-            assert not wc.held()
-            assert self._block()["held_for_s"] is None
-            assert wc.status()["held_since"] is None
-        finally:
-            asyncio.run(store.close())
-
-    def test_a_new_hold_starts_its_own_age(self, tmp_path, monkeypatch):
-        """A hold re-armed in the same process after a release is a new one:
-        the age of the last must not make it read as hours old."""
-        from datetime import datetime, timedelta, timezone
-
-        store = _held_store(tmp_path)
-        try:
-            monkeypatch.setattr(wc, "_held_since",
-                                datetime.now(timezone.utc) - timedelta(hours=3))
-            asyncio.run(store.refresh_warehouse_layers(trigger="dirty_flag"))
-            assert not wc.held()
-            _seed(store, **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True}})
-            monkeypatch.setattr(wc, "_settled", False)
-            asyncio.run(wc.settle_writer(store))
-            assert wc.held() and wc.held_for_s() < 60
-        finally:
-            asyncio.run(store.close())
 
     def test_the_default_publishes_no_age(self):
         block = self._block()
@@ -1474,24 +1018,6 @@ class TestTheRetiredComparisonsSharedNames:
 
         assert set(wc.RETIRED_COMPARISONS) <= set(check_order())
 
-    def test_a_page_the_silver_comparison_was_reporting_holds_the_switch(self):
-        from core.alerting import _gate
-
-        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
-        _mirror_run({"reconcile_silver": [_critical("mirror_row_values")]})
-        assert wc.open_retired_conditions() == {"mirror_row_values": self.GROUP}
-        facts = asyncio.run(wc.gather_facts({}))
-        (unmet,) = [u for u in wc.evaluate_preconditions({}, facts)
-                    if u.key == "retired_conditions_clear"]
-        assert "mirror_row_values" in unmet.detail
-
-    def test_so_does_one_of_the_utm_comparison(self):
-        from core.alerting import _gate
-
-        _gate.note_delivered_conditions(["mirror_missing_rows"], self.GROUP)
-        _mirror_run({"reconcile_order_utm": [
-            _critical("mirror_missing_rows", "silver.order_utm")]})
-        assert wc.open_retired_conditions() == {"mirror_missing_rows": self.GROUP}
 
     def test_a_page_only_a_comparison_that_stays_reports_does_not(self):
         """The same name, from `reconcile_orders`: the switch does not wait on
@@ -1517,26 +1043,6 @@ class TestTheRetiredComparisonsSharedNames:
         assert "mirror_row_values" in _gate.delivered_groups()
         assert wc.open_retired_conditions() == {}
 
-    def test_a_run_that_compares_clean_takes_the_mark_off(self):
-        from core.alerting import _gate
-
-        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
-        _mirror_run({"reconcile_silver": [_critical("mirror_row_values")],
-                     "reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
-        assert wc.open_retired_conditions() == {"mirror_row_values": self.GROUP}
-        # Silver clean; the page stays open for `bronze.orders`, and is theirs.
-        _mirror_run({"reconcile_orders": [_critical("mirror_row_values", "bronze.orders")]})
-        assert wc.open_retired_conditions() == {}
-
-    def test_a_run_where_one_of_them_raised_only_adds(self):
-        """`reconcile_gold` raised, so the run has no verdict on everything
-        they report: a mark is not taken off on the strength of it."""
-        from core.alerting import _gate
-
-        _gate.note_delivered_conditions(["mirror_row_values"], self.GROUP)
-        _mirror_run({"reconcile_silver": [_critical("mirror_row_values")]})
-        _mirror_run({"reconcile_gold": RuntimeError("down")})
-        assert wc.open_retired_conditions() == {"mirror_row_values": self.GROUP}
 
     def test_a_run_that_stood_them_down_marks_nothing(self, postgres):
         from core.alerting import _gate
@@ -1602,36 +1108,7 @@ class TestTheGateMarks:
 
 
 class TestPublishedAndJudged:
-    def test_health_publishes_the_keys_and_never_the_details(self, met, monkeypatch):
-        from web.routes.api.health import _warehouse_writer_mode
 
-        monkeypatch.setenv(wc.ENV, "postgres")
-        monkeypatch.setenv("KS_READ_GOLD", "duckdb")
-        wc.configure_mode()
-        block = _warehouse_writer_mode()
-        assert block["mode"] == "duckdb"
-        assert block["preconditions_unmet"] == ["reader:KS_READ_GOLD"]
-        assert "KS_READ_GOLD is" not in repr(block) and "needs" not in repr(block), (
-            "a detail quotes the environment")
-        assert (block["held"], block["reclassify_needed"]) == (False, False)
-
-    def test_the_public_endpoint_carries_it(self, met, monkeypatch):
-        from fastapi.testclient import TestClient
-
-        from web.main import app
-        from web.ratelimit import limiter
-
-        monkeypatch.setenv(wc.ENV, "postgres")
-        monkeypatch.setenv("KS_UTM_PARSE", "duckdb")
-        wc.configure_mode()
-        limiter.reset()
-        try:
-            body = TestClient(app).get("/api/health").json()
-        finally:
-            limiter.reset()
-        block = body["warehouse_writer_mode"]
-        assert block["preconditions_unmet"] == ["utm_parse_postgres"]
-        assert "held" in block and "reclassify_needed" in block
 
     def test_the_canary_pages_on_it_and_is_quiet_otherwise(self):
         from bot.canary import check_warehouse_preconditions
@@ -1692,89 +1169,6 @@ class TestPublishedAndJudged:
 
         assert spec_for("warehouse_preconditions_unmet").kind is Kind.CONDITION
 
-    def test_the_status_page_says_what_settling_found(self, monkeypatch):
-        monkeypatch.setattr(wc, "_held", True)
-        monkeypatch.setattr(wc, "_writer_record", {"writer": "postgres"})
-        status = wc.status()
-        assert status["held"] is True and status["writer"] == {"writer": "postgres"}
-        assert status["stood_down_duckdb_checks"] == sorted(wc.STOOD_DOWN_WHEN_POSTGRES)
-
-
-class TestATypoAfterAFlipIsTheWayBack:
-    """One letter lost editing `.env` after a flip: web runs as duckdb, and
-    `settle_writer` finds `postgres` recorded — the full DuckDB rebuild, the
-    checks held, what an unmet precondition costs. It used to reach the
-    canary as the typo's WARN alone, whose lever does not say a rollback has
-    happened; it pages as the way back now. Before a flip a typo is still the
-    WARN it was (DN-28)."""
-
-    def _settled_under(self, tmp_path, monkeypatch, value, *, recorded):
-        from web.routes.api.health import _warehouse_writer_mode
-
-        store = _store(tmp_path)
-        try:
-            if recorded:
-                _seed(store, **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True,
-                                                "since": "2026-10-01T00:00:00+00:00"}})
-            if value is None:
-                monkeypatch.delenv(wc.ENV, raising=False)
-            else:
-                monkeypatch.setenv(wc.ENV, value)
-            assert wc.configure_mode() == wc.DUCKDB
-            asyncio.run(wc.settle_writer(store))
-            # The scheduler configures again after the boot's settle.
-            assert wc.configure_mode() == wc.DUCKDB
-            return _warehouse_writer_mode()
-        finally:
-            asyncio.run(store.close())
-
-    def _judged(self, block):
-        from bot import canary
-
-        payload = {"warehouse_writer_mode": block}
-        keys = [k for k, _ in canary.check_warehouse_preconditions(payload)
-                + canary.check_warehouse_writer_mode(payload)]
-        result = canary.CanaryResult(
-            ok=False, severity="critical" if "warehouse_preconditions_unmet" in keys else "warn",
-            failures=[m for _, m in canary.check_warehouse_preconditions(payload)],
-            failure_keys=keys)
-        return keys, result
-
-    def test_after_a_flip_it_pages_as_the_way_back(self, tmp_path, monkeypatch):
-        from bot import canary
-
-        block = self._settled_under(tmp_path, monkeypatch, "postgre", recorded=True)
-        assert wc.held(), "the way back was not taken"
-        assert block["preconditions_unmet"] == ["value_understood"]
-        assert block["error"]
-        keys, result = self._judged(block)
-        assert keys == ["warehouse_preconditions_unmet", "warehouse_mode_invalid"]
-        assert canary._what_to_do(result).startswith("After a flip this IS the way back")
-        assert "KS_WRITE_WAREHOUSE=postgre ran as duckdb" in result.failures[0]
-        (unmet,) = wc.status()["preconditions_unmet"]
-        assert unmet["key"] == "value_understood" and "'postgre'" in unmet["detail"]
-
-    def test_before_a_flip_it_is_the_warn_it_was(self, tmp_path, monkeypatch):
-        block = self._settled_under(tmp_path, monkeypatch, "postgre", recorded=False)
-        assert not wc.held() and block["preconditions_unmet"] == []
-        keys, _ = self._judged(block)
-        assert keys == ["warehouse_mode_invalid"]
-
-    @pytest.mark.parametrize("value", [None, "duckdb", " DuckDB "])
-    def test_the_way_back_an_operator_took_pages_nothing(self, tmp_path, monkeypatch, value):
-        block = self._settled_under(tmp_path, monkeypatch, value, recorded=True)
-        assert wc.held() and block["preconditions_unmet"] == []
-        keys, _ = self._judged(block)
-        assert keys == []
-
-    def test_the_status_page_names_it_live_too(self, met, monkeypatch):
-        monkeypatch.setenv(wc.ENV, "postgress")
-        wc.configure_mode()
-        monkeypatch.setattr("core.pg.current_revision",
-                            AsyncMock(return_value=REQUIRED_REVISION))
-        ready = asyncio.run(wc.readiness())
-        assert [u["key"] for u in ready["unmet"]] == ["value_understood"]
-
 
 class TestTheResolveNote:
     def test_it_is_one_more_line_under_the_list(self):
@@ -1814,38 +1208,6 @@ def _seed(store, **rows):
 
 
 class TestAPageTheWayBackDeliveredIsClosed:
-    def test_the_next_start_under_postgres_closes_it(self, tmp_path, postgres, monkeypatch):
-        """A way back that never validated leaves the record saying `postgres`,
-        resolved — and its DuckDB ticks can page the group. Back under
-        postgres nothing else would ever resolve that page."""
-        from core.alerting import _gate, delivered_conditions
-
-        store = _store(tmp_path)
-        try:
-            with patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
-                asyncio.run(wc.settle_writer(store))
-            assert _writer(store)["resolved"] is True
-
-            _restart()
-            monkeypatch.delenv(wc.ENV)
-            wc.configure_mode()
-            asyncio.run(wc.settle_writer(store))
-            assert wc.held()
-            # The owed full tick crashed once, and paged.
-            _gate.note_delivered_conditions(["warehouse:refresh_errored"], "warehouse")
-
-            _restart()
-            monkeypatch.setenv(wc.ENV, "postgres")
-            assert wc.configure_mode() == wc.POSTGRES
-            with patch("core.alert_archive.write_resolved_now", AsyncMock(return_value=True)), \
-                 patch("bot.main.send_admin_message", AsyncMock(return_value=1)) as send:
-                asyncio.run(wc.settle_writer(store))
-            assert "warehouse:refresh_errored" not in delivered_conditions()
-            (text,) = send.await_args.args[:1]
-            assert "warehouse:refresh_errored" in text and wc.RESOLVE_NOTE in text
-            assert _writer(store)["resolved"] is True
-        finally:
-            asyncio.run(store.close())
 
     def test_with_nothing_open_a_resolved_record_asks_nothing(self, tmp_path, postgres):
         store = _store(tmp_path)
@@ -1881,145 +1243,8 @@ class TestASettleThatCouldNotFinishIsAskedAgain:
         finally:
             asyncio.run(store.close())
 
-    def test_under_postgres_the_derivation_tick_records_what_the_start_could_not(
-        self, tmp_path, postgres, job, monkeypatch,
-    ):
-        """The only job that ticks under postgres. Without it a process whose
-        boot and start could not write the record runs unrecorded, and a way
-        back after it owes DuckDB nothing: an incremental tick over the id list
-        abandoned at the switch."""
-        from tests.unit.test_pg_own_derivation import _derive
-
-        store = _store(tmp_path)
-        try:
-            _seed(store, warehouse_dirty="[1, 2]")
-            real = wc._write_writer
-            monkeypatch.setattr(wc, "_write_writer", AsyncMock(side_effect=OSError("disk")))
-            for _ in ("boot", "scheduler start"):
-                with pytest.raises(OSError):
-                    asyncio.run(wc.settle_writer(store))
-            monkeypatch.setattr(wc, "_write_writer", real)
-
-            with patch("core.duckdb_store.get_store", AsyncMock(return_value=store)):
-                _derive(job)
-            assert _writer(store)["writer"] == "postgres"
-
-            _restart()
-            monkeypatch.delenv(wc.ENV)
-            wc.configure_mode()
-            asyncio.run(wc.settle_writer(store))
-            assert wc.held() and _metadata(store, "warehouse_dirty")[0] == "full"
-        finally:
-            asyncio.run(store.close())
-
-    def test_on_the_way_back_the_first_refresh_tick_settles_before_its_peek(
-        self, tmp_path, monkeypatch,
-    ):
-        """Boot and start could not read the record: the first tick must still
-        find the rebuild owed in full and the checks held before it peeks, or
-        it runs incremental over a Silver as old as the switch."""
-        from core.scheduler import BackgroundScheduler
-
-        class _Peeked(Exception):
-            pass
-
-        store = _store(tmp_path)
-        try:
-            _seed(store, warehouse_dirty="[7, 8]",
-                  **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True}})
-            real = wc.read_writer
-            monkeypatch.setattr(wc, "read_writer", AsyncMock(side_effect=OSError("disk")))
-            for _ in ("boot", "scheduler start"):
-                with pytest.raises(OSError):
-                    asyncio.run(wc.settle_writer(store))
-            monkeypatch.setattr(wc, "read_writer", real)
-            assert not wc.held()
-
-            seen = {}
-
-            async def peek():
-                async with store.connection() as conn:
-                    seen["dirty"] = conn.execute(
-                        "SELECT value FROM sync_metadata WHERE key = 'warehouse_dirty'"
-                    ).fetchone()[0]
-                seen["held"] = wc.held()
-                raise _Peeked
-
-            monkeypatch.setattr(store, "peek_warehouse_dirty", peek)
-            with patch("core.duckdb_store.get_store", AsyncMock(return_value=store)):
-                with pytest.raises(_Peeked):
-                    asyncio.run(BackgroundScheduler()._run_warehouse_refresh())
-            assert seen == {"dirty": "full", "held": True}
-        finally:
-            asyncio.run(store.close())
-
-    def test_a_release_that_raises_asks_for_another_full_tick(self, tmp_path, monkeypatch):
-        """The hold outlives a record it could not write only if the next tick
-        is full again; the job clears the flag it peeked, so the re-mark is
-        what keeps it."""
-        from core.scheduler import BackgroundScheduler
-
-        store = _store(tmp_path)
-        try:
-            asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
-            _seed(store, **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True}})
-            asyncio.run(wc.settle_writer(store))
-            assert wc.held()
-            monkeypatch.setattr(wc, "_write_writer", AsyncMock(side_effect=OSError("disk")))
-            with patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
-                 patch.object(BackgroundScheduler, "_rebuild_postgres_layers", AsyncMock()):
-                result = asyncio.run(BackgroundScheduler()._run_warehouse_refresh())
-            assert result["status"] == "success" and result["validation_passed"] is True
-            assert wc.held()
-            assert _metadata(store, "warehouse_dirty")[0] == "full"
-        finally:
-            asyncio.run(store.close())
-
 
 # ─── The status page ─────────────────────────────────────────────────────────
-
-
-class TestTheStatusPage:
-    def _get(self, tmp_path):
-        from web.routes.api import admin
-
-        tmp_path.mkdir(parents=True, exist_ok=True)
-        store = _store(tmp_path)
-        try:
-            with patch("core.alerting.resolve_group", AsyncMock(return_value=0)):
-                asyncio.run(store.refresh_warehouse_layers(trigger="dirty_flag"))
-            with patch.object(admin, "get_store", AsyncMock(return_value=store)), \
-                 patch.object(admin, "_pg_derivation_status",
-                              AsyncMock(return_value={"mode": "own", "owed": False})), \
-                 patch.object(wc, "readiness", AsyncMock(return_value={"mode": wc.mode()})):
-                return asyncio.run(_unwrap(admin.get_warehouse_status)(MagicMock()))
-        finally:
-            asyncio.run(store.close())
-
-    def test_under_postgres_the_frozen_duckdb_refresh_is_not_the_answer(
-        self, tmp_path, monkeypatch,
-    ):
-        """DuckDB's last tick is as old as the switch; an operator reading the
-        page after the flip must not take it for the warehouse's state."""
-        body_before = self._get(tmp_path / "a")
-        assert body_before["last_trigger"] == "dirty_flag"
-
-        monkeypatch.setattr(wc, "_mode", wc.POSTGRES)
-        body = self._get(tmp_path / "b")
-        assert "last_refresh" not in body and "validation_passed" not in body
-        assert body["writer"] == "postgres" and body["postgres"]["mode"] == "own"
-        assert body["duckdb_frozen"]["last_trigger"] == "dirty_flag"
-        assert body["cutover"] == {"mode": "postgres"}
-
-    def test_the_default_answers_as_before(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("KS_PG_DERIVE", raising=False)
-        from core import pg_derivation
-
-        pg_derivation.configure_mode()
-        body = self._get(tmp_path)
-        assert body["last_trigger"] == "dirty_flag" and body["validation_passed"] is True
-        assert "postgres" not in body and "duckdb_frozen" not in body
-        assert "writer" not in body
 
 
 # ─── The UTM doors under postgres ────────────────────────────────────────────
@@ -2106,19 +1331,6 @@ class TestTheUtmDoorsUnderPostgres:
         finally:
             asyncio.run(store.close())
 
-    def test_the_default_reclassify_is_unchanged(self, tmp_path):
-        store = _store(tmp_path)
-        try:
-            asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
-            router = AsyncMock(return_value={"shipped": 2})
-            result = self._door("reclassify_traffic", store, router)
-            assert result == {"success": True, "utm_records": 2}
-            router.assert_awaited_once_with(store, full=True)
-            assert _utm_rows(store) == 2
-            assert _writer(store) is None, "the default writes no record"
-        finally:
-            asyncio.run(store.close())
-
 
 def _one_utm_row(store) -> None:
     async def seed():
@@ -2132,149 +1344,6 @@ def _utm_rows(store) -> int:
         async with store.connection() as conn:
             return conn.execute("SELECT COUNT(*) FROM silver_order_utm").fetchone()[0]
     return asyncio.run(count())
-
-
-class TestTheBackfillDoorsUnderPostgres:
-    """The `manager_comment` backfill task and the CLI: the comments still land
-    in DuckDB's `orders` and ship to `bronze.orders` — landing, which the
-    switch does not move — and the verdicts are Postgres' alone."""
-
-    @pytest.mark.asyncio
-    async def test_the_task_parses_postgres_alone(self, tmp_path, postgres):
-        from tests.unit.test_comment_backfill_survives_a_ship_fault import (
-            _Client, _two_orders)
-        from web.routes.api import traffic
-
-        store = await _two_orders(tmp_path)
-        scheduler = MagicMock()
-        scheduler._heavy_job_lock = asyncio.Lock()
-        before = dict(traffic._backfill_status)
-
-        async def ship(_store, ids, *, version_kind, **_kw):
-            return {"orders_shipped": len(ids)}
-
-        router = AsyncMock(return_value={"parsed": 1, "rows": 2})
-        try:
-            with patch.object(traffic, "get_store", AsyncMock(return_value=store)), \
-                 patch("core.keycrm.get_async_client", AsyncMock(return_value=_Client())), \
-                 patch("core.scheduler.get_scheduler", return_value=scheduler), \
-                 patch("core.pg_backfill.ship_orders_by_id", new=ship), \
-                 patch.object(store, "refresh_utm_silver_layer",
-                              new=AsyncMock(side_effect=AssertionError("DuckDB parsed"))), \
-                 patch.object(traffic, "reparse_router", router), \
-                 patch("asyncio.sleep", new=AsyncMock()):
-                await asyncio.wait_for(traffic._run_backfill_inner(1), timeout=20)
-            result = dict(traffic._backfill_status["result"])
-
-            router.return_value = {"error": "RuntimeError: postgres went away"}
-            async with store.connection() as conn:
-                conn.execute("UPDATE orders SET manager_comment = NULL WHERE id = 2")
-            with patch.object(traffic, "get_store", AsyncMock(return_value=store)), \
-                 patch("core.keycrm.get_async_client", AsyncMock(return_value=_Client())), \
-                 patch("core.scheduler.get_scheduler", return_value=scheduler), \
-                 patch("core.pg_backfill.ship_orders_by_id", new=ship), \
-                 patch.object(store, "refresh_utm_silver_layer",
-                              new=AsyncMock(side_effect=AssertionError("DuckDB parsed"))), \
-                 patch.object(traffic, "reparse_router", router), \
-                 patch("asyncio.sleep", new=AsyncMock()):
-                await asyncio.wait_for(traffic._run_backfill_inner(1), timeout=20)
-            failed = dict(traffic._backfill_status["result"])
-        finally:
-            traffic._backfill_status.clear()
-            traffic._backfill_status.update(before)
-            await store.close()
-
-        assert result["status"] == "success" and result["utm_records_parsed"] == 1
-        assert "pg_parse_error" not in result
-        router.assert_awaited_with(store)
-        assert failed["status"] == "partial"
-        assert failed["pg_parse_error"].startswith("RuntimeError")
-
-    @pytest.mark.asyncio
-    async def test_the_cli_parses_postgres_alone_and_notes_it(self, tmp_path, postgres):
-        import scripts.backfill_utm as cli
-        from tests.unit.test_comment_backfill_survives_a_ship_fault import (
-            _Client, _two_orders)
-
-        store = await _two_orders(tmp_path, name="cli.duckdb")
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO silver_order_utm (order_id) VALUES (1)")
-
-        async def ship(_store, ids, *, version_kind, **_kw):
-            return {"orders_shipped": len(ids)}
-
-        router = AsyncMock(return_value={"rows": 2, "replaced": 1})
-        try:
-            with patch("core.duckdb_store.get_store", AsyncMock(return_value=store)), \
-                 patch("core.keycrm.get_async_client", AsyncMock(return_value=_Client())), \
-                 patch("core.runtime_modes.configure_modes", MagicMock()), \
-                 patch("core.pg_backfill.ship_orders_by_id", new=ship), \
-                 patch.object(store, "refresh_utm_silver_layer",
-                              new=AsyncMock(side_effect=AssertionError("DuckDB parsed"))), \
-                 patch("core.pg_utm_parse.reparse_router", router):
-                await asyncio.wait_for(cli.backfill_utm(days_back=1), timeout=20)
-            async with store.connection() as conn:
-                kept = conn.execute("SELECT COUNT(*) FROM silver_order_utm").fetchone()[0]
-                raw = conn.execute("SELECT value FROM sync_metadata WHERE key = ?",
-                                   [wc.WRITER_KEY]).fetchone()
-        finally:
-            await store.close()
-
-        router.assert_awaited_once_with(store, full=True, force=False)
-        assert kept == 1, "DuckDB's silver_order_utm was emptied under postgres"
-        assert wc.UTM_REPARSED in json.loads(raw[0])
-
-
-class TestTheWayBackReparsesWhatPostgresAloneReclassified:
-    @pytest.fixture
-    def reclassified(self, tmp_path):
-        """DuckDB holding a verdict under the old rules, and a record saying a
-        reclassify ran in Postgres alone since."""
-        store = _store(tmp_path)
-        asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
-        asyncio.run(store.refresh_utm_silver_layer())
-
-        async def seed():
-            async with store.connection() as conn:
-                conn.execute("UPDATE silver_order_utm SET platform = 'old-rules'")
-                conn.execute(
-                    "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                    "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                    [wc.WRITER_KEY, json.dumps({
-                        "writer": "postgres", "resolved": True,
-                        wc.UTM_REPARSED: "2026-09-20T10:00:00+00:00"})])
-        asyncio.run(seed())
-        yield store
-        asyncio.run(store.close())
-
-    def test_the_way_back_empties_duckdbs_verdicts_and_the_owed_tick_reparses(
-        self, reclassified,
-    ):
-        asyncio.run(wc.settle_writer(reclassified))
-        assert wc.held() and _utm_rows(reclassified) == 0
-        assert _metadata(reclassified, "warehouse_dirty")[0] == "full"
-
-        result = asyncio.run(reclassified.refresh_warehouse_layers(trigger="dirty_flag"))
-        assert result["validation_passed"] is True and result["utm_orders_parsed"] == 2
-        assert not wc.held() and not wc.reclassify_needed()
-
-        async def platforms():
-            async with reclassified.connection() as conn:
-                return {r[0] for r in conn.execute(
-                    "SELECT DISTINCT platform FROM silver_order_utm").fetchall()}
-        assert "old-rules" not in asyncio.run(platforms())
-
-    def test_without_the_note_the_verdicts_stay(self, tmp_path):
-        """What the note buys: the incremental parse re-reads only what changed."""
-        store = _store(tmp_path)
-        try:
-            asyncio.run(store.upsert_orders(_orders(1, comment="utm_source=instagram")))
-            asyncio.run(store.refresh_utm_silver_layer())
-            _seed(store, **{wc.WRITER_KEY: {"writer": "postgres", "resolved": True}})
-            asyncio.run(wc.settle_writer(store))
-            assert wc.held() and _utm_rows(store) == 1
-        finally:
-            asyncio.run(store.close())
 
 
 # ─── The doors OD-10 has not decided ─────────────────────────────────────────
@@ -2439,14 +1508,6 @@ class TestTheDoorsOd10HasNotDecided:
     # A door somebody adds after OD-10: the walk would put it on the list.
     NEW_DOOR = (("web/routes/api/example.py:a_new_door", "GET /api/a-new-door"),)
 
-    def test_the_start_reads_the_list(self, met, monkeypatch):
-        """`_local_facts` hands `OD10_DOORS` to the evaluator — the list is
-        not a document: while it is not empty, `postgres` runs as duckdb."""
-        monkeypatch.setattr(wc, "OD10_DOORS", self.NEW_DOOR)
-        monkeypatch.setenv(wc.ENV, "postgres")
-        assert wc.configure_mode() == wc.DUCKDB
-        (unmet,) = wc.preconditions_unmet()
-        assert unmet.key == "od10_doors" and "/api/a-new-door" in unmet.detail
 
     def test_the_status_page_reads_it_too(self, met, monkeypatch):
         monkeypatch.setattr(wc, "OD10_DOORS", self.NEW_DOOR)

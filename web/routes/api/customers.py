@@ -85,10 +85,10 @@ async def get_customer_insights(
         brand = validate_brand_name(brand)
         promocode = validate_promocode(promocode)
         sales_type = validate_sales_type(sales_type)
+        start, end = dashboard_service.parse_period(period, start_date, end_date)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    start, end = dashboard_service.parse_period(period, start_date, end_date)
     return await dashboard_service.get_customer_insights(
         start, end, brand=brand, source_id=source_id, sales_type=sales_type,
         promocode=promocode,

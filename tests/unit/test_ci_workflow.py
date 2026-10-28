@@ -11,10 +11,14 @@ one careless edit away from being false.
 """
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
+
+from tests.repo_tree import needs_checkout
 
 REPO = Path(__file__).resolve().parents[2]
 CI_PATH = REPO / ".github" / "workflows" / "ci.yml"
@@ -26,6 +30,7 @@ CI_TEXT = CI_PATH.read_text()
 TRIGGERS = CI[True] if True in CI else CI["on"]
 
 STEPS = CI["jobs"]["tests"]["steps"]
+TYPECHECK = CI["jobs"]["typecheck"]["steps"]
 
 # Everything in this repository that can start or stop a container. The
 # runbooks under deploy/agent/ are prose for the diagnostician, not scripts.
@@ -384,3 +389,103 @@ class TestTheGatesTestTheCodeInFrontOfThem:
             assert 'docker image inspect "$IMAGE"' in text, (
                 f"{name} skips the build without checking the image exists"
             )
+
+
+def _runtime_python() -> str:
+    match = re.search(r"FROM python:(\d+\.\d+)-slim", (REPO / "Dockerfile.web").read_text())
+    assert match, "Dockerfile.web no longer pins a python:X.Y-slim base"
+    return match.group(1)
+
+
+def _jsonc(text: str):
+    """`pyrightconfig.json` may carry `//` comments; `json` may not. Strings
+    are matched first, so a `//` inside one survives."""
+    return json.loads(re.sub(
+        r'"(?:\\.|[^"\\])*"|//[^\n]*',
+        lambda m: m.group(0) if m.group(0).startswith('"') else "",
+        text,
+    ))
+
+
+class TestTheTypeCheckMeansWhatItSays:
+    """The `typecheck` job: basedpyright under `pyrightconfig.json`, against
+    `.basedpyright/baseline.json`. Its findings are a function of the
+    installed packages' annotations as much as of this repository, so the
+    suite's properties hold here too — the lock, the runtime's Python, no
+    narrowing of its own — plus one that is the baseline's: it only shrinks.
+    """
+
+    def _step(self, name):
+        return next(s for s in TYPECHECK if s.get("name") == name)
+
+    def test_it_installs_the_locked_set(self):
+        """Another fastapi or pandas gives another list of findings, and the
+        baseline would read as broken for no change of ours."""
+        install = self._step("Install dependencies")["run"]
+        assert "requirements-dev.lock" in install
+        assert "requirements-dev.txt" not in install
+
+    def test_it_runs_the_runtimes_python(self):
+        setup = next(
+            s for s in TYPECHECK if str(s.get("uses", "")).startswith("actions/setup-python")
+        )
+        assert str(setup["with"]["python-version"]) == _runtime_python()
+
+    def test_the_command_narrows_nothing(self):
+        """`pyrightconfig.json` owns the scope, the mode and the Python it
+        models. A path or a flag here would make CI and a laptop disagree
+        about what passing means — the suite's rule, for the suite's reason."""
+        assert self._step("Type check")["run"].strip() == "basedpyright"
+
+    def test_the_baseline_only_shrinks(self):
+        """After a clean check a rewrite can only drop entries, so a diff is a
+        fixed finding still listed — which would admit the next finding of
+        the same shape in that file. Mutation: drop the diff, or run the
+        rewrite before the check, where it would absorb every new finding."""
+        names = [s.get("name") for s in TYPECHECK]
+        assert names.index("Type check") < names.index("The baseline only shrinks")
+        run = self._step("The baseline only shrinks")["run"]
+        assert "basedpyright --writebaseline" in run
+        assert re.search(r"git diff --(quiet|exit-code) -- \.basedpyright/baseline\.json", run)
+        assert "exit 1" in run
+
+    def test_the_checker_ci_installs_is_the_one_the_intent_file_pins(self):
+        """The baseline is only true for the version that wrote it, so a bump
+        is a commit of its own — and only possible where both files agree."""
+        def pin(name):
+            found = re.search(r"^basedpyright==(\S+)$", (REPO / name).read_text(), re.M)
+            assert found, f"{name} does not pin basedpyright exactly"
+            return found.group(1)
+
+        assert pin("requirements-dev.txt") == pin("requirements-dev.lock")
+
+
+@needs_checkout
+class TestTheTypeCheckersConfig:
+    """Read from the checkout: the image the VPS gate runs the suite in holds
+    neither `pyrightconfig.json` nor the baseline."""
+
+    def _config(self):
+        return _jsonc((REPO / "pyrightconfig.json").read_text())
+
+    def test_it_models_the_python_production_runs(self):
+        config = self._config()
+        assert config["pythonVersion"] == _runtime_python()
+        assert config["pythonPlatform"] == "Linux"
+
+    def test_it_covers_every_tree_but_the_suite(self):
+        """Derived from the tree, not listed: a guard that names its subjects
+        only guards the ones somebody was already thinking of. Every top-level
+        directory holding a tracked `.py` file is in `include`, except
+        `tests/`, which patches and fakes on purpose."""
+        tracked = subprocess.run(
+            ["git", "ls-files", "*.py"], cwd=REPO, capture_output=True, text=True,
+            check=True,
+        ).stdout.split()
+        trees = {path.split("/")[0] for path in tracked if "/" in path} - {"tests"}
+        assert set(self._config()["include"]) == trees
+
+    def test_a_warning_fails_it_too(self):
+        """In `standard` a warning is an import that resolves to stubs alone —
+        an ImportError the day nothing guards it."""
+        assert self._config()["failOnWarnings"] is True

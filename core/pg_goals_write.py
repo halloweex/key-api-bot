@@ -124,35 +124,19 @@ def env_writes_postgres() -> bool:
 
 
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and a value nobody can read: once
-    a goal has been written here, setting the variable back must not start a
-    second writer beside the first.
+    """Whether this chain writes Postgres — the one answer every caller reads:
+    True, a constant since step 14's S14-00. Neither the flag nor the latch
+    routes any more; the chain has not written yet in production, and its
+    first write still takes the latch (decision 3), which the images before
+    step 14 route by. Last consumers: `set_goal` and the registry — S14-11.
     """
-    if chain_latch.latched(CHAIN):
-        return True
-    return env_writes_postgres()
+    return True
 
 
 def reads_postgres() -> bool:
     """Whether a read of this chain's table must ask Postgres, whatever the
-    page's own read flag says — `writes_postgres()` applied to reads.
-
-    One difference, and only for a flag nobody can read on a chain that has
-    never written here: the writer then refuses in both stores and the hourly
-    replace stands down, so neither copy moves, and the page's own flag
-    chooses between them as it did before this chain existed. Raising here
-    instead would take the page down over a variable about writes; the typo
-    is published by `core.write_chains.chain_modes()` and paged by the
-    canary. A latched chain never reaches the question.
-    """
-    if chain_latch.latched(CHAIN):
-        return True
-    try:
-        return env_writes_postgres()
-    except RuntimeError:
-        return False
+    page's own read flag says: True, a constant since S14-00."""
+    return True
 
 
 def reads_the_chain(sql: str) -> bool:

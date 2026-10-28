@@ -161,7 +161,9 @@ class TestTheMarker:
 class TestTheOneAnswerEveryConsumerReads:
     @pytest.mark.parametrize("chain", write_chains.WRITE_CHAINS, ids=write_chains.chain_name)
     def test_latched_outranks_the_flag(self, flags, chain):
-        assert chain.writes_postgres() is False
+        """Since step 14's S14-00 the chain writes Postgres before its latch
+        too — a constant — and the flag, still readable, routes nothing."""
+        assert chain.writes_postgres() is True
         chain_latch.latch(chain.CHAIN)
         assert chain.writes_postgres() is True, "the flag moved the writes back"
         flags.setenv(chain.WRITE_ENV, "duckdb")
@@ -178,13 +180,6 @@ class TestTheOneAnswerEveryConsumerReads:
         assert chain.writes_postgres() is True
         with pytest.raises(RuntimeError):
             chain.env_writes_postgres()
-
-    def test_the_tables_and_the_sync_keys_stand_down_on_the_latch_alone(self, flags):
-        chain_latch.latch("pg_inventory_write")
-
-        assert write_chains.stood_down_tables() >= frozenset(pg_inventory_write.CHAIN_TABLES)
-        assert write_chains.stood_down_sync_keys() == frozenset(
-            {"last_sync_offers", "last_sync_stocks"})
 
     def test_health_publishes_both_halves_of_the_disagreement(self, flags):
         from web.routes.api.health import _write_chains
@@ -332,10 +327,9 @@ class TestAWriteThatNeverReachesPostgres:
         assert not chain_latch.latched("pg_expenses_write"), (
             "a write that never reached Postgres latched the chain")
         assert not chain_latch.marker_path("pg_expenses_write").exists()
-
-        # And so the flag is still the whole answer: the rollback survives.
-        flags.setenv("KS_WRITE_EXPENSES", "duckdb")
-        assert pg_expenses_write.writes_postgres() is False
+        # Until step 14's S14-00 the flag was then still the whole answer; it
+        # routes nothing now, but an image from before step 14 does, and finds
+        # no marker.
         async with store.connection() as conn:
             assert conn.execute("SELECT COUNT(*) FROM manual_expenses").fetchone()[0] == 0
 
@@ -376,8 +370,6 @@ class TestAWriteThatNeverReachesPostgres:
         assert not chain_latch.latched("pg_expense_types_write"), (
             "a write that never got a connection latched the chain")
         assert not chain_latch.marker_path("pg_expense_types_write").exists()
-        flags.setenv("KS_WRITE_EXPENSE_TYPES", "duckdb")
-        assert pg_expense_types_write.writes_postgres() is False
 
     @pytest.mark.asyncio
     async def test_the_inventory_chain_too(self, flags, store):
@@ -392,8 +384,6 @@ class TestAWriteThatNeverReachesPostgres:
                 await store.upsert_offers([{"id": 1, "product_id": 101, "sku": "S-1"}])
 
         assert not chain_latch.latched("pg_inventory_write")
-        flags.setenv("KS_WRITE_INVENTORY", "duckdb")
-        assert pg_inventory_write.writes_postgres() is False
 
     @pytest.mark.parametrize("failing", ["get_pool", "require_revision"])
     @pytest.mark.asyncio
@@ -417,8 +407,6 @@ class TestAWriteThatNeverReachesPostgres:
 
         assert not chain_latch.latched("pg_buyers_write")
         assert not chain_latch.marker_path("pg_buyers_write").exists()
-        flags.setenv("KS_WRITE_BUYERS", "duckdb")
-        assert pg_buyers_write.writes_postgres() is False
         # And DuckDB was not written in its place: under the flag the batch
         # belonged to Postgres.
         async with store.connection() as conn:

@@ -13,6 +13,13 @@ guard saw 2 of 7 groups; the volume bound was written into one gate of two; the
 transient-key exclusion named a retired key). A new write chain that forgets to
 register itself would keep being full-replaced out of a frozen DuckDB — the
 silent hourly rollback — and this is what makes that fail in CI instead.
+
+Since step 14's S14-00 every chain writes Postgres, a constant, so every
+shipper and comparison stands down on the local answer before it reads an
+owner row; the tests of a shipper that ships "without a chain", of the owner
+rows standing it down behind a lost marker and of the admin doors that start
+a re-ship went with that (the shippers themselves go in S14-13). The walks
+stay: a new writer of `bronze.*`/`app.*` must still ask.
 """
 from __future__ import annotations
 
@@ -1010,28 +1017,7 @@ def flags(monkeypatch):
 
 
 class TestWhatStandsDown:
-    def test_nothing_while_every_chain_writes_duckdb(self, flags):
-        from core.write_chains import stood_down_tables
-        assert stood_down_tables() == frozenset()
 
-    def test_only_the_expenses_table_when_only_chain_8_is_on(self, flags):
-        from core.write_chains import stood_down_tables
-        flags.setenv("KS_WRITE_EXPENSES", "postgres")
-        assert stood_down_tables() == frozenset({"app.manual_expenses"})
-
-    def test_the_union_when_both_are_on(self, flags):
-        from core import pg_inventory_write
-        from core.write_chains import stood_down_tables
-        flags.setenv("KS_WRITE_EXPENSES", "postgres")
-        flags.setenv("KS_WRITE_INVENTORY", "postgres")
-        assert stood_down_tables() == (
-            frozenset(pg_inventory_write.CHAIN_TABLES) | {"app.manual_expenses"})
-
-    def test_an_unknown_expenses_value_raises(self, flags):
-        from core.pg_expenses_write import writes_postgres
-        flags.setenv("KS_WRITE_EXPENSES", "postgre")
-        with pytest.raises(RuntimeError):
-            writes_postgres()
 
     def test_the_expenses_table_is_one_the_shipper_actually_replaces(self):
         """Standing down a table the shipper never touched would be a no-op that
@@ -1039,32 +1025,6 @@ class TestWhatStandsDown:
         from core.pg_expenses_write import CHAIN_TABLES
         from core.pg_operational import _FULL_REPLACE
         assert set(CHAIN_TABLES) <= {pg for pg, _d, _c, _o in _FULL_REPLACE}
-
-    @pytest.mark.parametrize("duckdb", ["on", "off"])
-    def test_the_shadow_chains_tables_are_compared_only_while_duckdb_is_on(
-            self, duckdb, flags):
-        """Every registered shadow chain latched: its tables stand down for
-        the copy under either mode, and are compared facing Postgres→DuckDB
-        only under KS_DUCKDB=on — under off the shadow write stands down
-        (stage 5, PR-4), so there is nothing in DuckDB to compare and the
-        comparison does not open the file for them. Derived from the
-        registry, so a shadow chain added later is held here the day it
-        registers. Mutation: drop the `off` answer in `compared_in_shadow`."""
-        from core import chain_latch, duckdb_switch
-        from core.write_chains import (
-            chain_name, compared_in_shadow, shadow_chains, stood_down_tables,
-        )
-
-        flags.setenv(duckdb_switch.ENV, duckdb)
-        duckdb_switch.configure_mode()
-        shadowed = set()
-        for chain in shadow_chains():
-            chain_latch.latch(chain_name(chain), chain.WRITE_ENV)
-            shadowed.update(chain.CHAIN_TABLES)
-        assert len(shadowed) == 8, shadowed
-        assert shadowed <= stood_down_tables()
-        assert compared_in_shadow() == (
-            frozenset(shadowed) if duckdb == "on" else frozenset())
 
 
 # ─── DN-22a: the order write path asks the registry ──────────────────────────
@@ -1272,34 +1232,7 @@ class TestOwnershipOfTheOrderTablesPassesAsAUnit:
 
 
 class TestTheOrderTablesAskOnlyTheirOwnChain:
-    def test_nothing_stands_down_in_production_today(self, flags):
-        """KS_WRITE_EXPENSES=postgres is live; its table is not an order table."""
-        from core.pg_landing import order_tables_stood_down
 
-        flags.setenv("KS_WRITE_EXPENSES", "postgres")
-        assert order_tables_stood_down() == frozenset()
-
-    def test_a_chain_that_declares_no_order_table_is_not_even_asked(
-            self, flags, order_chain, caplog):
-        """DN-01's rule, carried from sync keys to tables: an unrelated typo is
-        not read, so the sync cannot log it once a minute."""
-        from core.pg_landing import order_tables_stood_down
-
-        asked = []
-        order_chain(tables=("app.something_else",),
-                    env=lambda: asked.append(1) or True)
-        flags.setenv("KS_WRITE_EXPENSES", "postgre")
-        with caplog.at_level("ERROR", logger="core.write_chains"):
-            assert order_tables_stood_down() == frozenset()
-        assert asked == []
-        assert not caplog.records
-
-    @pytest.mark.parametrize("tables", [(ORDERS,), (LINES,), (ORDERS, LINES)])
-    def test_a_chain_on_either_table_is_seen(self, order_chain, tables):
-        from core.pg_landing import order_tables_stood_down
-
-        order_chain(tables=tables)
-        assert order_tables_stood_down() == frozenset(tables)
 
     def test_the_owning_chains_typo_stands_it_down_and_does_not_raise(
             self, order_chain, caplog):
@@ -1351,112 +1284,6 @@ class TestTheOrderTablesAskOnlyTheirOwnChain:
             assert stood_down_among(asked) == stood_down_tables() & asked, asked
 
 
-class TestTheSyncMirror:
-    @pytest.mark.asyncio
-    async def test_without_a_chain_the_recorder_sees_the_rows_and_the_archive(
-            self, pool, tmp_path):
-        """The control. Nothing below means anything unless this recorder can
-        see a mirror write and a version capture when they happen."""
-        from core.pg_order_versions import TABLE
-
-        store = await _store(tmp_path)
-        await store.upsert_orders([_order(1)])
-        assert pool.wrote(ORDERS) and pool.wrote(LINES)
-        assert pool.wrote(TABLE)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("tables", [(ORDERS,), (LINES,)])
-    async def test_either_table_owned_ships_nothing_at_all(
-            self, pool, order_chain, tmp_path, tables):
-        """Ownership of the order tables passes as a unit, so a chain on either
-        one stops both — and DuckDB's own write is untouched. No real chain may
-        declare only one (`TestOwnershipOfTheOrderTablesPassesAsAUnit`); this
-        is the stand-down holding if one ever did."""
-        order_chain(tables=tables)
-        store = await _store(tmp_path)
-        result = await store.upsert_orders([_order(1)])
-
-        assert result.changed_ids == [1]
-        assert pool.acquired == 0 and pool.sql == []
-        async with store.connection() as conn:
-            assert conn.execute("SELECT count(*) FROM orders").fetchone()[0] == 1
-
-    @pytest.mark.asyncio
-    async def test_a_status_refresh_ships_nothing_either(
-            self, pool, order_chain, tmp_path):
-        """The 05:15 shape: force_update, headers only — the path that would
-        otherwise archive 1,400 forced rewrites against the chain's rows."""
-        store = await _store(tmp_path, [1])
-        order_chain()
-        result = await store.upsert_orders(
-            [_order(1)], force_update=True, skip_products=True)
-        assert result.changed_ids == [1]
-        assert pool.acquired == 0
-
-
-class TestTheBackfillAndItsRepair:
-    @pytest.mark.asyncio
-    async def test_without_a_chain_it_writes(self, pool, tmp_path):
-        from core.pg_backfill import backfill_orders
-        from core.pg_order_versions import TABLE
-
-        store = await _store(tmp_path, [1, 2])
-        result = await backfill_orders(store)
-        assert result["orders_shipped"] == 2
-        assert pool.wrote(ORDERS) and pool.wrote(TABLE)
-
-    @pytest.mark.asyncio
-    async def test_the_ids_diff_and_the_header_only_repair_refuse_before_postgres(
-            self, pool, order_chain, tmp_path):
-        from core.pg_backfill import backfill_orders
-
-        store = await _store(tmp_path, [1, 2])
-        order_chain()
-        with pytest.raises(RuntimeError, match="write chain"):
-            await backfill_orders(store)
-        _never_reached_postgres(pool)
-
-    @pytest.mark.asyncio
-    async def test_the_hourly_diff_stands_down_quietly(
-            self, pool, order_chain, tmp_path, caplog):
-        """A decision, not a fault: no ERROR every hour."""
-        from core.pg_backfill import hourly_orders_ids_diff
-
-        store = await _store(tmp_path, [1])
-        order_chain(tables=(LINES,))
-        with caplog.at_level("ERROR"):
-            result = await hourly_orders_ids_diff(store)
-        assert result == {"stood_down": [LINES]}
-        _never_reached_postgres(pool)
-        assert not [r for r in caplog.records if r.levelname == "ERROR"]
-
-
-class TestTheCommentShip:
-    @pytest.mark.asyncio
-    async def test_without_a_chain_it_writes_a_backfill_version(self, pool, tmp_path):
-        from core.pg_backfill import ship_orders_by_id
-        from core.pg_order_versions import BACKFILL, TABLE
-
-        store = await _store(tmp_path, [1])
-        result = await ship_orders_by_id(store, [1], version_kind=BACKFILL)
-        assert result["orders_shipped"] == 1
-        assert pool.wrote(ORDERS) and pool.wrote(TABLE)
-
-    @pytest.mark.asyncio
-    async def test_it_is_skipped_so_the_callers_duckdb_half_still_runs(
-            self, pool, order_chain, tmp_path):
-        from core.pg_backfill import ship_orders_by_id
-        from core.pg_order_versions import BACKFILL
-
-        store = await _store(tmp_path, [1])
-        order_chain()
-        result = await ship_orders_by_id(store, [1], version_kind=BACKFILL)
-        assert result["orders_shipped"] == 0
-        assert result["stood_down"] == [LINES, ORDERS]
-        assert "write chain" in result["skipped"]
-        _never_reached_postgres(pool)
-
-
 class _NoStore:
     """A DuckDB the comparison must not open once it has stood down."""
 
@@ -1481,15 +1308,6 @@ class TestTheBucketComparison:
         assert ORDERS in issues[0].description
         _never_reached_postgres(pool)
 
-    @pytest.mark.asyncio
-    async def test_without_a_chain_it_compares(self, pool, tmp_path):
-        """The control: the same call reads both stores and files no stand-down."""
-        from core.mirror_reconciliation import reconcile_orders
-
-        store = await _store(tmp_path, [1])
-        issues = await reconcile_orders(store)
-        assert pool.acquired > 0
-        assert "mirror_stood_down" not in {i.check_name for i in issues}
 
     def test_its_lever_is_not_the_generic_mirror_advice(self):
         """`mirror_` says "wait for the re-ship", which is the one thing the
@@ -1521,20 +1339,6 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
         assert order_tables_stood_down() == frozenset(), "the local answer must be empty"
         return pool
 
-    @pytest.mark.asyncio
-    async def test_one_owner_row_holds_both_order_tables(self, owned):
-        """Ownership passes for a chain as a unit (`claimed_tables`)."""
-        from core.pg_landing import order_tables_stood_down_or_owned
-
-        assert await order_tables_stood_down_or_owned(owned) == frozenset({ORDERS, LINES})
-        assert owned.only_asked_who_owns()
-
-    @pytest.mark.asyncio
-    async def test_another_chains_owner_row_is_not_an_order_table(self, pool):
-        from core.pg_landing import order_tables_stood_down_or_owned
-
-        pool.owner_rows = {"app.manual_expenses": "2026-09-20T08:00:00+00:00"}
-        assert await order_tables_stood_down_or_owned(pool) == frozenset()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("row", [ORDERS, LINES])
@@ -1554,18 +1358,6 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
         assert await order_tables_stood_down_or_owned(pool) == frozenset({ORDERS, LINES})
         assert pool.only_asked_who_owns()
 
-    @pytest.mark.asyncio
-    async def test_after_a_rollback_the_backfill_still_refuses(
-            self, flags, pool, tmp_path):
-        """The same case through a path: nothing shipped over the chain's rows."""
-        from core.pg_backfill import backfill_orders
-
-        _rolled_back(flags)
-        pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
-        store = await _store(tmp_path, [1, 2])
-        with pytest.raises(RuntimeError, match="write chain"):
-            await backfill_orders(store)
-        assert pool.only_asked_who_owns()
 
     @pytest.mark.asyncio
     async def test_the_local_answer_is_still_part_of_it(self, pool, order_chain):
@@ -1584,172 +1376,6 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
         pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
         with pytest.raises(RuntimeError, match="unreadable"):
             await order_tables_stood_down_or_owned(pool)
-
-    @pytest.mark.asyncio
-    async def test_the_backfill_refuses_and_writes_nothing(self, owned, tmp_path):
-        from core import pg
-        from core.pg_backfill import backfill_orders
-
-        store = await _store(tmp_path, [1, 2])
-        with pytest.raises(RuntimeError, match="write chain"):
-            await backfill_orders(store)
-        assert owned.only_asked_who_owns()
-        pg.require_revision.assert_awaited()
-
-    @pytest.mark.asyncio
-    async def test_the_hourly_diff_stands_down_quietly(self, owned, tmp_path, caplog):
-        from core.pg_backfill import hourly_orders_ids_diff
-
-        store = await _store(tmp_path, [1])
-        with caplog.at_level("ERROR"):
-            result = await hourly_orders_ids_diff(store)
-        assert result == {"stood_down": [LINES, ORDERS]}
-        assert owned.only_asked_who_owns()
-        assert not [r for r in caplog.records if r.levelname == "ERROR"]
-
-    @pytest.mark.asyncio
-    async def test_an_unreadable_owner_row_is_the_hourly_diffs_error_not_a_ship(
-            self, pool, order_chain, tmp_path):
-        """The job's own contract — returned, never raised — and nothing
-        shipped on the strength of a read that failed."""
-        from core.pg_backfill import hourly_orders_ids_diff
-
-        order_chain(env=lambda: False)
-        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
-        store = await _store(tmp_path, [1])
-        result = await hourly_orders_ids_diff(store)
-        assert "unreadable" in result["error"]
-        assert pool.only_asked_who_owns()
-
-    @pytest.mark.asyncio
-    async def test_the_comment_ship_is_skipped_and_writes_nothing(self, owned, tmp_path):
-        from core.pg_backfill import ship_orders_by_id
-        from core.pg_order_versions import BACKFILL
-
-        store = await _store(tmp_path, [1])
-        result = await ship_orders_by_id(store, [1], version_kind=BACKFILL)
-        assert result["orders_shipped"] == 0
-        assert result["stood_down"] == [LINES, ORDERS]
-        assert "write chain" in result["skipped"]
-        assert owned.only_asked_who_owns()
-
-    @pytest.mark.asyncio
-    async def test_the_bucket_comparison_pages_and_reads_no_order_table(self, owned):
-        """Not the INFO stand-down: on the owner rows alone the sync's mirror
-        is still shipping, so this is a CRITICAL — one, for both tables."""
-        from core.data_quality import Severity
-        from core.mirror_reconciliation import reconcile_orders
-
-        issues = await reconcile_orders(_NoStore())
-        assert [(i.check_name, i.table_name, i.severity, i.count)
-                for i in issues] == [
-            ("order_owner_row_without_marker", f"{LINES}, {ORDERS}",
-             Severity.CRITICAL, 2),
-        ]
-        assert owned.only_asked_who_owns()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", [
-        "backfill_orders", "hourly_orders_ids_diff", "reconcile_orders",
-        "ship_orders_by_id",
-    ])
-    async def test_a_schema_behind_the_code_breaks_before_the_owner_read(
-            self, owned, path):
-        """The owner rows live in `meta.chain_watermarks` (revision 0032), so
-        each path asks `require_revision()` first and a database behind the
-        code breaks as `SchemaVersionError` — never as a missing table, and
-        never as a stand-down read off a schema nobody verified. Here the owner
-        row is present, so a path that read it first would stand down or skip
-        instead of surfacing the error; and a path that dropped the revision
-        check altogether would do the same. `assert_awaited` alone could see
-        neither: the patched check passes in any position."""
-        from core import pg
-        from core.mirror_reconciliation import reconcile_orders
-        from core.pg_backfill import (
-            backfill_orders, hourly_orders_ids_diff, ship_orders_by_id,
-        )
-        from core.pg_order_versions import BACKFILL
-
-        pg.require_revision.side_effect = pg.SchemaVersionError(
-            "database at 0031, code wants 0033")
-        calls = {
-            "backfill_orders": lambda: backfill_orders(_NoStore()),
-            "hourly_orders_ids_diff": lambda: hourly_orders_ids_diff(_NoStore()),
-            "reconcile_orders": lambda: reconcile_orders(_NoStore()),
-            "ship_orders_by_id": lambda: ship_orders_by_id(
-                _NoStore(), [1], version_kind=BACKFILL),
-        }
-        if path == "hourly_orders_ids_diff":
-            # The job's never-raises contract: the error is returned.
-            result = await calls[path]()
-            assert result.get("error", "").startswith("SchemaVersionError"), result
-        else:
-            with pytest.raises(pg.SchemaVersionError):
-                await calls[path]()
-        pg.require_revision.assert_awaited_once()
-        assert owned.sql == [] and owned.acquired == 0, owned.sql
-
-
-class TestTheStandDownFindingSaysWhetherTheSyncStillShips:
-    """The finding is read by the one person who could act, so its claim
-    about the sync's mirror is parsed out of it and checked against what the
-    mirror then does with the same recorder. On the local answer the mirror
-    has stopped; on the owner rows alone it has not — it asks only the local
-    answer — and a finding saying it had would read as nothing to do."""
-
-    @staticmethod
-    def _claim(issues) -> str:
-        """The one description the stand-down carries: the INFO on both
-        tables on the local answer, the one CRITICAL on the owner rows."""
-        from core.data_quality import Severity
-
-        shape = [(i.check_name, i.table_name, i.severity) for i in issues]
-        assert shape in (
-            [("mirror_stood_down", ORDERS, Severity.INFO),
-             ("mirror_stood_down", LINES, Severity.INFO)],
-            [("order_owner_row_without_marker", f"{LINES}, {ORDERS}",
-              Severity.CRITICAL)],
-        ), shape
-        (text,) = {i.description for i in issues}
-        stopped = "no longer ships DuckDB's copy" in text
-        shipping = "the sync mirror is still shipping" in text
-        assert stopped != shipping, f"says neither or both: {text}"
-        return text
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("state", ["flagged", "marker_lost", "rolled_back"])
-    async def test_the_claim_is_what_the_sync_mirror_does(
-            self, flags, pool, order_chain, tmp_path, state):
-        from core.mirror_reconciliation import reconcile_orders
-
-        if state == "flagged":
-            order_chain()                       # the local answer names both
-        else:
-            if state == "marker_lost":
-                order_chain(env=lambda: False)  # declared, flag duckdb, no marker
-            else:
-                _rolled_back(flags)             # nothing here declares them
-            pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
-        issues = await reconcile_orders(_NoStore())
-        text = self._claim(issues)
-
-        pool.sql.clear()
-        store = await _store(tmp_path)
-        await store.upsert_orders([_order(9)])
-        assert pool.wrote(ORDERS) == ("the sync mirror is still shipping" in text), text
-        # And the severity says the same thing the text does: a page exactly
-        # when the mirror is still writing over the chain's rows.
-        assert pool.wrote(ORDERS) == (issues[0].severity.value == "CRITICAL")
-
-        if state == "flagged":
-            assert "owner row" not in text
-        elif state == "marker_lost":
-            assert ("the marker is missing; the sync mirror is still shipping — "
-                    "restore data/write-chain-owners or run "
-                    "scripts/chain_copy_back.py") in text
-        else:
-            assert "the marker is missing" not in text
-            assert "no chain in this build declares the order tables" in text
 
 
 async def _persisted(store, issues):
@@ -1801,20 +1427,6 @@ class TestWhatTheStandDownTellsAHuman:
 
     STAND_DOWN = {"mirror_stood_down", "order_owner_row_without_marker"}
 
-    @pytest.mark.asyncio
-    async def test_no_chain_owns_the_order_tables_files_nothing_about_them(
-            self, pool, tmp_path):
-        """Production today: no chain declares an order table and no owner row
-        names one. The comparison runs, and no stand-down of either kind and
-        no CRITICAL is persisted."""
-        from core.mirror_reconciliation import reconcile_orders
-
-        store = await _store(tmp_path, [1])
-        run, rows = await _persisted(store, await reconcile_orders(store))
-
-        assert pool.acquired > 0, "the comparison did not run — nothing proved"
-        assert not self.STAND_DOWN & {r["check_name"] for r in rows}, rows
-        assert run["critical_count"] == 0 and run["status"] != "CRITICAL", run
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("state", ["marker_present", "flagged"])
@@ -1843,34 +1455,6 @@ class TestWhatTheStandDownTellsAHuman:
         assert run["status"] == "PASS" and run["critical_count"] == 0, run
         assert "order_owner_row_without_marker" not in _what_a_human_reads(run, rows)
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("road", ["marker_lost", "rolled_back"])
-    async def test_on_the_owner_rows_alone_it_pages_and_never_says_not_a_defect(
-            self, flags, pool, order_chain, tmp_path, road):
-        from core.mirror_reconciliation import reconcile_orders
-        from core.pg_landing import order_tables_stood_down
-
-        if road == "marker_lost":
-            order_chain(env=lambda: False)      # declared, flag duckdb, no marker
-        else:
-            _rolled_back(flags)                 # nothing here declares them
-        pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
-        assert order_tables_stood_down() == frozenset()
-        store = await _store(tmp_path)
-        run, rows = await _persisted(store, await reconcile_orders(store))
-
-        assert [(r["check_name"], r["table_name"], r["severity"], r["count"])
-                for r in rows] == [
-            ("order_owner_row_without_marker", f"{LINES}, {ORDERS}", "CRITICAL", 2),
-        ]
-        assert run["status"] == "CRITICAL" and run["critical_count"] == 1, run
-
-        read = _what_a_human_reads(run, rows)
-        assert "not a defect" not in read.lower(), read
-        assert "the sync is overwriting order tables a write chain owns" in read
-        (lever,) = [line for line in read.splitlines() if line.startswith("→ ")]
-        assert "scripts/chain_copy_back.py" in lever
-        assert "data/write-chain-owners" in lever
 
     def test_the_registry_says_it_does_not_clear_by_itself(self):
         """The REGISTRY comment on `mirror_stood_down` reads "a decision
@@ -1940,74 +1524,6 @@ class TestTheAdminBackfill:
         assert res.json()["detail"].startswith(self.REFUSAL)
         backfill.assert_not_called()
         _never_reached_postgres(pool)
-
-    @pytest.mark.parametrize("background", ["true", "false"])
-    def test_409_on_the_owner_rows_when_the_marker_is_lost(
-            self, flags, pool, order_chain, backfill, background):
-        """Flag at duckdb, no marker, an owner row in Postgres: the local
-        answer is empty, and "started" here was the backfill refusing into a
-        log line nobody reads (or a 500 in the foreground)."""
-        order_chain(env=lambda: False)
-        pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
-        res = self._post(flags, background)
-        assert res.status_code == 409, res.json()
-        assert res.json()["detail"].startswith(self.REFUSAL)
-        backfill.assert_not_called()
-        assert pool.only_asked_who_owns()
-
-    @pytest.mark.parametrize("background", ["true", "false"])
-    def test_an_unreadable_owner_row_is_a_503_never_started(
-            self, flags, pool, order_chain, backfill, background):
-        order_chain(env=lambda: False)
-        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
-        res = self._post(flags, background)
-        assert res.status_code == 503, res.json()
-        assert res.json().get("status") != "started"
-        assert "unreadable" in res.json()["detail"]
-        backfill.assert_not_called()
-
-    @pytest.mark.parametrize("background", ["true", "false"])
-    def test_a_schema_behind_the_code_is_a_503_before_the_owner_read(
-            self, flags, pool, backfill, background):
-        from core import pg
-
-        pg.require_revision.side_effect = pg.SchemaVersionError(
-            "database at 0031, code wants 0033")
-        pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
-        res = self._post(flags, background)
-        assert res.status_code == 503, res.json()
-        assert "SchemaVersionError" in res.json()["detail"]
-        assert pool.sql == [] and pool.acquired == 0
-        backfill.assert_not_called()
-
-    @pytest.mark.parametrize("background", ["true", "false"])
-    @pytest.mark.parametrize("chain", ["none", "flagged"])
-    def test_with_the_mirror_off_it_refuses_and_asks_postgres_nothing(
-            self, flags, pool, order_chain, backfill, background, chain):
-        """`backfill_orders` refuses a switched-off mirror, so the route says
-        so first: a 409, never "started" in the background (the refusal was
-        a line in the web log) nor a 500 in the foreground. First means
-        before the latch checks: with a chain flagged onto the order tables
-        the answer is still the mirror's, and no Postgres read stands in
-        front of it either way."""
-        from core.pg_landing import MIRROR_ENV
-
-        flags.setenv(MIRROR_ENV, "0")
-        if chain == "flagged":
-            order_chain()                       # the local answer names both
-            pool.owner_rows = {ORDERS: "2026-09-20T08:00:00+00:00"}
-        res = self._post(flags, background)
-        assert res.status_code == 409, res.json()
-        assert res.json() == {"detail": "KS_MIRROR_LANDING is off; nothing was started"}
-        assert res.json().get("status") != "started"
-        backfill.assert_not_called()
-        _never_reached_postgres(pool)
-
-    def test_without_a_chain_it_runs(self, flags, pool, backfill):
-        res = self._post(flags, "false")
-        assert res.status_code == 200
-        backfill.assert_awaited_once()
-        assert pool.only_asked_who_owns()
 
 
 class TestTheOrderWatchesOutliveTheStandDown:
@@ -2142,29 +1658,6 @@ class TestChain7aGoals:
     """DN-25: `app.revenue_goals` joins the registry behind `KS_WRITE_GOALS`,
     off by default — so the default stands down exactly what it did before."""
 
-    def test_off_by_default_stands_nothing_down(self, flags):
-        from core.pg_goals_write import writes_postgres
-        from core.write_chains import stood_down_sync_keys, stood_down_tables
-        assert writes_postgres() is False
-        assert stood_down_tables() == frozenset()
-        assert stood_down_sync_keys() == frozenset()
-
-    def test_only_the_goals_table_when_only_chain_7a_is_on(self, flags):
-        from core.write_chains import stood_down_sync_keys, stood_down_tables
-        flags.setenv("KS_WRITE_GOALS", "postgres")
-        assert stood_down_tables() == frozenset({"app.revenue_goals"})
-        # No `last_sync_*` key: goals are typed, never synced.
-        assert stood_down_sync_keys() == frozenset()
-
-    def test_an_unknown_value_raises_in_the_writer_and_stands_down_the_table(self, flags):
-        from core.pg_goals_write import writes_postgres
-        from core.write_chains import stood_down_tables_checked
-        flags.setenv("KS_WRITE_GOALS", "postgre")
-        with pytest.raises(RuntimeError, match="KS_WRITE_GOALS"):
-            writes_postgres()
-        tables, errors = stood_down_tables_checked()
-        assert tables == frozenset({"app.revenue_goals"})
-        assert list(errors) == ["pg_goals_write"]
 
     def test_the_goals_table_is_one_the_shipper_actually_replaces(self):
         from core.pg_goals_write import CHAIN_TABLES
@@ -2289,15 +1782,6 @@ class TestTheSyncShippersStandDown:
     """The per-tick mirrors and the classification copy: skipped with a
     reason, and Postgres not asked anything — the write path's local answer."""
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", sorted(_SHIPS))
-    async def test_without_a_chain_the_recorder_sees_the_write(
-            self, pool, tmp_path, path):
-        """The control. A recorder that could not see these writes would pass
-        every test below."""
-        store = await _landing_store(tmp_path)
-        await _ship(path, store)
-        assert pool.wrote(_SHIPS[path]), pool.sql
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("path", sorted(_SHIPS))
@@ -2342,24 +1826,6 @@ class TestTheSyncShippersStandDown:
         assert out.skipped.startswith("stood down"), out
         assert pool.sql == []
 
-    @pytest.mark.asyncio
-    async def test_the_sync_writes_duckdb_and_ships_only_what_is_not_owned(
-            self, pool, landing_chain, tmp_path):
-        """`SyncService._upsert_orders_with_expenses`, the site that ships the
-        expenses every tick: DuckDB gets them, Postgres gets the orders — no
-        chain declares those here — and not the expenses."""
-        from core.sync_service import SyncService
-
-        landing_chain(tables=(EXPENSES,))
-        store = await _store(tmp_path)
-        order = dict(_order(1), expenses=_EXPENSE_ORDERS[0]["expenses"])
-        await SyncService(store)._upsert_orders_with_expenses([order])
-
-        async with store.connection() as conn:
-            assert conn.execute("SELECT count(*) FROM expenses").fetchone()[0] == 1
-        assert pool.wrote(ORDERS), pool.sql
-        assert not pool.wrote(EXPENSES), pool.sql
-
 
 # The two sync shippers that read the owner rows as well as the local answer
 # (the DN-22b review): the unit each one writes in one transaction.
@@ -2367,78 +1833,6 @@ _OWNER_AWARE = {
     "mirror_buyers": (BUYERS, CONTACTS),
     "replicate_managers": (MANAGERS, CLASSIFICATIONS),
 }
-
-
-class TestTheBuyersAndClassificationCopiesReadTheOwnerRows:
-    """`replicate_managers` asked the local answer alone, so a lost marker let
-    its full replace delete every interval a human set in Postgres the first
-    time it ran — reproduced on PostgreSQL 17.2 — and the 07:30 page came
-    after the damage. `mirror_buyers` had the same shape. Both now read the
-    owner rows once the local answer is empty, before DuckDB is read."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", sorted(_OWNER_AWARE))
-    @pytest.mark.parametrize("half", [0, 1])
-    @pytest.mark.parametrize("road", ["marker_lost", "rolled_back"])
-    async def test_the_owner_row_alone_stands_the_unit_down(
-            self, flags, pool, landing_chain, path, half, road):
-        from core.pg_landing import stood_down_reason
-
-        unit = _OWNER_AWARE[path]
-        if road == "marker_lost":
-            landing_chain(tables=unit, env=lambda: False)
-        else:
-            _no_landing_chain(flags)
-        pool.owner_rows = {unit[half]: "2026-09-20T08:00:00+00:00"}
-
-        out = await _ship(path, _NoStore())
-
-        assert _skip_reason(out) == stood_down_reason(unit), out
-        assert out["stood_down"] == sorted(unit), out
-        assert pool.only_asked_who_owns(), pool.sql
-        from core import pg
-        pg.require_revision.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", sorted(_OWNER_AWARE))
-    async def test_an_unreadable_owner_row_ships_nothing_and_says_so(
-            self, pool, landing_chain, tmp_path, path):
-        """Not an absent owner row: the copy fails closed, as any other
-        Postgres failure here does — counted, never shipped on the strength of
-        a read that did not happen."""
-        landing_chain(tables=_OWNER_AWARE[path], env=lambda: False)
-        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
-        out = await _ship(path, await _landing_store(tmp_path))
-
-        assert "unreadable" in out["error"], out
-        assert not any(pool.wrote(t) for t in _OWNER_AWARE[path]), pool.sql
-        assert [s for s in pool.sql if "failures_since_ok + 1" in s], (
-            "the failure left no trace in the watermark")
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", sorted(_OWNER_AWARE))
-    async def test_a_schema_behind_the_code_fails_before_the_owner_read(
-            self, pool, tmp_path, path):
-        """`require_revision()` first: the owner row is present here, so a
-        path that read it first would report a stand-down off an old schema."""
-        from core import pg
-
-        pg.require_revision.side_effect = pg.SchemaVersionError(
-            "database at 0031, code wants 0033")
-        pool.owner_rows = {_OWNER_AWARE[path][0]: "2026-09-20T08:00:00+00:00"}
-        out = await _ship(path, await _landing_store(tmp_path))
-
-        assert out["error"].startswith("SchemaVersionError"), out
-        assert not [s for s in pool.sql if "meta.chain_watermarks" in s], pool.sql
-        assert not any(pool.wrote(t) for t in _OWNER_AWARE[path]), pool.sql
-
-    @pytest.mark.asyncio
-    async def test_an_empty_buyer_batch_asks_postgres_nothing(self, pool):
-        """The owner read is paid for a batch to ship, not for every tick."""
-        from core.pg_buyers import mirror_buyers
-
-        assert await mirror_buyers([]) == {"rows": 0}
-        _never_reached_postgres(pool)
 
 
 # The backfills and the hourly diffs, which hold a pool and so read the owner
@@ -2487,15 +1881,6 @@ async def _expect_stood_down(path, store, caplog):
 
 
 class TestTheBackfillsAndTheHourlyDiffs:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", sorted(_POOLED))
-    async def test_without_a_chain_it_writes(self, pool, tmp_path, path):
-        """The control: each ships DuckDB's row into the recorder. Postgres
-        holds nothing there, so everything DuckDB has is missing."""
-        store = await _landing_store(tmp_path)
-        out = await _run_pooled(path, store)
-        assert "error" not in out, out
-        assert pool.wrote(_POOLED[path]), pool.sql
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("path", sorted(_POOLED))
@@ -2507,16 +1892,6 @@ class TestTheBackfillsAndTheHourlyDiffs:
         await _expect_stood_down(path, _NoStore(), caplog)
         _never_reached_postgres(pool)
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", sorted(_POOLED))
-    async def test_the_owner_row_stands_it_down_when_the_marker_is_lost(
-            self, pool, landing_chain, tmp_path, path, caplog):
-        """Flag at duckdb, no marker: only the owner row in Postgres says the
-        table moved, and a path holding a pool reads it — DN-06's rule."""
-        landing_chain(env=lambda: False)
-        pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
-        await _expect_stood_down(path, _NoStore(), caplog)
-        assert pool.only_asked_who_owns(), pool.sql
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("path", sorted(_POOLED))
@@ -2539,45 +1914,6 @@ class TestTheBackfillsAndTheHourlyDiffs:
         out = await hourly_ids_diff(await _landing_store(tmp_path))
         assert out == {"stood_down": [CONTACTS, BUYERS]}, out
         assert pool.only_asked_who_owns()
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", sorted(_POOLED))
-    async def test_an_unreadable_owner_row_ships_nothing(
-            self, pool, landing_chain, tmp_path, path):
-        """Not an absent owner row: the backfill raises it, the hourly diff
-        returns it as its error, and neither ships on the strength of it."""
-        landing_chain(env=lambda: False)
-        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
-        store = await _landing_store(tmp_path)
-        if path.startswith("hourly"):
-            out = await _run_pooled(path, store)
-            assert "unreadable" in out["error"], out
-        else:
-            with pytest.raises(RuntimeError, match="unreadable"):
-                await _run_pooled(path, store)
-        assert pool.only_asked_who_owns(), pool.sql
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", sorted(_POOLED))
-    async def test_a_schema_behind_the_code_breaks_before_the_owner_read(
-            self, pool, tmp_path, path):
-        """`require_revision()` first, so an old schema is a
-        `SchemaVersionError` and never a stand-down read off it — the owner
-        row is present here, so a path that read it first would stand down."""
-        from core import pg
-
-        pg.require_revision.side_effect = pg.SchemaVersionError(
-            "database at 0031, code wants 0033")
-        pool.owner_rows = {_POOLED[path]: "2026-09-20T08:00:00+00:00"}
-        store = await _landing_store(tmp_path)
-        if path.startswith("hourly"):
-            out = await _run_pooled(path, store)
-            assert out.get("error", "").startswith("SchemaVersionError"), out
-        else:
-            with pytest.raises(pg.SchemaVersionError):
-                await _run_pooled(path, store)
-        pg.require_revision.assert_awaited()
-        assert pool.sql == [] and pool.acquired == 0, pool.sql
 
 
 class TestTheAdminExpenseBackfill:
@@ -2607,44 +1943,6 @@ class TestTheAdminExpenseBackfill:
         assert res.json()["detail"].startswith(self.REFUSAL)
         backfill.assert_not_called()
         _never_reached_postgres(pool)
-
-    def test_409_on_the_owner_row_when_the_marker_is_lost(
-            self, flags, pool, landing_chain, backfill):
-        landing_chain(env=lambda: False)
-        pool.owner_rows = {EXPENSES: "2026-09-20T08:00:00+00:00"}
-        res = self._post(flags)
-        assert res.status_code == 409, res.json()
-        assert res.json()["detail"].startswith(self.REFUSAL)
-        backfill.assert_not_called()
-        assert pool.only_asked_who_owns()
-
-    def test_an_unreadable_owner_row_is_a_503(
-            self, flags, pool, landing_chain, backfill):
-        landing_chain(env=lambda: False)
-        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
-        res = self._post(flags)
-        assert res.status_code == 503, res.json()
-        assert "unreadable" in res.json()["detail"]
-        backfill.assert_not_called()
-
-    def test_a_schema_behind_the_code_is_a_503_before_the_owner_read(
-            self, flags, pool, backfill):
-        from core import pg
-
-        pg.require_revision.side_effect = pg.SchemaVersionError(
-            "database at 0031, code wants 0033")
-        pool.owner_rows = {EXPENSES: "2026-09-20T08:00:00+00:00"}
-        res = self._post(flags)
-        assert res.status_code == 503, res.json()
-        assert "SchemaVersionError" in res.json()["detail"]
-        assert pool.sql == [] and pool.acquired == 0
-        backfill.assert_not_called()
-
-    def test_without_a_chain_it_runs(self, flags, pool, backfill):
-        res = self._post(flags)
-        assert res.status_code == 200, res.json()
-        backfill.assert_awaited_once()
-        assert pool.only_asked_who_owns()
 
 
 class TestTheAdminBuyerReship:
@@ -2677,31 +1975,6 @@ class TestTheAdminBuyerReship:
         reship.assert_not_called()
         _never_reached_postgres(pool)
 
-    def test_409_on_the_owner_row_when_the_marker_is_lost(
-            self, flags, pool, landing_chain, reship):
-        landing_chain(env=lambda: False)
-        pool.owner_rows = {CONTACTS: "2026-09-20T08:00:00+00:00"}
-        res = self._post(flags)
-        assert res.status_code == 409, res.json()
-        assert self.REFUSAL in res.json()["detail"]
-        reship.assert_not_called()
-        assert pool.only_asked_who_owns()
-
-    def test_an_unreadable_owner_row_is_a_503(self, flags, pool, landing_chain, reship):
-        landing_chain(env=lambda: False)
-        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
-        res = self._post(flags)
-        assert res.status_code == 503, res.json()
-        assert "unreadable" in res.json()["detail"]
-        reship.assert_not_called()
-
-    def test_the_mirror_off_is_a_409_and_postgres_is_not_asked(self, flags, pool, reship):
-        flags.setenv("KS_MIRROR_LANDING", "0")
-        res = self._post(flags)
-        assert res.status_code == 409, res.json()
-        assert "KS_MIRROR_LANDING" in res.json()["detail"]
-        reship.assert_not_called()
-        _never_reached_postgres(pool)
 
     def test_a_second_reship_while_one_runs_is_refused(self, flags, pool, reship):
         from unittest.mock import MagicMock
@@ -2717,75 +1990,6 @@ class TestTheAdminBuyerReship:
         assert "already running" in res.json()["detail"]
         reship.assert_not_called()
 
-    def test_without_a_chain_it_answers_started(self, flags, pool, reship):
-        res = self._post(flags)
-        assert res.status_code == 200, res.json()
-        assert res.json()["status"] == "started"
-        assert pool.only_asked_who_owns()
-
-    @pytest.mark.asyncio
-    async def test_two_requests_at_once_start_one_reship(self, flags, pool, reship):
-        """The review's double click: both requests used to pass the "already
-        running" check while the first sat in the owner read, before any task
-        existed. Two requests in flight at once, the first held in that read;
-        exactly one may start."""
-        import asyncio
-        import time as _time
-
-        import httpx
-
-        from core.permissions import ADMIN_USER_IDS
-        from web.main import app
-        from web.routes.api import admin
-        from web.routes.api._deps import limiter
-        from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
-
-        limiter.reset()
-        flags.setattr(admin, "_RESHIP_SLOT", {"claimed": False})
-        admin_id = sorted(ADMIN_USER_IDS)[0]
-
-        async def _resolve(session):
-            return {"user_id": admin_id, "role": "admin"}
-
-        flags.setattr("web.routes.auth._resolve_session", _resolve)
-        release = asyncio.Event()
-        real = __import__("core.pg_landing", fromlist=["x"]).tables_stood_down_or_owned
-
-        async def held(pool_, unit):
-            await release.wait()
-            return await real(pool_, unit)
-
-        flags.setattr("core.pg_landing.tables_stood_down_or_owned", held)
-        cookie = session_serializer.dumps(create_session_data(
-            {"id": str(admin_id), "first_name": "T", "last_name": "U",
-             "username": "t", "auth_date": str(int(_time.time()))}, role="admin"))
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://t",
-                                     cookies={SESSION_COOKIE: cookie}) as client:
-            first = asyncio.ensure_future(client.post("/api/mirror/backfill/buyers"))
-            await asyncio.sleep(0.05)                   # the first is in the owner read
-            try:
-                # Bounded: without the slot the second request also waits in
-                # the held read, and the test would hang rather than fail.
-                second = await asyncio.wait_for(
-                    client.post("/api/mirror/backfill/buyers"), 5)
-            finally:
-                release.set()
-            first = await asyncio.wait_for(first, 5)
-        assert second.status_code == 409, second.json()
-        assert "already running" in second.json()["detail"]
-        assert first.status_code == 200 and first.json()["status"] == "started"
-
-    def test_a_refused_request_gives_the_slot_back(self, flags, pool, landing_chain, reship):
-        """A 503 or a 409 from the owner read must not leave the slot claimed,
-        or every later reship would be refused as "already running"."""
-        from web.routes.api import admin
-
-        flags.setattr(admin, "_RESHIP_SLOT", {"claimed": False})
-        landing_chain(env=lambda: False)
-        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
-        assert self._post(flags).status_code == 503
-        assert admin._RESHIP_SLOT["claimed"] is False
 
     # ── What the detached run is handed, and what it gives back (F1, F3) ──
     #
@@ -2834,101 +2038,6 @@ class TestTheAdminBuyerReship:
                 out.append((res.status_code, admin._RESHIP_SLOT["claimed"]))
         return out
 
-    @pytest.mark.asyncio
-    async def test_the_run_is_handed_the_chunk_it_was_asked_for(self, flags, pool, reship):
-        """F1. Mutation killed: `chunk=2000` (or any constant) in place of
-        `chunk=chunk_size` — the query parameter accepted and ignored."""
-        BASE = "/api/mirror/backfill/buyers"
-        assert await self._post_and_finish(flags, BASE, BASE + "?chunk_size=100") == [
-            (200, False), (200, False)]
-        assert [c.kwargs["chunk"] for c in reship.await_args_list] == [2000, 100]
-
-    @pytest.mark.asyncio
-    async def test_every_portion_waits_for_the_heavy_job_lock(self, flags, pool, reship):
-        """F1. The route's promise that each portion lands between two sync
-        ticks: the reship is handed a guard that holds the scheduler's
-        heavy-job lock (`_run_incremental_sync` holds it every minute), and
-        that gives up — `False`, the run stops — when the lock stays busy.
-        Without it the review interleaved a sync tick between a portion's
-        DuckDB read and its Postgres write, and the stale read overwrote the
-        fresh mirror. Mutations killed: no `portion_guard=`, or a guard that
-        does not take that lock."""
-        import asyncio
-
-        from core.scheduler import get_scheduler
-        from web.routes.api import admin
-
-        lock = asyncio.Lock()
-        flags.setattr(get_scheduler(), "_heavy_job_lock", lock)
-        assert await self._post_and_finish(
-            flags, "/api/mirror/backfill/buyers") == [(200, False)]
-        guard = reship.await_args.kwargs.get("portion_guard")
-        assert guard is not None, "the reship was handed no portion guard"
-
-        async with guard() as go:
-            assert go is True and lock.locked()
-        assert not lock.locked()
-
-        flags.setattr(admin, "SYNC_ALL_LOCK_WAIT_S", 0.05)
-        async with lock:                                # a sync tick holds it
-            async with guard() as go:
-                assert go is False
-
-    @pytest.mark.asyncio
-    async def test_the_guard_waits_as_long_as_the_full_sync_does(self, flags, pool, reship):
-        """The review of F1. The test above proves the guard takes the heavy
-        lock and can give up; it did not prove how long it waits. A reship is
-        detached, outside any request budget, and a full sync or a resync
-        holds the lock for minutes — so it waits `SYNC_ALL_LOCK_WAIT_S` (300 s)
-        as the full buyer sync does, not the 20 s a request can afford
-        (`HEAVY_LOCK_WAIT_S`), after which every reship that met a sync would
-        stop. The two waits are moved apart here — the request budget huge,
-        the reship's tiny — so the wrong one cannot pass by being slow: it
-        times out. Mutations killed: `_heavy_lock(HEAVY_LOCK_WAIT_S)`, or any
-        constant, in the guard."""
-        import asyncio
-
-        from core.scheduler import get_scheduler
-        from web.routes.api import admin
-
-        assert admin.SYNC_ALL_LOCK_WAIT_S == 300
-        assert admin.SYNC_ALL_LOCK_WAIT_S > admin.HEAVY_LOCK_WAIT_S
-
-        lock = asyncio.Lock()
-        flags.setattr(get_scheduler(), "_heavy_job_lock", lock)
-        assert await self._post_and_finish(
-            flags, "/api/mirror/backfill/buyers") == [(200, False)]
-        guard = reship.await_args.kwargs["portion_guard"]
-
-        flags.setattr(admin, "HEAVY_LOCK_WAIT_S", 3600)
-        flags.setattr(admin, "SYNC_ALL_LOCK_WAIT_S", 0.05)
-
-        async def gives_up() -> bool:
-            async with guard() as go:
-                return go
-
-        async with lock:
-            assert await asyncio.wait_for(gives_up(), 5) is False
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("outcome", [
-        {"return_value": {"status": "done"}},
-        {"side_effect": RuntimeError("the lock stayed busy")},
-    ], ids=["finished", "failed"])
-    async def test_a_run_that_ended_gives_the_slot_back(self, flags, pool, reship, outcome):
-        """F3. The slot a request claims is released by the task's done
-        callback — after a run that finished and after one that raised — or
-        every later reship is refused as "already running" until web
-        restarts, and the documented recovery for a stopped run (run it
-        again) is gone. Mutation killed: no
-        `task.add_done_callback(_release_reship_slot)` — the review saw
-        [200, 409]."""
-        reship.configure_mock(**outcome)
-        assert await self._post_and_finish(
-            flags, "/api/mirror/backfill/buyers", "/api/mirror/backfill/buyers") == [
-            (200, False), (200, False)]
-        assert reship.await_count == 2
-
 
 # ─── DN-22b: the daily comparisons stand down with their shippers ───────────
 
@@ -2969,17 +2078,6 @@ def _read_a_table(pool, tables) -> list:
 
 
 class TestTheComparisonsStandDown:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name", sorted(_COMPARED))
-    async def test_without_a_chain_they_compare(self, pool, tmp_path, name):
-        """The control: each reads its tables in Postgres and files no
-        stand-down of either kind."""
-        store = await _landing_store(tmp_path)
-        issues = await _compare(name, store)
-        tables = _COMPARED[name][0]
-        assert _read_a_table(pool, tables), pool.sql
-        assert not {"mirror_stood_down", "owner_row_without_marker"} & {
-            i.check_name for i in issues}, issues
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name", sorted(_COMPARED))
@@ -3013,77 +2111,6 @@ class TestTheComparisonsStandDown:
             s.pg_table for s in MIRRORED_TABLES)
         assert {i.check_name for i in issues} == {"mirror_stood_down"}
         _never_reached_postgres(pool)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name", sorted(_COMPARED))
-    @pytest.mark.parametrize("road", ["marker_lost", "rolled_back"])
-    async def test_on_the_owner_rows_alone_what_each_shipper_earns_and_no_read(
-            self, flags, pool, landing_chain, name, road):
-        """A CRITICAL for the tables whose sync shipper asks the local answer
-        alone and is still writing over the chain's rows; an INFO per table
-        for the buyers and the classification, whose shippers read the owner
-        rows too and have stopped (the DN-22b review) — the latch itself is
-        `chain_latch_disagrees`' or `chain_owner_unregistered`'s page."""
-        from core.data_quality import Severity
-
-        tables = _COMPARED[name][0]
-        if road == "marker_lost":
-            landing_chain(env=lambda: False)
-            # One owner row holds the chain's every table (`claimed_tables`).
-            pool.owner_rows = {tables[0]: "2026-09-20T08:00:00+00:00"}
-        else:
-            _no_landing_chain(flags)
-            # No chain to expand a row through: each row holds its own unit,
-            # so the catalogue's two units need a row each.
-            pool.owner_rows = {t: "2026-09-20T08:00:00+00:00" for t in tables}
-        issues = await _compare(name, None)
-
-        still = sorted(t for t in tables if t in _SHIPPED_ON_THE_LOCAL_ANSWER)
-        stopped = sorted(t for t in tables if t not in _SHIPPED_ON_THE_LOCAL_ANSWER)
-        pages = [i for i in issues if i.check_name == "owner_row_without_marker"]
-        if still:
-            (page,) = pages
-            assert page.severity is Severity.CRITICAL
-            assert page.table_name == ", ".join(still)
-            assert page.count == len(still)
-            if road == "marker_lost":
-                assert "the marker is missing" in page.description
-            else:
-                assert "no chain in this build declares them" in page.description
-        else:
-            assert pages == [], pages
-        infos = [i for i in issues if i.check_name == "mirror_stood_down"]
-        assert sorted(i.table_name for i in infos) == stopped
-        for info in infos:
-            assert info.severity is Severity.INFO
-            assert "reads the owner rows too" in info.description
-            assert "chain_owner_unregistered" in info.description
-        assert _read_a_table(pool, tables) == [], pool.sql
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name", sorted(_COMPARED))
-    async def test_a_schema_behind_the_code_breaks_before_the_owner_read(
-            self, pool, name):
-        from core import pg
-
-        pg.require_revision.side_effect = pg.SchemaVersionError(
-            "database at 0031, code wants 0033")
-        pool.owner_rows = {_COMPARED[name][0][0]: "2026-09-20T08:00:00+00:00"}
-        with pytest.raises(pg.SchemaVersionError):
-            await _compare(name, None)
-        assert pool.sql == [] and pool.acquired == 0, pool.sql
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name", sorted(_COMPARED))
-    async def test_an_unreadable_owner_row_is_the_comparisons_error(
-            self, pool, landing_chain, name):
-        """Raised, so the 07:30 job records the check as failed rather than
-        comparing — `reconcile_operational`'s contract for the same read."""
-        landing_chain(env=lambda: False)
-        pool.owner_error = RuntimeError("meta.chain_watermarks unreadable")
-        with pytest.raises(RuntimeError, match="unreadable"):
-            await _compare(name, None)
-        assert pool.only_asked_who_owns(), pool.sql
 
 
 class TestTheLandingFindingSaysWhetherTheSyncStillShips:
@@ -3148,25 +2175,6 @@ class TestWhatTheLandingStandDownTellsAHuman:
         ]
         assert run["status"] == "PASS" and run["critical_count"] == 0, run
 
-    @pytest.mark.asyncio
-    async def test_on_the_owner_rows_alone_it_pages_and_never_says_not_a_defect(
-            self, pool, landing_chain, tmp_path):
-        from core.mirror_reconciliation import reconcile_expenses
-
-        landing_chain(env=lambda: False)
-        pool.owner_rows = {EXPENSES: "2026-09-20T08:00:00+00:00"}
-        store = await _landing_store(tmp_path)
-        run, rows = await _persisted(store, await reconcile_expenses(store))
-
-        assert [(r["check_name"], r["table_name"], r["severity"]) for r in rows] == [
-            ("owner_row_without_marker", EXPENSES, "CRITICAL")]
-        assert run["status"] == "CRITICAL", run
-        read = _what_a_human_reads(run, rows)
-        assert "not a defect" not in read.lower(), read
-        assert "the sync is overwriting tables a write chain owns" in read
-        (lever,) = [line for line in read.splitlines() if line.startswith("→ ")]
-        assert "scripts/chain_copy_back.py" in lever
-        assert "data/write-chain-owners" in lever
 
     def test_the_registry_says_it_does_not_clear_by_itself(self):
         from core.alerting import REGISTRY, Kind
@@ -3236,25 +2244,6 @@ class TestAnUnregisteredOwnerRowHoldsTheOperationalCopy:
         assert _touched(pool, GENDER), pool.sql
         assert "chain_owner_unregistered" not in result
 
-    @pytest.mark.asyncio
-    async def test_the_owner_row_alone_holds_it_and_nothing_else(
-            self, flags, dsn, pool, tmp_path):
-        from core.pg_operational import replicate_operational
-
-        _no_chain_declares(flags, GENDER)
-        pool.owner_rows = {GENDER: STAMP}
-        result = await replicate_operational(await _landing_store(tmp_path))
-
-        assert "error" not in result, result
-        assert _touched(pool, GENDER) == [], pool.sql
-        assert GENDER in result["stood_down"] and GENDER not in result["replaced"]
-        assert result["chain_owner_unregistered"] == {GENDER: STAMP}
-        # Per table, not an off switch: every other table still ships.
-        assert _touched(pool, "app.revenue_goals"), pool.sql
-        # And not stamped: the chain writes this table, not this job, and a
-        # failure count only a later shipment could clear would outlive the
-        # rollback it describes.
-        assert not [s for s in pool.sql if "failures_since_ok + 1" in s], pool.sql
 
     @pytest.mark.asyncio
     async def test_an_owner_row_for_a_table_it_never_ships_is_not_reported(

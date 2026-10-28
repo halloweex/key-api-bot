@@ -28,6 +28,21 @@ import pytest
 from core import ch_silver, warehouse_cutover
 from core.data_quality import IntegrityIssue, Severity
 
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is what the mirror-landing and reconciliation jobs
+    file, not where the quality journal lives, and it reads the journal
+    back from DuckDB. So this module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_dq_journal_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
+
+
 UNWATCHED = "gold_values_unwatched"
 
 
@@ -138,23 +153,10 @@ class TestItsSeverityFollowsWhoElseLooks:
     """Mutation: make `gold_unwatched_severity` return WARN unconditionally
     and the two CRITICAL tests fail; CRITICAL unconditionally, the WARN one."""
 
-    def test_warn_while_duckdb_gold_is_still_compared(self, duckdb_derives):
-        assert ch_silver.gold_values_unwatched("x").severity is Severity.WARN
-
     def test_critical_once_postgres_alone_derives(self, postgres_alone):
         issue = ch_silver.gold_values_unwatched("x")
         assert issue.severity is Severity.CRITICAL
         assert "no second engine checked" in issue.description
-
-    def test_critical_while_the_way_back_holds_duckdbs_comparison_down(
-        self, monkeypatch,
-    ):
-        """DuckDB derives again but `reconcile_gold` still stands down (the
-        hold): ClickHouse is again the only independent check that runs."""
-        monkeypatch.setattr(warehouse_cutover, "_mode", warehouse_cutover.DUCKDB)
-        monkeypatch.setattr(warehouse_cutover, "_held", True)
-        assert warehouse_cutover.duckdb_derives()
-        assert ch_silver.gold_values_unwatched("x").severity is Severity.CRITICAL
 
     def test_unreadable_predicate_is_critical_and_still_files(self, monkeypatch):
         """Mutation: let the predicate's raise escape and this raises."""
@@ -193,19 +195,6 @@ class TestTheJobFilesWhatTheComparisonCannotReturn:
     """A raise leaves `reconcile_clickhouse` nothing to return. Mutation:
     drop the `if not gold_compared` block in `_run_dq_mirror_landing` and the
     first three fail."""
-
-    @pytest.mark.asyncio
-    async def test_a_raise_is_filed_and_the_run_still_fails(self, duckdb_derives):
-        from tests.unit.test_mirror_landing_isolation import _run
-
-        persisted, paged, resolved = await _run(
-            {"reconcile_clickhouse": RuntimeError("lock wait")})
-        issue = _unwatched(persisted["issues"])
-        assert issue is not None and issue.severity is Severity.WARN
-        assert "reconcile_clickhouse: RuntimeError" in issue.description
-        assert "reconcile_clickhouse: RuntimeError" in persisted["error_message"]
-        # WARN while DuckDB still compares: the digest's, not a page.
-        assert paged == [] and resolved == []
 
     @pytest.mark.asyncio
     async def test_after_step_13_a_raise_pages_although_the_run_failed(
@@ -753,7 +742,8 @@ class TestTheReconciliationCatchUpReadsItsArms:
     async def _queued(monkeypatch, ages):
         from tests.unit.test_scheduler_catchup import _scheduler_with
 
-        scheduler = _scheduler_with(monkeypatch, ages)
+        # Which arms this host writes is read off `stores`' environment.
+        scheduler = _scheduler_with(monkeypatch, ages, writes_layers=None)
         await scheduler._schedule_catchup_runs()
         return set(scheduler._scheduler.added)
 
@@ -819,20 +809,6 @@ class TestTheReconciliationCatchUpReadsItsArms:
         queued = await self._queued(monkeypatch, _ages(
             reconciliation=3 * 3600, integrity=3600))
         assert queued == set()
-
-    @pytest.mark.asyncio
-    async def test_an_unreadable_configuration_leaves_the_job_layer_to_decide(
-        self, monkeypatch, stores,
-    ):
-        from core import ch_common
-
-        def boom():
-            raise RuntimeError("env unreadable")
-
-        monkeypatch.setattr(ch_common, "configured", boom)
-        queued = await self._queued(monkeypatch, _ages(
-            reconciliation=30 * 3600, integrity=3600, reconciliation_ch=None))
-        assert queued == {"dq_reconciliation_catchup"}
 
 
 # ─── Production, one evening ────────────────────────────────────────────────
@@ -947,24 +923,6 @@ class TestNothingNewPagesInProduction:
             payload["data_quality"][layer]["age_seconds"] = 24 * 3600 - 60
         result = await _judge(payload)
         assert (result.severity, result.failure_keys) == ("ok", [])
-
-    @pytest.mark.asyncio
-    async def test_a_blind_comparison_today_is_the_digests_not_a_page(
-        self, duckdb_derives,
-    ):
-        """Production runs DuckDB's derivation (`warehouse_writer_mode.mode`
-        above), so the mirror-landing job files a ClickHouse outage as a WARN
-        for the 09:00 digest and pages nobody over it. An outage that costs
-        the 05:30 comparison against KeyCRM pages, but through the canary's
-        `reconciliation_ch` watch, 30 h after the last run that compared
-        (`TestADeadClickHouseKeepsPaging`)."""
-        from tests.unit.test_mirror_landing_isolation import _run
-
-        assert PRODUCTION_HEALTH_2026_09_30["warehouse_writer_mode"]["mode"] == "duckdb"
-        persisted, paged, _ = await _run(
-            {"reconcile_clickhouse": [ch_silver.gold_values_unwatched("down")]})
-        assert _unwatched(persisted["issues"]).severity is Severity.WARN
-        assert paged == []
 
 
 class TestTheHistoryIsAskedForEveryPagedArm:

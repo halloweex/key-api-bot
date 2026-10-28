@@ -19,6 +19,20 @@ from core.duckdb_store import DuckDBStore
 from core.scheduler import BackgroundScheduler
 
 
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. The
+    half-written selection's and repair's semantics are pinned here on
+    DuckDB's implementation; S14-09 decides what of this to carry to the
+    Postgres one. So this module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_orders_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_orders_write)
+
+
 async def _make_store(tmp_path: Path) -> DuckDBStore:
     store = DuckDBStore(db_path=tmp_path / "test.duckdb")
     await store.connect()
