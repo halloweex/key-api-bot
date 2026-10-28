@@ -3608,7 +3608,13 @@ training frame (`KS_READ_FORECAST_INPUT`), the weekly report
 (`KS_READ_WEEKLY`), the assistant's tools (`KS_READ_CHAT`), the buyer-sync
 selection (`KS_READ_BUYER_SYNC`) and the search index
 (`KS_READ_SEARCH_INDEX`) — read Postgres alone, a failure their own error as
-before; the index keeps one watermark, `last_sync_meilisearch_pg`, and the
+before. That now takes in a lost `KS_PG_DSN` line, which `no_address` used
+to turn into a counted refusal there (the assistant's `data_unavailable`, a
+job's `read_unavailable`): it is `core.pg`'s own `KS_PG_DSN is not set`,
+handled as an unreachable Postgres already was there, while every tab above
+still answers it with its 503 (measured beside the base on one seeded
+Postgres: the same 728 requests, and every tab's answer equal but
+`GET /api/goals`'s 503 above). The index keeps one watermark, `last_sync_meilisearch_pg`, and the
 DuckDB-built index's `meilisearch` cursor went with its frames. None of
 these modules carries `ENV`, `enabled` or `available` any more. The numbers
 are literals DuckDB answered on each fixture before its side went
