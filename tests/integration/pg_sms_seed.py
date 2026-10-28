@@ -39,13 +39,15 @@ needs_postgres = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN")
 
 # What `/sms` reads and writes. The audience reads Silver's orders through
-# `silver.order_lines` (a view over the first three), the buyers, the costs
-# and the opt-outs; the campaigns are the tab's own state.
+# `silver.order_lines` (a view over orders, lines, products and categories),
+# the buyers, the costs, the opt-outs and the buyers' gender; the campaigns
+# are the tab's own state.
 SMS_TABLES = (
     "app.sms_dlr_events", "app.sms_campaign_members", "app.sms_campaigns",
     "app.sms_audience_presets", "app.marketing_optouts",
     "silver.orders", "bronze.order_products", "bronze.products",
     "bronze.categories", "bronze.buyers", "bronze.offer_stocks",
+    "app.buyer_gender",
 )
 # Who may open the dashboard, and what each level may do there.
 ACCESS_TABLES = ("app.dashboard_users", "app.role_permissions")
