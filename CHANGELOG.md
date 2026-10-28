@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.301
+
+- Traffic tab says who the pixel-only buyers are
+- A hung cancel is judged by what the answer did not wait for, not a stopwatch
+- The two preflights are judged by the order they were asked in, not a stopwatch
+
+
 ## 3.0.300
 
 - S14-00: every test starts with no SyncService singleton
