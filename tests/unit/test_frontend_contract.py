@@ -85,11 +85,17 @@ def test_what_the_reports_pages_send_is_what_their_harness_sends():
     m = fc.marketing_page()
     assert m.endpoints == ("/api/reports/marketing-summary",) and m.params == MARGIN_PARAMS
     assert fc.download_csv_path() == "/api/reports/export/csv"
-    assert fc.download_csv_query(c, "top_products", source_id=2, limit=5000, period="month",
+    assert fc.download_csv_query(c, "top_products", chip=2, limit=5000, period="month",
                                  sales_type="all") == (
         "period=month&sales_type=all&type=top_products&source_id=2&limit=5000")
-    assert fc.download_csv_query(c, "summary", period="month", sales_type="all") == (
-        "period=month&sales_type=all&type=summary")
+    # The chip replaces the header's source where it stands; the summary
+    # export keeps the header's.
+    assert fc.download_csv_query(c, "top_products", chip=1, limit=10, period="week",
+                                 sales_type="retail", source_id=4) == (
+        "period=week&sales_type=retail&source_id=1&type=top_products&limit=10")
+    assert fc.download_csv_query(c, "summary", period="month", sales_type="all",
+                                 source_id=4) == (
+        "period=month&sales_type=all&source_id=4&type=summary")
     assert fc.marketing_csv_path() == "/api/reports/marketing-summary/export/csv"
     assert fc.marketing_csv_query(sales_type="retail", period="custom", start_date="2026-10-01",
                                   end_date="2026-10-21", brand="Some Brand") == (

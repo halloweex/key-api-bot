@@ -370,15 +370,17 @@ def download_csv_path() -> str:
     return m.group(1)
 
 
-def download_csv_query(c: Contract, type_: str, *, source_id: Optional[int] = None,
+def download_csv_query(c: Contract, type_: str, *, chip: Optional[int] = None,
                        limit: Optional[int] = None, **state) -> str:
-    """The query `useDownloadCsv(type_, extra)` sends from `c`'s page."""
+    """The query `useDownloadCsv(type_, extra)` sends from `c`'s page:
+    `state` is the page's (the header's `source_id` among it), `chip` the
+    top products' source chip, which replaces it where it stands."""
     pairs = url_set(_pairs(c, endpoint=None, extra=None, **{
         **dict(period=None, start_date=None, end_date=None, source_id=None,
                category_id=None, brand=None, promocode=None), **state}), "type", type_)
     if type_ == "top_products":
-        if source_id:
-            pairs = url_set(pairs, "source_id", str(source_id))
+        if chip:
+            pairs = url_set(pairs, "source_id", str(chip))
         pairs = url_set(pairs, "limit", str(limit))
     return encode(pairs)
 
