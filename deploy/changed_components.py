@@ -1,6 +1,6 @@
 """Which halves of the system a range of commits touched, for deploy.yml.
 
-    git diff --name-only --no-renames BASE HEAD | python3 .github/scripts/changed_components.py
+    git diff --name-only --no-renames BASE HEAD | python3 deploy/changed_components.py
 
 prints three lines for `$GITHUB_OUTPUT`:
 

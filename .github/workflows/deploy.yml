@@ -45,7 +45,7 @@ jobs:
   # queues, so the newer one must carry the cancelled one's changes; and a
   # run whose Rust half failed has not deployed it. A half's baseline is the
   # newest run on main in which that half's deploy job succeeded; with none,
-  # everything counts as changed. The rules are .github/scripts/changed_components.py.
+  # everything counts as changed. The rules are deploy/changed_components.py.
   changes:
     runs-on: ubuntu-latest
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
@@ -93,7 +93,7 @@ jobs:
               printf 'python=true\nrust_image=true\nrust_deploy=true\n'
             else
               git diff --name-only --no-renames "$1" "$GITHUB_SHA" \
-                | python3 .github/scripts/changed_components.py
+                | python3 deploy/changed_components.py
             fi
           }
           python_base=$(last_deployed deploy)

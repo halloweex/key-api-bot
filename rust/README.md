@@ -37,7 +37,7 @@ rust/
 │   ├── src/pytables.rs     GENERATED: Unicode facts CPython 3.14 answers with
 │   ├── gen_pytables.py     writes pytables.rs and tests/fixtures/python_semantics.jsonl
 │   ├── gen_access_fixtures.py   writes tests/fixtures/access_semantics.jsonl
-│   └── tests/              the port against 8 629 CPython answers
+│   └── tests/              the port against 8 638 CPython answers
 ├── crates/ks-loadgen/      the benchmark's closed-loop client
 └── bench/                  bench.sh, the Python side (py_app.py), paths.txt
 ```
@@ -117,7 +117,7 @@ KS_PG_DSN=postgresql://… KS_RUST_PILOT_URL=http://127.0.0.1:8090 TZ=UTC pytest
 ```
 
 - `test_rust_pilot_trend.py` seeds ~42 000 orders through production's own
-  Silver and Gold derivations (`tests/rust_pilot_fixture.py`) and sends 3 260
+  Silver and Gold derivations (`tests/rust_pilot_fixture.py`) and sends 3 347
   trend requests at frozen instants either side of the Kyiv midnights that
   matter.
 - `test_rust_pilot_access.py` sends cookie states × users × tab sets × every
@@ -180,4 +180,4 @@ Everything a route needs to move is already in place and routes nothing:
   `Dockerfile.rust` changed, on an arm64 runner, and deploys it in its own job:
   pull, `up` under the profile, wait for healthy, `nginx -t`, `nginx -s reload`.
   A change to `routes.conf` alone is that job's reload and nothing else
-  (`.github/scripts/changed_components.py` decides).
+  (`deploy/changed_components.py` decides).
