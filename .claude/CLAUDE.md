@@ -675,7 +675,8 @@ any group (`SmsAudienceGroup`, at most `MAX_AUDIENCE_GROUPS` = 5).
 - **One group selects what the audience selected before groups.**
   `tests/sms_segments_legacy.py` freezes the query as it was on main at
   5b4d1c61, and `test_sms_audience_groups_two_engines.py` runs it beside the
-  current one for every filter: the same rows on DuckDB and on PostgreSQL. On
+  current one for every filter: the same rows, on PostgreSQL — and on DuckDB
+  too until step 14's S14-08 left Postgres the audience's only engine. On
   production on 2026-10-17, group B alone through both: zero rows different.
 - **A group's window is its own.** `scored` reads everyone inside the widest
   window and a narrower group carries `recency <= ?` in its own flag, so a
@@ -5942,12 +5943,17 @@ literal DuckDB write, and a table belongs to `KS_SMS_STORE`, `KS_USER_STORE`
 or `KS_WRITE_WAREHOUSE` only if every writer runs on the branch where that
 reader says DuckDB. Since step 14's S14-08 the first two have no DuckDB
 branch left to read: their sets are literals (`STORE_SWITCH_TABLES`, what the
-walk derived the commit before) and the walk requires that nothing writes
-those tables in the file. A write naming its table as a `{hole}` — one text
-for two engines, chain 10's watchdog statements — is rendered for DuckDB by
-its module's own function, or says what fills the hole (`TEMPLATED_ELSEWHERE`):
-the walk lost all three sample tables before it read them. `duckdb_written()` is held to the same writers, not to
-`kind` — `schema_migrations` is retired at stage 5 and written until then.
+walk derived the commit before) and the walk requires that no literal DuckDB
+write of those tables is left. That cannot see a DuckDB tail back inside a
+router, since the walk reads every routed statement as Postgres's, so the
+four routers and `_PgTx`'s methods are held to their syntax instead
+(`tests/store_reach.py`): nothing on `self` but what renders the statement,
+no `super`, no way to the store or its file. A write naming its table as a
+`{hole}` — one text for two engines, chain 10's watchdog statements — is
+rendered for DuckDB by its module's own function, or says what fills the hole
+(`TEMPLATED_ELSEWHERE`): the walk lost all three sample tables before it read
+them. `duckdb_written()` is held to the same writers, not to `kind` —
+`schema_migrations` is retired at stage 5 and written until then.
 
 `deploy/duckdb_table_fates_check.py` asks the same of a file: the newest
 nightly backup, opened read-only, never the live database (refused by name, by
