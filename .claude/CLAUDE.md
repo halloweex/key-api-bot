@@ -5869,9 +5869,10 @@ store helpers that route by a switch of their own (`_sms_run`, `_users_run`,
 switch. Since step 14's S14-08 they write Postgres alone and are checked to
 read no switch (`_POSTGRES_STORE_HELPERS`), with `_PgTx`'s `none`, `many`,
 `one` and `all` beside them: `_DuckTx`'s same-named methods had hidden the
-transaction's writers from the walk, by accident. And "holding a pool" means reaching `get_pool` through a callee too —
-`replicate_managers` held it inside `write_managers`, where the walk did not
-look — with `_mirror` and `upsert_orders` the two named per-tick exemptions.
+transaction's writers from the walk, by accident. And "holding a pool" means
+reaching `get_pool` through a callee too — `replicate_managers` held it
+inside `write_managers`, where the walk did not look — with `_mirror` and
+`upsert_orders` the two named per-tick exemptions.
 Limits that remain: a target held on an object attribute
 (`dialect.silver_orders`) reads as unknown, statements kept in a container
 constant (a dict of SQL) are not rendered, and DuckDB SQL beside a Postgres
@@ -5942,9 +5943,9 @@ or `KS_WRITE_WAREHOUSE` only if every writer runs on the branch where that
 reader says DuckDB. Since step 14's S14-08 the first two have no DuckDB
 branch left to read: their sets are literals (`STORE_SWITCH_TABLES`, what the
 walk derived the commit before) and the walk requires that nothing writes
-those tables in the file. A write naming its table as a `{hole}` — one text for two
-engines, chain 10's watchdog statements — is rendered for DuckDB by its
-module's own function, or says what fills the hole (`TEMPLATED_ELSEWHERE`):
+those tables in the file. A write naming its table as a `{hole}` — one text
+for two engines, chain 10's watchdog statements — is rendered for DuckDB by
+its module's own function, or says what fills the hole (`TEMPLATED_ELSEWHERE`):
 the walk lost all three sample tables before it read them. `duckdb_written()` is held to the same writers, not to
 `kind` — `schema_migrations` is retired at stage 5 and written until then.
 
