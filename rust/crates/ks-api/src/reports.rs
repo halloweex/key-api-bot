@@ -101,7 +101,7 @@ fn int(raw: String, name: &'static str, errors: &mut Vec<FieldError>) -> Option<
         kind,
         loc: ("query", name),
         msg: int_message(kind),
-        input: raw,
+        input: Some(raw),
     });
     None
 }
@@ -114,15 +114,14 @@ fn parse(route: Route, raw: &str) -> Result<Query, Failure> {
     let mut take = |name: &str| last.remove(name);
     let mut errors = Vec::new();
     // FastAPI reads the parameters in the signature's order. The export's
-    // `type` comes first and is required; FastAPI's `input` for a missing
-    // one is null, and a missing one is hostile input, compared by status.
+    // `type` comes first and is required.
     let kind = match (route, take("type")) {
         (Route::ExportCsv, None) => {
             errors.push(FieldError {
                 kind: "missing",
                 loc: ("query", "type"),
                 msg: "Field required",
-                input: String::new(),
+                input: None,
             });
             None
         }
@@ -1541,5 +1540,16 @@ mod tests {
         // What a route does not declare, FastAPI never reads.
         assert!(kinds(Route::Marketing, "source_id=x&limit=y&type=z").is_empty());
         assert!(kinds(Route::AllProducts, "limit=y").is_empty());
+    }
+
+    #[test]
+    fn a_missing_type_is_fastapis_422() {
+        let Err(Failure::Unprocessable(errors)) = parse(Route::ExportCsv, "") else {
+            panic!("expected a 422");
+        };
+        assert_eq!(
+            serde_json::to_string(&errors).unwrap(),
+            r#"[{"type":"missing","loc":["query","type"],"msg":"Field required","input":null}]"#
+        );
     }
 }

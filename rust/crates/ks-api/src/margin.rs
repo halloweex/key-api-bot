@@ -75,7 +75,7 @@ fn field_error(
         kind,
         loc: ("query", name),
         msg,
-        input: input.to_owned(),
+        input: Some(input.to_owned()),
     }
 }
 
