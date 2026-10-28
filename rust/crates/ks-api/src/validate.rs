@@ -75,8 +75,10 @@ pub fn category_id(value: Option<&PyInt>) -> Result<bool, String> {
 
 /// Python's `\w` approximated by `char::is_alphanumeric`; they part on
 /// Unicode's Other_Alphabetic marks (a Devanagari vowel sign is a letter
-/// here and not there). A brand only ever selects the line-level branch,
-/// which the pilot does not serve, so the difference is 400 against 501.
+/// here and not there). On the trend a brand only ever selects the
+/// line-level branch, which the pilot does not serve, so the difference is
+/// 400 against 501; on /reports and /marketing, which it serves, 400 against
+/// 200, and the harness lists it.
 fn brand_char(c: char) -> bool {
     c == '_' || c.is_alphanumeric() || py_isspace(c) || "-.'&,()".contains(c)
 }
@@ -101,6 +103,12 @@ pub fn brand(value: Option<&str>) -> Result<bool, String> {
         ));
     }
     Ok(true)
+}
+
+/// What `validate_brand_name` returns: the stripped brand, or `None` when
+/// none was sent (absent or empty).
+pub fn brand_value(value: Option<&str>) -> Result<Option<String>, String> {
+    Ok(brand(value)?.then(|| py_strip(value.unwrap_or_default()).to_owned()))
 }
 
 /// `validate_promocode`; `Ok(true)` when the stripped code is not empty.

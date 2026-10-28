@@ -129,7 +129,8 @@ pub fn lax_bool(raw: &str) -> Option<bool> {
     }
 }
 
-fn int_message(kind: &str) -> &'static str {
+/// pydantic's `msg` for an error `lax_int` reports.
+pub fn int_message(kind: &str) -> &'static str {
     if kind == "int_parsing_size" {
         "Unable to parse input string as an integer, exceeded maximum size"
     } else {
