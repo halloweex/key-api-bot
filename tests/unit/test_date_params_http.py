@@ -36,7 +36,6 @@ from core.filters import MAX_RANGE_DAYS
 from tests.routes_helper import iter_endpoints
 from tests.unit.test_read_fallback_http import _request_for
 from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
-    _seed_gold,
     admin_client,
 )
 from web.main import app
@@ -45,37 +44,68 @@ from web.main import app
 def _chains_on_duckdb(monkeypatch):
     """Since step 14's S14-00 every write chain writes Postgres, a constant.
     This module's subject is how a route reads its dates, not where its rows
-    live, and it runs against the per-test DuckDB file with no Postgres
-    behind the client. `/api/returns` joins the managers, whose reads follow
-    chain 5 to Postgres once it writes there, and the marketing report and
-    its CSV read chain 7a's target line the same way; so this module keeps
-    DuckDB as those chains' store (`tests.conftest.route_chains_to_duckdb`)
-    until their DuckDB branches go."""
-    from core import pg_goals_write, pg_managers_write
+    live, and the routes that still have a DuckDB tail run against the
+    per-test DuckDB file. The goal routes read chain 7a's table, which
+    follows the chain to Postgres once it writes there; so this module keeps
+    DuckDB as that chain's store (`tests.conftest.route_chains_to_duckdb`)
+    until its DuckDB branch goes. (Chain 5 was here too, for `/api/returns`'
+    managers join, until step 14's S14-06 gave the dashboard one path.)"""
+    from core import pg_goals_write
     from tests.conftest import route_chains_to_duckdb
 
-    route_chains_to_duckdb(monkeypatch, pg_goals_write, pg_managers_write)
+    route_chains_to_duckdb(monkeypatch, pg_goals_write)
 
 
-# The routers step 14's S14-05 left on Postgres alone, by the module each
-# reads through, and the routes they answer. Those routes are answered by a
-# real Postgres here; without one they refuse, and say so as a skip.
+# The routers step 14's S14-05 and S14-06 left on Postgres alone, by the
+# module each reads through, and the routes they answer. Those routes are
+# answered by a real Postgres here; without one they refuse, and say so as a
+# skip.
 POSTGRES_ONLY = ("pg_traffic_read", "pg_margin_read", "pg_products_intel_read",
-                 "pg_reports_read", "pg_marketing_read", "pg_lookups_read")
+                 "pg_reports_read", "pg_marketing_read", "pg_lookups_read",
+                 "pg_dashboard_read", "pg_silver_read")
 POSTGRES_ONLY_ROUTES = ("/api/traffic/", "/api/margin/", "/api/products/intel/",
-                        "/api/reports/", "/api/promocodes/analytics")
+                        "/api/reports/", "/api/promocodes/analytics",
+                        # The dashboard's, S14-06.
+                        "/api/summary", "/api/revenue/trend", "/api/sales/by-source",
+                        "/api/products/top", "/api/returns",
+                        "/api/products/performance", "/api/brands/analytics",
+                        "/api/categories/breakdown", "/api/customers/insights")
 DSN = os.getenv("KS_PG_DSN")
+
+
+class _OneConnectionPool:
+    """What `core.pg_gold_read`'s two readers ask `get_pool` for, one
+    connection per `acquire()` on the caller's loop."""
+
+    def acquire(self):
+        return _OneConnection()
+
+
+class _OneConnection:
+    async def __aenter__(self):
+        import asyncpg
+
+        self.conn = await asyncpg.connect(DSN)
+        return self.conn
+
+    async def __aexit__(self, *exc):
+        await self.conn.close()
 
 
 @pytest.fixture(autouse=True)
 def _postgres_only_routers_on_their_own_connections(monkeypatch):
-    """The six read a live Postgres, one connection per statement on the
-    request's own loop: the client runs every request on a loop of its own,
-    and a pool would outlive the loop it was made on. What is read is
-    whatever the database holds — the question is the status, not the
-    numbers."""
+    """The routers with no DuckDB tail read a live Postgres, one connection
+    per statement on the request's own loop: the client runs every request
+    on a loop of its own, and a pool would outlive the loop it was made on.
+    What is read is whatever the database holds — the question is the
+    status, not the numbers. The dashboard's Gold readers take the pool
+    from `core.pg.get_pool` themselves, so they are handed one that opens a
+    connection per `acquire()`."""
     if not DSN:
         return
+    from unittest.mock import AsyncMock, patch
+
+    from core import pg_gold_read
 
     async def fetch(sql, params=()):
         import asyncpg
@@ -91,6 +121,17 @@ def _postgres_only_routers_on_their_own_connections(monkeypatch):
 
     for module in POSTGRES_ONLY:
         monkeypatch.setattr(f"core.{module}.fetch", fetch)
+
+    def on_one_connection(reader):
+        async def read(*args, **kwargs):
+            with patch("core.pg.get_pool",
+                       new=AsyncMock(return_value=_OneConnectionPool())):
+                return await reader(*args, **kwargs)
+        return read
+
+    for name in ("fetch_summary", "fetch_series"):
+        monkeypatch.setattr(pg_gold_read, name,
+                            on_one_connection(getattr(pg_gold_read, name)))
 
 
 def _needs_postgres(path: str) -> None:
@@ -224,6 +265,7 @@ def test_dates_inside_the_window_are_answered(admin_client, endpoint, start, end
 @pytest.mark.parametrize("compare_type", COMPARISONS)
 @pytest.mark.parametrize("start, end", INSIDE)
 def test_the_trend_answers_them_under_every_comparison(admin_client, compare_type, start, end):
+    _needs_postgres("/api/revenue/trend")
     r = admin_client.get("/api/revenue/trend", params={
         "start_date": start, "end_date": end, "compare_type": compare_type})
     assert r.status_code == 200, r.text
@@ -250,9 +292,37 @@ def test_the_marketing_csv_labels_29_february_a_year_back_as_the_28th(admin_clie
     assert "2023-02-01 — 2023-02-28" in r.content.decode("utf-8-sig")
 
 
+@pytest.fixture
+def gold_cell():
+    """One retail roll-up cell in Postgres's Gold, where the trend reads it
+    since step 14's S14-06, taken out again afterwards."""
+    import asyncio
+
+    import asyncpg
+
+    _needs_postgres("/api/revenue/trend")
+    day = date(2026, 1, 7)
+
+    async def run(*statements):
+        conn = await asyncpg.connect(DSN)
+        try:
+            for sql, args in statements:
+                await conn.execute(sql, *args)
+        finally:
+            await conn.close()
+
+    clear = ("DELETE FROM gold.daily_revenue WHERE date = $1", (day,))
+    asyncio.run(run(clear, (
+        "INSERT INTO gold.daily_revenue (date, sales_type, source_id, revenue,"
+        " orders_count, unique_customers, new_customers, returning_customers,"
+        " returns_count, returns_revenue, avg_order_value)"
+        " VALUES ($1, 'retail', NULL, 1234.5, 3, 3, 1, 2, 0, 0, 411.5)", (day,))))
+    yield
+    asyncio.run(run(clear))
+
+
 class TestValidInputAnswersAsBefore:
-    def test_a_forgiven_form_answers_as_its_iso_spelling(self, admin_client):
-        _seed_gold(date(2026, 1, 7), 1234.5, 3)
+    def test_a_forgiven_form_answers_as_its_iso_spelling(self, admin_client, gold_cell):
         forgiven = admin_client.get("/api/revenue/trend", params={
             "start_date": "2026-1-5", "end_date": "2026-01- 9"})
         iso = admin_client.get("/api/revenue/trend", params={
@@ -263,6 +333,7 @@ class TestValidInputAnswersAsBefore:
         assert forgiven.json()["revenue"][2] == 1234.5
 
     def test_a_range_of_exactly_the_cap_is_answered(self, admin_client):
+        _needs_postgres("/api/revenue/trend")
         start = date(2016, 1, 1)
         end = start + timedelta(days=MAX_RANGE_DAYS - 1)
         r = admin_client.get("/api/revenue/trend", params={

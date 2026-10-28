@@ -66,12 +66,11 @@ decision, not a failure.
 from __future__ import annotations
 
 import ast
-import asyncio
 import logging
 import pathlib
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Dict, Iterable, List, Optional, Set
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1101,25 +1100,6 @@ def admin_client(monkeypatch):
          "auth_date": str(int(time.time()))}, role="admin")))
     yield client
     limiter.reset()
-
-
-def _seed_gold(day: date, revenue: float, orders: int) -> None:
-    """One Gold cell in the per-test DuckDB file the app is about to open."""
-    from core.duckdb_store import DuckDBStore
-
-    async def seed():
-        store = DuckDBStore()
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                conn.execute(
-                    "INSERT INTO gold_daily_revenue (date, sales_type, revenue, "
-                    "orders_count) VALUES (?, 'retail', ?, ?)",
-                    [day, revenue, orders])
-        finally:
-            await store.close()
-
-    asyncio.run(seed())
 
 
 class TestThroughTheApp:
