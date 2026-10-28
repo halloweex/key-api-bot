@@ -36,6 +36,9 @@ def ch(monkeypatch):
 
     monkeypatch.setattr("core.ch_common.execute", execute)
     monkeypatch.setattr(ch_cohorts.asyncio, "sleep", sleep)
+    # An address to ask: since step 14's S14-07 `fetch` refuses without one
+    # before it calls `execute` (the router used to ask `available()`).
+    monkeypatch.setenv("KS_CH_URL", "http://clickhouse.test:8123")
     return script, calls, slept
 
 

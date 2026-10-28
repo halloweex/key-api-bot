@@ -365,22 +365,23 @@ class TestRoutedReads:
         assert "\n" not in lever and len(lever) <= 150
 
 
-class TestWhatOffWouldRefuseIsPublished:
-    """Web publishes a route to DuckDB exactly when `off` would refuse it.
-    The cohorts' gate is `ch_cohorts.enabled() and ch_cohorts.available()`,
-    and under `off` everything else goes to `no_engine` and is refused;
-    `misconfigured` and `no_engine` together must name exactly that."""
+class TestWhatOffWouldRefuseIsSeen:
+    """Until step 14's S14-07 the cohorts' gate was `ch_cohorts.enabled() and
+    ch_cohorts.available()`, and web published a route to DuckDB
+    (`misconfigured`, `no_engine`) exactly when `off` would refuse it. The
+    cohorts ask ClickHouse whatever `KS_READ_COHORTS` says now, so nothing
+    routes them anywhere: they are refused exactly when there is no
+    ClickHouse to ask, and every such refusal is counted, which the canary
+    pages as `read_refused`. Mutation: let a missing `KS_CH_URL` answer, or
+    refuse a configured one by the switch."""
 
-    def test_the_engine_only_table_is_the_cohorts_gate(self):
-        from core import ch_cohorts, read_fallback
-
-        assert read_fallback.ENGINE_ONLY == {"cohorts": (ch_cohorts.ENV, "clickhouse")}
-
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("switch", [None, "duckdb", "clickhouse", " ClickHouse "])
     @pytest.mark.parametrize("url", [None, "http://ks-clickhouse:8123"])
-    def test_published_exactly_when_refused(self, fresh_read_fallback, monkeypatch,
-                                            switch, url):
-        from core import ch_cohorts
+    async def test_refused_exactly_without_an_address_and_counted(
+        self, fresh_read_fallback, monkeypatch, tmp_path, switch, url,
+    ):
+        from core.duckdb_store import DuckDBStore
 
         if switch is None:
             monkeypatch.delenv("KS_READ_COHORTS", raising=False)
@@ -392,12 +393,22 @@ class TestWhatOffWouldRefuseIsPublished:
             monkeypatch.setenv("KS_CH_URL", url)
         fresh_read_fallback.configure_mode()
 
-        refused_under_off = not (ch_cohorts.enabled() and ch_cohorts.available())
-        published = [line for line in (fresh_read_fallback.misconfigured()
-                                       + fresh_read_fallback.no_engine_routes())
-                     if "KS_READ_COHORTS" in line]
-        assert bool(published) == refused_under_off, published
-        assert len(published) <= 1, "one cause, one line"
+        async def _answers(sql, **_):
+            return ""
+
+        monkeypatch.setattr("core.ch_common.execute", _answers)
+        store = DuckDBStore(db_path=tmp_path / "never.duckdb")
+        try:
+            rows = await store._analytics_rows(
+                lambda d: f"SELECT 1 FROM {d.silver_orders} o", [], ("int",))
+        except fresh_read_fallback.ReadUnavailable as refused:
+            assert url is None, "a configured ClickHouse was refused"
+            assert refused.surface == "cohorts"
+            assert fresh_read_fallback.refusals()["cohorts"]["count"] == 1
+        else:
+            assert url is not None, "no ClickHouse, and the cohorts answered"
+            assert rows == []
+        assert fresh_read_fallback.no_engine_routes() == []
 
 
 # ─── A probe that read nothing clears nothing ──────────────────────────────

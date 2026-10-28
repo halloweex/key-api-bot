@@ -1,8 +1,13 @@
-"""Which engine answers `/expenses`, and the fan-out the port found.
+"""The `/expenses` statements, the history gate, and the fan-out the port found.
 
-The numbers are `tests/integration/test_expenses_two_engines.py`'s job. What
-is proved here is the wiring, the shared parse, and one defect that was live on
-production before this port touched anything:
+The numbers are `tests/integration/test_expenses_two_engines.py`'s job,
+against a real Postgres; that `_expenses_run` asks Postgres and nothing else
+since step 14's S14-07 is `tests/unit/test_tab_routers_postgres_only.py`'s
+(the flag, every method on an empty DuckDB and the DuckDB branch's
+offloading went with that PR). What is proved here is the statements, the
+history gate — an explicit refusal, reading `bronze.expenses` by its name —
+the shared parse, and one defect that was live on production before this
+port touched anything:
 
 `get_profit_analysis` read `FROM orders o LEFT JOIN expenses e` and summed
 `o.grand_total` over the joined rows, so an order carrying two expenses had its
@@ -13,23 +18,19 @@ production catalogue: ₴16,433,644.56 reported over 90 days against a true
 from __future__ import annotations
 
 import ast
-import asyncio
-import inspect
-import textwrap
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from core import pg_expenses_read
 from core.duckdb_store import DuckDBStore
-from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+from core import read_fallback
+from core.sql_dialect import POSTGRES, render_tables
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "expenses.py"
 W = (date.today() - timedelta(days=30), date.today())
-TIMEOUT_S = 20
 
 READS = (
     ("get_expense_types", (), {}),
@@ -39,42 +40,6 @@ READS = (
     ("get_ad_spend_by_platform", W, {}),
     ("get_expenses_summary", (), {}),
 )
-
-
-class TestTheFlag:
-    def test_it_defaults_to_duckdb(self, monkeypatch):
-        monkeypatch.delenv("KS_READ_EXPENSES", raising=False)
-        assert pg_expenses_read.enabled() is False
-
-    def test_postgres_turns_it_on(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
-        assert pg_expenses_read.enabled() is True
-
-    def test_a_typo_raises(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_EXPENSES", "postgress")
-        with pytest.raises(ValueError, match="KS_READ_EXPENSES"):
-            pg_expenses_read.enabled()
-
-
-class TestEveryMethodActuallyRuns:
-    """A hole written with single braces parses, reads correctly to a human,
-    and fails only on the call. The timeout is the second assertion: the store
-    lock is not reentrant and a nested acquisition hangs rather than raising."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,args,kwargs", READS, ids=[r[0] for r in READS])
-    async def test_it_returns_rather_than_raising_or_hanging(
-        self, tmp_path, monkeypatch, name, args, kwargs,
-    ):
-        monkeypatch.delenv("KS_READ_EXPENSES", raising=False)
-        store = DuckDBStore(db_path=tmp_path / f"e-{name}.duckdb")
-        await store.connect()
-        try:
-            await asyncio.wait_for(
-                getattr(store, name)(*args, **kwargs), timeout=TIMEOUT_S,
-            )
-        finally:
-            await store.close()
 
 
 class TestTheRoutedBodies:
@@ -108,13 +73,12 @@ class TestTheRoutedBodies:
         for name, lineno, text in self._statements():
             assert "{" in text, f"{name}:{lineno} names no table hole"
 
-    def test_both_renderings_leave_no_hole(self):
+    def test_the_rendering_leaves_no_hole(self):
         for name, lineno, text in self._statements():
-            for dialect in (DUCKDB, POSTGRES):
-                rendered = render_tables(text, dialect)
-                assert "{" not in rendered and "}" not in rendered, (
-                    f"{name}:{lineno} unrendered for {dialect.name}"
-                )
+            rendered = render_tables(text, POSTGRES)
+            assert "{" not in rendered and "}" not in rendered, (
+                f"{name}:{lineno} unrendered for {POSTGRES.name}"
+            )
 
     def test_no_read_opens_the_store_or_bypasses_the_router(self):
         src = REPOSITORY.read_text(encoding="utf-8")
@@ -129,20 +93,6 @@ class TestTheRoutedBodies:
                     assert "connection()" not in head, f"{fn.name} opens DuckDB"
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                     assert node.func.attr != "execute", f"{fn.name} bypasses the router"
-
-    def test_the_router_keeps_the_offloading_helpers(self):
-        """`/traffic` lost these by writing the obvious thing; the DuckDB
-        branch is what answers when Postgres is down, and it must not block
-        the event loop without a bound."""
-        from core.repositories.expenses import ExpensesMixin
-
-        src = inspect.getsource(ExpensesMixin._expenses_run)
-        assert "self._fetch_one(" in src and "self._fetch_all(" in src
-        for node in ast.walk(ast.parse(textwrap.dedent(src))):
-            if isinstance(node, ast.AsyncWith):
-                head = ast.unparse(node.items[0].context_expr)
-                assert "connection()" not in head, "nested store-lock acquisition"
-
 
 class TestTheFanOutIsFixed:
     """The defect this port surfaced, pinned so it cannot return."""
@@ -308,18 +258,25 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
     async def test_a_body_reading_the_landing_waits_for_history(
         self, tmp_path, monkeypatch,
     ):
-        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
+        """And waiting is a refusal: no engine could answer it — what
+        `no_engine` made of it under `KS_DUCKDB=off` before step 14's S14-07,
+        a 503 naming `expenses`, never a page of zeros."""
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
         store = DuckDBStore(db_path=tmp_path / "h1.duckdb")
         await store.connect()
+        read_fallback.reset_counts()
         try:
             with patch("core.pg_expenses_read.backfilled",
                        new=AsyncMock(return_value=False)), \
                  patch("core.pg_expenses_read.fetch",
                        new=AsyncMock(return_value=[])) as fetch:
-                await store.get_profit_analysis(*W)
+                with pytest.raises(read_fallback.ReadUnavailable) as raised:
+                    await store.get_profit_analysis(*W)
             fetch.assert_not_awaited()
+            assert raised.value.surface == "expenses"
+            assert read_fallback.refusals()["expenses"]["count"] == 1
         finally:
+            read_fallback.reset_counts()
             await store.close()
 
     @pytest.mark.asyncio
@@ -329,7 +286,6 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
         The summary's totals query is `SELECT COALESCE(SUM(...), 0), ...`
         with no GROUP BY, which always returns exactly one row — mocking it
         empty tests the mock, not the code."""
-        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
         store = DuckDBStore(db_path=tmp_path / "h2.duckdb")
         await store.connect()
@@ -349,7 +305,6 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
     ):
         """`manual_expenses` is replicated whole and the type dictionary is
         re-shipped every sync; neither has history to be missing."""
-        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
         store = DuckDBStore(db_path=tmp_path / "h3.duckdb")
         await store.connect()
@@ -382,6 +337,44 @@ class TestHistoryMustBeAcrossBeforePostgresAnswers:
             assert await r.backfilled() is True
             assert await r.backfilled() is True
         assert conn.fetchval.await_count == 1, "a settled latch was re-read"
+        # The table asked for by its name (step 14, S14-07).
+        assert conn.fetchval.await_args.args[1] == "bronze.expenses"
+
+    def test_the_gate_names_the_table_rather_than_importing_it(self):
+        """`backfilled()` writes `bronze.expenses` out instead of importing
+        `EXPENSES_TABLE` from `core.pg_expense_backfill`, which goes with the
+        backfills (S14-13): an import that failed inside its `try` would be a
+        refusal, and /expenses a 503 on every start. Mutation: import it
+        again."""
+        source = (REPO / "core" / "pg_expenses_read.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        imported = {node.module for node in ast.walk(tree)
+                    if isinstance(node, ast.ImportFrom)}
+        assert "core.pg_expense_backfill" not in imported
+        assert not any(isinstance(node, ast.Name) and node.id == "EXPENSES_TABLE"
+                       for node in ast.walk(tree))
+        assert '"bronze.expenses"' in source
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_watermark_is_refused(self):
+        """The check that cannot read `meta.mirror_state` is refused naming
+        `expenses` — the read behind it is not going to succeed either — and
+        the refusal holds until the recheck window passes."""
+        from core import pg_expenses_read as r
+
+        down = OSError("connection refused")
+        read_fallback.reset_counts()
+        try:
+            with patch("core.pg.get_pool", new=AsyncMock(side_effect=down)):
+                with pytest.raises(read_fallback.ReadUnavailable) as raised:
+                    await r.backfilled()
+                assert raised.value.__cause__ is down
+                with pytest.raises(read_fallback.ReadUnavailable):
+                    await r.backfilled()
+            assert read_fallback.refusals()["expenses"]["count"] == 2
+        finally:
+            r._check_failed = None
+            read_fallback.reset_counts()
 
 
 class TestItDoesNotTakeTheDuckDbLock:
@@ -389,7 +382,6 @@ class TestItDoesNotTakeTheDuckDbLock:
     async def test_a_postgres_read_answers_while_the_store_lock_raises(
         self, tmp_path, monkeypatch,
     ):
-        monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
         store = DuckDBStore(db_path=tmp_path / "ex.duckdb")
         await store.connect()
@@ -404,17 +396,3 @@ class TestItDoesNotTakeTheDuckDbLock:
             assert "bronze.expense_types" in fetch.await_args.args[0]
         finally:
             await store.close()
-
-    @pytest.mark.asyncio
-    async def test_the_duckdb_path_still_uses_the_store(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("KS_READ_EXPENSES", raising=False)
-        store = DuckDBStore(db_path=tmp_path / "ex2.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_expenses_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await store.get_expense_types()
-            fetch.assert_not_awaited()
-        finally:
-            await store.close()
-

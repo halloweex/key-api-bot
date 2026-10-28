@@ -1,10 +1,13 @@
-"""The chat tools' engine switch — the structure a two-engine test cannot see."""
+"""The chat tools' one door — the structure a two-engine test cannot see.
+
+Since step 14's S14-07 `_chat_run` reads Postgres alone and `KS_READ_CHAT`
+chooses nothing (`tests/unit/test_tab_routers_postgres_only.py`); the tests
+of that switch — its default, a typo raising — went with it."""
 from __future__ import annotations
 
 import ast
 import pathlib
 
-import pytest
 
 CHAT_TOOLS = pathlib.Path(__file__).resolve().parents[2] / "core" / "chat_tools.py"
 
@@ -13,19 +16,6 @@ def _functions():
     tree = ast.parse(CHAT_TOOLS.read_text(encoding="utf-8"))
     return {n.name: n for n in tree.body
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-
-
-class TestTheSwitch:
-    def test_an_unknown_value_raises(self, monkeypatch):
-        from core import pg_chat_read
-        monkeypatch.setenv("KS_READ_CHAT", "postgre")
-        with pytest.raises(ValueError):
-            pg_chat_read.enabled()
-
-    def test_default_is_duckdb(self, monkeypatch):
-        from core import pg_chat_read
-        monkeypatch.delenv("KS_READ_CHAT", raising=False)
-        assert pg_chat_read.enabled() is False
 
 
 class TestOneDoorToTheStore:

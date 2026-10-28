@@ -275,42 +275,9 @@ class TestAFailureIsTheRefusalOffMade:
         assert "backfilled" in str(raised.value.__cause__)
         engine.assert_not_awaited()
         # The type dictionary and the typed expenses have no history to miss.
+        # That the gate names `bronze.expenses` rather than importing it from
+        # the backfill module is `tests/unit/test_pg_expenses_read.py`'s.
         assert await _manual(store) == [(1,)]
-
-    @pytest.mark.asyncio
-    async def test_the_gate_reads_the_table_by_its_name(self, monkeypatch):
-        """`backfilled()` asks for `bronze.expenses` written out, so it does
-        not depend on `core.pg_expense_backfill`, which goes with the
-        backfills (S14-13): an import failing inside its `try` would be a
-        503 on every start. Mutation: import `EXPENSES_TABLE` again."""
-        import ast
-
-        from core import pg_expenses_read
-
-        source = (ROOT / "core" / "pg_expenses_read.py").read_text(encoding="utf-8")
-        imported = {node.module for node in ast.walk(ast.parse(source))
-                    if isinstance(node, ast.ImportFrom)}
-        assert "core.pg_expense_backfill" not in imported
-
-        conn = AsyncMock()
-        conn.fetchval = AsyncMock(return_value=True)
-
-        class _Pool:
-            def acquire(self):
-                class _Ctx:
-                    async def __aenter__(self_inner):
-                        return conn
-
-                    async def __aexit__(self_inner, *exc):
-                        return False
-                return _Ctx()
-
-        monkeypatch.setattr(pg_expenses_read, "_backfilled", False)
-        monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
-        monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
-        monkeypatch.setattr("core.pg.get_pool", AsyncMock(return_value=_Pool()))
-        assert await pg_expenses_read.backfilled() is True
-        assert conn.fetchval.await_args.args[1] == "bronze.expenses"
 
 
 # (reader, module, function it calls, how to call it)

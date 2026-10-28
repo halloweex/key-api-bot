@@ -190,40 +190,60 @@ class TestAnInstantOnTheWireIsNormalised:
 
     Behavioural, not structural: the failure is in what the driver renders, so
     nothing in the source distinguishes a safe `.isoformat()` from an unsafe
-    one. Driving one engine under two session timezones is enough to catch it
-    and needs no second engine — which matters, because the differential test
-    that would also catch it only runs where a PostgreSQL is available.
+    one. Driving the engine under several session timezones is enough to
+    catch it. Found on DuckDB, which rendered a `TIMESTAMPTZ` in the session's
+    zone; since step 14's S14-07 `/inventory` reads Postgres alone, so the
+    session driven is Postgres' (`server_settings`), against a real server.
+    Skipped without `KS_PG_DSN`, which CI supplies.
     """
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("session_tz", ("UTC", "Europe/Kyiv",
                                             "Pacific/Kiritimati"))
     async def test_the_stock_summary_stamp_does_not_move_with_the_session(
-        self, tmp_path, session_tz,
+        self, tmp_path, monkeypatch, session_tz,
     ):
+        import os
         from datetime import date, datetime, timezone
+        from unittest.mock import AsyncMock, patch
 
-        from core.duckdb_store import DuckDBStore
+        import asyncpg
 
+        from tests.integration.pg_tab_seed import store_that_never_reaches_duckdb
+
+        dsn = os.getenv("KS_PG_DSN")
+        if not dsn:
+            pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
         stamp = datetime(2026, 9, 6, 11, 50, 45, tzinfo=timezone.utc)
-        store = DuckDBStore(db_path=tmp_path / f"tz-{session_tz.replace('/', '-')}.duckdb")
-        await store.connect()
+        pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2,
+                                         server_settings={"timezone": session_tz})
+        tables = ("app.sku_inventory_status", "bronze.offer_stocks")
+
+        async def _empty():
+            async with pool.acquire() as conn:
+                for table in tables:
+                    await conn.execute(f"TRUNCATE {table}")
+
         try:
-            async with store.connection() as conn:
-                conn.execute(f"SET TimeZone='{session_tz}'")
-                conn.execute(
-                    "INSERT INTO offer_stocks (id, sku, price, purchased_price,"
+            await _empty()
+            async with pool.acquire() as conn:
+                assert await conn.fetchval("SHOW timezone") == session_tz
+                await conn.execute(
+                    "INSERT INTO bronze.offer_stocks (id, sku, price, purchased_price,"
                     " quantity, reserve) VALUES (1, 'S-1', 500, 250, 7, 0)")
-                conn.execute(
-                    "INSERT INTO sku_inventory_status (offer_id, product_id, sku,"
+                await conn.execute(
+                    "INSERT INTO app.sku_inventory_status (offer_id, product_id, sku,"
                     " name, brand, category_id, quantity, reserve, price,"
                     " purchased_price, first_seen_at, updated_at)"
-                    " VALUES (1, 101, 'S-1', 'Name', 'B', 1, 7, 0, 500, 250, ?, ?)",
-                    [date(2026, 1, 1), stamp])
-
-            summary = await store.get_stock_summary(limit=5)
+                    " VALUES (1, 101, 'S-1', 'Name', 'B', 1, 7, 0, 500, 250, $1, $2)",
+                    date(2026, 1, 1), stamp)
+            store = store_that_never_reaches_duckdb(tmp_path, monkeypatch, "/inventory")
+            with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
+                    patch("core.pg.require_revision", new=AsyncMock()):
+                summary = await store.get_stock_summary(limit=5)
             assert summary["lastSync"] == "2026-09-06T11:50:45+00:00", (
                 f"the session timezone reached the wire: {summary['lastSync']}"
             )
         finally:
-            await store.close()
+            await _empty()
+            await pool.close()
