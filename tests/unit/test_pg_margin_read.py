@@ -166,20 +166,6 @@ class TestItDoesNotTakeTheDuckDbLock:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_a_postgres_fault_falls_back_to_duckdb(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KS_READ_MARGIN", "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        store = DuckDBStore(db_path=tmp_path / "mg3.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_margin_read.fetch",
-                       new=AsyncMock(side_effect=RuntimeError("pg is down"))):
-                out = await store.get_margin_overview(*W)
-            assert out["total_revenue"] == 0
-        finally:
-            await store.close()
-
 
 class TestNoOrderIsLeftToThePlanner:
     """Every ordered result ends on a key that cannot tie.

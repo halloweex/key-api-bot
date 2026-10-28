@@ -91,13 +91,6 @@ class TestTheTrafficReport:
         scheduler, sent = TestTrafficReport()._wire(monkeypatch, store, tmp_path)
         return store, week_start, scheduler, sent
 
-    @staticmethod
-    async def _ledger(store, week_start) -> bool:
-        from core.traffic_report import already_sent
-
-        async with store.connection() as conn:
-            return already_sent(conn, week_start, "retail")
-
     @pytest.mark.asyncio
     async def test_a_working_postgres_is_read_not_refused(
         self, live, monkeypatch, tmp_path,
@@ -118,9 +111,15 @@ class TestTheTrafficReport:
     async def test_an_outage_defers_it_with_no_ledger_row(
         self, live, monkeypatch, tmp_path,
     ):
+        from tests.unit.test_read_fallback_off_consumers import _ledger_answers
+
         pool, _get_pool = live
         store, week_start, scheduler, sent = await self._job(monkeypatch, tmp_path)
         try:
+            # The ledger is chain 11b's, in Postgres since step 14's S14-00,
+            # and asked first: answered here, so the refusal under test is the
+            # report's own read rather than the ledger's.
+            marked = _ledger_answers(monkeypatch)
             await pool.close()
 
             result = await scheduler._run_traffic_report()
@@ -128,7 +127,7 @@ class TestTheTrafficReport:
             assert result == {"sent": False, "week": week_start.isoformat(),
                               **_refused("traffic")}
             assert sent == []
-            assert not await self._ledger(store, week_start)
+            marked.assert_not_awaited()
             assert read_fallback.counts() == {}
         finally:
             await store.close()
@@ -152,10 +151,17 @@ class TestTheGoalsJob:
             _serve,
         )
 
+        from core import pg_forecast_write
+        from tests.conftest import route_chains_to_duckdb
+
         pool, get_pool = live
         store = await _goals_store(tmp_path)
         try:
             assert await _copy_silver(pool, store) == 25
+            # The job's flow, read everything then store once, is the subject:
+            # its tables stay in DuckDB here, as the unit test keeps them,
+            # though chain 7b-3 writes them to Postgres since S14-00.
+            route_chains_to_duckdb(monkeypatch, pg_forecast_write)
             _serve(monkeypatch, store)
             result = await BackgroundScheduler()._run_seasonality_calc()
 

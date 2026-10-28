@@ -1,6 +1,15 @@
 """Step 13 (DN-28, DN-29): the warehouse writer's mode, what it stands down,
 whether this deployment is ready for the switch — and the switch.
 
+**Since step 14's S14-00 the mode is a constant: `postgres`.** Step 13 has
+been in force in production since 2026-10-09 and DuckDB derives nothing, so
+`configure_mode()` reads `KS_WRITE_WAREHOUSE` only to publish it, evaluates
+no precondition and asks Postgres nothing; `writes_postgres()` is True,
+`duckdb_derives()` False and `warehouse_checks_stand_down()` True whatever
+the environment says. `readiness()` for `/api/warehouse/status` still
+evaluates the preconditions, as a report, until S14-15 removes it with the
+rest of this module. What follows is the history of the switch.
+
 Step 13 stops DuckDB deriving Silver, Gold and the UTM verdicts, and leaves
 Postgres the only engine that computes them. DN-28 built everything the switch
 needed in place; DN-29 is the switch.
@@ -123,56 +132,21 @@ _way_back_refused: Tuple[str, ...] = ()
 
 
 def configure_mode() -> str:
-    """Read `KS_WRITE_WAREHOUSE` once. Never raises. Called by
-    `configure_modes()`; idempotent, and logs a cause once rather than on every
-    call — web's startup and the scheduler both configure.
-
-    Under `postgres` the preconditions are evaluated here, the Postgres
-    revision included (`_gather_facts_blocking`), and only the first call of a
-    process asks: the verdict is kept."""
+    """`postgres`, whatever `KS_WRITE_WAREHOUSE` says (S14-00). Never raises,
+    reads no database. The variable is read only so `/api/health` publishes
+    it as `value`, in the form it always has; no precondition is evaluated —
+    production met every one when this was made a constant, and the way back
+    it guarded is the pre-step-14 images', not this code's."""
     global _value, _mode, _mode_error, _unmet, _decided_for, _way_back_refused
-    value = os.getenv(ENV, DUCKDB).strip().lower() or DUCKDB
-    # Local, and asked whatever the value: a start that would run as duckdb
-    # after a flip is a way back, and a latched chain owning what DuckDB
-    # derives from refuses it (THE WAY BACK, REFUSED, below).
-    holding = _chains_holding_duckdbs_sources()
-    if value in _VALID:
-        error = None
-    else:
-        error = (f"{ENV}={value!r} is not one of {_VALID}; running as "
-                 f"{(POSTGRES if holding else DUCKDB)!r}")
-    if error and error != _mode_error:
-        logger.error(error)
-    _value, _mode_error = value, error
-    if value != POSTGRES:
-        _unmet, _decided_for = (), None
-        _mode = _the_way_back(holding, f"{ENV}={value!r}")
-        return _mode
-    if _decided_for == POSTGRES and _mode is not None:
-        return _mode
-    env = os.environ
-    unmet = tuple(evaluate_preconditions(env, _gather_facts_blocking(env)))
-    _unmet, _decided_for = unmet, POSTGRES
-    if unmet:
-        _mode = _the_way_back(holding, f"{ENV}=postgres with {len(unmet)} "
-                                       "precondition(s) of the switch unmet ("
-                                       + ", ".join(u.key for u in unmet) + ")")
-        if _mode == DUCKDB:
-            logger.critical(
-                "%s=postgres, but %d precondition(s) of the switch are unmet — "
-                "running as duckdb, DuckDB goes on deriving: %s", ENV, len(unmet),
-                "; ".join(f"{u.key}: {u.detail}" for u in unmet))
-    else:
-        _mode, _way_back_refused = POSTGRES, ()
-        logger.warning(
-            "%s=postgres and every precondition holds: DuckDB no longer derives "
-            "Silver, Gold or the UTM verdicts in this process", ENV)
-    return _mode
+    _value = (os.getenv(ENV, DUCKDB) or DUCKDB).strip().lower() or DUCKDB
+    _mode, _mode_error = POSTGRES, None
+    _unmet, _decided_for, _way_back_refused = (), POSTGRES, ()
+    return POSTGRES
 
 
 def mode() -> str:
-    """The mode this process runs; `duckdb` until `configure_mode` has run."""
-    return _mode or DUCKDB
+    """The mode this process runs: `postgres`, a constant since S14-00."""
+    return POSTGRES
 
 
 def value() -> Optional[str]:
@@ -193,23 +167,17 @@ def preconditions_unmet() -> Tuple["Unmet", ...]:
 
 
 def writes_postgres() -> bool:
-    """Postgres alone derives the warehouse. Reads the cache, never the env."""
-    return _mode == POSTGRES
+    """Postgres alone derives the warehouse: True, a constant since S14-00.
+    Last consumers: the integrity job, the mirror-landing job, the sync's
+    refresh calls and the chains' step-13 preconditions — they go in S14-11
+    to S14-15."""
+    return True
 
 
 def verdict_reached() -> bool:
-    """`configure_mode` has decided this process's mode.
-
-    False before it has run, and while it runs. `writes_postgres()` is False
-    then, and means "not decided yet", never "decided against". A chain that
-    remembers its first unmet answer (chain 3's start hold) must not remember
-    that one: it would hold the chain for the life of the process on the very
-    start that found step 13 in force. Until chain 7b-4 the start itself asked
-    that question — the facts it gathered included the DN-12 goal bridge's
-    owners, read by asking every write chain over a bridge table for its mode
-    (the batch-E review). The bridge is gone and the start no longer asks; any
-    consumer that does before the verdict still gets "not decided yet"."""
-    return _mode is not None
+    """True: since S14-00 there is no verdict to wait for. Last consumer:
+    chain 3's start hold, which goes in S14-09."""
+    return True
 
 
 def duckdb_derives() -> bool:
@@ -222,9 +190,10 @@ def duckdb_derives() -> bool:
 
 def warehouse_checks_stand_down() -> bool:
     """The DuckDB checks over Silver, Gold and UTM — and the mirror-landing
-    comparisons of those tables — do not run: Postgres alone derives, or the
-    way back is still owed its first validated full tick (`held()`)."""
-    return writes_postgres() or _held
+    comparisons of those tables — do not run: True, a constant since S14-00
+    (Postgres alone derives; the way back's hold is the pre-step-14
+    images')."""
+    return True
 
 
 # ─── What stands down ────────────────────────────────────────────────────────
@@ -259,18 +228,14 @@ STOOD_DOWN_WHEN_POSTGRES: FrozenSet[str] = frozenset({
 
 def stood_down_duckdb_checks() -> FrozenSet[str]:
     """The DuckDB integrity checks that do not run, and that the twins do not
-    compare against, in this process. Empty unless Postgres alone derives, or
-    the way back has not yet validated a full DuckDB tick — and, since chain
-    3, the checks over the order tables once the orders are written to
-    Postgres (`pg_orders_write.landing_checks_stood_down`). One answer for
-    both, because the integrity job reads it once for the scan and for
-    `duckdb_looked`. Step 13's own `retired_conditions` stays its five: the
-    landing checks retire on chain 3's flip, which waits on its own
-    `landing_pages_clear`."""
+    compare against: since S14-00 always the set production stood down on
+    2026-10-21 — the five over Silver, Gold and UTM and chain 3's ten over
+    the order tables (`pg_orders_write.landing_checks_stood_down`, a constant
+    too). One answer for both, because the integrity job reads it once for
+    the scan and for `duckdb_looked`."""
     from core import pg_orders_write
 
-    warehouse = STOOD_DOWN_WHEN_POSTGRES if warehouse_checks_stand_down() else frozenset()
-    return warehouse | pg_orders_write.landing_checks_stood_down()
+    return STOOD_DOWN_WHEN_POSTGRES | pg_orders_write.landing_checks_stood_down()
 
 
 # ─── What the stood-down checks leave behind ─────────────────────────────────

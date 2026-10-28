@@ -29,6 +29,16 @@ from core.turbosms import TurboSmsClient, TurboSmsConfig
 from web.main import app
 from web.routes.auth import SESSION_COOKIE, create_session_data, session_serializer
 
+
+@pytest.fixture(autouse=True)
+def _sms_store_follows_env(monkeypatch):
+    """Since step 14's S14-00 the store switch decides nothing; this module's
+    two engines are chosen as before it (`tests.conftest.sms_store_follows_env`)."""
+    from tests.conftest import sms_store_follows_env
+
+    sms_store_follows_env(monkeypatch)
+
+
 ADMIN_ID = sorted(ADMIN_USER_IDS)[0]
 SEND = "/api/customers/sms-campaigns/aug/send"
 CHANNELS = "/api/customers/sms/channels"

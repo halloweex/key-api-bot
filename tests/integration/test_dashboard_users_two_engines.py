@@ -32,6 +32,16 @@ from unittest.mock import AsyncMock, patch
 from core.duckdb_store import DuckDBStore
 from core.pg_dashboard_users import USER_COLUMNS
 
+
+@pytest.fixture(autouse=True)
+def _user_store_follows_env(monkeypatch):
+    """Since step 14's S14-00 the store switch decides nothing; this module's
+    two engines are chosen as before it (`tests.conftest.user_store_follows_env`)."""
+    from tests.conftest import user_store_follows_env
+
+    user_store_follows_env(monkeypatch)
+
+
 asyncpg = pytest.importorskip("asyncpg")
 
 DSN = os.getenv("KS_PG_DSN")

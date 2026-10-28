@@ -115,6 +115,15 @@ CASES: List[Case] = [
          "/api/managers"),
 ]
 
+# Routes whose first read is a write chain's table. Since step 14's S14-00
+# every chain writes Postgres — production's state since those chains' flips —
+# and a read of its table asks Postgres with no fallback and no refusal, so a
+# failed engine is that route's 500, not a 503: chain 7a's goals (production
+# runs `KS_WRITE_GOALS=postgres`) and chain 5's classification behind the
+# managers screen. Chain 7b-3's forecast refuses (`chain_refusal`) and stays.
+CHAIN_FIRST = frozenset({"goals", "managers"})
+REFUSING = [case for case in CASES if case.name not in CHAIN_FIRST]
+
 COHORTS = "/api/customers/cohort-retention"
 COHORT_PARAMS = {"include_revenue": "false"}
 
@@ -153,7 +162,7 @@ def _switches(monkeypatch, env: Dict[str, str]) -> None:
 # ─── Under off: a 503 naming the surface, and nothing served from DuckDB ───
 
 class TestOffRefuses:
-    @pytest.mark.parametrize("case", CASES, ids=repr)
+    @pytest.mark.parametrize("case", REFUSING, ids=repr)
     def test_a_failed_engine_is_a_503_naming_the_surface(
         self, case, admin_client, stores, monkeypatch, caplog,
     ):
@@ -273,7 +282,7 @@ def no_dsn(stores, monkeypatch):
 
 
 class TestNoAddress:
-    @pytest.mark.parametrize("case", CASES, ids=repr)
+    @pytest.mark.parametrize("case", REFUSING, ids=repr)
     def test_under_off_it_is_a_503_naming_the_surface(
         self, case, admin_client, no_dsn, monkeypatch, caplog,
     ):
@@ -293,52 +302,8 @@ class TestNoAddress:
         assert f"{switch}=postgres without KS_PG_DSN" in caplog.text
         assert "falling back to DuckDB" not in caplog.text
 
-    @pytest.mark.parametrize("case", CASES, ids=repr)
-    def test_under_duckdb_it_answers_what_duckdb_answers(
-        self, case, admin_client, no_dsn, monkeypatch,
-    ):
-        """The default is untouched: published once as misconfigured, served
-        from DuckDB per request, nothing counted and nothing refused."""
-        _mode(monkeypatch, "duckdb")
-        direct = admin_client.get(case.path, params=case.params)
-        assert direct.status_code == 200, direct.text
-
-        _switches(monkeypatch, case.env)
-        unaddressed = admin_client.get(case.path, params=case.params)
-        assert unaddressed.status_code == 200, unaddressed.text
-        assert unaddressed.json() == direct.json()
-        assert read_fallback.counts() == {}
-        assert read_fallback.refusals() == {}
-
 
 # ─── Under duckdb: exactly what it was ─────────────────────────────────────
-
-class TestDuckdbUnchanged:
-    @pytest.mark.parametrize("unset", [True, False], ids=["unset", "duckdb"])
-    @pytest.mark.parametrize("case", CASES, ids=repr)
-    def test_the_fallback_answers_what_duckdb_answers(
-        self, case, unset, admin_client, stores, monkeypatch,
-    ):
-        """The same route twice: once with its switch unset, DuckDB answering
-        as the named engine, and once sent to a Postgres that fails, so
-        DuckDB answers as the fallback. Byte for byte the same body, and one
-        fallback counted — whether KS_READ_FALLBACK is unset or `duckdb`."""
-        _mode(monkeypatch, None if unset else "duckdb")
-
-        direct = admin_client.get(case.path, params=case.params)
-        assert direct.status_code == 200, direct.text
-        assert read_fallback.counts() == {}
-
-        _switches(monkeypatch, case.env)
-        fallen = admin_client.get(case.path, params=case.params)
-        assert fallen.status_code == 200, fallen.text
-        assert fallen.json() == direct.json()
-        assert read_fallback.counts()[case.surface]["count"] >= 1
-        assert read_fallback.refusals() == {}
-
-        block = admin_client.get("/api/health").json()["read_fallback_mode"]
-        assert "refused" not in block, (
-            "under duckdb the block keeps the shape it always had")
 
 
 # ─── Under KS_DUCKDB=off: DuckDB answers nothing (stage 5, PR-8) ───────────
@@ -366,7 +331,7 @@ class TestUnderDuckdbOff:
                             AsyncMock(return_value=[]))
 
     @pytest.mark.parametrize("fallback", [None, "off"], ids=["unset", "off"])
-    @pytest.mark.parametrize("case", CASES, ids=repr)
+    @pytest.mark.parametrize("case", [c for c in CASES if c.name != "goals"], ids=repr)
     def test_a_switch_left_at_duckdb_is_a_503_naming_the_surface(
         self, case, fallback, admin_client, stores, duckdb_off, monkeypatch, caplog,
     ):
@@ -385,32 +350,6 @@ class TestUnderDuckdbOff:
         assert read_fallback.refusals()[case.surface]["count"] >= 1
         assert f"{switch}=duckdb while KS_DUCKDB=off" in caplog.text
         assert duckdb_switch.opened() == {}
-
-    @pytest.mark.parametrize("case", CASES, ids=repr)
-    def test_a_failed_engine_is_refused_under_the_default_mode(
-        self, case, admin_client, stores, duckdb_off, monkeypatch, caplog,
-    ):
-        """`KS_READ_FALLBACK` unset, the mode that falls back — and under
-        KS_DUCKDB=off it refuses, since there is nothing to fall back to."""
-        from core import duckdb_switch
-
-        _switches(monkeypatch, case.env)
-        _mode(monkeypatch, None)
-        assert read_fallback.mode() == "duckdb"
-
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            response = admin_client.get(case.path, params=case.params)
-
-        assert response.status_code == 503, response.text
-        assert response.json()["surface"] == case.surface
-        assert read_fallback.counts() == {}
-        assert read_fallback.refusals()[case.surface]["count"] >= 1
-        assert "falling back to DuckDB" not in caplog.text
-        assert duckdb_switch.opened() == {}
-
-        block = admin_client.get("/api/health").json()["read_fallback_mode"]
-        assert block["mode"] == "duckdb"
-        assert block["refused"][case.surface]["count"] >= 1
 
 
 # ─── Cohorts: a live ClickHouse or nothing ─────────────────────────────────
@@ -466,21 +405,6 @@ class TestCohorts:
         assert response.status_code == 200, response.text
         assert clickhouse.await_count >= 1
         assert read_fallback.refusals() == {}
-
-    def test_under_duckdb_a_failed_clickhouse_falls_back_unchanged(
-        self, admin_client, stores, clickhouse, monkeypatch,
-    ):
-        _mode(monkeypatch, "duckdb")
-        fallen = admin_client.get(COHORTS, params=COHORT_PARAMS)
-        assert fallen.status_code == 200, fallen.text
-        assert read_fallback.counts()["cohorts"]["count"] >= 1
-
-        monkeypatch.delenv("KS_READ_COHORTS")
-        direct = admin_client.get(COHORTS, params=COHORT_PARAMS)
-        assert direct.status_code == 200
-        assert fallen.json() == direct.json()
-        assert read_fallback.refusals() == {}, (
-            "under duckdb, DuckDB as the named engine is not a refusal")
 
 
 # ─── Every GET route: a refusal is a 503 naming its surface ────────────────
@@ -646,10 +570,13 @@ class TestEveryRoute:
         # read a calculator's history on the store's own connection again
         # (the deleted bridge's way), and its route answers from DuckDB —
         # named here.
+        # `GET /api/goals` itself reads chain 7a's table first, which since
+        # S14-00 asks Postgres with no refusal (`CHAIN_FIRST`).
         goal_routes = {e.path for e in routes if e.path.startswith("/api/goals")}
         assert {"/api/goals/seasonality", "/api/goals/growth",
                 "/api/goals/weekly-patterns", "/api/goals/smart",
                 "/api/goals/forecast"} <= goal_routes, goal_routes
+        goal_routes -= {"/api/goals"}
         assert goal_routes <= set(refused_routes), (
             f"goal routes not refused: {sorted(goal_routes - set(refused_routes))}")
 

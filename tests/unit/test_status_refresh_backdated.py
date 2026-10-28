@@ -25,6 +25,21 @@ import pytest
 
 from core.duckdb_store import DuckDBStore
 
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. The
+    backdated selection's semantics are pinned here on DuckDB's
+    implementation; S14-09 decides what of this to carry to the Postgres
+    one. So this module keeps DuckDB as the chains' store
+    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
+    go."""
+    from core import pg_orders_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_orders_write)
+
+
 KYIV = ZoneInfo("Europe/Kyiv")
 
 

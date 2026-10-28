@@ -56,10 +56,6 @@ class TestTheUnion:
         compares a frozen DuckDB and the twins file every new order."""
         assert LANDING <= wc.stood_down_duckdb_checks()
 
-    def test_off_the_chain_none_does(self, flags):
-        assert pg_orders_write.mode() == "duckdb"
-        assert not (LANDING & wc.stood_down_duckdb_checks())
-
     def test_every_bare_check_a_twin_pairs_with_is_a_landing_check(self):
         """The twins count a bare DuckDB check as looked whenever the scan
         finished; a bare one left off the landing list would stay "looked"
@@ -119,8 +115,9 @@ class TestTheListIsTheScans:
         assert offenders == []
 
     def test_every_check_over_the_order_tables_stands_down_under_the_chain(self):
-        """Behind `landing` (chain 3) or a guard step 13 stands down — and
-        step 13 in force is a precondition of chain 3 (`_step13_unmet`)."""
+        """Behind `landing` (chain 3) or a guard step 13 stands down — both
+        constants since step 14's S14-00 (`landing_checks_stood_down`,
+        `STOOD_DOWN_WHEN_POSTGRES`)."""
         wrapped, _bare = _scan_calls()
         reading = {name for _kind, name, fn in wrapped if _reads_order_tables(fn)}
         assert reading, "the walk found no check over the order tables"
@@ -156,11 +153,13 @@ async def planted(tmp_path, flags):
 
 class TestTheScanSkipsThem:
     @pytest.mark.asyncio
-    async def test_they_file_on_duckdb_and_nothing_under_the_chain(self, planted, flags):
+    async def test_they_file_nothing_under_the_chain(self, planted, flags):
+        """The planted defects are there, and nothing over the order tables is
+        filed — unlatched (the chain is a constant since step 14's S14-00) and
+        latched alike. Until then the first half proved they filed on DuckDB."""
         async with planted.connection() as conn:
             filed = {i.check_name for i in data_quality.check_internal_integrity(conn)}
-        assert {"fk_orphan_order_products_order_id", "not_null_orders_ordered_at",
-                "value_domain_orders_status_id", "orders_without_line_items"} <= filed
+        assert not (filed & LANDING), filed & LANDING
 
         chain_latch.latch(pg_orders_write.CHAIN, pg_orders_write.WRITE_ENV)
         chain_latch._latched = None

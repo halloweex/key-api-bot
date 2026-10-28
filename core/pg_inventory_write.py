@@ -163,15 +163,14 @@ def env_writes_postgres() -> bool:
 
 
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
-    read: once a movement has been recorded here, the id allocator has moved
-    and no environment variable may move it back. See `core/chain_latch.py`.
+    """Whether this chain writes Postgres — the one answer every caller reads:
+    True, a constant since step 14's S14-00. The chain has been latched in
+    production since 2026-09-30; neither the flag nor the latch routes any
+    more, and the first write in a process still takes the latch (decision
+    3). Last consumers: the repository's inventory writers, the sync's stock
+    step and the registry — they go in S14-11.
     """
-    if chain_latch.latched(CHAIN):
-        return True
-    return env_writes_postgres()
+    return True
 
 
 def _latch() -> str:

@@ -59,37 +59,41 @@ switch. The weekly compaction's phase 1 — the one scheduled process outside
 web that opens the live file, read-only, which the file's hash cannot see —
 opens through it too.
 
-AN UNKNOWN VALUE DOES NOT STOP WEB
+AN UNKNOWN VALUE DOES NOT STOP A SCRIPT
 
-`KS_READ_FALLBACK`'s rule and OD-09's: web is the only process that syncs
-orders, so a typo runs as `on`, today's behaviour, logs at ERROR, is published
-as `duckdb_switch.error`, and the canary warns `duckdb_mode_invalid`. Whoever
-typed `of` believes the week of silence is running; it is not, and the soak's
-week-of-silence check says so too.
+`KS_READ_FALLBACK`'s rule and OD-09's: a typo runs as `on`, logs at ERROR and
+is published as `duckdb_switch.error`. In web it no longer can (below): web
+reads the variable for nothing since S14-00, so the canary's
+`duckdb_mode_invalid` has nothing left to fire on and goes with the block.
 
 Read once, in `core.runtime_modes.configure_modes()`, before the boot sync —
 and, unlike the other cached modes, lazily on the first open if no entry point
 configured it: a script that forgot `configure_modes()` must not be the one
 process that opens the file under `off`.
 
-OFF IS A CLAIM, CHECKED AT THE START (stage 5's PR-2)
+WEB IS ALWAYS OFF (step 14's S14-00)
 
-In web, `off` holds only when nothing web does still needs the file: step 13
-in force, every write chain on Postgres, the user list there, step 13's
-record and the chains' frozen watermarks in Postgres' copy, and no page open
-that a check `off` stands down would announce resolved unseen
-(`core/duckdb_off.py`). One of them unmet and web runs `on` — the owner's
-OD-S5-1 (a): the file is opened, order intake goes on, the week of silence
-does not start — publishes the unmet keys as `duckdb_switch.held_back`, and
-the canary pages `duckdb_off_held_back` CRITICAL. The verdict is reached once
-per process (`hold`) and kept. A script under `off` reaches none and stays
-`off`: it is not the syncer, and it must not open the file in a week web may
-be keeping silent. It cannot tell whether web is: the host's sidecars start
-from `.env`, and the Sunday compaction's runs with web stopped. So while web
-is held back the weekly compaction and the nightly DuckDB snapshot are
-refused too, as web writes the file on — a hold is to be cleared, not lived
-in, and each refusal says so (`HELD_BACK_NOTE`) instead of saying only that
-the week has started (review of PR-2).
+Stage 5's PR-2 made `off` a claim checked at web's start: one precondition
+unmet and web ran `on`. That verdict (`core/duckdb_off.py`) is gone. Since
+S14-00 **web runs `off` whatever `KS_DUCKDB` says**: `configure_modes(web=
+True)` configures this switch as web's, the value read is published as
+`value` and one WARNING says when it is not `off`, and `held_back` is
+published as `[]`. Every path web takes is a Postgres path (the step-14
+constants, `.planning/DUCKDB_EXIT_STEP14_PLAN.md` S14-00), and the hourly
+host hash of the file must keep reading UNCHANGED until the file is deleted.
+The tripwire — `guard`, `open_file`, `opened_while_off` and the canary's
+`duckdb_opened_while_off` — stays until step 14's S14-18.
+
+A script and a host tool are not web: they read `KS_DUCKDB` as before, and
+the archive tools in the pinned image are run with `-e KS_DUCKDB=on`.
+`HELD_BACK_NOTE` stays for the compaction's sidecar, which quotes it.
+
+History, before S14-00: in web, `off` held only when nothing web did still
+needed the file — step 13 in force, every write chain on Postgres, the user
+list there, step 13's record and the chains' frozen watermarks in Postgres'
+copy, and no page open that a check `off` stands down would announce
+resolved unseen. One unmet and web ran `on` (OD-S5-1 (a)), published the
+keys as `held_back`, and the canary paged `duckdb_off_held_back`.
 """
 from __future__ import annotations
 
@@ -102,7 +106,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -133,12 +137,13 @@ OTHER = "other"
 _mode: Optional[str] = None
 _value: Optional[str] = None
 _mode_error: Optional[str] = None
-# The verdict on `off` (`core.duckdb_off`, stage 5's PR-2): None until web's
-# start under `off` has reached it, then the keys it found unmet — empty when
-# `off` holds. Kept for the life of the process, like step 13's: a start that
-# ran `on` must not be handed a scheduler that runs `off`, nor the other way
-# round.
-_held_back: Optional[Tuple[str, ...]] = None
+# Whether this process is web: `configure_modes(web=True)` says so, and from
+# then on the switch is `off` whatever the variable says (S14-00). Kept for
+# the life of the process.
+_web = False
+# The value the WARNING below was last logged for, so web's startup and its
+# scheduler, which both configure, say it once.
+_warned: Optional[str] = None
 
 _lock = threading.Lock()
 _opened: Dict[str, Dict[str, object]] = {}
@@ -150,9 +155,11 @@ _opened: Dict[str, Dict[str, object]] = {}
 # file the refusal leaves uncompacted and unsnapshotted (review of PR-2). One
 # sentence for every such refusal, short because weekly_compact.sh quotes 300
 # characters of the line it ends; `/api/health` publishes `held_back` under
-# `off` alone (`health_block`).
-HELD_BACK_NOTE = (f"If web is held back (/api/health duckdb_switch.held_back), it "
-                  f"has not: meet those keys or set {ENV}={ON}")
+# `off` alone (`health_block`). Since S14-00 only an image from before step 14
+# can be held back — a step-14 web publishes `[]` — and `on` is a lever on
+# that image alone (CLAUDE.md, "Starting the week of silence").
+HELD_BACK_NOTE = (f"If a pre-step-14 web is held back (/api/health "
+                  f"duckdb_switch.held_back), it has not: meet those keys or set {ENV}={ON}")
 
 
 class DuckDBOpenedWhileOff(RuntimeError):
@@ -168,27 +175,35 @@ class DuckDBOpenedWhileOff(RuntimeError):
         self.count = count
 
 
-def configure_mode() -> str:
+def configure_mode(*, web: bool = False) -> str:
     """Read `KS_DUCKDB` once. Never raises. Called by `configure_modes()`.
 
-    A verdict that held `off` back to `on` in this process (`hold`) is kept:
-    the second `configure_modes()` — the scheduler's — reads `off` again and
-    still runs `on`. A value other than `off` forgets the verdict, which was
-    about `off` alone."""
-    global _mode, _value, _mode_error, _held_back
+    **In web it is `off`, whatever the variable says** (S14-00): `web=True`
+    marks this process as web for its life, the value is read only to be
+    published, and one WARNING says when it is not `off`. Anywhere else —
+    a script, a host tool — the variable decides as it always has: `on`
+    unless it says `off`, and a value nobody understands runs as `on` and is
+    published as the error."""
+    global _mode, _value, _mode_error, _web, _warned
     previous = _mode
     raw = os.getenv(ENV)
     value = (raw or "").strip().lower()
     _value = value or None
-    if not value or value in _VALID:
+    _web = _web or web
+    if _web:
+        mode, error = OFF, None
+        if value != OFF and value != _warned:
+            logger.warning(
+                "%s is %s, and web runs off whatever it says since step 14's "
+                "S14-00: it never opens the DuckDB file. Scripts and host tools "
+                "still read the variable; leave it off in .env", ENV,
+                "unset" if raw is None else repr(raw))
+        _warned = value
+    elif not value or value in _VALID:
         mode, error = (value or ON), None
     else:
         mode = ON
         error = f"{ENV}={value!r} is not one of {_VALID}; running as {ON!r}"
-    if mode != OFF:
-        _held_back = None
-    elif _held_back:
-        mode = ON
     # Once per cause, as `read_fallback.configure_mode` does: web's startup and
     # the scheduler both configure.
     if error and error != _mode_error:
@@ -224,28 +239,12 @@ def is_off() -> bool:
     return mode() == OFF
 
 
-def hold(unmet: Sequence[str]) -> str:
-    """Record the verdict on `off` for this process and return the mode it
-    leaves: `on` when `unmet` names any key — held back, OD-S5-1 (a): the
-    file is opened, order intake goes on, the week of silence does not start
-    — and `off` as configured when it names none. Called by
-    `core.duckdb_off.settle()`, in web only and only when `KS_DUCKDB=off` was
-    read. Local state, never raises."""
-    global _mode, _held_back
-    _held_back = tuple(unmet)
-    if _held_back and _mode == OFF:
-        _mode = ON
-    return mode()
-
-
 def held_back() -> Optional[Tuple[str, ...]]:
-    """The keys of `off`'s verdict this process found unmet: empty when it
-    holds, None when no verdict was reached — `KS_DUCKDB` is not `off`, the
-    process is not web (a script stays `off`), or nothing configured the
-    modes. Without a verdict `off` refuses every open, which is the safe
-    direction: a process that never asked must not open the file."""
+    """`()` in web, which runs `off` with nothing held back since S14-00;
+    None in any other process, which reaches no verdict. Kept for the
+    `/api/health` block's shape until the block goes (S14-17)."""
     mode()
-    return _held_back
+    return () if _web else None
 
 
 def _plumbing(module: str) -> bool:
@@ -454,13 +453,12 @@ def health_block() -> Dict[str, Any]:
         "error": mode_error(),
         "opened_while_off": opened(),
     }
-    # Under `KS_DUCKDB=off` only, so `on` publishes what it always did: the
-    # keys `off`'s verdict found unmet — the process then runs `on` and the
-    # canary pages `duckdb_off_held_back` — `[]` when it holds, None before
-    # any verdict. Keys, never details: this endpoint is public, and the
-    # details quote the environment; they are in web's log.
-    if _value == OFF:
-        block["held_back"] = None if _held_back is None else list(_held_back)
+    # Under `off` only, so `on` publishes what it always did. Since S14-00 web
+    # is always `off` and nothing is ever held back, so web publishes `[]`
+    # here — the shape the canary and the soak read, until S14-17 removes it.
+    if mode() == OFF:
+        held = held_back()
+        block["held_back"] = None if held is None else list(held)
     return block
 
 
@@ -477,7 +475,8 @@ def reset_counts() -> None:
 def reset() -> None:
     """Forget the mode and every count. Tests only; a process never forgets
     its own."""
-    global _mode, _value, _mode_error, _held_back
+    global _mode, _value, _mode_error, _web, _warned
     with _lock:
         _opened.clear()
-    _mode = _value = _mode_error = _held_back = None
+    _mode = _value = _mode_error = _warned = None
+    _web = False

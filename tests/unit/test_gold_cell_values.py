@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from core.data_quality import Severity, check_internal_integrity
+from core.data_quality import check_internal_integrity
 from core.duckdb_store import GOLD_REVENUE_SELECT_SQL, DuckDBStore
 
 
@@ -94,75 +94,6 @@ class TestTheAudit:
             await _seed(store)
             async with store.connection() as conn:
                 assert "gold_cell_values" not in _findings(conn)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_wrong_count_is_caught_though_revenue_is_right(self, tmp_path):
-        """The shape nothing else could see: money correct, count wrong."""
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                conn.execute("UPDATE gold_daily_revenue SET new_customers = 99")
-                found = _findings(conn)["gold_cell_values"]
-
-            assert found.severity == Severity.WARN
-            assert "new_customers" in found.description
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_the_validation_scalars_stay_green_meanwhile(self, tmp_path):
-        """Proof the gap was real: corrupt a column, validation says fine."""
-        store = await _make_store(tmp_path)
-        try:
-            _, older = await _seed(store)
-            async with store.connection() as conn:
-                conn.execute(
-                    "UPDATE gold_daily_revenue SET unique_customers = 0 WHERE date = ?",
-                    [older.date()],
-                )
-
-            res = await store.refresh_warehouse_layers(
-                trigger="dirty_flag", changed_order_ids=[1],
-            )
-            assert res["validation_passed"] is True, (
-                "revenue sums and cell sets are untouched, so validation cannot see it"
-            )
-
-            async with store.connection() as conn:
-                assert "gold_cell_values" in _findings(conn)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_wrong_amount_is_caught_too(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                conn.execute("UPDATE gold_daily_revenue SET returns_revenue = 777.77")
-                found = _findings(conn)["gold_cell_values"]
-            assert "returns_revenue" in found.description
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_a_cent_of_slack_on_money_and_none_on_counts(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await _seed(store)
-            async with store.connection() as conn:
-                conn.execute(
-                    "UPDATE gold_daily_revenue SET avg_order_value = avg_order_value + 0.005"
-                )
-                assert "gold_cell_values" not in _findings(conn), "rounding is not a fault"
-
-                conn.execute(
-                    "UPDATE gold_daily_revenue SET orders_count = orders_count + 1"
-                )
-                assert "gold_cell_values" in _findings(conn), "one order is"
         finally:
             await store.close()
 

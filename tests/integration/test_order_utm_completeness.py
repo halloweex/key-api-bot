@@ -369,17 +369,6 @@ class TestThroughTheJob:
         assert found["pg_order_utm_missing"].sample_ids == (307,)
         assert "more than 30 minutes" in found["pg_order_utm_missing"].description
 
-    @pytest.mark.asyncio
-    async def test_it_stands_down_with_the_mirror(self, conn, monkeypatch):
-        """`reconcile_order_utm`'s rule: with the landing mirror off,
-        `bronze.orders` stops moving and the question has no current answer."""
-        monkeypatch.setenv("KS_MIRROR_LANDING", "0")
-        await order(conn, 302)
-        pool = AsyncMock()
-        with patch("core.pg.get_pool", new=pool):
-            assert await mr.reconcile_order_utm_completeness(now=NOW) == []
-        pool.assert_not_called()
-
 
 # ── the parser and the check agree ────────────────────────────────────────────
 

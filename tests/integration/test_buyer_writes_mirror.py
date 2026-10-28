@@ -12,6 +12,11 @@ a real PostgreSQL, then runs the real `reconcile_buyers` past its 15-minute
 grace — inside the grace, any difference is forgiven and the check proves
 nothing. The control is the old path, the DuckDB-only portion write: it must
 still produce the CRITICAL, or this test is not measuring the mirror.
+
+Since step 14's S14-00 chain 4 writes Postgres whatever its flag says, so
+`upsert_buyers` reaches Postgres through the chain, the comparison stands
+down for its tables, and the control — a DuckDB write the comparison catches
+— went with the DuckDB path.
 """
 from __future__ import annotations
 
@@ -101,18 +106,8 @@ async def test_a_changed_buyer_reaches_postgres_and_the_comparison_is_clean(stor
             "SELECT value FROM bronze.buyer_contacts WHERE buyer_id = 9500001")]
     assert name == "Олена Нова"
     assert phones == ["+380500000003"], "a shrunk contact list kept an old number"
+    # The daily comparison stands down for chain 4's tables since step 14's
+    # S14-00: the chain writes them, and DuckDB's copy is not compared.
+    assert {f.check_name for f in await _findings(store)} <= {"mirror_stood_down"}
 
-    findings = await _findings(store)
-    assert [f.check_name for f in findings] == [], findings
 
-
-@pytest.mark.asyncio
-async def test_the_control_the_old_duckdb_only_write_is_still_caught(stores):
-    store, pool = stores
-    await store.upsert_buyers([_buyer("Олена Стара", ["+380500000001"])])
-    # What sync-all-buyers did before: DuckDB only, no mirror.
-    await store._upsert_buyer_portion([_buyer("Олена Нова", ["+380500000001"])])
-    await _history_has_crossed(pool)
-
-    names = {f.check_name for f in await _findings(store)}
-    assert "mirror_row_values" in names, names

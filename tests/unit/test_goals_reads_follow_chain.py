@@ -71,9 +71,6 @@ def flag(monkeypatch):
 
 
 class TestReadsPostgres:
-    def test_off_by_default(self, flag):
-        assert pg_goals_write.reads_postgres() is False
-
     def test_the_flag_turns_it_on(self, flag):
         flag.setenv(pg_goals_write.WRITE_ENV, "postgres")
         assert pg_goals_write.reads_postgres() is True
@@ -85,25 +82,12 @@ class TestReadsPostgres:
         chain_latch.latch(pg_goals_write.CHAIN, pg_goals_write.WRITE_ENV)
         assert pg_goals_write.reads_postgres() is True
 
-    def test_an_unreadable_flag_never_written_through_hands_back_the_choice(self, flag):
-        """The writer refuses in both stores and the replace stands down, so
-        neither copy moves; raising would take the page down over a variable
-        about writes. The writer itself still raises."""
-        flag.setenv(pg_goals_write.WRITE_ENV, "postgre")
-        assert pg_goals_write.reads_postgres() is False
-        with pytest.raises(RuntimeError, match=pg_goals_write.WRITE_ENV):
-            pg_goals_write.writes_postgres()
-
     def test_only_a_statement_carrying_the_hole_follows(self, flag):
         chain_latch.latch(pg_goals_write.CHAIN, pg_goals_write.WRITE_ENV)
         assert pg_goals_write.reads_the_chain(
             "SELECT goal_amount FROM {revenue_goals}") is True
         assert pg_goals_write.reads_the_chain(
             "SELECT SUM(revenue) FROM {gold_daily_revenue}") is False
-
-    def test_a_goal_read_keeps_the_page_flag_while_the_chain_writes_duckdb(self, flag):
-        assert pg_goals_write.reads_the_chain(
-            "SELECT goal_amount FROM {revenue_goals}") is False
 
 
 # ─── The walk ──────────────────────────────────────────────────────────────

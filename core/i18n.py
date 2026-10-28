@@ -1102,6 +1102,7 @@ _STRINGS: Dict[str, Dict[str, str]] = {
     "tab.reports": {EN: "Reports", UK: "Звіти", RU: "Отчёты"},
     "tab.marketing": {EN: "Marketing", UK: "Маркетинг", RU: "Маркетинг"},
     "tab.margin": {EN: "Margin", UK: "Маржа", RU: "Маржа"},
+    "tab.tgbot": {EN: "Telegram bot", UK: "Telegram-бот", RU: "Telegram-бот"},
     "tab.expenses": {EN: "Expenses", UK: "Витрати", RU: "Расходы"},
     "tab.sms": {EN: "SMS", UK: "SMS", RU: "SMS"},
     "admin.user_denied": {EN: "User denied", UK: "Користувача відхилено", RU: "Пользователь отклонён"},

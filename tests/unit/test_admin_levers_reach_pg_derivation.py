@@ -2,8 +2,11 @@
 
 Under KS_PG_DERIVE=own, POST /api/warehouse/refresh (and rebuild-silver) run the
 Postgres derivation past its floor, after releasing the heavy lock the
-derivation takes itself; GET /api/warehouse/status shows the owed state. Under
-piggyback, nothing about the three routes changes.
+derivation takes itself; GET /api/warehouse/status shows the owed state.
+
+Since step 14's S14-00 `own` and step 13's `postgres` are constants, so DuckDB
+derives nothing on the lever, the status leads with Postgres, and the tests
+of piggyback went with it.
 """
 from __future__ import annotations
 
@@ -65,15 +68,8 @@ class TestRefresh:
         scheduler = _Scheduler()
         result = _refresh(scheduler)
         assert scheduler.calls == [("manual", True)]
-        assert result["status"] == "success"
+        assert result["status"] == "skipped"            # DuckDB does not derive
         assert result["postgres"]["trigger"] == "manual"
-
-    def test_under_piggyback_it_is_unchanged(self, mode):
-        mode(None)
-        scheduler = _Scheduler()
-        result = _refresh(scheduler)
-        assert scheduler.calls == []
-        assert result == {"status": "success"}
 
 
 CUTOVER = {"mode": "duckdb", "preconditions_met": False,
@@ -96,13 +92,10 @@ class TestStatus:
 
     def test_under_own_it_shows_the_owed_state(self, mode):
         mode("own")
-        assert self._status() == {"last_refresh": "x",
+        assert self._status() == {"writer": "postgres",
                                   "postgres": {"mode": "own", "owed": False},
+                                  "duckdb_frozen": {"last_refresh": "x"},
                                   "cutover": CUTOVER}
-
-    def test_under_piggyback_it_adds_only_the_readiness(self, mode):
-        mode(None)
-        assert self._status() == {"last_refresh": "x", "cutover": CUTOVER}
 
 
 class TestTheCutoverReadiness:
@@ -118,7 +111,7 @@ class TestTheCutoverReadiness:
             body = TestStatus()._status(readiness=warehouse_cutover.readiness)
         cutover = body["cutover"]
         assert cutover["variable"] == "KS_WRITE_WAREHOUSE"
-        assert cutover["mode"] == "duckdb" and cutover["switch_built"] is True
+        assert cutover["mode"] == "postgres" and cutover["switch_built"] is True
         keys = [u["key"] for u in cutover["unmet"]]
         assert keys and set(keys) <= set(cutover["preconditions"])
 
@@ -129,8 +122,8 @@ class TestTheCutoverReadiness:
         text = 'password authentication failed for user "ks_app"'
         with caplog.at_level("ERROR", logger="web.routes.api.admin"):
             body = TestStatus()._status(readiness=AsyncMock(side_effect=RuntimeError(text)))
-        assert body["last_refresh"] == "x"
+        assert body["duckdb_frozen"]["last_refresh"] == "x"
         assert body["cutover"]["readiness_error"] == "RuntimeError"
         assert "ks_app" not in repr(body)
         assert text in caplog.text
-        assert body["cutover"]["mode"] == "duckdb"
+        assert body["cutover"]["mode"] == "postgres"

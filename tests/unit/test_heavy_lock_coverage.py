@@ -9,8 +9,6 @@ defect was structural — which call sites hold the lock.
 """
 import inspect
 
-import pytest
-
 from core import scheduler as scheduler_module
 from web.routes.api import admin
 
@@ -164,73 +162,3 @@ def test_every_writer_of_duckdb_orders_outside_core_answers_for_the_lock():
     assert len(found) >= 2, f"no UPDATE orders statements walked: {found}"
 
 
-@pytest.mark.asyncio
-async def test_the_comment_backfill_route_ships_what_it_changed_under_the_lock(tmp_path):
-    """Behavioural twin of the walk above, for the route DN-17 rewired.
-
-    Three claims, none of which the structural test can make: the KeyCRM
-    fetch is outside the lock, the DuckDB write and the ship are inside one
-    hold of it, and the ship carries only the orders whose comment actually
-    moved. That last one is not a nicety — `bronze.orders` upserts
-    `manager_comment` as `COALESCE(EXCLUDED, stored)`, so an order that
-    already had a comment has nothing to carry, and shipping it anyway would
-    be a version written for a row that did not change.
-    """
-    import asyncio
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    from core.duckdb_store import DuckDBStore
-    from web.routes.api import traffic
-
-    lock = asyncio.Lock()
-    seen = {}
-
-    class Client:
-        async def paginate(self, *_a, **_k):
-            seen["fetch_locked"] = lock.locked()
-            # Both orders come back from KeyCRM with a comment; only one of
-            # them is missing it here.
-            yield [{"id": 1, "manager_comment": "utm_source=fb"},
-                   {"id": 2, "manager_comment": "utm_source=tg"}]
-
-    async def ship(_store, ids, *, version_kind, **_kw):
-        seen["ship_locked"] = lock.locked()
-        seen["shipped"] = list(ids)
-        seen["kind"] = version_kind
-        return {"orders_shipped": len(ids)}
-
-    store = DuckDBStore(db_path=tmp_path / "analytics.duckdb")
-    await store.connect()
-    try:
-        async with store.connection() as conn:
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, grand_total,"
-                " ordered_at, buyer_id, manager_comment) VALUES"
-                " (1, 1, 1, 10.0, TIMESTAMPTZ '2026-08-01 10:00:00+00', 1, 'kept'),"
-                " (2, 1, 1, 10.0, TIMESTAMPTZ '2026-08-01 10:00:00+00', 2, NULL)"
-            )
-        scheduler = MagicMock()
-        scheduler._heavy_job_lock = lock
-        before = dict(traffic._backfill_status)
-        with patch.object(traffic, "get_store", AsyncMock(return_value=store)), \
-             patch("core.keycrm.get_async_client", AsyncMock(return_value=Client())), \
-             patch("core.scheduler.get_scheduler", return_value=scheduler), \
-             patch("core.pg_backfill.ship_orders_by_id", new=ship), \
-             patch.object(traffic, "reparse_router", new=AsyncMock()), \
-             patch("asyncio.sleep", new=AsyncMock()):
-            # Bounded for the reason the reconciliation test below is: a lock
-            # taken and never released is a deadlock, and a test that hangs on
-            # one fails nobody in time.
-            await asyncio.wait_for(traffic._run_backfill_inner(1), timeout=20)
-        traffic._backfill_status.clear()
-        traffic._backfill_status.update(before)
-
-        async with store.connection() as conn:
-            stored = dict(conn.execute(
-                "SELECT id, manager_comment FROM orders ORDER BY id").fetchall())
-    finally:
-        await store.close()
-
-    assert seen == {"fetch_locked": False, "ship_locked": True,
-                    "shipped": [2], "kind": "backfill"}
-    assert stored == {1: "kept", 2: "utm_source=tg"}

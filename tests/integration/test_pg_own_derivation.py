@@ -102,17 +102,6 @@ class TestTheWritersRaiseTheSignal:
         await write_orders([_order(IDS[0])], [], replace_products=False)
         assert await _signal(pool) == (2, 0)
 
-    @pytest.mark.asyncio
-    async def test_under_piggyback_it_does_not(self, own, monkeypatch):
-        from core import pg_derivation
-        from core.pg_landing import write_orders
-
-        pool, _s, _a = own
-        monkeypatch.setenv("KS_PG_DERIVE", "piggyback")
-        pg_derivation.configure_mode()
-        await write_orders([_order(IDS[0])], [], replace_products=False)
-        assert await _signal(pool) == (1, 0)
-
 
 class TestTheJob:
     @pytest.mark.asyncio
@@ -505,18 +494,15 @@ class TestADroppedMarkHeals:
 
 
 async def _unmarked(monkeypatch, *orders):
-    """Land orders the way a process whose mode was never configured would:
-    through the real writer, raising no mark."""
+    """Land orders the way a writer that raised no mark would: through the
+    real writer, with no signal. Since step 14's S14-00 every process derives
+    on its own signal (`owns()` is a constant), so the missing mark is made
+    by hand for this one write — what the journal's twin exists to catch."""
     from core import pg_derivation
     from core.pg_landing import write_orders
 
-    monkeypatch.setenv("KS_PG_DERIVE", "piggyback")
-    pg_derivation.configure_mode()
-    try:
+    with patch.object(pg_derivation, "owns", lambda: False):
         await write_orders(list(orders), [], replace_products=False)
-    finally:
-        monkeypatch.setenv("KS_PG_DERIVE", "own")
-        pg_derivation.configure_mode()
 
 
 async def _missed(pool):
@@ -774,21 +760,3 @@ class TestTheUtmParseIsTheLastStep:
         assert result["parsed"] >= 1, result
         assert (await _utm_row(pool, IDS[2]))["utm_campaign"] == "spring"
 
-    @pytest.mark.asyncio
-    async def test_under_duckdb_the_derivation_parses_nothing(self, own):
-        """The default, byte for byte: the derivation's result carries no parse
-        and no verdict appears; the table stays the tick's copy."""
-        from core import pg_utm_parse
-        from core.pg_landing import write_orders
-
-        pool, scheduler, _a = own
-        assert not pg_utm_parse.parses_in_postgres()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM silver.order_utm WHERE order_id = ANY($1::int[])", list(IDS))
-        await write_orders([_commented(IDS[0])], [], replace_products=False)
-
-        result = await scheduler._run_pg_derivation()
-
-        assert result["status"] == "success" and "order_utm" not in result
-        assert await _utm_row(pool, IDS[0]) is None

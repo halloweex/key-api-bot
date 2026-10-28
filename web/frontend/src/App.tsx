@@ -16,6 +16,7 @@ const ReportsPage = lazyChunk(() => import('./components/ReportsPage'))
 const MarketingPage = lazyChunk(() => import('./components/MarketingPage'))
 const MarginPage = lazyChunk(() => import('./components/MarginPage'))
 const SmsCampaignsPage = lazyChunk(() => import('./components/SmsCampaignsPage'))
+const TgBotPage = lazyChunk(() => import('./components/TgBotPage'))
 
 // ─── App Component ───────────────────────────────────────────────────────────
 
@@ -40,6 +41,19 @@ function App() {
           <AdminPermissionsPage />
         </Suspense>
       </AdminGuard>
+    )
+  }
+
+  // Customer Telegram bot activity (the bot's own counts)
+  if (path === '/v2/tg-bot' || path === '/tg-bot') {
+    return (
+      <AppShell>
+        <PermissionGuard feature="tgbot">
+          <Suspense fallback={<Spinner />}>
+            <TgBotPage />
+          </Suspense>
+        </PermissionGuard>
+      </AppShell>
     )
   }
 

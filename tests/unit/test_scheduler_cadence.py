@@ -24,6 +24,39 @@ from apscheduler.triggers.interval import IntervalTrigger
 from tests.unit.test_duckdb_off_sweep import target_state  # noqa: F401 — fixture
 from tests.unit.test_read_fallback_sites import fresh_read_fallback  # noqa: F401 — fixture
 
+# The instants every cadence below is read at, never the wall clock.
+# `_trigger_cadence_s` takes the longest gap among a trigger's next twelve
+# firings, so read today a six-hourly Kyiv cron says seven hours for the three
+# days before the night the clocks go back, and a daily one 25 h for the
+# twelve: the suite went red every October (25200.0, measured 2026-10-22).
+# Kyiv leaves summer time at 04:00 on 2026-10-25 and enters it at 03:00 on
+# 2026-03-29.
+QUIET = (2026, 7, 15, 12)    # no clock change in the next twelve days
+AUTUMN = (2026, 10, 23, 12)  # 01:00 → 07:00 on 25 Oct is seven hours
+SPRING = (2026, 3, 26, 12)   # 01:00 → 07:00 on 29 Mar is five; six still wins
+
+
+def _kyiv(at):
+    from core.scheduler import SCHEDULER_TIMEZONE
+
+    return datetime(*at, tzinfo=SCHEDULER_TIMEZONE)
+
+
+@pytest.fixture
+def cadence_read_at(monkeypatch):
+    """Fix the instant `_add_job` reads a trigger's cadence at. It asks with
+    no `now`, so without this the cadence the wrapper captures is today's."""
+    from core.scheduler import BackgroundScheduler
+
+    real = BackgroundScheduler._trigger_cadence_s
+
+    def at(when):
+        monkeypatch.setattr(
+            BackgroundScheduler, "_trigger_cadence_s",
+            staticmethod(lambda trigger, now=None: real(trigger, now or when)))
+
+    return at
+
 
 def _registered():
     """A scheduler with every production job registered and none started."""
@@ -58,9 +91,14 @@ class TestEveryJobCarriesItsCadence:
     def test_the_slow_emitters_get_the_rhythm_their_triggers_give(self):
         """The four whose alerts arrived every pass as news. Named here only
         as the record of why this exists; the two tests above are what keeps
-        the next one covered."""
+        the next one covered.
+
+        Read at a quiet instant. These triggers carry the process's zone —
+        UTC in CI, Europe/Kyiv in production — so on the wall clock this
+        failed only under a zone with a clock change: a laptop in Kyiv in
+        October."""
         s = _registered()
-        cadence = {j.id: s._trigger_cadence_s(j.trigger)
+        cadence = {j.id: s._trigger_cadence_s(j.trigger, _kyiv(QUIET))
                    for j in s._scheduler.get_jobs()}
         assert cadence["disk_watchdog"] == 6 * 3600
         assert cadence["dq_integrity_check"] == 6 * 3600
@@ -86,13 +124,20 @@ class TestTheWrapper:
                    func=probe, trigger=trigger)
         return s, s._scheduler.get_job("probe"), seen
 
-    def test_the_job_runs_under_its_triggers_cadence(self):
+    @pytest.mark.parametrize("at, hours", [(QUIET, 6), (AUTUMN, 7)],
+                             ids=["quiet", "clocks_go_back"])
+    def test_the_job_runs_under_its_triggers_cadence(
+            self, cadence_read_at, at, hours):
+        """Both directions: six hours on a quiet week, seven across the night
+        the clocks go back — what the trigger gives at registration, not a
+        constant."""
         from core.scheduler import INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE
 
+        cadence_read_at(_kyiv(at))
         _, job, seen = self._probe(
             CronTrigger(hour=INVARIANT_CHECK_HOURS, timezone=SCHEDULER_TIMEZONE))
         asyncio.run(job.func())
-        assert seen == [6 * 3600]
+        assert seen == [hours * 3600]
 
     def test_the_cadence_does_not_leak_past_the_job(self):
         from core.alerting import ALERT_CADENCE_S
@@ -105,12 +150,17 @@ class TestTheWrapper:
 
         assert asyncio.run(run_then_look()) is None
 
-    def test_a_catch_up_carries_the_scheduled_jobs_cadence(self):
+    @pytest.mark.parametrize("at, hours", [(QUIET, 6), (AUTUMN, 7)],
+                             ids=["quiet", "clocks_go_back"])
+    def test_a_catch_up_carries_the_scheduled_jobs_cadence(
+            self, cadence_read_at, at, hours):
         """The catch-up re-adds `job.func` under a one-shot DateTrigger, which
         has no rhythm of its own. The cadence was captured at registration, so
-        a caught-up integrity run still raises at six hours."""
+        a caught-up integrity run still raises at the scheduled run's six
+        hours — seven when registered across the night the clocks go back."""
         from core.scheduler import INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE
 
+        cadence_read_at(_kyiv(at))
         s, job, seen = self._probe(
             CronTrigger(hour=INVARIANT_CHECK_HOURS, timezone=SCHEDULER_TIMEZONE))
         s._scheduler.add_job(
@@ -118,7 +168,7 @@ class TestTheWrapper:
                 run_date=datetime.now(SCHEDULER_TIMEZONE) + timedelta(hours=1)),
             id="probe_catchup")
         asyncio.run(s._scheduler.get_job("probe_catchup").func())
-        assert seen == [6 * 3600]
+        assert seen == [hours * 3600]
 
     def test_a_one_shot_trigger_has_no_cadence(self):
         from core.scheduler import BackgroundScheduler, SCHEDULER_TIMEZONE
@@ -146,6 +196,19 @@ class TestTheCadenceIsElapsedTime:
                               timezone=SCHEDULER_TIMEZONE)
         before = datetime(2026, 10, 23, 12, 0, tzinfo=SCHEDULER_TIMEZONE)
         assert BackgroundScheduler._trigger_cadence_s(trigger, before) == 7 * 3600
+
+    def test_the_night_the_clocks_go_forward_is_still_six_hours(self):
+        """The longest gap, not the one across the change: on 2026-03-29 the
+        01:00 and 07:00 slots are five hours apart, and the six beside them
+        is what the Gate is told. Why only October ever turned this red."""
+        from core.scheduler import (
+            BackgroundScheduler, INVARIANT_CHECK_HOURS, SCHEDULER_TIMEZONE,
+        )
+
+        trigger = CronTrigger(hour=INVARIANT_CHECK_HOURS,
+                              timezone=SCHEDULER_TIMEZONE)
+        assert BackgroundScheduler._trigger_cadence_s(
+            trigger, _kyiv(SPRING)) == 6 * 3600
 
 
 class TestARequestedRunIsMarked:

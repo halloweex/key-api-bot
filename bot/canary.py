@@ -1009,7 +1009,10 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
     Chain 3's `orders_sync_failing` the same way, when the probe read no
     entry for the chain, or read it on Postgres with no step to judge: under
     chain 3 the order step is the only writer of orders, and the Postgres
-    hang that fails it hangs this endpoint too (batch-E review)."""
+    hang that fails it hangs this endpoint too (batch-E review).
+
+    And `backup_evidence_stale` (step 14's S14-00) when the probe read no
+    `backups` block: a stale drill stands until the next weekly run."""
     payload = payload or {}
     keys = []
     if not isinstance(payload.get("read_fallbacks"), dict):
@@ -1039,6 +1042,11 @@ def unjudged_keys(payload: Optional[dict]) -> "list[str]":
             orders.get("mode") == "postgres"
             and not isinstance(orders.get("sync_step"), dict)):
         keys.append("orders_sync_failing")
+    # The backup evidence (S14-00): the drills run weekly, so a stale marker
+    # stands for days, and a probe that read no `backups` block cannot say a
+    # drill has run since.
+    if not isinstance(payload.get("backups"), dict):
+        keys.append("backup_evidence_stale")
     return keys
 
 
@@ -1302,6 +1310,10 @@ def check_duckdb_off_held_back(payload: Optional[dict]) -> "list[tuple[str, str]
     """Judge `duckdb_switch.held_back`: KS_DUCKDB=off with a precondition of
     off unmet (stage 5's PR-2, core/duckdb_off.py).
 
+    Since step 14's S14-00 the verdict is gone and web publishes `[]`, so
+    this fires only for an image from before step 14, the rollback target;
+    it goes with the block (S14-17).
+
     CRITICAL, titled for what it is: web runs `on` — the owner's OD-S5-1 (a),
     never a stop, web is the only syncer — so the site serves and orders come
     in, but somebody set off believing the week of silence starts, and it has
@@ -1352,6 +1364,53 @@ def check_goals_history_mode(payload: Optional[dict]) -> "list[tuple[str, str]]"
         return [("goals_history_mode_invalid",
                  f"goal history: {block['error']}")]
     return []
+
+
+# `(field of /api/health's backups block, what it proves, the script that
+# writes its marker, which limit)`. The limits are `core/backup_evidence.py`'s,
+# read there, so the canary and the host never disagree about a marker.
+BACKUP_EVIDENCE: "tuple[tuple[str, str, str, str], ...]" = (
+    ("pitr_drill_age_h", "PITR drill", "deploy/pg_pitr_drill.sh", "drill"),
+    ("remote_restore_age_h", "off-site restore drill",
+     "deploy/pg_restore_drill.sh --from-remote", "drill"),
+    ("pg_offsite_age_h", "Postgres off-site copy", "deploy/pg_offsite.sh", "offsite"),
+)
+
+
+def check_backup_evidence(payload: Optional[dict]) -> "list[tuple[str, str]]":
+    """Judge `/api/health`'s `backups` block: a backup marker past its limit.
+
+    The host's PITR drill, its off-site restore drill and the Postgres
+    off-site shipment each leave a marker in `data/` on success only
+    (`core/backup_evidence.py`), and web publishes their ages in hours.
+    Until step 14's S14-00 the two drills were judged by chain 3's
+    precondition alone, which paged `write_chain_precondition_unmet`; with
+    that gone a drill that quietly stopped running would be seen by nobody,
+    since `deploy/offsite_check.sh` reads the shipment's marker alone. Warn:
+    nothing is broken now, but the evidence that Postgres can be got back is
+    getting old. A null age is a marker that does not exist — the script has
+    never passed on this host. An absent block, or one that is not an
+    object, is not judged: an older web, or web unable to read the
+    directory, which says nothing about the drills."""
+    block = (payload or {}).get("backups")
+    if not isinstance(block, dict):
+        return []
+    from core.backup_evidence import DRILL_MAX_AGE_H, OFFSITE_MAX_AGE_H
+
+    limits = {"drill": DRILL_MAX_AGE_H, "offsite": OFFSITE_MAX_AGE_H}
+    stale: list[str] = []
+    for name, what, script, kind in BACKUP_EVIDENCE:
+        if name not in block:
+            continue
+        age = block.get(name)
+        limit = limits[kind]
+        if age is None:
+            stale.append(f"{what} never passed ({script})")
+        elif isinstance(age, (int, float)) and age > limit:
+            stale.append(f"{what} {age:.1f} h old, over its {limit} h limit ({script})")
+    if not stale:
+        return []
+    return [("backup_evidence_stale", "Backup evidence stale: " + "; ".join(stale))]
 
 
 # ─── Orchestration ──────────────────────────────────────────────────────────
@@ -1607,6 +1666,13 @@ async def run_canary(
             fail(key, message)
         if precondition_failures and severity == "ok":
             severity = "warn"
+        # A backup marker past its limit: warn. The drills prove Postgres can
+        # be got back, and nothing else watches the two of them (S14-00).
+        backup_failures = check_backup_evidence(payload)
+        for key, message in backup_failures:
+            fail(key, message)
+        if backup_failures and severity == "ok":
+            severity = "warn"
         # A delivered report whose ledger row is spooled: warn.
         ledger_failures = check_report_ledger_pending(payload)
         for key, message in ledger_failures:
@@ -1711,6 +1777,9 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
      "grep web's log for 'UTM layer refresh failed'; then POST /api/warehouse/refresh — a full tick whose parse finishes ends it"),
     ("write_chain_precondition_unmet",
      "Set the read flag the message names to postgres, then docker compose up -d web"),
+    ("backup_evidence_stale",
+     "On the host, run the script the line names; it writes its marker in data/ "
+     "on success only, and the next probe clears this"),
     ("report_ledger_pending",
      "Nothing to resend: the next daily tick drains data/report-ledger-pending into the ledger, under either flag; grep -i 'report ledger' in web's log"),
     ("utm_parse_mode_invalid",

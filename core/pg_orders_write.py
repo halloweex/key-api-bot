@@ -88,9 +88,15 @@ move the writes back to DuckDB. A batch with nothing to write — every order
 already in its state and no expense — reads that on the same connection
 before the latch and returns, so an idle tick latches nothing.
 
-PRECONDITIONS THE FLAG ENFORCES
+PRECONDITIONS THE FLAG ENFORCED — UNTIL S14-00
 
-`unmet_precondition()` names what must hold before `KS_WRITE_ORDERS=postgres`
+Since step 14's S14-00 the chain writes Postgres whatever its flag says and
+asks no precondition: `writes_postgres`, `mode`, `unmet_precondition`,
+`stood_down_layers` and `landing_checks_stood_down` are constants, and the
+start hold is gone. The backup evidence is judged by the canary instead
+(`backup_evidence_stale`). What follows is the history.
+
+`unmet_precondition()` named what must hold before `KS_WRITE_ORDERS=postgres`
 moves the writes; until all of it does an unlatched chain runs as duckdb
 whatever the flag says (DN-26's rule, generic in the registry since DN-27).
 `goals_bridge` was the first, while the goal calculators rendered the DN-12
@@ -249,40 +255,26 @@ def env_writes_postgres() -> bool:
     return value == "postgres"
 
 
-# ─── Preconditions ───────────────────────────────────────────────────────────
-
-
-def _step13_unmet() -> Optional[str]:
-    from core import warehouse_cutover
-
-    if warehouse_cutover.writes_postgres():
-        return None
-    return ("step13: DuckDB still derives the warehouse "
-            "(KS_WRITE_WAREHOUSE is not in force), and it would derive from "
-            "orders this chain freezes")
-
-
-def _chain1_unmet() -> Optional[str]:
-    from core import pg_inventory_write
-
-    try:
-        if pg_inventory_write.writes_postgres():
-            return None
-        why = f"{pg_inventory_write.WRITE_ENV} is not postgres"
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        why = f"{pg_inventory_write.WRITE_ENV} is not understood ({exc})"
-    return (f"chain1: {why}, and DuckDB's SKU rebuild reads DuckDB order "
-            "lines, which this chain freezes")
+# ─── Preconditions — none since S14-00 ──────────────────────────────────────
+#
+# Until step 14's S14-00 the flag moved the writes only with the lock-out
+# revision, step 13 and chain 1 in force, no delivered page under a check the
+# flip retires, and the backup evidence fresh (OD-13 (a)). Production met all
+# of them; their checks went with them. The backup evidence is judged by the
+# canary instead (`backup_evidence_stale`), so a drill that silently stopped
+# running is still seen.
 
 
 def landing_checks_stood_down() -> frozenset:
     """The DuckDB integrity checks over the order tables that do not run once
     this chain has moved: on a frozen DuckDB they would compare old orders,
-    and DN-23's Postgres twins stand in alone. Empty while the chain writes
-    DuckDB. Never raises."""
+    and DN-23's Postgres twins stand in alone. Always the ten
+    (`ORDER_LANDING_CHECKS`), a constant since step 14's S14-00 — otherwise
+    they would knock on the refused DuckDB connection and page
+    `duckdb_opened_while_off`. Never raises."""
     from core.data_quality import ORDER_LANDING_CHECKS
 
-    return ORDER_LANDING_CHECKS if mode() != "duckdb" else frozenset()
+    return ORDER_LANDING_CHECKS
 
 
 def retired_conditions() -> frozenset:
@@ -312,182 +304,40 @@ STOOD_DOWN_LAYERS = frozenset({"reconciliation"})
 
 
 def stood_down_layers() -> frozenset:
-    """The layers neither written, paged on, caught up nor digested while the
-    chain is off DuckDB. Empty while it writes DuckDB. Never raises — the
-    canary's block, the catch-up and the digest all ask."""
-    try:
-        return STOOD_DOWN_LAYERS if mode() != "duckdb" else frozenset()
-    except Exception:  # noqa: BLE001 — mode() promises not to; then: not stood down
-        logger.exception("pg_orders_write: the stood-down layers could not be read")
-        return frozenset()
+    """The layers neither written, paged on, caught up nor digested since the
+    chain moved: `{"reconciliation"}`, a constant since step 14's S14-00 —
+    until then an exception here opened into the empty set. Never raises —
+    the canary's block, the catch-up and the digest all ask. Last consumers:
+    those three and `dq_reconciliation` — S14-12."""
+    return STOOD_DOWN_LAYERS
 
 
-def _landing_pages_unmet() -> Optional[str]:
-    from core.alerting import delivered_conditions
-
-    try:
-        delivered = delivered_conditions()
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        return f"landing_pages_clear: the alert gate cannot be read ({type(exc).__name__})"
-    retired = retired_conditions()
-    open_ = sorted(key for key, group in delivered.items()
-                   if key in retired or group == RECONCILIATION_GROUP)
-    if not open_:
-        return None
-    return ("landing_pages_clear: a delivered page stands under a check the "
-            "flip retires (" + ", ".join(open_) + "); let the DuckDB check "
-            "clear it first")
-
-
-def _lockout_unmet() -> Optional[str]:
-    return chain_latch.lockout_unmet(LOCKOUT_REVISION)
-
-
-def _backup_unmet() -> List[str]:
-    from core import backup_evidence
-
-    return backup_evidence.unmet()
-
-
-# What this process decided the first time it found a precondition unmet under
-# `KS_WRITE_ORDERS=postgres`: `(since, reason)`, or None while it never has.
-# Once set it holds the chain on DuckDB until the process ends, whatever the
-# facts do afterwards — see `unmet_precondition`. Reset per test by
-# `tests/conftest.py`.
+# The hold this process used to take the first time it found a precondition
+# unmet under `KS_WRITE_ORDERS=postgres`. Never set since S14-00; the
+# attribute stays for `tests/conftest.py`, which resets it, until S14-09.
 _held: Optional[Tuple[str, str]] = None
 
 HELD_KEY = "held_until_restart"
 
 
-def _flag_says_postgres() -> bool:
-    try:
-        return env_writes_postgres()
-    except Exception:  # noqa: BLE001 — a typo is published by the registry
-        return False
-
-
 def unmet_precondition() -> Optional[str]:
-    """Why `KS_WRITE_ORDERS=postgres` must not move the writes yet, or None:
-    `unmet_reasons()` joined with "; ", the form the registry publishes and
-    the canary pages. Never raises."""
-    reasons = unmet_reasons()
-    return "; ".join(reasons) if reasons else None
+    """None, a constant since step 14's S14-00: the chain writes Postgres
+    whatever its flag says, and nothing it waited on is asked any more.
+    Kept for the registry's `unmet_precondition` field, which keeps its shape
+    until S14-11."""
+    return None
 
 
 def unmet_reasons() -> List[str]:
-    """Every reason `KS_WRITE_ORDERS=postgres` must not move the writes yet,
-    one entry per precondition, in order; empty when none. What the
-    preflight publishes, entry for entry. A reason may carry a "; " of its
-    own — the retired pages', and the hold, which quotes every reason it held
-    on — so the joined `unmet_precondition()` cannot be split back into them:
-    split, `/api/health` published the goal bridge's lever, "port chain 7b
-    first (OD-14)", as a precondition of its own (batch-E review), while
-    that precondition existed.
-
-    Never raises and never asks Postgres (module docstring): every fact is a
-    cached verdict, an environment variable, a marker file or this process's
-    alert gate. A fact that cannot be read is unmet, because nobody can then
-    say it holds.
-
-    **Held is held until the process ends** (the chain-3 review). Several
-    facts change with time inside a running web — the backup markers age and
-    are rewritten by the host's drills (the Monday PITR drill at 08:44), a
-    delivered page resolves — and every consumer asks this on every call. So
-    a web started with the flag set and one fact unmet used to flip on its
-    own the moment the fact came good: the next sync write latched the chain,
-    with no stopped window, no `chain_copy_back.py orders --handover` and
-    nobody watching, and whatever the mirrors had not shipped by then was
-    stranded in the store that had just become the source of truth. Now the
-    first unmet answer under the flag is remembered (`_held`), and from then
-    on this process answers unmet — the live reasons while any stands, and
-    `held_until_restart` once none does. The flip therefore happens only in a
-    process that found every precondition met from its start
-    (`settle_hold()`, called by `configure_modes()`) to its first write: the
-    restart the runbook puts after `--handover`. A latched chain is not held
-    — the latch outranks every precondition (OD-19 (a)); what is unmet is
-    published either way.
-
-    **Step 13's verdict is a fact only once it has been reached.** Before
-    `warehouse_cutover.configure_mode` has decided, `step13` reads unmet and
-    means "not decided yet". It still keeps the chain on DuckDB, but it is
-    never held on: held, it made every start under
-    `KS_WRITE_WAREHOUSE=postgres` hold this chain for good, at the very start
-    that found step 13 in force (and chain 5, whose precondition is this
-    chain, with it) — step 13's start asked this chain its mode while it
-    decided, gathering the DN-12 goal bridge's owners, until chain 7b-4
-    deleted the bridge. The start's verdict (`settle_hold()`) is taken after
-    step 13's."""
-    global _held
-
-    found = _live_unmet()
-    live = [why for _key, why in found]
-    if chain_latch.latched(CHAIN):
-        return live
-    if _held is None:
-        holdable = [why for key, why in found
-                    if key != _STEP13 or _step13_decided()]
-        if holdable and _flag_says_postgres():
-            _held = (_now_utc().isoformat(timespec="seconds"), "; ".join(holdable))
-            logger.warning(
-                "%s=postgres, and the chain is held on DuckDB until this "
-                "process restarts: %s", WRITE_ENV, _held[1])
-        return live
-    if live:
-        return live
-    since, reason = _held
-    return [f"{HELD_KEY}: this process held the chain on DuckDB at {since} "
-            f"({reason}), and every precondition has held since — the flip "
-            "happens only at a start: stop web, ask "
-            "scripts/chain_copy_back.py orders --handover, and start it again"]
+    """Empty, a constant since S14-00 (`unmet_precondition`)."""
+    return []
 
 
 def settle_hold() -> Optional[str]:
-    """The start's verdict, taken before anything can write: `unmet_precondition`
-    once, so a precondition unmet when the process started holds it from the
-    first question rather than from whichever consumer asks first. Called by
-    `core.runtime_modes.configure_modes()`; idempotent. Never raises, and
-    with the flag off — production today — reads nothing at all."""
-    if not _flag_says_postgres():
-        return None
-    try:
-        return unmet_precondition()
-    except Exception:  # noqa: BLE001 — it promises not to; then: the next ask
-        logger.exception("pg_orders_write: the start's verdict could not be read")
-        return None
-
-
-# The key of step 13's precondition — the one fact that is not a fact until
-# `warehouse_cutover` has reached its verdict (`unmet_precondition`).
-_STEP13 = "step13"
-
-
-def _step13_decided() -> bool:
-    from core import warehouse_cutover
-
-    return warehouse_cutover.verdict_reached()
-
-
-def _live_unmet() -> List[Tuple[str, str]]:
-    """The preconditions as they stand now — `unmet_precondition` without the
-    hold — as `(key, reason)`, one per precondition unmet, in order; empty
-    when every one holds. Never raises."""
-    reasons: List[Tuple[str, str]] = []
-    # The checks are looked up when asked, so a test standing one in is read.
-    for key, check in ((chain_latch.LOCKOUT_KEY, _lockout_unmet),
-                       (_STEP13, _step13_unmet), ("chain1", _chain1_unmet),
-                       ("landing_pages_clear", _landing_pages_unmet)):
-        try:
-            why = check()
-        except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-            why = f"{check.__name__.strip('_')}: could not be read ({type(exc).__name__})"
-        if why:
-            reasons.append((key, why))
-    try:
-        reasons.extend(("backups", why) for why in _backup_unmet())
-    except Exception as exc:  # noqa: BLE001 — carried out, not swallowed
-        reasons.append(("backups",
-                        f"backups: the evidence could not be read ({type(exc).__name__})"))
-    return reasons
+    """Does nothing since S14-00: there is no precondition left to hold on,
+    and `configure_modes()` no longer calls it. Kept until S14-09 for its
+    other callers."""
+    return None
 
 
 def _warn_unmet(reason: str) -> None:
@@ -500,36 +350,20 @@ def _warn_unmet(reason: str) -> None:
 
 
 def writes_postgres() -> bool:
-    """Whether this chain writes Postgres — the one answer every caller reads.
-
-    The latch outranks the flag (OD-19 (a)), and outranks a value nobody can
-    read. Unlatched, the flag moves the writes only once `unmet_precondition()`
-    holds. Raises on a flag nobody can read while unlatched; `mode()` is the
-    question that never raises."""
-    if chain_latch.latched(CHAIN):
-        return True
-    if not env_writes_postgres():
-        return False
-    unmet = unmet_precondition()
-    if unmet:
-        _warn_unmet(unmet)
-        return False
+    """Whether this chain writes Postgres — the one answer every caller reads:
+    True, a constant since step 14's S14-00. Neither the flag, nor the latch,
+    nor a precondition routes any more; the first write in a process still
+    takes the latch (decision 3), which the images before step 14 route by.
+    Last
+    consumers: the sync's order step, the repository's order writers and
+    selections, and the registry — S14-09."""
     return True
 
 
 def mode() -> Optional[str]:
-    """Where this chain's writes go: "postgres", "duckdb", or None when
-    `KS_WRITE_ORDERS` is not understood and no latch overrides it. The
-    registry's answer (`write_chains.chain_modes`). Never raises."""
-    from core import write_chains
-
-    return write_chains._chain_state(_self())["mode"]
-
-
-def _self():
-    import sys
-
-    return sys.modules[__name__]
+    """Where this chain's writes go: "postgres", a constant since step 14's
+    S14-00 — never None, since no flag is read for it."""
+    return "postgres"
 
 
 # The landing tables whose history must be in Postgres before the flip: the

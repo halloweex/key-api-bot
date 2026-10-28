@@ -86,20 +86,26 @@ async def _seed_duckdb(store):
                 "INSERT INTO orders (id,source_id,status_id,grand_total,"
                 "ordered_at,buyer_id,manager_id) VALUES (?,?,?,?,?,?,?)",
                 [oid, src, status, total, now - timedelta(days=days), oid, mgr])
-    # Written through the store, so the shared parse is the thing under test.
-    await store.upsert_expense_types([
-        {"id": i, "name": n, "alias": a, "is_active": act}
-        for i, n, a, act in TYPES
-    ])
-    await store.upsert_expenses_batch([
-        {"id": oid, "expenses": [
-            {"id": eid, "expense_type_id": tid, "amount": amt,
-             "description": f"exp {eid}", "status": "paid",
-             "payment_date": None, "created_at": now - timedelta(days=1)}
-            for eid, o, tid, amt in EXPENSES if o == oid
-        ]}
-        for oid in {o for _, o, _, _ in EXPENSES}
-    ])
+    # Written through the store, so the shared parse is the thing under test —
+    # through its DuckDB branch, which since step 14's S14-00 nothing routes
+    # to but this (`tests.conftest.chains_on_duckdb`).
+    from core import pg_expense_types_write, pg_orders_write
+    from tests.conftest import chains_on_duckdb
+
+    with chains_on_duckdb(pg_expense_types_write, pg_orders_write):
+        await store.upsert_expense_types([
+            {"id": i, "name": n, "alias": a, "is_active": act}
+            for i, n, a, act in TYPES
+        ])
+        await store.upsert_expenses_batch([
+            {"id": oid, "expenses": [
+                {"id": eid, "expense_type_id": tid, "amount": amt,
+                 "description": f"exp {eid}", "status": "paid",
+                 "payment_date": None, "created_at": now - timedelta(days=1)}
+                for eid, o, tid, amt in EXPENSES if o == oid
+            ]}
+            for oid in {o for _, o, _, _ in EXPENSES}
+        ])
     async with store.connection() as conn:
         for eid, days, cat, etype, amt, plat in SPEND:
             conn.execute(

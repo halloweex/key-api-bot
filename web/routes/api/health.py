@@ -699,7 +699,10 @@ async def health_check(request: Request):
         seconds_since_sync = None
         if sync_stats.get("last_sync_time"):
             from datetime import datetime
-            from core.config import DEFAULT_TZ
+            # The clock `last_sync_time` was stamped with. `core.config` never
+            # had this name, and the ImportError, swallowed below, published
+            # `sync: null` from 2026-02-12 until the type checker said so.
+            from core.sync_service import DEFAULT_TZ
             last_sync = datetime.fromisoformat(sync_stats["last_sync_time"])
             seconds_since_sync = int((datetime.now(DEFAULT_TZ) - last_sync).total_seconds())
 

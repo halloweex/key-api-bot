@@ -258,29 +258,6 @@ class TestTheInventoryChainStandsDown:
             "app.inventory_history",
         }
 
-    def test_an_unknown_flag_value_raises(self):
-        """`KS_BOT_STORE`'s rule: a typo in the variable deciding which store
-        owns the only record of a stock change must stop the process."""
-        import os
-
-        import pytest
-
-        from core.pg_inventory_write import WRITE_ENV, writes_postgres
-
-        before = os.environ.get(WRITE_ENV)
-        try:
-            os.environ[WRITE_ENV] = "postgres "
-            assert writes_postgres() is True          # whitespace is forgiven
-            os.environ[WRITE_ENV] = "postgre"
-            with pytest.raises(RuntimeError):
-                writes_postgres()
-            os.environ.pop(WRITE_ENV)
-            assert writes_postgres() is False          # default is duckdb
-        finally:
-            os.environ.pop(WRITE_ENV, None)
-            if before is not None:
-                os.environ[WRITE_ENV] = before
-
     def test_insert_binds_every_column(self):
         sql = _insert("app.t", ("a", "b", "c"))
         assert sql == "INSERT INTO app.t (a, b, c) VALUES ($1, $2, $3)"
@@ -490,8 +467,12 @@ class TestItNeverRaises:
         every_table = (*(t for t, _d, _c, _o in _FULL_REPLACE),
                        *(s.pg_table for s in _APPEND_ABOVE))
         assert set(pg_expenses_write.CHAIN_TABLES) <= set(every_table)
-        assert stamped == [t for t in every_table
-                           if t not in pg_expenses_write.CHAIN_TABLES]
+        # Since step 14's S14-00 every chain's tables stand down, a constant:
+        # what the run was copying, and stamps, is the rest.
+        from core.write_chains import stood_down_tables
+
+        moved = stood_down_tables()
+        assert stamped and stamped == [t for t in every_table if t not in moved]
         assert {c.args[1] for c in stamps.await_args_list} == {result["error"]}
         assert "schema is behind" in result["error"]
 
@@ -1189,7 +1170,6 @@ class TestTheForecastGroup:
     # `test_order_versions.py`'s deliberate literal — which exists precisely so
     # that moving the pin is something a human types. Two guards where the
     # weaker one silently covers for the stronger is worse than one.
-
 
 
 class TestTheWatchdogsAndLedgers:

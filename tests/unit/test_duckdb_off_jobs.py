@@ -376,29 +376,6 @@ class TestTheLandingIsReadOnlyForWhatSurvives:
         assert duckdb_switch.opened() == {}
 
     @pytest.mark.asyncio
-    async def test_a_table_that_survives_is_read_after_the_stand_down(
-            self, duckdb_off, postgres, monkeypatch):
-        """No chain latched: every table survives, and the reader is asked
-        for exactly those, after Postgres said who owns what. Mutation: read
-        every spec rather than the survivors."""
-        from core.mirror_reconciliation import MIRRORED_TABLES, reconcile_mirror
-        from core.write_chains import WRITE_CHAINS
-
-        for chain in WRITE_CHAINS:
-            monkeypatch.delenv(chain.WRITE_ENV, raising=False)
-        pool = postgres(_Pool())
-        asked = []
-
-        async def reader(specs):
-            asked.append((pool.acquired, tuple(s.pg_table for s in specs)))
-            return {s.pg_table: ({}, {}) for s in specs}
-
-        await reconcile_mirror(None, read_duckdb=reader)
-        ((acquired_before, tables),) = asked
-        assert tables == tuple(s.pg_table for s in MIRRORED_TABLES)
-        assert acquired_before >= 1     # the owner rows were read first
-
-    @pytest.mark.asyncio
     async def test_under_on_the_side_read_first_is_compared_as_before(
             self, monkeypatch, postgres):
         """The control: handed a DuckDB side, the reader is not consulted."""
@@ -496,14 +473,6 @@ class TestTheHistoryTables:
         assert errors == {}
         assert _tables_to_ship(stood_down | stood_down_under_off()) == ()
 
-    def test_under_on_they_ship_as_they_always_have(self, target_state, monkeypatch):  # noqa: F811
-        from core.write_chains import stood_down_tables_checked
-
-        _turn_on(monkeypatch)
-        assert stood_down_under_off() == frozenset()
-        stood_down, _errors = stood_down_tables_checked()
-        assert set(_tables_to_ship(stood_down)) == set(DUCKDB_HISTORY_TABLES)
-
 
 class TestTheOperationalCopyUnderOff:
     @pytest.mark.asyncio
@@ -539,23 +508,6 @@ class TestTheOperationalCopyUnderOff:
         assert list(duckdb_switch.opened()) == [
             "core.pg_operational:replicate_operational"]
         assert conn.touched == []
-
-    @pytest.mark.asyncio
-    async def test_under_on_the_history_is_copied_as_before(
-            self, target_state, copy_lock, monkeypatch, tmp_path):  # noqa: F811
-        """The control: the same state under on reads DuckDB and writes the
-        three history tables, and only them."""
-        _turn_on(monkeypatch)
-        store = DuckDBStore(db_path=tmp_path / "on.duckdb")
-        await store.connect()
-        stamps = AsyncMock(return_value=True)
-        try:
-            result, conn = await _copy(store, _every_owner_row(), stamps)
-        finally:
-            await store.close()
-        assert "error" not in result, result
-        assert set(result["replaced"]) | set(result["appended"]) == set(DUCKDB_HISTORY_TABLES)
-        assert any("app.sync_metadata" in sql for sql in conn.touched)
 
 
 # ─── The operational comparison ──────────────────────────────────────────────
@@ -626,22 +578,6 @@ class TestTheOperationalComparisonUnderOff:
         store = _Store()
         await reconcile_operational(store)
         assert store.opened == 0 and duckdb_reads == []
-
-    @pytest.mark.asyncio
-    async def test_under_on_the_history_is_compared_as_before(
-            self, target_state, postgres, duckdb_reads, monkeypatch):  # noqa: F811
-        """The control: the same state under on reads the three history
-        tables out of DuckDB, and the store is opened for an empty read as
-        it always was."""
-        from core.mirror_reconciliation import reconcile_operational
-
-        _turn_on(monkeypatch)
-        monkeypatch.setattr("core.write_chains.compared_in_shadow", lambda: frozenset())
-        postgres(_Pool(_every_owner_row()))
-        store = _Store()
-        await reconcile_operational(store)
-        assert set(duckdb_reads) == set(DUCKDB_HISTORY_TABLES)
-        assert store.opened == 2
 
 
 # ─── The reconciliation against KeyCRM ───────────────────────────────────────

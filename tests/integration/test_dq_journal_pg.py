@@ -6,8 +6,10 @@ What `tests/unit/test_dq_journal.py` cannot prove without a database:
 - two runs journaled at once get two consecutive ids (the advisory lock);
 - the Postgres readers return what DuckDB's return for the same journal,
   rendered in the same zone;
-- the daily comparison, facing Postgres→DuckDB, is silent on an honest shadow
-  and names a shadow that failed;
+- the daily comparison, facing Postgres→DuckDB, was silent on an honest
+  shadow and named a shadow that failed (since step 14's S14-00 the comparison no longer compares a shadow —
+  `compared_in_shadow()` is empty, as it has been in production under
+  `KS_DUCKDB=off` — and its test went with it);
 - the standing watch reads an orphaned finding with its real SQL;
 - the way back carries a Postgres-only run into DuckDB, floors DuckDB's
   allocator above it, carries the digest's beat back and releases.
@@ -16,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -174,7 +176,10 @@ class TestTheReadersAgree:
                 NOW, NOW)
             pg_ages = await chain.last_success_ages(conn, ("integrity", "reconciliation"))
         assert pg_health == dk_health
-        assert pg_health["integrity"]["last_run"]["started_at"].endswith("+03:00")
+        # Kyiv's offset at the run's own instant: +03:00 in summer, +02:00 in
+        # winter. The literal "+03:00" failed every run from the clocks' change.
+        started = datetime.fromisoformat(pg_health["integrity"]["last_run"]["started_at"])
+        assert started.utcoffset() == started.astimezone(ZoneInfo("Europe/Kyiv")).utcoffset()
         assert [(s.run, s.issues, s.diffs, s.previous_issues, s.previous_diffs)
                 for s in pg_sections] == \
             [(s.run, s.issues, s.diffs, s.previous_issues, s.previous_diffs)
@@ -192,41 +197,6 @@ class TestTheReadersAgree:
             assert await chain.digest_marker(conn) == "2026-10-01T06:00:00+00:00"
         last, _ = await dq_journal.digest_inputs(store, ("integrity",), NOW)
         assert last == datetime(2026, 10, 1, 6, tzinfo=timezone.utc)
-
-
-class TestTheShadowIsCompared:
-    @pytest.mark.asyncio
-    async def test_an_honest_shadow_is_silent_and_a_failed_one_is_named(self, stores):
-        """The third state end to end: the hourly copy stands down for the
-        journal, and the daily comparison keeps comparing it facing
-        Postgres→DuckDB. Mutation: drop `- shadowed` in
-        `reconcile_operational` (the journal is never compared), or keep the
-        shipper running (it would delete the Postgres-only run)."""
-        from core.mirror_reconciliation import reconcile_operational
-        from core.pg_operational import replicate_operational
-
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        old = NOW - timedelta(hours=5)
-        await dq_journal.journal_run(store, **_kwargs(started=old))
-        issues = [i for i in await reconcile_operational(store)
-                  if i.table_name in TABLES]
-        assert issues == [], issues
-
-        # A shadow that failed: the run is in Postgres only.
-        async with store.connection() as conn:
-            conn.execute("DELETE FROM data_quality_diffs")
-            conn.execute("DELETE FROM data_quality_issues")
-            conn.execute("DELETE FROM data_quality_runs")
-        found = {(i.check_name, i.table_name) for i in await reconcile_operational(store)
-                 if i.table_name in TABLES}
-        assert found == {("shadow_missing_in_duckdb", t) for t in TABLES}
-
-        # And the hourly copy does not "repair" it out of DuckDB.
-        shipped = await replicate_operational(store)
-        assert set(TABLES) <= set(shipped.get("stood_down", [])), shipped
-        pg, _ = await _both(store, pool, "app.data_quality_runs")
-        assert len(pg) == 1
 
 
 class TestTheStandingWatch:

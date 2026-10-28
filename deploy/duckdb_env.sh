@@ -12,7 +12,8 @@
 # WHY .env AND NOT WEB
 # The compaction and the nightly snapshot start their sidecars with
 # `docker run --env-file .env`, so what refuses them under `off` is the file,
-# not web's environment and not web's verdict (core/duckdb_off.py). A host
+# not web's environment and not web's verdict (core/duckdb_off.py, before
+# step 14; a step-14 web runs off whatever .env says). A host
 # script that asked web instead would be asking the wrong process — and the
 # compaction asks while web is stopped. Read by exact name: nothing here
 # prints, lists or exports the environment, whose other lines are secrets.
@@ -181,11 +182,14 @@ ks_duckdb_stands_down() {
 # these scripts cannot import it: the process they stand down for reads `.env`
 # and not web's verdict, so while web is held back the file it goes on writing
 # is neither compacted nor shipped — a hold is to be cleared, not lived in.
+# Only an image from before step 14 can be held back, or run on: a step-14 web
+# runs off whatever .env says and publishes held_back as [], so there
+# KS_DUCKDB=on changes nothing in web and only re-arms these scripts.
 ks_duckdb_env_note() {
     local note="" bare="write KS_DUCKDB=off as a line of its own, nothing before it and nothing after"
     if ks_duckdb_stands_down; then
         if [ "$KS_DUCKDB_ENV_WEB" != off ]; then
-            note="KS_DUCKDB in .env reads off to docker run --env-file and $KS_DUCKDB_ENV_WEB to compose, whose last line for it is a KS_DUCKDB: line docker skips: web runs on, and a sidecar would be refused; make it one line, KS_DUCKDB=off or KS_DUCKDB=on. "
+            note="KS_DUCKDB in .env reads off to docker run --env-file and $KS_DUCKDB_ENV_WEB to compose, whose last line for it is a KS_DUCKDB: line docker skips: an image from before step 14 runs web on (a step-14 web runs off whatever it says), and a sidecar would be refused; make it one line, KS_DUCKDB=off. "
         else
             case "$KS_DUCKDB_ENV" in
                 invalid) note="KS_DUCKDB is written with quotes or a comment ($KS_DUCKDB_ENV_VALUE): compose drops them and web runs off, but docker run --env-file keeps them, so a sidecar would read a value the switch does not understand and run on, and the soak's P4 fails on it; $bare. " ;;
@@ -194,5 +198,5 @@ ks_duckdb_env_note() {
             esac
         fi
     fi
-    printf '%s' "${note}If web is held back (/api/health duckdb_switch.held_back), the week has not started: meet those keys or set KS_DUCKDB=on."
+    printf '%s' "${note}If web is held back (/api/health duckdb_switch.held_back, only ever non-empty from an image before step 14), the week has not started: meet those keys or, on that image, set KS_DUCKDB=on."
 }

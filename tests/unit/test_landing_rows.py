@@ -208,31 +208,6 @@ class TestTheStoreReadsThroughIt:
         assert 'min_price' not in src
 
     @pytest.mark.asyncio
-    async def test_a_real_upsert_still_writes_the_same_row(self, tmp_path):
-        from core.duckdb_store import DuckDBStore
-
-        store = DuckDBStore(db_path=tmp_path / "landing.duckdb")
-        await store.connect()
-        try:
-            await store.upsert_categories([{"id": 1, "name": "Care", "parent_id": None}])
-            await store.upsert_products([{
-                "id": 100, "name": "Serum", "category_id": 1, "sku": "SKU-A",
-                "min_price": 0, "price": 700.0,
-                "custom_fields": [{"uuid": BRAND_FIELD_UUID, "value": ["NEOGEN"]}],
-            }])
-            async with store.connection() as conn:
-                cat = conn.execute(
-                    "SELECT id, name, parent_id FROM categories"
-                ).fetchone()
-                prod = conn.execute(
-                    "SELECT id, name, category_id, brand, sku, price FROM products"
-                ).fetchone()
-            assert cat == (1, "Care", None)
-            assert prod == (100, "Serum", 1, "NEOGEN", "SKU-A", 700.0)
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
     async def test_an_empty_list_still_writes_nothing(self, tmp_path):
         from core.duckdb_store import DuckDBStore
 

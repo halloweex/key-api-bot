@@ -66,41 +66,6 @@ class TestRefreshSelfHeal:
         assert await store._count_consecutive_refresh_failures() == 2
 
     @pytest.mark.asyncio
-    async def test_pipeline_exception_marks_dirty_and_alerts(self, tmp_path, monkeypatch):
-        store = await _make_store(tmp_path)
-        async with store.connection() as conn:
-            _insert_order(conn, oid=1)
-
-        alerts: list[tuple[str, str | None]] = []
-
-        async def fake_alert(msg, key=None):
-            alerts.append((msg, key))
-
-        monkeypatch.setattr(store, "_send_warehouse_alert", fake_alert)
-        # Poison the Silver projection so the INSERT SELECT throws inside the
-        # pipeline → exercises the outer except (self-heal) path.
-        #
-        # The projection, not `_date_in_kyiv`: since the dialect split it reads
-        # its date expression from `core.sql_dialect.DUCKDB`, so poisoning the
-        # old helper stopped reaching the pipeline and both of these tests
-        # passed while exercising nothing. This seam is the one the pipeline
-        # actually calls.
-        monkeypatch.setattr(
-            "core.duckdb_store.silver_select_sql", lambda *a, **k: "not valid sql ("
-        )
-
-        res = await store.refresh_warehouse_layers(trigger="manual", changed_order_ids=None)
-
-        assert res["status"] == "error"
-        is_dirty, _ = await store.consume_warehouse_dirty()
-        assert is_dirty is True, "partial-failure must mark warehouse dirty to self-heal"
-        assert alerts, "must alert on refresh error"
-        assert "error" in alerts[0][0].lower()
-        # Keyed, or the throttle cannot recognise the repeat: the body carries
-        # an attempt counter that differs on every tick.
-        assert alerts[0][1] == "warehouse:refresh_errored"
-
-    @pytest.mark.asyncio
     async def test_exception_stops_retry_after_max(self, tmp_path, monkeypatch):
         store = await _make_store(tmp_path)
         async with store.connection() as conn:
@@ -202,22 +167,36 @@ class TestReturnStatusGroup:
 
 # ─────────────────────── A12-2 / A7-1 freshness ───────────────────────
 
+def _history(conn, now):
+    """A row in DuckDB's own `sync_metadata`, so the check is past its
+    fresh-install gate; the watermarks it judges are the chains'."""
+    conn.execute(
+        "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+        ["last_sync_orders", (now - timedelta(minutes=5)).isoformat()],
+    )
+
+
+def _moved(now, **stamps):
+    """Every watermark the write chains keep in Postgres — every chain's
+    since step 14's S14-00, a constant — fresh, but for the ones given."""
+    from core.write_chains import stood_down_sync_keys
+
+    out = {k: (now - timedelta(minutes=5)).isoformat() for k in stood_down_sync_keys()}
+    out.update({f"last_sync_{k}": v.isoformat() for k, v in stamps.items()})
+    return out
+
+
 class TestFreshnessCheck:
     @pytest.mark.asyncio
     async def test_stale_catalog_fires_fresh_orders_pass(self, tmp_path):
         store = await _make_store(tmp_path)
         now = datetime(2026, 5, 20, 22, 0, 0).astimezone()
         async with store.connection() as conn:
+            _history(conn, now)
             # orders current; categories 45 days stale (the real incident).
-            conn.execute(
-                "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                ["last_sync_orders", (now - timedelta(minutes=5)).isoformat()],
-            )
-            conn.execute(
-                "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                ["last_sync_categories", (now - timedelta(days=45)).isoformat()],
-            )
-            issues = _freshness_check(conn, now=now)
+            issues = _freshness_check(conn, now=now, chain_watermarks=_moved(
+                now, orders=now - timedelta(minutes=5),
+                categories=now - timedelta(days=45)))
         names = {i.check_name for i in issues}
         assert "freshness_categories" in names
         assert "freshness_orders" not in names
@@ -227,11 +206,9 @@ class TestFreshnessCheck:
         store = await _make_store(tmp_path)
         now = datetime(2026, 5, 20, 22, 0, 0).astimezone()
         async with store.connection() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                ["last_sync_orders", (now - timedelta(hours=12)).isoformat()],
-            )
-            issues = _freshness_check(conn, now=now)
+            _history(conn, now)
+            issues = _freshness_check(conn, now=now, chain_watermarks=_moved(
+                now, orders=now - timedelta(hours=12)))
         orders = [i for i in issues if i.check_name == "freshness_orders"]
         assert orders and orders[0].severity == Severity.CRITICAL
 

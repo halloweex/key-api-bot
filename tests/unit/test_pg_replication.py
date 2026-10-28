@@ -13,11 +13,14 @@ reconciliation that follows would be measuring the classification instead of
 the migration.
 
 So: copied from DuckDB, replaced whole, and pinned here.
+
+Since step 14's S14-00 chain 5 writes both tables, a constant, so the copy
+stands down: the tests of it carrying the rows, of the sync and the endpoint
+running it and of the stats it shipped went with it (S14-13 deletes it).
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-import asyncio
+from datetime import date
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -28,9 +31,7 @@ from core.duckdb_constants import RETAIL_MANAGER_IDS
 from core.duckdb_store import DuckDBStore
 from core.pg_replication import (
     CLASSIFICATION_COLUMNS,
-    CLASSIFICATIONS_TABLE,
     MANAGER_COLUMNS,
-    MANAGERS_TABLE,
     read_managers,
     replicate_managers,
     write_managers,
@@ -114,31 +115,6 @@ class TestItRefusesToEmptyTheTable:
 
 class TestItNeverRaises:
     @pytest.mark.asyncio
-    async def test_a_write_failure_is_counted_against_both_tables(self, tmp_path):
-        store = await _store(tmp_path)
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO managers (id, name) VALUES (4, 'M')")
-
-        with patch("core.pg_replication.write_managers",
-                   side_effect=RuntimeError("pg is down")), \
-             patch("core.pg_landing._record_failure", new=AsyncMock()):
-            result = await replicate_managers(store)
-
-        assert result["ok"] is False
-        assert "pg is down" in result["error"]
-        assert pg_landing.health()["failures"] == {
-            MANAGERS_TABLE: 1, CLASSIFICATIONS_TABLE: 1,
-        }
-
-    @pytest.mark.asyncio
-    async def test_a_read_failure_does_not_reach_the_caller(self, tmp_path):
-        store = await _store(tmp_path)
-        with patch("core.pg_replication.read_managers",
-                   side_effect=RuntimeError("duckdb is busy")):
-            result = await replicate_managers(store)
-        assert result["ok"] is False and "duckdb is busy" in result["error"]
-
-    @pytest.mark.asyncio
     async def test_the_kill_switch_skips_without_touching_postgres(
         self, tmp_path, monkeypatch,
     ):
@@ -148,61 +124,6 @@ class TestItNeverRaises:
             result = await replicate_managers(store)
         w.assert_not_called()
         assert result["skipped"]
-
-    @pytest.mark.asyncio
-    async def test_a_success_reports_what_it_carried(self, tmp_path):
-        store = await _store(tmp_path)
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO managers (id, name) VALUES (4, 'M')")
-            conn.execute(
-                "INSERT INTO manager_classifications "
-                "(manager_id, is_retail, valid_from) VALUES (4, TRUE, ?)",
-                [date(2026, 1, 1)],
-            )
-        with patch("core.pg_replication.write_managers", new=AsyncMock()):
-            result = await replicate_managers(store)
-
-        assert result == {
-            "managers": 1, "classifications": 1, "ok": True,
-            "skipped": None, "error": None,
-        }
-
-
-class TestTheSyncAndTheEndpointBothCarryIt:
-    @pytest.mark.asyncio
-    async def test_a_manager_sync_replicates(self, tmp_path):
-        """Otherwise a new manager exists in one store's `sales_type` and not
-        the other's until somebody notices."""
-        store = await _store(tmp_path)
-        with patch("core.pg_replication.replicate_managers",
-                   new=AsyncMock()) as rep:
-            count = await store.upsert_managers([{"id": 4, "name": "M"}])
-        assert count == 1
-        rep.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_the_sync_still_returns_its_count_when_postgres_is_down(
-        self, tmp_path,
-    ):
-        """Rule 8: the step leaves the system working."""
-        store = await _store(tmp_path)
-        with patch("core.pg_replication.write_managers",
-                   side_effect=RuntimeError("nope")), \
-             patch("core.pg_landing._record_failure", new=AsyncMock()):
-            assert await store.upsert_managers([{"id": 4, "name": "M"}]) == 1
-
-    def test_the_classification_endpoint_replicates_too(self):
-        """Waiting for the daily manager sync would leave Silver computed in
-        Postgres carrying yesterday's answer for up to a day."""
-        import inspect
-
-        from web.routes.api.admin import set_manager_retail_status
-
-        source = inspect.getsource(set_manager_retail_status)
-        assert "replicate_managers" in source
-        assert source.index("set_manager_retail_status(") < source.index(
-            "replicate_managers(store)"
-        )
 
 
 class TestItHappensAtStartup:
@@ -256,70 +177,3 @@ class TestItHappensAtStartup:
         assert "_replicate_classification_once" in source
 
 
-class TestStatsRecomputeReplicates:
-    """`update_manager_stats` writes three columns that Postgres also holds.
-
-    Replication used to hang off `upsert_managers` alone, which is a different
-    event: the daily `manager_stats` job never replicated at all, and
-    `sync_managers` recomputes *after* upserting, so even the sync path ended
-    with the two stores apart. `dq_mirror_landing` reported the result as
-    CRITICAL every morning — `mirror_row_values` on last_order_date and
-    order_count — against a check whose tolerance is deliberately zero.
-    """
-
-    @pytest.mark.asyncio
-    async def test_recomputing_stats_replicates_the_result(self, tmp_path):
-        store = await _store(tmp_path)
-        with patch("core.pg_replication.replicate_managers",
-                   new=AsyncMock()) as rep:
-            await store.update_manager_stats()
-        rep.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_the_replicated_numbers_are_the_new_ones(self, tmp_path):
-        """Replicating before the recompute would ship the old figures and
-        leave exactly the disagreement this is meant to end."""
-        store = await _store(tmp_path)
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO managers (id, name) VALUES (7, 'M')")
-            conn.execute(
-                "INSERT INTO orders (id, source_id, status_id, manager_id, ordered_at, "
-                "grand_total) VALUES (1, 1, 1, 7, TIMESTAMP '2026-08-20 10:00:00', 100)"
-            )
-
-        seen = {}
-
-        async def _capture(store_arg):
-            async with store_arg.connection() as conn:
-                seen["row"] = conn.execute(
-                    "SELECT order_count, last_order_date FROM managers WHERE id = 7"
-                ).fetchone()
-            return {"ok": True}
-
-        with patch("core.pg_replication.replicate_managers", new=_capture):
-            await store.update_manager_stats()
-
-        assert seen["row"][0] == 1, "replication saw the recomputed order_count"
-        assert str(seen["row"][1]) == "2026-08-20"
-
-    @pytest.mark.asyncio
-    async def test_it_replicates_outside_the_connection_lock(self, tmp_path):
-        """`asyncio.Lock` is not reentrant and `replicate_managers` opens its
-        own connection, so calling it inside the block deadlocks rather than
-        failing — a hang, with no traceback to read. This pins the call site
-        outside: the stand-in takes the lock itself and must not block.
-        """
-        store = await _store(tmp_path)
-        acquired = False
-
-        async def _needs_the_lock(store_arg):
-            nonlocal acquired
-            async with store_arg.connection() as conn:
-                conn.execute("SELECT 1")
-                acquired = True
-            return {"ok": True}
-
-        with patch("core.pg_replication.replicate_managers", new=_needs_the_lock):
-            await asyncio.wait_for(store.update_manager_stats(), timeout=5)
-
-        assert acquired, "replication ran while the store lock was free"

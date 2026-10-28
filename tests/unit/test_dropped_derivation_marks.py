@@ -219,15 +219,6 @@ class TestHealthPublishesTheDrops:
         block, _ = self._read(pool_error=RuntimeError("no dsn"))
         assert (block["marks_dropped_unhealed"], block["last_mark_drop_age_s"]) == (None, None)
 
-    def test_under_piggyback_it_is_not_asked(self, mode):
-        """Nothing marks and nothing heals there, so a count left from an
-        earlier soak would page for ever."""
-        mode(None)
-        block, get_pool = self._read(_Conn(row={"failures_since_ok": 5,
-                                                "last_attempted_at": datetime.now(timezone.utc)}))
-        assert (block["marks_dropped_unhealed"], block["last_mark_drop_age_s"]) == (None, None)
-        assert get_pool.await_count == 0
-
     def test_the_endpoint_carries_the_block(self):
         tree = ast.parse((REPO / "web/routes/api/health.py").read_text(encoding="utf-8"))
         handler = next(n for n in ast.walk(tree)

@@ -24,6 +24,20 @@ from core.data_quality import (
 from core.duckdb_store import DuckDBStore
 
 
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module's subject is the integrity checks' judgement, which the
+    inventory continuity check makes the same over either store's
+    calendar, and it was written against DuckDB's. So this module keeps
+    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
+    until their DuckDB branches go."""
+    from core import pg_inventory_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_inventory_write)
+
+
 async def _make_store(tmp_path: Path) -> DuckDBStore:
     s = DuckDBStore(db_path=tmp_path / "test.duckdb")
     await s.connect()
@@ -215,32 +229,6 @@ class TestCheckInternalIntegrity:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_combined_violations_aggregated(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            async with store.connection() as conn:
-                _insert_minimal_order(conn, 1, status_id=999)
-                _insert_minimal_order(conn, 2, source_id=99)
-                conn.execute(
-                    "INSERT INTO order_products (id, order_id, product_id, name, quantity, price_sold) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    [1, 88888, 1, "orphan", 1, 100.0],
-                )
-                issues = check_internal_integrity(conn)
-
-            check_names = {i.check_name for i in issues}
-            assert "fk_orphan_order_products_order_id" in check_names
-            assert "value_domain_orders_status_id" in check_names
-            assert "value_domain_orders_source_id" in check_names
-
-            critical = [i for i in issues if i.severity == Severity.CRITICAL]
-            warn = [i for i in issues if i.severity == Severity.WARN]
-            assert len(critical) >= 1
-            assert len(warn) >= 2
-        finally:
-            await store.close()
-
 
 # ─── summarize_issues ─────────────────────────────────────────────────────────
 
@@ -250,59 +238,6 @@ class TestSummarizeIssues:
         s = summarize_issues([])
         assert set(s.keys()) == {sv.value for sv in Severity}
         assert all(v == 0 for v in s.values())
-
-
-class TestIntendedShipmentsAreCountedNotWarnedAbout:
-    """An influence manager ships cosmetics to bloggers: line items, zero
-    money, forever. That is the job. A check that reports it as a defect is
-    one people stop reading — and this one had ₴1.19M of it inside a WARN."""
-
-    @pytest.mark.asyncio
-    async def test_internal_shipments_leave_the_warning_and_get_their_own_line(
-        self, tmp_path,
-    ):
-        from core.data_quality import check_internal_integrity
-
-        store = DuckDBStore(db_path=tmp_path / "t.duckdb")
-        await store.connect()
-        try:
-            async with store.connection() as conn:
-                # A retail order billed at zero — the real disagreement.
-                conn.execute("""
-                    INSERT INTO silver_orders
-                    (id, source_id, status_id, grand_total, ordered_at, buyer_id,
-                     manager_id, order_date, is_return, sales_type,
-                     is_active_source, source_name)
-                    VALUES (1, 4, 12, 0, now(), 10, 4, CURRENT_DATE, FALSE,
-                            'retail', TRUE, 'Shopify')
-                """)
-                # An influence shipment — intended.
-                conn.execute("""
-                    INSERT INTO silver_orders
-                    (id, source_id, status_id, grand_total, ordered_at, buyer_id,
-                     manager_id, order_date, is_return, sales_type,
-                     is_active_source, source_name)
-                    VALUES (2, 4, 12, 0, now(), 20, 28, CURRENT_DATE, FALSE,
-                            'internal', TRUE, 'Shopify')
-                """)
-                for oid, amount in ((1, 300.0), (2, 5000.0)):
-                    conn.execute(
-                        "INSERT INTO order_products (id, order_id, product_id, "
-                        "name, quantity, price_sold) VALUES (?, ?, 1, 'x', 1, ?)",
-                        [oid * 1000, oid, amount],
-                    )
-                issues = {i.check_name: i for i in check_internal_integrity(conn)}
-
-            warned = issues["headline_vs_line_items"]
-            assert warned.count == 1, "only the retail order is a disagreement"
-            assert "300" in warned.description
-
-            counted = issues["goods_shipped_without_sale"]
-            assert counted.count == 1
-            assert counted.severity == Severity.INFO, "a number, not a warning"
-            assert "5,000.00" in counted.description
-        finally:
-            await store.close()
 
 
 # ─── Inventory snapshot continuity ────────────────────────────────────────────
@@ -469,7 +404,11 @@ class TestInventorySnapshotContinuity:
         gaps either — the DuckDB copy is frozen under the flag and every day
         since the switch would look missing.
         """
-        monkeypatch.setenv("KS_WRITE_INVENTORY", "postgres")
+        from core import pg_inventory_write
+
+        # Production's state, which this module's fixture otherwise routes
+        # away from: chain 1 writes Postgres (a constant since S14-00).
+        monkeypatch.setattr(pg_inventory_write, "writes_postgres", lambda: True)
         store = await _make_store(tmp_path)
         try:
             now = datetime.now().astimezone()

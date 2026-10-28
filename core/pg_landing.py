@@ -35,7 +35,6 @@ reading of a brand.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence
@@ -55,17 +54,25 @@ logger = logging.getLogger(__name__)
 MIRROR_ENV = "KS_MIRROR_LANDING"
 
 
-def mirror_on(value: Optional[str]) -> bool:
-    """Whether a `KS_MIRROR_LANDING` value turns the mirror on; unset is on.
+def mirror_on(value: Optional[str] = None) -> bool:
+    """Whether a `KS_MIRROR_LANDING` value turns the mirror on: True, for any
+    value, a constant since step 14's S14-00.
 
-    Separate from `enabled()` so a caller judging an environment it was handed
-    — the step-13 precondition evaluator, `core/warehouse_cutover.py` — reads
-    the variable exactly as the mirror does rather than by a second rule."""
-    return ("1" if value is None else value).strip().lower() not in {"0", "false", "no", ""}
+    Production leaves the variable unset, which has always meant on, and step
+    13 made "the landing mirror on" one of its preconditions. Every shipper
+    out of DuckDB already stands down on the write chains' ownership, so what
+    this still gates is the orders writer and the stamps of
+    `meta.mirror_state`. Last consumers: the shippers and backfills in
+    `pg_landing`, `pg_backfill`, `pg_buyers`, `pg_expense_backfill` and the
+    scheduler's ids-diffs, and step 13's `evaluate_preconditions` — they go in
+    S14-13 and S14-15. Until S14-00: unset was on, and "0", "false", "no" or
+    an empty value turned it off."""
+    return True
 
 
 def enabled() -> bool:
-    return mirror_on(os.getenv(MIRROR_ENV))
+    """`mirror_on()`: True, a constant since S14-00."""
+    return mirror_on()
 
 
 @dataclass

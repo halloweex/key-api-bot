@@ -9,12 +9,12 @@ outside the partition would balance them perfectly while appearing nowhere.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from core.duckdb_constants import KNOWN_SALES_TYPES, RETAIL_MANAGER_IDS
+from core.duckdb_constants import KNOWN_SALES_TYPES
 from core.duckdb_store import DuckDBStore
 
 
@@ -24,83 +24,9 @@ async def _make_store(tmp_path: Path) -> DuckDBStore:
     return s
 
 
-def _api_manager(mid: int, name: str = "Someone", status: str = "active"):
-    return {"id": mid, "name": name, "email": f"{mid}@example.com", "status": status}
-
-
-# ─── P2-1: a classification that survives the next sync ─────────────────────
-
-class TestManagerClassificationIsDurable:
-    @pytest.mark.asyncio
-    async def test_a_manual_classification_survives_a_manager_sync(self, tmp_path):
-        """This is the whole point: KeyCRM cannot tell us who is wholesale."""
-        store = await _make_store(tmp_path)
-        try:
-            unlisted = 34
-            assert unlisted not in RETAIL_MANAGER_IDS
-
-            await store.upsert_managers([_api_manager(unlisted)])
-            await store.set_manager_retail_status(unlisted, True)
-
-            # …the next sync arrives with the same manager.
-            await store.upsert_managers([_api_manager(unlisted, name="Renamed")])
-
-            managers = {m["id"]: m for m in await store.get_all_managers()}
-            assert managers[unlisted]["is_retail"] is True, (
-                "the sync overwrote a human's classification"
-            )
-            assert managers[unlisted]["name"] == "Renamed", "fields KeyCRM owns still update"
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_new_managers_are_seeded_from_the_constant(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            known_retail = RETAIL_MANAGER_IDS[0]
-            await store.upsert_managers([
-                _api_manager(known_retail), _api_manager(9999),
-            ])
-            managers = {m["id"]: m for m in await store.get_all_managers()}
-            assert managers[known_retail]["is_retail"] is True
-            assert managers[9999]["is_retail"] is False
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_demoting_a_manager_also_sticks(self, tmp_path):
-        """The constant lists managers who have left; a correction runs both ways."""
-        store = await _make_store(tmp_path)
-        try:
-            listed = RETAIL_MANAGER_IDS[0]
-            await store.upsert_managers([_api_manager(listed)])
-            await store.set_manager_retail_status(listed, False)
-            await store.upsert_managers([_api_manager(listed)])
-
-            managers = {m["id"]: m for m in await store.get_all_managers()}
-            assert managers[listed]["is_retail"] is False
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_sync_does_not_reset_computed_stats(self, tmp_path):
-        """order_count and the date range are computed here, not in KeyCRM."""
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_managers([_api_manager(7)])
-            async with store.connection() as conn:
-                conn.execute(
-                    "UPDATE managers SET order_count = 412, "
-                    "first_order_date = DATE '2025-01-05' WHERE id = 7"
-                )
-
-            await store.upsert_managers([_api_manager(7, name="Still Here")])
-
-            managers = {m["id"]: m for m in await store.get_all_managers()}
-            assert managers[7]["order_count"] == 412
-            assert managers[7]["first_order_date"] == date(2025, 1, 5)
-        finally:
-            await store.close()
+# P2-1, a classification that survives the next sync, is chain 5's writer's
+# rule since step 14's S14-00 made the chain a constant:
+# tests/integration/test_managers_chain_writer.py (M4).
 
 
 # ─── P2-2: the partition has to be exhaustive ───────────────────────────────
@@ -385,38 +311,6 @@ class TestSalesTypeCaseSpeaksOnlyKnownTypes:
         """All four are reachable today; a known type no branch yields is dead."""
         for dialect, (results, _) in self._results_by_dialect().items():
             assert set(results) == set(KNOWN_SALES_TYPES), dialect
-
-
-class TestClassificationReachesTheWarehouse:
-    """A classification nobody rebuilds for changes nothing a reader can see.
-
-    `sales_type` is materialised into silver_orders by one CASE at rebuild
-    time. The route has always marked the warehouse dirty after calling this;
-    the method never did, so any other caller left Silver stale and no test
-    would have noticed.
-    """
-
-    @pytest.mark.asyncio
-    async def test_setting_retail_status_marks_the_warehouse_dirty(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_managers([_api_manager(4, "Someone")])
-            # Clear whatever the sync left behind.
-            await store.consume_warehouse_dirty()
-
-            await store.set_manager_retail_status(4, False)
-
-            is_dirty, changed_ids = await store.consume_warehouse_dirty()
-            assert is_dirty is True, (
-                "reclassifying a manager left the warehouse clean, so Silver "
-                "keeps the old sales_type until something else triggers a rebuild"
-            )
-            assert changed_ids is None, (
-                "the scope must be full: the classification applies to every "
-                "order the manager ever took, not to a list of changed ids"
-            )
-        finally:
-            await store.close()
 
 
 class TestOrderStatusRefreshIsOffTheCompactionInstant:

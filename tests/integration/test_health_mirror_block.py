@@ -87,12 +87,15 @@ class TestTheBlock:
         a minute is the budget."""
         calls = []
 
-        async def counting(pool, *a, **kw):
+        async def counting(pool, *a, tables=("bronze.orders",), **kw):
+            # Every table asked for: since step 14's S14-00 the derived
+            # layers and the UTM table are always among them (`own`, and the
+            # parse in Postgres, are constants).
             calls.append(1)
-            return {"bronze.orders": {
+            return {table: {
                 "last_ok_at": None, "age_seconds": None,
                 "failures_since_ok": 0, "failing": False,
-            }}
+            } for table in tables}
 
         async def fake_pool():
             return object()

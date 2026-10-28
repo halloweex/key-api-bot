@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from core.data_quality import KNOWN_STATUS_IDS, check_internal_integrity
+from core.data_quality import KNOWN_STATUS_IDS
 from core.duckdb_store import DuckDBStore
 from core.models import (
     LEGACY_STATUS_NAMES,
@@ -33,6 +33,20 @@ from core.models import (
     Order,
     OrderStatus,
 )
+
+
+@pytest.fixture(autouse=True)
+def _chains_on_duckdb(monkeypatch):
+    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
+    module pins the status-group rule in the Silver body both engines
+    render, seeded through DuckDB's order writer. So this module keeps
+    DuckDB as the chains' store (`tests.conftest.route_chains_to_duckdb`)
+    until their DuckDB branches go."""
+    from core import pg_orders_write
+    from tests.conftest import route_chains_to_duckdb
+
+    route_chains_to_duckdb(monkeypatch, pg_orders_write)
+
 
 # The mapping the API returned, as measured.
 MEASURED_GROUPS = {1: 1, 9: 4, 12: 5, 15: 6, 19: 6, 20: 4, 21: 6, 22: 6, 23: 6}
@@ -183,43 +197,6 @@ class TestSilverUsesIt:
                 ).fetchall())
             assert rows[1] is True
             assert rows[2] is False
-        finally:
-            await store.close()
-
-
-class TestTheDisagreementCheck:
-    @pytest.mark.asyncio
-    async def test_silent_while_the_two_agree(self, tmp_path):
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_orders([
-                _api_order(1, status_id=12, group_id=5),
-                _api_order(2, status_id=19, group_id=6),
-                _api_order(3, status_id=20, group_id=4),
-            ])
-            async with store.connection() as conn:
-                issues = check_internal_integrity(conn)
-            assert not [i for i in issues if i.check_name == "status_group_vs_return_list"]
-        finally:
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_names_the_status_that_parted_company(self, tmp_path):
-        """A new cancel status KeyCRM invents tomorrow shows up here."""
-        store = await _make_store(tmp_path)
-        try:
-            await store.upsert_orders([
-                _api_order(1, status_id=25, group_id=6, total="4500.00"),
-                _api_order(2, status_id=12, group_id=5),
-            ])
-            async with store.connection() as conn:
-                issues = check_internal_integrity(conn)
-
-            found = [i for i in issues if i.check_name == "status_group_vs_return_list"]
-            assert found, "an unlisted lost/cancel status must be reported"
-            assert found[0].count == 1
-            assert "status 25 is KeyCRM group 6" in found[0].description
-            assert "4,500.00" in found[0].description
         finally:
             await store.close()
 

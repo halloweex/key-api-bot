@@ -176,43 +176,13 @@ class TestTheHourlyShipperCannotRollTheWriterBack:
         assert "app.manual_expenses" not in result["replaced"], result
         assert await _row(pool, expense_id) is not None, "the hourly replace rolled it back"
 
-    @pytest.mark.asyncio
-    async def test_control_without_the_flag_the_same_replace_wipes_it(
-        self, empty_duckdb_and_postgres, monkeypatch,
-    ):
-        """Proves the replace is real — so the survival above is the stand-down
-        working, not a run that quietly did nothing.
-
-        Removing the variable is no longer enough to get here, and that is the
-        point of DN-06: the first typed expense LATCHES the chain, and from then
-        on the writes, the shipper and the comparison all follow the latch
-        rather than the flag (OD-19 (a)). So the control releases both copies of
-        it, which is what `scripts/chain_copy_back.py` will do after it has
-        carried the rows back to DuckDB — and only then does the replace bite.
-        """
-        from core import chain_latch
-        from core.pg_operational import replicate_operational
-
-        store, pool = empty_duckdb_and_postgres
-        monkeypatch.setenv("KS_WRITE_EXPENSES", "postgres")
-        expense_id = await self._typed_in_postgres(pool)
-        monkeypatch.delenv("KS_WRITE_EXPENSES", raising=False)   # DuckDB is the writer again
-        chain_latch.release("pg_expenses_write")
-        async with pool.acquire() as conn:
-            await conn.execute("DELETE FROM meta.chain_watermarks WHERE key LIKE 'owner:%'")
-
-        result = await replicate_operational(store)
-
-        assert "error" not in result, result
-        assert "app.manual_expenses" not in result.get("stood_down", [])
-        assert await _row(pool, expense_id) is None, "the replace out of an empty DuckDB did not run"
-
 
 class TestAFlagNotUnderstoodStandsDownOnlyItsChain:
     """DN-01. A typo in KS_WRITE_EXPENSES used to raise inside the shipper's
     registry call and take the hourly copy of every stage-3 table with it. Now
-    that chain stands down — its Postgres row cannot be overwritten — its table
-    is stamped failing, and everything else ships."""
+    that chain stands down — its Postgres row cannot be overwritten — and its
+    table is stamped failing. (Everything else shipped, until S14-00 stood
+    every chain's tables down.)"""
 
     @pytest_asyncio.fixture
     async def stores(self, tmp_path, monkeypatch):
@@ -255,7 +225,8 @@ class TestAFlagNotUnderstoodStandsDownOnlyItsChain:
         assert "app.manual_expenses" in result["stood_down"]
         assert "pg_expenses_write" in result["chain_flag_errors"]
         assert "app.manual_expenses" not in result["replaced"]
-        assert "bronze.expense_types" in result["replaced"]         # the rest shipped
+        # "The rest ships" was the other half until step 14's S14-00: since
+        # then every chain's tables stand down, whatever its flag says.
         assert await _row(pool, row[0]) is not None, "the typo let the copy wipe the row"
         async with pool.acquire() as conn:
             state = await conn.fetchrow(
