@@ -37,6 +37,7 @@ use crate::access::ratelimit::{Limiter, client_key};
 use crate::access::routing::{Captures, Resolution, Router};
 use crate::access::store::PgAccess;
 use crate::gold::PgGold;
+use crate::margin::{self, PgMargin};
 use crate::trend::{self, Failure};
 
 /// `DEFAULT_REQUEST_TIMEOUT` in `web/middleware.py`.
@@ -47,6 +48,7 @@ const SPA_CATCH_ALL: &str = "web.routes.pages.catch_all_spa";
 
 pub struct AppState {
     gold: PgGold,
+    margin: PgMargin,
     access: Access<PgAccess>,
     router: Router,
     limiter: Limiter,
@@ -59,6 +61,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(
         gold: PgGold,
+        margin: PgMargin,
         access: Access<PgAccess>,
         router: Router,
         listen: SocketAddr,
@@ -66,6 +69,7 @@ impl AppState {
     ) -> Self {
         Self {
             gold,
+            margin,
             access,
             router,
             limiter: Limiter::default(),
@@ -179,15 +183,17 @@ impl IntoResponse for Failure {
                 tracing::error!(why, "the Python app raises here; answering its 500");
                 json(StatusCode::INTERNAL_SERVER_ERROR, &INTERNAL)
             }
-            Failure::Unavailable(error) => {
-                tracing::error!(error = %error.0, "Gold read failed");
+            Failure::Unavailable(surface, error) => {
+                tracing::error!(surface, error = %error.0, "read failed");
+                let detail = format!(
+                    "The data behind '{surface}' cannot be read right now. Try again shortly."
+                );
                 json(
                     StatusCode::SERVICE_UNAVAILABLE,
                     &ErrorBody {
                         error: "Service Unavailable",
-                        detail: "The data behind 'dashboard' cannot be read right now. \
-                                 Try again shortly.",
-                        surface: Some("dashboard"),
+                        detail: &detail,
+                        surface: Some(surface),
                     },
                 )
             }
@@ -338,6 +344,10 @@ async fn endpoint(
 ) -> Response {
     match route.endpoint.as_str() {
         TREND => revenue_trend(state, route, query, headers, peer).await,
+        name if margin::Route::from_endpoint(name).is_some() => {
+            let which = margin::Route::from_endpoint(name).expect("matched above");
+            margin_route(state, which, route, query, headers, peer).await
+        }
         SPA_CATCH_ALL => {
             // `path == "api" or path.startswith("api/")`, before any session check.
             let spa = captures.get("path").map_or("", String::as_str);
@@ -367,11 +377,32 @@ async fn revenue_trend(
             "X-Pilot-Now must be an RFC 3339 instant",
         );
     };
+    match trend::revenue_trend(
+        &state.gold,
+        query,
+        now,
+        admitter(state, route, headers, peer),
+    )
+    .await
+    {
+        Ok(body) => raw_json(StatusCode::OK, body),
+        Err(failure) => failure.into_response(),
+    }
+}
+
+/// The route's slowapi limits, checked when the endpoint is called: once the
+/// parameters parse, before the route's own validators.
+fn admitter<'a>(
+    state: &'a AppState,
+    route: &'a ApiRoute,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+) -> impl FnOnce() -> Result<(), Failure> + 'a {
     let key = client_key(
         headers.get("x-real-ip").map(HeaderValue::as_bytes),
         &peer.ip().to_string(),
     );
-    let admit = || {
+    move || {
         let Some(key) = key.as_deref() else {
             return Ok(());
         };
@@ -384,8 +415,26 @@ async fn revenue_trend(
             Some(limit) => Err(Failure::RateLimited(limit.limit.clone())),
             None => Ok(()),
         }
+    }
+}
+
+/// One of `/api/margin/*`, past the gates.
+async fn margin_route(
+    state: &AppState,
+    which: margin::Route,
+    route: &ApiRoute,
+    query: &str,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+) -> Response {
+    let Some(now) = state.trend_now(headers) else {
+        return detail(
+            StatusCode::BAD_REQUEST,
+            "X-Pilot-Now must be an RFC 3339 instant",
+        );
     };
-    match trend::revenue_trend(&state.gold, query, now, admit).await {
+    let admit = admitter(state, route, headers, peer);
+    match margin::answer(which, &state.margin, query, now, admit).await {
         Ok(body) => raw_json(StatusCode::OK, body),
         Err(failure) => failure.into_response(),
     }

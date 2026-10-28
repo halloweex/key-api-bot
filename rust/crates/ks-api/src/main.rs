@@ -29,6 +29,7 @@ use ks_api::access::routing::Router;
 use ks_api::access::signer::SessionKey;
 use ks_api::access::store::PgAccess;
 use ks_api::gold::PgGold;
+use ks_api::margin::PgMargin;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
@@ -160,6 +161,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
              A harness build — never where a person reads the answer."
         );
     }
+    let revision = contract.required_revision.clone();
     let access = Access {
         key: SessionKey::derive(&config.secret, contract.session.salt.as_bytes()),
         store: PgAccess::new(
@@ -171,7 +173,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
         contract,
     };
     let app = ks_api::router(ks_api::AppState::new(
-        PgGold::new(pool, config.timeout),
+        PgGold::new(pool.clone(), config.timeout),
+        PgMargin::new(pool, config.timeout, revision),
         access,
         router,
         config.listen,
