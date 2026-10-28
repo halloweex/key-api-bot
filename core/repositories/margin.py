@@ -10,6 +10,32 @@ from core import read_fallback
 
 logger = logging.getLogger(__name__)
 
+# The cost side, one row per SKU. `offer_stocks` is keyed by offer, and nothing
+# stops two offers carrying one SKU: only `id` is unique, the `sku` index is
+# not. Joined as it stood, such a SKU counted each of its lines once per offer —
+# revenue, units and cost alike. Production held none on 2026-10-29 (918 rows,
+# 911 SKUs, all distinct), so on its data this changes no number.
+_SKU_COST = """(
+                SELECT sku, MAX(purchased_price) AS purchased_price
+                FROM {offer_stocks}
+                WHERE sku IS NOT NULL
+                GROUP BY sku
+            )"""
+
+# A category's root, however deep it sits. The CTE this replaced went up one
+# level, so a grandchild was filed under its parent. A category whose parent
+# is missing is a root, as it was before.
+_ROOT_CAT = """root_cat AS (
+                SELECT c.id, c.name AS root_name
+                FROM {categories} c
+                WHERE c.parent_id IS NULL
+                   OR NOT EXISTS (SELECT 1 FROM {categories} p WHERE p.id = c.parent_id)
+                UNION ALL
+                SELECT c.id, r.root_name
+                FROM {categories} c
+                JOIN root_cat r ON c.parent_id = r.id
+            )"""
+
 
 class MarginMixin:
     """Margin analysis queries using silver_orders + offer_stocks."""
@@ -68,7 +94,7 @@ class MarginMixin:
                 COUNT(DISTINCT l.sku) as total_skus,
                 COALESCE(SUM(l.quantity), 0) as total_units
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             WHERE {where}
         """, params, mode="one")
 
@@ -114,7 +140,7 @@ class MarginMixin:
                 ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
                     THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             WHERE {where}
               AND TRIM(l.brand) != '' AND l.brand IS NOT NULL
             GROUP BY 1
@@ -157,12 +183,7 @@ class MarginMixin:
         where = self._margin_base_where(sales_type, params)
 
         rows = await self._margin_run(f"""
-            WITH root_cat AS (
-                SELECT c1.id,
-                       COALESCE(c2.name, c1.name) as root_name
-                FROM {{categories}} c1
-                LEFT JOIN {{categories}} c2 ON c1.parent_id = c2.id
-            )
+            WITH RECURSIVE {_ROOT_CAT}
             SELECT
                 COALESCE(rc.root_name, 'Uncategorized') as category,
                 SUM(l.quantity) as total_units,
@@ -171,10 +192,14 @@ class MarginMixin:
                     THEN l.line_amount ELSE 0 END), 2) as costed_revenue,
                 ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
                     THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs,
+                -- NULLIF: a window whose lines sum to zero (a day of free
+                -- b2b or blogger shipments; five days in the year to
+                -- 2026-10-29) divided by zero, which Postgres raises and the
+                -- page answered 503. The share is NULL there, read as 0 below.
                 ROUND(100.0 * SUM(l.line_amount)
-                    / SUM(SUM(l.line_amount)) OVER (), 1) as rev_share_pct
+                    / NULLIF(SUM(SUM(l.line_amount)) OVER (), 0), 1) as rev_share_pct
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             LEFT JOIN root_cat rc ON l.category_id = rc.id
             WHERE {where}
             GROUP BY 1
@@ -229,7 +254,7 @@ class MarginMixin:
                     THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs,
                 ROUND(SUM(l.line_amount), 2) as total_revenue
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             WHERE {where}
             GROUP BY 1
             ORDER BY 1
@@ -264,12 +289,7 @@ class MarginMixin:
         where = self._margin_base_where(sales_type, params)
 
         rows = await self._margin_run(f"""
-            WITH root_cat AS (
-                SELECT c1.id,
-                       COALESCE(c2.name, c1.name) as root_name
-                FROM {{categories}} c1
-                LEFT JOIN {{categories}} c2 ON c1.parent_id = c2.id
-            )
+            WITH RECURSIVE {_ROOT_CAT}
             SELECT
                 COALESCE(NULLIF(TRIM(l.brand), ''), 'Unknown') as brand,
                 COALESCE(rc.root_name, 'Uncategorized') as category,
@@ -280,7 +300,7 @@ class MarginMixin:
                 ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
                     THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             LEFT JOIN root_cat rc ON l.category_id = rc.id
             WHERE {where}
             GROUP BY 1, 2
@@ -334,7 +354,7 @@ class MarginMixin:
                 ROUND(SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
                     THEN os.purchased_price * l.quantity ELSE 0 END), 2) as cogs
             FROM {{order_lines}} l
-            LEFT JOIN {{offer_stocks}} os ON l.sku = os.sku
+            LEFT JOIN {_SKU_COST} os ON l.sku = os.sku
             WHERE {where}
             GROUP BY 1
             HAVING SUM(CASE WHEN os.purchased_price IS NOT NULL AND os.purchased_price > 0
