@@ -21,7 +21,7 @@ rust/
 │   ├── src/strptime.rs     datetime.strptime(s, "%Y-%m-%d"), regex for regex
 │   ├── src/pytables.rs     GENERATED: Unicode facts CPython 3.14 answers with
 │   ├── gen_pytables.py     writes pytables.rs and tests/fixtures/*.jsonl
-│   └── tests/              the port against 2 925 CPython answers
+│   └── tests/              the port against 2 924 CPython answers
 ├── crates/ks-loadgen/      the benchmark's closed-loop client
 └── bench/                  bench.sh, the Python side (py_app.py), paths.txt
 ```
@@ -59,7 +59,7 @@ the harness's hook for Kyiv midnights, never for anything a person reads.
 
 `tests/integration/test_rust_pilot_trend.py` seeds ~42 000 orders through
 production's own Silver and Gold derivations (`tests/rust_pilot_fixture.py`),
-then sends 3 260 requests to the Python app in-process and to the pilot over
+then sends 3 347 requests to the Python app in-process and to the pilot over
 HTTP, at frozen instants either side of the Kyiv midnights that matter. It
 fails on any difference in status, content type or JSON (keys sorted, `0` and
 `0.0` told apart). `.github/workflows/rust-pilot.yml` runs it on every pull
