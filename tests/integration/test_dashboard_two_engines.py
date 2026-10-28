@@ -39,7 +39,9 @@ THE SEARCH INDEX, BELOW, STILL COMPARES TWO ENGINES
 
 `sync_to_meilisearch` reads under `KS_READ_SEARCH_INDEX`, which step 14 takes
 in S14-07; until then its tests keep the two-engine fixture (`both_engines`),
-which seeds this file's original dashboard fixture into both stores.
+which seeds this file's original dashboard fixture into both stores — and so
+does `tests/integration/test_chat_tools_two_engines.py`, which imports it with
+`_comparable`, `WINDOW` and `DSN`.
 
 Skipped without `KS_PG_DSN`; CI and `deploy/gate_with_stores.sh` supply one.
 """
@@ -213,6 +215,25 @@ async def both_engines(tmp_path, monkeypatch):
                 await conn.execute(f"DELETE FROM {table}")
         await pool.close()
         await store.close()
+
+
+def _comparable(value):
+    """Money to six places. DuckDB divides a DECIMAL into a DOUBLE and
+    Postgres into a NUMERIC, so the two legitimately differ in the last bits —
+    far below anything this tab renders, far above the noise.
+
+    No test here compares two engines any more; kept, with `both_engines`,
+    for `tests/integration/test_chat_tools_two_engines.py`, which imports
+    both (step 14's S14-07 takes the assistant's tools off DuckDB)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dict):
+        return {k: _comparable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_comparable(v) for v in value]
+    if hasattr(value, "as_tuple") or isinstance(value, float):
+        return round(float(value), 6)
+    return value
 
 
 # ─── The dashboard, on Postgres alone (step 14, S14-06) ──────────────────────
