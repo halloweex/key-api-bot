@@ -38,7 +38,8 @@ refuse a failure (`read_fallback.refuse`): their switch is not read, so a
 switch left at `duckdb` or naming nothing reads Postgres, and with no DSN at
 all the pool's own refusal to guess a database is the failure refused — the
 same 503 naming the surface, which `no_address` gave them before
-(`POSTGRES_ONLY` below).
+(`POSTGRES_ONLY` below). Since S14-06 the dashboard's do too — the summary,
+the trend and the customer block — and the managers screen's Silver read.
 
 The walk over every fallback site is `tests/unit/test_read_fallback_sites.py`.
 """
@@ -136,9 +137,16 @@ REFUSING = [case for case in CASES if case.name not in CHAIN_FIRST]
 # failure — a DSN that is not there included. The rest still route by their
 # switch and ask `no_address`.
 POSTGRES_ONLY = frozenset({"traffic", "margin", "products_intel", "reports",
-                           "marketing", "lookups"})
+                           "marketing", "lookups",
+                           # The dashboard's, step 14's S14-06.
+                           "summary", "trend", "insights"})
 SWITCHED = [case for case in REFUSING if case.name not in POSTGRES_ONLY]
 UNSWITCHED = [case for case in CASES if case.name in POSTGRES_ONLY]
+# The managers screen's Silver read left `KS_READ_SILVER` in S14-06 as well,
+# but its route reads chain 5's classification first, which raises rather
+# than refuses (`CHAIN_FIRST`): it is asked only where that read answers
+# (`TestUnderDuckdbOff`, whose fixture makes it).
+MANAGERS = next(case for case in CASES if case.name == "managers")
 
 COHORTS = "/api/customers/cohort-retention"
 COHORT_PARAMS = {"include_revenue": "false"}
@@ -260,9 +268,15 @@ class TestOffRefuses:
         and the refusal is still counted — so a broken goals port stays
         visible under `read_fallback_mode.refused`. What `off` forbids is
         DuckDB's numbers, and none reach the page. The forecast's own
-        endpoint is not an overlay and answers 503 (the `forecast` case)."""
+        endpoint is not an overlay and answers 503 (the `forecast` case).
+
+        The chart's own series is Gold's in Postgres since step 14's S14-06,
+        so it is given an answer here — the pool still raises for the
+        forecast's reads, which is what this asks about."""
         _mode(monkeypatch, "off")
         _switches(monkeypatch, {"KS_READ_GOALS": "postgres"})
+        monkeypatch.setattr("core.pg_gold_read.fetch_series",
+                            AsyncMock(return_value=[]))
         response = admin_client.get("/api/revenue/trend", params={
             "period": "month", "include_forecast": "true"})
         assert response.status_code == 200, response.text
@@ -397,7 +411,8 @@ class TestUnderDuckdbOff:
 
     @pytest.mark.parametrize("fallback", [None, "off"], ids=["unset", "off"])
     @pytest.mark.parametrize("case", [c for c in CASES if c.name != "goals"
-                                      and c.name not in POSTGRES_ONLY], ids=repr)
+                                      and c.name not in POSTGRES_ONLY
+                                      and c is not MANAGERS], ids=repr)
     def test_a_switch_left_at_duckdb_is_a_503_naming_the_surface(
         self, case, fallback, admin_client, stores, duckdb_off, monkeypatch, caplog,
     ):
@@ -417,13 +432,14 @@ class TestUnderDuckdbOff:
         assert f"{switch}=duckdb while KS_DUCKDB=off" in caplog.text
         assert duckdb_switch.opened() == {}
 
-    @pytest.mark.parametrize("case", UNSWITCHED, ids=repr)
+    @pytest.mark.parametrize("case", UNSWITCHED + [MANAGERS], ids=repr)
     def test_a_switch_it_no_longer_reads_asks_postgres(
         self, case, admin_client, stores, duckdb_off, monkeypatch, caplog,
     ):
-        """S14-05's six: the switch at `duckdb` is not read, the router asks
-        Postgres, and Postgres failing is the refusal — nothing reaches for
-        the file, and the log names no switch."""
+        """S14-05's six and S14-06's dashboard and managers screen: the
+        switch at `duckdb` is not read, the router asks Postgres, and
+        Postgres failing is the refusal — nothing reaches for the file, and
+        the log names no switch."""
         from core import duckdb_switch
 
         (switch, _value), = case.env.items()
