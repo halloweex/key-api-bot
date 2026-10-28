@@ -38,6 +38,7 @@ TIMEOUT_S = 20
 CALLS = (
     ("get_traffic_analytics", {}),
     ("get_traffic_organic", {}),
+    ("get_traffic_pixel_only", {}),
     ("get_traffic_trend", {}),
     ("get_traffic_transactions", {}),
     ("get_traffic_utm_campaigns", {}),
@@ -64,7 +65,7 @@ class TestEveryMethodActuallyRuns:
     """The guard the f-string brace earned.
 
     A hole written with single braces parses, reads correctly to a human, and
-    fails only on the call — so all six are called for real, against an empty
+    fails only on the call — so all seven are called for real, against an empty
     DuckDB. The timeout is the second assertion: the store lock is not
     reentrant and a nested acquisition hangs rather than raising.
     """
@@ -125,14 +126,15 @@ class TestTheRoutedBodies:
                 if "SELECT" in text.upper():
                     yield node.lineno, text
 
-    def test_the_scan_finds_all_twelve(self):
-        """Six methods, twelve statements: analytics and the organic breakdown
+    def test_the_scan_finds_all_thirteen(self):
+        """Seven methods, thirteen statements: the pixel-only breakdown runs one,
+        analytics and the organic breakdown
         each run their new buyers beside their orders (the breakdown runs its
         orders statement for two periods, but it is one text), transactions
         and campaigns each run a count beside their page of rows, and ROAS
         runs three — total revenue, paid revenue per platform, and the ad
         spend."""
-        assert len(list(self._statements())) == 12
+        assert len(list(self._statements())) == 13
 
     def test_every_hole_survived_the_f_string(self):
         """`{silver_orders}` inside an f-string is an expression Python
