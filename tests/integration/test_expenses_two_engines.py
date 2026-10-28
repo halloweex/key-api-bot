@@ -37,7 +37,11 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# Pinned (step 14, S14-07): the answers are recorded as literals from DuckDB
+# on this fixture, so the calendar under them cannot move with the run. No
+# body here reads the clock in SQL; every window is a parameter.
+TODAY = date(2026, 9, 15)
+NOW = datetime(2026, 9, 15, 9, 0, tzinfo=timezone.utc)   # midday Kyiv
 W = (TODAY - timedelta(days=25), TODAY)
 
 # (id, source_id, grand_total, days_ago, status_id, manager_id)
@@ -79,7 +83,7 @@ SPEND_COLS = ("id", "expense_date", "category", "expense_type", "amount",
 
 
 async def _seed_duckdb(store):
-    now = datetime.now(timezone.utc)
+    now = NOW
     async with store.connection() as conn:
         for oid, src, total, days, status, mgr in ORDERS:
             conn.execute(

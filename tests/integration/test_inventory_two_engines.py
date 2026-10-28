@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -49,7 +50,11 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# Kyiv's day, the one the views count from (`TODAY_IN_KYIV`): the views take
+# their "today" from the server's clock, so it cannot be pinned, and the
+# answers are recorded relative to it: a date as how many days before today.
+# `date.today()` was the runner's day, which is not Kyiv's from 21:00 UTC.
+TODAY = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Kyiv")).date()
 
 
 def _d(days_ago: int) -> date:

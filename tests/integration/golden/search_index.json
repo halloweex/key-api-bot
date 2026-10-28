@@ -1,0 +1,291 @@
+{
+ "answers": {
+  "sync_to_meilisearch[\"Europe/Kyiv\"]": {
+   "docs": {
+    "buyers": {
+     "7": {
+      "city": null,
+      "created_at": "NaT",
+      "email": null,
+      "full_name": "Олена",
+      "id": 7,
+      "manager_id": null,
+      "note": null,
+      "order_count": 4,
+      "phone": "+380501112233"
+     },
+     "8": {
+      "city": null,
+      "created_at": "NaT",
+      "email": null,
+      "full_name": "Ігор",
+      "id": 8,
+      "manager_id": null,
+      "note": null,
+      "order_count": 1,
+      "phone": null
+     }
+    },
+    "orders": {
+     "1": {
+      "buyer_id": 7,
+      "buyer_name": "Олена",
+      "grand_total": 1200.0,
+      "id": 1,
+      "order_date": "2026-09-13T00:00:00",
+      "ordered_at": "2026-09-13T12:00:00+03:00",
+      "source_name": "Instagram",
+      "status_id": 1
+     },
+     "2": {
+      "buyer_id": 7,
+      "buyer_name": "Олена",
+      "grand_total": 600.0,
+      "id": 2,
+      "order_date": "2026-09-12T00:00:00",
+      "ordered_at": "2026-09-12T12:00:00+03:00",
+      "source_name": "Telegram",
+      "status_id": 1
+     },
+     "3": {
+      "buyer_id": 999,
+      "buyer_name": null,
+      "grand_total": 400.0,
+      "id": 3,
+      "order_date": "2026-09-11T00:00:00",
+      "ordered_at": "2026-09-11T12:00:00+03:00",
+      "source_name": "Instagram",
+      "status_id": 19
+     },
+     "4": {
+      "buyer_id": 7,
+      "buyer_name": "Олена",
+      "grand_total": 900.0,
+      "id": 4,
+      "order_date": "2026-09-10T00:00:00",
+      "ordered_at": "2026-09-10T12:00:00+03:00",
+      "source_name": "Other",
+      "status_id": 1
+     },
+     "5": {
+      "buyer_id": 8,
+      "buyer_name": "Ігор",
+      "grand_total": 750.0,
+      "id": 5,
+      "order_date": "2026-09-09T00:00:00",
+      "ordered_at": "2026-09-09T12:00:00+03:00",
+      "source_name": "Shopify",
+      "status_id": 1
+     },
+     "6": {
+      "buyer_id": 7,
+      "buyer_name": "Олена",
+      "grand_total": 300.0,
+      "id": 6,
+      "order_date": "2026-09-08T00:00:00",
+      "ordered_at": "2026-09-08T12:00:00+03:00",
+      "source_name": "Instagram",
+      "status_id": 1
+     },
+     "7": {
+      "buyer_id": 7,
+      "buyer_name": "Олена",
+      "grand_total": 500.0,
+      "id": 7,
+      "order_date": "2026-09-07T00:00:00",
+      "ordered_at": "2026-09-07T12:00:00+03:00",
+      "source_name": "Telegram",
+      "status_id": 19
+     }
+    },
+    "products": {
+     "100": {
+      "brand": "BrandA",
+      "category_id": 2,
+      "category_name": "Serums",
+      "id": 100,
+      "name": "Serum",
+      "price": 500.0,
+      "sku": "SKU-A"
+     },
+     "200": {
+      "brand": "BrandB",
+      "category_id": 3,
+      "category_name": "Ampoules",
+      "id": 200,
+      "name": "Ampoule",
+      "price": 100.0,
+      "sku": "SKU-B"
+     },
+     "300": {
+      "brand": null,
+      "category_id": 4,
+      "category_name": "Makeup",
+      "id": 300,
+      "name": "Lipstick",
+      "price": 250.0,
+      "sku": "SKU-C"
+     },
+     "400": {
+      "brand": "BrandA",
+      "category_id": 2,
+      "category_name": "Serums",
+      "id": 400,
+      "name": "Toner",
+      "price": 200.0,
+      "sku": "SKU-D"
+     }
+    }
+   },
+   "stats": {
+    "buyers": 2,
+    "orders": 7,
+    "products": 4
+   }
+  },
+  "sync_to_meilisearch[\"UTC\"]": {
+   "docs": {
+    "buyers": {
+     "7": {
+      "city": null,
+      "created_at": "NaT",
+      "email": null,
+      "full_name": "Олена",
+      "id": 7,
+      "manager_id": null,
+      "note": null,
+      "order_count": 4,
+      "phone": "+380501112233"
+     },
+     "8": {
+      "city": null,
+      "created_at": "NaT",
+      "email": null,
+      "full_name": "Ігор",
+      "id": 8,
+      "manager_id": null,
+      "note": null,
+      "order_count": 1,
+      "phone": null
+     }
+    },
+    "orders": {
+     "1": {
+      "buyer_id": 7,
+      "buyer_name": "Олена",
+      "grand_total": 1200.0,
+      "id": 1,
+      "order_date": "2026-09-13T00:00:00",
+      "ordered_at": "2026-09-13T09:00:00+00:00",
+      "source_name": "Instagram",
+      "status_id": 1
+     },
+     "2": {
+      "buyer_id": 7,
+      "buyer_name": "Олена",
+      "grand_total": 600.0,
+      "id": 2,
+      "order_date": "2026-09-12T00:00:00",
+      "ordered_at": "2026-09-12T09:00:00+00:00",
+      "source_name": "Telegram",
+      "status_id": 1
+     },
+     "3": {
+      "buyer_id": 999,
+      "buyer_name": null,
+      "grand_total": 400.0,
+      "id": 3,
+      "order_date": "2026-09-11T00:00:00",
+      "ordered_at": "2026-09-11T09:00:00+00:00",
+      "source_name": "Instagram",
+      "status_id": 19
+     },
+     "4": {
+      "buyer_id": 7,
+      "buyer_name": "Олена",
+      "grand_total": 900.0,
+      "id": 4,
+      "order_date": "2026-09-10T00:00:00",
+      "ordered_at": "2026-09-10T09:00:00+00:00",
+      "source_name": "Other",
+      "status_id": 1
+     },
+     "5": {
+      "buyer_id": 8,
+      "buyer_name": "Ігор",
+      "grand_total": 750.0,
+      "id": 5,
+      "order_date": "2026-09-09T00:00:00",
+      "ordered_at": "2026-09-09T09:00:00+00:00",
+      "source_name": "Shopify",
+      "status_id": 1
+     },
+     "6": {
+      "buyer_id": 7,
+      "buyer_name": "Олена",
+      "grand_total": 300.0,
+      "id": 6,
+      "order_date": "2026-09-08T00:00:00",
+      "ordered_at": "2026-09-08T09:00:00+00:00",
+      "source_name": "Instagram",
+      "status_id": 1
+     },
+     "7": {
+      "buyer_id": 7,
+      "buyer_name": "Олена",
+      "grand_total": 500.0,
+      "id": 7,
+      "order_date": "2026-09-07T00:00:00",
+      "ordered_at": "2026-09-07T09:00:00+00:00",
+      "source_name": "Telegram",
+      "status_id": 19
+     }
+    },
+    "products": {
+     "100": {
+      "brand": "BrandA",
+      "category_id": 2,
+      "category_name": "Serums",
+      "id": 100,
+      "name": "Serum",
+      "price": 500.0,
+      "sku": "SKU-A"
+     },
+     "200": {
+      "brand": "BrandB",
+      "category_id": 3,
+      "category_name": "Ampoules",
+      "id": 200,
+      "name": "Ampoule",
+      "price": 100.0,
+      "sku": "SKU-B"
+     },
+     "300": {
+      "brand": null,
+      "category_id": 4,
+      "category_name": "Makeup",
+      "id": 300,
+      "name": "Lipstick",
+      "price": 250.0,
+      "sku": "SKU-C"
+     },
+     "400": {
+      "brand": "BrandA",
+      "category_id": 2,
+      "category_name": "Serums",
+      "id": 400,
+      "name": "Toner",
+      "price": 200.0,
+      "sku": "SKU-D"
+     }
+    }
+   },
+   "stats": {
+    "buyers": 2,
+    "orders": 7,
+    "products": 4
+   }
+  }
+ },
+ "source": "DuckDB's answer to every two-engine call of tests/integration/test_dashboard_two_engines.py's search-index classes on that file's fixture, recorded at step 14's S14-07 on the code before it (67e8e733) while the same run asserted Postgres answered each one equally. The fixture is pinned to 2026-09-15; keyed by the TZ the run had. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it."
+}

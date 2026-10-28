@@ -68,7 +68,9 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# Pinned (step 14, S14-07) for the search index and the assistant's tools,
+# whose answers are recorded as literals from DuckDB on `both_engines`.
+TODAY = date(2026, 9, 15)
 WINDOW = (TODAY - timedelta(days=30), TODAY)
 
 CATEGORIES = [(1, "Care", None), (2, "Serums", 1), (3, "Ampoules", 1), (4, "Makeup", None)]
@@ -131,7 +133,7 @@ PG_TABLES = ("gold.daily_revenue", "silver.orders", "bronze.order_products",
 
 
 async def _seed_duckdb(store):
-    now = datetime.now(timezone.utc)
+    now = datetime(2026, 9, 15, 9, 0, tzinfo=timezone.utc)   # midday Kyiv
     async with store.connection() as conn:
         conn.executemany(
             "INSERT INTO categories (id, name, parent_id) VALUES (?,?,?)", CATEGORIES)

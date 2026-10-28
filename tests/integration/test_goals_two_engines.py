@@ -65,7 +65,11 @@ pytestmark = pytest.mark.skipif(
 # are deliberately not touched: none of them fails today, and rewriting ten
 # fixtures on the strength of one proof is how nine working tests break.
 KYIV = ZoneInfo("Europe/Kyiv")
-TODAY = datetime.now(timezone.utc).astimezone(KYIV).date()
+# Pinned (step 14, S14-07), and the clock with it (`_frozen_clock`): the
+# answers are recorded as literals from DuckDB on this fixture, and the weekly
+# and monthly grains bucket by the calendar, so the day the suite runs would
+# otherwise move them.
+TODAY = date(2026, 9, 15)
 
 # Eight weeks of history so the weekly grain has something to trend over, and
 # the monthly grain more than one bucket.
@@ -89,6 +93,27 @@ GOALS = [
     ("daily", 5000.0, True, 4500.0, 1.10),
     ("weekly", 30000.0, False, 31000.0, 1.05),
 ]
+
+
+class _FrozenClock(datetime):
+    """`datetime` with `now()` at midday in Kyiv on `TODAY`."""
+
+    @classmethod
+    def now(cls, tz=None):
+        moment = datetime.combine(TODAY, time(12, 0), tzinfo=KYIV)
+        return moment.astimezone(tz) if tz else moment.replace(tzinfo=None)
+
+
+@pytest.fixture(autouse=True)
+def _frozen_clock(monkeypatch):
+    """Every clock these reads ask, at `TODAY`: the goal repository's Python
+    clock, the forecast service's Kyiv day, and the SQL's own "today" — the
+    one body that reads it (`get_historical_revenue`) imports
+    `TODAY_IN_KYIV` at the call, so the pinned date reaches both engines.
+    `DATE '…'` reads the same in DuckDB and Postgres."""
+    monkeypatch.setattr("core.repositories.goals.datetime", _FrozenClock)
+    monkeypatch.setattr("core.prediction_service._today_kyiv", lambda: TODAY)
+    monkeypatch.setattr("core.sql_dialect.TODAY_IN_KYIV", f"DATE '{TODAY.isoformat()}'")
 
 
 async def _seed_duckdb(store):
