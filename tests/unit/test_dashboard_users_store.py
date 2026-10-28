@@ -466,8 +466,9 @@ class TestTheRoleMatrixLeftDuckDB:
         an `app.` table. `store_reach.names` would not do for this — it counts
         the name as spelled when it is merely imported. Mutation (the review
         of S14-08's fix): `sql.format(users="dashboard_users", self=…)` with
-        the import of `TABLE` kept, which resolves to the schema-less name
-        and passed every structural guard."""
+        the import of `TABLE` kept, which resolves to the schema-less name.
+        It passed every test in this module; only the live-Postgres access
+        tests elsewhere still failed on it."""
         from tests import store_reach
 
         tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
