@@ -32,6 +32,7 @@ from pathlib import Path
 import pytest
 
 from core.rollback_lever import ROLLBACK_LEVER, ROLLBACK_RUNBOOK
+from tests.repo_tree import needs_checkout
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -283,6 +284,7 @@ class TestEveryLeverNamesTheOneLine:
             "rollback-step14") < ROLLBACK_LEVER.index("owner rows")
         assert "only after checking the markers" in ROLLBACK_LEVER
 
+    @needs_checkout
     def test_the_runbook_it_names_exists(self):
         """Mutation: rename the CLAUDE.md heading, or the constant's."""
         heading = re.search(r'"(.+)"', ROLLBACK_RUNBOOK).group(1)
