@@ -9,10 +9,12 @@ attribution, which looks exactly like a week where nothing came from anywhere.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import date, timedelta
 
 import pytest
+import pytest_asyncio
 
 from core.traffic_report import (
     CAMPAIGN_FLOOR,
@@ -25,6 +27,7 @@ from core.traffic_report import (
     format_report,
     format_report_rich,
 )
+from tests.integration.pg_tab_seed import needs_postgres
 from tests.unit.test_rich_report import SUPPORTED_TAGS
 
 
@@ -377,31 +380,51 @@ async def _duck_store(tmp_path):
     return store
 
 
-async def _seed_gold(store, complete=True):
+async def _seed_gold(_store, complete=True):
     """Enough Gold for the readiness gate to pass — the job asks the warehouse
-    how far it has got, not how much traffic there was."""
+    how far it has got, not how much traffic there was.
+
+    Postgres' Gold, roll-up rows, through the pool `core.pg.get_pool` answers
+    with (`_warehouse_in_postgres`): the gate reads Postgres alone since step
+    14's S14-07 (`core.weekly_report.warehouse_max_date`). The store argument
+    is the DuckDB one the send ledger lives in, and is not written here."""
     from datetime import datetime, timedelta
 
+    from core.pg import get_pool
     from core.scheduler import SCHEDULER_TIMEZONE
     from core.weekly_report import last_complete_week
 
     today = datetime.now(SCHEDULER_TIMEZONE).date()
     start, end = last_complete_week(today)
     last = end if complete else end - timedelta(days=3)
-    async with store.connection() as conn:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         day = start
         while day <= last:
-            conn.execute(
-                "INSERT OR REPLACE INTO gold_daily_revenue "
-                "(date, sales_type, revenue, orders_count) VALUES (?, 'retail', ?, ?)",
-                [day, 5_000, 2],
-            )
+            await conn.execute(
+                "INSERT INTO gold.daily_revenue (date, sales_type, source_id, revenue,"
+                " orders_count, unique_customers, new_customers, returning_customers,"
+                " returns_count, returns_revenue, avg_order_value)"
+                " VALUES ($1, 'retail', NULL, $2, $3, 0, 0, 0, 0, 0, 0)",
+                day, 5_000, 2)
             day += timedelta(days=1)
     return start
 
 
+@needs_postgres
 class TestTheScheduledJob:
     ADMINS = [111, 222]
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _warehouse_in_postgres(self, monkeypatch):
+        """An empty Postgres warehouse for `_seed_gold` to fill."""
+        from tests.integration.pg_tab_seed import tab_in_postgres
+
+        async def _nothing(conn, pool):
+            pass
+
+        async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _nothing):
+            yield
 
     def _wire(self, monkeypatch, store, tmp_path, *, analytics=None, campaigns=None):
         import importlib
