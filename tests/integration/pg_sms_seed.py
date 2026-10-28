@@ -132,6 +132,12 @@ async def pg_conn():
         yield conn
 
 
+def as_tuple(record) -> Any:
+    """An asyncpg row as the tuple DuckDB's `fetchone()` handed back, so an
+    assertion written against one reads the other; None stays None."""
+    return tuple(record) if record is not None else None
+
+
 async def insert(conn, table: str, rows: Iterable[Mapping[str, Any]]) -> None:
     """Rows into `table`, each a mapping of column to value — the column list
     of the first row for all of them."""
@@ -254,7 +260,7 @@ def shifted(day: date, recorded_on: date) -> date:
 
 
 __all__ = [
-    "ACCESS_TABLES", "DSN", "SMS_TABLES", "clear", "for_async_tests",
+    "ACCESS_TABLES", "DSN", "SMS_TABLES", "as_tuple", "clear", "for_async_tests",
     "golden", "insert",
     "kyiv_today", "needs_postgres", "on_postgres", "order_row", "pg_conn",
     "relative", "same_numbers", "shifted", "store",
