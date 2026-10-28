@@ -319,7 +319,10 @@ class TestEveryWayIn:
         count = defaultdict(int)
         for kind in kinds.values():
             count[kind] += 1
-        assert count["door"] >= 120, dict(count)
+        # 120 and more until step 14's S14-07, whose routes and jobs over
+        # `/expenses`, `/inventory`, `/goals`, the cohorts, the assistant and
+        # the index stopped reaching the file at all: 112 then.
+        assert count["door"] >= 100, dict(count)
         assert count["held"] >= 10, dict(count)
         assert kinds["web/main.py:startup_event"] == "door"
         assert kinds["core/scheduler.py:BackgroundScheduler._run_dq_digest"] == "door"
