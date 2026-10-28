@@ -114,7 +114,7 @@ KS_PG_DSN=postgresql://… KS_RUST_PILOT_URL=http://127.0.0.1:8090 TZ=UTC pytest
 ```
 
 - `test_rust_pilot_trend.py` seeds ~42 000 orders through production's own
-  Silver and Gold derivations (`tests/rust_pilot_fixture.py`) and sends 3 260
+  Silver and Gold derivations (`tests/rust_pilot_fixture.py`) and sends 3 347
   trend requests at frozen instants either side of the Kyiv midnights that
   matter.
 - `test_rust_pilot_access.py` sends cookie states × users × tab sets × every
