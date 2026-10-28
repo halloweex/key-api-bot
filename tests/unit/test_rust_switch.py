@@ -270,8 +270,8 @@ class TestTheDeploySplitsTheHalves:
         leave its changes undeployed: the newer run would not see them."""
         run = JOBS["changes"]["steps"][-1]["run"]
         assert "last_deployed deploy)" in run and "last_deployed deploy-rust)" in run
-        assert ".github/scripts/changed_components.py" in run
-        assert (REPO / ".github" / "scripts" / "changed_components.py").is_file()
+        assert "deploy/changed_components.py" in run
+        assert (REPO / "deploy" / "changed_components.py").is_file()
 
     def test_one_deploy_at_a_time_still(self):
         assert WORKFLOW["concurrency"] == {"group": "deploy-production", "cancel-in-progress": False}

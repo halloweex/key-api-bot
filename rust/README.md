@@ -180,4 +180,4 @@ Everything a route needs to move is already in place and routes nothing:
   `Dockerfile.rust` changed, on an arm64 runner, and deploys it in its own job:
   pull, `up` under the profile, wait for healthy, `nginx -t`, `nginx -s reload`.
   A change to `routes.conf` alone is that job's reload and nothing else
-  (`.github/scripts/changed_components.py` decides).
+  (`deploy/changed_components.py` decides).

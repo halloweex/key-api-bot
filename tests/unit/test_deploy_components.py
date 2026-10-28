@@ -1,4 +1,4 @@
-"""Which half a change deploys: .github/scripts/changed_components.py.
+"""Which half a change deploys: deploy/changed_components.py.
 
 The rule the deploy depends on is asymmetric on purpose. A path is the Rust
 pilot's only when the script names it; everything else counts as Python,
@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
-SCRIPT = REPO / ".github" / "scripts" / "changed_components.py"
+SCRIPT = REPO / "deploy" / "changed_components.py"
 _spec = importlib.util.spec_from_file_location("changed_components", SCRIPT)
 components = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(components)
