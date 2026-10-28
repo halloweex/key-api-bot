@@ -3,28 +3,34 @@
 The behaviour under test is the one that broke: seeding stopped at the first
 existing row, so a feature added later never reached the table, and every role
 whose permissions come from the database was denied it silently.
+
+The store is Postgres — `app.role_permissions` and `app.dashboard_users`,
+where access has lived since 2026-09-07 and the only store the routers know
+since step 14's S14-08 (these ran on DuckDB until then;
+`tests/integration/pg_sms_seed.py`). Skipped without `KS_PG_DSN`.
 """
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from core.duckdb_store import DuckDBStore
 from core.permissions import Feature, ROLE_PERMISSIONS, Role
+from tests.integration import pg_sms_seed
+from tests.integration.pg_sms_seed import ACCESS_TABLES, needs_postgres, pg_conn
+
+pytestmark = needs_postgres
 
 
-@pytest.fixture(autouse=True)
-def _users_on_duckdb(monkeypatch):
-    """This module's user list is DuckDB's, as it was before step 14's S14-00
-    made its store a constant (`tests.conftest.user_store_on_duckdb`)."""
-    from tests.conftest import user_store_on_duckdb
-
-    user_store_on_duckdb(monkeypatch)
+@pytest_asyncio.fixture(autouse=True)
+async def _postgres(monkeypatch):
+    async with pg_sms_seed.on_postgres(monkeypatch, ACCESS_TABLES,
+                                       what="the access path"):
+        yield
 
 
 async def _store(tmp_path: Path) -> DuckDBStore:
-    store = DuckDBStore(db_path=tmp_path / "perms.duckdb")
-    await store.connect()
-    return store
+    return pg_sms_seed.store(tmp_path, "perms.duckdb")
 
 
 @pytest.mark.asyncio
@@ -47,9 +53,9 @@ async def test_a_new_feature_reaches_an_already_seeded_table(tmp_path):
     store = await _store(tmp_path)
     try:
         await store.seed_default_permissions()
-        async with store.connection() as conn:
-            conn.execute(
-                "DELETE FROM role_permissions WHERE feature = ?", [Feature.SMS.value],
+        async with pg_conn() as conn:
+            await conn.execute(
+                "DELETE FROM app.role_permissions WHERE feature = $1", Feature.SMS.value,
             )
 
         await store.seed_default_permissions()
