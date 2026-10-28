@@ -358,6 +358,47 @@ class TestTheTwoListsAreNotConfusedForEachOther:
 # ─── the matrix followed the list ────────────────────────────────────────────
 
 
+def _format_hole_node(fn: ast.AST, hole: str) -> ast.AST:
+    """The value of `hole=` in the router's one `sql.format(...)` call."""
+    calls = [n for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "format" and isinstance(n.func.value, ast.Name)
+             and n.func.value.id == "sql"]
+    assert len(calls) == 1, f"expected one sql.format(...), found {len(calls)}"
+    values = [kw.value for kw in calls[0].keywords if kw.arg == hole]
+    assert len(values) == 1, f"sql.format(...) has no {hole}= hole"
+    return values[0]
+
+
+def _format_hole(fn: ast.AST, hole: str):
+    node = _format_hole_node(fn, hole)
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _bindings(fn: ast.AST, name: str) -> list:
+    """Every place inside `fn` that binds `name`: an import as
+    `(module, imported name)`, anything else by its kind and line."""
+    found: list = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.ImportFrom):
+            found += [(node.module, a.name) if a.asname is None
+                      else (node.module, f"{a.name} as {a.asname}")
+                      for a in node.names if (a.asname or a.name) == name]
+        elif isinstance(node, ast.Import):
+            found += [f"import {a.name} at line {node.lineno}"
+                      for a in node.names
+                      if (a.asname or a.name.split(".")[0]) == name]
+        elif (isinstance(node, ast.Name) and node.id == name
+                and isinstance(node.ctx, (ast.Store, ast.Del))):
+            found.append(f"assigned at line {node.lineno}")
+        elif isinstance(node, ast.arg) and node.arg == name:
+            found.append(f"a parameter at line {node.lineno}")
+        elif isinstance(node, (ast.Global, ast.Nonlocal)) and name in node.names:
+            found.append(f"declared {type(node).__name__.lower()} "
+                         f"at line {node.lineno}")
+    return found
+
+
 class TestTheRoleMatrixLeftDuckDB:
     """`KS_USER_STORE` decides where *all* of access lives, not half of it.
 
@@ -417,16 +458,32 @@ class TestTheRoleMatrixLeftDuckDB:
         router's rule (`tests/store_reach.py`): no `self` beyond the
         signature, no `super`, nothing of the store or its file. Mutations:
         `user_store_is_postgres()` back, under any spelling; `await
-        self._fetch_all(…)` or `self.connection()` in either."""
+        self._fetch_all(…)` or `self.connection()` in either.
+
+        "Renders into `app.*`" is read off the `sql.format(...)` call itself:
+        its `users=` / `perms=` hole must be the bare name `TABLE` /
+        `PERMISSIONS_TABLE`, bound only where it should be, to a value that is
+        an `app.` table. `store_reach.names` would not do for this — it counts
+        the name as spelled when it is merely imported. Mutation (the review
+        of S14-08's fix): `sql.format(users="dashboard_users", self=…)` with
+        the import of `TABLE` kept, which resolves to the schema-less name
+        and passed every structural guard."""
         from tests import store_reach
 
         tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
-        for name, table in (("_users_run", "TABLE"),
-                            ("_perms_run", "PERMISSIONS_TABLE")):
+        module_constants = {
+            target.id: node.value.value
+            for node in tree.body if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            for target in node.targets if isinstance(target, ast.Name)}
+        for name, table, hole, binding, value in (
+                ("_users_run", "TABLE", "users",
+                 [("core.pg_dashboard_users", "TABLE")], duf.TABLE),
+                ("_perms_run", "PERMISSIONS_TABLE", "perms",
+                 [], module_constants.get("PERMISSIONS_TABLE"))):
             fn = next(n for n in ast.walk(tree)
                       if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
             spelled = store_reach.names(fn)
-            assert table in spelled, f"{name} no longer renders {table}"
             assert "user_store_is_postgres" not in spelled, (
                 f"{name} chooses its engine again")
             found = store_reach.reaches(
@@ -435,6 +492,13 @@ class TestTheRoleMatrixLeftDuckDB:
             assert not found, (
                 f"{name} reaches the DuckDB store: there is one store to run on "
                 f"({found})")
+            assert _format_hole(fn, hole) == table, (
+                f"{name} no longer renders {table}: the {hole}= hole of its "
+                f"sql.format(...) is {ast.dump(_format_hole_node(fn, hole))}")
+            assert _bindings(fn, table) == binding, (
+                f"{name} binds {table} somewhere else: {_bindings(fn, table)}")
+            assert isinstance(value, str) and value.startswith("app."), (
+                f"{name} renders {table} = {value!r}, not an app.* table")
 
     @pytest.mark.asyncio
     async def test_seeding_is_one_statement(self, tmp_path, monkeypatch):
