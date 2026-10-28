@@ -44,6 +44,7 @@ def test_the_value_domains_are_the_frontends_types():
         "last_7_days", "last_28_days",
     )
     assert fc.sales_types() == ("retail", "b2b", "exhibition", "internal", "all")
+    assert fc.sources() == (1, 2, 4)
 
 
 def test_every_margin_endpoint_is_a_get_route_of_the_app():
@@ -61,3 +62,26 @@ def test_a_narrowed_page_drops_the_filters_it_does_not_apply():
 def test_a_reshaped_hook_fails_loudly():
     with pytest.raises(fc.FrontendShapeError):
         fc.hook_calls(("useNoSuchHook",))
+
+
+def test_the_query_is_built_as_use_query_params_builds_it():
+    c = fc.margin()
+    assert fc.query(c, period="month", sales_type="retail") == "period=month&sales_type=retail"
+    # `custom` sends the two dates, or neither while one is missing.
+    assert fc.query(c, period="custom", start_date="2026-10-01", end_date="2026-10-21",
+                    sales_type="all") == "start_date=2026-10-01&end_date=2026-10-21&sales_type=all"
+    assert fc.query(c, period="custom", start_date="2026-10-01", sales_type="b2b") == "sales_type=b2b"
+    # A filter is sent only when truthy, in the store's order.
+    assert fc.query(c, period="week", sales_type="retail", source_id=0, brand="",
+                    promocode="SALE", category_id=12) == (
+        "period=week&sales_type=retail&category_id=12&promocode=SALE")
+    # A filter the page does not apply is left out, as `filtersForPath` does.
+    assert fc.query(fc.contract("/traffic", ()), period="week", sales_type="retail",
+                    brand="X", source_id=4) == "period=week&sales_type=retail&source_id=4"
+
+
+def test_the_encoding_is_url_search_params():
+    """WHATWG's serializer, which `urlencode` is not: `~` and `*` differ."""
+    assert fc.encode([("brand", "Етуде Хаус"), ("x", "a*b~c/d&e=f+g")]) == (
+        "brand=%D0%95%D1%82%D1%83%D0%B4%D0%B5+%D0%A5%D0%B0%D1%83%D1%81"
+        "&x=a*b%7Ec%2Fd%26e%3Df%2Bg")

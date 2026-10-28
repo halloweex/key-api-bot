@@ -106,29 +106,33 @@ fn limit(raw: Option<String>, errors: &mut Vec<FieldError>) -> i64 {
     20
 }
 
-/// A `float = Query(default, ge=0, le=…)`, read as Rust reads a float. NaN
-/// fails both bounds, as a comparison with it does.
+/// A `float = Query(default, ge=0, le=…)`, read as Rust reads a float, and
+/// finite: NaN and the infinities are refused here rather than carried into
+/// a bound or a bind.
 fn float(
-    raw: Option<String>,
+    raw: &str,
     name: &'static str,
     le: Option<(f64, &'static str)>,
     errors: &mut Vec<FieldError>,
 ) -> Option<f64> {
-    let raw = raw?;
     let ge0 = "Input should be greater than or equal to 0";
     match raw.parse::<f64>() {
         Err(_) => errors.push(field_error(
             "float_parsing",
             name,
             "Input should be a valid number, unable to parse string as a number",
-            &raw,
+            raw,
         )),
-        Ok(x) if x.is_nan() || x < 0.0 => {
-            errors.push(field_error("greater_than_equal", name, ge0, &raw))
-        }
+        Ok(x) if !x.is_finite() => errors.push(field_error(
+            "finite_number",
+            name,
+            "Input should be a finite number",
+            raw,
+        )),
+        Ok(x) if x < 0.0 => errors.push(field_error("greater_than_equal", name, ge0, raw)),
         Ok(x) => match le {
-            Some((bound, msg)) if x.is_nan() || x > bound => {
-                errors.push(field_error("less_than_equal", name, msg, &raw));
+            Some((bound, msg)) if x > bound => {
+                errors.push(field_error("less_than_equal", name, msg, raw));
             }
             _ => return Some(x),
         },
@@ -164,13 +168,23 @@ fn parse(route: Route, raw: &str) -> Result<Query, Failure> {
     // reach asyncpg as integers, exactly.
     let mut min_revenue = Decimal::from(if route == Route::Alerts { 50_000 } else { 500 });
     if route == Route::BrandCategory
-        && let Some(x) = float(take("min_revenue"), "min_revenue", None, &mut errors)
+        && let Some(raw) = take("min_revenue")
+        && let Some(x) = float(&raw, "min_revenue", None, &mut errors)
     {
-        min_revenue = to_decimal(x).ok_or(Failure::Raised("min_revenue is not a decimal"))?;
+        // A finite f64 past `Decimal`'s 28 digits has no bind here.
+        match to_decimal(x) {
+            Some(d) => min_revenue = d,
+            None => errors.push(field_error(
+                "decimal_max_digits",
+                "min_revenue",
+                "Decimal input should have no more than 28 digits in total",
+                &raw,
+            )),
+        }
     }
-    let margin_floor = match route {
-        Route::Alerts => float(
-            take("margin_floor"),
+    let margin_floor = match (route, take("margin_floor")) {
+        (Route::Alerts, Some(raw)) => float(
+            &raw,
             "margin_floor",
             Some((100.0, "Input should be less than or equal to 100")),
             &mut errors,
@@ -674,9 +688,14 @@ mod tests {
             errors(Route::Alerts, "margin_floor=101"),
             ["less_than_equal"]
         );
+        for spelling in ["nan", "inf", "-inf"] {
+            let query = format!("margin_floor={spelling}&min_revenue={spelling}");
+            assert_eq!(errors(Route::Alerts, &query), ["finite_number"]);
+            assert_eq!(errors(Route::BrandCategory, &query), ["finite_number"]);
+        }
         assert_eq!(
-            errors(Route::Alerts, "margin_floor=nan"),
-            ["greater_than_equal"]
+            errors(Route::BrandCategory, "min_revenue=1e300"),
+            ["decimal_max_digits"]
         );
     }
 

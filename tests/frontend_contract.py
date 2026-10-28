@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, FrozenSet, Tuple
+from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 SRC = Path(__file__).resolve().parents[1] / "web" / "frontend" / "src"
 
@@ -66,6 +66,17 @@ def periods() -> Tuple[str, ...]:
 
 def sales_types() -> Tuple[str, ...]:
     return _union("SalesType")
+
+
+def sources() -> Tuple[int, ...]:
+    """The source ids the header offers: `SourceFilter`'s `SOURCES`. The
+    other three filters offer what `/api/categories`, `/api/brands` and
+    `/api/promocodes` answer, so a harness reads those off the app."""
+    m = re.search(r"const SOURCES\s*=\s*\[(.*?)\]", _read("components/SourceFilter.tsx"), re.S)
+    ids = tuple(int(i) for i in re.findall(r"\bid:\s*(\d+)", m.group(1))) if m else ()
+    if not ids:
+        raise FrontendShapeError("components/SourceFilter.tsx: no `const SOURCES = [{ id: … }]`")
+    return ids
 
 
 def global_params() -> Tuple[str, ...]:
@@ -141,6 +152,59 @@ def contract(page: str, hooks: Tuple[str, ...]) -> Contract:
     )
     endpoints = tuple("/api" + client_path(fn) for fn in hook_calls(hooks).values())
     return Contract(page, endpoints, periods(), sales_types(), params)
+
+
+def query(
+    c: Contract,
+    *,
+    period: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    sales_type: str,
+    source_id: Optional[int] = None,
+    category_id: Optional[int] = None,
+    brand: Optional[str] = None,
+    promocode: Optional[str] = None,
+) -> str:
+    """The query string `useQueryParams` builds for this state, on `c`'s page.
+
+    Its branches, as written there: a period unless it is `custom`, else both
+    dates or neither; the sales type always; a filter only when it is set —
+    truthy, so `0` and `''` are never sent — and the page applies it.
+    """
+    pairs: List[Tuple[str, str]] = []
+    if period is not None and period != "custom":
+        pairs.append(("period", period))
+    elif start_date and end_date:
+        pairs += [("start_date", start_date), ("end_date", end_date)]
+    pairs.append(("sales_type", sales_type))
+    for name, value in (("source_id", source_id), ("category_id", category_id),
+                        ("brand", brand), ("promocode", promocode)):
+        if value and name in c.params:
+            pairs.append((name, str(value)))
+    unknown = {name for name, _ in pairs} - set(c.params)
+    if unknown:
+        raise FrontendShapeError(f"{c.page} does not send {sorted(unknown)}")
+    return encode(pairs)
+
+
+def encode(pairs: Sequence[Tuple[str, str]]) -> str:
+    """`URLSearchParams.toString()`: WHATWG's urlencoded serializer. A space
+    is `+`; every byte but ASCII letters, digits and `*-._` is
+    percent-encoded, upper case. Not `urllib.parse.urlencode`, which keeps
+    `~` and encodes `*`."""
+    def one(text: str) -> str:
+        out = []
+        for byte in text.encode("utf-8"):
+            char = chr(byte)
+            if char.isascii() and (char.isalnum() or char in "*-._"):
+                out.append(char)
+            elif byte == 0x20:
+                out.append("+")
+            else:
+                out.append(f"%{byte:02X}")
+        return "".join(out)
+    return "&".join(f"{one(k)}={one(v)}" for k, v in pairs)
 
 
 MARGIN_HOOKS = (
