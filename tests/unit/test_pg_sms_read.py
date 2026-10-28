@@ -134,20 +134,35 @@ class TestItDoesNotTakeTheDuckDbLock:
 
 
 class TestTheSwitchIsGone:
-    """`/sms` has one store, and nothing in the repository asks which.
+    """`/sms` has one store, and nothing on its path asks which.
 
     Until step 14's S14-08 every SMS statement went through `_sms_run` or
     `_sms_tx`, which asked `sms_store_is_postgres()` and could run on DuckDB;
     the audience did the same, and `refuse_while_unported` stood guard over
     any path left on one engine (`UNPORTED`, empty since every path ran on
     both). With the DuckDB branches gone the guard had nothing to guard and
-    went with them. What stays true is checked here instead: nothing in the
-    repository names the switch, DuckDB's dialect or the guard, and nothing
-    on the `/sms` path takes the store's own connection. Parsed, not grepped:
-    a comment naming the function satisfies a grep.
+    went with them. What stays true is checked here instead, of the store
+    side (`core/repositories/customers.py`): it spells neither the switch,
+    nor DuckDB's dialect, nor the guard — bare, as an attribute of a module
+    (`pg_sms.sms_store_is_postgres()`, `sql_dialect.DUCKDB`), imported under
+    another name, or as a string. And no function on the path — the store
+    side, the Postgres reader, the routes and the TurboSMS webhook — reaches
+    the file (`tests/store_reach.py`): no `connection()`, no helper over it
+    (`_fetch_one`, `_fetch_all`, `_offload`), no opener.
+
+    The switch itself is still defined, a constant, in `core/pg_sms.py` for
+    its last readers (the copy and its comparison, S14-12/13; the manifest,
+    S14-18), and `core/pg_sms_read.py` still renders the Postgres body with
+    `sms_segments_select`; neither is the store side. Parsed, not grepped: a
+    comment naming the function satisfies a grep.
     """
 
     _COHORTS = "_analytics_rows"   # the cohort tab's DuckDB tail: step 14's S14-07
+    # The rest of the path, beside the store side. Each reaches the store only
+    # through `get_store()`'s methods, which is why `get_store` is not a way
+    # to the file here (it is in a router, `test_duckdb_table_fates.py`).
+    _PATH = ("core/pg_sms_read.py", "web/routes/api/customers.py",
+             "web/routes/api/webhooks.py")
 
     def _tree(self):
         import ast
@@ -158,12 +173,17 @@ class TestTheSwitchIsGone:
         return ast.parse(inspect.getsource(module))
 
     def test_nothing_names_the_switch_or_the_guard(self):
-        import ast
+        """Mutation (the review's, on 4cceda69): `from core import pg_sms as
+        _sw; from core import sql_dialect as _d`, then `if
+        _sw.sms_store_is_postgres(): … else: … _d.sms_segments_select(
+        _d.DUCKDB, …)` in `get_sms_segments` — it passed, because only bare
+        names were read."""
+        from tests import store_reach
 
-        names = {n.id for n in ast.walk(self._tree()) if isinstance(n, ast.Name)}
+        spelled = store_reach.names(self._tree())
         for gone in ("sms_store_is_postgres", "refuse_while_unported", "DUCKDB",
                      "_DuckTx", "sms_segments_select"):
-            assert gone not in names, f"{gone} is still read on the /sms path"
+            assert gone not in spelled, f"{gone} is still read on the /sms path"
 
     def test_the_guard_left_core_pg_sms(self):
         from core import pg_sms
@@ -172,18 +192,26 @@ class TestTheSwitchIsGone:
         assert not hasattr(pg_sms, "UNPORTED")
 
     def test_no_sms_method_opens_the_store(self):
+        """Mutations (the review's, on 4cceda69): `await self._fetch_all(…)`
+        after `_sms_run`'s Postgres call, and in `get_sms_segments`' DuckDB
+        branch — both passed, because only `.connection` calls were read;
+        `super()._fetch_all(…)` and `getattr(store, "_fetch_all")`."""
         import ast
+        from pathlib import Path
 
+        from tests import store_reach
+
+        repo = Path(__file__).resolve().parents[2]
+        trees = [("core/repositories/customers.py", self._tree())] + [
+            (rel, ast.parse((repo / rel).read_text(encoding="utf-8")))
+            for rel in self._PATH]
         offenders = []
-        for node in ast.walk(self._tree()):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if node.name == self._COHORTS:
-                continue
-            for call in ast.walk(node):
-                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
-                        and call.func.attr == "connection"):
-                    offenders.append(node.name)
+        for rel, tree in trees:
+            for fn in store_reach.functions(tree):
+                if fn.name == self._COHORTS:
+                    continue
+                for found in store_reach.reaches(fn):
+                    offenders.append(f"{rel}::{fn.name}: {found}")
         assert not offenders, offenders
 
 

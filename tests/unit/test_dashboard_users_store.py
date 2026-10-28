@@ -255,18 +255,21 @@ class TestNothingGoesRoundTheRouter:
         permission dependency on ~120 of the 140 endpoints, so every cache
         miss took the store lock on an authorisation path. The two routers
         were the last to hold a DuckDB tail, and step 14's S14-08 took it
-        away: nothing in the file may open the store now, routers included."""
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        offenders = []
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            body = ast.get_source_segment(source, node) or ""
-            if "self.connection()" in body:
-                offenders.append(node.name)
+        away: nothing in the file may reach the file now, routers included —
+        not by `connection()`, not by a helper over it (`_fetch_one`,
+        `_fetch_all`, `_offload`), not by the opener, read off the syntax
+        (`tests/store_reach.py`). Mutation (the review's, on 4cceda69):
+        `await self._fetch_all(sql.format(users="users", self="users"),
+        params)` in `_users_run` — it passed, because only the text
+        `self.connection()` was looked for."""
+        from tests import store_reach
+
+        tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
+        offenders = [f"{fn.name}: {found}"
+                     for fn in store_reach.functions(tree)
+                     for found in store_reach.reaches(fn)]
         assert not offenders, (
-            f"{offenders} open DuckDB directly. Nothing in the access path may: "
+            f"{offenders} reach DuckDB directly. Nothing in the access path may: "
             f"the store lock is held by a warehouse rebuild every two minutes, "
             f"and an authorisation check that can queue behind a rebuild is the "
             f"one read that must not. Route it through _users_run/_perms_run."
@@ -410,20 +413,28 @@ class TestTheRoleMatrixLeftDuckDB:
         `app.*` and ask nothing. `KS_USER_STORE` chose for both until step
         14 (a constant since S14-00); a router that asked again, or kept a
         branch of its own, would let an approval and the permissions behind
-        it disagree about which database is authoritative."""
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
+        it disagree about which database is authoritative. Held to the
+        router's rule (`tests/store_reach.py`): no `self` beyond the
+        signature, no `super`, nothing of the store or its file. Mutations:
+        `user_store_is_postgres()` back, under any spelling; `await
+        self._fetch_all(…)` or `self.connection()` in either."""
+        from tests import store_reach
+
+        tree = ast.parse(REPOSITORY.read_text(encoding="utf-8"))
         for name, table in (("_users_run", "TABLE"),
                             ("_perms_run", "PERMISSIONS_TABLE")):
             fn = next(n for n in ast.walk(tree)
                       if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
-            names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
-            assert table in names, f"{name} no longer renders {table}"
-            assert "user_store_is_postgres" not in names, (
+            spelled = store_reach.names(fn)
+            assert table in spelled, f"{name} no longer renders {table}"
+            assert "user_store_is_postgres" not in spelled, (
                 f"{name} chooses its engine again")
-            attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
-            assert "connection" not in attrs, (
-                f"{name} reaches for the DuckDB store: there is one store to run on")
+            found = store_reach.reaches(
+                fn, self_attrs=frozenset(), reach=store_reach.ROUTER_REACHES,
+                modules=store_reach.ROUTER_MODULES)
+            assert not found, (
+                f"{name} reaches the DuckDB store: there is one store to run on "
+                f"({found})")
 
     @pytest.mark.asyncio
     async def test_seeding_is_one_statement(self, tmp_path, monkeypatch):
