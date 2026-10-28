@@ -30,6 +30,7 @@ use ks_api::access::signer::SessionKey;
 use ks_api::access::store::PgAccess;
 use ks_api::gold::PgGold;
 use ks_api::margin::PgMargin;
+use ks_api::pgread::PgReads;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
@@ -174,7 +175,8 @@ async fn run() -> Result<(), Box<dyn Error>> {
     };
     let app = ks_api::router(ks_api::AppState::new(
         PgGold::new(pool.clone(), config.timeout),
-        PgMargin::new(pool, config.timeout, revision),
+        PgMargin::new(pool.clone(), config.timeout, revision.clone()),
+        PgReads::new(pool, config.timeout, revision),
         access,
         router,
         config.listen,

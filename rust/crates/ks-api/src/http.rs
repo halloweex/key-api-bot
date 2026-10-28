@@ -38,6 +38,8 @@ use crate::access::routing::{Captures, Resolution, Router};
 use crate::access::store::PgAccess;
 use crate::gold::PgGold;
 use crate::margin::{self, PgMargin};
+use crate::pgread::PgReads;
+use crate::products_intel;
 use crate::trend::{self, Failure};
 
 /// `DEFAULT_REQUEST_TIMEOUT` in `web/middleware.py`.
@@ -49,6 +51,8 @@ const SPA_CATCH_ALL: &str = "web.routes.pages.catch_all_spa";
 pub struct AppState {
     gold: PgGold,
     margin: PgMargin,
+    /// Wave 1's tabs past margin, each read as its Python reader reads.
+    reads: PgReads,
     access: Access<PgAccess>,
     router: Router,
     limiter: Limiter,
@@ -62,6 +66,7 @@ impl AppState {
     pub fn new(
         gold: PgGold,
         margin: PgMargin,
+        reads: PgReads,
         access: Access<PgAccess>,
         router: Router,
         listen: SocketAddr,
@@ -70,6 +75,7 @@ impl AppState {
         Self {
             gold,
             margin,
+            reads,
             access,
             router,
             limiter: Limiter::default(),
@@ -348,6 +354,10 @@ async fn endpoint(
             let which = margin::Route::from_endpoint(name).expect("matched above");
             margin_route(state, which, route, query, headers, peer).await
         }
+        name if products_intel::Route::from_endpoint(name).is_some() => {
+            let which = products_intel::Route::from_endpoint(name).expect("matched above");
+            products_route(state, which, route, query, headers, peer).await
+        }
         SPA_CATCH_ALL => {
             // `path == "api" or path.startswith("api/")`, before any session check.
             let spa = captures.get("path").map_or("", String::as_str);
@@ -435,6 +445,28 @@ async fn margin_route(
     };
     let admit = admitter(state, route, headers, peer);
     match margin::answer(which, &state.margin, query, now, admit).await {
+        Ok(body) => raw_json(StatusCode::OK, body),
+        Err(failure) => failure.into_response(),
+    }
+}
+
+/// One of `/api/products/intel/*`, past the gates.
+async fn products_route(
+    state: &AppState,
+    which: products_intel::Route,
+    route: &ApiRoute,
+    query: &str,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+) -> Response {
+    let Some(now) = state.trend_now(headers) else {
+        return detail(
+            StatusCode::BAD_REQUEST,
+            "X-Pilot-Now must be an RFC 3339 instant",
+        );
+    };
+    let admit = admitter(state, route, headers, peer);
+    match products_intel::answer(which, &state.reads, query, now, admit).await {
         Ok(body) => raw_json(StatusCode::OK, body),
         Err(failure) => failure.into_response(),
     }
