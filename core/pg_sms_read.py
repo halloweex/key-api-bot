@@ -26,7 +26,7 @@ half-switched state to be in.
 
 AND NO FALLBACK, DELIBERATELY
 
-`core/pg_gold_read.py` falls back to DuckDB on error, because a dashboard that
+`core/pg_gold_read.py` fell back to DuckDB until S14-06, as a dashboard that
 goes dark teaches everyone never to flip the flag. Here the opposite is right:
 after the switch the two stores diverge — every opt-out and every campaign
 recorded since lives in Postgres only — so a silent fallback would answer from

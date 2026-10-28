@@ -3758,13 +3758,14 @@ shapes, never a list of routers: a "falling back to DuckDB" log; an
 `enabled() and available()` gate whose handler carries on toward DuckDB; and
 **every** handler in a function reaching another engine under
 `core/repositories/` or `core/pg_*_read*.py`, because `backfilled()` returns
-False and `_pg_gold_summary` returns None and it is the caller that then reads
-DuckDB. Each must call `fall_back`, re-raise, or say in the same `try` what
-`ReadUnavailable` means — `_get_ml_forecast_total` lets it through, so a
-refusal is never turned into a goal computed without its signal. And every
-gate's function must call `no_address` with the switch the gate consults (or
-`no_engine`); the two Gold readers gained `pg_gold_read.available()` so they
-take the gate's shape and the walk sees them.
+False and it is the caller that then reads DuckDB (`_pg_gold_summary`
+returned None the same way until S14-06). Each must call `fall_back`,
+re-raise, or say in the same `try` what `ReadUnavailable` means —
+`_get_ml_forecast_total` lets it through, so a refusal is never turned into a
+goal computed without its signal. And every gate's function must call
+`no_address` with the switch the gate consults (or `no_engine`). The two Gold
+readers carried `pg_gold_read.available()` for that until S14-06, when they
+lost their gate and their tail; they refuse, and rule 5 holds them.
 
 That the refusal then *reaches* the 503 is proved by running it, not listing
 it: `tests/unit/test_read_fallback_http.py` sweeps **every GET route under
