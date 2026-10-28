@@ -1747,7 +1747,7 @@ class DuckDBStore(
         # Silver's shape lives at module level — see silver_select_sql above.
         # It used to be built here and copied into web/routes/api/admin.py,
         # which is how the two drifted apart in under a day.
-        _silver_select_cols = silver_select_sql()
+        _silver_select_cols = silver_select_sql(_DUCKDB_DIALECT)
         _silver_pass2_sql = silver_pass2_sql
 
         try:
@@ -1848,7 +1848,8 @@ class DuckDBStore(
                         if silver_affected_buyers:
                             bph = ",".join("?" * len(silver_affected_buyers))
                             conn.execute(
-                                _silver_pass2_sql(buyer_filter=bph),
+                                _silver_pass2_sql(buyer_filter=bph,
+                                                  dialect=_DUCKDB_DIALECT),
                                 silver_affected_buyers + silver_affected_buyers,
                             )
                     else:
@@ -1858,7 +1859,7 @@ class DuckDBStore(
                             SELECT {_silver_select_cols}
                             FROM orders o
                         """)
-                        conn.execute(_silver_pass2_sql())
+                        conn.execute(_silver_pass2_sql(dialect=_DUCKDB_DIALECT))
                     conn.execute("COMMIT")
                 except Exception:
                     try:

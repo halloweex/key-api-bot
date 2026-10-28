@@ -89,9 +89,10 @@ class TestTheCategoryExists:
         contain it: the definition moved to module level so the copy in
         `admin.py` could import it instead of restating it.
         """
-        from core.duckdb_store import silver_sales_type_case
+        from core.sql_dialect import POSTGRES
+        from core.warehouse_sql import silver_sales_type_case
 
-        case = silver_sales_type_case()
+        case = silver_sales_type_case(POSTGRES)
         assert case.rstrip().endswith("END")
         assert "ELSE 'internal'" in case, (
             "the partition is exhaustive by construction — the last branch is "

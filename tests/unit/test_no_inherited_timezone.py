@@ -50,7 +50,7 @@ import pytest
 
 from core.duckdb_constants import DISPLAY_TIMEZONE
 from core.sql_dialect import (
-    CLICKHOUSE_ANALYTICS, DUCKDB, DUCKDB_ANALYTICS, POSTGRES, TODAY_IN_KYIV,
+    CLICKHOUSE_ANALYTICS, DUCKDB, POSTGRES, TODAY_IN_KYIV,
     inventory_view_selects, sms_segments_select,
 )
 from core.repositories.customers import SmsAudienceFilters
@@ -96,7 +96,9 @@ def _rendered_bodies():
         "days_to_second_purchase_select", "cohort_ltv_select",
         "at_risk_customers_select",
     )
-    for dialect in (DUCKDB_ANALYTICS, CLICKHOUSE_ANALYTICS):
+    # ClickHouse's alone since step 14's S14-07, which took DuckDB's analytics
+    # dialect with the cohorts' fallback.
+    for dialect in (CLICKHOUSE_ANALYTICS,):
         for fn_name in cohort_bodies:
             yield f"cohort:{dialect.name}:{fn_name}", getattr(dialects, fn_name)(
                 dialect, sales_type_filter="", months_back=12)
@@ -138,9 +140,10 @@ class TestTheTwoSpellingsStayApart:
     only where an engine refuses the shared form."""
 
     def test_duckdb_and_postgres_share_one_expression(self):
+        """(DuckDB's analytics dialect said `TODAY_IN_KYIV` too, until step
+        14's S14-07 took it.)"""
         assert "AT TIME ZONE" in TODAY_IN_KYIV
         assert DISPLAY_TIMEZONE in TODAY_IN_KYIV
-        assert DUCKDB_ANALYTICS.today == TODAY_IN_KYIV
 
     def test_clickhouse_gets_the_only_form_it_parses(self):
         # Measured on 24.8.14.39, production's version: it rejects

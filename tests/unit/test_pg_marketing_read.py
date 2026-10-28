@@ -26,7 +26,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from core.duckdb_store import DuckDBStore
-from core.sql_dialect import DUCKDB, POSTGRES, marketing_period_measures
+from core.sql_dialect import POSTGRES, marketing_period_measures
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "revenue.py"
@@ -37,16 +37,10 @@ class TestTheTwoGoldShapes:
     """The one hole in this port that is not a table name."""
 
     def test_both_render_eleven_items_in_one_order(self):
-        for dialect in (DUCKDB, POSTGRES):
-            items = [i for i in marketing_period_measures(dialect).split(",\n")]
-            assert len(items) == 11, (dialect.name, len(items))
-
-    def test_duckdb_reads_the_channel_columns(self):
-        sql = marketing_period_measures(DUCKDB)
-        for column in ("instagram_revenue", "telegram_revenue", "shopify_revenue",
-                       "instagram_orders", "telegram_orders", "shopify_orders"):
-            assert column in sql
-        assert "source_id" not in sql, "DuckDB's Gold has no such dimension"
+        """One shape since step 14's S14-07, whose DuckDB branch — a column
+        per channel — went with the last DuckDB body carrying the hole."""
+        items = [i for i in marketing_period_measures(POSTGRES).split(",\n")]
+        assert len(items) == 11, len(items)
 
     def test_postgres_reads_the_source_dimension(self):
         sql = marketing_period_measures(POSTGRES)

@@ -518,7 +518,8 @@ class TestTheDerivationSignal:
         causes goes. Mutation: mark there without revisiting this: a Silver
         that starts reading the columns must come back here."""
         from core import pg_managers_write
-        from core.duckdb_store import silver_select_sql
+        from core.sql_dialect import POSTGRES
+        from core.warehouse_sql import silver_select_sql
 
         calls = {getattr(n.func, "id", getattr(n.func, "attr", ""))
                  for n in ast.walk(_fn_tree(pg_managers_write.update_manager_stats))
@@ -526,7 +527,7 @@ class TestTheDerivationSignal:
         assert "mark_if_owned" not in calls and "mark" not in calls
         import re
 
-        silver = silver_select_sql()
+        silver = silver_select_sql(POSTGRES)
         for column in ("first_order_date", "last_order_date", "order_count"):
             # `buyer_first_order_date` is the buyer's, not the manager's.
             assert not re.search(rf"\b{column}\b", silver), column

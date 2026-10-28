@@ -80,16 +80,28 @@ class TestEveryRenderingIsTheBytesFrom57fd7c22:
         assert render()["GOLD_MEASURES"] == tuple(home.GOLD_MEASURES.items())
         assert home.silver_select_sql.__module__ == "core.warehouse_sql"
 
-    def test_the_defaults_are_still_duckdb(self):
-        """`dialect=None` → DUCKDB until S14-07 removes that dialect."""
-        from core.sql_dialect import DUCKDB
+    def test_the_dialect_is_required(self):
+        """`dialect=None` meant DUCKDB until step 14's S14-07; every builder
+        takes its dialect now, so no rendering is DuckDB's by omission — the
+        DuckDB callers left name it. Mutation: give any of them a default
+        back."""
+        import inspect
+
         from core.warehouse_sql import (silver_pass2_sql, silver_recompute_ctes,
                                         silver_sales_type_case, silver_select_sql)
 
-        assert silver_sales_type_case() == silver_sales_type_case(DUCKDB)
-        assert silver_select_sql() == silver_select_sql(DUCKDB)
-        assert silver_pass2_sql() == silver_pass2_sql(dialect=DUCKDB)
-        assert silver_recompute_ctes() == silver_recompute_ctes(DUCKDB)
+        for builder in (silver_sales_type_case, silver_select_sql,
+                        silver_recompute_ctes):
+            with pytest.raises(TypeError):
+                builder()
+            assert inspect.signature(builder).parameters["dialect"].default \
+                is inspect.Parameter.empty
+        with pytest.raises(TypeError):
+            silver_pass2_sql()
+        with pytest.raises(TypeError):
+            silver_pass2_sql("?")
+        assert inspect.signature(silver_pass2_sql).parameters["dialect"].kind \
+            is inspect.Parameter.KEYWORD_ONLY
 
 
 # ─── The re-exports ──────────────────────────────────────────────────────────
