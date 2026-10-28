@@ -911,13 +911,16 @@ the web container through `core/repositories/users.py` and by the bot through
 its own pool — a grant written two ways would drift the first time one of them
 learned something the other did not.
 
-`available()` is the honest half: it needs `KS_BOT_STORE=postgres` **and**
-`KS_USER_STORE=postgres`. Under `KS_USER_STORE=duckdb` the dashboard's list is
-in a file the web container holds the single writer for, so no bot process can
-reach it — the approval still grants bot access and the message says the tabs
-are set from Admin → Users, rather than showing a checklist that would do
-nothing. Two variables in the same `.env`; if they ever disagree, a tab set
-written by the bot would go to a table nothing reads.
+`available()` is the honest half: it needed `KS_BOT_STORE=postgres` **and**
+`KS_USER_STORE=postgres`. Under `KS_USER_STORE=duckdb` the dashboard's list was
+in a file the web container holds the single writer for, so no bot process
+could reach it — the approval still granted bot access and the message said the
+tabs are set from Admin → Users, rather than showing a checklist that would do
+nothing. **Since step 14's S14-08 it asks only `KS_BOT_STORE`**, by the adapter
+that variable chose: the Postgres one answers True, SQLite's False. The
+dashboard's list has no store but Postgres (a constant since S14-00), so the
+disagreement this guarded against cannot happen, and the bot's startup ERROR
+about it went with it.
 
 One portability trap, found by running the statement rather than reading about
 it: DuckDB cannot resolve a bare `CURRENT_TIMESTAMP` on the right of
@@ -987,7 +990,11 @@ every two minutes (the measured cause of the SMS tab going 124 → 38 req/s).
 Revision 0022 puts `role_permissions` in `app`, routed by `_perms_run` through
 the same `KS_USER_STORE` switch, so one variable still answers "where does
 access live" — splitting them would let an approval and the permissions behind
-it disagree about which database is authoritative.
+it disagree about which database is authoritative. **Since step 14's S14-08
+neither `_users_run` nor `_perms_run` has a DuckDB tail**: both render into
+`app.*` and ask nothing, and `KS_USER_STORE` routes nothing — `_ENV` left
+`core/pg_dashboard_users.py`; the `.env` line stays while an image from before
+step 14 can be a rollback target, which reads an absent value as `duckdb`.
 
 **Not ClickHouse**, asked and answered: these rows are read on every request,
 written by a human, and authoritative. ClickHouse has no transactional update
@@ -1077,6 +1084,21 @@ gateway, and each refusal hands the claim back with nothing sent:
   a refusal, not a pass. Every refusal is a 409 whose JSON carries `reason`
   (`recent_campaign`, `balance_short`, `balance_unreadable`) and the figures.
 - **A guard that raises** releases the claim before the error goes out.
+
+**Since step 14's S14-08 `/sms` has one store, Postgres**, and the guards are
+proved on it. `_sms_tx`, `_sms_run` and the audience lost their DuckDB
+branches (`_DuckTx`, `sms_segments_select(DUCKDB)`), and the half-switch
+guard `refuse_while_unported`/`UNPORTED` — empty since every path ran on both
+engines — went with them; `sms_store_is_postgres()` stays a constant for its
+last readers (the copy and its comparison, S14-12/13; the manifest, S14-18).
+The tests that ran on a DuckDB fixture seed the tables the production reads
+name (`tests/integration/pg_sms_seed.py`), and every guard above has a test
+end to end over a real Postgres store — the typed name, the claim (two sends
+at once, one goes), an overlap, a short or unreadable balance, a guard that
+raises — that reads the claim back out of `app.sms_campaigns`
+(`TestTheGuardsOverAPostgresStore`). The two-engine files compare with
+DuckDB's answers recorded on their fixtures (`tests/integration/golden/`),
+dates written back from today so a literal holds on any day.
 
 **Every refusal on the campaign routes is named**, not only the three above:
 the name typed back, the claim (`not_frozen`, `already_sent`), the gateway's
@@ -5844,7 +5866,10 @@ when its statement carries one of its parameters, to a fixed point; and
 unresolved counts). That also made `_users_run`'s writers visible, so the three
 store helpers that route by a switch of their own (`_sms_run`, `_users_run`,
 `_perms_run`) exempt what goes only through them, each checked to read its
-switch. And "holding a pool" means reaching `get_pool` through a callee too —
+switch. Since step 14's S14-08 they write Postgres alone and are checked to
+read no switch (`_POSTGRES_STORE_HELPERS`), with `_PgTx`'s `none`, `many`,
+`one` and `all` beside them: `_DuckTx`'s same-named methods had hidden the
+transaction's writers from the walk, by accident. And "holding a pool" means reaching `get_pool` through a callee too —
 `replicate_managers` held it inside `write_managers`, where the walk did not
 look — with `_mirror` and `upsert_orders` the two named per-tick exemptions.
 Limits that remain: a target held on an object attribute
@@ -5914,7 +5939,10 @@ tables a store switch moves is read off the writers**, not declared: the
 statements each router runs, rendered by the router itself, plus every
 literal DuckDB write, and a table belongs to `KS_SMS_STORE`, `KS_USER_STORE`
 or `KS_WRITE_WAREHOUSE` only if every writer runs on the branch where that
-reader says DuckDB. A write naming its table as a `{hole}` — one text for two
+reader says DuckDB. Since step 14's S14-08 the first two have no DuckDB
+branch left to read: their sets are literals (`STORE_SWITCH_TABLES`, what the
+walk derived the commit before) and the walk requires that nothing writes
+those tables in the file. A write naming its table as a `{hole}` — one text for two
 engines, chain 10's watchdog statements — is rendered for DuckDB by its
 module's own function, or says what fills the hole (`TEMPLATED_ELSEWHERE`):
 the walk lost all three sample tables before it read them. `duckdb_written()` is held to the same writers, not to
