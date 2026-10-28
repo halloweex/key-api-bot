@@ -47,6 +47,49 @@ KYIV_INSTANTS = (
 )
 
 
+# What the date picker can give: two dates, the second never before the
+# first (`DateRangePicker` swaps a backward pick), with no lower bound — the
+# last two are the 400s a page can get (a range past 3 660 days, a date
+# before 2000).
+PICKER_RANGES = (
+    ("2026-10-21", "2026-10-21"),        # today, picked
+    ("2026-10-01", "2026-10-21"),        # the month so far
+    ("2025-10-26", "2025-10-26"),        # the 25-hour day
+    ("2026-03-29", "2026-03-29"),        # the 23-hour day
+    ("2024-02-29", "2024-03-31"),        # a leap day to a month's end
+    ("2025-12-25", "2026-01-07"),        # across a year's end
+    ("2025-01-01", "2025-12-31"),        # a year
+    ("2016-10-26", "2026-10-21"),        # the whole history, inside the cap
+    ("2016-01-01", "2026-10-21"),        # 3 947 days
+    ("1999-12-31", "2000-01-02"),        # before 2000
+)
+
+
+async def header_filters(python) -> Dict[str, list]:
+    """What the header's dropdowns offer: `SourceFilter`'s constant, and the
+    app's own answers for the other three — a root's children too, which
+    `CategoryFilter` offers once a root is picked."""
+    from tests import frontend_contract
+
+    async def names(path: str) -> list:
+        answer = await python.get(path)
+        assert answer.status_code == 200, (path, answer.status_code, answer.text[:200])
+        return answer.json()
+
+    roots = await names("/api/categories")
+    children = await names(f"/api/categories/{roots[0]['id']}/children") if roots else []
+    found = {
+        "source_id": list(frontend_contract.sources()),
+        "category_id": [c["id"] for c in roots + children],
+        "brand": [b["name"] for b in await names("/api/brands")],
+        "promocode": [p["name"] for p in await names("/api/promocodes")],
+    }
+    # Two values at least per filter: a seed that offers one shrinks the
+    # contract without a word.
+    assert all(len(values) >= 2 for values in found.values()), found
+    return found
+
+
 class Clock(datetime):
     """`datetime` with `now()` pinned: what `core.filters` calls for a
     period shortcut. The pilot is told the same instant by `X-Pilot-Now`."""
