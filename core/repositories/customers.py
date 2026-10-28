@@ -943,16 +943,15 @@ class CustomersMixin:
     ) -> Dict[str, Any]:
         """Customer insights: new vs returning, AOV trend, CLV, repeat rate.
 
-        Rides `KS_READ_DASHBOARD` — this is the dashboard's customer block, it
-        reads the same two layers the rest of that tab reads, and a rollback
-        that left it on the other engine would put one card of a page on a
-        different store from the cards beside it.
+        Rides the dashboard's router — this is the dashboard's customer block,
+        it reads the same two layers the rest of that tab reads, from
+        Postgres, and a failure is refused naming `dashboard` like the cards
+        beside it (`KS_READ_DASHBOARD` is not read since step 14's S14-06).
 
         `_dashboard_run` lives on `RevenueMixin` and is reached through `self`
         from here, which is one mixin boundary crossed on purpose. The
-        alternative is a second router with the same flag and the same
-        fallback rule, and two places that have to stay in step about what
-        happens when Postgres is down. `render_tables` was extracted from a
+        alternative is a second router with the same refusal, and two places
+        that have to stay in step about what happens when Postgres is down. `render_tables` was extracted from a
         mixin for this reason when it gained a *third* consumer; this is the
         second, and the note is here so the next one moves it.
         """

@@ -1,72 +1,52 @@
 """The Silver-grain answers of `/api/summary` and `/api/revenue/trend`.
 
-`KS_READ_GOLD` covers exactly two Gold primitives, and says so: "line filters
+NO FALLBACK SINCE STEP 14 (S14-06)
+
+These read Postgres. The flag that chose the engine (`KS_READ_SILVER`)
+chooses nothing now: `_pg_silver` and `get_manager_sales_365d` ask Postgres
+and nothing else, and a failure — a lost DSN line included — is refused as a
+503 naming `dashboard` (or `managers`, for the managers screen), which is what
+`KS_READ_FALLBACK=off` made of it since 2026-10-09. The paragraphs below are
+the history of the port.
+
+`KS_READ_GOLD` covered exactly two Gold primitives, and said so: "line filters
 do not reach Postgres — the flag changes the engine and nothing else". That was
 a deliberate scope for step 1 of «Одна бронза», and it left a hole that stage 1's
 "16 of 16" could not see, because it counted repository methods and these are
 branches *inside* two methods it had already counted.
 
-The hole is every request Gold cannot answer:
+The hole was every request Gold cannot answer:
 
 - a **line-level** filter — category or brand — selects part of an order, so it
   reads the order-lines level;
 - a **promocode**, which Gold has no column for;
-- a **source** Gold has no column for — source 5, Виставка, ₴266k.
+- a **source** the dashboard does not ask Gold about — source 5, Виставка, ₴266k.
 
-All of them fall through to DuckDB `silver_orders` / `silver_order_lines`. While
-DuckDB still derives Silver that is merely a second engine serving one endpoint
-depending on which dropdown is set. Once it stops, it is the dashboard's headline
-revenue showing a frozen number the moment anybody picks a brand.
+All of them fell through to DuckDB `silver_orders` / `silver_order_lines`.
+While DuckDB still derived Silver that was merely a second engine serving one
+endpoint depending on which dropdown was set. Once it stopped, it would have
+been the dashboard's headline revenue showing a frozen number the moment
+anybody picked a brand.
 
-WHY A FLAG OF ITS OWN
+WHY IT HAD A FLAG OF ITS OWN
 
-`KS_READ_GOLD` is on in production. Widening what it means would move these
-requests on deploy, with no step in between to compare the engines on live data
-first — the ordering every other port here has kept. This one ships off.
+`KS_READ_GOLD` was on in production. Widening what it meant would have moved
+these requests on deploy, with no step in between to compare the engines on
+live data first — the ordering every other port here kept. This one shipped
+off, and was turned on together with `KS_READ_GOLD`.
 
-**Turn it on together with `KS_READ_GOLD`, or not at all.** One flag per grain
-means that with only one set, the same endpoint answers from two engines
-depending on whether a filter is present — which is today's state, and the
-reason this exists.
-
-THE MANAGERS SCREEN RIDES IT TOO
+THE MANAGERS SCREEN RODE IT TOO
 
 `GET /api/managers` sums a year of `silver_orders` per manager and sales type,
-which is this grain and nothing else, so it takes this switch rather than a
-flag of its own — one more variable to flip on the way off DuckDB would buy a
-rollback nobody needs for an admin-only screen. Same fallback as the rest:
-a failed Postgres read is an ERROR in the log and a DuckDB answer.
+which is this grain and nothing else, so it took this switch rather than a
+flag of its own.
 """
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_SILVER"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    """Whether the Silver-grain answers should ask Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule: a typo in the variable that
-    decides which engine answers must stop the read, not serve the other store.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:

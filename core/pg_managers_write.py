@@ -156,7 +156,8 @@ ACQUIRE_TIMEOUT_S = 10
 # `core.sql_dialect.render_tables` fills `{managers}`; `{classifications}` is
 # the dialect's name for the intervals. `reads_the_chain` recognises a read by
 # them, and `tests/unit/test_managers_chain.py` walks `core/` and `web/` for
-# every such statement.
+# every such statement — each must reach a router that reads Postgres alone
+# (step 14, S14-06).
 TABLE_HOLES: Tuple[str, ...] = ("{managers}", "{classifications}")
 
 # How often the unmet-precondition warning may repeat for one reason: the
@@ -271,7 +272,11 @@ def reads_postgres() -> bool:
 
 def reads_the_chain(sql: str) -> bool:
     """Whether this statement reads the chain's tables while the chain owns
-    them — decided from the body, `pg_goals_write.reads_the_chain`'s rule."""
+    them — decided from the body, `pg_goals_write.reads_the_chain`'s rule.
+
+    No router asks it since step 14's S14-06: `_dashboard_run`, which did for
+    the returns list's `{managers}` join, reads Postgres alone. Kept with the
+    chain's other `reads_*` constants until S14-11 collapses chain 5."""
     return any(hole in sql for hole in TABLE_HOLES) and reads_postgres()
 
 
