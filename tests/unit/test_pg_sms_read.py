@@ -108,9 +108,7 @@ class TestItDoesNotTakeTheDuckDbLock:
     ):
         from core.duckdb_store import DuckDBStore
 
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
         store = DuckDBStore(db_path=tmp_path / "locked.duckdb")
-        await store.connect()
 
         def _explode(*_a, **_k):
             raise AssertionError(
@@ -135,56 +133,58 @@ class TestItDoesNotTakeTheDuckDbLock:
             await store.close()
 
 
-class TestTheSwitchIsWhole:
-    """Nothing is left half-switched, and the guard that proved it still works.
+class TestTheSwitchIsGone:
+    """`/sms` has one store, and nothing in the repository asks which.
 
-    `UNPORTED` is empty: every path `/sms` uses runs against whichever store
-    `KS_SMS_STORE` names. The mechanism stays rather than being deleted the day
-    it first reached empty — the next thing to move onto two engines wants the
-    same protection, and a guard removed at that moment is one nobody rebuilds
-    in time.
+    Until step 14's S14-08 every SMS statement went through `_sms_run` or
+    `_sms_tx`, which asked `sms_store_is_postgres()` and could run on DuckDB;
+    the audience did the same, and `refuse_while_unported` stood guard over
+    any path left on one engine (`UNPORTED`, empty since every path ran on
+    both). With the DuckDB branches gone the guard had nothing to guard and
+    went with them. What stays true is checked here instead: nothing in the
+    repository names the switch, DuckDB's dialect or the guard, and nothing
+    on the `/sms` path takes the store's own connection. Parsed, not grepped:
+    a comment naming the function satisfies a grep.
     """
 
-    def test_nothing_is_left_behind(self):
-        from core.pg_sms import UNPORTED
+    _COHORTS = "_analytics_rows"   # the cohort tab's DuckDB tail: step 14's S14-07
 
-        assert UNPORTED == (), (
-            f"still answered by DuckDB alone: {UNPORTED} — the flag would move "
-            f"the read and leave these writing to the other store"
-        )
-
-    def test_no_method_still_calls_the_guard(self):
-        """The list and the code must not drift apart in either direction.
-        Parsed, not grepped: a comment naming the function satisfies a grep."""
+    def _tree(self):
         import ast
         import inspect
 
-        from core.pg_sms import UNPORTED
         from core.repositories import customers as module
 
-        tree = ast.parse(inspect.getsource(module))
-        guarded = set()
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.AsyncFunctionDef):
-                continue
-            for call in ast.walk(node):
-                if (isinstance(call, ast.Call)
-                        and getattr(call.func, "id", None) == "refuse_while_unported"):
-                    guarded.add(node.name)
+        return ast.parse(inspect.getsource(module))
 
-        assert guarded == set(UNPORTED), (
-            f"guarded but not listed: {guarded - set(UNPORTED)}; "
-            f"listed but not guarded: {set(UNPORTED) - guarded}"
-        )
+    def test_nothing_names_the_switch_or_the_guard(self):
+        import ast
 
-    def test_the_guard_still_refuses_when_something_is_listed(self, monkeypatch):
-        """The mechanism itself, exercised on a name that is not real — so the
-        test keeps working after every method has moved."""
+        names = {n.id for n in ast.walk(self._tree()) if isinstance(n, ast.Name)}
+        for gone in ("sms_store_is_postgres", "refuse_while_unported", "DUCKDB",
+                     "_DuckTx", "sms_segments_select"):
+            assert gone not in names, f"{gone} is still read on the /sms path"
+
+    def test_the_guard_left_core_pg_sms(self):
         from core import pg_sms
 
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
-        with pytest.raises(NotImplementedError, match="KS_SMS_STORE"):
-            pg_sms.refuse_while_unported("some_future_half_ported_thing")
+        assert not hasattr(pg_sms, "refuse_while_unported")
+        assert not hasattr(pg_sms, "UNPORTED")
+
+    def test_no_sms_method_opens_the_store(self):
+        import ast
+
+        offenders = []
+        for node in ast.walk(self._tree()):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name == self._COHORTS:
+                continue
+            for call in ast.walk(node):
+                if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                        and call.func.attr == "connection"):
+                    offenders.append(node.name)
+        assert not offenders, offenders
 
 
 class TestTheDeliveryWriteEscapesTheStoreLock:
@@ -210,18 +210,17 @@ class TestTheDeliveryWriteEscapesTheStoreLock:
     not the waiting, which is why four hypotheses were eliminated and the
     cause was not found.
 
-    So this pins the property rather than the throughput: with the flag on,
-    the delivery write must not reach for the store's connection at all. A
-    timing test would be flaky; this one cannot be.
+    So this pins the property rather than the throughput: the delivery write
+    must not reach for the store's connection at all — Postgres is the only
+    store it knows since step 14's S14-08. A timing test would be flaky; this
+    one cannot be.
     """
 
     @pytest.mark.asyncio
     async def test_it_writes_while_the_store_lock_is_fatal(self, tmp_path, monkeypatch):
         from core.duckdb_store import DuckDBStore
 
-        monkeypatch.setenv("KS_SMS_STORE", "postgres")
         store = DuckDBStore(db_path=tmp_path / "burst.duckdb")
-        await store.connect()
 
         def _explode(*_a, **_k):
             raise AssertionError(
