@@ -142,12 +142,9 @@ def _run(workdir: Path, **fake: str) -> Run:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("FAKE_", "SOAK_"))}
     env.update({"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
                 "FAKE_DOCKER_CALLS": str(calls),
-                # The file-hash record P1 and P4 read: none, unless a test
-                # makes one. Never the host's /root/duckdb-silence.
-                "DUCKDB_SILENCE_STATE_DIR": str(workdir / "silence"),
-                # The `.env` the host-cron sidecars read (P4): none, unless a
-                # test writes one. Never the checkout's.
-                "SOAK_ENV_FILE": str(workdir / "dot-env"), **fake})
+                # The file-hash record P1 reads: none, unless a test makes
+                # one. Never the host's /root/duckdb-silence.
+                "DUCKDB_SILENCE_STATE_DIR": str(workdir / "silence"), **fake})
     done = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True,
                           text=True, timeout=120)
     return Run(done, calls.read_text().splitlines())
@@ -532,15 +529,16 @@ class TestTheOtherShadowChains:
 
 
 class TestStage5:
-    """The parallel period and the week of silence (OD-17 (a)): KS_DUCKDB read
-    by name, the declared start passed through, and the file's hash record
-    read with `--status` — which hashes nothing and writes nothing."""
+    """The DuckDB file (P1, OD-17 (a)): KS_DUCKDB read by name, and the file's
+    hash record read with `--status` — which hashes nothing and writes
+    nothing. P2–P4 and F1 went at step 14's S14-02, and with P4 the report's
+    one reason to read `.env`."""
 
-    def test_nothing_set_is_on_undeclared_and_no_record(self, healthy):
-        assert all("duckdb_off=0 " in c and "parallel_from= " in c
+    def test_nothing_set_is_on_and_no_record(self, healthy):
+        assert all("duckdb_off=0 " in c
                    and "duckdb_file_last=none " in c and "duckdb_file_since= " in c
                    for c in healthy.psql), healthy.psql
-        assert "duckdb_off=0 (KS_DUCKDB), in .env: unknown, file record: none" in healthy.out
+        assert "duckdb_off=0 (KS_DUCKDB), file record: none" in healthy.out
 
     @pytest.mark.parametrize("value, expected", [
         ("off", "1"), (" OFF ", "1"), ("on", "0"), ("", "0"), ("of", "invalid")])
@@ -552,10 +550,20 @@ class TestStage5:
         run = _run(tmp_path, FAKE_WEB="exited")
         assert all("duckdb_off=unknown " in c for c in run.psql)
 
-    def test_the_declared_start_is_passed(self, tmp_path):
-        run = _run(tmp_path, SOAK_PARALLEL_FROM="2026-11-02 10:00+02")
-        assert all("parallel_from=2026-11-02 10:00+02 " in c for c in run.psql)
-        assert "parallel period from 2026-11-02 10:00+02" in run.out
+    def test_the_retired_checks_and_their_inputs_are_gone(self, healthy):
+        """The parallel period's declared start and `.env`'s reading went with
+        P3 and P4: nothing passes them, and nothing reads `.env` — a file whose
+        other lines are secrets — for a check that no longer exists. Mutation:
+        put the `.env` reader back, or a `-v parallel_from=`."""
+        assert not any("parallel_from=" in c or "duckdb_off_env=" in c
+                       or "duckdb_env_changed_at=" in c for c in healthy.psql), healthy.psql
+        code = [ln for ln in SCRIPT.read_text().splitlines()
+                if not ln.lstrip().startswith("#")]
+        assert not [ln for ln in code
+                    if any(word in ln for word in ("duckdb_env.sh", "ks_duckdb_env_read",
+                                                   "SOAK_ENV_FILE", "SOAK_PARALLEL_FROM"))], code
+        labels = set(LABELS.values())
+        assert not {label for label in labels if label.split()[0] in ("P2", "P3", "P4", "F1")}, labels
 
     def test_the_record_is_read_and_left_as_it_was(self, tmp_path):
         """The hourly cron's record, made by the real script, then read by the
@@ -586,7 +594,7 @@ class TestStage5:
     def test_a_missing_episode_reaches_the_checks(self, tmp_path):
         """The review of 02.10's sequence, by the real script: baseline, the
         file moved away for a check, moved back. The record reads UNCHANGED
-        since the baseline; `missing_at` is what tells P1 and P4. Mutation:
+        since the baseline; `missing_at` is what tells P1. Mutation:
         drop the `missing_at=*` case from `silence_record`."""
         db = tmp_path / "analytics.duckdb"
         db.write_bytes(b"duck")
@@ -615,77 +623,6 @@ class TestStage5:
         run = _run(tmp_path, DUCKDB_SILENCE_STATE_DIR=str(state))
         assert all("duckdb_file_last=error " in c for c in run.psql)
 
-    # The forms of tests/unit/test_week_of_silence_host.ENV_FORMS fed to P4:
-    # every reading docker can give (off, on, invalid, refused) at least
-    # once, the four the review of PR-10 found the first reader wrong on, and
-    # the last-line and other-key cases. The reader itself is run on all of
-    # them there; here it is the soak's mapping of its answer that is new.
-    SOAK_FORMS = ("off", "upper-crlf", "off-last", "on-last", "on", "absent",
-                  "comment", "typo", "double-quoted", "inline-comment",
-                  "leading-spaces", "export", "spaces-around-equals", "colon")
-
-    @pytest.mark.parametrize("name", SOAK_FORMS)
-    def test_env_reads_as_the_host_scripts_read_it(self, tmp_path, name):
-        """P4 judges the week by what a sidecar started from `.env` would run
-        (`docker run --env-file`), and the host scripts stand down by
-        deploy/duckdb_env.sh — so the soak reads the file through that reader
-        and maps its docker answer, never a parse of its own, and the two
-        cannot judge one line two ways. Fed the same input, the soak's
-        `duckdb_off_env` is the reader's `KS_DUCKDB_ENV`: 1 for off, 0 for
-        on, `invalid` and `refused` as they are. Mutation: put a `grep` of
-        `^KS_DUCKDB=` back in the soak — the indented and the `export` lines
-        read 0 there and off or refused here."""
-        from tests.unit.test_week_of_silence_host import ENV_FORMS, _read
-
-        text, docker = next((t, d) for n, t, d, _ in ENV_FORMS if n == name)
-        (reader, *_), _, _ = _read(tmp_path, text)
-        assert reader == docker
-        env_file = tmp_path / "dot-env"
-        env_file.write_bytes(text.encode())
-        os.utime(env_file, (1900000000, 1900000000))
-        run = _run(tmp_path, SOAK_ENV_FILE=str(env_file))
-        expected = {"off": "1", "on": "0"}.get(reader, reader)
-        assert all(f"duckdb_off_env={expected} " in c
-                   and "duckdb_env_changed_at=2030-03-17T17:46:40Z" in c
-                   for c in run.psql), run.psql
-
-    def test_the_soak_has_no_parse_of_its_own(self):
-        """One reader for the week, sourced: the soak names no `KS_DUCKDB=`
-        line itself. Mutation: copy the reader's grep into the soak."""
-        code = [ln for ln in SCRIPT.read_text().splitlines()
-                if not ln.lstrip().startswith("#")]
-        assert any(re.search(r"(^|[\s;&|])(source|\.)\s+deploy/duckdb_env\.sh\b", ln)
-                   for ln in code), "the soak does not source deploy/duckdb_env.sh"
-        assert any("ks_duckdb_env_read" in ln for ln in code)
-        assert not [ln for ln in code if "grep" in ln and "KS_DUCKDB" in ln]
-
-    @pytest.mark.parametrize("lines, expected", [
-        ("KS_DUCKDB=off\n", "1"),
-        ("KS_DUCKDB= OFF \r\n", "1"),
-    ])
-    def test_env_is_read_the_way_the_sidecars_read_it(self, tmp_path, lines, expected):
-        """The weekly compaction and the nightly off-site start their sidecars
-        with `docker run --env-file .env`, so what refuses them is `.env`, not
-        web's environment — and since when: the file's mtime."""
-        env_file = tmp_path / "dot-env"
-        env_file.write_text(lines)
-        os.utime(env_file, (1900000000, 1900000000))
-        run = _run(tmp_path, SOAK_ENV_FILE=str(env_file))
-        assert all(f"duckdb_off_env={expected} " in c
-                   and "duckdb_env_changed_at=2030-03-17T17:46:40Z" in c
-                   for c in run.psql), run.psql
-
-    def test_no_env_is_unknown_and_nothing_else_is_read_from_it(self, tmp_path):
-        run = _run(tmp_path)
-        assert all("duckdb_off_env=unknown " in c and "duckdb_env_changed_at= " in c
-                   for c in run.psql), run.psql
-        env_file = tmp_path / "dot-env"
-        env_file.write_text("BOT_TOKEN=123456:never-printed\nKS_DUCKDB=off\n")
-        run = _run(tmp_path, SOAK_ENV_FILE=str(env_file))
-        assert "never-printed" not in run.out and not any("never-printed" in c
-                                                           for c in run.calls)
-        assert "in .env: 1 (edited 20" in run.out, run.out
-
     def test_the_check_is_only_ever_asked_for_its_status(self):
         calls = re.findall(r'"\$SILENCE_CHECK"[^\n]*', SCRIPT.read_text())
         assert calls == ['"$SILENCE_CHECK" --status 2>&1 || true)"'], calls
@@ -694,14 +631,21 @@ class TestStage5:
 def test_every_variable_a_check_reads_is_passed():
     """Walked over the checks, not listed: a `:'name'` a file reads that the
     script does not pass reaches the server as psql's literal text, and the
-    check judges that. Mutation: drop `-v duckdb_off_env=...` from the
-    script."""
+    check judges that. And nothing else is passed: a `-v` no check reads is
+    an input left behind by a check that went (S14-02 took P2–P4's three),
+    computed every morning for nobody. Every read is the quoted form, so
+    the walk sees them all. Mutation: drop `-v duckdb_off=...` from the
+    script, or put back `-v parallel_from=...`."""
     passed = set(re.findall(r"-v (\w+)=", SCRIPT.read_text())) - {"ON_ERROR_STOP"}
     read = set()
     for path in FILES:
-        read |= set(re.findall(r":'(\w+)'",
-                               re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8"))))
+        sql = re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8"))
+        read |= set(re.findall(r":'(\w+)'", sql))
+        # A bare `:name` or `:"name"` would be read too, and the walk above
+        # would not see it; `::type` casts are not variables.
+        assert not re.findall(r"(?<![:\w]):(?:\"\w+\"|[A-Za-z_]\w*)", sql), path.name
     assert read <= passed, sorted(read - passed)
+    assert passed <= read, sorted(passed - read)
 
 
 # A soak file is named in prose far from where it lives — a module docstring

@@ -135,7 +135,9 @@ anything is the one on the server.
   Daily is a scheduling change once the backup object itself moves to Parquet.
 - **Restore drill: `deploy/restore-test.sh`** — pulls the newest archive back
   from the Storage Box and rebuilds a validated warehouse in a throwaway
-  container. Quarterly. An untested backup is a hypothesis.
+  container of `BACKUP_RESTORE_IMAGE`, the pinned image that carries DuckDB
+  1.5.5 (`keycrm-web:rollback-step14` since step 14; never `:latest`, which
+  loses DuckDB at S14-19). Quarterly. An untested backup is a hypothesis.
 - **Staleness: `deploy/offsite_check.sh`** in the host crontab, daily. Alerts if
   no copy has left in 36 h — this line said "9 days" until 2026-09-18, a
   threshold the script stopped using when the push moved off the weekly

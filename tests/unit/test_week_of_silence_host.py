@@ -58,15 +58,28 @@ def _recorder(name: str, real: "str | None") -> str:
 # `docker run --entrypoint id … -u` asks the image who it runs as; every other
 # docker call succeeds and does nothing — except the snapshot sidecar under
 # FAKE_SIDECAR_REFUSES, which exits 1 the way the switch inside it refuses a
-# sidecar started from a `.env` that says off.
+# sidecar started from a `.env` that says off, and step 14's pinned-image
+# questions (deploy/archive_image.sh): `image inspect` fails under
+# FAKE_NO_IMAGE, and `import duckdb` answers FAKE_DUCKDB (1.5.5 unless set;
+# `absent` fails the import).
 FAKE_DOCKER = r"""#!/usr/bin/env bash
 printf 'docker %s\n' "$*" >> "$FAKE_CALLS"
 case " $* " in
+    *" image inspect "*) [ -n "${FAKE_NO_IMAGE:-}" ] && exit 1 ;;
+    *"import duckdb"*)
+        if [ "${FAKE_DUCKDB:-1.5.5}" = absent ]; then
+            echo "ModuleNotFoundError: No module named 'duckdb'" >&2
+            exit 1
+        fi
+        echo "${FAKE_DUCKDB:-1.5.5}" ;;
     *" --entrypoint id "*) echo 999 ;;
     *" python /app/deploy/snapshot_export.py"*) [ -n "${FAKE_SIDECAR_REFUSES:-}" ] && exit 1 ;;
 esac
 exit 0
 """
+
+# The image the archive tools run in since step 14 (S14-02).
+PINNED = "halloweex/keycrm-web:rollback-step14"
 
 # GNU `stat -c` on a laptop whose stat is BSD's: the script runs on Linux and
 # says `stat -c %Y`; this lets the on-path be driven here as well as in CI.
@@ -95,7 +108,7 @@ class Box:
         self.root = root
         self.bin = bin_dir
         (root / "deploy").mkdir(parents=True)
-        for name in ("daily_offsite.sh", "duckdb_env.sh", "notify.sh"):
+        for name in ("daily_offsite.sh", "duckdb_env.sh", "notify.sh", "archive_image.sh"):
             shutil.copy(DEPLOY / name, root / "deploy" / name)
         push = root / "deploy" / "offsite_parquet.sh"
         push.write_text(FAKE_PUSH)
@@ -119,7 +132,7 @@ class Box:
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("FAKE_", "BACKUP_", "KS_"))}
         env.update({"PATH": f"{self.bin}{os.pathsep}{os.environ.get('PATH', '')}",
-                    "FAKE_CALLS": str(self.calls), **extra})
+                    "FAKE_CALLS": str(self.calls), "BACKUP_RESTORE_IMAGE": PINNED, **extra})
         done = subprocess.run(["bash", str(self.root / "deploy" / "daily_offsite.sh")],
                               env=env, capture_output=True, text=True, timeout=60)
         return done.returncode, done.stdout + done.stderr, self.calls.read_text().splitlines()
@@ -163,9 +176,8 @@ def box(tmp_path, fake_bin):
 # Re-measure before editing a row: the review that added half of them found
 # the reader's guesses wrong for four forms compose reads as off.
 #
-# deploy/stage4_soak.sh's P4 reads the file through the same reader; its
-# test (test_stage4_soak_script.TestStage5.test_env_reads_as_the_host_scripts_
-# read_it) feeds the soak rows of this table and holds it to this reading.
+# deploy/stage4_soak.sh's P4 read the file through the same reader until step
+# 14's S14-02 retired it with the week it judged.
 ENV_FORMS = [
     # (id, text, docker, web)
     ("off", "KS_DUCKDB=off\n", "off", "off"),
@@ -383,17 +395,20 @@ class TestTheNightlySnapshotStandsDown:
     @pytest.mark.parametrize("env_text", ["", "KS_DUCKDB=on\n", "KS_DUCKDB=off\nKS_DUCKDB=on\n"],
                              ids=["unset", "on", "on-last"])
     def test_on_snapshots_and_ships_as_it_always_did(self, box, env_text):
-        """Nothing changes under `on`: the backup is linked, the image asked
-        who it runs as, the sidecar started with `.env`, the push called, and
-        the scratch directory removed. Mutation: stand down on anything but
-        a line that says off."""
+        """Under `on` the backup is linked, the image asked who it runs as,
+        the sidecar started with `.env`, the push called, and the scratch
+        directory removed — after step 14's two questions of the pinned image
+        (S14-02), which come before anything is touched. Mutation: stand down
+        on anything but a line that says off."""
         backup = box.backup()
         code, out, calls = box.run(env_text)
         assert code == 0, out
         kinds = [c.split()[0] for c in calls]
-        assert kinds[0] == "rm" and "ln" in kinds and "offsite_parquet.sh" in kinds, calls
-        assert any(c.startswith("docker run --rm --memory=6500m") and "--env-file .env" in c
-                   for c in calls), calls
+        assert calls[0] == f"docker image inspect {PINNED}", calls
+        assert "import duckdb" in calls[1] and "--pull never" in calls[1], calls
+        assert kinds[2] == "rm" and "ln" in kinds and "offsite_parquet.sh" in kinds, calls
+        assert any(c.startswith("docker run --rm --pull never --memory=6500m")
+                   and "--env-file .env" in c and f" {PINNED} " in c for c in calls), calls
         assert calls[-1].startswith("rm -rf data/.snapshot_tmp"), calls
         assert "KS_DUCKDB" not in out
         assert backup.exists()
@@ -404,6 +419,32 @@ class TestTheNightlySnapshotStandsDown:
         assert code == 0, out
         assert any(c.startswith("offsite_parquet.sh") for c in calls), calls
         assert "KS_DUCKDB=of in .env is not a value the switch understands" in out
+
+    @pytest.mark.parametrize("image, extra, words", [
+        ("", {}, "BACKUP_RESTORE_IMAGE is not set"),
+        ("halloweex/keycrm-web:latest", {}, "moves with every deploy"),
+        (PINNED, {"FAKE_NO_IMAGE": "1"}, "this does not pull"),
+        (PINNED, {"FAKE_DUCKDB": "absent"}, "cannot import duckdb"),
+        (PINNED, {"FAKE_DUCKDB": "1.4.3"}, "carries DuckDB 1.4.3, not 1.5.5"),
+    ], ids=["unset", "latest", "no-image", "no-duckdb", "another-version"])
+    def test_on_refuses_an_image_that_is_not_the_pinned_one(self, box, image, extra, words):
+        """Step 14 (S14-02): the image used to default to :latest, which
+        loses DuckDB at S14-19. Now an unset, moving, absent or DuckDB-less
+        image refuses, exit 2, before anything is linked, deleted or started
+        — and pages, because nothing left the server that night. Mutation:
+        put the :latest default back, or ask the image after the `ln`."""
+        backup = box.backup()
+        code, out, calls = box.run("KS_DUCKDB=on\n", BACKUP_RESTORE_IMAGE=image, **extra)
+        assert code == 2, out
+        assert words in out and "rollback-step14" in out, out
+        # Only the cleanup trap's removal of its own scratch directory: no
+        # link, no chown, no sidecar, no push.
+        assert [c for c in calls if c.split()[0] == "rm"] in (
+            [], ["rm -rf data/.snapshot_tmp"]), calls
+        assert not [c for c in calls if c.split()[0] in ("ln", "chown")], calls
+        assert not [c for c in calls if "snapshot_export.py" in c or "offsite_parquet" in c]
+        assert "notify suppressed" in out and "Daily snapshot FAILED" in out, out
+        assert backup.exists()
 
     def test_on_still_refuses_a_stale_backup(self, box):
         """The on-path's own guard, unchanged: a backup older than a day means
@@ -514,6 +555,22 @@ class TestTheRunbook:
         assert "a step-14 web runs `off` whatever `.env` says" in opening
         assert "History since S14-00" in self._item("Preconditions", 4)
 
+    def test_the_way_back_names_the_snapshots_image_before_its_cron_line(self):
+        """Step 3 of the way back puts the nightly snapshot's cron line back,
+        and since S14-02 the snapshot has no default image: without the
+        variable in deploy/backup.env, or without the rollback-step14 tag on
+        the host, every night refuses (exit 2) and pages "Daily snapshot
+        FAILED". On main before S14-02 the same way back ran :latest. The
+        variable is read from the script, not spelled here. Mutation: drop
+        the sentence from step 3, or give the snapshot a default image."""
+        script = (REPO / "deploy" / "daily_offsite.sh").read_text(encoding="utf-8")
+        [var] = re.findall(r'^IMAGE="\$\{(\w+):-\}"$', script, re.M)
+        step3 = self._item("The way back", 3)
+        assert "nightly snapshot re-added" in step3, step3
+        for words in (f"`{var}`", "`deploy/backup.env`", "`rollback-step14`",
+                      "Daily snapshot FAILED"):
+            assert words in step3, (words, step3)
+
     def test_web_waits_for_the_freeze_not_the_upload(self):
         """deploy/ark_ship.sh prints SOURCE RELEASED once nothing after it
         reads the file — test_ark_ship_script holds that line before anything
@@ -557,6 +614,15 @@ exit 0
 
 FAKE_RECORDING_DOCKER = """#!/usr/bin/env bash
 printf 'docker %s\\n' "$*" >> "$FAKE_CALLS"
+case " $* " in
+    *" image inspect "*) [ -n "${FAKE_NO_IMAGE:-}" ] && exit 1 ;;
+    *"import duckdb"*)
+        if [ "${FAKE_DUCKDB:-1.5.5}" = absent ]; then
+            echo "ModuleNotFoundError: No module named 'duckdb'" >&2
+            exit 1
+        fi
+        echo "${FAKE_DUCKDB:-1.5.5}" ;;
+esac
 exit 0
 """
 
@@ -585,7 +651,8 @@ class TestTheRestoreDrill:
     def drill(self, tmp_path):
         root = tmp_path / "repo"
         (root / "deploy").mkdir(parents=True)
-        for name in ("restore-test.sh", "duckdb_env.sh", "restore_from_export.py"):
+        for name in ("restore-test.sh", "duckdb_env.sh", "restore_from_export.py",
+                     "archive_image.sh"):
             shutil.copy(DEPLOY / name, root / "deploy" / name)
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
@@ -595,7 +662,7 @@ class TestTheRestoreDrill:
             (bin_dir / name).chmod(0o755)
         calls = tmp_path / "calls.log"
 
-        def run(env_text: str, age_h: int = 2):
+        def run(env_text: str, age_h: int = 2, **extra: str):
             import datetime
             import tarfile
 
@@ -616,7 +683,8 @@ class TestTheRestoreDrill:
                    if not k.startswith(("FAKE_", "BACKUP_", "KS_"))}
             env.update({"PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
                         "FAKE_CALLS": str(calls), "FAKE_ARCHIVE": str(archive),
-                        "BACKUP_REMOTE": "u1@storage.invalid"})
+                        "BACKUP_REMOTE": "u1@storage.invalid",
+                        "BACKUP_RESTORE_IMAGE": PINNED, **extra})
             done = subprocess.run(["bash", str(root / "deploy" / "restore-test.sh")],
                                   env=env, capture_output=True, text=True, timeout=60)
             return done.returncode, done.stdout + done.stderr, calls.read_text().splitlines()
@@ -632,8 +700,10 @@ class TestTheRestoreDrill:
         Mutation: drop the `-e KS_DUCKDB=on`."""
         code, out, calls = drill(env_text)
         assert code == 0, out
-        [rebuild] = [c for c in calls if c.startswith("docker run")]
+        [rebuild] = [c for c in calls if c.startswith("docker run")
+                     and "restore_from_export.py" in c]
         assert "--env-file .env" in rebuild and "-e KS_DUCKDB=on" in rebuild, rebuild
+        assert "--pull never" in rebuild and f" {PINNED} " in rebuild, rebuild
         assert "python /app/deploy/restore_from_export.py" in rebuild
         assert "/opt/key-api-bot/data" not in rebuild and ":/app/data " in rebuild
         assert "PASS — the off-site archive rebuilt a validated warehouse." in out
@@ -658,6 +728,33 @@ class TestTheRestoreDrill:
         assert code == 1, out
         assert calls == [], calls
         assert "docker run --env-file refuses" in out and "KS_DUCKDB=off" in out
+
+    def test_the_image_is_asked_before_the_archive_is_fetched(self, drill):
+        """Step 14 (S14-02): the pinned image, present, with DuckDB 1.5.5 —
+        asked first, so a drill that could rebuild nothing fetches nothing.
+        Mutation: probe after the download."""
+        code, out, calls = drill("KS_DUCKDB=off\n")
+        assert code == 0, out
+        assert calls[0] == f"docker image inspect {PINNED}", calls
+        assert "import duckdb" in calls[1] and "--network none" in calls[1], calls
+        assert calls[2].startswith("sftp "), calls
+
+    @pytest.mark.parametrize("image, extra, words", [
+        ("", {}, "BACKUP_RESTORE_IMAGE is not set"),
+        ("halloweex/keycrm-web:latest", {}, "moves with every deploy"),
+        (PINNED, {"FAKE_NO_IMAGE": "1"}, "this does not pull"),
+        (PINNED, {"FAKE_DUCKDB": "absent"}, "cannot import duckdb"),
+        (PINNED, {"FAKE_DUCKDB": "1.4.3"}, "carries DuckDB 1.4.3, not 1.5.5"),
+    ], ids=["unset", "latest", "no-image", "no-duckdb", "another-version"])
+    def test_a_drill_without_the_pinned_image_refuses(self, drill, image, extra, words):
+        """It used to default to :latest, which after step 14's S14-19 has no
+        DuckDB to rebuild with. Exit 2 — refused, not failed — naming the tag
+        to use, and nothing fetched. Mutation: put the default back."""
+        code, out, calls = drill("KS_DUCKDB=off\n", BACKUP_RESTORE_IMAGE=image, **extra)
+        assert code == 2, out
+        assert words in out and "rollback-step14" in out, out
+        assert not [c for c in calls if c.startswith("sftp")], calls
+        assert not [c for c in calls if "restore_from_export.py" in c], calls
 
     @needs_checkout
     def test_the_real_restore_carries_it_too(self):

@@ -65,7 +65,7 @@
 # Install at the start of the week of silence (not installed by anything here;
 # `--crontab` prints this line with the two the week retires):
 #   17 * * * *  /opt/key-api-bot/deploy/duckdb_silence_check.sh >/dev/null 2>&1
-# Its output is in the record; deploy/stage4_soak.sh reads it (P1, P4).
+# Its output is in the record; deploy/stage4_soak.sh reads it (P1).
 set -Eeuo pipefail
 umask 077
 

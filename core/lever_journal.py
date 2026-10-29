@@ -32,10 +32,9 @@ the one event that should have stopped it. `core/alert_archive.py` writes
 fire-and-forget because a page must never wait on its ledger; this is the
 opposite contract, and the reason it is a module of its own.
 
-The soak's lever check (`deploy/stage4_soak/51_p2_rollback_levers.sql`), and
-the two clocks built on it (`52_p3_parallel_period.sql`,
-`53_p4_week_of_silence.sql`), read these rows by `LEVER_PREFIX` and
-`LEVER_USED`, and a test holds the files to the constants here.
+The soak's lever check (P2), and the two clocks built on it (P3, P4), read
+these rows by `LEVER_PREFIX` and `LEVER_USED` until step 14's S14-02 retired
+all three: the owner closed both clocks on 2026-10-20.
 """
 from __future__ import annotations
 

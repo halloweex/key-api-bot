@@ -58,7 +58,8 @@ key-api-bot/
 ├── deploy/                       # Reached only from host cron, never imported
 │   ├── daily_offsite.sh         # 02:45 daily — snapshot + ship off-site
 │   ├── offsite_check.sh         # 09:00 daily — freshness, in-app watchdog liveness
-│   └── restore_from_export.py   # The only restore path. Never delete.
+│   ├── api_fingerprint.py       # sha256 of past-window API answers, before/after a deploy
+│   └── restore_from_export.py   # The only restore path, on the pinned image. Never delete.
 │
 ├── tests/                        # 67 files. pytest.ini sets testpaths, so only
 │   │                            # this tree is collected — scripts/ is not.
@@ -3621,21 +3622,15 @@ the last probe, and that tail ends at the latest at the new process's start,
 probe. The first form judged the gap, and the Sunday compaction alone —
 last probe, stop, compaction, web's startup, the bot's first probe failing
 before web answers — could pass 35 min every week. One row, so it declares
-its own bound. `deploy/stage4_soak/22_f1_read_fallbacks.sql` (F1) judges the
-page journal and the watch **a day at a time**, like every check in the
-report:
-
-- **FAIL**: a page of either key fired, escalated or resolved in the last
-  24 h, or is still standing however old, or the watch's latest probe, inside
-  the day, found a read served from DuckDB. The last one counts because the
-  Gate journals only a delivered page.
-- **UNKNOWN**: no watch row, a watch not written for 35 min, or one clean for
-  less than the day.
-- **PASS**: otherwise, and its detail says how many of the week's 168 h the
-  clean run has covered. "Covered" is the licence for `off`. It was 168 h
-  deep at first, which made F1 UNKNOWN for a week after every deploy and every
-  reset, and one fallback a week of FAIL, in the daily report chain 1's soak
-  reads too.
+its own bound. The soak's F1 judged the page journal and the watch **a day
+at a time**: FAIL on a page of either key in the day or still standing, or a
+read served from DuckDB at the watch's latest probe; UNKNOWN on no watch, one
+not written for 35 min, or one clean for less than the day; PASS otherwise,
+with the hours of the 168 h week covered. **F1 is gone since step 14's
+S14-02**: it licensed `KS_READ_FALLBACK=off`, which production has run
+since 2026-10-09, and the owner closed stage 5's clocks on 2026-10-20 — kept,
+it would turn UNKNOWN every day once step 14 stops the watch row being
+written. The pages and the watch stay until their emitters go (S14-16).
 
 What it cannot see is a fallback in a web process after the canary's last
 probe of it and before it was replaced: at most the tail above. **A refusal
@@ -4922,51 +4917,21 @@ asks for `fired`/`escalated`/`resolved` by name. A copy-back container that
 inherits `KS_DUCKDB=off` is refused (exit 2); `-e KS_DUCKDB=on` is the
 decision to restart both clocks, said out loud.
 
-**The soak checks**, `deploy/stage4_soak/50`–`53`, read-only as `ks_readonly`:
+**The soak check**, `deploy/stage4_soak/50_p1_duckdb_file.sql`, read-only as `ks_readonly`:
 
 - **P1** the file record. FAIL on MISSING, or a `missing_at` inside the day,
   always; under `off`, FAIL on a change at the last check or inside the day,
   UNKNOWN with no record, one over 3 h old, or one younger than the day;
   under `on`, not applicable.
-- **P2** levers in the day: a `lever_used` row, a `write_chain_flag_mismatch`
-  or `warehouse_hold_stuck` page (fired, escalated, resolved or still
-  standing), step 13 given back (`warehouse_writer` = duckdb with `since` in
-  the day), and `warehouse_preconditions_unmet` — but only once a period is
-  declared or web runs `off`, because before the step-13 flip that page means
-  "held back", not "rolled back". And `warehouse_way_back_refused`, always:
-  while chain 3 or 5 owns what DuckDB derives from, the way back is refused
-  and pages that key *instead of* the one above — in the parallel period,
-  with every chain latched, the only page a way back can raise — and it can
-  only happen after a flip. UNKNOWN when nothing says a page could
-  have been journaled: the pages reach `app.alert_events` only through the
-  bot's fire-and-forget alert archive (nothing without `KS_PG_DSN`, standing
-  down while Postgres is slow), whose proof of life is the
-  `watch:read_fallbacks` row the same writer rewrites every probe — none, or
-  none for 35 min, and an empty journal says nothing (review of 02.10: it used
-  to PASS on one nobody wrote). A recorded copy-back FAILs without it.
-- **P3** the parallel period. Starts at the latest of `SOAK_PARALLEL_FROM`
-  (the operator declares the last flip — nothing in the database knows which
-  flip the stage needed), the newest `owner:` row, step 13's switch, every
-  breach (P2's and F1's pages), and the `watch:read_fallbacks` clean-since — an
-  unwatched stretch is not a clean one. Covered at **336 h** (14 days, the
-  owner's amendment of 2026-10-08).
-- **P4** the week of silence, under `off` only. Starts at the latest of the
-  `watch:duckdb_switch` clean-since (the canary writes it only while web runs
-  `off`, on F1's 35-minute rule), the file's unchanged-since, the last edit of
-  `.env`, every breach of all four kinds — the file's `missing_at` among them,
-  and a `duckdb_off_held_back` page, since a held web opens the file —
-  and F1's watch. `.env` is asked because the Sunday compaction and the
-  nightly off-site start their sidecars from it, not from web's environment,
-  and only the switch in the sidecar refuses their read-only open: web `off` with `.env` not saying `off` the way
-  `docker run --env-file` reads it is a FAIL — quotes and an inline comment
-  kept, and `export` or a space before the `=` making it refuse the whole
-  file — read through `deploy/duckdb_env.sh`, the reader the host scripts
-  stand down by, and any edit of the file restarts the week. Covered at **168 h** — a full week holds
-  Sunday 05:00 and Monday 09:30 by construction — **and** an
-  `app.weekly_report_sends.sent_at` after the start, because a week that never
-  delivered a report has not shown the Monday path works without DuckDB.
-  Today that ledger is written in DuckDB and copied, so under `off` it cannot
-  be covered: correctly, since the decoupling has not happened.
+
+**P2, P3 and P4 are gone since step 14's S14-02.** P2 read the
+rollback levers of the day (a `lever_used` row, the lever pages, step 13
+given back), P3 the 14-day parallel period and P4 the week of silence,
+each restarted by every breach. The owner closed both clocks on
+2026-10-20 and step 14 began; with nothing left to license, they would
+only have turned UNKNOWN every day as step 14 stops the watch rows they
+read being written, and hidden a new UNKNOWN among them. P1 stays until
+the file is deleted (the final stage's Z2).
 
 These are the measurements, not the gate: every chain latched, source
 reconciliation clean, `KS_READ_FALLBACK=off`, the second Ark and the rest of
@@ -4979,13 +4944,19 @@ the repository runs any of it: every step is a person's, on the host, as
 root, in `/opt/key-api-bot`. `KS_DUCKDB=off` in production needs the owner's
 own "yes", separate from every merge (decision of 10.10.2026).
 
-**Since step 14's S14-00 web ignores `KS_DUCKDB`**: a step-14 web runs `off`
-whatever `.env` says, publishes `held_back: []`, and never registers
-`db_backup` or `duckdb_checkpoint`; `core/duckdb_off.py` and
+**History since 2026-10-20.** The week ran from 2026-10-16 under `off`, and
+the owner closed it on 2026-10-20 and started step 14: the soak's P2–P4 and
+F1 that it reads went at S14-02, and step 14's PRs take away the code behind
+most of it. **Since step 14's S14-00 web ignores `KS_DUCKDB`**: a step-14
+web runs `off` whatever `.env` says, publishes `held_back: []`, and never
+registers `db_backup` or `duckdb_checkpoint`; `core/duckdb_off.py` and
 `chains_keeping_sync_metadata()` are gone. What follows is the runbook as
 the week was started, under an image from before step 14. Its host half
 still holds — the host scripts read `.env`, so the line stays
-`KS_DUCKDB=off` — and its way back is not a way back any more (below).
+`KS_DUCKDB=off` — and its way back is not a way back any more on its own:
+it is that image's way back, taken only after a rollback to
+`rollback-step14` (below). The archive tools it names run on the same
+pinned image ("The archive tools on a pinned image").
 
 **What PR-10 changed on the host**, which is what makes the order below safe:
 
@@ -5165,7 +5136,13 @@ Deployment); the steps below are that image's.
    `duckdb.status` no longer `off`.
 3. Root's crontab: the WAY BACK half of `--crontab` — the compaction and the
    nightly snapshot re-added, the silence check deleted. Its record under
-   `/root/duckdb-silence` stays, as history.
+   `/root/duckdb-silence` stays, as history. **Before the snapshot's line goes
+   back**, `deploy/backup.env` must set `BACKUP_RESTORE_IMAGE` to the image
+   tagged `rollback-step14` (`deploy/backup.env.example` has the line), and
+   that tag must be on the host — S14-02's host steps 1 and 2. Since S14-02
+   the snapshot has no default image: without either it refuses every night,
+   exit 2, and pages "Daily snapshot FAILED" ("The archive tools on a pinned
+   image").
 4. Expected, not to be chased: the first start under `on` opens the file
    with its always-run migrations (0027's sequence shift among them) and
    merges `data/warehouse-utm-reparsed-at` if a UTM re-parse ran under `off`
@@ -5180,6 +5157,78 @@ Deployment); the steps below are that image's.
 
 Starting again later is step 1 again, a new Ark included: the file changed
 the moment web ran `on`.
+
+### The archive tools on a pinned image (step 14, S14-02)
+
+Step 14 takes DuckDB out of the code, and at S14-19 out of the images. The
+archives stay: the off-site Parquet archive, the nightly snapshots, two Arks.
+What reads them is DuckDB 1.5.5, the version that wrote every one, with the
+restore code they were proven against — `scripts/compact_duckdb.py`'s phases
+2 and 3, which rebuild the schema from the application's own DDL. Both live in
+every image built before step 14, and the host's `keycrm-web:rollback-step14`
+is the last of them, pinned at S14-00's deploy (the plan's H1/H2; see "Before
+any rollback to an image from before step 14"). A tag is never removed by the
+deploy's `docker image prune -f`; `:latest` moves with every deploy and
+carries no DuckDB from S14-19 on.
+
+So `deploy/restore-test.sh`, `deploy/daily_offsite.sh` and
+`deploy/ark_ship.sh` no longer default to `:latest`. They take their image
+from `BACKUP_RESTORE_IMAGE` (the Ark: `BACKUP_ARK_IMAGE`, else the same) in
+`deploy/backup.env`, and ask it before anything is fetched, linked or frozen
+(`deploy/archive_image.sh`): a tag that does not move (not `:latest`, not
+untagged), present on the host (nothing pulls it, and `rollback-step14` is on
+no registry), and `import duckdb` inside it saying 1.5.5. Any of them false is
+exit 2 with a line naming `rollback-step14`; the nightly snapshot, which only
+runs on the way back, pages it as a failed night, which is why the way back's
+step 3 sets the variable before it puts the snapshot's cron line back. Every
+container they start carries `--pull never`.
+
+**What is mounted into it imports only what it carries.** The drill mounts
+`restore_from_export.py`, the snapshot `snapshot_export.py` and
+`core/snapshot_validation.py`, the Ark `ark_freeze.py`, and the table-fate
+check's recipe the check and `core/duckdb_table_fates.py` — files from the
+checkout, run inside that pinned image. A name main gains after it is a name
+the container does not have. `tests/unit/test_archive_image.py` derives the
+mounts from the scripts and their headers' recipes, read as the shell reads
+them (`${PWD}`, `$(pwd)`, variables, function arguments, the `DOCKER_RUN`
+array; a checkout directory mounted whole is refused, and a source it cannot
+resolve must be listed with a reason), and holds every import in them to a
+frozen list of what the pinned image carries: the standard library, `duckdb`,
+`compact_duckdb`'s eight names and the `core` modules they reach today —
+read from 3.0.292's code and checked against 3.0.298's, where both modules it
+names are unchanged. A step-14 PR that deletes `compact_duckdb.py` from main
+changes nothing there; one that has a mounted file import something new fails
+it.
+
+**Response fingerprints.** `deploy/api_fingerprint.py` is how a read PR of
+step 14 shows production answered the same before and after its deploy. It
+asks a fixed list of GET routes, each with a window for one that is absolute
+— by default the last whole month that ended at least 40 days ago, because
+the 05:15 refresh rewrites the last 30 — and keeps each body's sha256 and
+size, never the body. Routes the API offers no window for (cohorts, the SMS
+preview with an absolute period, the stock pages, the goal tables and the
+forecast, the header's filter lookups) are asked anyway and marked `live`.
+So are routes that take a window and still answer something counted from
+today: the smart goals for the window's month (one signal is counted back
+from today), the customer insights (all-time lifetime value, purchase
+frequency and repeat rate beside the window's figures, so any order moves
+them) and the six /margin routes (the window's lines costed at today's
+purchase price, which the hourly stock sync rewrites). A live route that
+moved is a question the hashes cannot answer, so the "before" is taken just
+before the merge and the "after" as soon as the deploy is done. An absolute
+route still reads the catalogue as it is today: a brand renamed or a product
+moved to another category in KeyCRM moves the past-window answers grouped by
+brand or category.
+Routes that need a production id or name in the request (a category's
+drill-down, one campaign's results) are not asked. `compare`
+exits 1 when a past window or any status moved, 3 when only live routes did,
+2 when the two snapshots are not of one window. The admin session comes from
+`KS_FINGERPRINT_SESSION` and nowhere else: never an argument, never printed
+or written, sent only over https (or to loopback) and never after a redirect.
+The token is unrevocable for seven days, so the owner runs it in their own
+terminal (`read -rs`); the header has the commands. Take two "before"
+snapshots first: a past-window route that moves between those is query
+noise, not the deploy. Two "before"s say nothing about a live one.
 
 ### The order write path asks the registry too (DN-22a)
 

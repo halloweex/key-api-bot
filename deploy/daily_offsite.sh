@@ -29,6 +29,13 @@
 # cron line is removed (deploy/duckdb_silence_check.sh --crontab prints it).
 # The copy of .env this archive carries goes off-site with every Postgres
 # shipment too (deploy/pg_offsite.sh, OD-S5-6), so retiring it loses none.
+#
+# Under `on` — the way back — the sidecar runs in BACKUP_RESTORE_IMAGE, which
+# must be set in deploy/backup.env and is asked before anything is linked
+# (step 14, S14-02; deploy/archive_image.sh): a pinned tag, on this host,
+# carrying DuckDB 1.5.5 — the image tagged rollback-step14. It used to default
+# to :latest, which loses DuckDB at step 14's S14-19. A refused image exits 2
+# and pages like any other failed night: nothing left the server.
 set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
@@ -52,7 +59,7 @@ CONFIG="deploy/backup.env"
 [ -f "$CONFIG" ] && . "$CONFIG"
 
 BACKUP_DIR="${BACKUP_LOCAL_DIR:-data/backups}"
-IMAGE="${BACKUP_RESTORE_IMAGE:-halloweex/keycrm-web:latest}"
+IMAGE="${BACKUP_RESTORE_IMAGE:-}"
 WORK="data/.snapshot_tmp"
 
 EX_UNCONFIGURED=78
@@ -82,6 +89,8 @@ alert_chat_ids() {
 # the kill switch, the instance signature, and a best-effort row in the
 # alert archive. deploy/notify.sh owns the implementation.
 source deploy/notify.sh
+# shellcheck source=/dev/null
+source deploy/archive_image.sh
 
 on_error() {
     local rc=$?
@@ -112,6 +121,10 @@ if [ "$AGE_H" -gt "${BACKUP_MAX_LOCAL_AGE_HOURS:-30}" ]; then
 fi
 echo "source: $(basename "$LATEST") (${AGE_H}h old)"
 
+# The image, asked before anything is linked or started: a bare call, so a
+# refusal (2, the reason on stderr) is a failed night the ERR trap pages.
+archive_image_ready BACKUP_RESTORE_IMAGE "$IMAGE" >&2
+
 rm -rf "$WORK"
 mkdir -p "$WORK"
 # Hard link, not a copy: same inode, instant, and no second multi-GB file on a
@@ -130,11 +143,14 @@ ln "$LATEST" "$WORK/analytics.duckdb"
 # Only the directory and the json, never "$WORK/analytics.duckdb": that is a
 # hard link, so chown -R would change the ownership of the backup itself
 # through the shared inode.
-APPUID="$(docker run --rm --entrypoint id "$IMAGE" -u)"
+APPUID="$(docker run --rm --pull never --entrypoint id "$IMAGE" -u)"
 chown "$APPUID:$APPUID" "$WORK"
 [ -f "$WORK/.last_snapshot.json" ] && chown "$APPUID:$APPUID" "$WORK/.last_snapshot.json"
 
-docker run --rm \
+# The two files below run in the pinned image, so they import only what it
+# carries — compact_duckdb from its /app/scripts, core.duckdb_switch, the
+# standard library and duckdb (tests/unit/test_archive_image.py).
+docker run --rm --pull never \
     --memory=6500m \
     -e DUCKDB_MEMORY_LIMIT=4GB \
     -v "$PWD/$WORK:/app/data" \
