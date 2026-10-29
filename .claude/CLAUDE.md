@@ -3630,7 +3630,8 @@ That is an accepted change in what pages (the owner's decision, the S14-07
 review): when only that read fails, `read_fallback_mode.refused.goals` counts
 it and the canary pages `read_refused` (WARN), where nothing paged before —
 the same change S14-05 made for /marketing's goal line and S14-06 for the
-returns list. They are held as /traffic's and the dashboard's are: rule 5
+returns list. The four tabs' readers are held as /traffic's and the
+dashboard's are: rule 5
 reads ClickHouse's modules in every spelling it reads Postgres's, the walk
 that holds a tab's readers to its router holds these four files — a chain's
 writer may reach its writer, nothing else reaches an engine round a router
