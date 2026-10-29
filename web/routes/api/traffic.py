@@ -13,7 +13,7 @@ from web.services import dashboard_service
 from web.routes.auth import require_admin
 from ._deps import (
     limiter, get_store,
-    validate_period, validate_source_id, validate_sales_type,
+    validate_period, validate_source_id, validate_sales_type, validate_db_int,
     ValidationError,
 )
 
@@ -152,6 +152,7 @@ async def get_traffic_transactions(
     try:
         validate_period(period)
         validate_source_id(source_id)
+        validate_db_int(offset, "offset", bits=64)
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -201,6 +202,7 @@ async def get_traffic_utm_campaigns(
     try:
         validate_period(period)
         validate_source_id(source_id)
+        validate_db_int(offset, "offset", bits=64)
         sales_type = validate_sales_type(sales_type)
     except ValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
