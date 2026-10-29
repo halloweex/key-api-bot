@@ -3634,8 +3634,10 @@ returns list. The four tabs' readers are held as /traffic's and the
 dashboard's are. Rule 5 reads ClickHouse's modules in every spelling it
 reads Postgres's. The walk that holds a tab's readers to its router reads
 these four files (`test_tab_routers_postgres_only.py`): an engine is reached
-only by a router, by a reader rule 5 holds clean, or by a chain's writer
-reaching its own writer, and only `_analytics_rows` reaches ClickHouse. The
+only by a router, by a reader rule 5 holds clean, or by a function that
+writes. That function may call a chain writer's module only for its writes
+and their `writes_postgres`, never for one of the module's readers such as
+`read_snapshot_calendar`. Only `_analytics_rows` reaches ClickHouse. The
 HTTP sweep holds every route of `/expenses`, `/inventory`, `/goals`, the
 cohorts and the forecast to the 503, except the training frame's, whose
 reader has no fallback.
