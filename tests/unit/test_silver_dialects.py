@@ -15,8 +15,8 @@ touching only one branch, fails here and nowhere else.
 from __future__ import annotations
 
 from core.duckdb_constants import DISPLAY_TIMEZONE, _date_in_kyiv
-from core.duckdb_store import silver_sales_type_case, silver_select_sql
 from core.sql_dialect import DUCKDB, POSTGRES
+from core.warehouse_sql import silver_sales_type_case, silver_select_sql
 
 
 def _normalise(sql: str, dialect) -> str:
