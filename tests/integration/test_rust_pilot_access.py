@@ -5,8 +5,9 @@ is the pilot at `KS_RUST_PILOT_URL`. Every request below goes to both.
 
 WHAT IS COMPARED
 
-`GET /api/revenue/trend`, the six `GET /api/margin/*` routes (wave 1's first
-tab, read from Postgres as production reads them) and the SPA catch-all's
+`GET /api/revenue/trend`, the six `GET /api/margin/*` and six
+`GET /api/products/intel/*` routes (wave 1's tabs, read from Postgres as
+production reads them) and the SPA catch-all's
 JSON 404 for an `/api` path are the endpoints the pilot answers, and they
 are compared whole: status,
 content type and body — byte for byte unless the answer is a 200, which is
@@ -84,7 +85,10 @@ TREND = "/api/revenue/trend"
 # The routes the pilot answers past the gates, by method and template.
 MARGIN = tuple(f"/api/margin/{name}" for name in (
     "overview", "by-brand", "by-category", "trend", "brand-category", "alerts"))
-PORTED = {("GET", TREND), ("GET", "/{path:path}")} | {("GET", path) for path in MARGIN}
+PRODUCTS_INTEL = tuple(f"/api/products/intel/{name}" for name in (
+    "summary", "pairs", "basket-distribution", "category-combos", "brand-affinity", "momentum"))
+PORTED = ({("GET", TREND), ("GET", "/{path:path}")}
+          | {("GET", path) for path in MARGIN + PRODUCTS_INTEL})
 PASSED = 299
 # Explicit dates: both services read the real clock, and a range does not move.
 TREND_QUERY = "start_date=2026-01-05&end_date=2026-01-11"
@@ -480,6 +484,7 @@ async def services(world, duckdb_off, monkeypatch):
     monkeypatch.setenv("KS_PG_DSN", DSN)
     monkeypatch.setenv("KS_READ_GOLD", "postgres")
     monkeypatch.setenv("KS_READ_MARGIN", "postgres")
+    monkeypatch.setenv("KS_READ_PRODUCTS_INTEL", "postgres")
     monkeypatch.setenv("KS_USER_STORE", "postgres")
     monkeypatch.setenv("KS_BOT_STORE", "postgres")
     monkeypatch.setattr(limiter, "enabled", True)

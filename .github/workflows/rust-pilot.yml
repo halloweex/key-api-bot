@@ -164,11 +164,13 @@ jobs:
           KS_RUST_PILOT_REPORT: rust-pilot-report.json
           KS_RUST_PILOT_ACCESS_REPORT: rust-pilot-access-report.json
           KS_RUST_MARGIN_REPORT: rust-wave1-margin-report.json
+          KS_RUST_PRODUCTS_REPORT: rust-wave1-products-report.json
         run: |
           set -o pipefail
           pytest -q -rs -p no:cacheprovider tests/integration/test_rust_pilot_trend.py \
             tests/integration/test_rust_pilot_access.py \
-            tests/integration/test_rust_wave1_margin.py | tee harness.out
+            tests/integration/test_rust_wave1_margin.py \
+            tests/integration/test_rust_wave1_products.py | tee harness.out
           if grep -qE "[0-9]+ skipped" harness.out; then
             echo "::error::the harness skipped instead of comparing"
             exit 1
@@ -181,11 +183,12 @@ jobs:
                                                  if k != "mismatches"}}, indent=1))
           access = json.load(open("rust-pilot-access-report.json"))
           print(json.dumps(access, indent=1, ensure_ascii=False))
-          margin = json.load(open("rust-wave1-margin-report.json"))
-          print(json.dumps({"seed": margin["seed"], "phases": {
-              name: {k: v for k, v in phase.items() if k != "first_differences"}
-              for name, phase in margin["phases"].items()},
-              "divergences": margin.get("divergences")}, indent=1, ensure_ascii=False))
+          for tab in ("margin", "products"):
+              wave1 = json.load(open(f"rust-wave1-{tab}-report.json"))
+              print(tab, json.dumps({"seed": wave1["seed"], "phases": {
+                  name: {k: v for k, v in phase.items() if k != "first_differences"}
+                  for name, phase in wave1["phases"].items()},
+                  "divergences": wave1.get("divergences")}, indent=1, ensure_ascii=False))
           EOF
 
       # Same requests, same Postgres, one CPU each; numbers for the report,

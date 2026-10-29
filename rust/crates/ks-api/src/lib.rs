@@ -12,6 +12,8 @@ mod http;
 pub mod margin;
 pub mod params;
 pub mod period;
+pub mod pgread;
+pub mod products_intel;
 pub mod pyrt;
 #[rustfmt::skip]
 mod pytables;

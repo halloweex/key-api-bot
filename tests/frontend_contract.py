@@ -15,7 +15,7 @@ contract.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
@@ -104,19 +104,38 @@ def filters_for_path(path: str) -> FrozenSet[str]:
     return frozenset(by_path.get(path, tuple(re.findall(r"'([A-Za-z]+)'", all_m.group(1)))))
 
 
-def hook_calls(hooks: Tuple[str, ...]) -> Dict[str, str]:
-    """For each hook in `hooks/useApi.ts`, the one `api.<fn>` it calls — which
-    must be with `useQueryParams()`'s string and nothing added to it."""
+def hook_calls(hooks: Tuple[str, ...]) -> Dict[str, Tuple[str, Tuple[str, ...]]]:
+    """For each hook in `hooks/useApi.ts`, the one `api.<fn>` it calls and the
+    parameters it adds to `useQueryParams()`'s string.
+
+    Two shapes are read, and nothing else: `api.fn(queryParams)`, which adds
+    nothing, and `const W = new URLSearchParams(queryParams)`, then
+    `W.set('<name>', …)`, then `const V = W.toString()` and `api.fn(V)` —
+    `useProductPairs`'s, whose `set` appends after the page's parameters.
+    """
     text = _read("hooks/useApi.ts")
     calls = {}
     for hook in hooks:
-        body = _body(text, rf"export function {hook}\(\)\s*\{{")
+        body = _body(text, rf"export function {hook}\([^)]*\)\s*\{{")
         if "const queryParams = useQueryParams()" not in body:
             raise FrontendShapeError(f"{hook} does not build its query with useQueryParams()")
         found = re.findall(r"api\.(\w+)\(([^)]*)\)", body)
-        if len(found) != 1 or found[0][1].strip() != "queryParams":
-            raise FrontendShapeError(f"{hook} calls {found}, not one api.<fn>(queryParams)")
-        calls[hook] = found[0][0]
+        if len(found) != 1:
+            raise FrontendShapeError(f"{hook} calls {found}, not one api.<fn>(…)")
+        fn, arg = found[0][0], found[0][1].strip()
+        extras: Tuple[str, ...] = ()
+        if arg != "queryParams":
+            built = re.search(rf"const {re.escape(arg)} = (\w+)\.toString\(\)", body)
+            source = built and re.search(
+                rf"const {built.group(1)} = new URLSearchParams\(queryParams\)", body)
+            if not (built and source):
+                raise FrontendShapeError(
+                    f"{hook} passes {arg!r}, not queryParams nor a URLSearchParams built on it")
+            params = built.group(1)
+            if re.search(rf"{params}\.(append|delete)\(", body):
+                raise FrontendShapeError(f"{hook} appends or deletes: read it again")
+            extras = tuple(re.findall(rf"{params}\.set\('([a-z_]+)'", body))
+        calls[hook] = (fn, extras)
     return calls
 
 
@@ -139,19 +158,24 @@ class Contract:
     periods: Tuple[str, ...]
     sales_types: Tuple[str, ...]
     params: Tuple[str, ...]
+    # What a hook adds to the page's parameters, by endpoint.
+    extras: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
 
 
 def contract(page: str, hooks: Tuple[str, ...]) -> Contract:
-    """What `page`'s `hooks` can send: their endpoints, and the parameters
-    `useQueryParams` sets there once `filtersForPath` has dropped some."""
+    """What `page`'s `hooks` can send: their endpoints, the parameters
+    `useQueryParams` sets there once `filtersForPath` has dropped some, and
+    what each hook adds."""
     applies = filters_for_path(page)
     sent = {FILTER_PARAMS[f] for f in applies if f in FILTER_PARAMS}
     params = tuple(
         name for name in global_params()
         if name not in FILTER_PARAMS.values() or name in sent
     )
-    endpoints = tuple("/api" + client_path(fn) for fn in hook_calls(hooks).values())
-    return Contract(page, endpoints, periods(), sales_types(), params)
+    calls = hook_calls(hooks).values()
+    endpoints = tuple("/api" + client_path(fn) for fn, _ in calls)
+    extras = {path: added for path, (_, added) in zip(endpoints, calls) if added}
+    return Contract(page, endpoints, periods(), sales_types(), params, extras)
 
 
 def query(
@@ -165,12 +189,16 @@ def query(
     category_id: Optional[int] = None,
     brand: Optional[str] = None,
     promocode: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    extra: Optional[Dict[str, object]] = None,
 ) -> str:
-    """The query string `useQueryParams` builds for this state, on `c`'s page.
+    """The query string `useQueryParams` builds for this state, on `c`'s page,
+    with what the hook for `endpoint` adds (`extra`) after it.
 
     Its branches, as written there: a period unless it is `custom`, else both
     dates or neither; the sales type always; a filter only when it is set —
-    truthy, so `0` and `''` are never sent — and the page applies it.
+    truthy, so `0` and `''` are never sent — and the page applies it. A
+    hook's own parameter is set the same way: when truthy.
     """
     pairs: List[Tuple[str, str]] = []
     if period is not None and period != "custom":
@@ -185,6 +213,10 @@ def query(
     unknown = {name for name, _ in pairs} - set(c.params)
     if unknown:
         raise FrontendShapeError(f"{c.page} does not send {sorted(unknown)}")
+    added = c.extras.get(endpoint or "", ())
+    for name in set(extra or {}) - set(added):
+        raise FrontendShapeError(f"{endpoint} is never sent {name!r}")
+    pairs += [(name, str((extra or {})[name])) for name in added if (extra or {}).get(name)]
     return encode(pairs)
 
 
@@ -215,3 +247,13 @@ MARGIN_HOOKS = (
 
 def margin() -> Contract:
     return contract("/margin", MARGIN_HOOKS)
+
+
+PRODUCTS_HOOKS = (
+    "useBasketSummary", "useProductPairs", "useBasketDistribution",
+    "useCategoryCombos", "useBrandAffinity", "useProductMomentum",
+)
+
+
+def products() -> Contract:
+    return contract("/products", PRODUCTS_HOOKS)
