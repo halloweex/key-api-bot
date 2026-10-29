@@ -92,7 +92,7 @@ class TestSilverWireFormat:
 
 class TestNoThirdDialect:
     def test_every_measure_renders_verbatim(self):
-        from core.duckdb_store import GOLD_MEASURES
+        from core.warehouse_sql import GOLD_MEASURES
 
         fine, rollup = derive_gold_sql()
         for name, expr in GOLD_MEASURES.items():

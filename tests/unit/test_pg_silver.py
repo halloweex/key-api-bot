@@ -22,9 +22,9 @@ import inspect
 import re
 from pathlib import Path
 
-from core.duckdb_store import silver_select_sql
 from core.pg_silver import SILVER_COLUMNS, SILVER_TABLE, pass1_sql, pass2_sql, rebuild_silver
 from core.sql_dialect import POSTGRES
+from core.warehouse_sql import silver_select_sql
 
 REPO = Path(__file__).resolve().parents[2]
 
