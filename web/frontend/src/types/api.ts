@@ -1106,6 +1106,33 @@ export interface TrafficOrganicResponse {
   channels: OrganicChannel[]
 }
 
+/** Orders, revenue and the people behind them; people do not add up across rows. */
+export interface PixelOnlyBucket extends TrafficMetric {
+  buyers: number
+}
+
+/**
+ * Where a pixel-only buyer's very first order came from. `group` is that
+ * order's traffic type folded the way the tab folds it: `organic` (channel is
+ * an `OrganicChannelKey`), `paid` (channel is the tab's platform), or
+ * `manager`, `pixel_only`, `unknown` (channel `opencart`, `exhibition` or
+ * `unknown`).
+ */
+export interface PixelOnlyFirstChannel extends PixelOnlyBucket {
+  group: 'organic' | 'paid' | 'manager' | 'pixel_only' | 'unknown'
+  channel: string
+  /** Of `buyers`, those whose pixel order is on their first day. */
+  new_buyers: number
+}
+
+export interface TrafficPixelOnlyResponse {
+  period: { start: string; end: string }
+  totals: PixelOnlyBucket
+  new: PixelOnlyBucket
+  returning: PixelOnlyBucket
+  first_channels: PixelOnlyFirstChannel[]
+}
+
 export interface TrafficTrendDay {
   date: string
   paid_orders: number

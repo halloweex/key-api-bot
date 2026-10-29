@@ -5,6 +5,7 @@ import { TrafficSummaryCards } from './TrafficSummaryCards'
 import { ROASSection } from './ROASSection'
 import { PlatformBreakdownChart } from './PlatformBreakdownChart'
 import { OrganicBreakdown } from './OrganicBreakdown'
+import { PixelOnlyBreakdown } from './PixelOnlyBreakdown'
 import { TrafficTrendChart } from './TrafficTrendChart'
 import { TrafficTransactionsTable } from './TrafficTransactionsTable'
 import { UtmCampaignsTable } from './UtmCampaignsTable'
@@ -27,6 +28,9 @@ export const TrafficPage = memo(function TrafficPage() {
       </section>
       <section aria-label={t('traffic.organicBreakdown')}>
         <OrganicBreakdown />
+      </section>
+      <section aria-label={t('traffic.pixelOnlyBreakdown')}>
+        <PixelOnlyBreakdown />
       </section>
       <section aria-label={t('traffic.utmCampaigns')}>
         <UtmCampaignsTable />
