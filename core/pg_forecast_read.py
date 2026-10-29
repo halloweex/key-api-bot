@@ -1,5 +1,15 @@
 """The forecast model's training frame, read from Postgres.
 
+ONE ENGINE SINCE STEP 14 (S14-07)
+
+The training frame is read from Postgres and nowhere else:
+`PredictionService._query_daily_revenue` calls `fetch_frame`, as production
+has since `KS_READ_FORECAST_INPUT=postgres` went on. There never was a
+fallback (below): a Postgres failure — a lost DSN line included — is the
+caller's own error, which both callers contain (`/trend` drops the forecast,
+training keeps the previous model). The flag chooses nothing now; the
+paragraphs below are the history of the port.
+
 `PredictionService._query_daily_revenue` is the input to everything the model
 does: training twice a week, `evaluate`, `tune`, and — on every request to
 `/api/revenue/trend?include_forecast=true&period=week` — `predict_range`, which
@@ -37,7 +47,7 @@ That is how DuckDB answers and it is reproduced, not corrected: it feeds a
 time-series model duplicate dates, which is a question about the model, not
 about this port.
 
-THE FLAG SHIPS OFF
+THE FLAG SHIPPED OFF
 
 Moving this changes the trained model, which retrains on its own schedule —
 so its effect lands days after the switch and is hard to attribute. It gets a
@@ -47,14 +57,11 @@ predictions before anybody sets it.
 from __future__ import annotations
 
 import logging
-import os
 from datetime import date
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-ENV = "KS_READ_FORECAST_INPUT"
-_VALID = ("duckdb", "postgres")
 
 # The frame's columns, in the order `_query_daily_revenue` has always returned
 # them. The model's feature code indexes by name, but the order is part of what
@@ -73,26 +80,6 @@ INT_COLUMNS = (
     "orders_count", "unique_customers", "new_customers", "returning_customers",
     "returns_count", "instagram_orders", "telegram_orders", "shopify_orders",
 )
-
-
-def enabled() -> bool:
-    """Whether the training frame should come from Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. This decides what the
-    model learns from; serving the other store's frame silently is worse than
-    stopping.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 def _select_sql(exclude_today: bool, filter_sales_type: bool) -> str:

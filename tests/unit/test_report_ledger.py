@@ -262,12 +262,30 @@ class TestUnderPostgres:
         assert not chain.chain_latch.marker_path(chain.CHAIN).exists()
 
 
+@pytest_asyncio.fixture
+async def warehouse(monkeypatch):
+    """Postgres' Gold and Silver, emptied, for the report's reads — Postgres'
+    alone since step 14's S14-07 — while the ledger under test is faked."""
+    import os
+
+    from tests.integration.pg_tab_seed import tab_in_postgres
+
+    if not os.getenv("KS_PG_DSN"):
+        pytest.skip("needs a live PostgreSQL at KS_PG_DSN")
+
+    async def _nothing(conn, pool):
+        pass
+
+    async with tab_in_postgres(os.environ["KS_PG_DSN"], monkeypatch, _nothing) as pool:
+        yield pool
+
+
 class TestTheJobSendsOnce:
     """Through the job the scheduler runs, with the sales report's own wiring."""
 
     @pytest.mark.asyncio
     async def test_postgres_refusing_after_delivery_never_sends_twice(
-            self, flags, tmp_path, monkeypatch):
+            self, flags, warehouse, tmp_path, monkeypatch):
         from tests.unit.test_weekly_report import TestSchedulerJob, _store
 
         chain = pg_weekly_ledger_write
@@ -277,7 +295,7 @@ class TestTheJobSendsOnce:
         store = await _store(tmp_path)
         try:
             job = TestSchedulerJob()
-            week_start = await job._seed(store, complete=True)
+            week_start = await job._seed(warehouse, complete=True)
             sent = []
             scheduler = job._wire(monkeypatch, store, sent, tmp_path)
             first = await scheduler._run_weekly_report()
@@ -292,7 +310,7 @@ class TestTheJobSendsOnce:
 
     @pytest.mark.asyncio
     async def test_the_traffic_floor_is_asked_before_the_ledger(
-            self, flags, tmp_path, monkeypatch):
+            self, flags, warehouse, tmp_path, monkeypatch):
         """A week before `KS_TRAFFIC_REPORT_FIRST_WEEK` is skipped without
         asking the ledger, so a Postgres that is down cannot turn "not this
         week" into a failed job. Mutation: move the floor after the gate —
@@ -471,7 +489,8 @@ class TestASpoolOutlivesItsFlag:
                                    "unreadable": ["2026-09-21__retail"]}
 
     @pytest.mark.asyncio
-    async def test_through_the_job_the_week_goes_out_once(self, flags, tmp_path, monkeypatch):
+    async def test_through_the_job_the_week_goes_out_once(
+            self, flags, warehouse, tmp_path, monkeypatch):
         """End to end with the sales report's own wiring: delivered under
         `postgres`, record spooled, flag put back, the next tick. Mutation:
         drop the spool branch from the `duckdb` gate — `sent` holds two."""
@@ -484,7 +503,7 @@ class TestASpoolOutlivesItsFlag:
         store = await _store(tmp_path)
         try:
             job = TestSchedulerJob()
-            week_start = await job._seed(store, complete=True)
+            week_start = await job._seed(warehouse, complete=True)
             sent = []
             scheduler = job._wire(monkeypatch, store, sent, tmp_path)
             first = await scheduler._run_weekly_report()

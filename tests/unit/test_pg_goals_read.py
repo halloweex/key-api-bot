@@ -1,4 +1,13 @@
-"""Which engine answers `/goals`, and — mostly — what this flag may not touch.
+"""The `/goals` statements, and — mostly — what the router may not touch.
+
+ONE ENGINE SINCE STEP 14 (S14-07). `_goals_run` and `_goal_tables_run` read
+Postgres and refuse any failure (`tests/unit/test_tab_routers_postgres_only.py`);
+`KS_READ_GOALS` is not read. Until then this file held that flag — its
+default, a typo stopping every read — the DuckDB path, every routed method on
+an empty DuckDB, and the boundary that kept the three shared goal tables off
+`_goals_run` while Postgres held only an hourly replica of them (chain 7b-3
+wrote DuckDB). Those went with the flag and the replica. What stays is about
+the statements, and the paragraphs below are the history of the boundary.
 
 `/goals` is the tab where the interesting assertions are about the *boundary*
 rather than the routing, because not every one of its thirteen methods can
@@ -38,69 +47,20 @@ asserted here as a property of the *text* instead.
 from __future__ import annotations
 
 import ast
-import asyncio
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from core import pg_goals_read
 from core.duckdb_store import DuckDBStore
-
-
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is the KS_READ_GOALS read switch (S14-07), which the
-    goal and forecast tables answer only while their chains are on DuckDB.
-    So this module keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_goals_write, pg_forecast_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_goals_write, pg_forecast_write)
 
 
 REPO = Path(__file__).resolve().parents[2]
 REPOSITORY = REPO / "core" / "repositories" / "goals.py"
-TIMEOUT_S = 20
 
 ROUTED = ("get_goals", "get_smart_goals", "get_historical_revenue",
           "get_daily_revenue_for_dates", "get_predictions")
-
-# `generate_smart_goals` was not a read, and finding that out is why it is
-# alone here.
-#
-# The audit filed it beside `get_predictions` because it has no INSERT of its
-# own — too shallow a test. It counted `seasonal_indices`, and when the count
-# was short (or `recalculate=True`) it ran the three calculators, which wrote
-# those tables **in DuckDB**, and then read them back. Chain 7b-1 (OD-14 (i))
-# took the write branch out — it reads only now — but the three tables it
-# reads are still written in DuckDB, by `recalculate_goal_tables`, and
-# Postgres holds an hourly replica of them. So they are still read where they
-# are written.
-#
-# It reaches the router along four paths, and each is excluded from the walk
-# below by name, with what it routes checked separately: its ML signal,
-# `_get_ml_forecast_total`, which reads Gold and `revenue_predictions` (since
-# DN-12); and the three history reads it asks before taking its own
-# connection — the growth cap, last year's month and the recent months —
-# which read `{silver_orders}` (chain 7b-2; the only history since 7b-4). None of
-# the four names a table Postgres holds only as a replica, so the three
-# seasonality tables stay read where they are written.
-#
-# Since chain 7b-3 "where they are written" has two answers, and
-# `_goal_tables_run` asks that chain for it — DuckDB while it writes DuckDB,
-# Postgres once it writes there — and never `KS_READ_GOALS`, which is what this
-# walk forbids: it does not reach `_goals_run`.
-# `tests/unit/test_goals_reads_follow_chain.py` holds the other half.
-NOT_ROUTED = ("generate_smart_goals",)
-ROUTED_ONLY_VIA = {"generate_smart_goals": (
-    "_get_ml_forecast_total", "_dynamic_growth_cap", "_last_year_month_revenue",
-    "_recent_three_month_average")}
-ABSENT_FROM_POSTGRES_READS = ("seasonal_indices", "weekly_patterns", "growth_metrics")
 
 # The writes. These *may* reach the router — `set_goal` computes a suggestion
 # from the revenue history before storing it, and reading that history from
@@ -124,65 +84,6 @@ CALLS = (
     ("get_daily_revenue_for_dates", ([],), {}),          # the early return
     ("get_predictions", (date.today() - timedelta(days=7), date.today()), {}),
 )
-
-
-class TestTheFlag:
-    def test_it_defaults_to_duckdb(self, monkeypatch):
-        monkeypatch.delenv("KS_READ_GOALS", raising=False)
-        assert pg_goals_read.enabled() is False
-
-    def test_postgres_turns_it_on(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_GOALS", "postgres")
-        assert pg_goals_read.enabled() is True
-
-    def test_a_typo_raises_rather_than_serving_the_other_store(self, monkeypatch):
-        monkeypatch.setenv("KS_READ_GOALS", "postgress")
-        with pytest.raises(ValueError, match="KS_READ_GOALS"):
-            pg_goals_read.enabled()
-
-    def test_without_a_dsn_there_is_nothing_to_ask(self, monkeypatch):
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        assert pg_goals_read.available() is False
-
-
-# Every read that asks the flag. `get_daily_revenue_for_dates([])` is not here:
-# it returns before asking any engine, so there is nothing for a typo to stop.
-TYPO_CALLS = (
-    ("get_goals", (), {}),
-    ("get_smart_goals", (), {}),
-    ("get_historical_revenue", ("weekly",), {}),
-    ("get_daily_revenue_for_dates", ([date.today()],), {}),
-    ("get_predictions", (date.today() - timedelta(days=7), date.today()), {}),
-    # The smart goal's ML signal, and the method `/api/goals/forecast` returns
-    # as it stands — the pair the DN-12 review found swallowing the refusal.
-    ("_get_ml_forecast_total", (2026, 10), {}),
-    ("generate_smart_goals", (2026, 10), {}),
-)
-
-
-class TestATypoStopsEveryRead:
-    """`enabled()` raising is a contract only while no caller swallows it.
-
-    `_get_ml_forecast_total` did: it read through `_goals_run` inside an
-    `except Exception`, so the ValueError became a missing ML signal, logged at
-    DEBUG, and `generate_smart_goals` answered with a different goal — the
-    blend re-weighted over what was left, the method switched from
-    `ml_forecast` to `yoy_growth` — and a 200."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,args,kwargs", TYPO_CALLS,
-                             ids=[c[0] for c in TYPO_CALLS])
-    async def test_it_raises(self, tmp_path, monkeypatch, name, args, kwargs):
-        monkeypatch.setenv("KS_READ_GOALS", "postgress")
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        store = DuckDBStore(db_path=tmp_path / f"typo-{name}.duckdb")
-        await store.connect()
-        try:
-            with pytest.raises(ValueError, match="KS_READ_GOALS"):
-                await asyncio.wait_for(
-                    getattr(store, name)(*args, **kwargs), TIMEOUT_S)
-        finally:
-            await store.close()
 
 
 class TestTheBoundary:
@@ -219,58 +120,6 @@ class TestTheBoundary:
     @pytest.mark.parametrize("name", ROUTED)
     def test_the_four_that_can_move_go_through_the_router(self, name):
         assert self._reaches_router(name), f"{name} never reaches _goals_run"
-
-    @pytest.mark.parametrize("name", NOT_ROUTED)
-    def test_the_seasonality_tables_are_not_routed(self, name):
-        assert not self._reaches_router(
-            name, excluding=ROUTED_ONLY_VIA.get(name, ())), (
-            f"{name} reaches the router outside its ML signal and its history "
-            f"reads. It reads seasonal_indices / weekly_patterns / "
-            f"growth_metrics, which DuckDB writes; Postgres holds only an "
-            f"hourly replica of those three, so a routed read would answer up "
-            f"to an hour behind POST /goals/recalculate."
-        )
-
-    @pytest.mark.parametrize("name", sorted(
-        {via for vias in ROUTED_ONLY_VIA.values() for via in vias}))
-    def test_the_one_permitted_path_reads_only_what_postgres_has(self, name):
-        """The exclusion above is only honest if what that path routes names
-        none of the tables Postgres lacks. Walked, not listed: every body any
-        function under it hands to `_goals_run`."""
-        source = REPOSITORY.read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        module = {n.targets[0].id: n.value.value
-                  for n in ast.walk(tree)
-                  if isinstance(n, ast.Assign) and len(n.targets) == 1
-                  and isinstance(n.targets[0], ast.Name)
-                  and isinstance(n.value, ast.Constant)
-                  and isinstance(n.value.value, str)}
-        bodies = {n.name: n for n in ast.walk(tree)
-                  if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))}
-
-        routed, todo, seen = [], [name], set()
-        while todo:
-            fn = todo.pop()
-            if fn in seen or fn not in bodies:
-                continue
-            seen.add(fn)
-            for call in ast.walk(bodies[fn]):
-                if not (isinstance(call, ast.Call)
-                        and isinstance(call.func, ast.Attribute)):
-                    continue
-                if call.func.attr == "_goals_run":
-                    routed += [n.id for n in ast.walk(call.args[0])
-                               if isinstance(n, ast.Name) and n.id in module]
-                else:
-                    todo.append(call.func.attr)
-
-        assert routed, f"{name} no longer reaches the router — drop the exclusion"
-        for body in routed:
-            for table in ABSENT_FROM_POSTGRES_READS:
-                assert table not in module[body], (
-                    f"{body}, routed from {name}, reads {table}: Postgres has "
-                    f"only an hourly replica of it, behind the recompute this "
-                    f"path follows")
 
     @pytest.mark.parametrize("name", WRITERS)
     def test_a_writer_still_writes_to_duckdb(self, name):
@@ -357,7 +206,6 @@ class TestItDoesNotTakeTheDuckDbLock:
     async def test_a_postgres_read_answers_while_the_store_lock_raises(
         self, tmp_path, monkeypatch, name, args, kwargs,
     ):
-        monkeypatch.setenv("KS_READ_GOALS", "postgres")
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
         store = DuckDBStore(db_path=tmp_path / f"g-{name}-{len(args)}.duckdb")
         await store.connect()
@@ -371,59 +219,16 @@ class TestItDoesNotTakeTheDuckDbLock:
         finally:
             await store.close()
 
-    @pytest.mark.asyncio
-    async def test_the_duckdb_path_still_uses_the_store(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("KS_READ_GOALS", raising=False)
-        store = DuckDBStore(db_path=tmp_path / "g-mirror.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_goals_read.fetch",
-                       new=AsyncMock(return_value=[])) as fetch:
-                await store.get_historical_revenue("weekly")
-            fetch.assert_not_awaited()
-        finally:
-            await store.close()
-
-
-class TestEveryRoutedMethodReturns:
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "name,args,kwargs", CALLS,
-        ids=[f"{n}{a[0] if a and not isinstance(a[0], list) else ''}" for n, a, k in CALLS],
-    )
-    async def test_it_returns_rather_than_hanging(
-        self, tmp_path, monkeypatch, name, args, kwargs,
-    ):
-        monkeypatch.delenv("KS_READ_GOALS", raising=False)
-        store = DuckDBStore(db_path=tmp_path / f"g-ret-{name}-{len(args)}.duckdb")
-        await store.connect()
-        try:
-            await asyncio.wait_for(
-                getattr(store, name)(*args, **kwargs), timeout=TIMEOUT_S)
-        finally:
-            await store.close()
-
-
 class TestTheRoutedBodies:
-    def test_both_renderings_leave_no_hole(self):
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+    def test_the_rendering_leaves_no_hole(self):
+        from core.sql_dialect import POSTGRES, render_tables
         from core.repositories import goals
 
         for name in BODIES:
             sql = getattr(goals, name)
             sql = sql.replace("{where}", "TRUE").replace("{grain}", "s.order_date")
-            for dialect in (DUCKDB, POSTGRES):
-                rendered = render_tables(sql, dialect)
-                assert "{" not in rendered and "}" not in rendered, name
-
-    def test_the_two_renderings_differ(self):
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
-        from core.repositories import goals
-
-        for name in BODIES:
-            sql = getattr(goals, name)
-            sql = sql.replace("{where}", "TRUE").replace("{grain}", "s.order_date")
-            assert render_tables(sql, DUCKDB) != render_tables(sql, POSTGRES), name
+            rendered = render_tables(sql, POSTGRES)
+            assert "{" not in rendered and "}" not in rendered, name
 
     def test_no_body_computes_the_kyiv_date(self):
         """`silver.orders.order_date` is already it."""

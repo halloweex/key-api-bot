@@ -189,11 +189,15 @@ def _read_fallback_mode() -> dict:
     it was not understood, and every read switch naming an engine this process
     has no address for. Local state, no I/O.
 
-    `no_engine` lists the surfaces only one engine may answer under `off`
-    whose switch does not name it — the cohorts at `KS_READ_COHORTS=duckdb`:
-    served from DuckDB uncounted today, refused under `off`. With
-    `misconfigured` it is what the canary pages as `read_routed_to_duckdb`
-    (OD-07).
+    `no_engine` listed the surfaces only one engine may answer under `off`
+    whose switch did not name it — the cohorts at `KS_READ_COHORTS=duckdb`,
+    served from DuckDB uncounted under `duckdb`, refused under `off`. It is
+    always empty since step 14's S14-07 (`read_fallback.ENGINE_ONLY` is
+    empty): the cohorts ask ClickHouse whatever that switch says, and are
+    refused, counted under `refused`, only when ClickHouse fails or
+    `KS_CH_URL` is unset. With `misconfigured` it is what the canary pages as
+    `read_routed_to_duckdb` (OD-07), which fires only under `mode=duckdb`,
+    never since S14-00; S14-16 takes both fields and the key.
 
     Under `off`, also `refused` — `{surface: {count, last_at}}`, the reads
     answered 503 rather than from DuckDB (DN-20b) — and under `KS_DUCKDB=off`
@@ -523,17 +527,6 @@ def _derivation_mode() -> dict:
     return {"mode": pg_derivation.mode(), "error": pg_derivation.mode_error()}
 
 
-def _goals_history() -> dict:
-    """KS_GOALS_HISTORY as a goal history read takes it (chain 7b): `mode`
-    (`silver`, the only history since 7b-4 retired the variable), or null and
-    the `error` every such read raises —
-    the variable is read at each read, not at start, so this is asked on each
-    request, with no I/O. Judged by the canary."""
-    from core import pg_goals_read
-
-    return pg_goals_read.history_state()
-
-
 def _utm_parse_mode() -> dict:
     """KS_UTM_PARSE as this process understood it at start, and the error when
     it ran as `duckdb` instead of what was set — an unknown value, or
@@ -839,7 +832,6 @@ async def health_check(request: Request):
         "duckdb_switch": _duckdb_switch(),
         "warehouse_writer_mode": _warehouse_writer_mode(),
         "utm_parse": _utm_parse_mode(),
-        "goals_history": _goals_history(),
         "buyer_sync": await _buyer_sync_block(),
         "backups": _backups(),
     }

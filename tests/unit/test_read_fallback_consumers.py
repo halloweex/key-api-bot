@@ -132,18 +132,16 @@ STORE_RECEIVER = re.compile(r"(^|[._])store$|get_store\(\)")
 # request's. Each must get an answer of its own — defer, keep the previous
 # model, skip the step for the tick — and none may half-write on the way.
 NON_HTTP_CONSUMERS = {
-    # The sync, every 2 minutes, and its search index.
-    "core/scheduler.py:BackgroundScheduler._run_incremental_sync",
-    "core/scheduler.py:BackgroundScheduler._run_meilisearch_sync",
-    # Training, and the Monday goals job, which writes seasonal_indices once
-    # every read it makes has answered (chain 7b-1).
-    "core/scheduler.py:BackgroundScheduler._run_revenue_prediction",
+    # The Monday goals job, which writes seasonal_indices once every read it
+    # makes has answered (chain 7b-1).
     "core/scheduler.py:BackgroundScheduler._run_seasonality_calc",
-    # The two weekly messages.
+    # The weekly traffic message, through the tab's router.
     "core/scheduler.py:BackgroundScheduler._run_traffic_report",
-    "core/scheduler.py:BackgroundScheduler._run_weekly_report",
-    # The boot sync, before web serves anything.
-    "web/main.py:startup_event",
+    # Gone with step 14's S14-07: the sync and its buyers step, the search
+    # index, training, the weekly sales report and the boot reached a
+    # refusal only through `no_address` on a switch, and no reader asks it.
+    # Their reads have no fallback: a Postgres failure is their own error,
+    # as it always was.
 }
 
 # The assistant's routes. HTTP, but its tools run inside a conversation,
@@ -161,13 +159,13 @@ IN_BAND_ROUTES = {
 # Anthropic API (and the stream is one of the sweep's NETWORK_ROUTES).
 UNSWEPT_ROUTES = {
     "DELETE /api/goals/{period_type}",
-    "POST /api/duckdb/sync-buyers",
     "POST /api/goals",
     # Reads the order history through the goals router (Silver, the only
     # history since chain 7b-4), before its one write.
     "POST /api/goals/recalculate",
-    "POST /api/revenue/forecast/train",
-    "POST /api/revenue/forecast/tune",
+    # `POST /api/duckdb/sync-buyers` and the forecast's `train` and `tune`
+    # reached one through the buyer-sync and training-frame switches until
+    # step 14's S14-07; their reads have no fallback, and fail as they did.
 } | IN_BAND_ROUTES
 
 # DN-20c: where each consumer's refusal stops, as `file:function:kind`.
@@ -189,25 +187,30 @@ UNSWEPT_ROUTES = {
 _BUYERS = "core/sync_service.py:SyncService.incremental_sync:named"
 _TOOLS = "core/chat_tools.py:execute_tool:named"
 ANSWERS = {
-    "core/scheduler.py:BackgroundScheduler._run_incremental_sync": {_BUYERS},
-    "core/scheduler.py:BackgroundScheduler._run_meilisearch_sync": {
-        "core/scheduler.py:BackgroundScheduler._run_meilisearch_sync:named"},
-    "core/scheduler.py:BackgroundScheduler._run_revenue_prediction": {
-        "core/scheduler.py:BackgroundScheduler._run_revenue_prediction:named"},
     "core/scheduler.py:BackgroundScheduler._run_seasonality_calc": {
         "core/scheduler.py:BackgroundScheduler._run_seasonality_calc:named"},
     "core/scheduler.py:BackgroundScheduler._run_traffic_report": {
         "core/scheduler.py:BackgroundScheduler._run_traffic_report:named"},
-    "core/scheduler.py:BackgroundScheduler._run_weekly_report": {
-        "core/scheduler.py:BackgroundScheduler._run_weekly_report:named"},
-    # The boot: each step it runs contains its own failures, and a refused
-    # read is one of them. Nothing is served before this returns, so there
-    # is no request to answer 503 to.
-    "web/main.py:startup_event": {
-        _BUYERS,
-        "core/sync_service.py:init_and_sync:broad",
-        "web/main.py:_train_prediction_model:broad",
-    },
+}
+
+# The named answers step 14's S14-07 left with no refusal to answer: the
+# readers behind them stopped asking a switch (`no_address`), and with no
+# fallback they fail with their own error, which these handlers never named.
+# The plan keeps them until S14-16 ("they must stay alive"), so they are
+# pinned: the HTTP rule that a handler naming the refusal must raise it
+# exempts exactly these, and only while the entries below alone reach them.
+KEPT_ANSWERS = {
+    "core/scheduler.py:BackgroundScheduler._run_weekly_report",
+    "core/scheduler.py:BackgroundScheduler._run_revenue_prediction",
+    "core/scheduler.py:BackgroundScheduler._run_meilisearch_sync",
+    "core/sync_service.py:SyncService.incremental_sync",
+}
+KEPT_ENTRIES = {
+    "core/scheduler.py:BackgroundScheduler._run_weekly_report",
+    "core/scheduler.py:BackgroundScheduler._run_revenue_prediction",
+    "core/scheduler.py:BackgroundScheduler._run_meilisearch_sync",
+    "core/scheduler.py:BackgroundScheduler._run_incremental_sync",
+    "web/main.py:startup_event",
 }
 
 # The routes the sweep does not run, and where a refusal stops on each before
@@ -220,11 +223,8 @@ UNSWEPT_STOPS = {
     "DELETE /api/goals/{period_type}": set(),
     "GET /api/chat/stream": {_TOOLS},
     "POST /api/chat": {_TOOLS},
-    "POST /api/duckdb/sync-buyers": set(),
     "POST /api/goals": set(),
     "POST /api/goals/recalculate": set(),
-    "POST /api/revenue/forecast/train": set(),
-    "POST /api/revenue/forecast/tune": set(),
 }
 
 # Calls the resolver leaves unresolved although a function that reaches a
@@ -235,10 +235,8 @@ UNSWEPT_STOPS = {
 UNRESOLVED_NAMESAKES = {
     # KeyCRM's API client, not the store's `get_categories`.
     "core/keycrm.py:SyncKeyCRMClient._get: client.get_categories",
-    # LightGBM's `train`, not PredictionService's.
-    "core/prediction_service.py:_run_evaluation: lgb.train",
-    "core/prediction_service.py:_train_model: lgb.train",
-    "core/prediction_service.py:_tune_hyperparameters: lgb.train",
+    # (LightGBM's `train` stood here until step 14's S14-07, when
+    # PredictionService's stopped reaching a refusal.)
     # The Anthropic client under the assistant, which reads no store.
     "web/services/chat_service.py:ChatService.chat: self.llm.chat",
     "web/services/chat_service.py:ChatService.chat_stream: self.llm.chat_stream",
@@ -798,7 +796,7 @@ def named_answers_out_of_place(graph: Graph, routes=None) -> Dict[str, List[str]
     otherwise. Empty when each answer sits only where it is allowed to."""
     routes = _routes(graph) if routes is None else routes
     index = {fn.key: fn for fn in graph.functions}
-    allowed = NON_HTTP_CONSUMERS | IN_BAND_ROUTES
+    allowed = NON_HTTP_CONSUMERS | IN_BAND_ROUTES | KEPT_ENTRIES
     out: Dict[str, List[str]] = {}
     for fn_key in sorted(named_answer_functions()):
         labels = set()
@@ -957,25 +955,51 @@ class TestEveryConsumerAnswers:
                     derived[label] = contained.stops_of(fn)
         assert derived == UNSWEPT_STOPS
 
+    def test_the_kept_answers_are_reached_by_no_refusal(self, graph):
+        """`KEPT_ANSWERS` is not a second list of consumers: none of them is
+        on a refusal's path. A refusal that reached one again would make it
+        a consumer, derived above — and it belongs in `ANSWERS` then, with
+        the stop it has. Each still holds its handler, which S14-16 keeps."""
+        index = {fn.key: fn for fn in graph.functions}
+        reaching = set(graph.reaching)
+        for key in KEPT_ANSWERS:
+            assert index[key] not in reaching, key
+            tree = ast.parse((REPO / key.split(":", 1)[0]).read_text(encoding="utf-8"))
+            name = key.rsplit(".", 1)[-1].split(":")[-1]
+            fn = next(n for n in ast.walk(tree)
+                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and n.name == name)
+            assert any(isinstance(h, ast.ExceptHandler) and h.type is not None
+                       and "ReadUnavailable" in ast.unparse(h.type)
+                       for h in ast.walk(fn)), key
+
     def test_the_walk_sees_a_refusal_escape(self, graph, contained):
         """Non-vacuity: the routers themselves escape — that is what a
         refusal is — and so do the helpers between a job and its answer."""
         index = {fn.key: fn for fn in graph.functions}
+        # The weekly report's readers, training and the search index were
+        # here until step 14's S14-07, when they stopped reaching a refusal.
         for key in ("core/repositories/traffic.py:TrafficMixin._traffic_run",
-                    "core/weekly_report.py:_weekly_run",
-                    "core/weekly_report.py:warehouse_max_date",
+                    "core/repositories/goals.py:GoalsMixin._goals_run",
+                    "core/repositories/goals.py:GoalsMixin._compute_goal_tables",
+                    "core/repositories/expenses.py:ExpensesMixin._expenses_run",
+                    "core/repositories/inventory.py:InventoryMixin._inventory_batch",
+                    "core/repositories/customers.py:CustomersMixin._analytics_rows"):
+            assert index[key] in contained.escaping, key
+        for key in ("core/weekly_report.py:_weekly_run",
                     "core/prediction_service.py:PredictionService._train_impl",
                     "core/sync_service.py:SyncService.sync_to_meilisearch"):
-            assert index[key] in contained.escaping, key
+            assert index[key] not in contained.escaping, key
 
 
 def named_answer_functions() -> Set[str]:
     """`file:function` of every named answer in `ANSWERS` and
-    `UNSWEPT_STOPS`."""
+    `UNSWEPT_STOPS`, and of those kept with nothing to answer
+    (`KEPT_ANSWERS`)."""
     return {entry.rsplit(":", 1)[0]
             for pins in (ANSWERS, UNSWEPT_STOPS)
             for stops in pins.values() for entry in stops
-            if entry.endswith(":named")}
+            if entry.endswith(":named")} | KEPT_ANSWERS
 
 
 class TestTheContainmentRule:

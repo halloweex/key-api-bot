@@ -1,11 +1,19 @@
 """Reading the cohort tab from ClickHouse.
 
+ONE ENGINE SINCE STEP 14 (S14-07)
+
+The cohort tab reads ClickHouse and nothing else: `CustomersMixin._analytics_rows`
+asks this module, and a failure — `KS_CH_URL` unset included — is refused as a
+503 naming `cohorts` (`read_fallback.refuse`), which is what
+`KS_READ_FALLBACK=off` made of it since 2026-10-09. `KS_READ_COHORTS` chooses
+nothing now. The paragraphs below are the history of the port.
+
 The five customer-analytics queries are the natural ClickHouse candidate and
 the only one in this dashboard: they are order-level, read-only, and
 `silver.orders` is already shipped there hourly by `core/ch_silver.py`. Nothing
 new has to be replicated for them to run.
 
-WHY THIS FALLS BACK AND `/sms` DOES NOT
+WHY IT FELL BACK, UNTIL S14-07
 
 `core/pg_sms_read.py` refuses to fall back, because after that switch the two
 stores diverge and answering from the stale one would look perfectly ordinary.
@@ -27,37 +35,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_COHORTS"
-_VALID = ("duckdb", "clickhouse")
-
-
-def enabled() -> bool:
-    """Whether the cohort queries should ask ClickHouse.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. A typo in the variable
-    that decides which engine answers should stop the request loudly rather
-    than quietly serve the other one.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "clickhouse"
-
-
-def available() -> bool:
-    """ClickHouse is configured at all. Without `KS_CH_URL` there is nothing
-    to ask, and the flag alone must not turn a working tab into an error."""
-    from core.ch_common import configured
-
-    return configured()
 
 
 # ClickHouse's HTTP interface answers in TabSeparated — every value arrives as
@@ -116,8 +96,16 @@ async def fetch(
     has no positional binding, and the callers here pass integers only — the
     horizon in months. Anything textual would have to travel a different way,
     and a test pins that these queries bind nothing else.
+
+    Without `KS_CH_URL` there is nothing to ask, and this raises saying so,
+    as `core.pg.get_pool` does without `KS_PG_DSN`: the caller refuses it
+    (step 14, S14-07). It used to be `available()`, asked by the router
+    before it fell back to DuckDB.
     """
-    from core.ch_common import execute, parse_tsv
+    from core.ch_common import URL_ENV, configured, execute, parse_tsv
+
+    if not configured():
+        raise RuntimeError(f"{URL_ENV} is not set: there is no ClickHouse to ask")
 
     rendered = sql
     for value in params:

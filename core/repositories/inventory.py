@@ -42,59 +42,42 @@ def _render(sql: str, dialect: Dialect, **extra: Any) -> str:
 
 class InventoryMixin:
 
-    # ─── Which engine answers /inventory ─────────────────────────────────────
+    # ─── Who answers /inventory: Postgres ────────────────────────────────────
     #
-    # Eight methods, eleven views, one flag. The bodies are shared
+    # Eight methods, eleven views. The bodies are shared
     # (`core.sql_dialect.inventory_view_selects`, migration 0014), so what is
-    # left here is choosing an engine and rendering the table names.
-    #
-    # The choice is made BEFORE any connection is taken — §34's invariant: a
-    # read bound for Postgres must not first queue behind DuckDB's single
-    # writer. Two tests enforce it, one making the lock raise and demanding an
-    # answer anyway, and its mirror so the first cannot pass by being broken in
-    # both directions.
-    #
-    # **Never call these from inside `self.connection()`.** The store lock is
-    # not reentrant, and the deadlock does not raise — the call simply never
-    # returns, which is how the cohort port shipped one that no test called.
-    # `tests/unit/test_inventory_smoke.py` calls every one of the eight.
+    # left here is rendering the table names. Since step 14's S14-07 the
+    # router asks Postgres and nothing else: `KS_READ_INVENTORY` is not read,
+    # and a failure is the 503 naming `inventory` that `fall_back` gave under
+    # `KS_READ_FALLBACK=off`. Nothing here takes the DuckDB store's lock.
 
     async def _inventory_batch(
         self, queries: Sequence[Tuple[str, Sequence[Any]]], **extra: Any
     ) -> List[List[Tuple]]:
-        """Several inventory queries against one connection, either engine.
+        """Several inventory queries against one Postgres connection.
 
         One connection rather than one per query, because `get_inventory_turnover`
         combines five results into one set of KPIs and `get_inventory_summary_v2`
-        four into one summary. DuckDB's `connection()` is a lock, so today those
-        queries cannot have a writer interleaved between them; taking the lock
-        per query would quietly give that up.
+        four into one summary, and taking one per query would let a writer
+        interleave between them.
 
-        A Postgres fault falls back to DuckDB with an ERROR in the log. Nothing
-        diverges between the two — this tab writes nothing, and every view is a
-        projection over tables Postgres receives from DuckDB.
+        One path since step 14's S14-07: the Postgres read, and on any failure
+        a refusal — `read_fallback.refuse`, a 503 naming `inventory`. Without
+        `KS_PG_DSN` the pool raises and that is the refusal.
         """
         from core import pg_inventory_read
 
-        read_fallback.no_address("inventory", pg_inventory_read)
-        if pg_inventory_read.enabled() and pg_inventory_read.available():
-            try:
-                return await pg_inventory_read.fetch_many(
-                    [(_render(sql, POSTGRES, **extra), params) for sql, params in queries]
-                )
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("inventory", exc)
-
-        async with self.connection() as conn:
-            return [
-                conn.execute(_render(sql, DUCKDB, **extra), list(params)).fetchall()
-                for sql, params in queries
-            ]
+        try:
+            return await pg_inventory_read.fetch_many(
+                [(_render(sql, POSTGRES, **extra), params) for sql, params in queries]
+            )
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("inventory", exc)
 
     async def _inventory_rows(
         self, sql: str, params: Sequence[Any] = (), **extra: Any
     ) -> List[Tuple]:
-        """One inventory query, from whichever engine answers."""
+        """One inventory query, from Postgres."""
         batch = await self._inventory_batch([(sql, params)], **extra)
         return batch[0]
 

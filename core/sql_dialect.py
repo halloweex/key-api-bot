@@ -551,19 +551,19 @@ def sku_status_rebuild_select(dialect: Dialect) -> str:
 
 
 def marketing_period_measures(dialect: Dialect) -> str:
-    """The eleven select items, in the order the caller unpacks them.
+    """The eleven select items, in the order the caller unpacks them: the
+    five period measures off the roll-up row, then the channels off the fine
+    rows — Postgres' Gold, where a channel is the `source_id` dimension.
 
-    Both renderings sum the same measures over the same rows; only the way a
-    channel is named differs. `reconcile_gold` compares the two shapes against
-    each other on production data every morning, which is what makes swapping
-    one for the other something already proven rather than newly asserted.
+    DuckDB's Gold, where a channel was a column, had a rendering of its own
+    until step 14's S14-07: no DuckDB body carries `{period_measures}` or
+    `{channel_measures}` since the routers that read DuckDB's Gold went
+    (S14-05, S14-06), so that branch went with them. `render_tables` still
+    fills both holes for any dialect; for DuckDB the text is never run.
     """
-    if dialect.gold_revenue_rollup == "TRUE":       # DuckDB: channels are columns
-        items = [f"COALESCE(SUM({m}), 0)" for m in _PERIOD_MEASURES]
-    else:                                            # Postgres: a dimension
-        rollup = dialect.gold_revenue_rollup
-        items = [f"COALESCE(SUM({m}) FILTER (WHERE {rollup}), 0)"
-                 for m in _PERIOD_MEASURES]
+    rollup = dialect.gold_revenue_rollup
+    items = [f"COALESCE(SUM({m}) FILTER (WHERE {rollup}), 0)"
+             for m in _PERIOD_MEASURES]
     return ",\n        ".join(items + _channel_items(dialect))
 
 
@@ -574,8 +574,8 @@ def channel_measures(dialect: Dialect) -> str:
     interleaved, which is the order `/dashboard`'s doughnut unpacks. The
     eleven-item `marketing_period_measures` groups them differently because its
     caller does, so the shared thing between them is not the string: it is
-    `_channel_items`, the one place that knows a channel is a *column* in
-    DuckDB's Gold and a *dimension* in Postgres'.
+    `_channel_items`, the one place that knows a channel is a *dimension* in
+    Postgres' Gold (it was a *column* in DuckDB's, until step 14's S14-07).
 
     Splitting it that way rather than reusing the eleven wholesale is the
     charter's rule 1 read literally. Two callers wanting different orderings of
@@ -595,14 +595,12 @@ def _channel_items(dialect: Dialect) -> List[str]:
     """Three revenues then three order counts, one channel each.
 
     The only place in the repository that knows how a channel is spelled in
-    each Gold. DuckDB has a column per channel and cannot name a source nobody
-    wrote a column for; Postgres carries `source_id` and can, which is why
-    source 5 (Виставка) is ₴266,059.00 that lives in `revenue` and in none of
-    the three columns.
+    Gold. Postgres carries `source_id` and can name any source — which is why
+    source 5 (Виставка) is ₴266,059.00 that lived in DuckDB's `revenue` and in
+    none of its three channel columns. DuckDB's spelling, a column per
+    channel, went with step 14's S14-07 (`marketing_period_measures` says
+    why); `dialect` is still taken, so the holes render for any.
     """
-    if dialect.gold_revenue_rollup == "TRUE":       # DuckDB: channels are columns
-        return ([f"COALESCE(SUM({name}_revenue), 0)" for name, _ in _CHANNELS]
-                + [f"COALESCE(SUM({name}_orders), 0)" for name, _ in _CHANNELS])
     return ([f"COALESCE(SUM(revenue) FILTER (WHERE source_id = {sid}), 0)"
              for _name, sid in _CHANNELS]
             + [f"COALESCE(SUM(orders_count) FILTER (WHERE source_id = {sid}), 0)"
@@ -620,7 +618,7 @@ def channel_totals_items(dialect: Dialect) -> "List[Tuple[str, str, str]]":
     the doughnut wants them interleaved and flat.
 
     What all three share is `_channel_items` — the one place that knows a
-    channel is a column in DuckDB's Gold and a dimension in Postgres'.
+    channel is a dimension in Postgres' Gold.
 
     Note for callers: the Postgres spelling is `SUM(...) FILTER (WHERE
     source_id = n)`, which selects the *fine* rows. A query using these must
@@ -1026,9 +1024,10 @@ class AnalyticsDialect:
     today: str
 
 
-DUCKDB_ANALYTICS = AnalyticsDialect(
-    name="duckdb", silver_orders="silver_orders", today=TODAY_IN_KYIV,
-)
+# DuckDB's analytics dialect stood here until step 14's S14-07, when the
+# cohorts stopped falling back to DuckDB (`CustomersMixin._analytics_rows`
+# asks ClickHouse alone): `name="duckdb", silver_orders="silver_orders",
+# today=TODAY_IN_KYIV`.
 
 CLICKHOUSE_ANALYTICS = AnalyticsDialect(
     # `core/ch_silver.py` ships Silver under the same name Postgres uses.

@@ -7,7 +7,7 @@ from typing import Optional, List, Dict, Any
 
 from core.duckdb_constants import _date_in_kyiv
 from core.models import OrderStatus
-from core import duckdb_switch, read_fallback
+from core import read_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -17,58 +17,44 @@ class ExpensesMixin:
     async def _expenses_run(
         self, sql: str, params: "list | None" = None, *, mode: str = "all",
     ):
-        """Run one expense statement against whichever engine the flag names.
+        """Run one expense statement against Postgres.
 
-        `_fetch_one`/`_fetch_all` on the DuckDB side, not a bare
-        `conn.execute` under `self.connection()`: they take the store lock
-        themselves — so this must not, the lock is not reentrant and a nested
-        acquisition hangs rather than raising — and they run the query in a
-        thread bounded by `DEFAULT_QUERY_TIMEOUT`, interrupting it on expiry.
-        The `/traffic` port lost that by writing the obvious thing, and it was
-        worst exactly where it mattered: the DuckDB branch is what answers when
-        Postgres is already down.
+        The bodies carry `{expenses}`, `{expense_types}`, `{silver_orders}` and
+        `{manual_expenses}` holes; `render_tables` fills them for Postgres
+        here rather than at the call site.
 
-        The rendering happens here rather than at the call site, because a
-        caller that picks the fragment from the flag renders one engine's shape
-        into the other's fallback.
+        One path since step 14's S14-07: the Postgres read, and on any failure
+        a refusal — the 503 naming `expenses` that `fall_back` gave under
+        `KS_READ_FALLBACK=off`, production's mode since 2026-10-09.
+        `KS_READ_EXPENSES` is not read here, and nothing here reaches for
+        DuckDB; without `KS_PG_DSN` the pool raises and that is the refusal.
+
+        A statement that reads the mirrored landing needs its history to be
+        across; one that reads `manual_expenses` or the type dictionary does
+        not. Decided from the body rather than from a flag per method, so a
+        query that starts reading `{expenses}` tomorrow is gated the moment it
+        does. A history that is not across is refused too, an explicit 503
+        naming `expenses`: what `no_engine` refused under `KS_DUCKDB=off`
+        before S14-07. Unreachable in production, where that history was a
+        precondition of step 13 (`expenses_backfilled`).
         """
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+        from core.sql_dialect import POSTGRES, render_tables
 
         from core import pg_expenses_read
 
         params = list(params or [])
-        # A statement that reads the mirrored landing needs its history to be
-        # across; one that reads `manual_expenses` or the type dictionary does
-        # not. Decided from the body rather than from a flag per method, so a
-        # query that starts reading `{expenses}` tomorrow is gated the moment
-        # it does.
-        needs_history = "{expenses}" in sql
-        read_fallback.no_address("expenses", pg_expenses_read)
-        if (pg_expenses_read.enabled() and pg_expenses_read.available()
-                and (not needs_history or await pg_expenses_read.backfilled())):
-            try:
-                rows = await pg_expenses_read.fetch(
-                    render_tables(sql, POSTGRES), params,
-                )
-                return (rows[0] if rows else None) if mode == "one" else rows
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("expenses", exc)
-        elif duckdb_switch.is_off():
-            # Under KS_DUCKDB=off the gate above is false only here: a switch
-            # off Postgres or without its address was refused by `no_address`,
-            # an unreadable watermark by `backfilled()`'s own `fall_back`. What
-            # is left is a Postgres that answered "no history" — a NULL
-            # `backfilled_at` — and DuckDB is not there to answer instead
-            # (stage 5, PR-8). Unreachable in production, where that history
-            # is a precondition of step 13 (`expenses_backfilled`).
-            read_fallback.no_engine(
-                "expenses", "bronze.expenses holds no backfilled history in "
-                            "Postgres, and KS_DUCKDB=off")
-
-        duck = render_tables(sql, DUCKDB)
-        if mode == "one":
-            return await self._fetch_one(duck, params)
-        return await self._fetch_all(duck, params)
+        try:
+            if "{expenses}" in sql and not await pg_expenses_read.backfilled():
+                raise read_fallback.refuse("expenses", LookupError(
+                    "bronze.expenses holds no backfilled history in Postgres"))
+            rows = await pg_expenses_read.fetch(render_tables(sql, POSTGRES), params)
+        except read_fallback.ReadUnavailable:
+            # Already refused — by the gate above, or by `backfilled()`
+            # when it could not read the watermark — and counted once.
+            raise
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("expenses", exc)
+        return (rows[0] if rows else None) if mode == "one" else rows
 
     async def upsert_expense_types(self, expense_types: List[Dict[str, Any]]) -> int:
         """Insert or update expense types from API response."""

@@ -280,9 +280,10 @@ class TestTheEvaluator:
     def test_the_goal_history_is_no_precondition_any_more(self, value):
         """Chain 7b-4 deleted the DN-12 bridge: no goal calculator reads
         DuckDB's orders, managers or manager_classifications under any value
-        of the retired `KS_GOALS_HISTORY` — a value other than silver refuses
-        every goal history read, and the canary pages it
-        (`goals_history_mode_invalid`), so step 13 has nothing to wait for.
+        of the retired `KS_GOALS_HISTORY` — until step 14's S14-07 a value
+        other than silver refused every goal history read and the canary
+        paged it (`goals_history_mode_invalid`); since then nothing reads it
+        — so step 13 has nothing to wait for.
         What makes the goal history Postgres' is `reader:KS_READ_GOALS` and
         `read_fallback_off`, both still here. Mutation: put `goals_bridge`
         back in `PRECONDITIONS` — `bridge`, unset or a typo is unmet again."""
@@ -359,14 +360,18 @@ class TestEveryReadSwitchIsDecided:
         "KS_USER_STORE",
     }
     # Read by nothing since step 14's S14-05, whose six routers ask Postgres
-    # whatever these say, and S14-06, whose dashboard does the same with the
-    # last three. Still on `WAREHOUSE_READERS` — the cutover's readiness on
-    # `/api/warehouse/status` reads the environment for them until S14-15
-    # removes the cutover — so production's answer there is unchanged; no
-    # module declares them any more.
+    # whatever these say, S14-06, whose dashboard does the same with the next
+    # three, and S14-07, the rest. Still on `WAREHOUSE_READERS` — the
+    # cutover's readiness on `/api/warehouse/status` reads the environment
+    # for them until S14-15 removes the cutover — so production's answer
+    # there is unchanged; no module declares them any more. The cohorts'
+    # switch (`COHORTS`) went with S14-07 too, and is asked apart below.
     RETIRED = {"KS_READ_TRAFFIC", "KS_READ_MARGIN", "KS_READ_PRODUCTS_INTEL",
                "KS_READ_REPORTS", "KS_READ_MARKETING", "KS_READ_LOOKUPS",
-               "KS_READ_GOLD", "KS_READ_SILVER", "KS_READ_DASHBOARD"}
+               "KS_READ_GOLD", "KS_READ_SILVER", "KS_READ_DASHBOARD",
+               "KS_READ_EXPENSES", "KS_READ_INVENTORY", "KS_READ_GOALS",
+               "KS_READ_WEEKLY", "KS_READ_FORECAST_INPUT", "KS_READ_SEARCH_INDEX",
+               "KS_READ_CHAT", "KS_READ_BUYER_SYNC"}
 
     @classmethod
     def _names_in(cls, source: str) -> set:
@@ -389,8 +394,11 @@ class TestEveryReadSwitchIsDecided:
 
     def test_every_read_switch_is_a_precondition_or_excluded_by_name(self):
         declared = self._declared()
-        # 22 until S14-05 retired six and S14-06 three more (`RETIRED`).
-        assert len(declared) >= 13, "the walk is not looking"
+        # 22 until S14-05 retired six, S14-06 three more and S14-07 nine
+        # (`RETIRED`, and the cohorts'): the four left are the stores' and
+        # the fallback's (`NOT_READERS`, `KS_SMS_STORE`).
+        assert len(declared) >= 4, "the walk is not looking"
+        assert {"KS_SMS_STORE"} | self.NOT_READERS <= set(declared)
         decided = set(wc.WAREHOUSE_READERS) | {wc.COHORTS} | self.NOT_READERS
         undecided = {name: sorted(where) for name, where in declared.items()
                      if name not in decided}
@@ -424,7 +432,7 @@ class TestEveryReadSwitchIsDecided:
 
     def test_the_list_names_only_switches_that_exist(self):
         declared = set(self._declared())
-        assert (set(wc.WAREHOUSE_READERS) | {wc.COHORTS}) - self.RETIRED <= declared
+        assert set(wc.WAREHOUSE_READERS) - self.RETIRED <= declared
         assert self.NOT_READERS <= declared
 
     def test_a_retired_switch_is_declared_nowhere(self):
@@ -432,6 +440,8 @@ class TestEveryReadSwitchIsDecided:
         back — it is then a reader again and must come off `RETIRED`."""
         assert not self.RETIRED & set(self._declared())
         assert self.RETIRED <= set(wc.WAREHOUSE_READERS)
+        # The cohorts' switch, which `ch_cohorts` declared until S14-07.
+        assert wc.COHORTS not in self._declared()
 
 
 # ─── A page under a retired check holds the switch ───────────────────────────

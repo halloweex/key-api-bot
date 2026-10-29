@@ -162,11 +162,13 @@ class TestTheLevel:
         try:
             await _seed(store)
             from core.duckdb_store import SILVER_ORDERS_DDL, silver_select_sql
+            from core.sql_dialect import DUCKDB
             async with store.connection() as conn:
                 conn.execute("DROP TABLE IF EXISTS silver_orders")
                 conn.execute(SILVER_ORDERS_DDL)
                 conn.execute(
-                    "INSERT INTO silver_orders SELECT " + silver_select_sql() + " FROM orders o"
+                    "INSERT INTO silver_orders SELECT " + silver_select_sql(DUCKDB)
+                    + " FROM orders o"
                 )
                 assert conn.execute(
                     "SELECT COUNT(*) FROM silver_order_lines"

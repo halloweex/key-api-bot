@@ -384,9 +384,10 @@ class TestSilverHasOneDefinition:
     def test_the_exhibition_branch_comes_before_the_manager_branches(self):
         """Source wins over manager, or a retail-listed manager reclaims it."""
         from core.duckdb_constants import EXHIBITION_SOURCE_ID
-        from core.duckdb_store import silver_sales_type_case
+        from core.sql_dialect import POSTGRES
+        from core.warehouse_sql import silver_sales_type_case
 
-        case = silver_sales_type_case()
+        case = silver_sales_type_case(POSTGRES)
         assert case.index(f"o.source_id = {EXHIBITION_SOURCE_ID}") < case.index("o.manager_id"), (
             "the exhibition was staffed by a manager on the retail list, so a "
             "manager-based branch placed first would pull it into retail"

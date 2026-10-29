@@ -252,13 +252,20 @@ class HealthResponse(BaseModel):
             "off; under off a read whose engine fails is refused, and an HTTP "
             "route answers 503 naming the surface (DN-20b) — and `error` "
             "names a value that was not understood and ran as duckdb; judged "
-            "by the canary. `misconfigured` lists every KS_READ_* naming an "
-            "engine without its address (KS_PG_DSN, KS_CH_URL): under duckdb "
-            "each of those reads is served by DuckDB with nothing failing to "
-            "count, and under off each is refused. `no_engine` lists the "
-            "surfaces only one engine may answer under off whose switch does "
-            "not name it (the cohorts at KS_READ_COHORTS=duckdb): the same, "
-            "with no address missing. Under off only, `refused` "
+            "by the canary. `misconfigured` lists every KS_READ_* set to an "
+            "engine whose address is missing (KS_PG_DSN, KS_CH_URL), found "
+            "by prefix in the environment. Since S14-07 none of those "
+            "switches routes a read, so a line names only the missing "
+            "address, and the reads its switch used to route fail either way: "
+            "a tab's is refused, counted under `refused`; a reader's with no "
+            "fallback — the weekly report, the assistant, the training "
+            "frame, the buyer-sync selection, the search index — meets its "
+            "engine's own error and is counted nowhere. `no_engine` listed the "
+            "surfaces only one engine may answer under off whose switch did "
+            "not name it — the cohorts at KS_READ_COHORTS=duckdb, until "
+            "S14-07 — and is always empty since: the cohorts ask ClickHouse "
+            "whatever that switch says, and are refused, under `refused`, "
+            "only when it fails or KS_CH_URL is unset. Under off only, `refused` "
             "is `{surface: {count, last_at}}` for the reads refused since the "
             "process started."
         ),
@@ -303,16 +310,6 @@ class HealthResponse(BaseModel):
             "`error` names a value that ran as duckdb instead: one not "
             "understood, or postgres without KS_PG_DERIVE=own. Judged by the "
             "canary (DN-19)."
-        ),
-    )
-    goals_history: Optional[Dict[str, Any]] = Field(
-        None,
-        description=(
-            "Which orders the goal calculators count (chain 7b): `mode` is "
-            "silver — Silver is the only history since chain 7b-4 retired "
-            "KS_GOALS_HISTORY — or null with `error` when the variable holds "
-            "anything but unset or silver (bridge included), and then every "
-            "goal history read raises. Judged by the canary."
         ),
     )
     mirrors: Optional[Dict[str, MirrorFreshness]] = Field(

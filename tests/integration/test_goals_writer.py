@@ -398,12 +398,17 @@ class TestTheReadsFollowTheChain:
                 raise ConnectionError("pg down")
             return await real(sql, params)
 
+        # Since step 14's S14-07 the failure is the goal router's refusal, a
+        # 503 naming `goals` — counted, where it escaped raw — and never a
+        # fallback, whatever `KS_READ_GOALS` says.
         with patch.object(pg_goals_read, "fetch", new=goals_table_down):
-            with pytest.raises(ConnectionError, match="pg down"):
-                await store.get_goals()
-            with pytest.raises(ConnectionError, match="pg down"):
-                await store.get_smart_goals()
+            for read in (store.get_goals, store.get_smart_goals):
+                with pytest.raises(read_fallback.ReadUnavailable) as raised:
+                    await read()
+                assert raised.value.surface == "goals"
+                assert isinstance(raised.value.__cause__, ConnectionError)
         assert "goals" not in read_fallback.counts(), "it fell back to DuckDB"
+        assert read_fallback.refusals()["goals"]["count"] == 2
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("read_flag", ["postgres", "duckdb"])

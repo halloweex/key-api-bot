@@ -1,23 +1,33 @@
-"""`/expenses` means the same thing in DuckDB and Postgres.
+"""`/expenses` answers in Postgres what DuckDB answered.
 
 Six read methods across two shapes: three that read only what a human typed —
-`app.manual_expenses`, already here since revision 0018 — and three that read
-the order-level costs KeyCRM serves, which revision 0020 mirrors.
+`app.manual_expenses`, here since revision 0018 — and three that read the
+order-level costs KeyCRM serves, which revision 0020 mirrors.
+
+ONE ENGINE SINCE STEP 14 (S14-07)
+
+`/expenses` reads Postgres and nothing else. Every call below is compared with
+a literal (`tests/integration/golden/expenses.json`): DuckDB's answer on this
+file's fixture, pinned to 2026-09-15, recorded while the same run asserted
+Postgres answered each one equally (rule 9 of the step-14 plan; all fourteen
+agreed). Postgres derives Silver from the seeded Bronze — the production path
+— and the expenses and their types go through the shared parse
+(`core.landing_rows`), as the sync lands them. The store's DuckDB connection
+is a trap, so an answer can only be Postgres's.
 
 The fixture is built to attack the two things the port changed in both
 engines:
 
 * **the fan-out.** Order 1 carries three expenses and order 2 carries two, so
   a query that sums `grand_total` across the join reports their revenue three
-  and two times over. That was live on production — ₴314,365.50 over 90 days —
-  and the fix has to hold identically in both stores.
+  and two times over. That was live on production — ₴314,365.50 over 90 days.
 * **the move to Silver.** The old bodies joined raw `orders` and narrowed with
   an `EXISTS` against Silver; these read Silver directly. A return and a b2b
   order are here so the flags and the classification are actually exercised.
 
-`tests/unit/test_pg_expenses_read.py` proves the wiring and the shared parse.
+`tests/unit/test_pg_expenses_read.py` proves the wiring and the history gate.
 
-Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` supplies one.
+Skipped without `KS_PG_DSN`; CI and `deploy/gate_with_stores.sh` supply one.
 """
 from __future__ import annotations
 
@@ -26,9 +36,11 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch
 
-from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import (
+    call_key, comparable, derive, golden, seed, store_that_never_reaches_duckdb,
+    tab_in_postgres,
+)
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -37,14 +49,17 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# Pinned: the answers are literals taken from DuckDB on this fixture, so the
+# calendar under them cannot move with the run. No body here reads the clock
+# in SQL; every window is a parameter.
+TODAY = date(2026, 9, 15)
+NOW = datetime(2026, 9, 15, 9, 0, tzinfo=timezone.utc)   # midday Kyiv
 W = (TODAY - timedelta(days=25), TODAY)
 
 # (id, source_id, grand_total, days_ago, status_id, manager_id)
 # status 19 is KeyCRM's lost/cancel group. Manager 15 is `B2B_MANAGER_ID`, and
 # the Silver CASE reads that constant rather than the `managers` table, so
-# order 4 classifies as b2b with no manager row to seed — which is one fewer
-# thing for this fixture to get wrong.
+# order 4 classifies as b2b with no manager row to seed.
 ORDERS = [
     (1, 1, 1000.0, 2, 1, None),
     (2, 1, 2000.0, 3, 1, None),
@@ -71,170 +86,75 @@ SPEND = [
     (3, 5, "salary", "Salary", 9999.0, None),
 ]
 
-EXP_COLS = ("id", "order_id", "expense_type_id", "amount", "description",
-            "status", "payment_date", "created_at")
-TYPE_COLS = ("id", "name", "alias", "is_active")
-SPEND_COLS = ("id", "expense_date", "category", "expense_type", "amount",
-              "currency", "note", "created_at", "updated_at", "platform")
 
+async def _populate(conn, pool):
+    from core.landing_rows import (
+        EXPENSE_COLUMNS, EXPENSE_TYPE_COLUMNS, expense_rows, expense_type_rows,
+    )
 
-async def _seed_duckdb(store):
-    now = datetime.now(timezone.utc)
-    async with store.connection() as conn:
-        for oid, src, total, days, status, mgr in ORDERS:
-            conn.execute(
-                "INSERT INTO orders (id,source_id,status_id,grand_total,"
-                "ordered_at,buyer_id,manager_id) VALUES (?,?,?,?,?,?,?)",
-                [oid, src, status, total, now - timedelta(days=days), oid, mgr])
-    # Written through the store, so the shared parse is the thing under test —
-    # through its DuckDB branch, which since step 14's S14-00 nothing routes
-    # to but this (`tests.conftest.chains_on_duckdb`).
-    from core import pg_expense_types_write, pg_orders_write
-    from tests.conftest import chains_on_duckdb
-
-    with chains_on_duckdb(pg_expense_types_write, pg_orders_write):
-        await store.upsert_expense_types([
-            {"id": i, "name": n, "alias": a, "is_active": act}
-            for i, n, a, act in TYPES
-        ])
-        await store.upsert_expenses_batch([
-            {"id": oid, "expenses": [
-                {"id": eid, "expense_type_id": tid, "amount": amt,
-                 "description": f"exp {eid}", "status": "paid",
-                 "payment_date": None, "created_at": now - timedelta(days=1)}
-                for eid, o, tid, amt in EXPENSES if o == oid
-            ]}
-            for oid in {o for _, o, _, _ in EXPENSES}
-        ])
-    async with store.connection() as conn:
-        for eid, days, cat, etype, amt, plat in SPEND:
-            conn.execute(
-                "INSERT INTO manual_expenses (id,expense_date,category,"
-                "expense_type,amount,currency,note,created_at,platform)"
-                " VALUES (?,?,?,?,?,'UAH',NULL,?,?)",
-                [eid, TODAY - timedelta(days=days), cat, etype, amt,
-                 now - timedelta(days=days), plat])
-    await store.refresh_warehouse_layers(trigger="manual")
-
-
-async def _seed_postgres(conn, store):
-    for t in ("bronze.expenses", "bronze.expense_types", "app.manual_expenses",
-              "silver.orders"):
-        await conn.execute(f"DELETE FROM {t}")
-
-    async with store.connection() as duck:
-        silver = duck.execute(
-            "SELECT id, source_id, status_id, grand_total, ordered_at, buyer_id,"
-            " manager_id, order_date, is_return, sales_type, is_active_source,"
-            " source_name, is_new_customer, buyer_first_order_date, promocode"
-            " FROM silver_orders ORDER BY id").fetchall()
-        types = duck.execute(
-            f"SELECT {', '.join(TYPE_COLS)} FROM expense_types ORDER BY id").fetchall()
-        exps = duck.execute(
-            f"SELECT {', '.join(EXP_COLS)} FROM expenses ORDER BY id").fetchall()
-        spend = duck.execute(
-            f"SELECT {', '.join(SPEND_COLS)} FROM manual_expenses ORDER BY id").fetchall()
-
+    await seed(conn, orders=[
+        (oid, src, status, total, NOW - timedelta(days=days), oid, mgr, None)
+        for oid, src, total, days, status, mgr in ORDERS])
+    await derive(pool)
+    # The shared parse, as the sync lands them: the localisation-key name is
+    # resolved there, not here.
+    types = expense_type_rows([
+        {"id": i, "name": n, "alias": a, "is_active": act} for i, n, a, act in TYPES])
     await conn.executemany(
-        "INSERT INTO silver.orders (id,source_id,status_id,grand_total,ordered_at,"
-        "buyer_id,manager_id,order_date,is_return,sales_type,is_active_source,"
-        "source_name,is_new_customer,buyer_first_order_date,promocode)"
-        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
-        [tuple(r) for r in silver])
-    await conn.executemany(
-        f"INSERT INTO bronze.expense_types ({', '.join(TYPE_COLS)}) "
+        f"INSERT INTO bronze.expense_types ({', '.join(EXPENSE_TYPE_COLUMNS)}) "
         f"VALUES ($1,$2,$3,$4)", [tuple(r) for r in types])
+    expenses = expense_rows([
+        {"id": oid, "expenses": [
+            {"id": eid, "expense_type_id": tid, "amount": amt,
+             "description": f"exp {eid}", "status": "paid", "payment_date": None,
+             "created_at": NOW - timedelta(days=1)}
+            for eid, o, tid, amt in EXPENSES if o == oid]}
+        for oid in sorted({o for _, o, _, _ in EXPENSES})])
     await conn.executemany(
-        f"INSERT INTO bronze.expenses ({', '.join(EXP_COLS)}) "
-        f"VALUES ({', '.join(f'${i}' for i in range(1, len(EXP_COLS) + 1))})",
-        [tuple(r) for r in exps])
+        f"INSERT INTO bronze.expenses ({', '.join(EXPENSE_COLUMNS)}) "
+        f"VALUES ({', '.join(f'${i}' for i in range(1, len(EXPENSE_COLUMNS) + 1))})",
+        [tuple(r) for r in expenses])
     await conn.executemany(
-        f"INSERT INTO app.manual_expenses ({', '.join(SPEND_COLS)}) "
-        f"VALUES ({', '.join(f'${i}' for i in range(1, len(SPEND_COLS) + 1))})",
-        [tuple(r) for r in spend])
-
-    # A backfilled mirror, which is the only state in which Postgres is
-    # allowed to answer the two methods that read the landing. Without this
-    # the read falls back to DuckDB — correctly, and the comparison below
-    # would then be comparing DuckDB with itself, which is what the fatal
-    # fallback in `_both` refuses to let happen quietly.
+        "INSERT INTO app.manual_expenses (id, expense_date, category, expense_type,"
+        " amount, currency, note, created_at, platform)"
+        " VALUES ($1,$2,$3,$4,$5,'UAH',NULL,$6,$7)",
+        [(eid, TODAY - timedelta(days=days), cat, etype, amt,
+          NOW - timedelta(days=days), plat)
+         for eid, days, cat, etype, amt, plat in SPEND])
+    # A backfilled mirror, the only state in which the two methods that read
+    # the landing are answered at all (`_expenses_run`'s history gate).
+    # Replaced whole: a row another test left could carry a `last_attempted_at`
+    # the check constraint would hold a fresh `last_ok_at` against.
+    await conn.execute(
+        "DELETE FROM meta.mirror_state WHERE table_name = 'bronze.expenses'")
     await conn.execute(
         """
         INSERT INTO meta.mirror_state (table_name, last_ok_at, backfilled_at)
         VALUES ('bronze.expenses', now(), now())
-        ON CONFLICT (table_name) DO UPDATE
-            SET last_ok_at = now(), backfilled_at = now()
         """
     )
 
 
 @pytest_asyncio.fixture
-async def both_engines(tmp_path, monkeypatch):
-    monkeypatch.setenv("KS_PG_DSN", DSN)
-    # Module state, and a latch that only closes forward — so a test that left
-    # it closed would let the next one answer from Postgres without having
-    # earned it.
+async def in_postgres(tmp_path, monkeypatch):
+    """The tab's store, never connected: its DuckDB connection is a trap, so
+    an answer below can only be Postgres's."""
     from core import pg_expenses_read
 
+    # Module state, and a latch that only closes forward.
     monkeypatch.setattr(pg_expenses_read, "_backfilled", False)
     monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
-    store = DuckDBStore(db_path=tmp_path / "expenses.duckdb")
-    await store.connect()
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
-    try:
-        await _seed_duckdb(store)
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
+    monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
+    async with tab_in_postgres(DSN, monkeypatch, _populate) as pool:
+        try:
+            yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "/expenses")
+        finally:
             async with pool.acquire() as conn:
-                await _seed_postgres(conn, store)
-            yield store
-    finally:
-        async with pool.acquire() as conn:
-            for t in ("bronze.expenses", "bronze.expense_types",
-                      "app.manual_expenses", "silver.orders"):
-                await conn.execute(f"DELETE FROM {t}")
-            await conn.execute(
-                "DELETE FROM meta.mirror_state WHERE table_name = 'bronze.expenses'"
-            )
-        await pool.close()
-        await store.close()
+                await conn.execute(
+                    "DELETE FROM meta.mirror_state WHERE table_name = 'bronze.expenses'")
 
 
-async def _both(store, monkeypatch, name, args, kwargs):
-    """Each engine once — and the Postgres leg with DuckDB made fatal.
-
-    Without this the comparison passes while Postgres never answers: the second
-    call falls back, returns the DuckDB answer, and the two "engines" agree
-    because they were the same engine. `get_margin_trend` shipped a
-    DuckDB-only function that way.
-    """
-    monkeypatch.delenv("KS_READ_EXPENSES", raising=False)
-    duck = await getattr(store, name)(*args, **kwargs)
-
-    monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
-
-    def _no_duckdb(*_a, **_k):
-        raise AssertionError(
-            f"{name} fell back to DuckDB — the comparison below would have "
-            f"compared DuckDB with itself"
-        )
-
-    with patch.object(type(store), "connection", _no_duckdb):
-        postgres = await getattr(store, name)(*args, **kwargs)
-    monkeypatch.delenv("KS_READ_EXPENSES", raising=False)
-    return duck, postgres
-
-
-def _comparable(v):
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, dict):
-        return {k: _comparable(x) for k, x in v.items()}
-    if isinstance(v, (list, tuple)):
-        return [_comparable(x) for x in v]
-    if hasattr(v, "as_tuple") or isinstance(v, float):
-        return round(float(v), 6)
-    return v
-
+GOLDEN = golden("expenses")
 
 CALLS = (
     ("get_expense_types", (), {}),
@@ -254,60 +174,55 @@ CALLS = (
 )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "name,args,kwargs", CALLS,
-    ids=[f"{n}{tuple(k.values()) if k else ''}" for n, _, k in CALLS],
-)
-async def test_both_engines_return_the_same_answer(
-    both_engines, monkeypatch, name, args, kwargs,
-):
-    duck, postgres = await _both(both_engines, monkeypatch, name, args, kwargs)
-    assert _comparable(postgres) == _comparable(duck)
+def _key(name, args, kwargs):
+    return call_key(name, [[a.isoformat() for a in args], kwargs])
+
+
+class TestPostgresAnswersWhatDuckDBAnswered:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "name,args,kwargs", CALLS,
+        ids=[f"{n}{tuple(k.values()) if k else ''}" for n, _, k in CALLS],
+    )
+    async def test_the_whole_result_is_the_literal(self, in_postgres, name, args, kwargs):
+        answer = await getattr(in_postgres, name)(*args, **kwargs)
+        assert comparable(answer) == GOLDEN[_key(name, args, kwargs)], (
+            f"{name}{args}{kwargs}: {answer!r}")
+
+    def test_every_literal_is_a_call_and_every_call_has_one(self):
+        assert set(GOLDEN) == {_key(n, a, k) for n, a, k in CALLS}
 
 
 @pytest.mark.asyncio
-async def test_revenue_is_not_multiplied_by_the_expense_count(
-    both_engines, monkeypatch,
-):
+async def test_revenue_is_not_multiplied_by_the_expense_count(in_postgres):
     """Order 1 has three expenses and order 2 has two. Under the old join
     their ₴1 000 and ₴2 000 were counted three and two times; the truth is
     each once."""
-    duck, pg = await _both(both_engines, monkeypatch, "get_profit_analysis", W, {})
+    out = await in_postgres.get_profit_analysis(*W)
     retail = [o for o in ORDERS if o[5] is None and o[4] != 19]
     expected = round(sum(o[2] for o in retail), 2)
-    for out in (duck, pg):
-        revenue = round(sum(out["chart"]["datasets"][0]["data"]), 2)
-        assert revenue == expected, (
-            f"revenue {revenue} against a true {expected} — the join fans out"
-        )
+    revenue = round(sum(out["chart"]["datasets"][0]["data"]), 2)
+    assert revenue == expected, (
+        f"revenue {revenue} against a true {expected} — the join fans out")
 
 
 @pytest.mark.asyncio
-async def test_the_expense_total_survives_the_fix(both_engines, monkeypatch):
+async def test_the_expense_total_survives_the_fix(in_postgres):
     """Folding the expenses before the join must not lose any of them."""
-    duck, pg = await _both(both_engines, monkeypatch, "get_profit_analysis", W, {})
+    out = await in_postgres.get_profit_analysis(*W)
     retail_ids = {o[0] for o in ORDERS if o[5] is None and o[4] != 19}
     expected = round(sum(a for _, o, _, a in EXPENSES if o in retail_ids), 2)
-    for out in (duck, pg):
-        total = round(sum(out["chart"]["datasets"][1]["data"]), 2)
-        assert total == expected
+    assert round(sum(out["chart"]["datasets"][1]["data"]), 2) == expected
 
 
 @pytest.mark.asyncio
-async def test_the_localisation_key_reaches_both_stores_resolved(
-    both_engines, monkeypatch,
-):
+async def test_the_localisation_key_arrives_resolved(in_postgres):
     """The parse that had to move before the table gained a second writer."""
-    duck, pg = await _both(both_engines, monkeypatch, "get_expense_types", (), {})
-    for out in (duck, pg):
-        names = {t["name"] for t in out}
-        assert "Delivery" in names
-        assert not any(n.startswith("dictionaries.") for n in names)
+    names = {t["name"] for t in await in_postgres.get_expense_types()}
+    assert "Delivery" in names
+    assert not any(n.startswith("dictionaries.") for n in names)
 
 
 @pytest.mark.asyncio
-async def test_an_inactive_type_is_absent_from_both(both_engines, monkeypatch):
-    duck, pg = await _both(both_engines, monkeypatch, "get_expense_types", (), {})
-    for out in (duck, pg):
-        assert "Retired" not in {t["name"] for t in out}
+async def test_an_inactive_type_is_absent(in_postgres):
+    assert "Retired" not in {t["name"] for t in await in_postgres.get_expense_types()}

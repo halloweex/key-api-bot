@@ -2,10 +2,12 @@
 
 The six tabs step 14's S14-05 left on Postgres alone — `/traffic`, `/margin`,
 `/products` intelligence, `/reports`, `/marketing` and the filter bar — were
-proven against DuckDB by comparing the two engines on one fixture. With the
-DuckDB side gone, each of their `*_two_engines.py` tests seeds what KeyCRM
-lands — `bronze.orders`, `bronze.order_products`, `bronze.products`,
-`bronze.categories`, `bronze.offer_stocks` — lets Postgres derive Silver and
+proven against DuckDB by comparing the two engines on one fixture, and so
+were the dashboard (S14-06) and `/expenses`, `/goals`, the search index and
+the assistant's tools (S14-07). With the DuckDB side gone, each of their
+`*_two_engines.py` tests seeds what KeyCRM lands — `bronze.orders`,
+`bronze.order_products`, `bronze.products`, `bronze.categories`,
+`bronze.offer_stocks`, and the rest below — lets Postgres derive Silver and
 Gold the way production does (`rebuild_silver`, `rebuild_gold`), and compares
 every answer with a literal taken from DuckDB's answer on the same fixture
 before that side was deleted (rule 9 of the step-14 plan). The off sweep's
@@ -39,8 +41,10 @@ needs_postgres = pytest.mark.skipif(
 DERIVED = ("gold.daily_revenue", "silver.order_utm", "silver.orders")
 LANDED = ("bronze.order_products", "bronze.orders", "bronze.products",
           "bronze.categories", "bronze.offer_stocks", "bronze.buyers",
-          "bronze.managers")
-APP = ("app.manual_expenses", "app.revenue_goals")
+          "bronze.managers", "bronze.expenses", "bronze.expense_types")
+APP = ("app.manual_expenses", "app.revenue_goals", "app.revenue_predictions",
+       "app.manager_classifications", "app.seasonal_indices",
+       "app.growth_metrics", "app.weekly_patterns")
 TABLES = DERIVED + LANDED + APP
 WATERMARKS = ("silver.orders", "gold.daily_revenue")
 
@@ -49,8 +53,9 @@ GOLDEN = pathlib.Path(__file__).resolve().parent / "golden"
 
 def golden(name: str) -> dict:
     """The literal answers for one `*_two_engines.py`: DuckDB's, on that
-    file's fixture, recorded at step 14's S14-05 while the file still proved
-    DuckDB and Postgres equal on every one of them."""
+    file's fixture, recorded at step 14's S14-05, S14-06 or S14-07 (each file
+    says which) while the file still proved DuckDB and Postgres equal on
+    every one of them."""
     doc = json.loads((GOLDEN / f"{name}.json").read_text(encoding="utf-8"))
     return doc["answers"]
 

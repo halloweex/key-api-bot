@@ -1,126 +1,26 @@
-"""Which engine answers `/inventory`, and what the flag may not touch.
+"""The `/inventory` statements: what no engine may be left to decide.
 
-Three things need proving here and none of them is about numbers — the numbers
-are `tests/integration/test_inventory_two_engines.py`'s job:
+The numbers are `tests/integration/test_inventory_two_engines.py`'s job,
+against a real Postgres; that the router asks Postgres and nothing else since
+step 14's S14-07 is `tests/unit/test_tab_routers_postgres_only.py`'s. What is
+proved here is the shape of the routed statements and of the methods around
+them: no ordered result left to the planner, and no routing call inside a
+`self.connection()` block — the store lock is not reentrant, and a nested
+acquisition does not raise, it simply never comes back. That is how the
+cohort port shipped a deadlock past a green suite.
 
-  * an unknown value stops the read instead of quietly serving the other store;
-  * a Postgres read never touches DuckDB's lock (§34), tested by making the
-    lock fatal, with the mirror test so it cannot pass by the routing being
-    broken in both directions;
-  * every one of the eight methods returns rather than hanging, because the
-    store lock is not reentrant and a nested acquisition does not raise — it
-    simply never comes back. That is how the cohort port shipped a deadlock
-    past a green suite.
+Until S14-07 this also held the flag (`KS_READ_INVENTORY`: its default, a
+typo raising), that a Postgres read never took DuckDB's lock (§34) and that
+every method returned on an empty DuckDB; the flag and the DuckDB path went
+with that PR.
 """
 from __future__ import annotations
 
 import ast
-import asyncio
 import re
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
-import pytest
-
-from core import pg_inventory_read
 from tests.sql_helper import strip_comments_and_literals
-from core.duckdb_store import DuckDBStore
-
-TIMEOUT_S = 20
-
-# (method, kwargs) — every consumer of the eleven views, plus the three that
-# read `inventory_history` or `sku_inventory_status` directly. All ten of the
-# tab's read routes: `/stocks/summary` joined the rest on 2026-09-06.
-CALLS = (
-    ("get_stock_summary", {"limit": 10}),
-    ("get_inventory_summary_v2", {}),
-    ("get_dead_stock_items_v2", {"limit": 10}),
-    ("get_dead_stock_deep", {"limit": 10}),
-    ("get_brand_rotation", {"min_skus": 1}),
-    ("get_recommended_actions", {"limit": 10}),
-    ("get_restock_alerts", {"limit": 10}),
-    ("get_inventory_turnover", {"days": 30}),
-    ("get_abc_skus", {"abc_class": "A", "limit": 10}),
-    ("get_average_inventory", {"days": 30}),
-    ("get_inventory_trend", {"days": 90, "granularity": "daily"}),
-    ("get_inventory_trend", {"days": 90, "granularity": "monthly"}),
-)
-
-
-class TestTheFlag:
-    def test_it_defaults_to_duckdb(self, monkeypatch):
-        monkeypatch.delenv(pg_inventory_read.ENV, raising=False)
-        assert pg_inventory_read.enabled() is False
-
-    def test_an_empty_value_is_the_default_too(self, monkeypatch):
-        monkeypatch.setenv(pg_inventory_read.ENV, "   ")
-        assert pg_inventory_read.enabled() is False
-
-    def test_postgres_turns_it_on(self, monkeypatch):
-        monkeypatch.setenv(pg_inventory_read.ENV, "postgres")
-        assert pg_inventory_read.enabled() is True
-
-    def test_a_typo_raises_rather_than_serving_the_other_store(self, monkeypatch):
-        # `KS_BOT_STORE`'s rule. A misspelling in the variable that decides
-        # which engine answers must stop the read loudly.
-        monkeypatch.setenv(pg_inventory_read.ENV, "postgre")
-        with pytest.raises(ValueError, match="unknown engine"):
-            pg_inventory_read.enabled()
-
-    def test_without_a_dsn_there_is_nothing_to_ask(self, monkeypatch):
-        monkeypatch.delenv("KS_PG_DSN", raising=False)
-        assert pg_inventory_read.available() is False
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
-        assert pg_inventory_read.available() is True
-
-
-class TestItDoesNotTakeTheDuckDbLock:
-    """§34's invariant: the engine is chosen before any connection is taken,
-    so a Postgres read never queues behind DuckDB's single writer."""
-
-    @pytest.mark.asyncio
-    async def test_a_postgres_read_answers_while_the_store_lock_raises(
-        self, tmp_path, monkeypatch,
-    ):
-        monkeypatch.setenv(pg_inventory_read.ENV, "postgres")
-        monkeypatch.setenv("KS_PG_DSN", "postgresql://unused/unused")
-        store = DuckDBStore(db_path=tmp_path / "locked.duckdb")
-        await store.connect()
-
-        def _explode(*_a, **_k):
-            raise AssertionError("the Postgres read reached for DuckDB's connection")
-
-        # One row of eleven columns — the shape v_restock_alerts' consumer
-        # unpacks, which is enough to prove the Postgres path ran.
-        rows = [[(1, "sku", "name", "brand", 0, 5, "CRITICAL")]]
-        try:
-            monkeypatch.setattr(type(store), "connection", _explode)
-            with patch("core.pg_inventory_read.fetch_many",
-                       new=AsyncMock(return_value=rows)) as fetch:
-                result = await store.get_restock_alerts(limit=10)
-            assert fetch.await_count == 1
-            assert result == [{
-                "offerId": 1, "sku": "sku", "name": "name", "brand": "brand",
-                "unitsLeft": 0, "daysSinceSale": 5, "alertLevel": "CRITICAL",
-            }]
-        finally:
-            monkeypatch.undo()
-            await store.close()
-
-    @pytest.mark.asyncio
-    async def test_the_duckdb_path_still_uses_the_store(self, tmp_path, monkeypatch):
-        """The mirror, so the test above cannot pass by the routing being
-        broken in both directions."""
-        monkeypatch.delenv(pg_inventory_read.ENV, raising=False)
-        store = DuckDBStore(db_path=tmp_path / "used.duckdb")
-        await store.connect()
-        try:
-            with patch("core.pg_inventory_read.fetch_many", new=AsyncMock()) as fetch:
-                result = await store.get_restock_alerts(limit=10)
-            assert fetch.await_count == 0
-            assert result == []
-        finally:
-            await store.close()
 
 
 class TestNoResultOrderIsLeftToThePlanner:
@@ -214,32 +114,6 @@ class TestNoResultOrderIsLeftToThePlanner:
                 or "COUNT(*)" in sql.upper()      # single-row aggregates
                 or "COALESCE(SUM" in sql.upper()
             ), f"unordered query that is read as a list: {sql[:120]}"
-
-
-class TestEveryMethodReturns:
-    """A nested `self.connection()` does not raise — it hangs. Five methods
-    were covered by two tests in the cohort port and neither called any of
-    them, which is how that deadlock shipped."""
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("name,kwargs", CALLS, ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in CALLS])
-    async def test_it_returns_rather_than_hanging(
-        self, tmp_path, monkeypatch, name, kwargs,
-    ):
-        monkeypatch.delenv(pg_inventory_read.ENV, raising=False)
-        store = DuckDBStore(db_path=tmp_path / f"{name}.duckdb")
-        await store.connect()
-        try:
-            try:
-                await asyncio.wait_for(getattr(store, name)(**kwargs), TIMEOUT_S)
-            except asyncio.TimeoutError:
-                pytest.fail(
-                    f"{name} did not return within {TIMEOUT_S}s — the store "
-                    f"lock is not reentrant, so this is almost certainly a "
-                    f"routing helper called from inside `self.connection()`"
-                )
-        finally:
-            await store.close()
 
 
 class TestTheHelperIsNeverCalledUnderTheLock:

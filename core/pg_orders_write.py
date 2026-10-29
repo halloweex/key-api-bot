@@ -226,7 +226,9 @@ LOCKOUT_REVISION = "0035_batch_e_chains"
 # instead of re-indexing everything. Neither `_freshness_check` nor the
 # standing watch judges it: it is in no `FRESHNESS_THRESHOLDS` entry, and
 # `CHAIN_WATERMARK_MAX_AGE_MIN` is None. `last_sync_meilisearch`, the cursor
-# of the index built from DuckDB, is a DuckDB clock and stays DuckDB's.
+# of the index built from DuckDB, was a DuckDB clock and stayed DuckDB's,
+# never a chain's; it went with that index's frames in step 14's S14-07, and
+# nothing reads it now (history).
 CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_orders", "last_sync_meilisearch_pg")
 
 # Not judged by `core.pg_chain_invariants`: `last_sync_orders` holds KeyCRM's

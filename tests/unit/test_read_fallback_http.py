@@ -127,20 +127,22 @@ CASES: List[Case] = [
 # Routes whose first read is a write chain's table. Since step 14's S14-00
 # every chain writes Postgres — production's state since those chains' flips —
 # and a read of its table asks Postgres with no fallback and no refusal, so a
-# failed engine is that route's 500, not a 503: chain 7a's goals (production
-# runs `KS_WRITE_GOALS=postgres`) and chain 5's classification behind the
-# managers screen. Chain 7b-3's forecast refuses (`chain_refusal`) and stays.
-CHAIN_FIRST = frozenset({"goals", "managers"})
+# failed engine is that route's 500, not a 503: chain 5's classification
+# behind the managers screen. Chain 7a's goals were the other until S14-07,
+# whose `_goals_run` refuses every failure, theirs included.
+CHAIN_FIRST = frozenset({"managers"})
 REFUSING = [case for case in CASES if case.name not in CHAIN_FIRST]
-# The routers step 14's S14-05 left with no DuckDB tail: they read Postgres
-# whatever their switch says (`case.env` is not read for them), and refuse a
-# failure — a DSN that is not there included. The rest still route by their
-# switch and ask `no_address`.
+# The routers step 14's S14-05 to S14-07 left with no DuckDB tail: they read
+# Postgres whatever their switch says (`case.env` is not read for them), and
+# refuse a failure — a DSN that is not there included. Every router is one
+# since S14-07: no route is switched, and `no_address` has no caller.
 POSTGRES_ONLY = frozenset({"traffic", "margin", "products_intel", "reports",
                            "marketing", "lookups",
                            # The dashboard's, step 14's S14-06.
-                           "summary", "trend", "insights"})
-SWITCHED = [case for case in REFUSING if case.name not in POSTGRES_ONLY]
+                           "summary", "trend", "insights",
+                           # `/expenses`, `/inventory` and `/goals` with its
+                           # forecast, step 14's S14-07: none is left.
+                           "goals", "expenses_history", "inventory", "forecast"})
 UNSWITCHED = [case for case in CASES if case.name in POSTGRES_ONLY]
 # The managers screen's Silver read left `KS_READ_SILVER` in S14-06 as well,
 # but its route reads chain 5's classification first, which raises rather
@@ -284,24 +286,6 @@ class TestOffRefuses:
         assert read_fallback.refusals()["goals"]["count"] >= 1
         assert read_fallback.counts() == {}
 
-    @pytest.mark.parametrize("dsn", [True, False], ids=["dsn", "no_dsn"])
-    def test_a_switch_left_at_duckdb_is_not_a_fallback(
-        self, dsn, admin_client, stores, monkeypatch,
-    ):
-        """`off` refuses a fallback, not DuckDB as the engine a switch names:
-        a Postgres-backed tab whose switch says `duckdb` is a routing
-        decision, published nowhere and refused nowhere — with a DSN or
-        without one. The cohorts are the exception, below. (Shown on
-        `/inventory`, a switch still read: `/traffic`'s, the example until
-        S14-05, is read no longer — below.)"""
-        if not dsn:
-            monkeypatch.delenv("KS_PG_DSN", raising=False)
-        monkeypatch.setenv("KS_READ_INVENTORY", "duckdb")
-        _mode(monkeypatch, "off")
-        response = admin_client.get("/api/stocks/summary")
-        assert response.status_code == 200, response.text
-        assert read_fallback.refusals() == {}
-
     @pytest.mark.parametrize("value", [None, "duckdb", "junk-s14-05"],
                              ids=["unset", "duckdb", "junk"])
     @pytest.mark.parametrize("case", UNSWITCHED, ids=repr)
@@ -335,26 +319,6 @@ def no_dsn(stores, monkeypatch):
 
 
 class TestNoAddress:
-    @pytest.mark.parametrize("case", SWITCHED, ids=repr)
-    def test_under_off_it_is_a_503_naming_the_surface(
-        self, case, admin_client, no_dsn, monkeypatch, caplog,
-    ):
-        _switches(monkeypatch, case.env)
-        _mode(monkeypatch, "off")
-        (switch, value), = case.env.items()
-        assert read_fallback.misconfigured() == [
-            f"{switch}={value} without KS_PG_DSN"]
-
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            response = admin_client.get(case.path, params=case.params)
-
-        assert response.status_code == 503, response.text
-        assert response.json()["surface"] == case.surface
-        assert read_fallback.counts() == {}
-        assert read_fallback.refusals()[case.surface]["count"] >= 1
-        assert f"{switch}=postgres without KS_PG_DSN" in caplog.text
-        assert "falling back to DuckDB" not in caplog.text
-
     @pytest.mark.parametrize("case", UNSWITCHED, ids=repr)
     def test_with_no_dsn_the_pool_refuses_and_that_is_the_503(
         self, case, admin_client, monkeypatch, fresh_read_fallback, caplog,
@@ -363,10 +327,17 @@ class TestNoAddress:
         `no_address` any more, and `core.pg.dsn()` refusing to guess a
         database is the failure their router refuses — the same 503 naming
         the surface, with the DSN named in the log beside it."""
-        from core import pg
+        from core import pg, pg_expenses_read
 
         monkeypatch.delenv("KS_PG_DSN", raising=False)
         monkeypatch.setattr(pg, "_pool", None)
+        # The expenses' history latch, as `stores` leaves it: never asked. A
+        # test before this one may have left it within its recheck window,
+        # where it answers without asking the pool (since S14-07 that is
+        # the explicit "no history" refusal, not the DSN's).
+        monkeypatch.setattr(pg_expenses_read, "_backfilled", False)
+        monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
+        monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
         _switches(monkeypatch, case.env)
         _mode(monkeypatch, "off")
 
@@ -393,8 +364,8 @@ class TestUnderDuckdbOff:
     Each refusal is a 503 naming the surface, counted as a refusal and never
     as a fallback, and nothing reaches for the file: without this each was
     the tripwire's, a 503 naming `duckdb` and a CRITICAL page that named no
-    switch. Under on, `test_a_switch_left_at_duckdb_is_not_a_fallback` above
-    holds what was.
+    switch. Since step 14's S14-07 no router reads its switch at all, so what
+    is held is that the switch at `duckdb` is not read.
 
     The managers screen reads the classification before its read switch,
     and that list is chain 5's under off — a chain short of Postgres holds
@@ -408,29 +379,6 @@ class TestUnderDuckdbOff:
         monkeypatch.setattr(pg_managers_write, "reads_postgres", lambda: True)
         monkeypatch.setattr(pg_managers_read, "fetch_all_managers",
                             AsyncMock(return_value=[]))
-
-    @pytest.mark.parametrize("fallback", [None, "off"], ids=["unset", "off"])
-    @pytest.mark.parametrize("case", [c for c in CASES if c.name != "goals"
-                                      and c.name not in POSTGRES_ONLY
-                                      and c is not MANAGERS], ids=repr)
-    def test_a_switch_left_at_duckdb_is_a_503_naming_the_surface(
-        self, case, fallback, admin_client, stores, duckdb_off, monkeypatch, caplog,
-    ):
-        from core import duckdb_switch
-
-        (switch, _value), = case.env.items()
-        monkeypatch.setenv(switch, "duckdb")
-        _mode(monkeypatch, fallback)
-
-        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
-            response = admin_client.get(case.path, params=case.params)
-
-        assert response.status_code == 503, response.text
-        assert response.json()["surface"] == case.surface
-        assert read_fallback.counts() == {}
-        assert read_fallback.refusals()[case.surface]["count"] >= 1
-        assert f"{switch}=duckdb while KS_DUCKDB=off" in caplog.text
-        assert duckdb_switch.opened() == {}
 
     @pytest.mark.parametrize("case", UNSWITCHED + [MANAGERS], ids=repr)
     def test_a_switch_it_no_longer_reads_asks_postgres(

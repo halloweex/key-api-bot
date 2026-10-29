@@ -389,38 +389,29 @@ async def fetch_daily(
 
 
 async def _weekly_run(store, sql: str, params=None, *, mode: str = "all"):
-    """Run one statement against whichever engine `KS_READ_WEEKLY` names.
+    """Run one statement against Postgres.
 
     The bodies below carry `{gold_daily_revenue}`, `{silver_orders}`,
     `{order_lines}` and `{gold_revenue_rollup}` holes; `render_tables` fills
-    them for the engine that is about to answer, **inside this function** and
-    never at the call site. A caller that picked the fragment from the flag
-    would render the Postgres shape into the DuckDB body, which is how
-    `/marketing` was broken for an hour.
+    them **inside this function** and never at the call site.
 
-    `{gold_revenue_rollup}` is the one that bites. DuckDB's Gold has a single
-    grain, so it renders `TRUE`; Postgres' holds both the roll-up and a row per
-    `source_id`, so it renders `source_id IS NULL`. A body that forgets it
-    counts every order twice in Postgres and once in DuckDB — the defect that
+    `{gold_revenue_rollup}` is the one that bites: Postgres' Gold holds both
+    the roll-up and a row per `source_id`, so it renders `source_id IS NULL`,
+    and a body that forgets it counts every order twice — the defect that
     halved ROAS on /traffic, found there by porting rather than by reading.
 
     **No fallback.** See `core/pg_weekly_read.py`: a Postgres failure raises so
-    the daily tick defers, because falling back to a store that is going to
-    stop being written would send a plausible week of zeros.
+    the daily tick defers, because a fallback to a store that has stopped
+    being written would send a plausible week of zeros. One engine since step
+    14's S14-07: `KS_READ_WEEKLY` is not read, and `store` is not asked —
+    it chose DuckDB's Gold and Silver before S14-07, and the callers still
+    hand it over.
     """
-    from core.sql_dialect import DUCKDB, POSTGRES, render_tables
-    from core import pg_weekly_read, read_fallback
+    from core.sql_dialect import POSTGRES, render_tables
+    from core import pg_weekly_read
 
-    params = list(params or [])
-    read_fallback.no_address("weekly_report", pg_weekly_read)
-    if pg_weekly_read.enabled() and pg_weekly_read.available():
-        rows = await pg_weekly_read.fetch(render_tables(sql, POSTGRES), params)
-        return (rows[0] if rows else None) if mode == "one" else rows
-
-    duck = render_tables(sql, DUCKDB)
-    async with store.connection() as conn:
-        cur = conn.execute(duck, params)
-        return cur.fetchone() if mode == "one" else cur.fetchall()
+    rows = await pg_weekly_read.fetch(render_tables(sql, POSTGRES), list(params or []))
+    return (rows[0] if rows else None) if mode == "one" else rows
 
 
 async def fetch_channels(
@@ -437,13 +428,9 @@ async def fetch_channels(
     # the roll-up row carries no source_id, so keeping it would filter to
     # nothing. Every other body in this module needs the predicate and this one
     # must not have it — which is why it is stated rather than left to inference.
-    from core.sql_dialect import DUCKDB, POSTGRES, channel_totals_items
-    from core import pg_weekly_read, read_fallback
+    from core.sql_dialect import POSTGRES, channel_totals_items
 
-    read_fallback.no_address("weekly_report", pg_weekly_read)
-    dialect = (POSTGRES if (pg_weekly_read.enabled() and pg_weekly_read.available())
-               else DUCKDB)
-    channels = channel_totals_items(dialect)
+    channels = channel_totals_items(POSTGRES)
     cols = ", ".join(f"{rev}, {orders}" for _name, rev, orders in channels)
 
     async def totals(a: date, b: date):

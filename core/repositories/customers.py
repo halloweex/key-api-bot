@@ -138,7 +138,7 @@ from core.sms_holdout import assign_arm
 from core.sms_refusals import SmsCampaignRefused
 from core.sql_dialect import (
     AT_RISK_TYPES, CLICKHOUSE_ANALYTICS, COHORT_LTV_TYPES,
-    COHORT_RETENTION_TYPES, DAYS_TO_SECOND_TYPES, DUCKDB_ANALYTICS,
+    COHORT_RETENTION_TYPES, DAYS_TO_SECOND_TYPES,
     ENHANCED_RETENTION_TYPES, at_risk_customers_select,
     cohort_ltv_select, cohort_retention_select, days_to_second_purchase_select,
     enhanced_cohort_retention_select,
@@ -1699,44 +1699,25 @@ class CustomersMixin:
     # writer on its way to another engine.
 
     async def _analytics_rows(self, render, params, types):
-        """Rows for one customer-analytics query, from whichever engine answers.
+        """Rows for one customer-analytics query, from ClickHouse.
 
-        ClickHouse when `KS_READ_COHORTS` says so and the store is configured,
-        DuckDB otherwise — and DuckDB again if ClickHouse faults, with an ERROR
-        in the log. That fallback is right here and wrong for `/sms`: nothing
-        diverges between these two, because ClickHouse holds a copy of Silver
-        and both engines read the same derived facts. ClickHouse is an optional
-        store in this architecture, so nothing may depend on it being up.
+        One path since step 14's S14-07: the ClickHouse read, and on any
+        failure a refusal — `read_fallback.refuse`, a 503 naming `cohorts`,
+        which is what `fall_back` and `no_engine` gave under
+        `KS_READ_FALLBACK=off`, production's mode since 2026-10-09. These
+        queries have no Postgres body, so ClickHouse is their one engine.
+        `KS_READ_COHORTS` is not read, and nothing here reaches for DuckDB;
+        without `KS_CH_URL` `ch_cohorts.fetch` raises and that is the refusal.
 
-        The engine is chosen before any connection is taken — a read bound for
-        another engine must not queue behind DuckDB's single writer (§34).
-
-        `render` takes an `AnalyticsDialect` and returns the SQL; one function
-        for both, so neither engine gets a body of its own.
-
-        Under `KS_READ_FALLBACK=off` a live ClickHouse is the only thing that
-        may answer (DN-20b): a failed read is refused by `fall_back`, and so
-        is a switch that does not name a configured ClickHouse at all. These
-        queries have no Postgres body, so DuckDB is the only other engine, and
-        after step 13 its Silver is frozen — the one thing `off` is there to
-        keep off a page. Under `duckdb`, the default, `no_engine` does nothing.
+        `render` takes an `AnalyticsDialect` and returns the SQL — one
+        function per body, so the engine never gets a body of its own.
         """
         from core import ch_cohorts
 
-        if ch_cohorts.enabled() and ch_cohorts.available():
-            try:
-                return await ch_cohorts.fetch(
-                    render(CLICKHOUSE_ANALYTICS), params, types,
-                )
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("cohorts", exc)
-        else:
-            read_fallback.no_engine(
-                "cohorts", f"{ch_cohorts.ENV} does not name a configured "
-                "ClickHouse, and cohorts have no Postgres body")
-
-        async with self.connection() as conn:
-            return conn.execute(render(DUCKDB_ANALYTICS), list(params)).fetchall()
+        try:
+            return await ch_cohorts.fetch(render(CLICKHOUSE_ANALYTICS), params, types)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("cohorts", exc)
 
     @asynccontextmanager
     async def _sms_tx(self):

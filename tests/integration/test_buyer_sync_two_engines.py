@@ -1,9 +1,15 @@
-"""Which buyers the hourly sync fetches — the same answer from both engines.
+"""Which buyers the hourly sync fetches — Postgres' answer, as DuckDB gave it.
 
-Silver and buyers are seeded directly and identically into both stores, so the
-selection is compared on its own rather than through a warehouse rebuild. Then
-the one place the engines are meant to differ: a buyer DuckDB stored and the
-mirror never shipped.
+Silver and buyers are seeded directly, so the selection is compared on its own
+rather than through a warehouse rebuild.
+
+ONE ENGINE SINCE STEP 14 (S14-07). `get_missing_buyer_ids` selects from
+Postgres alone. The expected lists below are what both engines answered on
+this fixture while the file compared them — DuckDB's answer, written out,
+which is rule 9's literal. The store is never connected and its DuckDB
+connection is a trap. The one difference the engines were meant to have — a
+buyer DuckDB stored and the mirror never shipped, fetched again from Postgres
+— went with DuckDB's selection: there is no DuckDB store to hold one.
 """
 from __future__ import annotations
 
@@ -14,8 +20,6 @@ from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
-
-from core.duckdb_store import DuckDBStore
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -39,6 +43,8 @@ BUYERS = [(10, "Олена"), (12, "")]
 COLUMNS = ("id, source_id, status_id, grand_total, ordered_at, buyer_id, manager_id,"
            " order_date, is_return, sales_type, is_active_source, source_name,"
            " is_new_customer, buyer_first_order_date, promocode")
+# What both engines selected, in their order.
+SELECTED = [13, 14, 11, 12]
 
 
 def _silver_rows():
@@ -50,82 +56,47 @@ def _silver_rows():
 
 
 @pytest_asyncio.fixture
-async def both_engines(tmp_path, monkeypatch):
+async def in_postgres(tmp_path, monkeypatch):
+    from tests.integration.pg_tab_seed import store_that_never_reaches_duckdb
+
     monkeypatch.setenv("KS_PG_DSN", DSN)
-    monkeypatch.delenv("KS_READ_BUYER_SYNC", raising=False)
-    store = DuckDBStore(db_path=tmp_path / "buyers.duckdb")
-    await store.connect()
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
-    rows = list(_silver_rows())
-    async with store.connection() as conn:
-        conn.executemany(
-            f"INSERT INTO silver_orders ({COLUMNS}) VALUES ({', '.join('?' * 15)})", rows)
-        conn.executemany("INSERT INTO buyers (id, full_name) VALUES (?, ?)", BUYERS)
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM silver.orders")
         await conn.execute("DELETE FROM bronze.buyers")
         await conn.executemany(
             f"INSERT INTO silver.orders ({COLUMNS}) VALUES "
-            f"({', '.join(f'${i}' for i in range(1, 16))})", rows)
+            f"({', '.join(f'${i}' for i in range(1, 16))})", list(_silver_rows()))
         await conn.executemany(
             "INSERT INTO bronze.buyers (id, full_name) VALUES ($1, $2)", BUYERS)
     try:
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)), \
              patch("core.pg.require_revision", new=AsyncMock()):
-            yield store, pool, monkeypatch
+            yield store_that_never_reaches_duckdb(tmp_path, monkeypatch, "the selection")
     finally:
         async with pool.acquire() as conn:
             await conn.execute("DELETE FROM silver.orders")
             await conn.execute("DELETE FROM bronze.buyers")
         await pool.close()
-        await store.close()
 
 
-async def _both(store, env, limit):
-    from core import pg_buyers_write
-    from tests.conftest import chains_on_duckdb
-
-    env.delenv("KS_READ_BUYER_SYNC", raising=False)
-    # Since step 14's S14-00 chain 4 writes Postgres whatever its flag says,
-    # and its selection follows it there; DuckDB's is asked on purpose.
-    with chains_on_duckdb(pg_buyers_write):
-        duck = await store.get_missing_buyer_ids(limit)
-    env.setenv("KS_READ_BUYER_SYNC", "postgres")
-
-    def _no_duckdb(*_a, **_k):
-        raise AssertionError("the selection reached DuckDB under KS_READ_BUYER_SYNC=postgres")
-
-    with patch.object(DuckDBStore, "connection", _no_duckdb):
-        postgres = await store.get_missing_buyer_ids(limit)
-    env.delenv("KS_READ_BUYER_SYNC", raising=False)
-    return duck, postgres
-
-
-class TestTheSelectionAgrees:
+class TestTheSelection:
     @pytest.mark.asyncio
-    async def test_the_whole_set_in_the_same_order(self, both_engines):
-        store, _pool, env = both_engines
-        duck, postgres = await _both(store, env, 100)
-        assert duck == postgres == [13, 14, 11, 12]
+    async def test_the_whole_set_in_order(self, in_postgres):
+        assert await in_postgres.get_missing_buyer_ids(100) == SELECTED
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("limit", [1, 2, 3])
-    async def test_the_limit_cuts_in_the_same_place(self, both_engines, limit):
+    async def test_the_limit_cuts_in_the_same_place(self, in_postgres, limit):
         """A limit of 2 cuts between 14 and 11, which are level on both keys."""
-        store, _pool, env = both_engines
-        duck, postgres = await _both(store, env, limit)
-        assert duck == postgres == [13, 14, 11, 12][:limit]
+        assert await in_postgres.get_missing_buyer_ids(limit) == SELECTED[:limit]
 
-
-class TestTheOneIntendedDifference:
     @pytest.mark.asyncio
-    async def test_a_buyer_the_mirror_never_shipped_is_fetched_again(self, both_engines):
-        """DuckDB stored buyer 11; Postgres never received it. From DuckDB it
-        looks done for good; from Postgres it is still missing, so the next
-        hour fetches it and the mirror gets another try."""
-        store, _pool, env = both_engines
-        async with store.connection() as conn:
-            conn.execute("INSERT INTO buyers (id, full_name) VALUES (11, 'Ігор')")
-        duck, postgres = await _both(store, env, 100)
-        assert 11 not in duck
-        assert 11 in postgres
+    async def test_a_buyer_the_landing_has_is_not_fetched_again(self, in_postgres):
+        """Once Postgres holds buyer 11 with a name, the next hour leaves it."""
+        from core import pg
+
+        pool = await pg.get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("INSERT INTO bronze.buyers (id, full_name) VALUES (11, 'Ігор')")
+        assert await in_postgres.get_missing_buyer_ids(100) == [13, 14, 12]

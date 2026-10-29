@@ -40,36 +40,26 @@ from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
 )
 from web.main import app
 
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant.
-    This module's subject is how a route reads its dates, not where its rows
-    live, and the routes that still have a DuckDB tail run against the
-    per-test DuckDB file. The goal routes read chain 7a's table, which
-    follows the chain to Postgres once it writes there; so this module keeps
-    DuckDB as that chain's store (`tests.conftest.route_chains_to_duckdb`)
-    until its DuckDB branch goes. (Chain 5 was here too, for `/api/returns`'
-    managers join, until step 14's S14-06 gave the dashboard one path.)"""
-    from core import pg_goals_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_goals_write)
-
-
-# The routers step 14's S14-05 and S14-06 left on Postgres alone, by the
+# The routers step 14's S14-05 to S14-07 left on Postgres alone, by the
 # module each reads through, and the routes they answer. Those routes are
 # answered by a real Postgres here; without one they refuse, and say so as a
-# skip.
+# skip. (A fixture kept chain 7a's goal table on DuckDB here until S14-07,
+# whose `_goals_run` reads Postgres whatever the chain says; no dated route
+# reads it.)
 POSTGRES_ONLY = ("pg_traffic_read", "pg_margin_read", "pg_products_intel_read",
                  "pg_reports_read", "pg_marketing_read", "pg_lookups_read",
-                 "pg_dashboard_read", "pg_silver_read")
+                 "pg_dashboard_read", "pg_silver_read",
+                 # `/expenses`, S14-07.
+                 "pg_expenses_read")
 POSTGRES_ONLY_ROUTES = ("/api/traffic/", "/api/margin/", "/api/products/intel/",
                         "/api/reports/", "/api/promocodes/analytics",
                         # The dashboard's, S14-06.
                         "/api/summary", "/api/revenue/trend", "/api/sales/by-source",
                         "/api/products/top", "/api/returns",
                         "/api/products/performance", "/api/brands/analytics",
-                        "/api/categories/breakdown", "/api/customers/insights")
+                        "/api/categories/breakdown", "/api/customers/insights",
+                        # `/expenses`, S14-07.
+                        "/api/expenses/")
 DSN = os.getenv("KS_PG_DSN")
 
 
@@ -121,6 +111,11 @@ def _postgres_only_routers_on_their_own_connections(monkeypatch):
 
     for module in POSTGRES_ONLY:
         monkeypatch.setattr(f"core.{module}.fetch", fetch)
+    # The expenses' history gate reads `meta.mirror_state` through the pool;
+    # the question here is the dates, so the history is across.
+    from core import pg_expenses_read
+
+    monkeypatch.setattr(pg_expenses_read, "backfilled", AsyncMock(return_value=True))
 
     def on_one_connection(reader):
         async def read(*args, **kwargs):
