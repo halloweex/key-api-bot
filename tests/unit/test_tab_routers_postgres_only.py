@@ -29,7 +29,9 @@ error as before. What is held here, without a database:
 - a router's failure is the refusal `fall_back` made under `off`: the
   surface, the count, the log line, the cause, and no fallback counted; so is
   no `KS_PG_DSN` (no `KS_CH_URL` for the cohorts), and the expenses' history
-  not across;
+  not across; chain 7a's `app.revenue_goals`, read raw before S14-07, is
+  refused the same way, and through the app that is a `read_refused` page
+  (an accepted change in failure mode);
 - a reader with no fallback lets its own error through, uncounted, as it
   did;
 - no reader module carries `ENV`, `enabled` or `available`, and
@@ -55,6 +57,10 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core import read_fallback
+from tests.unit.test_read_fallback_sites import (  # noqa: F401 — fixtures
+    admin_client,
+    fresh_read_fallback,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -86,6 +92,13 @@ def _goals(store):
     return store._goals_run("SELECT 1 FROM {silver_orders} s WHERE s.id = ?", [7])
 
 
+def _stored_goals(store):
+    """Chain 7a's table, which `_goals_run` read raw — uncounted, a 500 on a
+    failure — until S14-07 (`pg_goals_write.reads_the_chain`)."""
+    return store._goals_run(
+        "SELECT 1 FROM {revenue_goals} WHERE period_type = ?", [7])
+
+
 def _goal_tables(store):
     return store._goal_tables_run("SELECT 1 FROM {seasonal_indices} WHERE month = ?", [7])
 
@@ -105,6 +118,8 @@ ROUTERS = [
     ("_inventory_rows", "inventory", "pg_inventory_read", "fetch_many", _inventory,
      "app.sku_inventory_status"),
     ("_goals_run", "goals", "pg_goals_read", "fetch", _goals, "silver.orders"),
+    ("_goals_run (chain 7a)", "goals", "pg_goals_read", "fetch", _stored_goals,
+     "app.revenue_goals"),
     ("_goal_tables_run", "goals", "pg_goals_read", "fetch", _goal_tables,
      "app.seasonal_indices"),
     ("_analytics_rows", "cohorts", "ch_cohorts", "fetch", _cohorts, "silver.orders"),
@@ -278,6 +293,41 @@ class TestAFailureIsTheRefusalOffMade:
         # That the gate names `bronze.expenses` rather than importing it from
         # the backfill module is `tests/unit/test_pg_expenses_read.py`'s.
         assert await _manual(store) == [(1,)]
+
+
+class TestChain7aAFailedReadPages:
+    """An accepted change in failure mode (the review of S14-07, decided):
+    a failed read of chain 7a's `app.revenue_goals` — `GET /api/goals`, the
+    smart goal's goals block — was let through raw before S14-07, an
+    uncounted 500 that paged nothing; it is the counted 503 naming `goals`
+    now, published under `read_fallback_mode.refused`, and the canary pages
+    `read_refused` (WARN) when it is the only read that fails. The same
+    change S14-05 made for /marketing's goal line and S14-06 for the returns
+    list. Mutation: read the chain's table raw again."""
+
+    def test_only_the_stored_goals_failing_is_a_counted_503_and_a_page(
+        self, admin_client, fresh_read_fallback, monkeypatch,
+    ):
+        from bot import canary
+        from core import pg_goals_read
+
+        async def fetch(sql, params):
+            if "app.revenue_goals" in sql:
+                raise OSError('relation "app.revenue_goals" does not exist')
+            return []
+
+        monkeypatch.setattr(pg_goals_read, "fetch", fetch)
+
+        response = admin_client.get("/api/goals")
+        assert response.status_code == 503, response.text
+        assert response.json()["surface"] == "goals"
+
+        health = admin_client.get("/api/health").json()
+        assert health["read_fallback_mode"]["refused"]["goals"]["count"] == 1
+        assert health["read_fallbacks"] == {}
+        [(key, message)] = canary.check_read_refusals(health)
+        assert key == "read_refused"
+        assert message.startswith(canary.READ_REFUSED_LINE + "goals ×1")
 
 
 # (reader, module, function it calls, how to call it)
