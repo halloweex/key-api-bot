@@ -7,6 +7,7 @@
 
 pub mod access;
 pub mod expenses;
+pub mod goals;
 pub mod gold;
 pub mod health;
 mod http;
