@@ -81,12 +81,6 @@ HOST_ENTRIES: Dict[str, str] = {
     "scripts/compact_duckdb.py:main": (
         "the Sunday compaction's sidecar; refused under off before the "
         "driver runs, its cron line retired at the start of the week"),
-    "scripts/weekly_report_preview.py:main": (
-        "a preview on a phone: reads Postgres through the weekly jobs' own "
-        "readers, refuses without their switch at postgres and KS_PG_DSN, and "
-        "hands them a store that refuses to connect (S14-03). The walk still "
-        "reaches the DuckDB branch of `core/weekly_report.py:_weekly_run`, the "
-        "job's own reader; this pin goes when S14-07 removes that branch"),
 }
 
 # Entries no production code calls. Kept, not deleted: OD-11 forbids
