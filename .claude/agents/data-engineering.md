@@ -433,53 +433,15 @@ HAVING cnt > 1;
 
 ## Resync Procedure
 
-### When to Resync
-- Data inconsistency detected
-- Schema changes
-- After KeyCRM data corrections
+A resync is `POST /api/duckdb/resync` (admin, `web/routes/api/admin.py`), which
+calls `core.sync_service.force_resync` and rewrites the window in place through
+the write chains. The CLI that did the same (`scripts/force_resync.py`) and the
+per-date DuckDB-against-KeyCRM check (`scripts/check_date.py`) were deleted in
+step 14's S14-03. Whether the stores agree with KeyCRM is the daily
+`dq_reconciliation` (90 days, every store, one fetch); `POST /api/reconcile`
+runs it over any window now.
 
-### Steps
-
-```bash
-# 1. Stop sync service
-docker-compose stop web
-
-# 2. Backup current DB
-cp data/analytics.duckdb data/analytics_backup_$(date +%Y%m%d).duckdb
-
-# 3. Run resync
-PYTHONPATH=. python scripts/force_resync.py --days 365
-
-# 4. Verify
-PYTHONPATH=. python scripts/check_date.py 2024-01-15
-
-# 5. Restart
-docker-compose start web
-```
-
-### Resync Script
-
-```python
-# scripts/force_resync.py
-async def main(days: int):
-    store = DuckDBStore("data/analytics_new.duckdb")
-    keycrm = KeyCRMClient()
-
-    # Full sync to new DB
-    await full_sync(store, keycrm, days=days)
-
-    # Verify
-    result = await validate_sync(store, keycrm)
-    if not result.is_valid:
-        print("Validation failed!")
-        return
-
-    # Swap databases
-    os.rename("data/analytics.duckdb", "data/analytics_old.duckdb")
-    os.rename("data/analytics_new.duckdb", "data/analytics.duckdb")
-
-    print("Resync complete!")
-```
+Never copy `data/analytics.duckdb` by hand: see `.claude/CLAUDE.md`.
 
 ---
 
@@ -553,11 +515,8 @@ import asyncio
 asyncio.run(SyncService().incremental_sync())
 "
 
-# Force full resync
-PYTHONPATH=. python scripts/force_resync.py --days 365
-
-# Validate specific date
-PYTHONPATH=. python scripts/check_date.py 2024-01-15
+# Force full resync: POST /api/duckdb/resync (admin)
+# Compare the stores with KeyCRM over a window: POST /api/reconcile (admin)
 
 # DuckDB CLI — read-only, for the reason duckdb_switch.open_file gives
 duckdb -readonly data/analytics.duckdb

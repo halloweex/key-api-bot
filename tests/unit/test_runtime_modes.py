@@ -183,16 +183,16 @@ class TestScriptsConfigureBeforeTheyWrite:
         return out
 
     def test_the_walk_finds_the_scripts_that_write(self):
-        """Two today, and the second is why the walk was written rather than a
-        list typed out. `force_resync.py` reaches `upsert_orders` through the
-        sync service. `backfill_utm.py` was named here as the near miss — it
+        """The walk was written rather than a list typed out, and
+        `backfill_utm.py` is why. (`force_resync.py`, which reached
+        `upsert_orders` through the sync service, was the first; S14-03
+        deleted it.) `backfill_utm.py` was named here as the near miss — it
         rewrote `manager_comment` in DuckDB with a plain `UPDATE` and reached
         Postgres only through `ship_after_reparse`, whose table no derivation
         reads. DN-17 gave it `ship_orders_by_id`, so it writes `bronze.orders`
         now, and this walk found it on the first run rather than a reviewer
         finding it later."""
         found = self._scripts()
-        assert "force_resync.py" in found, sorted(found)
         assert "backfill_utm.py" in found, sorted(found)
         # Chain 4: the gender derivation's CLI routes by the chain's latch.
         assert "backfill_gender.py" in found, sorted(found)
