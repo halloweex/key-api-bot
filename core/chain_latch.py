@@ -65,21 +65,25 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, FrozenSet, Mapping, Optional, Sequence
 
-from core.duckdb_constants import DB_DIR
+# The two file primitives moved to `core.atomic_file` in step 14's S14-01,
+# unchanged. The private names stay bound to them here: `latch` and `release`
+# call them, the suite patches them here, and they keep any caller of the old
+# names working for one release.
+from core.atomic_file import fsync_dir as _fsync_dir
+from core.atomic_file import write_atomic as _write_marker
+from core.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
 # Beside the DuckDB file, resolved the same way it is — `./data` is the one
 # directory both containers mount and the only one the web container (uid 999)
 # is known to be able to write, because it writes the database there.
-MARKER_DIR: Path = DB_DIR / "write-chain-owners"
+MARKER_DIR: Path = DATA_DIR / "write-chain-owners"
 
 # The prefix the audit copy lives under in `meta.chain_watermarks`. Revision
 # 0032's table is reused rather than a new one migrated: it already exists to
@@ -207,38 +211,6 @@ def release(chain: str) -> bool:
         _fsync_dir(MARKER_DIR)
     _cache().pop(chain, None)
     return removed
-
-
-def _fsync_dir(path: Path) -> None:
-    """Push a directory entry — a create or an unlink — to the disk itself."""
-    dir_fd = os.open(str(path), os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
-
-
-def _write_marker(path: Path, payload: str) -> None:
-    """Temp file, fsync, rename, fsync the directory.
-
-    The marker decides where a chain's writes go for the rest of the machine's
-    life, so a half-written one is worse than none: `_stamp_of` would have to
-    guess, and a rename that never reached the disk would unlatch the chain on
-    the next power cut. This is the arrangement the rest of the repository uses
-    where a file is a decision rather than a cache.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-    _fsync_dir(path.parent)
 
 
 def owner_key(table: str) -> str:

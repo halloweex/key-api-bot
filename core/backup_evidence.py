@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from core.duckdb_constants import DB_DIR
+from core.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ def _parse(path: Path) -> Optional[Marker]:
 
 
 def _directory(base: Optional[Path]) -> Path:
-    return base if base is not None else DB_DIR
+    return base if base is not None else DATA_DIR
 
 
 def read_markers(base: Optional[Path] = None) -> Tuple[Optional[Marker], Optional[Marker],

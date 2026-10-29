@@ -66,13 +66,13 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, List, Optional, Sequence
 
-from core.duckdb_constants import DB_DIR
+from core.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
 # Beside the latch markers, for their reason: `./data` is the directory both
 # containers mount and the web container can write.
-SPOOL_DIR: Path = DB_DIR / "report-ledger-pending"
+SPOOL_DIR: Path = DATA_DIR / "report-ledger-pending"
 
 # Seconds before each attempt after the first — ~12 s in all, inside the job.
 RETRY_DELAYS: Sequence[float] = (0, 2, 10)
@@ -148,10 +148,10 @@ def _spool_path(chain_name: str, week_start: date, sales_type: str) -> Path:
 def spool(chain_name: str, week_start: date, sales_type: str, revenue: Decimal,
           orders: int, sent_at: datetime) -> Path:
     """Write the pending row durably. Raises if it cannot."""
-    from core.chain_latch import _write_marker
+    from core.atomic_file import write_atomic
 
     path = _spool_path(chain_name, week_start, sales_type)
-    _write_marker(path, json.dumps({
+    write_atomic(path, json.dumps({
         "week_start": week_start.isoformat(), "sales_type": sales_type,
         "revenue": str(revenue), "orders": int(orders),
         "sent_at": sent_at.isoformat(),

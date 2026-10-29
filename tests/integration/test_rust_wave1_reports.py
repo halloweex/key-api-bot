@@ -169,16 +169,9 @@ DIVERGENCES: Dict[str, Divergence] = {
         ", so validate_limit refuses it as over the cap")),
     "source_id past 64 bits": Divergence(400, 422, _WIDTH.format(
         ", so validate_source_id refuses it as no source")),
-    # A Python defect, described in the PR and not fixed: the category tree
-    # binds the id against `bronze.categories.id`, an integer; asyncpg
-    # refuses the bind, `_lookups_run` reads that as the engine failing, and
-    # the 503 counts a refusal (`read_refused` on the canary). Rust asks
-    # Postgres with an int8 and is told no category has that id.
-    "category_id past int32": Divergence(503, 200, (
-        "Python's int reaches asyncpg as an int4 bind and overflows, answered "
-        "as Postgres unreadable; Rust binds an int8 and finds no such category")),
-    "category_id past 64 bits": Divergence(503, 422, _WIDTH.format(
-        " and overflows the bind the same way")),
+    # Not listed since #335: a category_id past int32, or past 64 bits, is
+    # validate_category_id's 400 on both sides; BAD_INPUT compares it byte
+    # for byte.
     "brand with a combining mark": Divergence(400, 200, (
         "validate_brand_name's \\w is str.isalnum(); Rust's char::is_alphanumeric "
         "also takes Unicode's Other_Alphabetic marks — a Devanagari vowel sign, "
@@ -492,3 +485,25 @@ async def test_hostile_input_differs_only_where_listed(pair):
     unlisted, stale = rust_wave1.judge_hostile(answers, DIVERGENCES)
     assert not unlisted, "differences no entry lists:\n" + "\n".join(unlisted)
     assert not stale, f"entries that no longer hold: {stale}"
+
+
+# #335's 400s, byte for byte: a category past `bronze.categories.id`'s int32
+# and past 64 bits, on the reports' order of checks and on the marketing
+# routes' own; and a NUL anywhere in the query, which the middleware refuses
+# before routing.
+BAD_INPUT = ((SUMMARY, "category_id=2147483648"), (SUMMARY, "category_id=99999999999999999999"),
+             (TOP, "category_id=-99999999999999999999"), (ALL_PRODUCTS, "category_id=3000000000"),
+             (MONTHLY, "category_id=2147483648"),
+             (MONTHLY, "sales_type=retail&category_id=99999999999999999999"),
+             (SUMMARY, "brand=a%00b"), (TOP, "period=%00"), (MONTHLY, "x=%00"))
+
+
+@pytest.mark.asyncio
+async def test_bad_input_is_the_same_400_byte_for_byte(pair):
+    rows = []
+    for path, query in BAD_INPUT:
+        py, rs = await pair.ask(path, query)
+        rows.append((f"{path}?{query}", py.status_code, rust_wave1.difference(py, rs)))
+    differences = REPORT.phase("bad_input", rows)
+    assert not differences, "\n".join(differences)
+    assert {status for _, status, _ in rows} == {400}

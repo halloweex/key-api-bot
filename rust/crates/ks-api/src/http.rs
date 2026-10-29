@@ -109,6 +109,7 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .fallback(dispatch)
+        .layer(middleware::from_fn(reject_nul))
         .layer(middleware::from_fn(observe))
         .layer(CatchPanicLayer::custom(panicked))
         .with_state(Arc::new(state))
@@ -584,6 +585,62 @@ fn correlation_id() -> String {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let hash = KEYS.get_or_init(RandomState::new).hash_one(n);
     format!("{:08x}", hash >> 32)
+}
+
+/// `RejectNulMiddleware`: an `/api/` request with a NUL in its path or its
+/// query string is a 400 before routing, before anything reads a session.
+/// It sits inside `observe`, as Python's sits inside the logging middleware.
+async fn reject_nul(request: Request, next: Next) -> Response {
+    if let Some(at) = nul_in(request.uri()) {
+        let detail = format!("{at}: Must not contain a NUL character");
+        return json(
+            StatusCode::BAD_REQUEST,
+            &ErrorBody {
+                error: "Validation Error",
+                detail: &detail,
+                surface: None,
+            },
+        );
+    }
+    next.run(request).await
+}
+
+/// `_nul_in`: `path` when the decoded path holds a NUL, `query` when the raw
+/// query string holds `%00` or a NUL — for a decoded path under `/api/`.
+fn nul_in(uri: &Uri) -> Option<&'static str> {
+    let path = unquoted(uri.path());
+    if !path.starts_with(b"/api/") {
+        return None;
+    }
+    if path.contains(&0) {
+        return Some("path");
+    }
+    let query = uri.query().unwrap_or("");
+    (query.contains("%00") || query.contains('\0')).then_some("query")
+}
+
+/// The raw path as uvicorn's `unquote` reads it, in bytes: each `%XX` one
+/// byte, anything else as it stands.
+fn unquoted(raw: &str) -> Vec<u8> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(hi), Some(lo)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// `RequestLoggingMiddleware` and `RequestTimeoutMiddleware` in one.

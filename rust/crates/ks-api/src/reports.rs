@@ -82,7 +82,8 @@ struct Query {
     start_date: Option<String>,
     end_date: Option<String>,
     source_id: Option<i64>,
-    category_id: Option<i64>,
+    /// Kept past 64 bits: `validate_category_id` refuses it with its value.
+    category_id: Option<PyInt>,
     brand: Option<String>,
     sales_type: String,
     limit: i64,
@@ -104,6 +105,31 @@ fn int(raw: String, name: &'static str, errors: &mut Vec<FieldError>) -> Option<
         input: Some(raw),
     });
     None
+}
+
+/// As `int`, but past 64 bits the digits Python's int would hold, for the
+/// category validator to refuse as Python's does (#335).
+fn int_or_big(raw: String, name: &'static str, errors: &mut Vec<FieldError>) -> Option<PyInt> {
+    match lax_int(&raw) {
+        Ok(v) => Some(v),
+        Err(kind) => {
+            errors.push(FieldError {
+                kind,
+                loc: ("query", name),
+                msg: int_message(kind),
+                input: Some(raw),
+            });
+            None
+        }
+    }
+}
+
+/// The category once its validator has passed it: an int32, as an `i64`.
+fn small(id: &Option<PyInt>) -> Option<i64> {
+    match id {
+        Some(PyInt::Small(v)) => Some(*v),
+        _ => None,
+    }
 }
 
 fn parse(route: Route, raw: &str) -> Result<Query, Failure> {
@@ -135,7 +161,8 @@ fn parse(route: Route, raw: &str) -> Result<Query, Failure> {
         (false, Some(raw)) => int(raw, "source_id", &mut errors),
         _ => None,
     };
-    let category_id = take("category_id").and_then(|raw| int(raw, "category_id", &mut errors));
+    let category_id =
+        take("category_id").and_then(|raw| int_or_big(raw, "category_id", &mut errors));
     let brand = take("brand");
     let sales_type = take("sales_type").unwrap_or_else(|| "retail".to_owned());
     let limit = match (route, take("limit")) {
@@ -185,7 +212,7 @@ fn reports_window(q: &Query, now: DateTime<Utc>) -> Result<Window, Failure> {
     let bad = Failure::BadRequest;
     validate::period(q.period.as_deref()).map_err(bad)?;
     validate::source_id(q.source_id.map(PyInt::Small).as_ref()).map_err(bad)?;
-    validate::category_id(q.category_id.map(PyInt::Small).as_ref()).map_err(bad)?;
+    validate::category_id(q.category_id.as_ref()).map_err(bad)?;
     let brand = validate::brand_value(q.brand.as_deref()).map_err(bad)?;
     let sales_type = validate::sales_type(&q.sales_type).map_err(bad)?;
     let (start, end) = dates(q, now)?;
@@ -193,7 +220,7 @@ fn reports_window(q: &Query, now: DateTime<Utc>) -> Result<Window, Failure> {
         start,
         end,
         source_id: q.source_id,
-        category_id: q.category_id,
+        category_id: small(&q.category_id),
         brand,
         sales_type,
     })
@@ -207,14 +234,14 @@ fn marketing_window(q: &Query, now: DateTime<Utc>) -> Result<Window, Failure> {
     if q.period.as_deref().is_some_and(|p| !p.is_empty()) {
         validate::period(q.period.as_deref()).map_err(bad)?;
     }
-    validate::category_id(q.category_id.map(PyInt::Small).as_ref()).map_err(bad)?;
+    validate::category_id(q.category_id.as_ref()).map_err(bad)?;
     let brand = validate::brand_value(q.brand.as_deref()).map_err(bad)?;
     let (start, end) = dates(q, now)?;
     Ok(Window {
         start,
         end,
         source_id: None,
-        category_id: q.category_id,
+        category_id: small(&q.category_id),
         brand,
         sales_type,
     })
@@ -1533,10 +1560,8 @@ mod tests {
             )
             .is_empty()
         );
-        assert_eq!(
-            kinds(Route::Summary, "category_id=99999999999999999999"),
-            [("int_parsing", "category_id")]
-        );
+        // Past 64 bits a category parses, and its validator refuses it (#335).
+        assert!(kinds(Route::Summary, "category_id=99999999999999999999").is_empty());
         // What a route does not declare, FastAPI never reads.
         assert!(kinds(Route::Marketing, "source_id=x&limit=y&type=z").is_empty());
         assert!(kinds(Route::AllProducts, "limit=y").is_empty());
