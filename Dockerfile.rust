@@ -1,12 +1,17 @@
-# The Rust pilot (rust/README.md): one endpoint, never deployed. Nothing in
-# docker-compose.yml or the deploy workflow builds or runs this image.
+# The Rust pilot (rust/README.md): one endpoint and the access layer in
+# front of every route, never deployed. Nothing in docker-compose.yml or the
+# deploy workflow builds or runs this image.
 #
 # Built with `rust/` as the context, not the repository root:
 #
 #     docker build -f Dockerfile.rust -t ks-rust-pilot rust
+#     docker build -f Dockerfile.rust --target harness -t ks-rust-pilot-harness rust
 #     docker build -f Dockerfile.rust --target loadgen -t ks-rust-loadgen rust
 #
-# so nothing outside the workspace can reach the image.
+# so nothing outside the workspace can reach the image. The default target is
+# the service. `harness` is the same code with the `test-clock` feature, the
+# only build in which `X-Pilot-Now` moves the trend's "today" — the service
+# image has no such door, and neither image has one into the session check.
 #
 # Base images pinned by digest, `Dockerfile.web`'s rule for its reasons. The
 # builder is `rust/rust-toolchain.toml`'s version; CI fails if they part.
@@ -21,6 +26,8 @@ WORKDIR /src
 # have rustup fetch rustfmt and clippy, which a release build never runs.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+# The route-to-gate table, exported from the Python app and embedded at build.
+COPY contract/ contract/
 
 # The registry and target/ live in BuildKit cache mounts: a warm rebuild
 # recompiles the crate that changed, not its 200 dependencies.
@@ -30,11 +37,24 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked -p ks-api \
     && install -D target/release/ks-api /out/ks-api
 
+FROM source AS build-harness
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    cargo build --release --locked -p ks-api --features test-clock \
+    && install -D target/release/ks-api /out/ks-api
+
 FROM source AS build-loadgen
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/src/target,sharing=locked \
     cargo build --release --locked -p ks-loadgen \
     && install -D target/release/ks-loadgen /out/ks-loadgen
+
+# The harness's build of the service: the trend's clock can be frozen.
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS harness
+COPY --from=build-harness /out/ks-api /usr/local/bin/ks-api
+ENV KS_PILOT_LISTEN=0.0.0.0:8090
+EXPOSE 8090
+ENTRYPOINT ["/usr/local/bin/ks-api"]
 
 # The benchmark's client. Its own target, so the service image never carries it.
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f AS loadgen
@@ -46,7 +66,8 @@ ENTRYPOINT ["/usr/local/bin/ks-loadgen"]
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 COPY --from=build-api /out/ks-api /usr/local/bin/ks-api
 # All interfaces of the container's own namespace. Reach it over an internal
-# network or a port published on 127.0.0.1: it checks nobody's session.
+# network or a port published on 127.0.0.1: it checks sessions as the app
+# does, and it is still a pilot nobody has reviewed for exposure.
 ENV KS_PILOT_LISTEN=0.0.0.0:8090
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/ks-api"]
