@@ -3596,7 +3596,12 @@ Gold readers (`_pg_gold_summary`, `_pg_gold_series`), the Silver escapes of
 screen's year (`get_manager_sales_365d`, surface `managers`) take the same
 one path, and `KS_READ_GOLD`, `KS_READ_SILVER` and `KS_READ_DASHBOARD` route
 nothing. Rule 5 holds any function in `core/repositories/` that refuses, not
-only a `_*_run`. Routing that was DuckDB's Gold stays: a source other than 1,
+only a `_*_run`. A reader calling Postgres round them would answer a failure
+with an uncounted 500, which neither rule 5 nor a refusal count sees: the
+walk that holds /traffic's readers to their router holds `revenue.py` to its
+routers and those four helpers (`test_dashboard_routers_postgres_only.py`),
+and the HTTP sweep holds every dashboard route to the 503, as it holds
+/traffic's. Routing that was DuckDB's Gold stays: a source other than 1,
 2 and 4 never reaches Gold — the trend answers it from Silver's order grain,
 the summary with zeros (owner's decision 5 for step 14). The returns list's
 `{managers}` join took a branch of its own while chain 5 wrote Postgres; a
