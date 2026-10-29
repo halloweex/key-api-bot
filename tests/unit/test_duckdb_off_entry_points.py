@@ -78,9 +78,6 @@ HOST_ENTRIES: Dict[str, str] = {
     "scripts/backfill_utm.py:backfill_utm": (
         "re-parses in Postgres alone under step 13 (PR-6); the store is "
         "unconnected under off"),
-    "scripts/chain_copy_back.py:main": (
-        "the way back; refused under off, exit 2 (PR-0) — `-e KS_DUCKDB=on` "
-        "is the decision to restart both clocks"),
     "scripts/compact_duckdb.py:main": (
         "the Sunday compaction's sidecar; refused under off before the "
         "driver runs, its cron line retired at the start of the week"),

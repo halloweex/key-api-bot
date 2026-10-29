@@ -209,7 +209,12 @@ class TestTheOneAnswerEveryConsumerReads:
         for field in sorted(published - {"env", "mode", "error"}):
             assert re.search(rf"\b{re.escape(field)}\b", described), \
                 f"{field} is published and undescribed"
-        assert "chain_copy_back" in described, "the way back is not named"
+        # The way back is the rollback image since step 14's S14-04, which
+        # deleted the copy-back this line used to name.
+        from core.rollback_lever import ROLLBACK_LEVER
+
+        assert ROLLBACK_LEVER.lower() in described.lower(), "the way back is not named"
+        assert "chain_copy_back" not in described
 
     def test_the_health_block_answers_without_postgres(self, flags):
         """The other disagreement — marker against owner row — is deliberately
@@ -708,9 +713,10 @@ class TestEveryWriterLatchesFirst:
     def test_and_none_of_them_latches_before_the_connection(self, module):
         """The window between the two calls is the whole point.
 
-        The latch is permanent — only `scripts/chain_copy_back.py` releases it
-        — so taking it for a write that never reaches Postgres spends a
-        rollback that is still available. Postgres restarting, the pool being
+        The latch is permanent — `scripts/chain_copy_back.py` was the only
+        thing that released it, until step 14's S14-04 deleted it — so taking
+        it for a write that never reaches Postgres spent a rollback that was
+        still available. Postgres restarting, the pool being
         exhausted and `require_revision` raising because `web` came up ahead of
         `migrate` are all ordinary events; reproduced against a live database,
         each of them latched the chain with zero rows written.
@@ -838,7 +844,10 @@ class TestTheCanaryJudgesThePublishedBlock:
 
         assert result.severity == "warn"
         assert "write_chain_flag_mismatch" in result.failure_keys
-        assert "chain_copy_back" in canary.format_alert(result, DASHBOARD)
+        from core.rollback_lever import ROLLBACK_LEVER
+
+        said = canary.format_alert(result, DASHBOARD)
+        assert ROLLBACK_LEVER in said and "chain_copy_back" not in said
 
 
 class TestTheLatchIsWhatTheStoreRoutesOn:

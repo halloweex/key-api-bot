@@ -340,9 +340,9 @@ async def backfill_mirror_catalogue(
             status_code=409,
             detail=(
                 f"{', '.join(sorted(moved))} is written by a write chain, not "
-                "shipped by the mirror; a row only DuckDB holds is the copy-back "
-                "handover's to decide now (scripts/chain_copy_back.py catalogue "
-                "--handover)."
+                "shipped by the mirror; a row only DuckDB holds stays there, "
+                "since nothing in a step-14 image carries it (the copy-back "
+                "and its handover went with S14-04)."
             ),
         )
 

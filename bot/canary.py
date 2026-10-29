@@ -27,6 +27,10 @@ from urllib.parse import urlparse
 
 import httpx
 
+# The ownership lever since step 14's S14-04 (a module with no imports of its
+# own: this one must not import the latch module, `test_chain_latch.py`).
+from core.rollback_lever import ROLLBACK_LEVER
+
 logger = logging.getLogger(__name__)
 
 # ─── Tunables ───────────────────────────────────────────────────────────────
@@ -474,8 +478,9 @@ def check_write_chain_latch(payload: Optional[dict]) -> "list[tuple[str, str]]":
     Warn, not critical: nothing is failing. The writes go where the rows are,
     which is the safe answer and the deliberate one — but somebody has edited
     a variable expecting a rollback that did not happen, and the shipper is
-    stamping those tables failing meanwhile. The only way back is
-    `scripts/chain_copy_back.py`.
+    stamping those tables failing meanwhile. Since step 14 no flag routes
+    (S14-00) and no copy-back exists (S14-04): the lever is
+    `core.rollback_lever.ROLLBACK_LEVER`, as for every ownership page.
 
     Judged from the published block alone, and not from the marker files —
     which this container *can* see, since `docker-compose.yml` mounts the same
@@ -1168,7 +1173,9 @@ def check_warehouse_way_back_refused(payload: Optional[dict]) -> "list[tuple[str
 
     Pages: either somebody asked for the way back and did not get it, or a
     start with a precondition unmet took it on its own; both need a person,
-    and the lever is not the way back's — the chains are copied back first.
+    and the lever is not the way back's. It was to copy the chains back
+    first; since step 14's S14-04 nothing does, and the action names
+    `core.rollback_lever.ROLLBACK_LEVER`.
     Web serves. Postgres derives only on its own signal: under any other
     KS_PG_DERIVE its rebuild rides the DuckDB tick, which a `postgres` start
     does not run, so then NOTHING derives and the message says so — read
@@ -1748,8 +1755,9 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("cert_unreachable", "TLS handshake fails: nginx or the network, not the app"),
     ("warehouse_preconditions_unmet",
      "After a flip this IS the way back (full DuckDB rebuild). Meet each cutover.unmet on /api/warehouse/status or unset KS_WRITE_WAREHOUSE; recreate web"),
-    ("warehouse_way_back_refused",
-     "Copy the named chains back first (scripts/chain_copy_back.py, chain 5 before chain 3), then recreate web for the way back; nothing derives meanwhile unless KS_PG_DERIVE=own"),
+    # Since step 14 nothing copies a chain back (S14-04): the way back from
+    # step 13 is an image from before step 14, and only after its checks.
+    ("warehouse_way_back_refused", f"{ROLLBACK_LEVER} (CLAUDE.md)"),
     # After step 13's: when it is held, `warehouse_postgres` is its symptom.
     # The host's sidecars read `.env`, not the verdict, so a hold also stops
     # the nightly snapshot and the Sunday compaction of the file web writes
@@ -1768,7 +1776,7 @@ _ACTIONS: tuple[tuple[str, str], ...] = (
     ("buyer_sync_",
      "grep web's log for 'Buyer' and 'Incremental sync'; 'step not reached' means the whole tick stops"),
     ("write_chain_flag_mismatch",
-     "Set the named KS_WRITE_* back to postgres, or run scripts/chain_copy_back.py to hand the tables back"),
+     f"Set KS_WRITE_* to postgres. {ROLLBACK_LEVER}"),
     ("read_fallback_mode_invalid",
      "Set KS_READ_FALLBACK to duckdb or off in .env, then recreate web"),
     ("warehouse_mode_invalid",
