@@ -41,6 +41,7 @@ import type {
   RestockAlert,
   TrafficAnalyticsResponse,
   TrafficOrganicResponse,
+  TrafficPixelOnlyResponse,
   UtmCampaignsResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
@@ -131,6 +132,7 @@ export const queryKeys = {
   // Traffic analytics
   trafficAnalytics: (params: string) => ['trafficAnalytics', params] as const,
   trafficOrganic: (params: string) => ['trafficOrganic', params] as const,
+  trafficPixelOnly: (params: string) => ['trafficPixelOnly', params] as const,
   trafficTrend: (params: string) => ['trafficTrend', params] as const,
   trafficTransactions: (params: string) => ['trafficTransactions', params] as const,
   trafficROAS: (params: string) => ['trafficROAS', params] as const,
@@ -639,6 +641,16 @@ export function useTrafficOrganic() {
   return useQuery<TrafficOrganicResponse>({
     queryKey: queryKeys.trafficOrganic(queryParams),
     queryFn: () => api.getTrafficOrganic(queryParams),
+    staleTime: CACHE_TTL.STANDARD,
+  })
+}
+
+export function useTrafficPixelOnly() {
+  const queryParams = useQueryParams()
+
+  return useQuery<TrafficPixelOnlyResponse>({
+    queryKey: queryKeys.trafficPixelOnly(queryParams),
+    queryFn: () => api.getTrafficPixelOnly(queryParams),
     staleTime: CACHE_TTL.STANDARD,
   })
 }

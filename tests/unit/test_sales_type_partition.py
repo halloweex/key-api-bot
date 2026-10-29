@@ -371,7 +371,7 @@ class TestSilverHasOneDefinition:
         ):
             assert fragment not in source, (
                 f"admin.py restates {what} instead of importing it from "
-                "core/duckdb_store.py. That duplicate drifted once already."
+                "core/warehouse_sql.py. That duplicate drifted once already."
             )
 
     def test_every_revenue_source_is_a_synced_source(self):

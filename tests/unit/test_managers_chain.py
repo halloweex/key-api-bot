@@ -1366,6 +1366,8 @@ class TestTheRouteAnswersWhatHappened:
     def test_a_refusal_postgres_never_saw_is_422_not_503(self, route, flags, monkeypatch):
         """A note carrying NUL, refused by the writer before Postgres is asked
         (the review's reproduction answered 503 "Postgres did not answer").
+        Handed to the writer here, because a NUL in the query string no longer
+        reaches the route: the edge answers it 400 (the test below).
         Mutation: drop the route's `ClassificationRefused` mapping."""
         from unittest.mock import AsyncMock
 
@@ -1379,12 +1381,32 @@ class TestTheRouteAnswersWhatHappened:
             async def set_manager_retail_status(self, manager_id, is_retail, **kw):
                 await pg_managers_write.set_manager_retail_status(
                     manager_id, is_retail, kw["effective_from"], kw["set_by"],
-                    kw["note"], set_at=T0)
+                    "a\x00b", set_at=T0)
 
-        res = route(_Writing()).post(self.PATH + "&effective_from=2026-10-07&note=a%00b")
+        res = route(_Writing()).post(self.PATH + "&effective_from=2026-10-07&note=ok")
         assert res.status_code == 422, res.text
         assert "note carries NUL" in res.json()["detail"]
         assert "a\x00b" not in res.text
+        get_pool.assert_not_awaited()
+
+    def test_a_nul_in_the_query_string_is_refused_at_the_edge(self, route, flags, monkeypatch):
+        """`RejectNulMiddleware` answers it 400 before routing: neither the
+        writer nor Postgres is asked."""
+        from unittest.mock import AsyncMock
+
+        from core import chain_latch, pg_managers_write
+
+        chain_latch.latch(pg_managers_write.CHAIN)
+        get_pool = AsyncMock(side_effect=AssertionError("Postgres was asked"))
+        monkeypatch.setattr("core.pg.get_pool", get_pool)
+
+        class _Unreached(_RouteStore):
+            async def set_manager_retail_status(self, manager_id, is_retail, **kw):
+                raise AssertionError("the writer was asked")
+
+        res = route(_Unreached()).post(self.PATH + "&effective_from=2026-10-07&note=a%00b")
+        assert res.status_code == 400, res.text
+        assert res.json()["detail"] == "query: Must not contain a NUL character"
         get_pool.assert_not_awaited()
 
 

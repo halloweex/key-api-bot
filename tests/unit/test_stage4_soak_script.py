@@ -283,10 +283,10 @@ class TestWhatTheScriptPromises:
         because the suite's own fixture redirects that attribute into a
         tmp_path so no test can latch a chain in the real data directory."""
         latch_src = (REPO / "core" / "chain_latch.py").read_text(encoding="utf-8")
-        consts_src = (REPO / "core" / "duckdb_constants.py").read_text(encoding="utf-8")
-        marker = re.search(r'MARKER_DIR[^=]*= DB_DIR / "([^"]+)"', latch_src)
-        db_dir = re.search(r'DB_DIR = Path\(__file__\)\.parent\.parent / "([^"]+)"',
-                           consts_src)
+        paths_src = (REPO / "core" / "paths.py").read_text(encoding="utf-8")
+        marker = re.search(r'MARKER_DIR[^=]*= DATA_DIR / "([^"]+)"', latch_src)
+        db_dir = re.search(r'DATA_DIR[^=]*= Path\(__file__\)\.parent\.parent / "([^"]+)"',
+                           paths_src)
         assert marker and db_dir, "the marker directory is no longer spelled this way"
         expected = f"/app/{db_dir.group(1)}/{marker.group(1)}"
         assert f'MARKER_DIR_IN_CONTAINER="{expected}"' in SCRIPT.read_text()
