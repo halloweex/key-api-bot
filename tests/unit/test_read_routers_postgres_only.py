@@ -414,7 +414,9 @@ class TestNothingGoesRoundTheRouter:
          "    return os.environ['KS_READ_TRAFFIC']\n", "environment"),
         ("async def get_x(self):\n"
          "    return 'KS_READ_TRAFFIC'\n", "environment"),
-    ])
+    ], ids=["module", "module-alias", "imported-name", "dotted-module", "get_pool",
+            "asyncpg", "no_address", "enabled-available", "getenv", "environ",
+            "switch-name"])
     def test_the_walk_bites(self, body, kind):
         source = ("class T:\n"
                   "    async def _t_run(self, sql):\n"
