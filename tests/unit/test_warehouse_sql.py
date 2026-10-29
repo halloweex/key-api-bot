@@ -103,6 +103,25 @@ class TestEveryRenderingIsTheBytesFrom57fd7c22:
         assert inspect.signature(silver_pass2_sql).parameters["dialect"].kind \
             is inspect.Parameter.KEYWORD_ONLY
 
+    def test_no_builder_of_the_module_defaults_its_dialect(self):
+        """The same, read off S14-01's module rather than named: a builder
+        moved or added there later takes its dialect too. Mutation: a fifth
+        builder, or one of the four, with `dialect=None`."""
+        import inspect
+
+        from core import warehouse_sql
+
+        builders = {
+            name: fn for name, fn in inspect.getmembers(warehouse_sql, inspect.isfunction)
+            if fn.__module__ == warehouse_sql.__name__
+            and "dialect" in inspect.signature(fn).parameters}
+        assert {"silver_sales_type_case", "silver_select_sql", "silver_pass2_sql",
+                "silver_recompute_ctes"} <= set(builders), sorted(builders)
+        defaulted = sorted(name for name, fn in builders.items()
+                           if inspect.signature(fn).parameters["dialect"].default
+                           is not inspect.Parameter.empty)
+        assert defaulted == [], defaulted
+
 
 # ─── The re-exports ──────────────────────────────────────────────────────────
 

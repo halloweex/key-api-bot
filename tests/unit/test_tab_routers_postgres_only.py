@@ -34,8 +34,13 @@ error as before. What is held here, without a database:
   (an accepted change in failure mode);
 - a reader with no fallback lets its own error through, uncounted, as it
   did;
-- no reader module carries `ENV`, `enabled` or `available`, and
-  `ch_cohorts` no `KS_READ_COHORTS`;
+- nothing in the routers' files reads an engine round them — S14-05's walk,
+  which the merge of S14-06 brought: only a router, a reader rule 5 holds
+  clean, or a chain's writer reaching its writer; the cohorts' ClickHouse
+  through `_analytics_rows` alone;
+- no reader module carries `ENV`, `enabled` or `available` — these nine
+  and every other `core/pg_*_read*.py` — and `ch_cohorts` no
+  `KS_READ_COHORTS`;
 - junk in every one of those variables, and in `KS_GOALS_HISTORY`, starts
   web and imports every module (rule 3 of the plan).
 
@@ -45,13 +50,16 @@ through the real app is `tests/unit/test_read_fallback_http.py`'s.
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Dict, List, Optional
 from unittest.mock import AsyncMock
 
 import pytest
@@ -192,6 +200,21 @@ class TestTheSwitchIsNotRead:
         m = importlib.import_module(f"core.{module}")
         assert not any(hasattr(m, name) for name in ("ENV", "enabled", "available",
                                                      "_VALID", "HISTORY_ENV"))
+
+    def test_no_reader_module_carries_one(self):
+        """The same of every reader module, read off `core/` rather than
+        named: S14-05's and S14-06's, a reader that comes later, and what the
+        merge of main brought in (#327's pixel-only breakdown reads through
+        `pg_traffic_read`). Mutation: `ENV = "KS_READ_TRAFFIC"` back in
+        `pg_traffic_read`."""
+        readers = sorted({p.stem for p in (ROOT / "core").glob("pg_*_read*.py")}
+                         | {"ch_cohorts"})
+        assert set(MODULES) <= set(readers) and len(readers) >= 20, readers
+        carrying = {name: [a for a in ("ENV", "enabled", "available", "_VALID",
+                                       "HISTORY_ENV")
+                           if hasattr(importlib.import_module(f"core.{name}"), a)]
+                    for name in readers}
+        assert {name: found for name, found in carrying.items() if found} == {}
 
     def test_the_walk_finds_none_of_them_a_switch(self):
         from tests.unit.test_read_fallback_sites import read_switch_modules
@@ -437,6 +460,180 @@ class TestTheReadersWithNoFallback:
         assert not any(hasattr(SyncService, name) for name in (
             "_meili_high_watermark", "_meili_buyers_frame", "_meili_orders_frame",
             "_meili_products_frame"))
+
+
+# The files of the routers above, with the `_*_run` routers in each and the
+# readers there that refuse for themselves (rule 5 holds both).
+THIRD_SET = [
+    ("core/repositories/expenses.py", {"_expenses_run"}, set()),
+    ("core/repositories/inventory.py", set(), {"_inventory_batch"}),
+    ("core/repositories/goals.py", {"_goals_run", "_goal_tables_run"}, set()),
+]
+COHORTS_FILE = "core/repositories/customers.py"
+# A chain's writer, which the files above call to write: a write is not a
+# read round the router, and its failure is the writer's own (S14-11 takes
+# the chains' mode away). Every other engine module is a read's.
+WRITE_MODULE = re.compile(r"core\.pg_[a-z0-9_]+_write|core\.pg_operational")
+
+
+def _engine_bindings(tree: ast.AST) -> Dict[str, str]:
+    """Every name the file binds to an engine module or to a function of
+    one, and the module: `from core import pg_x as y`, `from core.pg_x
+    import f`, `import core.pg_x as y`."""
+    from tests.unit.test_read_fallback_sites import ENGINE_PREFIXES, _is_engine_module
+
+    out: Dict[str, str] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module == "core":
+            for a in n.names:
+                if a.name == "pg" or a.name.startswith(ENGINE_PREFIXES):
+                    out[a.asname or a.name] = f"core.{a.name}"
+        elif isinstance(n, ast.ImportFrom) and n.module and _is_engine_module(n.module):
+            for a in n.names:
+                out[a.asname or a.name] = n.module
+        elif isinstance(n, ast.Import):
+            for a in n.names:
+                if a.asname and _is_engine_module(a.name):
+                    out[a.asname] = a.name
+    return out
+
+
+def _module_of(reach: str, bindings: Dict[str, str]) -> Optional[str]:
+    """The engine module one reach of S14-05's walk names, or None for a
+    reach that is not an engine's (the old shape, the environment)."""
+    if not reach.startswith("engine: "):
+        return None
+    what = reach[len("engine: "):]
+    if what.startswith("imports "):
+        return what[len("imports "):]
+    name = what[:-2] if what.endswith("()") else what
+    if name.startswith("core."):
+        return name.rsplit(".", 1)[0]
+    head = name.split(".", 1)[0]
+    if head in bindings:
+        return bindings[head]
+    return "core.pg" if name.rsplit(".", 1)[-1] == "get_pool" else None
+
+
+def round_the_routers(source: str, relpath: str) -> List[str]:
+    """What in `source` reads an engine round its routers: S14-06's
+    `round_a_refusal` — S14-05's walk of the tab modules, allowing a router
+    nothing and a reader rule 5 holds clean only the engine calls rule 5
+    judges — less what reaches a chain's writer."""
+    from tests.unit.test_dashboard_routers_postgres_only import round_a_refusal
+
+    bindings = _engine_bindings(ast.parse(source))
+    out = []
+    for line in round_a_refusal(source, relpath):
+        _function, reach = line.split(": ", 1)
+        module = _module_of(reach, bindings)
+        if module is not None and WRITE_MODULE.fullmatch(module):
+            continue
+        out.append(line)
+    return out
+
+
+class TestNothingGoesRoundTheRouter:
+    """The merge of S14-06 (S14-05's merge of main, #327's pixel-only
+    breakdown) brought the walk that holds /traffic's, /margin's and product
+    intelligence's readers to their router, and S14-06 held the dashboard to
+    it: a reader calling its engine itself answers a failure with an
+    uncounted 500, which rule 5 (it judges routers and what refuses) and the
+    HTTP sweep's violations (they judge refusals) never see. Here the same
+    walk holds this PR's: every function of `/expenses`', `/inventory`'s and
+    `/goals`' files reads an engine through its router, or is a router, or a
+    reader rule 5 holds clean; the cohorts' file — half of it the SMS tab's,
+    which keeps its own router until S14-08 — reads ClickHouse through
+    `_analytics_rows` alone, and the cohort readers reach no engine at all.
+    Mutations: `await pg_inventory_read.fetch_many(...)` in
+    `get_stock_summary`, `await pg_goals_read.fetch(...)` in `set_goal`,
+    `await ch_cohorts.fetch(...)` in `get_cohort_retention`."""
+
+    @pytest.mark.parametrize("path,routers,refusing", THIRD_SET,
+                             ids=[p for p, _r, _f in THIRD_SET])
+    def test_nothing_but_the_router_reads_an_engine(self, path, routers, refusing):
+        from tests.unit.test_read_fallback_sites import read_switch_modules, walk_source
+        from tests.unit.test_read_routers_postgres_only import (
+            _what_reaches_round_the_router,
+        )
+
+        source = (ROOT / path).read_text(encoding="utf-8")
+        found, reaches = _what_reaches_round_the_router(source)
+        assert found == routers, found
+        clean = {s.function for s in walk_source(source, path, read_switch_modules())
+                 if s.rule == "refuse" and s.ok}
+        assert refusing <= clean, clean
+        assert round_the_routers(source, path) == []
+        # Non-vacuity: the walk read the tab's readers, and saw the writers
+        # beside them reach their chain's writer, which is all it allowed.
+        readers = [n.name for n in ast.walk(ast.parse(source))
+                   if isinstance(n, ast.AsyncFunctionDef) and n.name.startswith("get_")]
+        assert len(readers) >= 4, readers
+        bindings = _engine_bindings(ast.parse(source))
+        writers = {fn for fn, seen in reaches.items() if fn not in refusing
+                   and all(WRITE_MODULE.fullmatch(_module_of(r, bindings) or "")
+                           for r in seen)}
+        assert len(writers) >= 3, sorted(reaches)
+
+    def test_only_the_cohort_router_reads_clickhouse(self):
+        from tests.unit.test_read_fallback_sites import read_switch_modules, walk_source
+        from tests.unit.test_read_routers_postgres_only import (
+            _what_reaches_round_the_router,
+        )
+
+        source = (ROOT / COHORTS_FILE).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        bindings = _engine_bindings(tree)
+        _routers, reaches = _what_reaches_round_the_router(source)
+        clickhouse = {fn for fn, seen in reaches.items()
+                      if any((_module_of(r, bindings) or "").startswith("core.ch_")
+                             for r in seen)}
+        assert clickhouse == {"_analytics_rows"}, clickhouse
+        assert any(s.function == "_analytics_rows" and s.rule == "refuse" and s.ok
+                   for s in walk_source(source, COHORTS_FILE, read_switch_modules()))
+        cohort_readers = {
+            fn.name for fn in ast.walk(tree)
+            if isinstance(fn, ast.AsyncFunctionDef) and fn.name != "_analytics_rows"
+            and any(isinstance(n, ast.Attribute) and n.attr == "_analytics_rows"
+                    for n in ast.walk(fn))}
+        assert len(cohort_readers) >= 4, cohort_readers
+        assert not cohort_readers & set(reaches), {
+            fn: reaches[fn] for fn in cohort_readers & set(reaches)}
+
+    ROUTER = ("from core import read_fallback\n"
+              "class T:\n"
+              "    async def _t_run(self, sql):\n"
+              "        from core import pg_goals_read\n"
+              "        try:\n"
+              "            return await pg_goals_read.fetch(sql, [])\n"
+              "        except Exception as exc:\n"
+              "            raise read_fallback.refuse('goals', exc)\n\n")
+    WRITER = ("    async def set_x(self):\n"
+              "        from core import pg_goals_write\n"
+              "        if pg_goals_write.writes_postgres():\n"
+              "            return await pg_goals_write.set_goal(1)\n")
+
+    def test_a_writer_reaching_its_chain_passes(self):
+        assert round_the_routers(self.ROUTER + self.WRITER, "core/repositories/x.py") == []
+
+    @pytest.mark.parametrize("method", [
+        ("    async def get_x(self):\n"
+         "        from core import pg_goals_read\n"
+         "        return await pg_goals_read.fetch('q', [])\n"),
+        ("    async def get_x(self):\n"
+         "        from core import ch_cohorts\n"
+         "        return await ch_cohorts.fetch('q', [], ())\n"),
+        ("    async def get_x(self):\n"
+         "        from core.pg import get_pool\n"
+         "        return await get_pool()\n"),
+        WRITER + "        return await pg_goals_read.fetch('q', [])\n",
+        WRITER.replace("pg_goals_write.writes_postgres()",
+                       "os.getenv('KS_READ_GOALS')"),
+    ], ids=["bare_reader", "bare_clickhouse_reader", "bare_pool",
+            "writer_reads_round_the_router", "writer_reads_a_switch"])
+    def test_the_walk_bites(self, method):
+        source = "from core import pg_goals_read\n" + self.ROUTER + method
+        assert round_the_routers(source, "core/repositories/x.py") != []
 
 
 class TestJunkStartsWeb:
