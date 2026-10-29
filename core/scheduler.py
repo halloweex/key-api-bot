@@ -42,6 +42,9 @@ from core.observability import get_logger, correlation_context
 # The data-quality journal's one door (chain 9, OD-02 (c)): every check
 # job journals its run through it, and the digest reads through it.
 from core import dq_journal
+# The application's data directory, `/app/data`: what the disk watchdog
+# samples and where it leaves the heartbeat host cron reads (S14-01).
+from core.paths import DATA_DIR
 
 logger = get_logger(__name__)
 
@@ -2817,6 +2820,11 @@ class BackgroundScheduler:
 
         with correlation_context() as corr_id:
             store = await get_store()
+            # The DuckDB file itself, by the store's own path: its size is the
+            # sample's `db_size_mb`. Everything else below is the data
+            # directory, `core.paths.DATA_DIR` since step 14's S14-01 — the
+            # same directory in production, where the file sits in it, but no
+            # longer found by way of the DuckDB store.
             sample = sample_disk_state(str(store.db_path))
 
             # The whole directory, not just the database file. The 27 GB that
@@ -2832,7 +2840,7 @@ class BackgroundScheduler:
             # watchdog that raises rather than measuring one thing less is a
             # watchdog that is off.
             dir_now = sample_data_dir(
-                str(store.db_path.parent),
+                str(DATA_DIR),
                 disk_used_bytes=sample.get("disk_used_bytes"),
             )
 
@@ -2875,7 +2883,7 @@ class BackgroundScheduler:
             # attestation is a file, and the reader is host cron.
             try:
                 from datetime import timezone as _tz
-                health_dir = store.db_path.parent / "health"
+                health_dir = DATA_DIR / "health"
                 health_dir.mkdir(exist_ok=True)
                 (health_dir / "watchdog_last_sample").write_text(
                     datetime.now(_tz.utc).isoformat(timespec="seconds")

@@ -132,6 +132,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -139,6 +140,33 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from core import chain_latch
 
 logger = logging.getLogger(__name__)
+
+
+# What an order upsert did — the shape `upsert_orders_with_expenses` returns
+# and `SyncService._upsert_orders_with_expenses` reads. It was DuckDB's
+# (`core.duckdb_store`) until step 14's S14-01 moved it to its one remaining
+# producer, unchanged; `core.duckdb_store` re-exports it for one release.
+@dataclass(frozen=True)
+class UpsertResult:
+    """What an order upsert actually did.
+
+    `count` used to be the whole return, and it counts a row that was already
+    in the desired state as a success — correct for "did this work", useless
+    for "what changed". The sync loop consumed it as the latter and marked the
+    entire fetched window dirty on every cycle, which is how a warehouse with
+    no new data rebuilt 583 dates every two minutes. `changed_ids` is the set
+    of rows actually written, and it is what callers should drive work from.
+    """
+
+    count: int                  # rows in the desired state (written or already correct)
+    changed_ids: List[int]      # rows this call actually wrote
+    skipped_unchanged: int      # rows already in the desired state
+    failed: int                 # rows rejected by a constraint/transaction error
+    deferred_to_full_sync: int = 0  # unknown ids a header-only refresh left for a full writer
+
+    def __len__(self) -> int:
+        return self.count
+
 
 WRITE_ENV = "KS_WRITE_ORDERS"
 
@@ -641,7 +669,6 @@ async def upsert_orders_with_expenses(
     `changed_ids` what was written, `failed` what Postgres would refuse.
     """
     from core import pg_landing
-    from core.duckdb_store import UpsertResult
     from core.landing_rows import EXPENSE_COLUMNS, expense_rows, landed_orders
     from core.pg_order_versions import CHANGE
 

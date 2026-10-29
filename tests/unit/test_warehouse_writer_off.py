@@ -252,12 +252,13 @@ class TestTheDoorsUnderOff:
         assert wc.utm_marker_stamp() == "2026-10-13T09:00:00+00:00"
 
     def test_the_marker_is_written_whole_or_not_at_all(self, postgres, frozen):
-        """Through the latch markers' writer — temp file, fsync, rename,
-        fsync the directory — and nothing beside it is left behind."""
-        from core import chain_latch
+        """Through the latch markers' writer (`core.atomic_file` since
+        S14-01) — temp file, fsync, rename, fsync the directory — and nothing
+        beside it is left behind."""
+        from core import atomic_file
 
-        with patch("core.chain_latch._write_marker",
-                   wraps=chain_latch._write_marker) as write:
+        with patch("core.atomic_file.write_atomic",
+                   wraps=atomic_file.write_atomic) as write:
             asyncio.run(wc.note_utm_reparsed_in_postgres(_unconnected()))
         path, payload = write.call_args.args
         assert path == wc.UTM_MARKER

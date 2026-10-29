@@ -209,6 +209,18 @@ comparison, expenses summary and profit, customer insights — and
 the date picker stops; eight years ahead had held the single ML thread for
 70 s.
 
+An integer parameter past the width of the column it meets, or a NUL in an
+`/api/` path or query string, is a 400 naming the field. Both used to reach
+asyncpg and fail there, and the engine routers read that as the store failing:
+a 503 naming the page and a `read_refused` page, for a request no page sends
+(found by the Rust ports, #330–#332). Integers are held to their column where
+the route reads them (`core.validators.validate_db_int`, and
+`validate_category_id`'s int32 ceiling); a NUL is refused before routing by
+`web.middleware.RejectNulMiddleware`. `tests/unit/test_input_bounds.py` walks
+every `/api/` route: each integer parameter is bounded on both sides by
+FastAPI (`ge`/`le`) or passed to a bounded validator, or is exempt there with
+the reason it never reaches SQL.
+
 ## DuckDB Schema
 
 ```
@@ -2462,7 +2474,9 @@ chain is on DuckDB and chain 3 still owns the orders; DuckDB's
 (`duckdb_orders_frozen`) rather than count frozen orders and ship
 `last_order_date` and `order_count` backwards. A value Postgres would refuse —
 a note with NUL, a `set_by` past INTEGER — is `ClassificationRefused`, which
-the route answers **422**, not "Postgres did not answer". Every precondition's
+the route answers **422**, not "Postgres did not answer". A NUL sent in the
+query string no longer reaches it: `RejectNulMiddleware` answers it 400 at the
+edge, before routing. Every precondition's
 reason starts with its key, an unreadable one too (`read_fallback_off`, not
 `read_fallback`). With the flag off nothing is asked on the chain's behalf:
 the preflight asks Postgres only once every local precondition holds — never
@@ -2586,9 +2600,16 @@ so Gold can never aggregate a Silver the next statement is about to replace.
 `TRUNCATE` then one `INSERT`, in one transaction, for `pg_silver`'s reasons.
 
 **The measures are shared; the shape is not.** The eight aggregates live in
-`GOLD_MEASURES` (`core/duckdb_store.py`) and are rendered verbatim into both
-`GOLD_REVENUE_SELECT_SQL` and the Postgres projection — rule 1, with a test
-per expression. What does not transfer is DuckDB's channel columns:
+`GOLD_MEASURES` (`core/warehouse_sql.py`) and are rendered verbatim into the
+Postgres projection, ClickHouse's derivation and DuckDB's
+`GOLD_REVENUE_SELECT_SQL` — rule 1, with a test per expression. They lived in
+`core/duckdb_store.py`, beside Silver's projection, until step 14's S14-01:
+every Postgres derivation tick imported the DuckDB store, and with it the
+`duckdb` driver and pandas, to render a string. Both moved, unchanged
+(`core/warehouse_sql.py`; the old names are re-exported for one release), and
+`tests/unit/test_warehouse_sql.py` holds every Postgres and ClickHouse
+rendering to the bytes 57fd7c22 produced. What does not transfer is DuckDB's
+channel columns:
 `instagram_revenue` and its five siblings can only name a channel somebody
 wrote a column for. Source 5 (Виставка) arrived with #101 and is
 **₴266,059.00 across 177 orders** that sits in `revenue` and in none of the
@@ -3470,6 +3491,23 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
 по-разному. Имена каналов на фронте — интерполированные ключи
 `traffic.organicChannel.*`/`…Desc.*`, и `test_frontend_locales.py` требует их
 во всех трёх языках.
+
+**«Тільки піксель» разложен по покупателю** (`GET /api/traffic/pixel-only`, блок
+«Тільки піксель: хто ці покупці»). `pixel_only` — заказ сайта, до которого не
+дошли UTM-метки, только кука пикселя Meta/TikTok; пиксель срабатывает и на 74%
+органических заказов с метками, так что корзина значит «метка не дошла», а не
+«привёл пиксель». Замер на проде 28.10.2026: в августе, когда шаблон
+комментария потерял UTM, она выросла с ~30% заказов сайта до 70%, а органика
+упала с 35% до 10%. Блок делит её на новых и повторных и для каждого покупателя
+называет канал его **самого первого** заказа (`first_order_channel`: органика —
+каналом органики, реклама — платформой вкладки, иначе `pixel_only`, `manager`,
+`opencart`, `exhibition`, `unknown`). «Первый» — правило Silver для нового
+клиента: любой источник и тип продаж, без отменённых, ничья — по id, поэтому
+«новый» здесь совпадает с `is_new_customer`. Люди не складываются: покупатель с
+пиксельным заказом в первый день и ещё одним позже есть и в новых, и в повторных.
+За 30.04–27.10 розницы: 2 125 заказов, ₴4.94M; 689 новых (₴1.26M) и 1 006
+повторных (₴3.68M), из них первыми пришли через Instagram Direct 193, ссылку в
+профиле 99, рекламу Facebook 82.
 
 ### Вкладка /expenses: половина уже стояла, и один веер ценой ₴314K
 
