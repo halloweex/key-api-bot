@@ -13,6 +13,13 @@ Since step 14's S14-05 the tab reads Postgres alone, so the repository's
 Silver rows go into Postgres where they went into DuckDB when this was
 written; those tests skip without `KS_PG_DSN`. The rows and the numbers are
 the ones they were.
+
+The filters the breakdown shares with the pixel-only card — the window's two
+edges, the header's source and sales type, the sources that count — and what
+the route hands the repository are held here too, with numbers written out
+by hand. They were not until the review of S14-05's merge (2026-10-29):
+eight mutations of them broke no test, one of them a default that would have
+shown a viewer internal sales, which are admin-only.
 """
 from __future__ import annotations
 
@@ -27,6 +34,7 @@ from core.utm_classify import FIRST_CHANNEL_OTHER, classify_traffic, first_order
 from tests.integration.pg_tab_seed import (
     needs_postgres, store_that_never_reaches_duckdb, tab_in_postgres,
 )
+from tests.unit.test_read_fallback_sites import admin_client  # noqa: F401 — fixture
 
 DAY = date(2026, 8, 12)
 WINDOW = (DAY - timedelta(days=1), DAY + timedelta(days=1))
@@ -83,7 +91,9 @@ async def tab(tmp_path, monkeypatch):
 async def _order(pool, order_id: int, buyer_id: Optional[int], *,
                  day: date = DAY, total: float = 100.0, source_id: int = 4,
                  utm: Optional[dict] = None, new: bool = False,
-                 is_return: bool = False, active: bool = True) -> None:
+                 is_return: bool = False, active: bool = True,
+                 sales_type: str = "retail",
+                 manager_id: Optional[int] = None) -> None:
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -91,9 +101,10 @@ async def _order(pool, order_id: int, buyer_id: Optional[int], *,
                 id, source_id, status_id, grand_total, ordered_at, buyer_id,
                 manager_id, order_date, is_return, sales_type, is_active_source,
                 source_name, is_new_customer, buyer_first_order_date, promocode
-            ) VALUES ($1, $2, 12, $3, NULL, $4, NULL, $5, $6, 'retail', $7, 'x', $8, NULL, NULL)
+            ) VALUES ($1, $2, 12, $3, NULL, $4, $9, $5, $6, $10, $7, 'x', $8, NULL, NULL)
             """,
             order_id, source_id, total, buyer_id, day, is_return, active, new,
+            manager_id, sales_type,
         )
         if utm is not None:
             tt, platform = classify_traffic(utm)
@@ -178,3 +189,219 @@ class TestTheBreakdown:
 
         assert out["first_channels"] == []
         assert out["totals"] == {"orders": 0, "revenue": 0.0, "buyers": 0}
+
+
+def _counts(out: dict) -> dict:
+    return out["totals"]
+
+
+@needs_postgres
+class TestTheFilters:
+    """The four predicates the breakdown shares with the pixel-only card:
+    the window with both of its edges, the header's source and sales type,
+    and the sources that count. Every pixel order above is a retail order
+    on the website, on the window's middle day, so none of these could
+    fail there. The numbers are written out by hand."""
+
+    @pytest.mark.asyncio
+    async def test_the_window_holds_both_of_its_edges_and_nothing_past_them(self, tab):
+        store, pool = tab
+        start, end = WINDOW
+        await _order(pool, 1, 1, day=start, total=100, utm=PIXEL)
+        await _order(pool, 2, 2, day=end, total=200, utm=PIXEL)
+        await _order(pool, 3, 3, day=start - timedelta(days=1), total=400, utm=PIXEL)
+        await _order(pool, 4, 4, day=end + timedelta(days=1), total=800, utm=PIXEL)
+        out = await store.get_traffic_pixel_only(start, end, sales_type="retail")
+
+        assert _counts(out) == {"orders": 2, "revenue": 300.0, "buyers": 2}
+
+    @pytest.mark.asyncio
+    async def test_a_source_narrows_the_orders_and_never_the_first_order(self, tab):
+        """Buyer 2's first order was in Instagram Direct (source 1, no tag):
+        asked for the website alone, their pixel order is still placed by
+        that first order, which the source filter does not reach."""
+        store, pool = tab
+        await _order(pool, 1, 1, total=100, source_id=1, utm=PIXEL)
+        await _order(pool, 21, 2, day=DAY - timedelta(days=60), source_id=1)
+        await _order(pool, 22, 2, total=200, source_id=4, utm=PIXEL)
+
+        instagram = await store.get_traffic_pixel_only(
+            *WINDOW, sales_type="retail", source_id=1)
+        website = await store.get_traffic_pixel_only(
+            *WINDOW, sales_type="retail", source_id=4)
+        every = await store.get_traffic_pixel_only(*WINDOW, sales_type="retail")
+
+        assert _counts(instagram) == {"orders": 1, "revenue": 100.0, "buyers": 1}
+        assert _counts(website) == {"orders": 1, "revenue": 200.0, "buyers": 1}
+        assert set(_firsts(website)) == {("organic", "instagram_direct")}
+        assert _counts(every) == {"orders": 2, "revenue": 300.0, "buyers": 2}
+
+    @pytest.mark.asyncio
+    async def test_a_sales_type_narrows_the_orders_and_all_does_not(self, tab):
+        """Retail, the wholesale manager and an internal one, each with a
+        pixel order. Buyer 1's first order was an internal one through a
+        Facebook ad: "first" spans every sales type, so asked for retail
+        alone that order still places them."""
+        from core.duckdb_constants import B2B_MANAGER_ID
+
+        store, pool = tab
+        await _order(pool, 11, 1, day=DAY - timedelta(days=60), utm=FB_AD,
+                     sales_type="internal", manager_id=99)
+        await _order(pool, 12, 1, total=100, utm=PIXEL)
+        await _order(pool, 2, 2, total=200, utm=PIXEL,
+                     sales_type="b2b", manager_id=B2B_MANAGER_ID)
+        await _order(pool, 3, 3, total=400, utm=PIXEL,
+                     sales_type="internal", manager_id=99)
+
+        def ask(sales_type=None):
+            if sales_type is None:
+                return store.get_traffic_pixel_only(*WINDOW)
+            return store.get_traffic_pixel_only(*WINDOW, sales_type=sales_type)
+
+        retail = await ask("retail")
+        assert _counts(retail) == {"orders": 1, "revenue": 100.0, "buyers": 1}
+        assert set(_firsts(retail)) == {("paid", "facebook")}
+        assert _counts(await ask("b2b")) == {"orders": 1, "revenue": 200.0, "buyers": 1}
+        assert _counts(await ask("internal")) == {"orders": 1, "revenue": 400.0, "buyers": 1}
+        every = {"orders": 3, "revenue": 700.0, "buyers": 3}
+        assert _counts(await ask("all")) == every
+        assert _counts(await ask()) == every, "the repository's default is every sales type"
+
+    @pytest.mark.asyncio
+    async def test_a_retired_source_and_a_return_are_not_counted(self, tab):
+        """An Opencart order (source 3, inactive) and a returned website
+        order whose UTM rows both say pixel_only: neither is a pixel-only
+        order of the period, here or on the card."""
+        store, pool = tab
+        await _order(pool, 1, 1, total=100, source_id=3, active=False, utm=PIXEL)
+        await _order(pool, 2, 2, total=200, is_return=True, utm=PIXEL)
+        await _order(pool, 3, 3, total=400, utm=PIXEL)
+        out = await store.get_traffic_pixel_only(*WINDOW, sales_type="all")
+        card = (await store.get_traffic_analytics(
+            *WINDOW, sales_type="all"))["summary"]["pixel_only"]
+
+        assert _counts(out) == {"orders": 1, "revenue": 400.0, "buyers": 1}
+        assert card == {"orders": 1, "revenue": 400.0}
+
+
+# ─── The route ───────────────────────────────────────────────────────────────
+
+ROUTE = "/api/traffic/pixel-only"
+DATES = {"start_date": WINDOW[0].isoformat(), "end_date": WINDOW[1].isoformat()}
+
+
+class _Recorder:
+    """A store that records what the route asked of it."""
+
+    def __init__(self):
+        self.calls: list = []
+
+    async def get_traffic_pixel_only(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"recorded": len(self.calls)}
+
+
+@pytest.fixture
+def recorder(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    rec = _Recorder()
+    monkeypatch.setattr("web.routes.api.traffic.get_store",
+                        AsyncMock(return_value=rec))
+    return rec
+
+
+class TestTheRoute:
+    """What `/api/traffic/pixel-only` hands the repository. The header's
+    sales type defaults to retail — `internal` is admin-only, and a default
+    of `all` would show it to every viewer — and every value is validated
+    before anything is asked."""
+
+    def test_with_no_sales_type_it_asks_for_retail(self, admin_client, recorder):
+        r = admin_client.get(ROUTE, params=DATES)
+
+        assert r.status_code == 200, r.text
+        assert recorder.calls == [{"start_date": WINDOW[0], "end_date": WINDOW[1],
+                                   "sales_type": "retail", "source_id": None}]
+
+    @pytest.mark.parametrize("given, asked", [
+        ("retail", "retail"), ("b2b", "b2b"), ("all", "all"), (" B2B ", "b2b"),
+    ], ids=["retail", "b2b", "all", "folded"])
+    def test_the_sales_type_reaches_the_store_validated(
+            self, admin_client, recorder, given, asked):
+        r = admin_client.get(ROUTE, params={**DATES, "sales_type": given})
+
+        assert r.status_code == 200, r.text
+        assert [c["sales_type"] for c in recorder.calls] == [asked]
+
+    def test_the_source_reaches_the_store(self, admin_client, recorder):
+        r = admin_client.get(ROUTE, params={**DATES, "source_id": 1,
+                                            "sales_type": "b2b"})
+
+        assert r.status_code == 200, r.text
+        assert [(c["source_id"], c["sales_type"]) for c in recorder.calls] == [(1, "b2b")]
+
+    @pytest.mark.parametrize("params", [
+        {"sales_type": "junk"}, {"source_id": 99}, {"period": "fortnight"},
+    ], ids=["sales_type", "source_id", "period"])
+    def test_a_value_it_does_not_know_is_a_400_and_asks_nothing(
+            self, admin_client, recorder, params):
+        r = admin_client.get(ROUTE, params={**DATES, **params})
+
+        assert r.status_code == 400, r.text
+        assert recorder.calls == []
+
+
+@needs_postgres
+class TestTheRouteAnswers:
+    """The same over HTTP against Postgres: what a viewer of the tab is
+    answered with no sales type in the request is the retail answer."""
+
+    @pytest.fixture
+    def per_statement(self, monkeypatch):
+        """The client runs each request on a loop of its own, which the
+        test's pool does not belong to: one connection per statement."""
+        import asyncpg
+
+        from core.sql_dialect import numbered
+
+        async def fetch(sql, params=()):
+            conn = await asyncpg.connect(os.environ["KS_PG_DSN"])
+            try:
+                rows = await conn.fetch(numbered(sql), *params)
+            finally:
+                await conn.close()
+            return [tuple(r) for r in rows]
+
+        monkeypatch.setattr("core.pg_traffic_read.fetch", fetch)
+
+    @pytest.mark.asyncio
+    async def test_no_sales_type_is_the_retail_answer(
+            self, tab, admin_client, per_statement, monkeypatch):
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from core.duckdb_constants import B2B_MANAGER_ID
+
+        store, pool = tab
+        monkeypatch.setattr("web.routes.api.traffic.get_store",
+                            AsyncMock(return_value=store))
+        await _order(pool, 1, 1, total=100, utm=PIXEL)
+        await _order(pool, 2, 2, total=200, utm=PIXEL,
+                     sales_type="b2b", manager_id=B2B_MANAGER_ID)
+        await _order(pool, 3, 3, total=400, source_id=1, utm=PIXEL)
+
+        async def get(**params):
+            r = await asyncio.to_thread(
+                admin_client.get, ROUTE, params={**DATES, **params})
+            return r.status_code, r.json()
+
+        status, default = await get()
+        assert status == 200, default
+        assert default["totals"] == {"orders": 2, "revenue": 500.0, "buyers": 2}
+        assert await get(sales_type="retail") == (200, default)
+        assert (await get(sales_type="all"))[1]["totals"] == {
+            "orders": 3, "revenue": 700.0, "buyers": 3}
+        assert (await get(source_id=1))[1]["totals"] == {
+            "orders": 1, "revenue": 400.0, "buyers": 1}
+        assert (await get(sales_type="junk"))[0] == 400
