@@ -19,8 +19,17 @@ and `web/` for the shapes a fallback takes rather than trusting a list.
 says** — production's value since 2026-10-09. `refusing()` is True,
 `mode()` is `off` and `mode_error()` None, so every `fall_back` is a
 refusal; the counters, `misconfigured` and `no_engine` are still published
-in their shape, and the fallback branches go in S14-16. What follows is the
-history of the two modes.
+in their shape, and the fallback branches go in S14-16.
+
+**Since S14-07 no reader calls `fall_back`, `no_address` or `no_engine`.**
+A tab's router refuses any failure of its one engine through `refuse()`, a
+missing address included, and a reader with no fallback — the weekly
+report, the assistant, the training frame, the buyer-sync selection, the
+search index — meets that engine's own error, uncounted. `misconfigured` is
+still found by prefix in the environment, so it is no longer exactly what is
+refused, as the paragraph on `no_address` below says: a line in it names a
+missing address, and every read its switch used to route fails one of those
+two ways. What follows is the history of the two modes.
 
 UNDER `off`, A FALLBACK IS REFUSED (DN-20b)
 
@@ -257,19 +266,25 @@ def configure_mode(*, report: bool = True) -> str:
 
 def report_misconfigured() -> None:
     """Log each read switch `configure_mode` found new without an address,
-    once per cause, saying what this process does with the reads behind it:
-    refused, or served from DuckDB. Never raises.
+    once per cause, saying what this process does with a tab's read behind
+    it: refused, or served from DuckDB. Never raises.
 
     Which of the two is `refusing()` — since S14-00 always refused. Until
     then the answer was not final when this mode was configured: stage 5's
     verdict on `KS_DUCKDB=off` came last in `configure_modes()` and could hold
     web on `on`, so the line waited for it. It still comes last; nothing is
-    left to wait for."""
+    left to wait for.
+
+    Until S14-07 the line said every read behind the switch was refused and
+    offered unsetting the flag as a cure. Neither holds since: no switch
+    routes a read, so a reader with no fallback meets the engine's own error
+    uncounted, and the read fails whatever the flag says."""
     global _unreported
     for line in _unreported:
         logger.error(
-            "%s — every read behind it is %s. Set the address or unset "
-            "the flag.", line,
+            "%s — no read of that engine can succeed, whatever the flag "
+            "says: a tab's is %s. Set the address; unsetting the flag only "
+            "hides this line.", line,
             f"refused ({_refusal_cause()})" if refusing()
             else "served from DuckDB")
     _unreported = []

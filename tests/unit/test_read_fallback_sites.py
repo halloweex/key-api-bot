@@ -870,9 +870,10 @@ class TestMisconfiguredReads:
         lines = [r.getMessage() for r in caplog.records if "KS_READ_GOLD" in r.getMessage()]
         # Refused: since step 14's S14-00 the mode is `off` whatever
         # KS_READ_FALLBACK says, and the line says what this process does.
-        assert lines == ["KS_READ_GOLD=postgres without KS_PG_DSN — every read "
-                         "behind it is refused (KS_READ_FALLBACK=off). Set the "
-                         "address or unset the flag."], lines
+        assert lines == ["KS_READ_GOLD=postgres without KS_PG_DSN — no read of "
+                         "that engine can succeed, whatever the flag says: a "
+                         "tab's is refused (KS_READ_FALLBACK=off). Set the "
+                         "address; unsetting the flag only hides this line."], lines
 
     def test_clickhouse_needs_its_url(self, fresh_read_fallback, monkeypatch):
         monkeypatch.delenv("KS_CH_URL", raising=False)
@@ -923,7 +924,7 @@ class TestMisconfiguredReads:
         monkeypatch.setenv("KS_READ_FALLBACK", "off")
         with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
             fresh_read_fallback.configure_mode()
-        assert "every read behind it is refused" in caplog.text
+        assert "a tab's is refused (KS_READ_FALLBACK=off)" in caplog.text
         for module in modules:
             with pytest.raises(fresh_read_fallback.ReadUnavailable):
                 fresh_read_fallback.no_address(module.__name__, module)

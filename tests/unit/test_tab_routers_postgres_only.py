@@ -389,6 +389,40 @@ class TestTheReadersWithNoFallback:
             await call(store)
         assert read_fallback.refusals() == {} and read_fallback.counts() == {}
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reader,module,fn,call", READERS, ids=[r[0] for r in READERS])
+    async def test_a_switch_published_without_its_dsn_is_not_refused(
+        self, store, fresh_read_fallback, monkeypatch, caplog, reader, module, fn, call,
+    ):
+        """What `/api/health` says of `read_fallback_mode.misconfigured`
+        (`web/schemas.py`), what the module's docstring says and what the
+        start's line says, since the second review of S14-07: the switch is
+        still listed, by prefix, but no `no_address` stands behind it any
+        more, so its reader meets `core.pg`'s own error, counted nowhere —
+        `misconfigured` is no longer exactly what is refused. No pool
+        patched, no DSN. Mutations: ask `no_address` again (a refusal is
+        counted), or have the line say every read behind the switch is
+        refused, or offer unsetting the flag as the cure."""
+        from core import pg
+
+        monkeypatch.delenv("KS_PG_DSN", raising=False)
+        monkeypatch.setattr(pg, "_pool", None)
+        _set(monkeypatch, "postgres")
+        with caplog.at_level(logging.ERROR, logger="core.read_fallback"):
+            fresh_read_fallback.configure_mode()
+
+        published = {line.split("=", 1)[0] for line in fresh_read_fallback.misconfigured()}
+        assert published == set(SWITCHES)
+        assert "every read behind it is refused" not in caplog.text
+        assert "unset the flag" not in caplog.text
+        assert ("no read of that engine can succeed, whatever the flag says: "
+                "a tab's is refused (KS_READ_FALLBACK=off)") in caplog.text
+
+        with pytest.raises(RuntimeError, match="KS_PG_DSN is not set"):
+            await call(store)
+        assert fresh_read_fallback.refusals() == {}
+        assert fresh_read_fallback.counts() == {}
+
     def test_the_search_index_keeps_one_watermark(self):
         """The DuckDB-built index's `meilisearch` cursor went with its frames;
         the index reads Postgres under `meilisearch_pg` alone."""
