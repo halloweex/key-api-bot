@@ -21,7 +21,7 @@ import pytest
 
 from core.permissions import ACCESS_PRESETS, Role, TAB_FEATURE_KEYS
 from core.sms_refusals import REFUSAL_REASONS
-from core.utm_classify import ORGANIC_CHANNELS
+from core.utm_classify import FIRST_CHANNEL_OTHER, ORGANIC_CHANNELS
 
 LOCALES = Path(__file__).resolve().parents[2] / "web" / "frontend" / "src" / "locales"
 LANGUAGES = ("en", "uk", "ru")
@@ -54,6 +54,9 @@ VOCABULARIES = {
     # breakdown on /traffic, and its `…Desc.` twin says how it is decided.
     "traffic.organicChannel.": list(ORGANIC_CHANNELS),
     "traffic.organicChannelDesc.": list(ORGANIC_CHANNELS),
+    # `t(`traffic.firstChannel.${channel}`)` names a pixel-only buyer's first
+    # channel when it is neither organic nor an ad platform.
+    "traffic.firstChannel.": list(FIRST_CHANNEL_OTHER),
 }
 
 
