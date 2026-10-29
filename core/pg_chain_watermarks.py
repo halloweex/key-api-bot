@@ -14,7 +14,7 @@ and the setter came apart the first time.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Tuple
 
 
 async def _pool():
@@ -61,3 +61,26 @@ async def read_values(keys: Iterable[str]) -> Dict[str, str]:
         rows = await conn.fetch(
             "SELECT key, value FROM meta.chain_watermarks WHERE key = ANY($1)", keys)
     return {r["key"]: r["value"] for r in rows}
+
+
+async def read_values_and_stamps(
+        keys: Iterable[str]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """`read_values`, and beside it `{key: when the row was last written}` —
+    `updated_at`, Postgres's `now()` at the setter, read in the same statement
+    so a value and its stamp are one row's.
+
+    The two are different clocks for one key. `last_sync_orders` holds
+    KeyCRM's newest `updated_at`, which stands still whenever nobody touches
+    an order — every quiet night — while the order step rewrites the row on
+    every tick that lands a batch. The freshness check judges that one by the
+    stamp (`data_quality.JUDGED_BY_LAST_WRITE`)."""
+    keys = list(keys)
+    if not keys:
+        return {}, {}
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT key, value, updated_at FROM meta.chain_watermarks "
+            "WHERE key = ANY($1)", keys)
+    return ({r["key"]: r["value"] for r in rows},
+            {r["key"]: r["updated_at"].isoformat() for r in rows})

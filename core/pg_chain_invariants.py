@@ -140,8 +140,9 @@ The orders (chain 3):
   about every run, because its 30-day `NOT EXISTS` cannot compare it.
 * **Not its watermark.** `last_sync_orders` holds KeyCRM's newest
   `updated_at`, not a sync time, and stands still overnight by design
-  (`pg_orders_write.CHAIN_WATERMARK_MAX_AGE_MIN`); `freshness_orders` and the
-  order step's own health judge the sync.
+  (`pg_orders_write.CHAIN_WATERMARK_MAX_AGE_MIN`); `freshness_orders`, by the
+  row's stamp (`data_quality.JUDGED_BY_LAST_WRITE`), and the order step's
+  own health judge the sync.
 
 The manager classification (chain 5):
 

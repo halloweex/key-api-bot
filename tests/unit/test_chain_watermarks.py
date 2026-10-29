@@ -176,7 +176,7 @@ class TestTheWiringHasOneHome:
             inspect.getsource(BackgroundScheduler._run_dq_integrity)))
         calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
         called = {c.func.id for c in calls if isinstance(c.func, ast.Name)}
-        assert {"stood_down_sync_keys", "read_values"} <= called
+        assert {"stood_down_sync_keys", "read_values_and_stamps"} <= called
         scan = [c for c in calls if isinstance(c.func, ast.Name)
                 and c.func.id == "check_internal_integrity"]
         assert scan and all(

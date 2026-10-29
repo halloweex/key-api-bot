@@ -259,6 +259,12 @@ class TestTheIntegrityJobUnderOff:
         monkeypatch.setattr(pg_chain_watermarks, "read_values",
                             AsyncMock(side_effect=lambda keys: {
                                 k: v for k, v in watermarks.items() if k in keys}))
+        # The integrity job reads each row's stamp beside its value; here the
+        # rows were written when their values say.
+        monkeypatch.setattr(pg_chain_watermarks, "read_values_and_stamps",
+                            AsyncMock(side_effect=lambda keys: (
+                                {k: v for k, v in watermarks.items() if k in keys},
+                                {k: v for k, v in watermarks.items() if k in keys})))
         monkeypatch.setattr(pg_frozen_metadata, "frozen_sync_rows",
                             AsyncMock(return_value=frozen))
         monkeypatch.setattr(pg_warehouse_dq, "read_facts",
