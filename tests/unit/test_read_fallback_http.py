@@ -484,6 +484,23 @@ DASHBOARD_ROUTES = frozenset({
     "/api/categories/breakdown", "/api/returns", "/api/customers/insights",
 })
 
+# The third set's GET routes (step 14, S14-07), beside the goal routes the
+# sweep reads off the app by prefix: `/expenses` and `/inventory` by theirs,
+# the cohorts and the forecast by name, since they share none. Every one
+# reads Postgres alone (the cohorts ClickHouse alone) through its router,
+# and refuses when it fails.
+EXPENSES_PREFIX = "/api/expense"           # /api/expenses*, /api/expense-types
+INVENTORY_PREFIX = "/api/stocks/"
+COHORT_ROUTES = frozenset({
+    "/api/customers/cohort-retention", "/api/customers/cohort-ltv",
+    "/api/customers/purchase-timing", "/api/customers/at-risk",
+})
+FORECAST_ROUTES = frozenset({"/api/revenue/forecast"})
+# The training frame's own route: its reader has no fallback, so a failure is
+# its own error, a 500 counted nowhere (S14-07's deviation 7), never a
+# refusal. Named, and held to exist and not to refuse.
+TRAINING_FRAME_ROUTES = frozenset({"/api/revenue/forecast/evaluate"})
+
 # Example values for required parameters a route validates itself, where a
 # generic value would end the request with a 400 before anything is read.
 # Values, not subjects: a parameter missing here still gets one by its type.
@@ -637,13 +654,13 @@ class TestEveryRoute:
         # read a calculator's history on the store's own connection again
         # (the deleted bridge's way), and its route answers from DuckDB —
         # named here.
-        # `GET /api/goals` itself reads chain 7a's table first, which since
-        # S14-00 asks Postgres with no refusal (`CHAIN_FIRST`).
+        # `GET /api/goals` itself included since step 14's S14-07: it reads
+        # chain 7a's table first, which asked Postgres with no refusal from
+        # S14-00 (`CHAIN_FIRST`) until `_goals_run` refused it too.
         goal_routes = {e.path for e in routes if e.path.startswith("/api/goals")}
-        assert {"/api/goals/seasonality", "/api/goals/growth",
+        assert {"/api/goals", "/api/goals/seasonality", "/api/goals/growth",
                 "/api/goals/weekly-patterns", "/api/goals/smart",
-                "/api/goals/forecast"} <= goal_routes, goal_routes
-        goal_routes -= {"/api/goals"}
+                "/api/goals/forecast", "/api/goals/history"} <= goal_routes, goal_routes
         assert goal_routes <= set(refused_routes), (
             f"goal routes not refused: {sorted(goal_routes - set(refused_routes))}")
         # Every /traffic route that reads refuses too, in every state: since
@@ -672,6 +689,26 @@ class TestEveryRoute:
             f"a named route is gone: {sorted(DASHBOARD_ROUTES - {e.path for e in routes})}")
         assert DASHBOARD_ROUTES <= set(refused_routes), (
             f"dashboard routes not refused: {sorted(DASHBOARD_ROUTES - set(refused_routes))}")
+        # The third set's the same way, since S14-07 left each with one
+        # engine: `/expenses` and `/inventory` read off the app by prefix,
+        # so a route added to either is held the day it lands; the cohorts
+        # and the forecast by name. What this adds to the violations above,
+        # as for /traffic: a reader calling its engine round the router
+        # counts no refusal, so its uncounted 500 was invisible there.
+        # Mutations: `await pg_inventory_read.fetch_many(...)` in
+        # `get_stock_summary`, `await ch_cohorts.fetch(...)` in
+        # `get_cohort_retention`, each with no `try`.
+        on_app = {e.path for e in routes}
+        third = {p for p in on_app if p.startswith((EXPENSES_PREFIX, INVENTORY_PREFIX))}
+        assert len({p for p in third if p.startswith(EXPENSES_PREFIX)}) >= 4, third
+        assert len({p for p in third if p.startswith(INVENTORY_PREFIX)}) >= 10, third
+        named = COHORT_ROUTES | FORECAST_ROUTES | TRAINING_FRAME_ROUTES
+        assert named <= on_app, f"a named route is gone: {sorted(named - on_app)}"
+        third |= COHORT_ROUTES | FORECAST_ROUTES
+        assert third <= set(refused_routes), (
+            f"S14-07's routes not refused: {sorted(third - set(refused_routes))}")
+        assert not TRAINING_FRAME_ROUTES & set(refused_routes), (
+            "the training frame's route was refused: its reader has no fallback")
 
     def test_the_sweep_is_read_off_the_app(self):
         """Every GET route but the named network ones — and a route added

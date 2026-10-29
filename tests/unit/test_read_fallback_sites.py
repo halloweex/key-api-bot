@@ -45,7 +45,8 @@ router must not turn the refusal into a quiet answer.
    calls `refuse` at all (the dashboard's `_pg_gold_summary`,
    `_pg_gold_series`, `_pg_silver` and `get_manager_sales_365d`), must run
    every engine call
-   (a function of a `core.pg_*` module it imports, or `get_pool`) inside a
+   (a function of a `core.pg_*` module it imports — or, since S14-07, of a
+   `core.ch_*` one — however it is spelled, or `get_pool`) inside a
    `try` whose handler for `Exception` is exactly `raise
    read_fallback.refuse("<surface>", <the caught exception>)`, and reach
    DuckDB through nothing at all. One bare `await pg_x.fetch()` outside the
@@ -302,33 +303,40 @@ def _engine_aliases(tree: ast.AST) -> Set[str]:
     return found
 
 
+def _is_engine_module(dotted: str) -> bool:
+    """`core.pg`, or a `core.pg_*` or `core.ch_*` module (`ENGINE_PREFIXES`)."""
+    return dotted == "core.pg" or dotted.startswith(
+        tuple(f"core.{p}" for p in ENGINE_PREFIXES))
+
+
 def _engine_names(tree: ast.AST) -> Set[str]:
-    """Every name the file imports from `core.pg` or a `core.pg_*` module,
-    at the top or inside a function — only a call of one counts, so a
-    constant among them changes nothing: `from core.pg_gold_read import
-    fetch_series`, `from core.pg import get_pool as gp`. Until the review of
-    step 14's S14-06 merge the rule judged `<module>.<fn>(...)` and a bare
+    """Every name the file imports from `core.pg` or a `core.pg_*` or
+    `core.ch_*` module, at the top or inside a function — only a call of one
+    counts, so a constant among them changes nothing: `from
+    core.pg_gold_read import fetch_series`, `from core.pg import get_pool as
+    gp`, `from core.ch_cohorts import fetch`. Until the review of step 14's
+    S14-06 merge the rule judged `<module>.<fn>(...)` and a bare
     `get_pool(...)` alone, so a call by such a name outside every `try` was
-    an uncounted 500 it never saw."""
+    an uncounted 500 it never saw; ClickHouse's modules, the cohorts' one
+    engine since S14-07, are read in every spelling since S14-07's merge of
+    that review."""
     found = set()
     for n in ast.walk(tree):
-        if isinstance(n, ast.ImportFrom) and n.module and (
-                n.module == "core.pg" or n.module.startswith("core.pg_")):
+        if isinstance(n, ast.ImportFrom) and n.module and _is_engine_module(n.module):
             found |= {a.asname or a.name for a in n.names}
     return found
 
 
 def _names_an_engine_module(node: ast.AST) -> bool:
-    """`core.pg` or `core.pg_*` spelled out: `import core.pg_x` binds no
-    alias, so its calls are `core.pg_x.fetch(...)`."""
+    """`core.pg`, `core.pg_*` or `core.ch_*` spelled out: `import
+    core.pg_x` binds no alias, so its calls are `core.pg_x.fetch(...)`."""
     parts = []
     while isinstance(node, ast.Attribute):
         parts.append(node.attr)
         node = node.value
     if not (isinstance(node, ast.Name) and node.id == "core" and parts):
         return False
-    module = parts[-1]
-    return module == "pg" or module.startswith("pg_")
+    return _is_engine_module(f"core.{parts[-1]}")
 
 
 def _engine_calls(fn: ast.AST, aliases: Set[str], names: Set[str]) -> List[ast.Call]:
@@ -779,9 +787,16 @@ class TestTheRules:
         ("        from core.pg import get_pool as gp\n", "gp()"),
         ("        from core import pg\n", "pg.get_pool()"),
         ("        import core.pg_x_read\n", "core.pg_x_read.fetch('SELECT 1')"),
+        # ClickHouse's modules, the cohorts' one engine since step 14's
+        # S14-07, in each spelling: S14-07 taught the rule the module's
+        # alias, and the merge of S14-06's review the rest.
+        ("        from core import ch_x as c\n", "c.fetch('SELECT 1')"),
+        ("        from core.ch_x import fetch\n", "fetch('SELECT 1')"),
+        ("        import core.ch_x\n", "core.ch_x.fetch('SELECT 1')"),
     ]
     SPELLING_IDS = ["imported_name", "imported_alias", "get_pool_alias",
-                    "get_pool_attribute", "spelled_out"]
+                    "get_pool_attribute", "spelled_out", "clickhouse_alias",
+                    "clickhouse_imported_name", "clickhouse_spelled_out"]
 
     @pytest.mark.parametrize("binding,call", SPELLINGS, ids=SPELLING_IDS)
     def test_every_spelling_outside_the_try_is_found(self, binding, call):
