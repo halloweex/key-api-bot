@@ -205,6 +205,18 @@ comparison, expenses summary and profit, customer insights — and
 the date picker stops; eight years ahead had held the single ML thread for
 70 s.
 
+An integer parameter past the width of the column it meets, or a NUL in an
+`/api/` path or query string, is a 400 naming the field. Both used to reach
+asyncpg and fail there, and the engine routers read that as the store failing:
+a 503 naming the page and a `read_refused` page, for a request no page sends
+(found by the Rust ports, #330–#332). Integers are held to their column where
+the route reads them (`core.validators.validate_db_int`, and
+`validate_category_id`'s int32 ceiling); a NUL is refused before routing by
+`web.middleware.RejectNulMiddleware`. `tests/unit/test_input_bounds.py` walks
+every `/api/` route: each integer parameter is bounded on both sides by
+FastAPI (`ge`/`le`) or passed to a bounded validator, or is exempt there with
+the reason it never reaches SQL.
+
 ## DuckDB Schema
 
 ```
@@ -2458,7 +2470,9 @@ chain is on DuckDB and chain 3 still owns the orders; DuckDB's
 (`duckdb_orders_frozen`) rather than count frozen orders and ship
 `last_order_date` and `order_count` backwards. A value Postgres would refuse —
 a note with NUL, a `set_by` past INTEGER — is `ClassificationRefused`, which
-the route answers **422**, not "Postgres did not answer". Every precondition's
+the route answers **422**, not "Postgres did not answer". A NUL sent in the
+query string no longer reaches it: `RejectNulMiddleware` answers it 400 at the
+edge, before routing. Every precondition's
 reason starts with its key, an unreadable one too (`read_fallback_off`, not
 `read_fallback`). With the flag off nothing is asked on the chain's behalf:
 the preflight asks Postgres only once every local precondition holds — never
