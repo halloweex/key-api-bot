@@ -462,6 +462,9 @@ services:
       # and report success (deploy/postgres-move-runbook.md).
       - ./nginx/rust:/etc/nginx/rust:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
+      # The /api request log (nginx.conf, `ks_api`), on the host so it outlives
+      # this container. Its bound is the `api-log` service below.
+      - /var/log/ks-api:/var/log/ks-api
     depends_on:
       web:
         condition: service_healthy
@@ -533,6 +536,32 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+  # The bound of the /api request log, declared beside the mount that creates
+  # the log, so the one cannot ship without the other. Every five minutes
+  # nginx/api-log/rotate.sh cuts the file at midnight UTC or past 32 MiB and
+  # keeps the newest 62 cuts: two months on an ordinary day. The script is
+  # read afresh on every pass, from a directory mount, so an edit to it lands
+  # at the next pass after a deploy. nginx's own image because it is on the
+  # host already and its busybox has everything the script uses. `init` and
+  # SIGTERM so a stop ends the loop at once: the image stops with SIGQUIT,
+  # which the shell outlives, and every stop then waited out Docker's ten
+  # seconds (measured: 10.7 s, against 0.18 s with these two).
+  api-log:
+    image: nginx:alpine
+    container_name: keycrm-api-log
+    restart: unless-stopped
+    logging: *default-logging
+    init: true
+    stop_signal: SIGTERM
+    command:
+      - sh
+      - -c
+      - while :; do sh /opt/api-log/rotate.sh || echo 'api-log - pass failed' >&2; sleep 300; done
+    volumes:
+      - /var/log/ks-api:/var/log/ks-api
+      - ./nginx/api-log:/opt/api-log:ro
+    mem_limit: 32m
+    cpus: 0.1
 
 volumes:
   meili_data:
