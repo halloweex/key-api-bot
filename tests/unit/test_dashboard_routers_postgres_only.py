@@ -681,7 +681,18 @@ class TestNothingGoesRoundARefusal:
                        "        import core.pg_gold_read\n"
                        "        try:\n"
                        "            await core.pg_gold_read.fetch_series(1)\n"),
-    ], ids=["module", "imported_name", "spelled_out"])
+        # ClickHouse's modules, which rule 5 reads since step 14's S14-07:
+        # by the module, and by a name imported from it.
+        HELPER.replace("        try:\n",
+                       "        from core import ch_cohorts\n"
+                       "        try:\n"
+                       "            await ch_cohorts.fetch('q', [], ())\n"),
+        HELPER.replace("        try:\n",
+                       "        from core.ch_cohorts import fetch\n"
+                       "        try:\n"
+                       "            await fetch('q', [], ())\n"),
+    ], ids=["module", "imported_name", "spelled_out", "clickhouse_module",
+            "clickhouse_imported_name"])
     def test_a_clean_helper_passes(self, helper):
         assert round_a_refusal(self.ROUTER + helper, REVENUE) == []
 

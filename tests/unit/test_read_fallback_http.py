@@ -697,7 +697,10 @@ class TestEveryRoute:
         # counts no refusal, so its uncounted 500 was invisible there.
         # Mutations: `await pg_inventory_read.fetch_many(...)` in
         # `get_stock_summary`, `await ch_cohorts.fetch(...)` in
-        # `get_cohort_retention`, each with no `try`.
+        # `get_cohort_ltv`, each with no `try`. (One in
+        # `get_cohort_retention` passes here: the route's default asks the
+        # enhanced form. `TestCohorts` and the walk in
+        # `test_tab_routers_postgres_only.py` see that one.)
         on_app = {e.path for e in routes}
         third = {p for p in on_app if p.startswith((EXPENSES_PREFIX, INVENTORY_PREFIX))}
         assert len({p for p in third if p.startswith(EXPENSES_PREFIX)}) >= 4, third
