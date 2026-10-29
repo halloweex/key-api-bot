@@ -2177,8 +2177,7 @@ incrementally rather than re-indexing everything), and the copy-back carries
 it into DuckDB and the release deletes it. Nothing judges its age: it is in no
 `FRESHNESS_THRESHOLDS` entry, so a run that cannot read the moved watermarks
 does not name it in `sync_watermarks_unwatched`. `last_sync_meilisearch`, the
-DuckDB-built index's cursor, was a DuckDB clock and stayed DuckDB's (history:
-it went with S14-07, with that index's frames, and nothing reads it). Declared on
+DuckDB-built index's cursor, is a DuckDB clock and stays DuckDB's. Declared on
 no chain until a review found it, while this file said chain 3 carried it.
 
 **What stands down with it.** DuckDB's arm of `dq_reconciliation` (layer
