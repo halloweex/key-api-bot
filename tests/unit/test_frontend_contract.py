@@ -224,3 +224,25 @@ def test_what_the_traffic_page_sends_is_what_its_harness_sends():
                     endpoint="/api/traffic/transactions",
                     extra={"traffic_type": "organic", "limit": 50, "offset": 50}) == (
         "period=week&sales_type=retail&source_id=4&traffic_type=organic&limit=50&offset=50")
+
+
+def test_what_the_dashboard_and_marketing_send_is_what_the_analytics_harness_sends():
+    d = fc.dashboard()
+    assert d.endpoints == (
+        "/api/summary", "/api/returns", "/api/sales/by-source", "/api/products/top",
+        "/api/products/performance", "/api/brands/analytics")
+    assert d.params == MARGIN_PARAMS
+    # No hook adds a parameter of its own: `/products/top` is sent no
+    # `limit`, `/returns` no `limit`.
+    assert d.extras == {} and d.always == {}
+    m = fc.marketing_analytics()
+    assert m.endpoints == ("/api/summary", "/api/promocodes/analytics")
+    assert m.params == MARGIN_PARAMS
+    assert fc.category_breakdown_query(d, "Догляд за шкірою", period="week",
+                                       sales_type="retail", brand="Some Brand") == (
+        "period=week&sales_type=retail&brand=Some+Brand"
+        "&parent_category=%D0%94%D0%BE%D0%B3%D0%BB%D1%8F%D0%B4%20%D0%B7%D0%B0%20"
+        "%D1%88%D0%BA%D1%96%D1%80%D0%BE%D1%8E")
+    assert fc.encode_uri_component("a b~'()*!-_.é") == "a%20b~'()*!-_.%C3%A9"
+    assert fc.lookup_paths() == ("/api/categories", "/api/categories/{parent_id}/children",
+                                 "/api/brands", "/api/promocodes")

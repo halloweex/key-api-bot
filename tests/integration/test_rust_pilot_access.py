@@ -107,9 +107,18 @@ INVENTORY = tuple(f"/api/stocks/{name}" for name in (
 # is a job in the Python process's memory, and stays the app's.
 TRAFFIC = tuple(f"/api/traffic/{name}" for name in (
     "analytics", "organic", "pixel-only", "trend", "transactions", "utm-campaigns", "roas"))
+# The analytics router's reads but the trend and the forecast: the filter
+# bar's four, open to any approved session; the dashboard's cards and charts
+# under `dashboard:view`; `/summary` under any of three tabs; brands and
+# promocodes under `dashboard` or `marketing`.
+ANALYTICS = ("/api/categories", "/api/categories/{parent_id}/children", "/api/brands",
+             "/api/promocodes", "/api/sales/by-source", "/api/products/top", "/api/summary",
+             "/api/returns", "/api/products/performance", "/api/brands/analytics",
+             "/api/promocodes/analytics", "/api/categories/breakdown")
 PORTED = ({("GET", TREND), ("GET", "/{path:path}")}
           | {("GET", path) for path in
-             MARGIN + PRODUCTS_INTEL + REPORTS + EXPENSES + GOALS + INVENTORY + TRAFFIC})
+             MARGIN + PRODUCTS_INTEL + REPORTS + EXPENSES + GOALS + INVENTORY + TRAFFIC
+             + ANALYTICS})
 PASSED = 299
 # Explicit dates: both services read the real clock, and a range does not move.
 TREND_QUERY = "start_date=2026-01-05&end_date=2026-01-11"
@@ -125,6 +134,9 @@ SUBJECTS: Dict[str, tuple] = {
     "viewer, blank tabs": (("viewer", "approved", "   "), NO_ROW),
     "viewer, traffic": (("viewer", "approved", "traffic"), NO_ROW),
     "viewer, dashboard and sms": (("viewer", "approved", "dashboard,sms"), NO_ROW),
+    # The dashboard tab alone: its cards, charts and goals open, every other
+    # tab shut — /summary and the brand chart open through it too.
+    "viewer, dashboard": (("viewer", "approved", "dashboard"), NO_ROW),
     # /reports and /marketing share a router and split on the gate:
     # `reports:view` on four routes, `marketing:view` on two.
     "viewer, reports": (("viewer", "approved", "reports"), NO_ROW),
@@ -534,6 +546,8 @@ async def services(world, duckdb_off, monkeypatch):
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
     monkeypatch.setenv("KS_READ_INVENTORY", "postgres")
     monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
+    monkeypatch.setenv("KS_READ_SILVER", "postgres")
+    monkeypatch.setenv("KS_READ_DASHBOARD", "postgres")
     # `backfilled()` latches per process: ask it afresh, as the pilot does
     # on every read.
     from core import pg_expenses_read

@@ -6,6 +6,7 @@
 //! `test_rust_pilot_access.py` does the same for who may ask.
 
 pub mod access;
+pub mod analytics;
 pub mod expenses;
 pub mod goals;
 pub mod gold;

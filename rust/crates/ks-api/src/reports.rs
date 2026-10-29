@@ -270,17 +270,17 @@ fn validate_limit(value: i64, max: i64) -> Result<i64, Failure> {
 
 /// The parameters in placeholder order: each `next` is the next `$n`.
 #[derive(Default)]
-struct Args(Vec<Bind>);
+pub(crate) struct Args(pub(crate) Vec<Bind>);
 
 impl Args {
-    fn next(&mut self, bind: Bind) -> String {
+    pub(crate) fn next(&mut self, bind: Bind) -> String {
         self.0.push(bind);
         format!("${}", self.0.len())
     }
 }
 
 /// `core.duckdb_constants.brand_where`, the unknown bucket included.
-fn brand_where(brand: &str, args: &mut Args, alias: &str) -> String {
+pub(crate) fn brand_where(brand: &str, args: &mut Args, alias: &str) -> String {
     let col = format!("{alias}.brand");
     // `brand.strip().casefold() == UNKNOWN_BRAND.casefold()`: no other text
     // casefolds to "unknown" but by lowering.
@@ -525,7 +525,7 @@ const GOAL_SQL: &str = "SELECT goal_amount FROM app.revenue_goals WHERE period_t
 
 /// An integer column whatever Postgres typed it — a COUNT is a bigint, a SUM
 /// of bigints a numeric — as `int()` reads it: a numeric truncated.
-fn int_col(row: &PgRow, i: usize) -> Result<Option<i64>, Failure> {
+pub(crate) fn int_col(row: &PgRow, i: usize) -> Result<Option<i64>, Failure> {
     if let Ok(v) = row.try_get::<Option<i64>, _>(i) {
         return Ok(v);
     }
@@ -547,7 +547,7 @@ fn int_col(row: &PgRow, i: usize) -> Result<Option<i64>, Failure> {
 }
 
 /// `float(x)` of a numeric, a double or an integer column.
-fn float_col(row: &PgRow, i: usize) -> Result<Option<f64>, Failure> {
+pub(crate) fn float_col(row: &PgRow, i: usize) -> Result<Option<f64>, Failure> {
     if let Ok(v) = row.try_get::<Option<Decimal>, _>(i) {
         return Ok(v.map(decimal_to_float));
     }
@@ -558,17 +558,17 @@ fn float_col(row: &PgRow, i: usize) -> Result<Option<f64>, Failure> {
 }
 
 /// `int(r[i] or 0)`.
-fn int_or_zero(row: &PgRow, i: usize) -> Result<i64, Failure> {
+pub(crate) fn int_or_zero(row: &PgRow, i: usize) -> Result<i64, Failure> {
     Ok(int_col(row, i)?.unwrap_or(0))
 }
 
 /// `int(r[i])`: a NULL is Python's TypeError, the app's 500.
-fn int_req(row: &PgRow, i: usize) -> Result<i64, Failure> {
+pub(crate) fn int_req(row: &PgRow, i: usize) -> Result<i64, Failure> {
     int_col(row, i)?.ok_or(Failure::Raised("int(None)"))
 }
 
 /// `float(r[i] or 0)`.
-fn float_or_zero(row: &PgRow, i: usize) -> Result<f64, Failure> {
+pub(crate) fn float_or_zero(row: &PgRow, i: usize) -> Result<f64, Failure> {
     Ok(float_col(row, i)?.unwrap_or(0.0))
 }
 
@@ -577,7 +577,7 @@ fn float_req(row: &PgRow, i: usize) -> Result<f64, Failure> {
     float_col(row, i)?.ok_or(Failure::Raised("float(None)"))
 }
 
-fn text(row: &PgRow, i: usize) -> Result<Option<String>, Failure> {
+pub(crate) fn text(row: &PgRow, i: usize) -> Result<Option<String>, Failure> {
     row.try_get(i)
         .map_err(|_| Failure::Raised("a column the statement names is not text"))
 }
@@ -594,7 +594,7 @@ fn ratio(num: f64, den: f64, scale: f64, ndigits: usize) -> PyNum {
 // ─── The reads ──────────────────────────────────────────────────────────────
 
 /// `_category_ids`: the category and its descendants, never empty.
-async fn category_ids(store: &PgReads, category_id: i64) -> Result<Vec<i64>, Failure> {
+pub(crate) async fn category_ids(store: &PgReads, category_id: i64) -> Result<Vec<i64>, Failure> {
     let rows = store
         .rows(TREE_SQL.to_owned(), &[Bind::Int(category_id)])
         .await

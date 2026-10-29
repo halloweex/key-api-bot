@@ -684,3 +684,68 @@ def traffic_table_options() -> Dict[str, Tuple[str, ...]]:
     _require("components/TrafficTransactionsTable.tsx", r"setOffset\(prev => prev \+ PAGE_SIZE\)")
     return {"traffic_type": types.pop(), "platform": platforms.pop(),
             "limit": (sizes_found.pop(),), "sort_by": columns, "sort_dir": ("asc", "desc")}
+
+
+# ─── The analytics router: the dashboard, /marketing and the filter bar ──────
+
+DASHBOARD_HOOKS = ("useSummary", "useReturns", "useSalesBySource", "useTopProducts",
+                   "useProductPerformance", "useBrandAnalytics")
+MARKETING_ANALYTICS_HOOKS = ("useSummary", "usePromocodeAnalytics")
+
+
+def dashboard() -> Contract:
+    """The dashboard's GETs on `useQueryParams` alone: the cards, the returns
+    list behind them, the product and brand charts — and
+    `/api/sales/by-source`, whose hook no component calls. The category
+    drill-down appends its own parameter (`category_breakdown_query`)."""
+    return contract("/", DASHBOARD_HOOKS)
+
+
+def marketing_analytics() -> Contract:
+    """/marketing's ROI calculator (`/api/summary`) and promocode chart."""
+    return contract("/marketing", MARKETING_ANALYTICS_HOOKS)
+
+
+def encode_uri_component(text: str) -> str:
+    """JavaScript's `encodeURIComponent`: every UTF-8 byte but ASCII letters,
+    digits and `-_.!~*'()` percent-encoded, upper case; a space is `%20`."""
+    out = []
+    for byte in text.encode("utf-8"):
+        char = chr(byte)
+        if char.isascii() and (char.isalnum() or char in "-_.!~*'()"):
+            out.append(char)
+        else:
+            out.append(f"%{byte:02X}")
+    return "".join(out)
+
+
+def category_breakdown_query(c: Contract, parent: str, **state: object) -> str:
+    """`api.getCategoryBreakdown(parentCategory, queryParams)`: the page's
+    query, then `&parent_category=` and the name the category chart was
+    clicked on, through `encodeURIComponent`."""
+    _require("api/client.ts",
+             r"getCategoryBreakdown: \(parentCategory: string, params: string, "
+             r"options\?: FetchOptions\) =>\s*fetchApi<CategoryBreakdown>\(\s*"
+             r"'/categories/breakdown',\s*"
+             r"`\$\{params\}&parent_category=\$\{encodeURIComponent\(parentCategory\)\}`")
+    _require("hooks/useApi.ts", r"api\.getCategoryBreakdown\(parentCategory!, queryParams\)")
+    return f"{query(c, **state)}&parent_category={encode_uri_component(parent)}"  # type: ignore[arg-type]
+
+
+def lookup_paths() -> Tuple[str, str, str, str]:
+    """The filter bar's four GETs, none with a query: the root categories, a
+    root's children (`CategoryFilter` asks once a root is picked), the brands
+    and the promocodes."""
+    _require(
+        "api/client.ts",
+        r"getCategories: \(options\?: FetchOptions\) =>\s*"
+        r"fetchApi<Category\[\]>\('/categories', undefined, options\)",
+        r"getChildCategories: \(parentId: number, options\?: FetchOptions\) =>\s*"
+        r"fetchApi<Category\[\]>\(`/categories/\$\{parentId\}/children`, undefined, options\)",
+        r"getBrands: \(options\?: FetchOptions\) =>\s*"
+        r"fetchApi<Brand\[\]>\('/brands', undefined, options\)",
+        r"getPromocodes: \(options\?: FetchOptions\) =>\s*"
+        r"fetchApi<Promocode\[\]>\('/promocodes', undefined, options\)",
+    )
+    return ("/api/categories", "/api/categories/{parent_id}/children",
+            "/api/brands", "/api/promocodes")

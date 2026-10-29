@@ -38,16 +38,37 @@ impl PgReads {
     }
 
     pub async fn rows(&self, sql: String, binds: &[Bind]) -> Result<Vec<PgRow>, ReadError> {
+        self.read(sql, binds, true).await
+    }
+
+    /// `rows` without the revision: `core/pg_gold_read.py`, the one reader
+    /// that does not ask it.
+    pub async fn rows_unrevised(
+        &self,
+        sql: String,
+        binds: &[Bind],
+    ) -> Result<Vec<PgRow>, ReadError> {
+        self.read(sql, binds, false).await
+    }
+
+    async fn read(
+        &self,
+        sql: String,
+        binds: &[Bind],
+        revised: bool,
+    ) -> Result<Vec<PgRow>, ReadError> {
         let work = async {
-            let found: Option<String> =
-                sqlx::query_scalar("SELECT version_num FROM meta.alembic_version LIMIT 1")
-                    .fetch_optional(&self.pool)
-                    .await?;
-            if found.as_deref() != Some(self.revision.as_str()) {
-                return Err(sqlx::Error::Protocol(format!(
-                    "schema is at {found:?}, this build requires {:?}",
-                    self.revision
-                )));
+            if revised {
+                let found: Option<String> =
+                    sqlx::query_scalar("SELECT version_num FROM meta.alembic_version LIMIT 1")
+                        .fetch_optional(&self.pool)
+                        .await?;
+                if found.as_deref() != Some(self.revision.as_str()) {
+                    return Err(sqlx::Error::Protocol(format!(
+                        "schema is at {found:?}, this build requires {:?}",
+                        self.revision
+                    )));
+                }
             }
             let mut query = sqlx::query(AssertSqlSafe(sql));
             for bind in binds {

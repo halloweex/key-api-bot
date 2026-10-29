@@ -38,6 +38,7 @@ use crate::access::paths::uvicorn_path;
 use crate::access::ratelimit::{Limiter, client_key};
 use crate::access::routing::{Captures, Resolution, Router};
 use crate::access::store::PgAccess;
+use crate::analytics;
 use crate::expenses;
 use crate::goals;
 use crate::gold::PgGold;
@@ -402,6 +403,21 @@ async fn endpoint(
             };
             let admit = admitter(state, route, headers, peer);
             match traffic::answer(which, &state.reads, query, now, admit).await {
+                Ok(body) => raw_json(StatusCode::OK, body),
+                Err(failure) => failure.into_response(),
+            }
+        }
+        name if analytics::Route::from_endpoint(name).is_some() => {
+            let which = analytics::Route::from_endpoint(name).expect("matched above");
+            let Some(now) = state.trend_now(headers) else {
+                return detail(
+                    StatusCode::BAD_REQUEST,
+                    "X-Pilot-Now must be an RFC 3339 instant",
+                );
+            };
+            let admit = admitter(state, route, headers, peer);
+            let parent = captures.get("parent_id").map(String::as_str);
+            match analytics::answer(which, &state.reads, query, parent, now, admit).await {
                 Ok(body) => raw_json(StatusCode::OK, body),
                 Err(failure) => failure.into_response(),
             }
