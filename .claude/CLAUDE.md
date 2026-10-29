@@ -375,6 +375,35 @@ docker-compose logs --tail=50 web
 docker-compose logs --tail=50 nginx
 ```
 
+### The /api request log
+
+`docker logs` goes with the container, and on 2026-10-29 the dead-route audit
+found four hours of it: too little to call a lever run by hand once a month
+dead. So nginx also writes one JSON line per HTTPS request under `/api/` to
+`/var/log/ks-api/api.log` on the host (`nginx/nginx.conf`, `ks_api`): time,
+method, path, status, bytes, both timings, the upstream by name and by
+address. **No client address, no user agent, no query string**: the query of
+a search is what somebody typed. The path is cut out of the request line as
+it arrived, so a request answered with the 502 page keeps its own path.
+
+The bound is the `api-log` service, declared beside the mount that creates
+the log (`nginx/api-log/rotate.sh`, every five minutes): the file is cut at
+the first pass after midnight UTC, or past 32 MiB, compressed, and the newest
+62 cuts are kept. That is two months on an ordinary day, and in a flood never
+much more than 62 × 32 MiB of text. Copy, then truncate, because nothing
+there can signal nginx: a line written inside the copy can be lost.
+`tests/unit/test_api_request_log.py` holds the path, the format and the bound
+to each other and runs the script.
+
+Which routes were asked, on the host:
+
+```bash
+zcat -f /var/log/ks-api/api.log /var/log/ks-api/api-*.log.gz | python3 -c '
+import collections, json, sys
+c = collections.Counter((r["m"], r["p"]) for r in map(json.loads, sys.stdin))
+for (m, p), n in c.most_common(): print(n, m, p)'
+```
+
 ## Testing
 
 `pytest.ini` sets `testpaths`, `asyncio_mode = strict`, and deselects the
