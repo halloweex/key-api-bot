@@ -6,12 +6,23 @@ job uses, so what arrives is what the job would send. This exists for
 looking at a layout on a real phone before a Monday, not for delivering the
 report; it writes nothing to the send ledger.
 
-Real numbers come from the DuckDB file when it holds the week; `--fixture`
-renders the 31.08–06.09.2026 retail week from values that reproduce the
-message actually delivered on 2026-09-07, for a host whose copy is stale.
+Real numbers come from Postgres, through the readers the two weekly jobs
+call — `core.weekly_report.build_report` and its `fetch_*` for the sales
+report, `core.traffic_report.build_report` for the traffic one — so it needs
+what those jobs have in production: `KS_READ_WEEKLY=postgres` (the traffic
+report: `KS_READ_TRAFFIC=postgres`) and `KS_PG_DSN`. Without them it refuses
+before reading anything. It opens no DuckDB file: the store it hands the
+readers refuses to connect, so a reader that would have asked DuckDB stops
+the preview instead (it read a DuckDB backup until step 14's S14-03).
+`--fixture` renders the 31.08–06.09.2026 retail week from values that
+reproduce the message actually delivered on 2026-09-07, and reads nothing.
 
     PYTHONPATH=. KS_ALERTS_DISABLED=0 KS_INSTANCE=dev-laptop \\
+        KS_READ_WEEKLY=postgres KS_PG_DSN=postgresql://... \\
         python scripts/weekly_report_preview.py --chat-id <id> --lang ru --form rich,rich-nocard
+
+On the host, web's own environment carries both variables:
+`docker compose run --rm --no-deps -T web python /app/scripts/weekly_report_preview.py ...`.
 
 The kill switch is honoured: without `KS_ALERTS_DISABLED=0` in the
 environment (a dev `.env` sets it to 1) every send is suppressed and logged.
@@ -20,11 +31,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import asynccontextmanager
 import logging
-import os
 import sys
 from datetime import date, datetime
+from typing import Any, Optional
 
 from core.weekly_report import (
     ChannelTotals,
@@ -47,10 +57,8 @@ from core.weekly_report_image import (
 # all; card / text: the two forms the scheduled job sends today.
 FORMS = ("rich", "rich-nocard", "rich-text", "card", "text")
 
-# Which weekly message to preview. The traffic one needs no fixture and no
-# readable DuckDB: its reads go through the repository, which follows
-# `KS_READ_TRAFFIC` to Postgres, so an empty throwaway store is enough to
-# carry the method and the numbers are still the live ones.
+# Which weekly message to preview. Both read Postgres live; only the sales
+# one has a fixture.
 REPORTS = ("sales", "traffic")
 
 
@@ -128,36 +136,58 @@ def fixture_report() -> WeeklyReport:
     )
 
 
-class _FileStore:
-    """The one `store` method `build_report` uses, over a file opened here.
+class PostgresOnly(RuntimeError):
+    """A reader asked for DuckDB. The preview reads Postgres alone."""
 
-    This script reads a DuckDB *file* on purpose — usually a backup, for a
-    laptop whose own copy is stale — so it has no `DuckDBStore` and wants
-    none: taking one would open the live database and the single-writer lock
-    with it. `build_report` needs exactly `async with store.connection()`, so
-    that is exactly what this provides.
 
-    It never consults `KS_READ_WEEKLY`. A preview is for looking at what a
-    given file says; pointing it at Postgres would make `--db` a lie.
+def _store() -> Any:
+    """The store the jobs hand their readers, refusing to connect.
+
+    Both reports take a store: the sales report's `fetch_*` run on its
+    connection when `KS_READ_WEEKLY` names DuckDB, and the traffic report's
+    reads are the store's own repository methods, which route by
+    `KS_READ_TRAFFIC`. The jobs get theirs from `get_store()`, which in web
+    under `KS_DUCKDB=off` is a store never connected. A script does not run
+    that verdict, so this is the same store with the connect refused: the
+    constructor touches no file, and a reader routed to DuckDB stops the
+    preview here rather than open one.
     """
+    from core.duckdb_store import DuckDBStore
 
-    def __init__(self, conn):
-        self._conn = conn
+    class _PostgresOnlyStore(DuckDBStore):
+        async def connect(self, *, reopen: bool = True) -> None:
+            raise PostgresOnly(
+                "a reader asked for DuckDB; the preview reads Postgres alone "
+                "(set KS_READ_WEEKLY / KS_READ_TRAFFIC to postgres)")
 
-    @asynccontextmanager
-    async def connection(self):
-        yield self._conn
+    return _PostgresOnlyStore()
 
 
-async def live_report(db_path: str, sales_type: str) -> WeeklyReport:
-    import duckdb
+def postgres_unready(report: str) -> Optional[str]:
+    """Why the live preview of `report` cannot read Postgres, or None.
 
-    conn = duckdb.connect(db_path, read_only=True)
+    The switch the report's readers consult, and the address they use — the
+    two the job has in production. Asked before the first read, so a laptop
+    `.env` still saying `duckdb` is a sentence, not a traceback.
+    """
+    from core import pg_traffic_read, pg_weekly_read
+
+    switch = pg_traffic_read if report == "traffic" else pg_weekly_read
     try:
-        return await build_report(
-            _FileStore(conn), datetime.now().date(), sales_type)
-    finally:
-        conn.close()
+        on = switch.enabled()
+    except ValueError as exc:
+        return str(exc)
+    if not on:
+        return (f"{switch.ENV} is not postgres; the preview reads what the job "
+                f"reads in production — set {switch.ENV}=postgres")
+    if not switch.available():
+        return "KS_PG_DSN is not set; the preview reads Postgres"
+    return None
+
+
+async def live_report(sales_type: str, today: Optional[date] = None) -> WeeklyReport:
+    """The sales report the job would build today, from Postgres."""
+    return await build_report(_store(), today or datetime.now().date(), sales_type)
 
 
 async def send(report: WeeklyReport, chat_id: int, lang: str,
@@ -201,31 +231,23 @@ async def send(report: WeeklyReport, chat_id: int, lang: str,
         print(f"{form:<12} lang={lang} delivered={n}")
 
 
-async def send_traffic(chat_id: int, lang: str, db_path: str,
-                       dashboard_url: str | None) -> None:
-    """Build and send the traffic report exactly as the job would.
-
-    The store is opened on `db_path` only to carry the repository methods —
-    with `KS_READ_TRAFFIC=postgres` not one of them touches the file, which
-    is why a throwaway path works while the production DuckDB is locked by
-    the running process.
-    """
-    from core.duckdb_store import DuckDBStore
+async def send_traffic(chat_id: int, lang: str,
+                       dashboard_url: Optional[str],
+                       today: Optional[date] = None) -> None:
+    """Build and send the traffic report exactly as the job would: the
+    tab's own repository methods, routed to Postgres by `KS_READ_TRAFFIC`,
+    on the store that refuses to connect."""
     from core.telegram_alerts import send_rich_message_http
-    from core.traffic_report import build_report, chart_view, format_report_rich
+    from core.traffic_report import build_report as build_traffic, chart_view
+    from core.traffic_report import format_report_rich as format_traffic_rich
     from core.weekly_report_image import render_channels_chart
 
-    store = DuckDBStore(db_path=db_path)
-    await store.connect()
-    try:
-        report = await build_report(store, datetime.now().date())
-    finally:
-        await store.close()
+    report = await build_traffic(_store(), today or datetime.now().date())
 
     print(f"week {report.start} – {report.end}: "
           f"{report.revenue:,.0f} from {report.orders} orders")
     chart = render_channels_chart(chart_view(report, lang), lang) if report.platforms else None
-    html = format_report_rich(
+    html = format_traffic_rich(
         report, dashboard_url, lang,
         figures={"platforms": "platforms"} if chart else None,
     )
@@ -242,7 +264,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="comma-separated: " + ", ".join(FORMS))
     parser.add_argument("--fixture", action="store_true",
                         help="render the 31.08–06.09.2026 week from fixed values")
-    parser.add_argument("--db", default=os.getenv("DUCKDB_PATH", "data/analytics.duckdb"))
     parser.add_argument("--sales-type", default="retail")
     parser.add_argument("--report", default="sales",
                         help="which weekly message: " + ", ".join(REPORTS))
@@ -254,19 +275,26 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     from core.config import DASHBOARD_URL
 
-    if args.report == "traffic":
-        asyncio.run(send_traffic(args.chat_id, args.lang, args.db,
-                                 DASHBOARD_URL or None))
-        return 0
     if args.report not in REPORTS:
         print(f"unknown report {args.report!r}; one of {', '.join(REPORTS)}",
               file=sys.stderr)
         return 1
+    if args.report == "traffic" or not args.fixture:
+        why = postgres_unready(args.report)
+        if why:
+            hint = "; or render the fixture week with --fixture" if args.report == "sales" else ""
+            print(f"cannot preview the live {args.report} report: {why}{hint}",
+                  file=sys.stderr)
+            return 2
+
+    if args.report == "traffic":
+        asyncio.run(send_traffic(args.chat_id, args.lang, DASHBOARD_URL or None))
+        return 0
 
     report = (fixture_report() if args.fixture
-              else asyncio.run(live_report(args.db, args.sales_type)))
+              else asyncio.run(live_report(args.sales_type)))
     if report.current.orders == 0:
-        print("the week has no orders in this copy; use --fixture", file=sys.stderr)
+        print("the week has no orders in Postgres; use --fixture", file=sys.stderr)
         return 1
     forms = [f.strip() for f in args.form.split(",") if f.strip()]
     asyncio.run(send(report, args.chat_id, args.lang, forms, DASHBOARD_URL or None))

@@ -1041,25 +1041,19 @@ def test_nothing_in_the_repository_schedules_or_calls_it():
 
 def test_the_documents_say_the_second_arks_are_kept_by_count():
     """OD-S5-6 keeps two of deploy/ark_ship.sh's Arks off-site, by count, in
-    the directory the first Ark went to. The runbook and the freezer's
-    docstring are where somebody reads how long an Ark lives, and after the
-    pruning existed both still said nothing there is pruned, or that the Ark
-    is never rotated. Each now names the knob that prunes and the decision
-    behind it, and the sentences that said otherwise are gone."""
+    the directory the first Ark went to. The freezer's docstring is where
+    somebody reads how long an Ark lives, and after the pruning existed it
+    still said the Ark is never rotated. It now names the knob that prunes
+    and the decision behind it, and the sentence that said otherwise is gone.
+    (The step-05 preflight runbook said the same and was held to it here
+    until S14-03 deleted it; its record of the first Ark is in git history.)"""
     assert re.search(r'^RETAIN="\$\{BACKUP_ARK_RETAIN:-2\}"$', SCRIPT.read_text(), re.M)
 
     def flat(text):
         return " ".join(text.split())
 
-    runbook = flat((DEPLOY / "step05-preflight-runbook.md").read_text())
     docstring = flat(_load_ark_freeze().__doc__)
-    for name, text in (("the runbook", runbook), ("ark_freeze.py", docstring)):
-        assert "BACKUP_ARK_RETAIN" in text and "OD-S5-6" in text, name
-    for stale in ("Nothing there is pruned today",
-                  "Nothing prunes it, here or there",
-                  "once in the deploy that removes DuckDB",
-                  "never rotated: once before the first landing write"):
-        assert stale not in runbook, stale
+    assert "BACKUP_ARK_RETAIN" in docstring and "OD-S5-6" in docstring
     assert "twice in the whole migration** and never rotated" not in docstring
 
 

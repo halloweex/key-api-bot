@@ -73,10 +73,6 @@ OPENERS = {"connection", "connect"}
 # runs (`test_duckdb_switch.py` pins their opener use; PR-10 their early
 # exits and messages).
 HOST_ENTRIES: Dict[str, str] = {
-    "deploy/measure_dlr_throughput.py:main": (
-        "a one-off measurement of the DLR path; retired with PR-10"),
-    "deploy/measure_dlr_throughput.py:rebuild_like": (
-        "the same one-off's rebuild; retired with PR-10"),
     "scripts/backfill_gender.py:main": (
         "`--duckdb` reads the file; refused under off by the switch"),
     "scripts/backfill_utm.py:backfill_utm": (
@@ -85,15 +81,15 @@ HOST_ENTRIES: Dict[str, str] = {
     "scripts/chain_copy_back.py:main": (
         "the way back; refused under off, exit 2 (PR-0) — `-e KS_DUCKDB=on` "
         "is the decision to restart both clocks"),
-    "scripts/check_date.py:main": (
-        "compares DuckDB's counts with KeyCRM's; refused under off (PR-10)"),
     "scripts/compact_duckdb.py:main": (
         "the Sunday compaction's sidecar; refused under off before the "
         "driver runs, its cron line retired at the start of the week"),
-    "scripts/force_resync.py:main": (
-        "rebuilds DuckDB from KeyCRM; refused under off (PR-10)"),
     "scripts/weekly_report_preview.py:main": (
-        "a preview on a laptop; reads through the report's own readers"),
+        "a preview on a phone: reads Postgres through the weekly jobs' own "
+        "readers, refuses without their switch at postgres and KS_PG_DSN, and "
+        "hands them a store that refuses to connect (S14-03). The walk still "
+        "reaches the DuckDB branch of `core/weekly_report.py:_weekly_run`, the "
+        "job's own reader; this pin goes when S14-07 removes that branch"),
 }
 
 # Entries no production code calls. Kept, not deleted: OD-11 forbids

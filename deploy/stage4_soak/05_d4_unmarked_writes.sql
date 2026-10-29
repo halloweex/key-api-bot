@@ -38,7 +38,8 @@
 -- rows older than that deploy.
 --
 -- WHAT A FAIL MEANS
--- A real unmarked write. After a one-off script (`force_resync`) it is
+-- A real unmarked write. After a one-off resync (`force_resync`, through
+-- `POST /api/duckdb/resync` since S14-03 deleted its script) it is
 -- expected and the heartbeat covered it — record it. Otherwise find the writer:
 -- the rows' `mirrored_at` says when.
 WITH clock AS (
