@@ -532,6 +532,58 @@ REFUSING_HELPERS = {"_pg_gold_summary", "_pg_gold_series", "_pg_silver",
                     "get_manager_sales_365d"}
 
 
+def _judged_by_rule_5(fn: ast.AST, aliases: Set[str], names: Set[str]) -> List[str]:
+    """The engine reaches of `fn`, in the words of S14-05's walk, that rule 5
+    of `test_read_fallback_sites.py` judges: every call its `_engine_calls`
+    returns, and every import in `fn` binding what those calls are read by —
+    a module by its alias (`from core import pg_x`, `import core.pg_x as y`),
+    spelled out (`import core.pg_x`), or a function by its name (`from
+    core.pg_x import y`). `fn`'s own nodes only, as rule 5 reads it."""
+    from tests.unit.test_read_fallback_sites import _engine_calls, _own_nodes
+    from tests.unit.test_read_routers_postgres_only import _dotted
+
+    judged = [f"engine: {_dotted(c.func)}()" for c in _engine_calls(fn, aliases, names)]
+    for n in _own_nodes(fn):
+        if isinstance(n, ast.ImportFrom) and n.module == "core":
+            judged += [f"engine: imports core.{a.name}" for a in n.names
+                       if a.name.startswith("pg_")]
+        elif isinstance(n, ast.ImportFrom) and n.module and (
+                n.module == "core.pg" or n.module.startswith("core.pg_")):
+            judged.append(f"engine: imports {n.module}")
+        elif isinstance(n, ast.Import):
+            judged += [f"engine: imports {a.name}" for a in n.names
+                       if a.name.startswith("core.pg_")]
+    return judged
+
+
+def _engine_held_as_a_value(fn: ast.AST, aliases: Set[str], names: Set[str]) -> List[str]:
+    """Where `fn` holds an engine module or function other than as the
+    callee of a call rule 5 judges. `fetch = pg_gold_read.fetch_series`, then
+    `await fetch(...)` outside the `try`, is a call neither walk sees."""
+    from tests.unit.test_read_fallback_sites import (
+        _engine_calls, _names_an_engine_module, _own_nodes,
+    )
+    from tests.unit.test_read_routers_postgres_only import _dotted
+
+    callees = set()
+    for call in _engine_calls(fn, aliases, names):
+        node = call.func
+        while isinstance(node, ast.Attribute):
+            callees.add(id(node))
+            node = node.value
+        callees.add(id(node))
+    held = []
+    for n in _own_nodes(fn):
+        if id(n) in callees:
+            continue
+        if (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                and (n.id in aliases or n.id in names or n.id == "get_pool")):
+            held.append(f"engine: {n.id} held as a value")
+        elif isinstance(n, ast.Attribute) and _names_an_engine_module(n):
+            held.append(f"engine: {_dotted(n)} held as a value")
+    return held
+
+
 def round_a_refusal(source: str, relpath: str) -> List[str]:
     """What in `source` reaches what only a router or a refusing helper may,
     and is neither. S14-05's walk of the tab modules
@@ -539,18 +591,36 @@ def round_a_refusal(source: str, relpath: str) -> List[str]:
     engine, the old shape's machinery, the environment), with one allowance:
     a function rule 5 of `test_read_fallback_sites.py` holds clean — it
     refuses, and every engine call it makes sits inside the `try` whose
-    handler is the refusal — may reach an engine, and nothing else."""
-    from tests.unit.test_read_fallback_sites import read_switch_modules, walk_source
+    handler is the refusal — may reach an engine, but only by what rule 5
+    judges. Every other engine reach of it is still reported: S14-05's walk
+    sees calls rule 5 does not (a function imported by its name was one,
+    until the review of this PR's merge widened rule 5), and an engine held
+    as a value is called by a name no walk reads. A name defined twice in
+    the file gets no allowance, since the walk keys its reaches by name."""
+    from collections import Counter
+
+    from tests.unit.test_read_fallback_sites import (
+        _engine_aliases, _engine_names, _functions, read_switch_modules, walk_source,
+    )
     from tests.unit.test_read_routers_postgres_only import (
         _what_reaches_round_the_router,
     )
 
+    tree = ast.parse(source)
+    aliases, names = _engine_aliases(tree), _engine_names(tree)
     _routers, reaches = _what_reaches_round_the_router(source)
+    defined = Counter(getattr(fn, "name", "") for fn in _functions(tree))
     clean = {s.function for s in walk_source(source, relpath, read_switch_modules())
-             if s.rule == "refuse" and s.ok}
-    return [f"{function}: {f}" for function, found in sorted(reaches.items())
-            for f in found
-            if function not in clean or not f.startswith("engine:")]
+             if s.rule == "refuse" and s.ok and defined[s.function] == 1}
+    out = []
+    for function, found in sorted(reaches.items()):
+        left = Counter(found)
+        if function in clean:
+            fn = next(f for f in _functions(tree) if getattr(f, "name", "") == function)
+            left -= Counter(_judged_by_rule_5(fn, aliases, names))
+            left += Counter(_engine_held_as_a_value(fn, aliases, names))
+        out += [f"{function}: {f}" for f in sorted(left.elements())]
+    return out
 
 
 class TestNothingGoesRoundARefusal:
@@ -562,8 +632,12 @@ class TestNothingGoesRoundARefusal:
     functions that refuse, and the HTTP sweep only refusals. It left
     `revenue.py` to this PR. Here the dashboard's file meets the same walk,
     with the four helpers that refuse for themselves allowed an engine.
-    Mutation: a bare `await pg_dashboard_read.fetch(...)` in
-    `get_sales_by_source`, which no other test sees."""
+    Mutations: a bare `await pg_dashboard_read.fetch(...)` in
+    `get_sales_by_source`, which no other test sees; and the merge review's
+    MD2, `from core.pg_gold_read import fetch_series` and an `await
+    fetch_series(...)` before `_pg_gold_summary`'s `try` — a 500 on
+    `/api/summary?source_id=2` that the first form of the allowance dropped,
+    and that this and rule 5 each find now."""
 
     def test_the_dashboard_file(self):
         source = (ROOT / REVENUE).read_text(encoding="utf-8")
@@ -592,8 +666,21 @@ class TestNothingGoesRoundARefusal:
               "        except Exception as exc:\n"
               "            raise read_fallback.refuse('dashboard', exc)\n")
 
-    def test_a_clean_helper_passes(self):
-        assert round_a_refusal(self.ROUTER + self.HELPER, REVENUE) == []
+    # The allowance is what rule 5 judges, in each spelling it reads: with
+    # the call inside the `try`, nothing is left to report.
+    @pytest.mark.parametrize("helper", [
+        HELPER,
+        HELPER.replace("        try:\n",
+                       "        from core.pg_gold_read import fetch_series\n"
+                       "        try:\n"
+                       "            await fetch_series(1)\n"),
+        HELPER.replace("        try:\n",
+                       "        import core.pg_gold_read\n"
+                       "        try:\n"
+                       "            await core.pg_gold_read.fetch_series(1)\n"),
+    ], ids=["module", "imported_name", "spelled_out"])
+    def test_a_clean_helper_passes(self, helper):
+        assert round_a_refusal(self.ROUTER + helper, REVENUE) == []
 
     @pytest.mark.parametrize("method", [
         ("    async def get_x(self):\n"
@@ -601,6 +688,21 @@ class TestNothingGoesRoundARefusal:
          "        return await pg_dashboard_read.fetch('q', [])\n"),
         HELPER.replace("        try:\n",
                        "        rows = await pg_gold_read.fetch_series(1)\n"
+                       "        try:\n"),
+        # The merge review's MD2: rule 5 did not read a call by a name
+        # imported from `core.pg_*`, so it held the helper clean and the
+        # allowance dropped what S14-05's walk had found.
+        HELPER.replace("        try:\n",
+                       "        from core.pg_gold_read import fetch_series\n"
+                       "        rows = await fetch_series(1)\n"
+                       "        try:\n"),
+        # No walk reads a call by a name the engine was handed to.
+        HELPER.replace("        try:\n",
+                       "        fetch = pg_gold_read.fetch_series\n"
+                       "        rows = await fetch(1)\n"
+                       "        try:\n"),
+        HELPER.replace("        try:\n",
+                       "        rows = await (lambda: pg_gold_read.fetch_series(1))()\n"
                        "        try:\n"),
         HELPER.replace("            raise read_fallback.refuse('dashboard', exc)\n",
                        "            return None\n"),
@@ -611,13 +713,18 @@ class TestNothingGoesRoundARefusal:
          "            return await pg_gold_read.fetch_summary(os.getenv('KS_READ_GOLD'))\n"
          "        except Exception as exc:\n"
          "            raise read_fallback.refuse('dashboard', exc)\n"),
-    ], ids=["bare_reader", "helper_bare_second_call", "helper_silent_handler",
-            "helper_reads_its_switch"])
+        # Two functions of one name: the walk keys its reaches by name, so
+        # neither is allowed anything.
+        HELPER + "class U:\n" + HELPER,
+    ], ids=["bare_reader", "helper_bare_second_call",
+            "helper_second_call_by_imported_name", "helper_holds_the_engine_as_a_value",
+            "helper_calls_it_in_a_lambda", "helper_silent_handler",
+            "helper_reads_its_switch", "helper_name_defined_twice"])
     def test_the_walk_bites(self, method):
         assert round_a_refusal(self.ROUTER + method, REVENUE) != []
 
 
-SUMMARY_KEYS ={"totalOrders", "totalRevenue", "avgCheck", "totalReturns",
+SUMMARY_KEYS = {"totalOrders", "totalRevenue", "avgCheck", "totalReturns",
                 "returnsRevenue", "startDate", "endDate"}
 DATASET_KEYS = {"label", "data", "borderColor", "backgroundColor", "fill",
                 "tension", "borderWidth"}
