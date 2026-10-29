@@ -34,7 +34,8 @@ The numbers are `tests/integration/test_dashboard_two_engines.py`'s, against a
 real Postgres and literals DuckDB answered before its side went; every route
 through the real app is `tests/unit/test_read_fallback_http.py`'s; that no
 engine call sits outside its `try` is `tests/unit/test_read_fallback_sites.py`'s
-rule 5.
+rule 5, and that nothing in `revenue.py` but a router or a refusing helper
+reaches an engine at all is `TestNothingGoesRoundARefusal`'s, below.
 """
 from __future__ import annotations
 
@@ -522,7 +523,101 @@ class TestAFailureIsTheRefusalOffMade:
         assert raised.value.surface == "dashboard"
 
 
-SUMMARY_KEYS = {"totalOrders", "totalRevenue", "avgCheck", "totalReturns",
+# `core/repositories/revenue.py`: the four `_*_run` routers it holds (S14-05's
+# three and the dashboard's), and the dashboard's four helpers that refuse for
+# themselves.
+REVENUE = "core/repositories/revenue.py"
+REVENUE_ROUTERS = {"_dashboard_run", "_reports_run", "_marketing_run", "_lookups_run"}
+REFUSING_HELPERS = {"_pg_gold_summary", "_pg_gold_series", "_pg_silver",
+                    "get_manager_sales_365d"}
+
+
+def round_a_refusal(source: str, relpath: str) -> List[str]:
+    """What in `source` reaches what only a router or a refusing helper may,
+    and is neither. S14-05's walk of the tab modules
+    (`test_read_routers_postgres_only._what_reaches_round_the_router`: an
+    engine, the old shape's machinery, the environment), with one allowance:
+    a function rule 5 of `test_read_fallback_sites.py` holds clean — it
+    refuses, and every engine call it makes sits inside the `try` whose
+    handler is the refusal — may reach an engine, and nothing else."""
+    from tests.unit.test_read_fallback_sites import read_switch_modules, walk_source
+    from tests.unit.test_read_routers_postgres_only import (
+        _what_reaches_round_the_router,
+    )
+
+    _routers, reaches = _what_reaches_round_the_router(source)
+    clean = {s.function for s in walk_source(source, relpath, read_switch_modules())
+             if s.rule == "refuse" and s.ok}
+    return [f"{function}: {f}" for function, found in sorted(reaches.items())
+            for f in found
+            if function not in clean or not f.startswith("engine:")]
+
+
+class TestNothingGoesRoundARefusal:
+    """The merge of S14-05's main (#327, the pixel-only breakdown) brought
+    `test_nothing_but_the_router_reaches_an_engine`: in the three tab modules
+    whose every reader goes through one router, nothing but that router may
+    reach an engine, because a reader calling Postgres itself answers an
+    engine failure with an uncounted 500 — rule 5 judges only routers and
+    functions that refuse, and the HTTP sweep only refusals. It left
+    `revenue.py` to this PR. Here the dashboard's file meets the same walk,
+    with the four helpers that refuse for themselves allowed an engine.
+    Mutation: a bare `await pg_dashboard_read.fetch(...)` in
+    `get_sales_by_source`, which no other test sees."""
+
+    def test_the_dashboard_file(self):
+        source = (ROOT / REVENUE).read_text(encoding="utf-8")
+        from tests.unit.test_read_routers_postgres_only import (
+            _what_reaches_round_the_router,
+        )
+
+        routers, reaches = _what_reaches_round_the_router(source)
+        assert routers == REVENUE_ROUTERS, routers
+        # Non-vacuity: the walk read the helpers, and found them clean.
+        assert set(reaches) == REFUSING_HELPERS, sorted(reaches)
+        assert round_a_refusal(source, REVENUE) == []
+
+    ROUTER = ("from core import read_fallback\n"
+              "class T:\n"
+              "    async def _t_run(self, sql):\n"
+              "        from core import pg_dashboard_read\n"
+              "        try:\n"
+              "            return await pg_dashboard_read.fetch(sql, [])\n"
+              "        except Exception as exc:\n"
+              "            raise read_fallback.refuse('dashboard', exc)\n\n")
+    HELPER = ("    async def _pg_x(self):\n"
+              "        from core import pg_gold_read\n"
+              "        try:\n"
+              "            return await pg_gold_read.fetch_summary(1)\n"
+              "        except Exception as exc:\n"
+              "            raise read_fallback.refuse('dashboard', exc)\n")
+
+    def test_a_clean_helper_passes(self):
+        assert round_a_refusal(self.ROUTER + self.HELPER, REVENUE) == []
+
+    @pytest.mark.parametrize("method", [
+        ("    async def get_x(self):\n"
+         "        from core import pg_dashboard_read\n"
+         "        return await pg_dashboard_read.fetch('q', [])\n"),
+        HELPER.replace("        try:\n",
+                       "        rows = await pg_gold_read.fetch_series(1)\n"
+                       "        try:\n"),
+        HELPER.replace("            raise read_fallback.refuse('dashboard', exc)\n",
+                       "            return None\n"),
+        ("    async def _pg_x(self):\n"
+         "        import os\n"
+         "        from core import pg_gold_read\n"
+         "        try:\n"
+         "            return await pg_gold_read.fetch_summary(os.getenv('KS_READ_GOLD'))\n"
+         "        except Exception as exc:\n"
+         "            raise read_fallback.refuse('dashboard', exc)\n"),
+    ], ids=["bare_reader", "helper_bare_second_call", "helper_silent_handler",
+            "helper_reads_its_switch"])
+    def test_the_walk_bites(self, method):
+        assert round_a_refusal(self.ROUTER + method, REVENUE) != []
+
+
+SUMMARY_KEYS ={"totalOrders", "totalRevenue", "avgCheck", "totalReturns",
                 "returnsRevenue", "startDate", "endDate"}
 DATASET_KEYS = {"label", "data", "borderColor", "backgroundColor", "fill",
                 "tension", "borderWidth"}
