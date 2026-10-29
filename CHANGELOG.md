@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.302
+
+- Step 14 S14-01: the shared warehouse SQL and constants live in neutral modules
+
+
 ## 3.0.301
 
 - Traffic tab says who the pixel-only buyers are
