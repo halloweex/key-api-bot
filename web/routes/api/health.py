@@ -189,11 +189,15 @@ def _read_fallback_mode() -> dict:
     it was not understood, and every read switch naming an engine this process
     has no address for. Local state, no I/O.
 
-    `no_engine` lists the surfaces only one engine may answer under `off`
-    whose switch does not name it — the cohorts at `KS_READ_COHORTS=duckdb`:
-    served from DuckDB uncounted today, refused under `off`. With
-    `misconfigured` it is what the canary pages as `read_routed_to_duckdb`
-    (OD-07).
+    `no_engine` listed the surfaces only one engine may answer under `off`
+    whose switch did not name it — the cohorts at `KS_READ_COHORTS=duckdb`,
+    served from DuckDB uncounted under `duckdb`, refused under `off`. It is
+    always empty since step 14's S14-07 (`read_fallback.ENGINE_ONLY` is
+    empty): the cohorts ask ClickHouse whatever that switch says, and are
+    refused, counted under `refused`, only when ClickHouse fails or
+    `KS_CH_URL` is unset. With `misconfigured` it is what the canary pages as
+    `read_routed_to_duckdb` (OD-07), which fires only under `mode=duckdb`,
+    never since S14-00; S14-16 takes both fields and the key.
 
     Under `off`, also `refused` — `{surface: {count, last_at}}`, the reads
     answered 503 rather than from DuckDB (DN-20b) — and under `KS_DUCKDB=off`

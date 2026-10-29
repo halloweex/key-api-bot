@@ -2177,7 +2177,8 @@ incrementally rather than re-indexing everything), and the copy-back carries
 it into DuckDB and the release deletes it. Nothing judges its age: it is in no
 `FRESHNESS_THRESHOLDS` entry, so a run that cannot read the moved watermarks
 does not name it in `sync_watermarks_unwatched`. `last_sync_meilisearch`, the
-DuckDB-built index's cursor, is a DuckDB clock and stays DuckDB's. Declared on
+DuckDB-built index's cursor, was a DuckDB clock and stayed DuckDB's (history:
+it went with S14-07, with that index's frames, and nothing reads it). Declared on
 no chain until a review found it, while this file said chain 3 carried it.
 
 **What stands down with it.** DuckDB's arm of `dq_reconciliation` (layer
@@ -3597,6 +3598,11 @@ and `KS_READ_EXPENSES`, `_INVENTORY`, `_GOALS` and `_COHORTS` route nothing.
 A failed read of chain 7a's goals — `GET /api/goals`, the smart goal — is
 now that counted 503 too, where it escaped as an uncounted 500, and chain
 7b-3's forecast reads refuse through the same path as `chain_refusal` did.
+That is an accepted change in what pages (the owner's decision, the S14-07
+review): when only that read fails, `read_fallback_mode.refused.goals` counts
+it and the canary pages `read_refused` (WARN), where nothing paged before —
+the same change S14-05 made for /marketing's goal line and S14-06 for the
+returns list.
 The expenses' history gate stays an explicit refusal: a NULL
 `meta.mirror_state.backfilled_at` for `bronze.expenses` is a 503 naming
 `expenses`, read by the table's name written out rather than imported from
@@ -3614,7 +3620,14 @@ job's `read_unavailable`): it is `core.pg`'s own `KS_PG_DSN is not set`,
 handled as an unreachable Postgres already was there, while every tab above
 still answers it with its 503 (measured beside the base on one seeded
 Postgres: the same 728 requests, and every tab's answer equal but
-`GET /api/goals`'s 503 above). The index keeps one watermark, `last_sync_meilisearch_pg`, and the
+`GET /api/goals`'s 503 above). Two routes over the training frame, which
+that run did not ask and the review did, follow the reader rather than the
+tabs: with no DSN `GET /api/revenue/forecast/evaluate` answers 500 and
+`POST /api/revenue/forecast/train` 200 `"status": "error"`, where each was
+the counted 503 naming `forecast` — what a DSN that is set and a Postgres
+that is down already gave both. Compose builds `KS_PG_DSN` with `:?`, so
+production cannot meet it, and the refusal helpers' end is S14-16's. The
+index keeps one watermark, `last_sync_meilisearch_pg`, and the
 DuckDB-built index's `meilisearch` cursor went with its frames. None of
 these modules carries `ENV`, `enabled` or `available` any more. The numbers
 are literals DuckDB answered on each fixture before its side went
