@@ -58,7 +58,7 @@ pub enum Failure {
     /// Python raised outside its handlers: the app's catch-all 500.
     Raised(&'static str),
     /// The read failed and `KS_READ_FALLBACK=off` refuses DuckDB: 503.
-    Unavailable(ReadError),
+    Unavailable(&'static str, ReadError),
     /// A branch the pilot leaves to Python.
     NotInPilot(&'static str),
     /// slowapi's 429, carrying `str(limit)`.
@@ -183,12 +183,12 @@ pub async fn revenue_trend<G: Gold>(
     let current = gold
         .series(start, end, &sales_type, source_id)
         .await
-        .map_err(Failure::Unavailable)?;
+        .map_err(|e| Failure::Unavailable("dashboard", e))?;
     let (prev_start, prev_end) = period::comparison_window(start, end, compare_type)?;
     let previous = gold
         .series(prev_start, prev_end, &sales_type, source_id)
         .await
-        .map_err(Failure::Unavailable)?;
+        .map_err(|e| Failure::Unavailable("dashboard", e))?;
 
     let by_day: HashMap<NaiveDate, (f64, i64)> = current
         .iter()
