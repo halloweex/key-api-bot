@@ -41,6 +41,7 @@ use crate::access::store::PgAccess;
 use crate::expenses;
 use crate::goals;
 use crate::gold::PgGold;
+use crate::inventory;
 use crate::margin::{self, PgMargin};
 use crate::pgread::PgReads;
 use crate::products_intel;
@@ -49,6 +50,20 @@ use crate::trend::{self, Failure};
 
 /// `DEFAULT_REQUEST_TIMEOUT` in `web/middleware.py`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// `SLOW_ENDPOINT_TIMEOUT`, for the paths in `SLOW_ENDPOINTS`.
+const SLOW_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+/// `SLOW_ENDPOINTS`, matched against the decoded path as
+/// `request.url.path` is.
+const SLOW_ENDPOINTS: [&str; 8] = [
+    "/api/duckdb/resync",
+    "/api/duckdb/refresh-statuses",
+    "/api/goals/recalculate",
+    "/api/stocks/analysis",
+    "/api/revenue/forecast/train",
+    "/api/revenue/forecast/evaluate",
+    "/api/revenue/forecast/tune",
+    "/api/traffic/reclassify",
+];
 /// The endpoints the pilot answers past the gates, by the contract's name.
 const TREND: &str = "web.routes.api.analytics.get_revenue_trend";
 const SPA_CATCH_ALL: &str = "web.routes.pages.catch_all_spa";
@@ -375,6 +390,15 @@ async fn endpoint(
             let which = goals::Route::from_endpoint(name).expect("matched above");
             goals_route(state, which, route, query, headers, peer).await
         }
+        name if inventory::Route::from_endpoint(name).is_some() => {
+            let which = inventory::Route::from_endpoint(name).expect("matched above");
+            let admit = admitter(state, route, headers, peer);
+            let abc_class = captures.get("abc_class").map(String::as_str);
+            match inventory::answer(which, &state.reads, query, abc_class, admit).await {
+                Ok(body) => raw_json(StatusCode::OK, body),
+                Err(failure) => failure.into_response(),
+            }
+        }
         SPA_CATCH_ALL => {
             // `path == "api" or path.startswith("api/")`, before any session check.
             let spa = captures.get("path").map_or("", String::as_str);
@@ -628,7 +652,12 @@ async fn observe(request: Request, next: Next) -> Response {
         tracing::info!(%method, %path, request_id = %id, "Request started");
     }
 
-    let mut response = match tokio::time::timeout(REQUEST_TIMEOUT, next.run(request)).await {
+    let (limit, detail) = if SLOW_ENDPOINTS.contains(&uvicorn_path(&path).as_str()) {
+        (SLOW_REQUEST_TIMEOUT, "Request exceeded 300.0s timeout")
+    } else {
+        (REQUEST_TIMEOUT, "Request exceeded 30.0s timeout")
+    };
+    let mut response = match tokio::time::timeout(limit, next.run(request)).await {
         Ok(response) => response,
         Err(_) => {
             tracing::warn!(%method, %path, request_id = %id, "Request timeout");
@@ -636,7 +665,7 @@ async fn observe(request: Request, next: Next) -> Response {
                 StatusCode::GATEWAY_TIMEOUT,
                 &Timeout {
                     error: "Request Timeout",
-                    detail: "Request exceeded 30.0s timeout",
+                    detail,
                     path: &path,
                     correlation_id: &id,
                 },

@@ -11,6 +11,7 @@ pub mod goals;
 pub mod gold;
 pub mod health;
 mod http;
+pub mod inventory;
 pub mod margin;
 pub mod params;
 pub mod period;
