@@ -6,10 +6,9 @@ decision OD-07 (a)). The counters live in web's process and every deploy
 empties them with its log, so the week is proven by the process that outlives
 web's: the canary pages `read_fallback_used` whenever `/api/health`'s
 `read_fallbacks` is non-empty, and rewrites one `watch:read_fallbacks` row on
-every probe that read the block. `deploy/stage4_soak/22_f1_read_fallbacks.sql`
-judges the two, and `tests/integration/test_stage4_soak_sql.py` holds it to
-them against a real Postgres; the watch row's own arithmetic is held in
-`tests/integration/test_read_fallback_watch.py`.
+every probe that read the block. The soak's F1 judged the two until step
+14's S14-02 retired it with the week it licensed; the watch row's own
+arithmetic is held in `tests/integration/test_read_fallback_watch.py`.
 
 What is held here: what the canary reads and says, that a refusal under `off`
 is never a fallback, what production's payload today does (nothing), that the

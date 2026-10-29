@@ -823,9 +823,9 @@ def check_read_fallback_mode(payload: Optional[dict]) -> "list[tuple[str, str]]"
 # `duckdb` those page too, as `read_routed_to_duckdb`, and the watch reads them
 # as not clean.
 
-# The first words of the pages' lines. The soak check (deploy/stage4_soak/
-# 22_f1_read_fallbacks.sql) reads the line back out of a page by the words the
-# two share; a test holds the two equal.
+# The first words of the pages' lines, which a reader greps the journal by.
+# The soak's F1 read the line back out of a page by the words the two share,
+# until step 14's S14-02 retired it with the week it licensed.
 READ_FALLBACK_LINE = "reads served from DuckDB: "
 READ_ROUTED_LINE = "reads served from DuckDB uncounted: "
 READ_REFUSED_LINE = "reads refused with a 503: "
@@ -1258,8 +1258,8 @@ def check_utm_parse_mode(payload: Optional[dict]) -> "list[tuple[str, str]]":
 # `off`, so a web running `on`, today, writes no row at all.
 
 # The first words of the page's line: what a reader greps the journal by. The
-# week-of-silence soak check (deploy/stage4_soak/53_p4_week_of_silence.sql)
-# judges the page by its key and the watch below, never by these words.
+# week-of-silence soak check (P4, retired at step 14's S14-02 once the owner
+# closed the week) judged the page by its key and the watch below.
 DUCKDB_OPENED_LINE = "DuckDB opened while KS_DUCKDB=off: "
 
 # The watch row in `app.alert_series` (`core.alert_archive.record_watch`), and

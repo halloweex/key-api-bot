@@ -3,7 +3,7 @@
 -- WHY IT EXISTS
 -- The week of silence is seven days in which nothing opened the DuckDB file,
 -- and "web opens DuckDB" and "the file hash changes" are two of its four
--- breaches. The tripwire (KS_DUCKDB=off, judged in P4) sees what web opens;
+-- breaches. The tripwire (KS_DUCKDB=off, paged by the canary) sees what web opens;
 -- this sees the file itself, so it also catches what runs outside web: a
 -- one-off container started with KS_DUCKDB=on, the weekly compaction, a
 -- script run by hand. `deploy/duckdb_silence_check.sh` hashes the file and

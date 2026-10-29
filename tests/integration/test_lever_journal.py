@@ -2,8 +2,8 @@
 Postgres.
 
 The parallel period and the week of silence both restart when a rollback lever
-is used, and the soak check that says so (`51_p2_rollback_levers.sql`) reads
-`lever_used` rows in `app.alert_events`. Before `core/lever_journal.py` a
+is used, and the soak check that said so (P2, retired at step 14's S14-02)
+read `lever_used` rows in `app.alert_events`. Before `core/lever_journal.py` a
 release left only an absence — owner rows deleted, a marker unlinked — which
 nothing can date. What is held here:
 
