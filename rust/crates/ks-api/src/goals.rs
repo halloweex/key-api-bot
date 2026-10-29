@@ -7,6 +7,11 @@
 //! the rows, float by float — `round` half to even, `sum()` compensated, an
 //! `int` 0 where Python never made a float, `min`/`max` keeping the first.
 //!
+//! An aggregate that divides — AVG, STDDEV, a quotient — is read as
+//! `::float8`: Postgres gives such a numeric more digits than a `Decimal`
+//! here holds, and `numeric_float8` rounds its exact text once, as
+//! Python's `float(Decimal)` does — the same double either way.
+//!
 //! Two clocks, as in Python: the history behind a suggested goal asks the
 //! database for Kyiv's today (`TODAY_IN_KYIV`), the calculators and the
 //! smart goal take the request's.
@@ -454,7 +459,7 @@ async fn history(
         WHERE {wh}
         GROUP BY {grain}
     )
-    SELECT AVG(revenue), MIN(revenue), MAX(revenue), COUNT(*), STDDEV(revenue)
+    SELECT AVG(revenue)::float8, MIN(revenue), MAX(revenue), COUNT(*), STDDEV(revenue)::float8
     FROM period_revenue
 "
         ),
@@ -488,8 +493,8 @@ async fn history(
         WHERE {wh}
         GROUP BY DATE_TRUNC('week', s.order_date)
     )
-    SELECT AVG(CASE WHEN week_num <= 2 THEN revenue END),
-           AVG(CASE WHEN week_num > 2 THEN revenue END)
+    SELECT AVG(CASE WHEN week_num <= 2 THEN revenue END)::float8,
+           AVG(CASE WHEN week_num > 2 THEN revenue END)::float8
     FROM weekly_revenue
 "
             ),
@@ -609,8 +614,8 @@ async fn seasonality(store: &PgReads, sales_type: &str) -> Result<Ordered<i64, S
     overall_avg AS (
         SELECT AVG(avg_revenue) AS grand_avg FROM monthly_stats
     )
-    SELECT ms.month, ms.avg_revenue, ms.min_revenue, ms.max_revenue,
-           ms.sample_size, ms.std_dev, ms.avg_revenue / oa.grand_avg
+    SELECT ms.month, ms.avg_revenue::float8, ms.min_revenue, ms.max_revenue,
+           ms.sample_size, ms.std_dev::float8, (ms.avg_revenue / oa.grand_avg)::float8
     FROM monthly_stats ms, overall_avg oa
     ORDER BY ms.month
 "
@@ -701,7 +706,7 @@ async fn growth(store: &PgReads, sales_type: &str, today: NaiveDate) -> Result<G
         HAVING COUNT(DISTINCT s.order_date) >= 25
     )
     SELECT curr.month, curr.year,
-           (curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0)
+           ((curr.revenue - prev.revenue) / NULLIF(prev.revenue, 0))::float8
     FROM monthly_by_year curr
     JOIN monthly_by_year prev
       ON curr.month = prev.month AND curr.year = prev.year + 1
@@ -796,7 +801,7 @@ async fn weekly(store: &PgReads, sales_type: &str) -> Result<Patterns, Failure> 
         JOIN monthly_totals mt ON wd.year = mt.year AND wd.month = mt.month
         GROUP BY wd.month, wd.week_of_month
     )
-    SELECT month, week_of_month, avg_weight, sample_size
+    SELECT month, week_of_month, avg_weight::float8, sample_size
     FROM weekly_weights
     ORDER BY month, week_of_month
 "
@@ -936,7 +941,7 @@ async fn growth_cap(store: &PgReads, month: u32, sales_type: &str) -> Result<f64
         FROM monthly_by_year curr
         JOIN monthly_by_year prev ON curr.year = prev.year + 1
     )
-    SELECT AVG(yoy), STDDEV(yoy), COUNT(*) FROM yoy_pairs
+    SELECT AVG(yoy)::float8, STDDEV(yoy)::float8, COUNT(*) FROM yoy_pairs
 "
         ),
         &binds,
@@ -1014,7 +1019,7 @@ async fn recent_three(
         ORDER BY year DESC, month DESC
         LIMIT 3
     )
-    SELECT AVG(revenue) FROM monthly_revenue
+    SELECT AVG(revenue)::float8 FROM monthly_revenue
 ",
             binds.len()
         ),
