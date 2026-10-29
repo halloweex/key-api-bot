@@ -32,6 +32,7 @@ nothing in these routers can call an engine outside its `try`,
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import logging
 import os
@@ -69,6 +70,87 @@ ROUTERS = [
      "SELECT id, name FROM {categories} ORDER BY name", "bronze.categories"),
 ]
 IDS = [r[0] for r in ROUTERS]
+
+# The three tabs whose every reader lives in one module beside its router.
+# (`revenue.py` holds the other three routers among the dashboard's gated
+# reads, which are S14-06's.)
+TAB_MODULES = [
+    ("core/repositories/traffic.py", "_traffic_run"),
+    ("core/repositories/margin.py", "_margin_run"),
+    ("core/repositories/products_intel.py", "_intel_run"),
+]
+OLD_SHAPE = {"fall_back", "no_address", "no_engine", "enabled", "available"}
+ENGINE_MODULES = ("core.pg", "asyncpg")
+
+
+def _dotted(node) -> str:
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _what_reaches_round_the_router(source: str):
+    """`(routers, reaches)` for one module: the `_*_run` functions — rule 5
+    of `test_read_fallback_sites.py` judges those — and, for every other
+    function, what it reaches that only a router may: an engine (a function
+    of a `core.pg*` module, by the module or imported by name; `get_pool`;
+    an import of `core.pg*` or `asyncpg` of its own), the old shape's
+    machinery (`fall_back`, `no_address`, `no_engine`, `enabled`,
+    `available`), or the environment (`os.getenv`, `os.environ`, a
+    `KS_READ_*` name outside a docstring)."""
+    tree = ast.parse(source)
+    modules, functions = set(), set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module:
+            if n.module == "core":
+                modules |= {a.asname or a.name for a in n.names
+                            if a.name.startswith("pg")}
+            elif n.module.startswith(ENGINE_MODULES):
+                functions |= {a.asname or a.name for a in n.names}
+        elif isinstance(n, ast.Import):
+            modules |= {a.asname for a in n.names
+                        if a.asname and a.name.startswith(ENGINE_MODULES)}
+    routers, reaches = set(), {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if fn.name.startswith("_") and fn.name.endswith("_run"):
+            routers.add(fn.name)
+            continue
+        docstrings = {id(f.body[0].value) for f in ast.walk(fn)
+                      if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and f.body and isinstance(f.body[0], ast.Expr)}
+        found = []
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                names = ([n.module or ""] if isinstance(n, ast.ImportFrom)
+                         else [a.name for a in n.names])
+                if isinstance(n, ast.ImportFrom) and n.module == "core":
+                    names = [f"core.{a.name}" for a in n.names]
+                found += [f"engine: imports {m}" for m in names
+                          if m.startswith(ENGINE_MODULES)]
+            elif isinstance(n, ast.Call):
+                name = _dotted(n.func)
+                head, last = name.split(".", 1)[0], name.rsplit(".", 1)[-1]
+                if (head in modules or name in functions
+                        or name.startswith(ENGINE_MODULES) or last == "get_pool"):
+                    found.append(f"engine: {name}()")
+                elif last in OLD_SHAPE:
+                    found.append(f"old shape: {name}()")
+                elif name in ("os.getenv", "getenv", "os.environ.get", "environ.get"):
+                    found.append(f"environment: {name}()")
+            elif isinstance(n, ast.Subscript) and _dotted(n.value) in ("os.environ", "environ"):
+                found.append("environment: os.environ[...]")
+            elif (isinstance(n, ast.Constant) and isinstance(n.value, str)
+                  and "KS_READ_" in n.value and id(n) not in docstrings):
+                found.append(f"environment: {n.value[:40]!r}")
+        if found:
+            reaches[fn.name] = found
+    return routers, reaches
 SWITCHES = [r[3] for r in ROUTERS]
 SWITCH_VALUES = [None, "", "duckdb", "postgres", "postgress", "junk-s14-05"]
 
@@ -280,6 +362,75 @@ class TestNothingGoesRoundTheRouter:
                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
             assert not calls & {"connection", "_fetch_one", "_fetch_all", "execute"}, (
                 node.name)
+
+    @pytest.mark.parametrize("path,router", TAB_MODULES, ids=[p for p, _ in TAB_MODULES])
+    def test_nothing_but_the_router_reaches_an_engine(self, path, router):
+        """The other half of "through the router": a method that called
+        Postgres itself — `await pg_traffic_read.fetch(...)` with no `try` —
+        would answer an engine failure with an uncounted 500, and neither the
+        test above (it looks for DuckDB) nor rule 5 (it judges `_*_run`
+        routers) would see it. Read off the module, so a reader added
+        tomorrow — the pixel-only breakdown was one — is held the day it
+        lands. Mutations: a bare engine call by module or by name in
+        `get_traffic_pixel_only`, or a switch read there."""
+        source = (ROOT / path).read_text(encoding="utf-8")
+        routers, reaches = _what_reaches_round_the_router(source)
+        assert routers == {router}, routers
+        assert reaches == {}, reaches
+        # Non-vacuity: the walk read the tab's readers, not nothing.
+        readers = [n.name for n in ast.walk(ast.parse(source))
+                   if isinstance(n, ast.AsyncFunctionDef)
+                   and n.name.startswith("get_")]
+        assert len(readers) >= 6, readers
+
+    @pytest.mark.parametrize("body,kind", [
+        ("from core import pg_traffic_read\n"
+         "async def get_x(self):\n"
+         "    return await pg_traffic_read.fetch('q', [])\n", "engine"),
+        ("from core import pg_traffic_read as t\n"
+         "async def get_x(self):\n"
+         "    return await t.fetch('q', [])\n", "engine"),
+        ("async def get_x(self):\n"
+         "    from core.pg_traffic_read import fetch\n"
+         "    return await fetch('q', [])\n", "engine"),
+        ("import core.pg_traffic_read\n"
+         "async def get_x(self):\n"
+         "    return await core.pg_traffic_read.fetch('q', [])\n", "engine"),
+        ("async def get_x(self):\n"
+         "    from core.pg import get_pool\n"
+         "    pool = await get_pool()\n", "engine"),
+        ("async def get_x(self):\n"
+         "    import asyncpg\n", "engine"),
+        ("async def get_x(self):\n"
+         "    read_fallback.no_address('traffic', None)\n", "old shape"),
+        ("async def get_x(self):\n"
+         "    if x.enabled() and x.available():\n"
+         "        pass\n", "old shape"),
+        ("import os\n"
+         "async def get_x(self):\n"
+         "    return os.getenv('KS_READ_TRAFFIC')\n", "environment"),
+        ("import os\n"
+         "async def get_x(self):\n"
+         "    return os.environ['KS_READ_TRAFFIC']\n", "environment"),
+        ("async def get_x(self):\n"
+         "    return 'KS_READ_TRAFFIC'\n", "environment"),
+    ])
+    def test_the_walk_bites(self, body, kind):
+        source = ("class T:\n"
+                  "    async def _t_run(self, sql):\n"
+                  "        return await pg_traffic_read.fetch(sql, [])\n\n"
+                  + "\n".join("    " + line if line else line
+                              for line in body.splitlines()) + "\n")
+        routers, reaches = _what_reaches_round_the_router(source)
+        assert routers == {"_t_run"}
+        assert any(kind in found for found in reaches.get("get_x", [])), reaches
+
+    def test_a_docstring_naming_a_switch_is_not_a_read(self):
+        source = ("class T:\n"
+                  "    async def get_x(self):\n"
+                  "        '''`KS_READ_TRAFFIC` is not read here.'''\n"
+                  "        return await self._t_run('q')\n")
+        assert _what_reaches_round_the_router(source) == (set(), {})
 
     def test_the_duckdb_category_helper_is_gone(self):
         """`_get_category_with_children` ran the tree on a DuckDB connection
