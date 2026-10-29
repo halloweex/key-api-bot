@@ -6,7 +6,8 @@
 //! Routing and the gates cover every route the app has
 //! (`rust/contract/access.json`). Past the gates, the pilot answers
 //! `GET /api/revenue/trend` and wave 1's tabs — /margin, /products' intel,
-//! /reports and /marketing — each with its rate limit, and the SPA
+//! /reports and /marketing, the expenses reads — each with its rate limit,
+//! and the SPA
 //! catch-all's JSON 404 for an unmatched `/api` path. Every other route that
 //! a request is let through to is a 501 naming it — the Python app serves it,
 //! and nginx hands it there (`nginx/rust/proxy.conf`). Two paths of its own,
@@ -37,6 +38,7 @@ use crate::access::paths::uvicorn_path;
 use crate::access::ratelimit::{Limiter, client_key};
 use crate::access::routing::{Captures, Resolution, Router};
 use crate::access::store::PgAccess;
+use crate::expenses;
 use crate::gold::PgGold;
 use crate::margin::{self, PgMargin};
 use crate::pgread::PgReads;
@@ -365,6 +367,10 @@ async fn endpoint(
             let which = reports::Route::from_endpoint(name).expect("matched above");
             reports_route(state, which, route, query, headers, peer).await
         }
+        name if expenses::Route::from_endpoint(name).is_some() => {
+            let which = expenses::Route::from_endpoint(name).expect("matched above");
+            expenses_route(state, which, route, query, headers, peer).await
+        }
         SPA_CATCH_ALL => {
             // `path == "api" or path.startswith("api/")`, before any session check.
             let spa = captures.get("path").map_or("", String::as_str);
@@ -498,6 +504,28 @@ async fn reports_route(
     match reports::answer(which, &state.reads, query, now, admit).await {
         Ok(reports::Answer::Json(body)) => raw_json(StatusCode::OK, body),
         Ok(reports::Answer::Csv { body, filename }) => csv(body, &filename),
+        Err(failure) => failure.into_response(),
+    }
+}
+
+/// One of the expenses router's four GET routes, past the gates.
+async fn expenses_route(
+    state: &AppState,
+    which: expenses::Route,
+    route: &ApiRoute,
+    query: &str,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+) -> Response {
+    let Some(now) = state.trend_now(headers) else {
+        return detail(
+            StatusCode::BAD_REQUEST,
+            "X-Pilot-Now must be an RFC 3339 instant",
+        );
+    };
+    let admit = admitter(state, route, headers, peer);
+    match expenses::answer(which, &state.reads, query, now, admit).await {
+        Ok(body) => raw_json(StatusCode::OK, body),
         Err(failure) => failure.into_response(),
     }
 }

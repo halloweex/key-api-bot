@@ -149,3 +149,19 @@ def test_the_encoding_is_url_search_params():
     assert fc.encode([("brand", "Етуде Хаус"), ("x", "a*b~c/d&e=f+g")]) == (
         "brand=%D0%95%D1%82%D1%83%D0%B4%D0%B5+%D0%A5%D0%B0%D1%83%D1%81"
         "&x=a*b%7Ec%2Fd%26e%3Df%2Bg")
+
+
+def test_what_the_expense_blocks_send_is_what_their_harness_sends():
+    c = fc.expenses()
+    assert c.endpoints == ("/api/expenses/summary", "/api/expenses/profit")
+    assert c.params == MARGIN_PARAMS and not c.extras
+    assert fc.expense_types_path() == "/api/expense-types"
+    assert fc.expense_categories() == ("marketing", "salary", "taxes", "logistics", "other")
+    assert fc.manual_expenses_fetches() == (
+        ("ManualExpensesTable", (None, "marketing", "salary", "taxes", "logistics", "other"), 50),
+        ("ROASSection", ("marketing",), 20),
+    )
+    # The store's period as it stands, `custom` included; no dates at all.
+    assert fc.manual_expenses_query(period="custom", category="taxes", limit=50) == (
+        "period=custom&category=taxes&limit=50")
+    assert fc.manual_expenses_query(period=None, category=None, limit=20) == "limit=20"

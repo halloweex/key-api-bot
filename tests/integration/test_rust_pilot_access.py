@@ -91,8 +91,12 @@ PRODUCTS_INTEL = tuple(f"/api/products/intel/{name}" for name in (
 REPORTS = tuple(f"/api/reports/{name}" for name in (
     "summary", "top-products", "all-products", "export/csv",
     "marketing-summary", "marketing-summary/export/csv"))
+# The expenses router's four reads, all under `expenses:view`; its POST and
+# DELETE stay the app's.
+EXPENSES = ("/api/expense-types", "/api/expenses/summary", "/api/expenses/profit",
+            "/api/expenses")
 PORTED = ({("GET", TREND), ("GET", "/{path:path}")}
-          | {("GET", path) for path in MARGIN + PRODUCTS_INTEL + REPORTS})
+          | {("GET", path) for path in MARGIN + PRODUCTS_INTEL + REPORTS + EXPENSES})
 PASSED = 299
 # Explicit dates: both services read the real clock, and a range does not move.
 TREND_QUERY = "start_date=2026-01-05&end_date=2026-01-11"
@@ -112,6 +116,8 @@ SUBJECTS: Dict[str, tuple] = {
     # `reports:view` on four routes, `marketing:view` on two.
     "viewer, reports": (("viewer", "approved", "reports"), NO_ROW),
     "viewer, marketing": (("viewer", "approved", "marketing"), NO_ROW),
+    # Nobody else holds `expenses` without `traffic` beside it.
+    "viewer, expenses": (("viewer", "approved", "expenses"), NO_ROW),
     "viewer, untidy tabs": (("viewer", "approved", " Dashboard , TRAFFIC,unknown,,margin "), NO_ROW),
     "editor": (("editor", "approved", None), NO_ROW),
     "editor, traffic and expenses": (("editor", "approved", "traffic,expenses"), NO_ROW),
@@ -503,6 +509,13 @@ async def services(world, duckdb_off, monkeypatch):
     monkeypatch.setenv("KS_READ_REPORTS", "postgres")
     monkeypatch.setenv("KS_READ_MARKETING", "postgres")
     monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
+    monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
+    # `backfilled()` latches per process: ask it afresh, as the pilot does
+    # on every read.
+    from core import pg_expenses_read
+    monkeypatch.setattr(pg_expenses_read, "_backfilled", False)
+    monkeypatch.setattr(pg_expenses_read, "_checked_at", 0.0)
+    monkeypatch.setattr(pg_expenses_read, "_check_failed", None)
     monkeypatch.setenv("KS_USER_STORE", "postgres")
     monkeypatch.setenv("KS_BOT_STORE", "postgres")
     monkeypatch.setattr(limiter, "enabled", True)

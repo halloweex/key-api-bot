@@ -417,3 +417,68 @@ def marketing_csv_query(*, sales_type: str, period: Optional[str] = None,
     if brand:
         pairs = url_set(pairs, "brand", brand)
     return encode(pairs)
+
+
+# /expenses' reads. The summary and the profit analysis are asked by the hooks
+# below, whose component — `ExpensesChart` — no page mounts today
+# (`LazyExpensesChart` has no importer). Their contract is what the hooks
+# send from any page but /traffic: the header's six filters, the widest.
+EXPENSES_HOOKS = ("useExpenseSummary", "useProfitAnalysis")
+
+
+def expenses() -> Contract:
+    return contract("/", EXPENSES_HOOKS)
+
+
+def expense_types_path() -> str:
+    """`getExpenseTypes`: the dictionary, asked with no parameters at all."""
+    text = _require(
+        "api/client.ts",
+        r"getExpenseTypes:\s*\(options\?: FetchOptions\)\s*=>\s*"
+        r"fetchApi<ExpenseType\[\]>\(\s*'(/expense-types)',\s*undefined,\s*options\s*\)",
+    )
+    m = re.search(r"fetchApi<ExpenseType\[\]>\(\s*'(/expense-types)'", text)
+    assert m
+    return "/api" + m.group(1)
+
+
+def expense_categories() -> Tuple[str, ...]:
+    """`ManualExpensesTable`'s category filter: `CATEGORIES`, one option each."""
+    text = _require("components/ManualExpensesTable.tsx",
+                    r"const options = CATEGORIES\.map\(\(cat\) => \{.*?value: cat,")
+    m = re.search(r"const CATEGORIES = \[([^\]]*)\]", text)
+    if not m:
+        raise FrontendShapeError("ManualExpensesTable.tsx: no `const CATEGORIES = [ … ]`")
+    return tuple(re.findall(r"'([^']+)'", m.group(1)))
+
+
+def manual_expenses_fetches() -> Tuple[Tuple[str, Tuple[Optional[str], ...], int], ...]:
+    """The two places that GET `/api/expenses`, as (where, the categories it
+    can send — None for none — its limit). Both send the filter store's
+    period whenever it is set, `custom` included: `if (period)` is all they
+    ask. The dashboard's table sends its category filter when one is picked;
+    /traffic's recent entries always send `marketing`."""
+    shape = (r"const params = new URLSearchParams\(\)\s*"
+             r"if \(period\) params\.set\('period', period\)\s*{category}"
+             r"params\.set\('limit', '(\d+)'\)\s*"
+             r"const response = await fetch\(`/api/expenses\?\$\{{params\}}`\)")
+    table = re.search(shape.format(
+        category=r"if \(categoryFilter\) params\.set\('category', categoryFilter\)\s*"),
+        _read("components/ManualExpensesTable.tsx"))
+    roas = re.search(shape.format(category=r"params\.set\('category', '([a-z]+)'\)\s*"),
+                     _read("components/ROASSection.tsx"))
+    if not (table and roas):
+        raise FrontendShapeError("ManualExpensesTable.tsx / ROASSection.tsx: the "
+                                 "`/api/expenses` query is not built as read; read it again")
+    return (("ManualExpensesTable", (None, *expense_categories()), int(table.group(1))),
+            ("ROASSection", (roas.group(1),), int(roas.group(2))))
+
+
+def manual_expenses_query(*, period: Optional[str], category: Optional[str], limit: int) -> str:
+    pairs: List[Tuple[str, str]] = []
+    if period:
+        pairs.append(("period", period))
+    if category:
+        pairs.append(("category", category))
+    pairs.append(("limit", str(limit)))
+    return encode(pairs)
