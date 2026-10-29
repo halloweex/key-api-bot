@@ -39,7 +39,10 @@ switch left at `duckdb` or naming nothing reads Postgres, and with no DSN at
 all the pool's own refusal to guess a database is the failure refused — the
 same 503 naming the surface, which `no_address` gave them before
 (`POSTGRES_ONLY` below). Since S14-06 the dashboard's do too — the summary,
-the trend and the customer block — and the managers screen's Silver read.
+the trend and the customer block — and the managers screen's Silver read;
+since S14-07 the rest — `/expenses`, `/inventory`, `/goals` with the
+forecast, and the cohorts, whose one engine is ClickHouse — and the sweep
+holds each of their routes to the 503 in every state.
 
 The walk over every fallback site is `tests/unit/test_read_fallback_sites.py`.
 """
