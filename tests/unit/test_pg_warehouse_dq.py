@@ -265,8 +265,8 @@ class TestTheRowValuesSql:
 
     def test_the_recompute_is_the_shared_text_rendered_for_postgres(self):
         """Rule 1: a Postgres copy of pass 2 would be a third statement of it."""
-        from core.duckdb_store import silver_recompute_ctes
         from core.sql_dialect import POSTGRES
+        from core.warehouse_sql import silver_recompute_ctes
 
         sql = twins._row_values_sql()
         assert silver_recompute_ctes(POSTGRES) in sql

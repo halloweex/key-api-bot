@@ -6,7 +6,7 @@ from typing import Optional
 
 from core.permissions import is_hardcoded_admin
 from web.routes.auth import require_admin
-from ._deps import limiter, get_store
+from ._deps import limiter, get_store, validate_db_int
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -54,6 +54,7 @@ async def list_users(
     user: dict = Depends(require_admin),
 ):
     """List all users (admin only)."""
+    validate_db_int(offset, "offset", bits=64)
     store = await get_store()
     users = await store.list_users(status=status, role=role, limit=limit, offset=offset)
     return {"users": users, "count": len(users)}
@@ -67,6 +68,7 @@ async def get_user(
     user: dict = Depends(require_admin),
 ):
     """Get a specific user by ID (admin only)."""
+    validate_db_int(user_id, "user_id", bits=64, allow_none=False)
     store = await get_store()
     target_user = await store.get_user(user_id)
     if not target_user:
@@ -83,6 +85,7 @@ async def update_user_role(
     user: dict = Depends(require_admin),
 ):
     """Update user role (admin only)."""
+    validate_db_int(user_id, "user_id", bits=64, allow_none=False)
     # The list of roles lives in core.permissions; restating it here is how a
     # role becomes settable everywhere except through the admin page.
     from core.permissions import Role
@@ -111,6 +114,7 @@ async def update_user_status(
     user: dict = Depends(require_admin),
 ):
     """Update user status (admin only)."""
+    validate_db_int(user_id, "user_id", bits=64, allow_none=False)
     if status not in ("approved", "denied", "frozen", "pending"):
         raise HTTPException(status_code=400, detail="Invalid status")
 
@@ -147,6 +151,7 @@ async def update_user_features(
     from "the parameter was omitted", which is the one distinction the column
     carries.
     """
+    validate_db_int(user_id, "user_id", bits=64, allow_none=False)
     from core.permissions import (
         ACCESS_PRESETS, TAB_FEATURE_KEYS, normalize_features, preset_features,
     )
@@ -301,6 +306,7 @@ async def approve_access_request(
     default preset — which is what the bot's Approve button grants, and what a
     viewer could reach before per-user tabs existed.
     """
+    validate_db_int(user_id, "user_id", bits=64, allow_none=False)
     from bot import database
     from core.permissions import (
         ACCESS_PRESETS, DEFAULT_PRESET, TAB_FEATURE_KEYS,
@@ -381,6 +387,7 @@ async def deny_access_request(
     who is not there. The count is what freezes, not the verdict: five
     refusals and the person is frozen out for thirty days.
     """
+    validate_db_int(user_id, "user_id", bits=64, allow_none=False)
     from bot import database
 
     admin_id = user.get("user_id")

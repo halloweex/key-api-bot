@@ -245,7 +245,7 @@ class TestTheRouting:
     async def test_the_sync_s_one_write_goes_to_postgres(self, met, duck):
         """Mutation: remove the branch in `_upsert_orders_with_expenses` —
         DuckDB's writer then refuses, and the order step fails."""
-        from core.duckdb_store import UpsertResult
+        from core.pg_orders_write import UpsertResult
         from core.sync_service import SyncService
 
         met.setenv("KS_WRITE_ORDERS", "postgres")
