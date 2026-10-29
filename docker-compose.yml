@@ -455,6 +455,12 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/security-headers.conf:/etc/nginx/security-headers.conf:ro
       - ./nginx/error.html:/etc/nginx/html/error.html:ro
+      # The routes the Rust pilot answers. A DIRECTORY, unlike the three file
+      # mounts above: switching a route is a line in routes.conf and
+      # `nginx -s reload`, and a single-file mount keeps the inode a
+      # `git reset --hard` replaced — the reload would re-read the old file
+      # and report success (deploy/postgres-move-runbook.md).
+      - ./nginx/rust:/etc/nginx/rust:ro
       - /etc/letsencrypt:/etc/letsencrypt:ro
     depends_on:
       web:
@@ -463,6 +469,66 @@ services:
     cpus: 0.25
     healthcheck:
       test: ["CMD-SHELL", "nginx -t || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── The Rust pilot (rust/README.md): up, and answering no one ────────────
+  #
+  # NOTHING ROUTES TO IT until nginx/rust/routes.conf names a location, and
+  # that file is empty: merged as it stands, this changes no answer anybody
+  # gets. Switching a route and taking it back are one line there each.
+  #
+  # Profile `rust`, so a plain `docker compose pull` / `up -d` — the deploy's
+  # Python step, a reboot, a human — neither pulls its image nor starts it,
+  # and a Rust image that will not pull or start cannot fail a Python
+  # deploy. The deploy's Rust step starts it with `--profile rust`. Checked on
+  # compose 2.23 before relying on it: a plain `up -d` leaves a running
+  # profiled container alone, and a plain `pull` skips its image.
+  #
+  # It reads Postgres as `ks_readonly`, so "the pilot writes nothing" is held
+  # by the grants and not only by the code. No `ports:` (rule 12): nginx
+  # reaches it over `default`, the network web is on. Not on `ks-data` —
+  # nothing outside this project has a reason to.
+  #
+  # The signing key and the hardcoded admins come from the same .env as web:
+  # the key is `config.web.secret_key or config.bot.token`, spelled as
+  # compose spells `or`; the admins are .env's ADMIN_USER_IDS, which the
+  # pilot refuses to start on unless they hash to core.permissions'
+  # ADMIN_USER_IDS — if the two lists disagree, it says so at start rather
+  # than admit a session the app would treat differently.
+  rust-api:
+    image: halloweex/keycrm-rust-api:latest
+    container_name: ks-rust-api
+    profiles: [rust]
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [default]
+    environment:
+      KS_PG_DSN: postgresql://ks_readonly:${KS_READONLY_PASSWORD:?set it in .env}@postgres:5432/ks
+      # max_connections is 40 for everyone this Postgres serves; a request
+      # here holds one connection at a time.
+      KS_PG_POOL_MAX: "3"
+      KS_USER_STORE: postgres
+      KS_BOT_STORE: postgres
+      DASHBOARD_SECRET_KEY: ${DASHBOARD_SECRET_KEY:-${BOT_TOKEN:-}}
+      KS_HARDCODED_ADMIN_IDS: ${ADMIN_USER_IDS:-}
+    expose:
+      - "8090"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # 30 MB at its peak in rust/bench/bench.sh, under a new client key per
+    # request filling the rate limiter's minute of windows.
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.5
+    healthcheck:
+      # Readiness, not liveness (rule 13): `/readyz` reads the schema revision
+      # as ks_readonly. An image older than the schema refuses every session,
+      # and this is where that shows — before a route is switched to it.
+      test: ["CMD", "/usr/local/bin/ks-api", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3

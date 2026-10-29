@@ -7,7 +7,9 @@
 //! (`rust/contract/access.json`). Past the gates, the pilot answers two
 //! endpoints: `GET /api/revenue/trend`, with its rate limit, and the SPA
 //! catch-all's JSON 404 for an unmatched `/api` path. Every other route that
-//! a request is let through to is a 501 naming it — the Python app serves it.
+//! a request is let through to is a 501 naming it — the Python app serves it,
+//! and nginx hands it there (`nginx/rust/proxy.conf`). Two paths of its own,
+//! outside the app's table: `/healthz` (alive) and `/readyz` (able to answer).
 
 use std::any::Any;
 use std::collections::hash_map::RandomState;
@@ -91,6 +93,7 @@ impl AppState {
 pub fn router(state: AppState) -> axum::Router {
     axum::Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .fallback(dispatch)
         .layer(middleware::from_fn(reject_nul))
         .layer(middleware::from_fn(observe))
@@ -394,6 +397,22 @@ async fn healthz() -> Response {
     raw_json(StatusCode::OK, br#"{"status":"ok"}"#.to_vec())
 }
 
+/// Readiness, which the container's healthcheck asks (`ks-api healthcheck`):
+/// Postgres answers this service's role, and the schema is at the contract's
+/// revision. Not the app's either — nginx routes no client to it.
+async fn readyz(State(state): State<Arc<AppState>>) -> Response {
+    match state.access.store.ready().await {
+        Ok(()) => raw_json(StatusCode::OK, br#"{"status":"ok"}"#.to_vec()),
+        Err(error) => {
+            tracing::warn!("not ready: {}", error.0);
+            raw_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                br#"{"status":"unavailable"}"#.to_vec(),
+            )
+        }
+    }
+}
+
 fn panicked(_payload: Box<dyn Any + Send + 'static>) -> Response {
     tracing::error!("handler panicked; answering the Python app's 500");
     json(StatusCode::INTERNAL_SERVER_ERROR, &INTERNAL)
@@ -473,7 +492,7 @@ async fn observe(request: Request, next: Next) -> Response {
         .map_or_else(correlation_id, str::to_owned);
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
-    let quiet = path == "/healthz";
+    let quiet = path == "/healthz" || path == "/readyz";
     let started = Instant::now();
     if !quiet {
         tracing::info!(%method, %path, request_id = %id, "Request started");

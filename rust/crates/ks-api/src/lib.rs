@@ -7,6 +7,7 @@
 
 pub mod access;
 pub mod gold;
+pub mod health;
 mod http;
 pub mod params;
 pub mod period;

@@ -39,9 +39,73 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  # Which half this run deploys — the Python app, the Rust pilot, or both —
+  # measured from the last deploy of each half that worked, not from the
+  # previous push. `concurrency` cancels a run still pending when a newer one
+  # queues, so the newer one must carry the cancelled one's changes; and a
+  # run whose Rust half failed has not deployed it. A half's baseline is the
+  # newest run on main in which that half's deploy job succeeded; with none,
+  # everything counts as changed. The rules are deploy/changed_components.py.
+  changes:
     runs-on: ubuntu-latest
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      python: ${{ steps.classify.outputs.python }}
+      rust_image: ${{ steps.classify.outputs.rust_image }}
+      rust_deploy: ${{ steps.classify.outputs.rust_deploy }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify the changes since each half last deployed
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The newest run on main whose job $1 succeeded, if this commit
+          # descends from it; nothing otherwise — and nothing when the API
+          # does not answer, which makes everything count as changed: a full
+          # deploy, what every run did before the halves were told apart.
+          last_deployed() {
+            local runs id sha ok
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy.yml \
+                     --branch main --status completed --limit 40 \
+                     --json databaseId,headSha --jq '.[] | "\(.databaseId) \(.headSha)"') || runs=""
+            while read -r id sha; do
+              [ -n "$id" ] || continue
+              ok=$(gh run view "$id" --repo "$GITHUB_REPOSITORY" --json jobs \
+                     --jq ".jobs[] | select(.name == \"$1\" and .conclusion == \"success\") | .name") || ok=""
+              if [ -n "$ok" ] && git merge-base --is-ancestor "$sha" "$GITHUB_SHA" 2>/dev/null; then
+                echo "$sha"
+                return 0
+              fi
+            done <<< "$runs"
+          }
+          flags() {
+            if [ -z "$1" ]; then
+              printf 'python=true\nrust_image=true\nrust_deploy=true\n'
+            else
+              git diff --name-only --no-renames "$1" "$GITHUB_SHA" \
+                | python3 deploy/changed_components.py
+            fi
+          }
+          python_base=$(last_deployed deploy)
+          rust_base=$(last_deployed deploy-rust)
+          echo "Python half since ${python_base:-no deploy}, Rust half since ${rust_base:-no deploy}"
+          flags "$python_base" | grep '^python=' | tee -a "$GITHUB_OUTPUT"
+          flags "$rust_base" | grep '^rust_' | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: changes
+    runs-on: ubuntu-latest
+    if: needs.changes.outputs.python == 'true'
 
     steps:
       - name: Checkout code
@@ -119,10 +183,49 @@ jobs:
           cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-web:buildcache-arm64
           cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-web:buildcache-arm64,mode=max
 
+  # The Rust pilot's image (rust/README.md), built only when its half changed.
+  # On an arm64 runner, natively: the host is arm64, and Rust compiled under
+  # QEMU — how the Python images above are built — takes many times as long.
+  build-rust:
+    needs: changes
+    if: needs.changes.outputs.rust_image == 'true'
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # No `target`: Dockerfile.rust's last stage, the service, built without
+      # the `test-clock` feature. Its `harness` stage is the CI's and is never
+      # pushed. Tagged by commit as well, so a rollback has a name to pull.
+      - name: Build and push the Rust pilot's image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25  # v5
+        with:
+          context: rust
+          file: ./Dockerfile.rust
+          push: true
+          platforms: linux/arm64
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/keycrm-rust-api:latest
+            ${{ secrets.DOCKER_USERNAME }}/keycrm-rust-api:sha-${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-rust-api:buildcache-arm64
+          cache-to: type=registry,ref=${{ secrets.DOCKER_USERNAME }}/keycrm-rust-api:buildcache-arm64,mode=max
+
   deploy:
-    needs: build
+    needs: [changes, build]
     runs-on: ubuntu-latest
-    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    if: needs.changes.outputs.python == 'true'
     # Manual-approval gate: this job pauses until a required reviewer of the
     # `production` environment approves it. Configure once in repo Settings →
     # Environments → production → Required reviewers. Prevents an unreviewed
@@ -226,3 +329,54 @@ jobs:
         run: |
           git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git
           bash scripts/bump_version.sh
+
+  # The Rust pilot's half: its service, and the routes nginx sends to it. After
+  # the Python half when both changed, so one SSH session at a time works on
+  # the host; with the Python half skipped, it runs alone. The checkout is
+  # reset to this commit either way — that is how an edit of
+  # nginx/rust/routes.conf, which is how a route is switched, reaches nginx.
+  deploy-rust:
+    needs: [changes, build-rust, deploy]
+    runs-on: ubuntu-latest
+    if: "!cancelled() && !failure() && needs.changes.outputs.rust_deploy == 'true'"
+    environment: production
+
+    steps:
+      - name: Deploy the Rust pilot
+        uses: appleboy/ssh-action@55dabf81b49d4120609345970c91507e2d734799  # v1.0.0
+        env:
+          GH_SHA: ${{ github.sha }}
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          envs: GH_SHA
+          script: |
+            set -e
+            cd /opt/key-api-bot
+            git fetch origin
+            DIRTY="$(git status --porcelain)"
+            if [ -n "$DIRTY" ]; then
+              echo "::warning::server tree dirty before reset --hard:"
+              echo "$DIRTY"
+            fi
+            git reset --hard "$GH_SHA"
+            # `--profile rust`: without it every compose command acts as if the
+            # service did not exist, which is what keeps the Python half off
+            # it. Recreated only when its image or its config changed.
+            docker compose --profile rust pull rust-api
+            docker compose --profile rust up -d --no-deps rust-api
+            # Healthy, not merely started: the healthcheck reads the schema
+            # revision as ks_readonly, so an image older than the schema fails
+            # here rather than after a route reaches it.
+            if ! timeout 120 sh -c 'until [ "$(docker inspect -f "{{.State.Health.Status}}" ks-rust-api 2>/dev/null)" = healthy ]; do sleep 3; done'; then
+              echo "::error::ks-rust-api is not healthy"
+              docker logs --tail=50 ks-rust-api 2>&1 || true
+              exit 1
+            fi
+            # nginx reads routes.conf on a reload only. `-t` first: a broken
+            # file fails the run here, instead of a reload that nginx refuses
+            # in silence while it keeps serving the old routes.
+            docker exec keycrm-nginx nginx -t
+            docker exec keycrm-nginx nginx -s reload
+            docker image prune -f
