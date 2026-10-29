@@ -107,13 +107,9 @@ DIVERGENCES: Dict[str, Divergence] = {
     "product_id as an integral float": Divergence(200, 422, _LAX.format(what="'5.0' as 5")),
     "product_id padded": Divergence(200, 422, _LAX.format(what="' 5' as 5")),
     "product_id with an underscore": Divergence(200, 422, _LAX.format(what="'1_0' as 10")),
-    # A Python defect, described in the PR and not fixed: asyncpg refuses
-    # the bind, the route reads that as its engine failing, and the 503
-    # counts a refusal (`read_refused` on the canary).
-    "product_id past 64 bits": Divergence(503, 422, (
-        "Python's int reaches asyncpg, whose int8 bind overflows, and the "
-        "router answers it as Postgres unreadable; Rust's i64 does not parse it")),
 }
+# Not listed since #335: a product_id past 64 bits is validate_db_int's 400
+# on both sides, and BAD_INPUT compares it byte for byte.
 
 REPORT = rust_wave1.Report()
 
@@ -305,3 +301,22 @@ async def test_hostile_input_differs_only_where_listed(pair):
     unlisted, stale = rust_wave1.judge_hostile(answers, DIVERGENCES)
     assert not unlisted, "differences no entry lists:\n" + "\n".join(unlisted)
     assert not stale, f"entries that no longer hold: {stale}"
+
+
+# #335's 400s, byte for byte: an integer past its column's width, and a NUL
+# anywhere in the query, which the middleware refuses before routing.
+BAD_INPUT = ((PAIRS, "product_id=99999999999999999999"),
+             (PAIRS, "product_id=-99999999999999999999"),
+             (PAIRS, "product_id=%2B99999999999999999999"), (PAIRS, "product_id=%00"),
+             (SUMMARY, "sales_type=re%00tail"), (MOMENTUM, "period=%00"))
+
+
+@pytest.mark.asyncio
+async def test_bad_input_is_the_same_400_byte_for_byte(pair):
+    rows = []
+    for path, query in BAD_INPUT:
+        py, rs = await pair.ask(path, query)
+        rows.append((f"{path}?{query}", py.status_code, rust_wave1.difference(py, rs)))
+    differences = REPORT.phase("bad_input", rows)
+    assert not differences, "\n".join(differences)
+    assert {status for _, status, _ in rows} == {400}
