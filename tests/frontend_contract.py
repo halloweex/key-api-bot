@@ -482,3 +482,53 @@ def manual_expenses_query(*, period: Optional[str], category: Optional[str], lim
         pairs.append(("category", category))
     pairs.append(("limit", str(limit)))
     return encode(pairs)
+
+
+# The goal routes. `api/client.ts` builds their queries itself, as template
+# literals with no encoding — not through `useQueryParams` — and only the
+# sales type comes from the store. The milestone widget asks `/goals/smart`
+# alone; the other hooks are exported and called by nothing today.
+_GOAL_CALLS = {
+    "/goals": "getGoals", "/goals/history": "getGoalHistory",
+    "/goals/seasonality": "getSeasonality", "/goals/growth": "getGrowthMetrics",
+    "/goals/weekly-patterns": "getWeeklyPatterns", "/goals/forecast": "getGoalForecast",
+}
+
+
+def goal_queries() -> Dict[str, Tuple[str, ...]]:
+    """Each goal GET's path and the parameters its template sends, in order;
+    `/goals/smart`'s `year` and `month` only when given."""
+    text = _read("api/client.ts")
+    found: Dict[str, Tuple[str, ...]] = {}
+    for path, fn in _GOAL_CALLS.items():
+        m = re.search(rf"{fn}: \([^)]*\)[^=]*=>\s*fetchApi<[^(]+>\(\s*'{re.escape(path)}',"
+                      r"\s*`([^`]*)`", text)
+        if not m:
+            raise FrontendShapeError(f"api/client.ts: {fn} is not fetchApi('{path}', `…`)")
+        pairs = m.group(1).split("&")
+        if not all(re.fullmatch(r"[a-z_]+=\$\{\w+\}", p) for p in pairs):
+            raise FrontendShapeError(f"api/client.ts: {fn}'s query is not name=${{value}} pairs")
+        found["/api" + path] = tuple(p.split("=")[0] for p in pairs)
+    _require("api/client.ts",
+             r"let params = `sales_type=\$\{salesType\}`\s*"
+             r"if \(year != null\) params \+= `&year=\$\{year\}`\s*"
+             r"if \(month != null\) params \+= `&month=\$\{month\}`\s*"
+             r"return fetchApi<SmartGoalsResponse>\('/goals/smart', params, options\)")
+    found["/api/goals/smart"] = ("sales_type", "year", "month")
+    # The forecast's hook never passes `recalculate`, so it sends the default.
+    _require("hooks/useApi.ts", r"api\.getGoalForecast\(year, month, salesType\)")
+    _require("api/client.ts", r"getGoalForecast: \([^)]*recalculate = false")
+    return found
+
+
+def goal_query(path: str, **values: object) -> str:
+    """The template's string: `name=value` in its order, a value as JS
+    interpolates it (a boolean as `true`/`false`), nothing encoded; a
+    smart goal's year and month left out when None."""
+    def text(v: object) -> str:
+        return ("true" if v else "false") if isinstance(v, bool) else str(v)
+
+    names = goal_queries()[path]
+    return "&".join(f"{n}={text(values[n])}" for n in names
+                    if not (path == "/api/goals/smart" and n in ("year", "month")
+                            and values.get(n) is None))
