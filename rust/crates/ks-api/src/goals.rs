@@ -116,7 +116,7 @@ impl<K: PartialEq, V> Ordered<K, V> {
 // ─── Python's numbers ───────────────────────────────────────────────────────
 
 /// `round(x)` with no digits: the nearest integer, ties to even, an `int`.
-fn round_int(x: f64) -> i64 {
+pub fn round_int(x: f64) -> i64 {
     x.round_ties_even() as i64
 }
 
@@ -135,7 +135,7 @@ fn floats(values: impl IntoIterator<Item = f64>) -> Vec<PyNum> {
 }
 
 /// `_recency_weighted`: the oldest pair weighs 1.0, the newest 2.0.
-fn recency_weighted(rates: &[f64]) -> f64 {
+pub fn recency_weighted(rates: &[f64]) -> f64 {
     let n = rates.len();
     if n == 1 {
         return rates[0];
@@ -950,12 +950,20 @@ async fn growth_cap(store: &PgReads, month: u32, sales_type: &str) -> Result<f64
     let Some(row) = rows.first() else {
         return Ok(0.35);
     };
-    let count = int_col(row, 2)?.unwrap_or(0);
-    let Some(avg) = num(row, 0)?.filter(|_| count >= 1) else {
-        return Ok(0.35);
-    };
-    let std = num(row, 1)?.unwrap_or(0.0);
-    Ok(py_max(0.10, py_min(0.50, avg + 1.5 * std)))
+    Ok(growth_cap_of(
+        num(row, 0)?,
+        num(row, 1)?,
+        int_col(row, 2)?.unwrap_or(0),
+    ))
+}
+
+/// `_growth_cap((avg, stddev, count))`: 0.35 without a pair, else
+/// `max(0.10, min(0.50, avg + 1.5 × stddev))`.
+pub fn growth_cap_of(avg: Option<f64>, std: Option<f64>, count: i64) -> f64 {
+    match avg {
+        Some(avg) if count >= 1 => py_max(0.10, py_min(0.50, avg + 1.5 * std.unwrap_or(0.0))),
+        _ => 0.35,
+    }
 }
 
 /// `_last_year_month_revenue`: the target month a year earlier.
@@ -1033,7 +1041,7 @@ async fn recent_three(
 }
 
 /// One month's seasonal row: the index, the average, the YoY, the confidence.
-type SeasonalRow = (Option<f64>, Option<f64>, Option<f64>, Option<String>);
+pub type SeasonalRow = (Option<f64>, Option<f64>, Option<f64>, Option<String>);
 
 /// What a smart goal reads of the three shared goal tables, in one
 /// statement, where chain 7b-3 writes them.
@@ -1176,6 +1184,60 @@ async fn smart(
     let last_year_revenue = last_year(store, y, m, sales_type).await?;
     let recent = recent_three(store, sales_type, today).await?;
     let tables = shared(store, m).await?;
+    Ok(compose(
+        Inputs {
+            year,
+            month,
+            ml,
+            cap,
+            last_year: last_year_revenue,
+            recent,
+            seasonal: tables.seasonal,
+            growth: tables.growth,
+            weekly: tables.weekly,
+        },
+        now,
+    ))
+}
+
+/// What a smart goal is computed from, once read.
+pub struct Inputs {
+    pub year: i64,
+    pub month: i64,
+    /// `_get_ml_forecast_total`.
+    pub ml: f64,
+    /// `_dynamic_growth_cap`.
+    pub cap: f64,
+    /// `_last_year_month_revenue`: the int 0, or a float.
+    pub last_year: PyNum,
+    /// `_recent_three_month_average`: the int 0, or a float.
+    pub recent: PyNum,
+    /// The month's row of `seasonal_indices`, if there is one.
+    pub seasonal: Option<SeasonalRow>,
+    /// `growth_metrics`' overall YoY: no row, a NULL, or a value.
+    pub growth: Option<Option<f64>>,
+    /// The month's weekly weights, sorted by week.
+    pub weekly: Vec<(i64, f64)>,
+}
+
+/// `generate_smart_goals` as the bytes orjson writes, from what it read.
+pub fn compose_json(inputs: Inputs, now: DateTime<Utc>) -> Vec<u8> {
+    json(&compose(inputs, now))
+}
+
+/// The arithmetic of `generate_smart_goals`, after its reads.
+fn compose(i: Inputs, now: DateTime<Utc>) -> Smart {
+    let (year, month, ml, cap) = (i.year, i.month, i.ml, i.cap);
+    let (y, m) = (
+        i32::try_from(year).expect("a validated year"),
+        u32::try_from(month).expect("a validated month"),
+    );
+    let (last_year_revenue, recent) = (i.last_year, i.recent);
+    let tables = Shared {
+        seasonal: i.seasonal,
+        growth: i.growth,
+        weekly: i.weekly,
+    };
 
     let (index, historical_avg, monthly_yoy, confidence) = match &tables.seasonal {
         Some((a, b, c, d)) => (
@@ -1288,7 +1350,7 @@ async fn smart(
     let daily_goal = round_int(monthly_goal as f64 / f64::from(days) / 10_000.0) * 10_000;
     let weekly_goal = round_int(monthly_goal as f64 / (f64::from(days) / 7.0) / 50_000.0) * 50_000;
 
-    Ok(Smart {
+    Smart {
         target_year: year,
         target_month: month,
         monthly: Monthly {
@@ -1329,7 +1391,7 @@ async fn smart(
             monthly_yoy: round_float(monthly_yoy, 4),
             calculated_at: kyiv_isoformat(now),
         },
-    })
+    }
 }
 
 #[derive(Serialize)]
