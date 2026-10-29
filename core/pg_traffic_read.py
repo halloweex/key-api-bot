@@ -1,10 +1,10 @@
 """Reading the `/traffic` tab from Postgres.
 
-Six methods, on Postgres alone: the platform breakdown, the daily trend, the
-transaction list, the campaign table and ROAS. What they read is
-`silver.orders` — there since revision 0005 — joined to `silver.order_utm` and,
-for ROAS only, `gold.daily_revenue` and `app.manual_expenses`. Revision 0018
-brings the two that were missing.
+Seven methods, on Postgres alone: the platform breakdown, the organic and
+pixel-only breakdowns, the daily trend, the transaction list, the campaign
+table and ROAS. What they read is `silver.orders` — there since revision 0005
+— joined to `silver.order_utm` and, for ROAS only, `gold.daily_revenue` and
+`app.manual_expenses`. Revision 0018 brings the two that were missing.
 
 NO FALLBACK SINCE STEP 14 (S14-05)
 
