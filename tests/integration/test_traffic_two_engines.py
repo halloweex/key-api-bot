@@ -21,9 +21,11 @@ The tab reads Postgres and nothing else, so the two engines are no longer run
 side by side. Every call is compared with a literal instead
 (`tests/integration/golden/traffic.json`): DuckDB's answer on this fixture,
 recorded while this file still asserted Postgres answered the same (rule 9 of
-the step-14 plan). Postgres derives its Silver and Gold from the seeded
-Bronze, the production path (`tests/integration/pg_tab_seed.py`), and the
-store's DuckDB connection is a trap.
+the step-14 plan) — re-recorded whole, the same way, when the pixel-only
+breakdown (#327) added order 10 to the fixture. Postgres derives its Silver
+and Gold from the seeded Bronze, the production path
+(`tests/integration/pg_tab_seed.py`), and the store's DuckDB connection is a
+trap.
 
 `tests/unit/test_pg_traffic_read.py` proves the statements. This proves the
 numbers.
@@ -71,7 +73,13 @@ ORDERS = [
     (7, 1, 700.0, 8, 1),      # tied on revenue with 5
     (8, 3, 400.0, 9, 1),      # Opencart — inactive source, excluded
     (9, 4, 450.0, 10, 1),     # Shopify, a Klaviyo newsletter → organic / email
+    (10, 4, 650.0, 1, 1),     # buyer 9 again, no tags → pixel_only
 ]
+
+# Every order is its own buyer but one: order 10 is buyer 9 coming back to the
+# website with no tags, so the pixel-only breakdown has a first channel to
+# find.
+BUYER_OF = {10: 9}
 
 # (order_id, utm_source, utm_medium, utm_campaign, traffic_type, platform, fbclid)
 UTM = [
@@ -84,6 +92,7 @@ UTM = [
     (8, "fbads", "paid", "spring", "paid_confirmed", "facebook", None),
     (9, "klaviyo", "klaviyo", "[07/28/26] Campaign #12: Beauty roulette",
      "organic", "email", None),
+    (10, None, None, None, "pixel_only", "unattributed", None),
 ]
 
 UTM_COLUMNS = (
@@ -118,7 +127,8 @@ async def _populate(conn, pool):
     `source_id IS NULL` roll-up row, and only with the fine rows there is the
     double-count the query's predicate prevents armed."""
     await seed(conn, orders=[
-        (oid, src, status, total, NOW - timedelta(days=days), oid, None, None)
+        (oid, src, status, total, NOW - timedelta(days=days),
+         BUYER_OF.get(oid, oid), None, None)
         for oid, src, total, days, status in ORDERS])
     await derive(pool)
     await conn.executemany(
@@ -161,6 +171,8 @@ CALLS = (
     ("get_traffic_organic", {}),
     ("get_traffic_organic", {"sales_type": "retail"}),
     ("get_traffic_organic", {"source_id": 2}),
+    ("get_traffic_pixel_only", {}),
+    ("get_traffic_pixel_only", {"sales_type": "retail"}),
     ("get_traffic_trend", {}),
     ("get_traffic_trend", {"source_id": 2}),
     ("get_traffic_transactions", {}),
@@ -237,15 +249,16 @@ async def test_the_return_and_the_inactive_source_are_both_absent(in_postgres):
 
 @pytest.mark.asyncio
 async def test_the_new_buyers_are_not_an_empty_block(in_postgres):
-    """Every order here has a buyer of its own (`buyer_id = id`), so every
-    counted order is a new buyer. That is what keeps the whole-payload
+    """Every order here but order 10 has a buyer of its own (`buyer_id =
+    id`), so every counted buyer is a new one; order 10 is buyer 9's second.
+    That is what keeps the whole-payload
     comparison above from passing on an empty `new_customers` block — and it
     puts the return and Opencart's order, whose buyers are never new, on the
     wrong side of the predicate if it is lost."""
     out = await _answer(in_postgres, "get_traffic_analytics", {})
     paid = {u[0] for u in UTM if u[4] in ("paid_confirmed", "paid_likely")}
     new = out["new_customers"]
-    assert new["total"] == len(COUNTED)
+    assert new["total"] == len({BUYER_OF.get(o[0], o[0]) for o in COUNTED})
     assert new["summary"]["paid"] == len(paid & {o[0] for o in COUNTED})
     assert new["by_platform"]["telegram"] == 1
 
@@ -296,3 +309,18 @@ async def test_organic_is_split_into_its_channels(in_postgres):
         "content": "", "orders": 1, "revenue": 450.0,
     }]
     assert out["totals"]["new_customers"] == 2
+
+
+@pytest.mark.asyncio
+async def test_pixel_only_finds_the_first_channel(in_postgres):
+    """Order 10 is buyer 9's second order, untagged; buyer 9 first came
+    through a Klaviyo newsletter. The ranking of every buyer's first order —
+    a window function over the whole of Silver — is the part a statement
+    could get wrong."""
+    out = await _answer(in_postgres, "get_traffic_pixel_only", {})
+    assert out["first_channels"] == [{
+        "group": "organic", "channel": "email_campaigns",
+        "orders": 1, "revenue": 650.0, "buyers": 1, "new_buyers": 0,
+    }]
+    assert out["returning"] == {"orders": 1, "revenue": 650.0, "buyers": 1}
+    assert out["new"] == {"orders": 0, "revenue": 0.0, "buyers": 0}

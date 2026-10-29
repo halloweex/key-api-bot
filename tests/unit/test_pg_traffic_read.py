@@ -71,14 +71,15 @@ class TestTheRoutedBodies:
                 if "SELECT" in text.upper():
                     yield node.lineno, text
 
-    def test_the_scan_finds_all_twelve(self):
-        """Six methods, twelve statements: analytics and the organic breakdown
+    def test_the_scan_finds_all_thirteen(self):
+        """Seven methods, thirteen statements: the pixel-only breakdown runs one,
+        analytics and the organic breakdown
         each run their new buyers beside their orders (the breakdown runs its
         orders statement for two periods, but it is one text), transactions
         and campaigns each run a count beside their page of rows, and ROAS
         runs three — total revenue, paid revenue per platform, and the ad
         spend."""
-        assert len(list(self._statements())) == 12
+        assert len(list(self._statements())) == 13
 
     def test_every_hole_survived_the_f_string(self):
         """`{silver_orders}` inside an f-string is an expression Python

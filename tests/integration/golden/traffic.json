@@ -1,5 +1,5 @@
 {
- "source": "DuckDB's answer to every call of tests/integration/test_traffic_two_engines.py's equality test, on that file's fixture pinned to 2026-09-15, recorded at step 14's S14-05 on the code before it (d6057d53) while the same run asserted Postgres answered each one equally. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it.",
+ "source": "DuckDB's answer to every call of tests/integration/test_traffic_two_engines.py's equality test, on that file's fixture pinned to 2026-09-15, recorded at step 14's S14-05 while the same run asserted Postgres answered each one equally: first on the code before S14-05 (d6057d53); re-recorded whole when S14-05 merged main, whose pixel-only breakdown (#327) added order 10 and two calls to the fixture, on that main (81d17205) with the same pin. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it.",
  "answers": {
   "get_traffic_analytics{\"sales_type\": \"retail\"}": {
    "period": {
@@ -7,8 +7,8 @@
     "end": "2026-09-15"
    },
    "totals": {
-    "orders": 7,
-    "revenue": 5650.0
+    "orders": 8,
+    "revenue": 6300.0
    },
    "summary": {
     "paid": {
@@ -32,8 +32,8 @@
      "revenue": 0.0
     },
     "pixel_only": {
-     "orders": 0,
-     "revenue": 0.0
+     "orders": 1,
+     "revenue": 650.0
     },
     "unknown": {
      "orders": 0,
@@ -48,6 +48,10 @@
     "tiktok": {
      "orders": 1,
      "revenue": 2000.0
+    },
+    "unattributed": {
+     "orders": 1,
+     "revenue": 650.0
     },
     "google_ads": {
      "orders": 1,
@@ -71,6 +75,10 @@
      "orders": 1,
      "revenue": 2000.0
     },
+    "pixel_only": {
+     "orders": 1,
+     "revenue": 650.0
+    },
     "organic": {
      "orders": 2,
      "revenue": 750.0
@@ -90,14 +98,14 @@
     "by_platform": {
      "google_ads": 1,
      "facebook": 3,
-     "tiktok": 1,
      "email": 1,
-     "telegram": 1
+     "telegram": 1,
+     "tiktok": 1
     },
     "by_traffic_type": {
      "paid_confirmed": 4,
-     "paid_likely": 1,
-     "organic": 2
+     "organic": 2,
+     "paid_likely": 1
     }
    }
   },
@@ -172,12 +180,12 @@
      "unknown": 0
     },
     "by_platform": {
-     "facebook": 3,
-     "tiktok": 1
+     "tiktok": 1,
+     "facebook": 3
     },
     "by_traffic_type": {
-     "paid_confirmed": 3,
-     "paid_likely": 1
+     "paid_likely": 1,
+     "paid_confirmed": 3
     }
    }
   },
@@ -187,8 +195,8 @@
     "end": "2026-09-15"
    },
    "totals": {
-    "orders": 7,
-    "revenue": 5650.0
+    "orders": 8,
+    "revenue": 6300.0
    },
    "summary": {
     "paid": {
@@ -212,8 +220,8 @@
      "revenue": 0.0
     },
     "pixel_only": {
-     "orders": 0,
-     "revenue": 0.0
+     "orders": 1,
+     "revenue": 650.0
     },
     "unknown": {
      "orders": 0,
@@ -228,6 +236,10 @@
     "tiktok": {
      "orders": 1,
      "revenue": 2000.0
+    },
+    "unattributed": {
+     "orders": 1,
+     "revenue": 650.0
     },
     "google_ads": {
      "orders": 1,
@@ -251,6 +263,10 @@
      "orders": 1,
      "revenue": 2000.0
     },
+    "pixel_only": {
+     "orders": 1,
+     "revenue": 650.0
+    },
     "organic": {
      "orders": 2,
      "revenue": 750.0
@@ -269,15 +285,15 @@
     },
     "by_platform": {
      "google_ads": 1,
+     "tiktok": 1,
      "facebook": 3,
      "email": 1,
-     "telegram": 1,
-     "tiktok": 1
+     "telegram": 1
     },
     "by_traffic_type": {
      "paid_confirmed": 4,
-     "organic": 2,
-     "paid_likely": 1
+     "paid_likely": 1,
+     "organic": 2
     }
    }
   },
@@ -449,11 +465,73 @@
     }
    ]
   },
+  "get_traffic_pixel_only{\"sales_type\": \"retail\"}": {
+   "period": {
+    "start": "2026-08-21",
+    "end": "2026-09-15"
+   },
+   "totals": {
+    "orders": 1,
+    "revenue": 650.0,
+    "buyers": 1
+   },
+   "new": {
+    "orders": 0,
+    "revenue": 0.0,
+    "buyers": 0
+   },
+   "returning": {
+    "orders": 1,
+    "revenue": 650.0,
+    "buyers": 1
+   },
+   "first_channels": [
+    {
+     "group": "organic",
+     "channel": "email_campaigns",
+     "orders": 1,
+     "revenue": 650.0,
+     "buyers": 1,
+     "new_buyers": 0
+    }
+   ]
+  },
+  "get_traffic_pixel_only{}": {
+   "period": {
+    "start": "2026-08-21",
+    "end": "2026-09-15"
+   },
+   "totals": {
+    "orders": 1,
+    "revenue": 650.0,
+    "buyers": 1
+   },
+   "new": {
+    "orders": 0,
+    "revenue": 0.0,
+    "buyers": 0
+   },
+   "returning": {
+    "orders": 1,
+    "revenue": 650.0,
+    "buyers": 1
+   },
+   "first_channels": [
+    {
+     "group": "organic",
+     "channel": "email_campaigns",
+     "orders": 1,
+     "revenue": 650.0,
+     "buyers": 1,
+     "new_buyers": 0
+    }
+   ]
+  },
   "get_traffic_roas{\"sales_type\": \"retail\"}": {
    "blended": {
-    "revenue": 5650.0,
+    "revenue": 6300.0,
     "spend": 750.0,
-    "roas": 7.53
+    "roas": 8.4
    },
    "by_platform": {
     "facebook": {
@@ -477,9 +555,9 @@
   },
   "get_traffic_roas{}": {
    "blended": {
-    "revenue": 5650.0,
+    "revenue": 6300.0,
     "spend": 750.0,
-    "roas": 7.53
+    "roas": 8.4
    },
    "by_platform": {
     "facebook": {
@@ -503,6 +581,15 @@
   },
   "get_traffic_transactions{\"limit\": 2}": {
    "transactions": [
+    {
+     "id": 10,
+     "date": "2026-09-14",
+     "amount": 650.0,
+     "source": "Shopify",
+     "traffic_type": "pixel_only",
+     "platform": "unattributed",
+     "evidence": []
+    },
     {
      "id": 1,
      "date": "2026-09-13",
@@ -529,31 +616,9 @@
        "value": "spring"
       }
      ]
-    },
-    {
-     "id": 2,
-     "date": "2026-09-12",
-     "amount": 2000.0,
-     "source": "Instagram",
-     "traffic_type": "paid_likely",
-     "platform": "tiktok",
-     "evidence": [
-      {
-       "field": "utm_source",
-       "value": "tiktok"
-      },
-      {
-       "field": "utm_medium",
-       "value": "cpc"
-      },
-      {
-       "field": "utm_campaign",
-       "value": "summer"
-      }
-     ]
     }
    ],
-   "total": 7,
+   "total": 8,
    "limit": 2,
    "offset": 0
   },
@@ -675,6 +740,15 @@
   },
   "get_traffic_transactions{}": {
    "transactions": [
+    {
+     "id": 10,
+     "date": "2026-09-14",
+     "amount": 650.0,
+     "source": "Shopify",
+     "traffic_type": "pixel_only",
+     "platform": "unattributed",
+     "evidence": []
+    },
     {
      "id": 1,
      "date": "2026-09-13",
@@ -822,7 +896,7 @@
      ]
     }
    ],
-   "total": 7,
+   "total": 8,
    "limit": 50,
    "offset": 0
   },
@@ -900,6 +974,15 @@
     "organic_revenue": 0.0,
     "other_orders": 0,
     "other_revenue": 0.0
+   },
+   {
+    "date": "2026-09-14",
+    "paid_orders": 0,
+    "paid_revenue": 0.0,
+    "organic_orders": 0,
+    "organic_revenue": 0.0,
+    "other_orders": 1,
+    "other_revenue": 650.0
    }
   ],
   "get_traffic_utm_campaigns{\"limit\": 2, \"offset\": 2}": {
@@ -921,7 +1004,7 @@
      "revenue": 700.0
     }
    ],
-   "total": 7,
+   "total": 8,
    "limit": 2,
    "offset": 2
   },
@@ -944,7 +1027,7 @@
      "revenue": 1000.0
     }
    ],
-   "total": 7,
+   "total": 8,
    "limit": 2,
    "offset": 0
   },
@@ -983,6 +1066,14 @@
      "revenue": 700.0
     },
     {
+     "campaign": "",
+     "utm_source": null,
+     "platform": "unattributed",
+     "traffic_type": "pixel_only",
+     "orders": 1,
+     "revenue": 650.0
+    },
+    {
      "campaign": "12345",
      "utm_source": "google",
      "platform": "google",
@@ -1007,7 +1098,7 @@
      "revenue": 300.0
     }
    ],
-   "total": 7,
+   "total": 8,
    "limit": 50,
    "offset": 0
   },
@@ -1046,6 +1137,14 @@
      "revenue": 700.0
     },
     {
+     "campaign": "",
+     "utm_source": null,
+     "platform": "unattributed",
+     "traffic_type": "pixel_only",
+     "orders": 1,
+     "revenue": 650.0
+    },
+    {
      "campaign": "12345",
      "utm_source": "google",
      "platform": "google",
@@ -1070,7 +1169,7 @@
      "revenue": 300.0
     }
    ],
-   "total": 7,
+   "total": 8,
    "limit": 50,
    "offset": 0
   }
