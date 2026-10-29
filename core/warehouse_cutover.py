@@ -92,7 +92,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 from core import duckdb_switch
-from core.duckdb_constants import DB_DIR
+from core.paths import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -967,7 +967,7 @@ _FROZEN_WRITER_SQL = f"SELECT value FROM {FROZEN_COPY} WHERE key = $1"
 
 # Beside the DuckDB file whose verdicts it describes, as the write-chain
 # markers are (`core.chain_latch.MARKER_DIR`); `tests/conftest.py` redirects it.
-UTM_MARKER: Path = DB_DIR / "warehouse-utm-reparsed-at"
+UTM_MARKER: Path = DATA_DIR / "warehouse-utm-reparsed-at"
 
 
 async def read_frozen_writer(conn=None) -> Optional[Dict[str, Any]]:
@@ -1029,10 +1029,10 @@ def utm_marker_stamp() -> Optional[str]:
 
 def _note_utm_marker() -> str:
     """Write the marker, keeping the later of its stamp and now. Returns it."""
-    from core.chain_latch import _write_marker
+    from core.atomic_file import write_atomic
 
     stamp = _later(utm_marker_stamp(), _now_iso())
-    _write_marker(UTM_MARKER, json.dumps({UTM_REPARSED: stamp}, sort_keys=True))
+    write_atomic(UTM_MARKER, json.dumps({UTM_REPARSED: stamp}, sort_keys=True))
     return stamp
 
 
@@ -1079,10 +1079,10 @@ def _remove_utm_marker(why: str) -> None:
     """Take the marker away, durably. A removal that fails is logged and left
     to the next start, which finds the note spent (`_marker_spent`)."""
     try:
-        from core.chain_latch import _fsync_dir
+        from core.atomic_file import fsync_dir
 
         UTM_MARKER.unlink()
-        _fsync_dir(UTM_MARKER.parent)
+        fsync_dir(UTM_MARKER.parent)
     except FileNotFoundError:
         pass
     except OSError as exc:

@@ -56,6 +56,7 @@ export {
   // Traffic Analytics
   useTrafficAnalytics,
   useTrafficOrganic,
+  useTrafficPixelOnly,
   useTrafficTrend,
   useTrafficTransactions,
   useTrafficROAS,

@@ -116,7 +116,7 @@ def test_the_health_block_reads_the_data_directory(tmp_path, monkeypatch):
     from web.routes.api import health
 
     _write(tmp_path, ev.OFFSITE, datetime.now(timezone.utc) - timedelta(hours=3))
-    monkeypatch.setattr(ev, "DB_DIR", tmp_path)
+    monkeypatch.setattr(ev, "DATA_DIR", tmp_path)
     block = health._backups()
     assert set(block) == {"pitr_drill_age_h", "remote_restore_age_h", "pg_offsite_age_h"}
     assert block["pitr_drill_age_h"] is None and block["remote_restore_age_h"] is None
