@@ -1196,19 +1196,82 @@ fn sum_of<'a>(items: impl IntoIterator<Item = &'a Sku>, f: impl Fn(&Sku) -> f64)
     py_sum(&floats(items.into_iter().map(f)))
 }
 
-/// One row of `v_sku_dead_stock_v2`, the decision taken as Python takes it.
-fn sku_of(r: &PgRow, carrying_rate: f64, discount: f64) -> Result<Sku, Failure> {
-    let available = int(r, 5)?.unwrap_or(0);
-    let cost_basis = or_zero(f8(r, 11)?);
-    let sale_value = or_zero(f8(r, 10)?);
-    let adv90 = or_zero(f8(r, 20)?);
-    let dos = f8(r, 21)?;
+/// A row of `v_sku_dead_stock_v2` as Python holds it once the driver and
+/// `float()` have been through it: each numeric the float Python makes of it.
+#[derive(Clone, Debug, Default)]
+pub struct DeepRow {
+    pub offer_id: Option<i64>,
+    pub sku: Option<String>,
+    pub name: Option<String>,
+    pub brand: Option<String>,
+    pub category_name: Option<String>,
+    pub available: Option<i64>,
+    pub price: Option<f64>,
+    pub purchased_price: Option<f64>,
+    pub effective_unit_cost: Option<f64>,
+    pub cost_quality: Option<String>,
+    pub sale_value: Option<f64>,
+    pub cost_basis: Option<f64>,
+    pub days_since_sale: Option<i64>,
+    pub days_in_stock: Option<i64>,
+    pub qty_sold_30d: Option<i64>,
+    pub qty_sold_90d: Option<i64>,
+    pub revenue_30d: Option<f64>,
+    pub revenue_90d: Option<f64>,
+    pub avg_daily_sales_30d: Option<f64>,
+    pub avg_daily_sales_90d: Option<f64>,
+    pub days_of_supply: Option<f64>,
+    pub velocity_tier: Option<String>,
+    pub velocity_ratio_30_90: Option<f64>,
+    pub abc_class: Option<String>,
+    pub annual_gross_profit: Option<f64>,
+    pub gmroi: Option<f64>,
+}
+
+fn deep_row(r: &PgRow) -> Result<DeepRow, Failure> {
+    Ok(DeepRow {
+        offer_id: int(r, 0)?,
+        sku: text(r, 1)?,
+        name: text(r, 2)?,
+        brand: text(r, 3)?,
+        category_name: text(r, 4)?,
+        available: int(r, 5)?,
+        price: f8(r, 6)?,
+        purchased_price: f8(r, 7)?,
+        effective_unit_cost: f8(r, 8)?,
+        cost_quality: text(r, 9)?,
+        sale_value: f8(r, 10)?,
+        cost_basis: f8(r, 11)?,
+        days_since_sale: int(r, 12)?,
+        days_in_stock: int(r, 13)?,
+        qty_sold_30d: int(r, 15)?,
+        qty_sold_90d: int(r, 16)?,
+        revenue_30d: f8(r, 17)?,
+        revenue_90d: f8(r, 18)?,
+        avg_daily_sales_30d: f8(r, 19)?,
+        avg_daily_sales_90d: f8(r, 20)?,
+        days_of_supply: f8(r, 21)?,
+        velocity_tier: text(r, 22)?,
+        velocity_ratio_30_90: f8(r, 23)?,
+        abc_class: text(r, 24)?,
+        annual_gross_profit: f8(r, 25)?,
+        gmroi: f8(r, 26)?,
+    })
+}
+
+/// One SKU, the decision taken as Python takes it.
+fn sku_of(r: &DeepRow, carrying_rate: f64, discount: f64) -> Result<Sku, Failure> {
+    let available = r.available.unwrap_or(0);
+    let cost_basis = or_zero(r.cost_basis);
+    let sale_value = or_zero(r.sale_value);
+    let adv90 = or_zero(r.avg_daily_sales_90d);
+    let dos = r.days_of_supply;
     let excess_units = max0(available as f64 - adv90 * OPTIMAL_DAYS as f64);
-    let unit_cost = or_zero(f8(r, 8)?);
+    let unit_cost = or_zero(r.effective_unit_cost);
     let excess_capital_cost = excess_units.as_f64() * unit_cost;
     let liq_revenue = sale_value * (1.0 - discount);
     let liq_npv = liq_revenue - cost_basis;
-    let annual_gross_profit = or_zero(f8(r, 25)?);
+    let annual_gross_profit = or_zero(r.annual_gross_profit);
     let hold_npv = match dos {
         Some(d) if d <= 365.0 && adv90 > 0.0 => {
             // `min(dos, 365)` is `dos` here; `min(12.0, dos / 30.0)` keeps 12.0 on a tie.
@@ -1220,8 +1283,7 @@ fn sku_of(r: &PgRow, carrying_rate: f64, discount: f64) -> Result<Sku, Failure> 
         _ if adv90 > 0.0 => annual_gross_profit - cost_basis * carrying_rate,
         _ => -cost_basis * carrying_rate,
     };
-    let velocity_tier = text(r, 22)?;
-    let tier = velocity_tier.as_deref();
+    let tier = r.velocity_tier.as_deref();
     let decision = if matches!(tier, Some("frozen" | "cold")) && liq_npv > hold_npv {
         "LIQUIDATE"
     } else if matches!(tier, Some("frozen" | "cold"))
@@ -1232,33 +1294,33 @@ fn sku_of(r: &PgRow, carrying_rate: f64, discount: f64) -> Result<Sku, Failure> 
         "HOLD"
     };
     Ok(Sku {
-        offer_id: int(r, 0)?,
-        sku: text(r, 1)?,
-        name: text(r, 2)?,
-        brand: text(r, 3)?,
-        category_name: text(r, 4)?,
-        abc_class: text(r, 24)?,
-        velocity_tier,
+        offer_id: r.offer_id,
+        sku: r.sku.clone(),
+        name: r.name.clone(),
+        brand: r.brand.clone(),
+        category_name: r.category_name.clone(),
+        abc_class: r.abc_class.clone(),
+        velocity_tier: r.velocity_tier.clone(),
         units: available,
-        price: or_zero(f8(r, 6)?),
-        purchased_price: f8(r, 7)?.filter(|p| *p != 0.0),
+        price: or_zero(r.price),
+        purchased_price: r.purchased_price.filter(|p| *p != 0.0),
         effective_unit_cost: unit_cost,
-        cost_quality: text(r, 9)?,
+        cost_quality: r.cost_quality.clone(),
         sale_value,
         cost_basis,
         excess_capital_cost,
-        days_since_sale: int(r, 12)?,
-        days_in_stock: int(r, 13)?,
+        days_since_sale: r.days_since_sale,
+        days_in_stock: r.days_in_stock,
         days_of_supply: dos.map(trunc_int).transpose()?,
-        qty_sold30d: int(r, 15)?.unwrap_or(0),
-        qty_sold90d: int(r, 16)?.unwrap_or(0),
-        revenue30d: or_zero(f8(r, 17)?),
-        revenue90d: or_zero(f8(r, 18)?),
-        avg_daily_sales30d: or_zero(f8(r, 19)?),
+        qty_sold30d: r.qty_sold_30d.unwrap_or(0),
+        qty_sold90d: r.qty_sold_90d.unwrap_or(0),
+        revenue30d: or_zero(r.revenue_30d),
+        revenue90d: or_zero(r.revenue_90d),
+        avg_daily_sales30d: or_zero(r.avg_daily_sales_30d),
         avg_daily_sales90d: adv90,
-        velocity_ratio30to90: f8(r, 23)?,
+        velocity_ratio30to90: r.velocity_ratio_30_90,
         annual_gross_profit,
-        gmroi: f8(r, 26)?,
+        gmroi: r.gmroi,
         npv_hold: hold_npv,
         npv_liquidate: liq_npv,
         decision,
@@ -1285,6 +1347,15 @@ async fn deep(store: &PgReads, carrying_rate: f64, discount: f64) -> Result<Deep
         &[],
     )
     .await?;
+    let rows = rows
+        .iter()
+        .map(deep_row)
+        .collect::<Result<Vec<_>, Failure>>()?;
+    deep_of(&rows, carrying_rate, discount)
+}
+
+/// The decisions and the aggregates over rows already read.
+fn deep_of(rows: &[DeepRow], carrying_rate: f64, discount: f64) -> Result<Deep, Failure> {
     let items_full = rows
         .iter()
         .map(|r| sku_of(r, carrying_rate, discount))
@@ -1430,6 +1501,42 @@ async fn deep(store: &PgReads, carrying_rate: f64, discount: f64) -> Result<Deep
             optimal_days: OPTIMAL_DAYS,
         },
     })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeepJson<'a> {
+    items: &'a [Sku],
+    quadrant_matrix: &'a Ordered<Ordered<Cell>>,
+    concentration: &'a Concentration,
+    cost_quality: &'a CostQuality,
+    gmroi_distribution: &'a GmroiDistribution,
+    liquidation_summary: &'a Liquidation,
+    params: &'a Params,
+}
+
+/// `get_dead_stock_deep(limit, carrying_rate, liquidation_discount)` over
+/// rows already read, as orjson writes the dict it returns.
+pub fn deep_json(
+    rows: &[DeepRow],
+    carrying_rate: f64,
+    discount: f64,
+    limit: Option<usize>,
+) -> Result<Vec<u8>, Failure> {
+    let deep = deep_of(rows, carrying_rate, discount)?;
+    let items = match limit {
+        Some(n) => &deep.items[..deep.items.len().min(n)],
+        None => &deep.items[..],
+    };
+    Ok(json(&DeepJson {
+        items,
+        quadrant_matrix: &deep.matrix,
+        concentration: &deep.concentration,
+        cost_quality: &deep.cost_quality,
+        gmroi_distribution: &deep.gmroi_distribution,
+        liquidation_summary: &deep.liquidation_summary,
+        params: &deep.params,
+    }))
 }
 
 #[derive(Serialize)]
@@ -1643,6 +1750,66 @@ fn rounded_if(cond: bool, x: impl FnOnce() -> f64, n: usize) -> PyNum {
     }
 }
 
+/// One row of `v_abc_summary` as Python holds it.
+#[derive(Clone, Debug, Default)]
+pub struct AbcRow {
+    pub class: Option<String>,
+    pub sku_count: Option<i64>,
+    pub total_units: Option<i64>,
+    pub stock_value: Option<f64>,
+    pub revenue: Option<f64>,
+    pub stock_pct: Option<f64>,
+    pub revenue_pct: Option<f64>,
+}
+
+/// One of the top excess SKUs; `days_of_supply` is the numeric's exact
+/// text, because `int()` cuts the Decimal and not a float made of it.
+#[derive(Clone, Debug, Default)]
+pub struct ExcessRow {
+    pub offer_id: Option<i64>,
+    pub sku: Option<String>,
+    pub name: Option<String>,
+    pub brand: Option<String>,
+    pub category_name: Option<String>,
+    pub available: Option<i64>,
+    pub value: Option<f64>,
+    pub days_of_supply: Option<String>,
+    pub sell_through_rate: Option<f64>,
+    pub avg_daily_sales: Option<f64>,
+    pub revenue_90d: Option<f64>,
+}
+
+/// The five reads `get_inventory_turnover` combines.
+#[derive(Clone, Debug, Default)]
+pub struct TurnoverRows {
+    /// `rev`: `float(SUM(revenue))` and the days that had any.
+    pub revenue: Option<f64>,
+    pub revenue_days: Option<i64>,
+    /// `stock`: the value at sale and at cost, the units, the SKUs in stock.
+    pub stock_sale: Option<f64>,
+    pub stock_cost: Option<f64>,
+    pub stock_units: Option<i64>,
+    pub active_skus: Option<i64>,
+    pub abc: Vec<AbcRow>,
+    /// `st`: fast, slow and zero movers, the average rate, the median days.
+    pub fast: Option<i64>,
+    pub slow: Option<i64>,
+    pub zero: Option<i64>,
+    pub avg_rate: Option<f64>,
+    pub median_days: Option<f64>,
+    pub excess: Vec<ExcessRow>,
+}
+
+/// The route's five settings.
+#[derive(Clone, Copy, Debug)]
+pub struct TurnoverParams {
+    pub days: i64,
+    pub lead_time: i64,
+    pub safety_multiplier: f64,
+    pub buffer_days: i64,
+    pub max_acceptable_days: i64,
+}
+
 async fn turnover(store: &PgReads, q: &Query) -> Result<Vec<u8>, Failure> {
     let days = q.days;
     let rev = read(
@@ -1688,7 +1855,7 @@ async fn turnover(store: &PgReads, q: &Query) -> Result<Vec<u8>, Failure> {
         &[],
     )
     .await?;
-    let excess_rows = read(
+    let excess = read(
         store,
         "SELECT offer_id, sku, name, brand, category_name, available, \
          available_value::float8 AS available_value_f, days_of_supply::text AS days_of_supply_t, \
@@ -1701,16 +1868,73 @@ async fn turnover(store: &PgReads, q: &Query) -> Result<Vec<u8>, Failure> {
         &[],
     )
     .await?;
+    let (r, s, t) = (first(&rev)?, first(&stock)?, first(&st)?);
+    let rows = TurnoverRows {
+        revenue: f8(r, 0)?,
+        revenue_days: int(r, 1)?,
+        stock_sale: f8(s, 0)?,
+        stock_cost: f8(s, 1)?,
+        stock_units: int(s, 2)?,
+        active_skus: int(s, 3)?,
+        abc: abc
+            .iter()
+            .map(|row| {
+                Ok(AbcRow {
+                    class: text(row, 0)?,
+                    sku_count: int(row, 1)?,
+                    total_units: int(row, 2)?,
+                    stock_value: f8(row, 3)?,
+                    revenue: f8(row, 4)?,
+                    stock_pct: f8(row, 5)?,
+                    revenue_pct: f8(row, 6)?,
+                })
+            })
+            .collect::<Result<_, Failure>>()?,
+        fast: int(t, 0)?,
+        slow: int(t, 1)?,
+        zero: int(t, 2)?,
+        avg_rate: f8(t, 3)?,
+        median_days: f8(t, 4)?,
+        excess: excess
+            .iter()
+            .map(|row| {
+                Ok(ExcessRow {
+                    offer_id: int(row, 0)?,
+                    sku: text(row, 1)?,
+                    name: text(row, 2)?,
+                    brand: text(row, 3)?,
+                    category_name: text(row, 4)?,
+                    available: int(row, 5)?,
+                    value: f8(row, 6)?,
+                    days_of_supply: text(row, 7)?,
+                    sell_through_rate: f8(row, 8)?,
+                    avg_daily_sales: f8(row, 9)?,
+                    revenue_90d: f8(row, 10)?,
+                })
+            })
+            .collect::<Result<_, Failure>>()?,
+    };
+    turnover_json(
+        &rows,
+        TurnoverParams {
+            days,
+            lead_time: q.lead_time,
+            safety_multiplier: q.safety_multiplier,
+            buffer_days: q.buffer_days,
+            max_acceptable_days: q.max_acceptable_days,
+        },
+    )
+}
 
-    let r = first(&rev)?;
-    let total_revenue = f8(r, 0)?.ok_or(Failure::Raised("float(None)"))?;
-    let actual_days = int(r, 1)?.filter(|d| *d != 0).unwrap_or(1);
-    let s = first(&stock)?;
-    let stock_value_sale = f8(s, 0)?.ok_or(Failure::Raised("float(None)"))?;
-    let stock_value_cost = f8(s, 1)?.ok_or(Failure::Raised("float(None)"))?;
-    let stock_units = int(s, 2)?.ok_or(Failure::Raised("int(None)"))?;
-    let active_skus = int(s, 3)?.ok_or(Failure::Raised("int(None)"))?;
-    let t = first(&st)?;
+/// `get_inventory_turnover`'s arithmetic over its five reads, as orjson
+/// writes the answer.
+pub fn turnover_json(rows: &TurnoverRows, p: TurnoverParams) -> Result<Vec<u8>, Failure> {
+    let total_revenue = rows.revenue.ok_or(Failure::Raised("float(None)"))?;
+    let actual_days = rows.revenue_days.filter(|d| *d != 0).unwrap_or(1);
+    let stock_value_sale = rows.stock_sale.ok_or(Failure::Raised("float(None)"))?;
+    let stock_value_cost = rows.stock_cost.ok_or(Failure::Raised("float(None)"))?;
+    let stock_units = rows.stock_units.ok_or(Failure::Raised("int(None)"))?;
+    let active_skus = rows.active_skus.ok_or(Failure::Raised("int(None)"))?;
 
     let daily_revenue = total_revenue / actual_days as f64;
     let monthly_revenue = daily_revenue * 30.0;
@@ -1726,10 +1950,10 @@ async fn turnover(store: &PgReads, q: &Query) -> Result<Vec<u8>, Failure> {
         2,
     );
 
-    let safety_days = round_int(q.lead_time as f64 * (q.safety_multiplier - 1.0))?;
-    let optimal_days = q.lead_time + safety_days + q.buffer_days;
+    let safety_days = round_int(p.lead_time as f64 * (p.safety_multiplier - 1.0))?;
+    let optimal_days = p.lead_time + safety_days + p.buffer_days;
     let optimal_value = daily_revenue * optimal_days as f64;
-    let max_acceptable_value = daily_revenue * q.max_acceptable_days as f64;
+    let max_acceptable_value = daily_revenue * p.max_acceptable_days as f64;
     let excess_value = max0(stock_value_sale - optimal_value);
     let excess_ratio = rounded_if(optimal_value > 0.0, || stock_value_sale / optimal_value, 2);
     let excess_days = rounded_if(
@@ -1741,17 +1965,16 @@ async fn turnover(store: &PgReads, q: &Query) -> Result<Vec<u8>, Failure> {
 
     let (mut a, mut b, mut c) = (None, None, None);
     let (mut c_stock_pct, mut c_revenue_pct) = (0.0, 0.0);
-    for row in &abc {
-        let class = text(row, 0)?;
+    for row in &rows.abc {
         let entry = AbcEntry {
-            sku_count: int(row, 1)?.ok_or(Failure::Raised("int(None)"))?,
-            total_units: int(row, 2)?.unwrap_or(0),
-            stock_value: PyNum::Float(or_zero(f8(row, 3)?)),
-            revenue: PyNum::Float(or_zero(f8(row, 4)?)),
-            stock_pct: PyNum::Float(or_zero(f8(row, 5)?)),
-            revenue_pct: PyNum::Float(or_zero(f8(row, 6)?)),
+            sku_count: row.sku_count.ok_or(Failure::Raised("int(None)"))?,
+            total_units: row.total_units.unwrap_or(0),
+            stock_value: PyNum::Float(or_zero(row.stock_value)),
+            revenue: PyNum::Float(or_zero(row.revenue)),
+            stock_pct: PyNum::Float(or_zero(row.stock_pct)),
+            revenue_pct: PyNum::Float(or_zero(row.revenue_pct)),
         };
-        match class.as_deref() {
+        match row.class.as_deref() {
             Some("A") => a = Some(entry),
             Some("B") => b = Some(entry),
             Some("C") => {
@@ -1762,28 +1985,28 @@ async fn turnover(store: &PgReads, q: &Query) -> Result<Vec<u8>, Failure> {
             _ => {}
         }
     }
-    let top_excess = excess_rows
+    let top_excess = rows
+        .excess
         .iter()
         .map(|r| {
             Ok(TopExcess {
-                offer_id: int(r, 0)?,
-                sku: text(r, 1)?,
-                name: text(r, 2)?,
-                brand: text(r, 3)?,
-                category_name: text(r, 4)?,
-                units: int(r, 5)?.unwrap_or(0),
-                value: or_zero(f8(r, 6)?),
-                days_of_supply: text(r, 7)?.map(|t| trunc_numeric(&t)).transpose()?,
-                sell_through_rate: or_zero(f8(r, 8)?),
-                avg_daily_sales: or_zero(f8(r, 9)?),
-                revenue90d: or_zero(f8(r, 10)?),
+                offer_id: r.offer_id,
+                sku: r.sku.clone(),
+                name: r.name.clone(),
+                brand: r.brand.clone(),
+                category_name: r.category_name.clone(),
+                units: r.available.unwrap_or(0),
+                value: or_zero(r.value),
+                days_of_supply: r.days_of_supply.as_deref().map(trunc_numeric).transpose()?,
+                sell_through_rate: or_zero(r.sell_through_rate),
+                avg_daily_sales: or_zero(r.avg_daily_sales),
+                revenue90d: or_zero(r.revenue_90d),
             })
         })
         .collect::<Result<_, Failure>>()?;
-    let median: Option<f64> = f8(t, 4)?;
     Ok(json(&Turnover {
         turnover: TurnoverPeriod {
-            period_days: days,
+            period_days: p.days,
             total_revenue: round_float(total_revenue, 2),
             actual_days,
             daily_revenue: round_float(daily_revenue, 2),
@@ -1806,12 +2029,12 @@ async fn turnover(store: &PgReads, q: &Query) -> Result<Vec<u8>, Failure> {
             },
         },
         optimal: Optimal {
-            lead_time_days: q.lead_time,
+            lead_time_days: p.lead_time,
             safety_days,
-            buffer_days: q.buffer_days,
+            buffer_days: p.buffer_days,
             total_days: optimal_days,
             total_value: round_float(optimal_value, 2),
-            max_acceptable_days: q.max_acceptable_days,
+            max_acceptable_days: p.max_acceptable_days,
             max_acceptable_value: round_float(max_acceptable_value, 2),
         },
         excess: Excess {
@@ -1821,11 +2044,11 @@ async fn turnover(store: &PgReads, q: &Query) -> Result<Vec<u8>, Failure> {
             carrying_cost_annual,
         },
         sell_through: SellThrough {
-            fast_movers: int(t, 0)?.unwrap_or(0),
-            slow_movers: int(t, 1)?.unwrap_or(0),
-            zero_velocity: int(t, 2)?.unwrap_or(0),
-            avg_sell_through_rate: round_float(or_zero(f8(t, 3)?), 1),
-            median_days_of_supply: median.map(|m| round_float(or_zero(Some(m)), 0)),
+            fast_movers: rows.fast.unwrap_or(0),
+            slow_movers: rows.slow.unwrap_or(0),
+            zero_velocity: rows.zero.unwrap_or(0),
+            avg_sell_through_rate: round_float(or_zero(rows.avg_rate), 1),
+            median_days_of_supply: rows.median_days.map(|m| round_float(or_zero(Some(m)), 0)),
         },
         abc: AbcBlock {
             a: a.unwrap_or_else(AbcEntry::absent),
@@ -1857,6 +2080,21 @@ struct Brand {
     health: &'static str,
 }
 
+/// One brand of the scorecard's GROUP BY as Python holds it; the 90 days'
+/// quantity is the numeric's text, handed on as FastAPI's encoder writes it.
+#[derive(Clone, Debug, Default)]
+pub struct BrandRow {
+    pub brand: Option<String>,
+    pub sku_count: Option<i64>,
+    pub frozen_skus: Option<i64>,
+    pub units: Option<i64>,
+    pub cost_basis: Option<f64>,
+    pub sale_value: Option<f64>,
+    pub revenue_90d: Option<f64>,
+    pub qty_sold_90d: Option<String>,
+    pub annual_gross_profit: Option<f64>,
+}
+
 async fn brand_rotation(store: &PgReads, min_skus: i64) -> Result<Vec<u8>, Failure> {
     // `ORDER BY cost_basis` names the output column, `SUM(cost_basis)`: the
     // exact sum sorts, the float8 beside it is only what Python reads.
@@ -1874,15 +2112,34 @@ async fn brand_rotation(store: &PgReads, min_skus: i64) -> Result<Vec<u8>, Failu
         &[Bind::Int(min_skus)],
     )
     .await?;
+    let rows = rows
+        .iter()
+        .map(|r| {
+            Ok(BrandRow {
+                brand: text(r, 0)?,
+                sku_count: int(r, 1)?,
+                frozen_skus: int(r, 2)?,
+                units: int(r, 3)?,
+                cost_basis: f8(r, 4)?,
+                sale_value: f8(r, 5)?,
+                revenue_90d: f8(r, 6)?,
+                qty_sold_90d: text(r, 7)?,
+                annual_gross_profit: f8(r, 8)?,
+            })
+        })
+        .collect::<Result<Vec<_>, Failure>>()?;
+    brands_json(&rows)
+}
+
+/// `get_brand_rotation`'s scorecard over its rows, as orjson writes it.
+pub fn brands_json(rows: &[BrandRow]) -> Result<Vec<u8>, Failure> {
     let brands = rows
         .iter()
         .map(|r| {
-            let sku_count = int(r, 1)?;
-            let frozen = int(r, 2)?;
-            let cost_basis = or_zero(f8(r, 4)?);
-            let sale_value = or_zero(f8(r, 5)?);
-            let revenue_90d = or_zero(f8(r, 6)?);
-            let gross_profit = or_zero(f8(r, 8)?);
+            let cost_basis = or_zero(r.cost_basis);
+            let sale_value = or_zero(r.sale_value);
+            let revenue_90d = or_zero(r.revenue_90d);
+            let gross_profit = or_zero(r.annual_gross_profit);
             let cogs_90d = if sale_value > 0.0 {
                 revenue_90d * (cost_basis / sale_value)
             } else {
@@ -1897,22 +2154,22 @@ async fn brand_rotation(store: &PgReads, min_skus: i64) -> Result<Vec<u8>, Failu
                 Some(d) if d > 60.0 => "ok",
                 Some(_) => "great",
             };
-            let frozen_share = match sku_count {
-                Some(n) if n != 0 => {
-                    PyNum::Float(frozen.ok_or(Failure::Raised("None / int"))? as f64 / n as f64)
-                }
+            let frozen_share = match r.sku_count {
+                Some(n) if n != 0 => PyNum::Float(
+                    r.frozen_skus.ok_or(Failure::Raised("None / int"))? as f64 / n as f64,
+                ),
                 _ => PyNum::Int(0),
             };
             Ok(Brand {
-                brand: text(r, 0)?,
-                sku_count,
-                frozen_skus: frozen.unwrap_or(0),
+                brand: r.brand.clone(),
+                sku_count: r.sku_count,
+                frozen_skus: r.frozen_skus.unwrap_or(0),
                 frozen_share,
-                units: int(r, 3)?.unwrap_or(0),
+                units: r.units.unwrap_or(0),
                 cost_basis,
                 sale_value,
                 revenue90d: revenue_90d,
-                qty_sold90d: numeric_or_zero(text(r, 7)?)?,
+                qty_sold90d: numeric_or_zero(r.qty_sold_90d.clone())?,
                 annual_gross_profit: gross_profit,
                 rotation_days: rotation_days.map(trunc_int).transpose()?,
                 gmroi: (cost_basis > 0.0).then(|| gross_profit / cost_basis),
