@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -103,6 +104,25 @@ class Clock(datetime):
         return cls.pinned.astimezone(tz) if tz is not None else cls.pinned
 
 
+# Python answers in this process, beside the test, on what a shared runner
+# has to spare, and `RequestTimeoutMiddleware` turns a slow answer into a
+# 504. Its limit says how long Python may take, not what it answers, so a
+# comparison lifts it, and a request that took longer than the limit is put
+# in its phase's report instead of failing as a 504 against the pilot's 200.
+# On 2026-10-29 the products summary over the picker's longest range passed
+# 30 s on a CI runner.
+PYTHON_LIMIT_LIFTED = 900.0
+OVER_LIMIT: List[Dict[str, Any]] = []
+
+
+def _python_limit(path: str) -> float:
+    """The limit `RequestTimeoutMiddleware` gives `path`."""
+    from web import middleware
+
+    return (middleware.SLOW_ENDPOINT_TIMEOUT if path in middleware.SLOW_ENDPOINTS
+            else middleware.DEFAULT_REQUEST_TIMEOUT)
+
+
 @dataclass
 class Pair:
     """The two services, signed in alike."""
@@ -119,11 +139,19 @@ class Pair:
                   key: Optional[str] = None):
         """Both answers to one GET, each service told the same `now` (None:
         their own clocks). A client key of its own unless `key` names one,
-        so the route's limit is not what a comparison measures."""
+        so the route's limit is not what a comparison measures — nor
+        Python's time limit, lifted for the request (`PYTHON_LIMIT_LIFTED`)."""
         Clock.pinned = datetime.fromisoformat(now) if now else None
         client = {"X-Real-IP": key or f"wave1-{self.run}-{next(self._clients)}"}
         url = f"{path}?{query}" if query else path
-        py = await self.python.get(url, headers=client)
+        started = time.monotonic()
+        with patch("web.middleware.DEFAULT_REQUEST_TIMEOUT", PYTHON_LIMIT_LIFTED), \
+                patch("web.middleware.SLOW_ENDPOINT_TIMEOUT", PYTHON_LIMIT_LIFTED):
+            py = await self.python.get(url, headers=client)
+        took = time.monotonic() - started
+        if took > _python_limit(path):
+            OVER_LIMIT.append({"request": url, "seconds": round(took, 1),
+                               "limit": _python_limit(path)})
         rs = await self.rust.get(url, headers={**client, **({"X-Pilot-Now": now} if now else {})})
         return py, rs
 
@@ -218,7 +246,8 @@ class Report:
 
     def phase(self, name: str, rows: Sequence[Tuple[str, int, Optional[str]]]) -> List[str]:
         """`rows` are (request, Python's status, the difference or None).
-        Records the phase and returns its differences."""
+        Records the phase, with the requests asked since the phase before
+        that took Python past its own limit, and returns its differences."""
         differences = [f"{request}: {found}" for request, _, found in rows if found]
         self.data["phases"][name] = {
             "requests": len(rows),
@@ -226,6 +255,9 @@ class Report:
             "statuses": {str(k): v for k, v in sorted(Counter(s for _, s, _ in rows).items())},
             "first_differences": differences[:20],
         }
+        if OVER_LIMIT:
+            self.data["phases"][name]["python_over_limit"] = OVER_LIMIT[:]
+            OVER_LIMIT.clear()
         return differences
 
     def write(self, path: Optional[str]) -> None:
