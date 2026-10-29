@@ -1,10 +1,18 @@
 """Reading the `/traffic` tab from Postgres.
 
-Five methods behind the flag: the platform breakdown, the daily trend, the
-transaction list, the campaign table and ROAS. What they read is
-`silver.orders` — there since revision 0005 — joined to `silver.order_utm` and,
-for ROAS only, `gold.daily_revenue` and `app.manual_expenses`. Revision 0018
-brings the two that were missing.
+Seven methods, on Postgres alone: the platform breakdown, the organic and
+pixel-only breakdowns, the daily trend, the transaction list, the campaign
+table and ROAS. What they read is `silver.orders` — there since revision 0005
+— joined to `silver.order_utm` and, for ROAS only, `gold.daily_revenue` and
+`app.manual_expenses`. Revision 0018 brings the two that were missing.
+
+NO FALLBACK SINCE STEP 14 (S14-05)
+
+`/traffic` reads Postgres. The flag that chose the engine (`KS_READ_TRAFFIC`)
+chooses nothing now: the router asks Postgres and nothing else, and a failure —
+a lost DSN line included — is refused as a 503 naming `traffic`
+(`read_fallback.refuse`), which is what `KS_READ_FALLBACK=off` made of it
+since 2026-10-09. The paragraphs below are the history of the port.
 
 WHAT MOVED, AND WHAT WAS TAKEN AWAY INSTEAD OF ADDED
 
@@ -35,7 +43,7 @@ true 5,553,520.25, measured over 30 days when `/marketing` moved. The body
 carries `{gold_revenue_rollup}` for exactly that, which is a predicate in
 Postgres and `TRUE` in DuckDB.
 
-WHY THIS FALLS BACK
+WHY IT FELL BACK, UNTIL S14-05
 
 Nothing diverges: the tab writes nothing, and every table it reads is one
 Postgres receives from DuckDB or derives from what DuckDB holds. A fault costs
@@ -55,35 +63,9 @@ on the Silver tick beside the UTM.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, List, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
-
-ENV = "KS_READ_TRAFFIC"
-_VALID = ("duckdb", "postgres")
-
-
-def enabled() -> bool:
-    """Whether the traffic queries should ask Postgres.
-
-    An unknown value raises — `KS_BOT_STORE`'s rule. A typo in the variable
-    deciding which engine answers should stop the read loudly rather than
-    quietly serve the other store.
-    """
-    value = os.getenv(ENV, "duckdb").strip().lower() or "duckdb"
-    if value not in _VALID:
-        raise ValueError(
-            f"{ENV}={value!r} — unknown engine. Expected one of {_VALID}; "
-            f"a typo here must stop the read, not point it at the other store."
-        )
-    return value == "postgres"
-
-
-def available() -> bool:
-    """Postgres is configured at all. Without a DSN there is nothing to ask,
-    and the flag alone must not turn a working tab into an error."""
-    return bool(os.getenv("KS_PG_DSN", "").strip())
 
 
 async def fetch(sql: str, params: Sequence[Any] = ()) -> List[Tuple]:

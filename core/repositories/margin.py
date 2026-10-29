@@ -14,43 +14,32 @@ logger = logging.getLogger(__name__)
 class MarginMixin:
     """Margin analysis queries using silver_orders + offer_stocks."""
 
-    # ─── Which engine answers `/margin` ──────────────────────────────────
+    # ─── What answers `/margin` ──────────────────────────────────────────
     #
-    # Six methods, three tables, and all three are already in Postgres:
-    # `silver.order_lines` (a view whose body is the same text DuckDB uses),
-    # `bronze.offer_stocks` and `bronze.categories`. No migration, no
-    # replication, no new hole in `Dialect`.
-    #
-    # The choice is made BEFORE any connection is taken — `/inventory`'s §34
-    # invariant: a read bound for Postgres must not first queue behind
-    # DuckDB's single writer, or the flag has moved the bottleneck rather than
-    # left it behind.
-    #
-    # **Never call this from inside `self.connection()`.** The store lock is
-    # not reentrant and the deadlock does not raise — it hangs.
+    # Six methods, three tables, all in Postgres: `silver.order_lines` (a
+    # view), `bronze.offer_stocks` and `bronze.categories`.
 
     async def _margin_run(
         self, sql: str, params: "list | None" = None, *, mode: str = "all",
     ):
-        """Run one margin statement against whichever engine the flag names."""
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+        """Run one margin statement against Postgres.
+
+        One path since step 14's S14-05: the Postgres read, and on any
+        failure a refusal — the 503 naming `margin` that `fall_back` gave
+        under `KS_READ_FALLBACK=off`, production's mode since 2026-10-09.
+        `KS_READ_MARGIN` is not read here; without `KS_PG_DSN` the pool
+        raises and that is the refusal.
+        """
+        from core.sql_dialect import POSTGRES, render_tables
 
         from core import pg_margin_read
 
         params = list(params or [])
-        read_fallback.no_address("margin", pg_margin_read)
-        if pg_margin_read.enabled() and pg_margin_read.available():
-            try:
-                rows = await pg_margin_read.fetch(
-                    render_tables(sql, POSTGRES), params,
-                )
-                return (rows[0] if rows else None) if mode == "one" else rows
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("margin", exc)
-
-        async with self.connection() as conn:
-            cursor = conn.execute(render_tables(sql, DUCKDB), params)
-            return cursor.fetchone() if mode == "one" else cursor.fetchall()
+        try:
+            rows = await pg_margin_read.fetch(render_tables(sql, POSTGRES), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("margin", exc)
+        return (rows[0] if rows else None) if mode == "one" else rows
 
     def _margin_base_where(self, sales_type: str, params: list) -> str:
         """The line predicate, which is not margin's to define — see

@@ -9,19 +9,20 @@ report; it writes nothing to the send ledger.
 Real numbers come from Postgres, through the readers the two weekly jobs
 call — `core.weekly_report.build_report` and its `fetch_*` for the sales
 report, `core.traffic_report.build_report` for the traffic one — so it needs
-what those jobs have in production: `KS_READ_WEEKLY=postgres` (the traffic
-report: `KS_READ_TRAFFIC=postgres`) and `KS_PG_DSN`. Without them it refuses
-before reading anything. It opens no DuckDB file: the store it hands the
-readers refuses to connect, so a reader that would have asked DuckDB stops
-the preview instead (it read a DuckDB backup until step 14's S14-03).
+what those jobs have in production: `KS_PG_DSN`. Without it it refuses before
+reading anything. Those readers read Postgres whatever `KS_READ_WEEKLY` and
+`KS_READ_TRAFFIC` say (step 14's S14-07 and S14-05), so neither is asked. It
+opens no DuckDB file: the store it hands the readers refuses to connect, so a
+reader that would have asked DuckDB stops the preview instead (it read a
+DuckDB backup until step 14's S14-03).
 `--fixture` renders the 31.08–06.09.2026 retail week from values that
 reproduce the message actually delivered on 2026-09-07, and reads nothing.
 
     PYTHONPATH=. KS_ALERTS_DISABLED=0 KS_INSTANCE=dev-laptop \\
-        KS_READ_WEEKLY=postgres KS_PG_DSN=postgresql://... \\
+        KS_PG_DSN=postgresql://... \\
         python scripts/weekly_report_preview.py --chat-id <id> --lang ru --form rich,rich-nocard
 
-On the host, web's own environment carries both variables:
+On the host, web's own environment carries it:
 `docker compose run --rm --no-deps -T web python /app/scripts/weekly_report_preview.py ...`.
 
 The kill switch is honoured: without `KS_ALERTS_DISABLED=0` in the
@@ -32,6 +33,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from datetime import date, datetime
 from typing import Any, Optional
@@ -143,22 +145,21 @@ class PostgresOnly(RuntimeError):
 def _store() -> Any:
     """The store the jobs hand their readers, refusing to connect.
 
-    Both reports take a store: the sales report's `fetch_*` run on its
-    connection when `KS_READ_WEEKLY` names DuckDB, and the traffic report's
-    reads are the store's own repository methods, which route by
-    `KS_READ_TRAFFIC`. The jobs get theirs from `get_store()`, which in web
-    under `KS_DUCKDB=off` is a store never connected. A script does not run
-    that verdict, so this is the same store with the connect refused: the
-    constructor touches no file, and a reader routed to DuckDB stops the
-    preview here rather than open one.
+    Both reports take a store: the sales report's `fetch_*` are handed it
+    and no longer ask it (step 14's S14-07), and the traffic report's reads
+    are the store's own repository methods, which read Postgres alone (step
+    14's S14-05). The jobs get theirs from `get_store()`, which in web is a
+    store never connected. A script does not run web's start, so this is the
+    same store with the connect refused: the constructor touches no file, and
+    a reader that still reached for DuckDB would stop the preview here rather
+    than open one.
     """
     from core.duckdb_store import DuckDBStore
 
     class _PostgresOnlyStore(DuckDBStore):
         async def connect(self, *, reopen: bool = True) -> None:
             raise PostgresOnly(
-                "a reader asked for DuckDB; the preview reads Postgres alone "
-                "(set KS_READ_WEEKLY / KS_READ_TRAFFIC to postgres)")
+                "a reader asked for DuckDB; the preview reads Postgres alone")
 
     return _PostgresOnlyStore()
 
@@ -166,21 +167,14 @@ def _store() -> Any:
 def postgres_unready(report: str) -> Optional[str]:
     """Why the live preview of `report` cannot read Postgres, or None.
 
-    The switch the report's readers consult, and the address they use — the
-    two the job has in production. Asked before the first read, so a laptop
-    `.env` still saying `duckdb` is a sentence, not a traceback.
+    The address the report's readers use — what the job has in production.
+    Asked before the first read, so a laptop without it is a sentence, not a
+    traceback. Both reports ask the same one: the switches that chose an
+    engine before step 14 (`KS_READ_WEEKLY`, `KS_READ_TRAFFIC`) are not read,
+    so whatever a laptop `.env` says of them changes nothing.
     """
-    from core import pg_traffic_read, pg_weekly_read
-
-    switch = pg_traffic_read if report == "traffic" else pg_weekly_read
-    try:
-        on = switch.enabled()
-    except ValueError as exc:
-        return str(exc)
-    if not on:
-        return (f"{switch.ENV} is not postgres; the preview reads what the job "
-                f"reads in production — set {switch.ENV}=postgres")
-    if not switch.available():
+    del report  # both reports read the one Postgres
+    if not os.getenv("KS_PG_DSN", "").strip():
         return "KS_PG_DSN is not set; the preview reads Postgres"
     return None
 
@@ -235,8 +229,8 @@ async def send_traffic(chat_id: int, lang: str,
                        dashboard_url: Optional[str],
                        today: Optional[date] = None) -> None:
     """Build and send the traffic report exactly as the job would: the
-    tab's own repository methods, routed to Postgres by `KS_READ_TRAFFIC`,
-    on the store that refuses to connect."""
+    tab's own repository methods, which read Postgres alone since step 14's
+    S14-05, on the store that refuses to connect."""
     from core.telegram_alerts import send_rich_message_http
     from core.traffic_report import build_report as build_traffic, chart_view
     from core.traffic_report import format_report_rich as format_traffic_rich

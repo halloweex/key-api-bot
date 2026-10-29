@@ -396,16 +396,25 @@ class TestTheReadsFollowTheChain:
                 raise ConnectionError("pg down")
             return await real(sql, params)
 
+        # Since step 14's S14-07 the failure is the goal router's refusal, a
+        # 503 naming `goals` — counted, where it escaped raw — and never a
+        # fallback, whatever `KS_READ_GOALS` says.
         with patch.object(pg_goals_read, "fetch", new=goals_table_down):
-            with pytest.raises(ConnectionError, match="pg down"):
-                await store.get_goals()
-            with pytest.raises(ConnectionError, match="pg down"):
-                await store.get_smart_goals()
+            for read in (store.get_goals, store.get_smart_goals):
+                with pytest.raises(read_fallback.ReadUnavailable) as raised:
+                    await read()
+                assert raised.value.surface == "goals"
+                assert isinstance(raised.value.__cause__, ConnectionError)
         assert "goals" not in read_fallback.counts(), "it fell back to DuckDB"
+        assert read_fallback.refusals()["goals"]["count"] == 2
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("read_flag", ["postgres", "duckdb"])
     async def test_the_target_line_raises_too(self, stores, read_flag):
+        """Since step 14's S14-05 the target line is read on `/marketing`'s
+        one path, which refuses any failure: the same 503 naming `marketing`
+        as the rest of the page, counted — where the goal's own branch let
+        the driver's exception out uncounted. Still never DuckDB's goal."""
         from core import pg_marketing_read, read_fallback
 
         store, _pool, env = stores
@@ -420,9 +429,12 @@ class TestTheReadsFollowTheChain:
             return await real(sql, params)
 
         with patch.object(pg_marketing_read, "fetch", new=goals_table_down):
-            with pytest.raises(ConnectionError, match="pg down"):
+            with pytest.raises(read_fallback.ReadUnavailable) as raised:
                 await store.get_marketing_report(2026, 8)
+        assert raised.value.surface == "marketing"
+        assert isinstance(raised.value.__cause__, ConnectionError)
         assert "marketing" not in read_fallback.counts(), "it fell back to DuckDB"
+        assert read_fallback.refusals()["marketing"]["count"] == 1
 
 
 class TestTheHourlyReplaceCannotRollItBack:

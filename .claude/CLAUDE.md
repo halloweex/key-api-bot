@@ -3118,6 +3118,14 @@ finding, not by reading the code.
 
 ### Шаги 1–2 «Одной бронзы»: переключение чтения и строка на клиента
 
+**С S14-06 шага 14 дашборд читает только Postgres**: `KS_READ_GOLD`,
+`KS_READ_SILVER` и `KS_READ_DASHBOARD` движок больше не выбирают (до S14-15
+их читает только готовность шага 13 на `/api/warehouse/status`), сбой —
+отказ 503 `surface=dashboard` (у экрана менеджеров — `managers`).
+`/api/summary` по источнику без колонки в DuckDB-Gold (3, 5) по-прежнему
+отвечает нулями — константа по решению владельца 5 для шага 14; маршрут
+`/api/summary` источник 5 и вовсе отвергает 400 до чтения. Ниже — история.
+
 **Шаг 1 — `KS_READ_GOLD`** (`duckdb` по умолчанию | `postgres`; опечатка
 роняет запрос, правило `KS_BOT_STORE`). **В проде `postgres` с 28.08** —
 включён после разбора WARN-гейта (§32 хендоффа): summary и trend читают
@@ -3257,6 +3265,13 @@ PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движк
 и делается на месте.
 
 ### Вкладка /traffic: слой, который убрали, а не скопировали
+
+**С S14-05 шага 14 вкладка читает только Postgres** — каждый её метод,
+разбивка органики и «Тільки піксель» тоже, одним роутером `_traffic_run`:
+`KS_READ_TRAFFIC` движок больше не выбирает (до S14-15 его читает только
+готовность шага 13 на `/api/warehouse/status`), сбой — отказ 503
+`surface=traffic` (см. «Every read that falls back to DuckDB is counted»).
+Ниже — история переноса и блоки вкладки.
 
 `KS_READ_TRAFFIC=postgres` переводит все пять методов вкладки. Две из них
 читали `gold_daily_traffic`, которой в Postgres нет — **и не будет**.
@@ -3552,6 +3567,11 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
 
 ### Вкладка /expenses: половина уже стояла, и один веер ценой ₴314K
 
+**С S14-07 шага 14 вкладка читает только Postgres**: `KS_READ_EXPENSES`
+движок больше не выбирает, сбой — отказ 503 `surface=expenses`, и пустой
+`backfilled_at` у `bronze.expenses` — тоже явный отказ, а не нули. Ниже —
+история переноса.
+
 `KS_READ_EXPENSES=postgres` переводит шесть читающих методов, и они делятся
 надвое. **Три** (`list_expenses`, `get_ad_spend_by_platform`,
 `get_expenses_summary`) читают только `manual_expenses`, которую привезла
@@ -3611,6 +3631,110 @@ exc)`: one uniform ERROR line carrying that phrase, and a per-surface counter
 `/api/health` publishes as `read_fallbacks {surface: {count, last_at}}` — no
 exception text, the endpoint is public. **Under the default, nothing a read
 returns changed.**
+
+**Since step 14's S14-05 six routers have no DuckDB tail at all** —
+`_traffic_run`, `_margin_run`, `_intel_run` (product intelligence),
+`_reports_run`, `_marketing_run` and `_lookups_run` (the filter bar and the
+category tree). Each runs its statement in Postgres and, on any exception,
+`raise read_fallback.refuse(surface, exc)`: the refusal `fall_back` made of
+the same failure under `off` — same body, so the same count under
+`read_fallback_mode.refused`, the same log line and the same 503 naming the
+surface. `KS_READ_TRAFFIC`, `_MARGIN`, `_PRODUCTS_INTEL`, `_REPORTS`,
+`_MARKETING` and `_LOOKUPS` route nothing: no router reads them and their
+modules carry no `ENV`. One reader is left, step 13's readiness on
+`/api/warehouse/status` (`cutover`, a `reader:*` key per switch not at
+`postgres`), until S14-15. The `.env` lines stay while an image from before
+step 14 is a rollback target. Without `KS_PG_DSN` the pool refuses to guess
+a database, and that is the failure refused — where `no_address` used to
+name the switch. The `/marketing` goal read has no branch of its own any
+more: a failure there is the page's counted 503, where it used to escape as
+an uncounted 500. Rule 5 of `tests/unit/test_read_fallback_sites.py` holds
+every engine call of a router with no tail inside a `try` whose handler is
+exactly that `raise`; the six tabs' numbers are literals DuckDB answered on
+their fixtures before its side went (`tests/integration/golden/`). The rest
+of this section is the history of the routers that still have a tail.
+
+**Since S14-06 the dashboard has none either**: `_dashboard_run`, the two
+Gold readers (`_pg_gold_summary`, `_pg_gold_series`), the Silver escapes of
+`/api/summary` and `/api/revenue/trend` (`_pg_silver`) and the managers
+screen's year (`get_manager_sales_365d`, surface `managers`) take the same
+one path, and `KS_READ_GOLD`, `KS_READ_SILVER` and `KS_READ_DASHBOARD` route
+nothing. Rule 5 holds any function in `core/repositories/` that refuses, not
+only a `_*_run`, and reads an engine call however it is spelled — a function
+imported by its name, `get_pool` under another, a module spelled out — where
+it read `<module>.<fn>(...)` and a bare `get_pool(...)` alone, and passed a
+`fetch_series()` imported by its name before a helper's `try`. A reader
+calling Postgres round them would answer a failure with an uncounted 500,
+which neither rule 5 nor a refusal count sees: the walk that holds
+/traffic's readers to their router holds `revenue.py` to its routers and
+those four helpers, allowing a helper only the engine calls rule 5 judges
+(`test_dashboard_routers_postgres_only.py`), and the HTTP sweep holds
+every dashboard route to the 503, as it holds
+/traffic's. Routing that was DuckDB's Gold stays: a source other than 1,
+2 and 4 never reaches Gold — the trend answers it from Silver's order grain,
+the summary with zeros (owner's decision 5 for step 14). The returns list's
+`{managers}` join took a branch of its own while chain 5 wrote Postgres; a
+failure there is now the page's counted 503 where it was an uncounted 500.
+The dashboard's numbers are `tests/integration/golden/dashboard.json`.
+
+**Since S14-07 the rest have none either**: `/expenses` (`_expenses_run`,
+surface `expenses`), `/inventory` (`_inventory_rows`/`_inventory_batch`,
+`inventory`), `/goals` (`_goals_run` and `_goal_tables_run`, `goals`) and
+the cohorts (`_analytics_rows`, `cohorts`) refuse any failure the same way,
+and `KS_READ_EXPENSES`, `_INVENTORY`, `_GOALS` and `_COHORTS` route nothing.
+A failed read of chain 7a's goals — `GET /api/goals`, the smart goal — is
+now that counted 503 too, where it escaped as an uncounted 500, and chain
+7b-3's forecast reads refuse through the same path as `chain_refusal` did.
+That is an accepted change in what pages (the owner's decision, the S14-07
+review): when only that read fails, `read_fallback_mode.refused.goals` counts
+it and the canary pages `read_refused` (WARN), where nothing paged before —
+the same change S14-05 made for /marketing's goal line and S14-06 for the
+returns list. The four tabs' readers are held as /traffic's and the
+dashboard's are. Rule 5 reads ClickHouse's modules in every spelling it
+reads Postgres's. The walk that holds a tab's readers to its router reads
+these four files (`test_tab_routers_postgres_only.py`): an engine is reached
+only by a router, by a reader rule 5 holds clean, or by a function that
+writes. That function may call a chain writer's module only for its writes
+and their `writes_postgres`, never for one of the module's readers such as
+`read_snapshot_calendar`. Only `_analytics_rows` reaches ClickHouse. The
+HTTP sweep holds every route of `/expenses`, `/inventory`, `/goals`, the
+cohorts and the forecast to the 503, except the training frame's, whose
+reader has no fallback.
+The expenses' history gate stays an explicit refusal: a NULL
+`meta.mirror_state.backfilled_at` for `bronze.expenses` is a 503 naming
+`expenses`, read by the table's name written out rather than imported from
+the backfill module. The cohorts have no Postgres body, so ClickHouse
+answers them or nobody does — without `KS_CH_URL` too, which is the refusal
+`no_engine` made of it under `off`; `ENGINE_ONLY` is empty, and
+`ch_cohorts` keeps no switch. The readers with no fallback at all — the
+training frame (`KS_READ_FORECAST_INPUT`), the weekly report
+(`KS_READ_WEEKLY`), the assistant's tools (`KS_READ_CHAT`), the buyer-sync
+selection (`KS_READ_BUYER_SYNC`) and the search index
+(`KS_READ_SEARCH_INDEX`) — read Postgres alone, a failure their own error as
+before. That now takes in a lost `KS_PG_DSN` line, which `no_address` used
+to turn into a counted refusal there (the assistant's `data_unavailable`, a
+job's `read_unavailable`): it is `core.pg`'s own `KS_PG_DSN is not set`,
+handled as an unreachable Postgres already was there, while every tab above
+still answers it with its 503 (measured beside the base on one seeded
+Postgres: the same 728 requests, and every tab's answer equal but
+`GET /api/goals`'s 503 above). Two routes over the training frame, which
+that run did not ask and the review did, follow the reader rather than the
+tabs: with no DSN `GET /api/revenue/forecast/evaluate` answers 500 and
+`POST /api/revenue/forecast/train` 200 `"status": "error"`, where each was
+the counted 503 naming `forecast` — what a DSN that is set and a Postgres
+that is down already gave both. Compose builds `KS_PG_DSN` with `:?`, so
+production cannot meet it, and the refusal helpers' end is S14-16's. The
+index keeps one watermark, `last_sync_meilisearch_pg`, and the
+DuckDB-built index's `meilisearch` cursor went with its frames. None of
+these modules carries `ENV`, `enabled` or `available` any more. The numbers
+are literals DuckDB answered on each fixture before its side went
+(`tests/integration/golden/{expenses,inventory,goals,goals_history,cohorts,
+chat_tools,search_index}.json`). The dialects lost what had no user left:
+DuckDB's analytics dialect, and the DuckDB spelling of Gold's channels (a
+column each) in `marketing_period_measures`. `core/warehouse_sql.py`'s
+builders take their dialect — the DuckDB renderings left name `DUCKDB` at
+the call — and `DUCKDB` itself stays until its last users go (the SMS
+audience, chain 4's gender backfill, the store's own schema and rebuild).
 
 **The week `off` waits for is proven by the canary, not by the log** (OD-07
 (a), 2026-09-30). The condition for `KS_READ_FALLBACK=off` is a covered, clean
@@ -3780,13 +3904,14 @@ shapes, never a list of routers: a "falling back to DuckDB" log; an
 `enabled() and available()` gate whose handler carries on toward DuckDB; and
 **every** handler in a function reaching another engine under
 `core/repositories/` or `core/pg_*_read*.py`, because `backfilled()` returns
-False and `_pg_gold_summary` returns None and it is the caller that then reads
-DuckDB. Each must call `fall_back`, re-raise, or say in the same `try` what
-`ReadUnavailable` means — `_get_ml_forecast_total` lets it through, so a
-refusal is never turned into a goal computed without its signal. And every
-gate's function must call `no_address` with the switch the gate consults (or
-`no_engine`); the two Gold readers gained `pg_gold_read.available()` so they
-take the gate's shape and the walk sees them.
+False and it is the caller that then reads DuckDB (`_pg_gold_summary`
+returned None the same way until S14-06). Each must call `fall_back`,
+re-raise, or say in the same `try` what `ReadUnavailable` means —
+`_get_ml_forecast_total` lets it through, so a refusal is never turned into a
+goal computed without its signal. And every gate's function must call
+`no_address` with the switch the gate consults (or `no_engine`). The two Gold
+readers carried `pg_gold_read.available()` for that until S14-06, when they
+lost their gate and their tail; they refuse, and rule 5 holds them.
 
 That the refusal then *reaches* the 503 is proved by running it, not listing
 it: `tests/unit/test_read_fallback_http.py` sweeps **every GET route under
@@ -5357,10 +5482,14 @@ Silver, `is_active_source` included — and answer as before;
 `test_goals_history_silver.py` reads every goal route off the app and holds
 it to one of the two lists. A value naming a history that no longer exists
 is a configuration nobody can satisfy; answering it from Silver in silence
-would hide that. `/api/health` publishes `goals_history {mode: silver |
-null, error}` and the canary pages `goals_history_mode_invalid`, CRITICAL
-like `write_chain_flag_invalid`; its lever, like the refusal, is to set the
-variable to `silver`.
+would hide that. `/api/health` published `goals_history {mode: silver |
+null, error}` and the canary paged `goals_history_mode_invalid`, CRITICAL
+like `write_chain_flag_invalid`; its lever, like the refusal, was to set the
+variable to `silver`. **Since step 14's S14-07 nothing reads
+`KS_GOALS_HISTORY` at all**: the refusal, the `goals_history` block, the
+canary check and its REGISTRY entry are gone, and the condition's name is
+not reused (step 14's rule 15). The `.env` line stays, for the reason
+below.
 
 **Retired is not removable: keep production's `.env` line
 (`KS_GOALS_HISTORY=silver`) for as long as an image from before 7b-4 can be
