@@ -98,8 +98,14 @@ EXPENSES = ("/api/expense-types", "/api/expenses/summary", "/api/expenses/profit
 # The goal routes' seven reads, all under `dashboard:view`.
 GOALS = tuple(f"/api/goals{name}" for name in (
     "", "/history", "/smart", "/seasonality", "/growth", "/weekly-patterns", "/forecast"))
+# The inventory router's ten reads, all under `inventory:view`; its POST
+# stays the app's.
+INVENTORY = tuple(f"/api/stocks/{name}" for name in (
+    "summary", "average", "trend", "analysis", "turnover", "skus", "brand-rotation",
+    "abc/{abc_class}", "actions", "alerts"))
 PORTED = ({("GET", TREND), ("GET", "/{path:path}")}
-          | {("GET", path) for path in MARGIN + PRODUCTS_INTEL + REPORTS + EXPENSES + GOALS})
+          | {("GET", path) for path in
+             MARGIN + PRODUCTS_INTEL + REPORTS + EXPENSES + GOALS + INVENTORY})
 PASSED = 299
 # Explicit dates: both services read the real clock, and a range does not move.
 TREND_QUERY = "start_date=2026-01-05&end_date=2026-01-11"
@@ -121,6 +127,8 @@ SUBJECTS: Dict[str, tuple] = {
     "viewer, marketing": (("viewer", "approved", "marketing"), NO_ROW),
     # Nobody else holds `expenses` without `traffic` beside it.
     "viewer, expenses": (("viewer", "approved", "expenses"), NO_ROW),
+    # The inventory tab alone: its ten reads open, every other tab shut.
+    "viewer, inventory": (("viewer", "approved", "inventory"), NO_ROW),
     "viewer, untidy tabs": (("viewer", "approved", " Dashboard , TRAFFIC,unknown,,margin "), NO_ROW),
     "editor": (("editor", "approved", None), NO_ROW),
     "editor, traffic and expenses": (("editor", "approved", "traffic,expenses"), NO_ROW),
@@ -520,6 +528,7 @@ async def services(world, duckdb_off, monkeypatch):
     monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
+    monkeypatch.setenv("KS_READ_INVENTORY", "postgres")
     # `backfilled()` latches per process: ask it afresh, as the pilot does
     # on every read.
     from core import pg_expenses_read
