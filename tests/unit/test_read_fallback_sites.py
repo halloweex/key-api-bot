@@ -296,15 +296,51 @@ def _engine_aliases(tree: ast.AST) -> Set[str]:
     return found
 
 
-def _engine_calls(fn: ast.AST, aliases: Set[str]) -> List[ast.Call]:
+def _engine_names(tree: ast.AST) -> Set[str]:
+    """Every name the file binds to a function of `core.pg` or a `core.pg_*`
+    module, at the top or inside a function: `from core.pg_gold_read import
+    fetch_series`, `from core.pg import get_pool as gp`. Until the review of
+    step 14's S14-06 merge the rule judged `<module>.<fn>(...)` and a bare
+    `get_pool(...)` alone, so a call by such a name outside every `try` was
+    an uncounted 500 it never saw."""
+    found = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.module and (
+                n.module == "core.pg" or n.module.startswith("core.pg_")):
+            found |= {a.asname or a.name for a in n.names}
+    return found
+
+
+def _names_an_engine_module(node: ast.AST) -> bool:
+    """`core.pg` or `core.pg_*` spelled out: `import core.pg_x` binds no
+    alias, so its calls are `core.pg_x.fetch(...)`."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not (isinstance(node, ast.Name) and node.id == "core" and parts):
+        return False
+    module = parts[-1]
+    return module == "pg" or module.startswith("pg_")
+
+
+def _engine_calls(fn: ast.AST, aliases: Set[str],
+                  names: Set[str] = frozenset()) -> List[ast.Call]:
+    """The engine calls in `fn`'s own nodes: a function of an engine module
+    by the module's alias or spelled out, a function imported by its name
+    (`names`, `_engine_names`), and `get_pool` however it is reached."""
     out = []
     for n in _own_nodes(fn):
         if not isinstance(n, ast.Call):
             continue
-        if isinstance(n.func, ast.Name) and n.func.id == "get_pool":
+        if _call_name(n) == "get_pool":
             out.append(n)
         elif (isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
               and n.func.value.id in aliases):
+            out.append(n)
+        elif isinstance(n.func, ast.Name) and n.func.id in names:
+            out.append(n)
+        elif isinstance(n.func, ast.Attribute) and _names_an_engine_module(n.func.value):
             out.append(n)
     return out
 
@@ -419,7 +455,7 @@ def walk_source(source: str, relpath: str, switches: Set[str]) -> List[Site]:
 
     # 5. A router with no gate left refuses every engine failure.
     if relpath.startswith("core/repositories/"):
-        aliases = _engine_aliases(tree)
+        aliases, names = _engine_aliases(tree), _engine_names(tree)
         for fn in _functions(tree):
             name = getattr(fn, "name", "")
             refuses = any(isinstance(n, ast.Call) and _is_read_fallback_refuse(n)
@@ -431,7 +467,7 @@ def walk_source(source: str, relpath: str, switches: Set[str]) -> List[Site]:
                 continue
             if any(_is_gate(n) for n in _own_nodes(fn)):
                 continue                      # the old shape; rules 2-4
-            calls = _engine_calls(fn, aliases)
+            calls = _engine_calls(fn, aliases, names)
             if not calls:
                 continue
             reached = {_call_name(n) for n in _own_nodes(fn)
@@ -719,6 +755,38 @@ class TestTheRules:
         src = self.REFUSING.replace(
             "        try:\n",
             "        rows = await pg_x_read.fetch('SELECT 1')\n        try:\n")
+        assert self._refuse_ok(src) == [False]
+
+    # Every spelling of an engine call but `<alias>.<fn>(...)` and a bare
+    # `get_pool(...)`, which the rule alone judged until the review of step
+    # 14's S14-06 merge: the first passed a `fetch_series()` imported by its
+    # name, outside the `try`, in a dashboard helper.
+    SPELLINGS = [
+        ("        from core.pg_x_read import fetch_y\n", "fetch_y('SELECT 1')"),
+        ("        from core.pg_x_read import fetch_y as f\n", "f('SELECT 1')"),
+        ("        from core.pg import get_pool as gp\n", "gp()"),
+        ("        from core import pg\n", "pg.get_pool()"),
+        ("        import core.pg_x_read\n", "core.pg_x_read.fetch('SELECT 1')"),
+    ]
+    SPELLING_IDS = ["imported_name", "imported_alias", "get_pool_alias",
+                    "get_pool_attribute", "spelled_out"]
+
+    @pytest.mark.parametrize("binding,call", SPELLINGS, ids=SPELLING_IDS)
+    def test_every_spelling_outside_the_try_is_found(self, binding, call):
+        src = self.REFUSING.replace(
+            "        try:\n", f"{binding}        rows = await {call}\n        try:\n")
+        assert self._refuse_ok(src) == [False]
+
+    @pytest.mark.parametrize("binding,call", SPELLINGS, ids=SPELLING_IDS)
+    def test_every_spelling_inside_the_try_is_refused(self, binding, call):
+        src = self.REFUSING.replace(
+            "        try:\n", f"{binding}        try:\n            await {call}\n")
+        assert self._refuse_ok(src) == [True]
+
+    def test_a_name_imported_at_the_top_is_read_too(self):
+        src = ("from core.pg_x_read import fetch_y\n"
+               + self.REFUSING.replace(
+                   "        try:\n", "        rows = await fetch_y(sql)\n        try:\n"))
         assert self._refuse_ok(src) == [False]
 
     @pytest.mark.parametrize("handler", [
