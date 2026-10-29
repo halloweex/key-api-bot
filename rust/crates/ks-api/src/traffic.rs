@@ -1245,7 +1245,12 @@ async fn trend(
         day.organic_revenue = round_float(day.organic_revenue, 2);
         day.other_revenue = round_float(day.other_revenue, 2);
     }
-    Ok(json(&days))
+    // The route wraps the list: `return {"trend": result}`.
+    #[derive(Serialize)]
+    struct Wrapped {
+        trend: Vec<Day>,
+    }
+    Ok(json(&Wrapped { trend: days }))
 }
 
 // ─── /traffic/transactions and /traffic/utm-campaigns ───────────────────────
