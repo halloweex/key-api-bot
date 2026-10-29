@@ -65,12 +65,40 @@ pub fn source_id(value: Option<&PyInt>) -> Result<Option<i32>, String> {
 pub fn category_id(value: Option<&PyInt>) -> Result<bool, String> {
     match value {
         None => Ok(false),
-        Some(v) if v.is_positive() => Ok(true),
-        Some(v) => Err(format!(
+        Some(v) if !v.is_positive() => Err(format!(
             "category_id: Must be a positive integer (got: {})",
             v.repr()
         )),
+        // `bronze.categories.id` is an integer column.
+        Some(PyInt::Small(n)) if *n <= INT32_MAX => Ok(true),
+        Some(v) => Err(format!(
+            "category_id: Must be at most {INT32_MAX} (got: {})",
+            v.repr()
+        )),
     }
+}
+
+/// `INT32_MAX` in `core/validators.py`: the widest `integer` column.
+pub const INT32_MAX: i64 = i32::MAX as i64;
+
+/// `validate_db_int(value, field, bits)`: an integer held to the width of
+/// the column it meets; `None` when it fits.
+pub fn db_int(value: Option<&PyInt>, field: &str, bits: u32) -> Option<String> {
+    let (low, high): (i128, i128) = if bits == 64 {
+        (i64::MIN.into(), i64::MAX.into())
+    } else {
+        (i32::MIN.into(), i32::MAX.into())
+    };
+    let fits = match value? {
+        PyInt::Small(n) => (low..=high).contains(&i128::from(*n)),
+        PyInt::Big(_) => false,
+    };
+    (!fits).then(|| {
+        format!(
+            "{field}: Must be between {low} and {high} (got: {})",
+            value.map(PyInt::repr).unwrap_or_default()
+        )
+    })
 }
 
 /// Python's `\w` approximated by `char::is_alphanumeric`; they part on

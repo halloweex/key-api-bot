@@ -19,6 +19,14 @@ VALID_SOURCE_IDS = {1, 2, 3, 4}  # Instagram, Telegram, Opencart, Shopify
 MAX_LIMIT = 100
 MAX_BRAND_LENGTH = 255
 
+# The widths of the columns an integer parameter meets. asyncpg refuses a value
+# past its parameter's width before the statement is sent, and the routers read
+# that as the store failing: a 503 naming the page and a `read_refused` page, for
+# a request no page sends. A parameter that reaches SQL is held to its column's
+# width here instead, and answered 400.
+INT32_MAX = 2**31 - 1
+INT64_MAX = 2**63 - 1
+
 
 def validate_date_string(
     value: str,
@@ -272,6 +280,47 @@ def validate_category_id(
     if value <= 0:
         raise ValidationError(field, "Must be a positive integer", value)
 
+    # `bronze.categories.id` is an integer column.
+    if value > INT32_MAX:
+        raise ValidationError(field, f"Must be at most {INT32_MAX}", value)
+
+    return value
+
+
+def validate_db_int(
+    value: Optional[int],
+    field: str,
+    bits: int = 32,
+    allow_none: bool = True
+) -> Optional[int]:
+    """
+    Validate an integer bound for a database column `bits` wide.
+
+    Args:
+        value: Integer to validate
+        field: Field name for error messages
+        bits: Width of the column it is compared with: 32 for `integer`,
+            64 for `bigint`
+        allow_none: Whether None is allowed
+
+    Returns:
+        Validated integer or None
+
+    Raises:
+        ValidationError: If the value does not fit the column
+    """
+    if value is None:
+        if allow_none:
+            return None
+        raise ValidationError(field, "Is required")
+
+    if not isinstance(value, int):
+        raise ValidationError(field, "Must be an integer", value)
+
+    high = INT64_MAX if bits == 64 else INT32_MAX
+    if not -high - 1 <= value <= high:
+        raise ValidationError(field, f"Must be between {-high - 1} and {high}", value)
+
     return value
 
 
@@ -320,7 +369,7 @@ def validate_sales_type(
     value: Optional[str],
     field: str = "sales_type",
     allow_none: bool = True
-) -> Optional[str]:
+) -> str:
     """
     Validate a sales type filter against KNOWN_SALES_TYPES, plus `all`.
 
@@ -330,7 +379,8 @@ def validate_sales_type(
         allow_none: Whether None is allowed (defaults to 'retail')
 
     Returns:
-        Validated sales type string or None
+        Validated sales type string; 'retail' when the value is absent and
+        allowed. Never None.
 
     Raises:
         ValidationError: If sales type is invalid

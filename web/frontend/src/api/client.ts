@@ -52,6 +52,7 @@ import type {
   TabFeature,
   TrafficAnalyticsResponse,
   TrafficOrganicResponse,
+  TrafficPixelOnlyResponse,
   TrafficTrendResponse,
   TrafficTransactionsResponse,
   TrafficROASResponse,
@@ -773,6 +774,9 @@ export const api = {
 
   getTrafficOrganic: (params: string, options?: FetchOptions) =>
     fetchApi<TrafficOrganicResponse>('/traffic/organic', params, options),
+
+  getTrafficPixelOnly: (params: string, options?: FetchOptions) =>
+    fetchApi<TrafficPixelOnlyResponse>('/traffic/pixel-only', params, options),
 
   getTrafficTrend: (params: string, options?: FetchOptions) =>
     fetchApi<TrafficTrendResponse>('/traffic/trend', params, options),

@@ -107,8 +107,8 @@ SILVER_COLUMNS = (
 
 def pass1_sql() -> str:
     """Every order projected into Silver, in the projection's column order."""
-    from core.duckdb_store import silver_select_sql
     from core.sql_dialect import POSTGRES
+    from core.warehouse_sql import silver_select_sql
 
     return (
         f"INSERT INTO {SILVER_TABLE} ({', '.join(SILVER_COLUMNS)})\n"
@@ -119,8 +119,8 @@ def pass1_sql() -> str:
 
 def pass2_sql() -> str:
     """`is_new_customer`, recomputed from each buyer's first order."""
-    from core.duckdb_store import silver_pass2_sql
     from core.sql_dialect import POSTGRES
+    from core.warehouse_sql import silver_pass2_sql
 
     return silver_pass2_sql(dialect=POSTGRES)
 

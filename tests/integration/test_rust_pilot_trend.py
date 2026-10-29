@@ -124,6 +124,10 @@ RAW = (
     "source_id=99999999999999999999", "source_id=%2B2", "source_id=02",
     "source_id=" + "9" * 4301,
     "category_id=0", "category_id=-5", "category_id=x", "brand=%20%20", "brand=" + "x" * 300,
+    # Past `bronze.categories.id`'s int32, and past 64 bits: the validator's
+    # 400 (#335); a NUL anywhere in the query: the middleware's 400.
+    "category_id=2147483648", "category_id=99999999999999999999",
+    "category_id=-99999999999999999999", "period=%00", "brand=a%00b", "x=%00&period=week",
     "brand=bad%3Cchar", "promocode=" + "y" * 101, "promocode=%20%20&period=week",
     "include_forecast=maybe", "include_forecast=%20true", "include_forecast=false&period=month",
     "include_forecast=0&period=week", "include_forecast=true&period=last_month",
@@ -325,6 +329,19 @@ def test_the_seed_puts_each_midnight_order_on_its_kyiv_day(seeded):
 
     expected = {BOUNDARY_ID_BASE + i: day for i, (_, day) in enumerate(BOUNDARY_ORDERS)}
     assert seeded == expected
+
+
+@pytest.mark.asyncio
+async def test_a_nul_is_refused_before_routing_byte_for_byte(services):
+    """`RejectNulMiddleware`: any `/api/` path, served or not, with a NUL in
+    the path or the query string, is the same 400 before any route runs."""
+    python, rust = services
+    for url in ("/api/revenue%00/trend", "/api/nowhere%00", "/api/revenue/trend?period=%00",
+                "/api/nowhere?x=1&y=%00", "/%61pi/revenue/trend%00"):
+        py, rs = await python.get(url), await rust.get(url)
+        assert py.status_code == 400, (url, py.status_code)
+        assert _differs(py, rs) is None, (url, _differs(py, rs))
+        assert py.content == rs.content, (url, py.content, rs.content)
 
 
 @pytest.mark.asyncio

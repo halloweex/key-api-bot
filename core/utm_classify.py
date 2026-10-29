@@ -399,3 +399,49 @@ def organic_detail(
         (utm_campaign or "").strip(),
         (utm_content or "").strip(),
     )
+
+
+# The first-channel keys that are neither an organic channel nor a paid
+# platform. `pixel_only`: the buyer's first order also came to the website
+# with no tags. `opencart` and `exhibition` are sources with no tags of their
+# own (the 2024 website, the exhibition stand), which a first order can still
+# sit on because "first" counts every source — Silver's rule for a new buyer.
+# `unknown`: a first order no tag explains, mostly website orders from before
+# the comment template carried UTM.
+FIRST_CHANNEL_OTHER: Tuple[str, ...] = (
+    "pixel_only", "manager", "opencart", "exhibition", "unknown",
+)
+
+
+def first_order_channel(
+    *,
+    source_id: Optional[int],
+    tagged: bool,
+    platform: str,
+    traffic_type: str,
+    utm_medium: Optional[str],
+    utm_campaign: Optional[str],
+) -> Tuple[str, str]:
+    """Where a buyer first came from: `(group, channel)` for their first order.
+
+    The group is the first order's own traffic type, folded the way the tab
+    folds it — `organic` (the channel is `organic_channel`'s), `paid` (the
+    channel is the tab's platform, so Google Ads stays apart from free
+    listings), and `manager`, `pixel_only` or `unknown`, each its own channel.
+    Read at query time from stored tags, like `organic_channel`, so it needs
+    no reclassify.
+    """
+    if traffic_type == "organic":
+        return "organic", organic_channel(
+            source_id=source_id, tagged=tagged, platform=platform,
+            utm_medium=utm_medium, utm_campaign=utm_campaign,
+        )
+    if traffic_type in GOOGLE_PAID_TYPES:
+        return "paid", tab_platform(platform, traffic_type)
+    if traffic_type in ("manager", "pixel_only"):
+        return traffic_type, traffic_type
+    if source_id == 3:
+        return "unknown", "opencart"
+    if source_id == 5:
+        return "unknown", "exhibition"
+    return "unknown", "unknown"
