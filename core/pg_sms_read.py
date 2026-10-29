@@ -20,9 +20,11 @@ would mean an opt-out recorded fifty minutes ago is invisible, and somebody who
 asked not to be messaged is messaged. That is not a stale number on a
 dashboard; it is a promise broken to a person.
 
-So reads follow `KS_SMS_STORE` — the same variable that moves the writer, the
-same arrangement `KS_BOT_STORE` has for the bot's state. There is no
-half-switched state to be in.
+So reads followed `KS_SMS_STORE` — the same variable that moved the writer,
+the same arrangement `KS_BOT_STORE` has for the bot's state. There was no
+half-switched state to be in. Since step 14's S14-08 there is no switch at
+all: production has run on `postgres` since 2026-09-06, a constant since
+S14-00, and the repository's DuckDB branches of the tab are gone.
 
 AND NO FALLBACK, DELIBERATELY
 
@@ -31,7 +33,8 @@ goes dark teaches everyone never to flip the flag. Here the opposite is right:
 after the switch the two stores diverge — every opt-out and every campaign
 recorded since lives in Postgres only — so a silent fallback would answer from
 a store that is missing them, and the roster it produced would look perfectly
-ordinary. It raises instead. The rollback is the variable.
+ordinary. It raises instead. The rollback was the variable; since step 14 it
+is the previous image.
 """
 from __future__ import annotations
 
