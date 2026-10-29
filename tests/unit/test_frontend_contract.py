@@ -201,3 +201,26 @@ def test_what_the_inventory_page_sends_is_what_its_harness_sends():
     assert fc.inventory_bare_paths() == (
         "/api/stocks/analysis", "/api/stocks/brand-rotation", "/api/stocks/skus",
         "/api/stocks/actions", "/api/stocks/alerts")
+
+
+def test_what_the_traffic_page_sends_is_what_its_harness_sends():
+    c = fc.traffic()
+    assert c.endpoints == (
+        "/api/traffic/analytics", "/api/traffic/organic", "/api/traffic/pixel-only",
+        "/api/traffic/trend", "/api/traffic/roas", "/api/traffic/transactions",
+        "/api/traffic/utm-campaigns")
+    assert c.params == ("period", "start_date", "end_date", "sales_type", "source_id")
+    assert c.extras["/api/traffic/transactions"] == ("traffic_type", "platform", "limit", "offset")
+    assert c.always["/api/traffic/utm-campaigns"] == ("sort_by", "sort_dir", "limit", "offset")
+    options = fc.traffic_table_options()
+    assert options["traffic_type"] == ("paid_confirmed", "paid_likely", "manager", "organic",
+                                       "pixel_only", "unknown")
+    assert options["platform"] == ("facebook", "instagram", "google", "tiktok", "email",
+                                   "telegram", "ai", "manager", "other", "unattributed")
+    assert options["limit"] == ("50",)
+    assert options["sort_by"] == ("campaign", "utm_source", "platform", "traffic_type",
+                                  "orders", "revenue")
+    assert fc.query(c, period="week", sales_type="retail", source_id=4,
+                    endpoint="/api/traffic/transactions",
+                    extra={"traffic_type": "organic", "limit": 50, "offset": 50}) == (
+        "period=week&sales_type=retail&source_id=4&traffic_type=organic&limit=50&offset=50")

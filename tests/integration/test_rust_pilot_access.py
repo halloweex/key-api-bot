@@ -103,9 +103,13 @@ GOALS = tuple(f"/api/goals{name}" for name in (
 INVENTORY = tuple(f"/api/stocks/{name}" for name in (
     "summary", "average", "trend", "analysis", "turnover", "skus", "brand-rotation",
     "abc/{abc_class}", "actions", "alerts"))
+# The traffic router's seven reads under `traffic:view`; its backfill status
+# is a job in the Python process's memory, and stays the app's.
+TRAFFIC = tuple(f"/api/traffic/{name}" for name in (
+    "analytics", "organic", "pixel-only", "trend", "transactions", "utm-campaigns", "roas"))
 PORTED = ({("GET", TREND), ("GET", "/{path:path}")}
           | {("GET", path) for path in
-             MARGIN + PRODUCTS_INTEL + REPORTS + EXPENSES + GOALS + INVENTORY})
+             MARGIN + PRODUCTS_INTEL + REPORTS + EXPENSES + GOALS + INVENTORY + TRAFFIC})
 PASSED = 299
 # Explicit dates: both services read the real clock, and a range does not move.
 TREND_QUERY = "start_date=2026-01-05&end_date=2026-01-11"
@@ -529,6 +533,7 @@ async def services(world, duckdb_off, monkeypatch):
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
     monkeypatch.setenv("KS_READ_GOALS", "postgres")
     monkeypatch.setenv("KS_READ_INVENTORY", "postgres")
+    monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
     # `backfilled()` latches per process: ask it afresh, as the pilot does
     # on every read.
     from core import pg_expenses_read

@@ -634,3 +634,53 @@ def inventory_bare_paths() -> Tuple[str, ...]:
     if "/stocks/average" in text:
         raise FrontendShapeError("api/client.ts: /stocks/average has a caller now")
     return tuple("/api" + p for p in _BARE_STOCK_CALLS)
+
+
+# ─── /traffic ────────────────────────────────────────────────────────────────
+
+TRAFFIC_HOOKS = ("useTrafficAnalytics", "useTrafficOrganic", "useTrafficPixelOnly",
+                 "useTrafficTrend", "useTrafficROAS", "useTrafficTransactions",
+                 "useTrafficUtmCampaigns")
+_TRAFFIC_TABLES = ("components/TrafficTransactionsTable.tsx", "components/UtmCampaignsTable.tsx")
+
+
+def traffic() -> Contract:
+    """The traffic page's seven GETs: `useQueryParams` on every one, the two
+    tables' filters, page and sort on top."""
+    return contract("/traffic", TRAFFIC_HOOKS)
+
+
+def _option_values(rel: str, name: str) -> Tuple[str, ...]:
+    """`const NAME = [{ value: '…', labelKey: … }, …]`'s values, less the empty
+    "all" one, which sends nothing."""
+    m = re.search(rf"const {name} = \[(.*?)\]", _read(rel), re.S)
+    if not m:
+        raise FrontendShapeError(f"{rel}: no `const {name} = [ … ]`")
+    values = tuple(v for v in re.findall(r"\{ value: '([a-z_]*)', labelKey:", m.group(1)) if v)
+    if not values:
+        raise FrontendShapeError(f"{rel}: {name} has no values")
+    return values
+
+
+def traffic_table_options() -> Dict[str, Tuple[str, ...]]:
+    """What the two tables can put in a query: the traffic types and
+    platforms of their filters (the same in both), the page size, and the
+    campaign table's sortable columns and directions."""
+    types = {_option_values(rel, "TRAFFIC_TYPES") for rel in _TRAFFIC_TABLES}
+    platforms = {_option_values(rel, "PLATFORMS") for rel in _TRAFFIC_TABLES}
+    sizes = {re.search(r"const PAGE_SIZE = (\d+)", _read(rel)) for rel in _TRAFFIC_TABLES}
+    if len(types) != 1 or len(platforms) != 1 or None in sizes:
+        raise FrontendShapeError("the traffic tables' filters or page size differ")
+    sizes_found = {m.group(1) for m in sizes if m}
+    if len(sizes_found) != 1:
+        raise FrontendShapeError(f"the traffic tables' page sizes differ: {sizes_found}")
+    campaigns = _require(
+        "components/UtmCampaignsTable.tsx",
+        r"setOffset\(prev => prev \+ PAGE_SIZE\)|setOffset\(\(?prev\)? => prev \+ PAGE_SIZE\)",
+        r"\{ by: column, dir: prev\.dir === 'asc' \? 'desc' : 'asc' \}")
+    columns = tuple(re.findall(r'<SortableTh column="([a-z_]+)"', campaigns))
+    if not columns:
+        raise FrontendShapeError("UtmCampaignsTable.tsx: no SortableTh columns")
+    _require("components/TrafficTransactionsTable.tsx", r"setOffset\(prev => prev \+ PAGE_SIZE\)")
+    return {"traffic_type": types.pop(), "platform": platforms.pop(),
+            "limit": (sizes_found.pop(),), "sort_by": columns, "sort_dir": ("asc", "desc")}
