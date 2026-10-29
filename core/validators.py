@@ -320,7 +320,7 @@ def validate_sales_type(
     value: Optional[str],
     field: str = "sales_type",
     allow_none: bool = True
-) -> Optional[str]:
+) -> str:
     """
     Validate a sales type filter against KNOWN_SALES_TYPES, plus `all`.
 
@@ -330,7 +330,8 @@ def validate_sales_type(
         allow_none: Whether None is allowed (defaults to 'retail')
 
     Returns:
-        Validated sales type string or None
+        Validated sales type string; 'retail' when the value is absent and
+        allowed. Never None.
 
     Raises:
         ValidationError: If sales type is invalid

@@ -471,6 +471,19 @@ NETWORK_ROUTES = {
         "lasts; what the assistant makes of a refusal is DN-20c's"),
 }
 
+# The /traffic GET routes that read no store: the backfill's status is the
+# process's own dict. Every other route of the tab refuses when Postgres does.
+TRAFFIC_READS_NOTHING = frozenset({"/api/traffic/backfill-utm/status"})
+
+# The dashboard's GET routes (step 14, S14-06): every one reads Postgres
+# alone through `core/repositories/revenue.py`'s readers, and refuses when it
+# fails.
+DASHBOARD_ROUTES = frozenset({
+    "/api/summary", "/api/revenue/trend", "/api/sales/by-source",
+    "/api/products/top", "/api/products/performance", "/api/brands/analytics",
+    "/api/categories/breakdown", "/api/returns", "/api/customers/insights",
+})
+
 # Example values for required parameters a route validates itself, where a
 # generic value would end the request with a 400 before anything is read.
 # Values, not subjects: a parameter missing here still gets one by its type.
@@ -633,6 +646,32 @@ class TestEveryRoute:
         goal_routes -= {"/api/goals"}
         assert goal_routes <= set(refused_routes), (
             f"goal routes not refused: {sorted(goal_routes - set(refused_routes))}")
+        # Every /traffic route that reads refuses too, in every state: since
+        # S14-05 the tab reads Postgres alone, whatever its switch says, and
+        # the pool raises here. Read off the app by prefix, so a route added
+        # to the tab is held the day it lands — the pixel-only breakdown was
+        # one. What this adds to the violations above: a reader calling
+        # Postgres round the router counts no refusal, so its uncounted 500
+        # was invisible there. Mutation: `await pg_traffic_read.fetch(...)`
+        # in `get_traffic_pixel_only` with no `try`.
+        traffic_routes = {e.path for e in routes if e.path.startswith("/api/traffic/")}
+        assert TRAFFIC_READS_NOTHING <= traffic_routes, "a named route is gone"
+        assert not TRAFFIC_READS_NOTHING & set(refused_routes), (
+            "a route said to read nothing was refused")
+        traffic_routes -= TRAFFIC_READS_NOTHING
+        assert len(traffic_routes) >= 7, traffic_routes
+        assert traffic_routes <= set(refused_routes), (
+            f"traffic routes not refused: {sorted(traffic_routes - set(refused_routes))}")
+        # The dashboard's routes the same way, since S14-06 put them on
+        # Postgres alone. Listed, because the dashboard shares no prefix; each
+        # must be on the app. `/api/managers` is not among them: it reads
+        # chain 5's classification first, which raises rather than refuses
+        # (`CHAIN_FIRST`). Mutation: `await pg_dashboard_read.fetch(...)` in
+        # `get_sales_by_source` with no `try`.
+        assert DASHBOARD_ROUTES <= {e.path for e in routes}, (
+            f"a named route is gone: {sorted(DASHBOARD_ROUTES - {e.path for e in routes})}")
+        assert DASHBOARD_ROUTES <= set(refused_routes), (
+            f"dashboard routes not refused: {sorted(DASHBOARD_ROUTES - set(refused_routes))}")
 
     def test_the_sweep_is_read_off_the_app(self):
         """Every GET route but the named network ones — and a route added

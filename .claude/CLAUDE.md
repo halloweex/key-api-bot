@@ -3207,10 +3207,12 @@ PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движк
 
 ### Вкладка /traffic: слой, который убрали, а не скопировали
 
-**С S14-05 шага 14 вкладка читает только Postgres**: `KS_READ_TRAFFIC`
-движок больше не выбирает (до S14-15 его читает только готовность шага 13
-на `/api/warehouse/status`), сбой — отказ 503 `surface=traffic` (см. «Every
-read that falls back to DuckDB is counted»). Ниже — история переноса.
+**С S14-05 шага 14 вкладка читает только Postgres** — каждый её метод,
+разбивка органики и «Тільки піксель» тоже, одним роутером `_traffic_run`:
+`KS_READ_TRAFFIC` движок больше не выбирает (до S14-15 его читает только
+готовность шага 13 на `/api/warehouse/status`), сбой — отказ 503
+`surface=traffic` (см. «Every read that falls back to DuckDB is counted»).
+Ниже — история переноса и блоки вкладки.
 
 `KS_READ_TRAFFIC=postgres` переводит все пять методов вкладки. Две из них
 читали `gold_daily_traffic`, которой в Postgres нет — **и не будет**.
@@ -3487,6 +3489,23 @@ collation базы, в DuckDB — нет, и два движка сгруппи�
 `traffic.organicChannel.*`/`…Desc.*`, и `test_frontend_locales.py` требует их
 во всех трёх языках.
 
+**«Тільки піксель» разложен по покупателю** (`GET /api/traffic/pixel-only`, блок
+«Тільки піксель: хто ці покупці»). `pixel_only` — заказ сайта, до которого не
+дошли UTM-метки, только кука пикселя Meta/TikTok; пиксель срабатывает и на 74%
+органических заказов с метками, так что корзина значит «метка не дошла», а не
+«привёл пиксель». Замер на проде 28.10.2026: в августе, когда шаблон
+комментария потерял UTM, она выросла с ~30% заказов сайта до 70%, а органика
+упала с 35% до 10%. Блок делит её на новых и повторных и для каждого покупателя
+называет канал его **самого первого** заказа (`first_order_channel`: органика —
+каналом органики, реклама — платформой вкладки, иначе `pixel_only`, `manager`,
+`opencart`, `exhibition`, `unknown`). «Первый» — правило Silver для нового
+клиента: любой источник и тип продаж, без отменённых, ничья — по id, поэтому
+«новый» здесь совпадает с `is_new_customer`. Люди не складываются: покупатель с
+пиксельным заказом в первый день и ещё одним позже есть и в новых, и в повторных.
+За 30.04–27.10 розницы: 2 125 заказов, ₴4.94M; 689 новых (₴1.26M) и 1 006
+повторных (₴3.68M), из них первыми пришли через Instagram Direct 193, ссылку в
+профиле 99, рекламу Facebook 82.
+
 ### Вкладка /expenses: половина уже стояла, и один веер ценой ₴314K
 
 **С S14-07 шага 14 вкладка читает только Postgres**: `KS_READ_EXPENSES`
@@ -3582,7 +3601,17 @@ Gold readers (`_pg_gold_summary`, `_pg_gold_series`), the Silver escapes of
 screen's year (`get_manager_sales_365d`, surface `managers`) take the same
 one path, and `KS_READ_GOLD`, `KS_READ_SILVER` and `KS_READ_DASHBOARD` route
 nothing. Rule 5 holds any function in `core/repositories/` that refuses, not
-only a `_*_run`. Routing that was DuckDB's Gold stays: a source other than 1,
+only a `_*_run`, and reads an engine call however it is spelled — a function
+imported by its name, `get_pool` under another, a module spelled out — where
+it read `<module>.<fn>(...)` and a bare `get_pool(...)` alone, and passed a
+`fetch_series()` imported by its name before a helper's `try`. A reader
+calling Postgres round them would answer a failure with an uncounted 500,
+which neither rule 5 nor a refusal count sees: the walk that holds
+/traffic's readers to their router holds `revenue.py` to its routers and
+those four helpers, allowing a helper only the engine calls rule 5 judges
+(`test_dashboard_routers_postgres_only.py`), and the HTTP sweep holds
+every dashboard route to the 503, as it holds
+/traffic's. Routing that was DuckDB's Gold stays: a source other than 1,
 2 and 4 never reaches Gold — the trend answers it from Silver's order grain,
 the summary with zeros (owner's decision 5 for step 14). The returns list's
 `{managers}` join took a branch of its own while chain 5 wrote Postgres; a
