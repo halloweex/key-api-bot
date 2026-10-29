@@ -165,3 +165,22 @@ def test_what_the_expense_blocks_send_is_what_their_harness_sends():
     assert fc.manual_expenses_query(period="custom", category="taxes", limit=50) == (
         "period=custom&category=taxes&limit=50")
     assert fc.manual_expenses_query(period=None, category=None, limit=20) == "limit=20"
+
+
+def test_what_the_goal_routes_are_sent_is_what_their_harness_sends():
+    assert fc.goal_queries() == {
+        "/api/goals": ("sales_type",),
+        "/api/goals/history": ("period_type", "weeks_back", "sales_type"),
+        "/api/goals/seasonality": ("sales_type",),
+        "/api/goals/growth": ("sales_type",),
+        "/api/goals/weekly-patterns": ("sales_type",),
+        "/api/goals/forecast": ("year", "month", "sales_type", "recalculate"),
+        "/api/goals/smart": ("sales_type", "year", "month"),
+    }
+    # A template literal: nothing encoded, a boolean as JS writes it.
+    assert fc.goal_query("/api/goals/forecast", year=2026, month=9, sales_type="b2b",
+                         recalculate=False) == "year=2026&month=9&sales_type=b2b&recalculate=false"
+    assert fc.goal_query("/api/goals/smart", sales_type="retail", year=None, month=None) == (
+        "sales_type=retail")
+    assert fc.goal_query("/api/goals/smart", sales_type="all", year=2026, month=9) == (
+        "sales_type=all&year=2026&month=9")

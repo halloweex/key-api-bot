@@ -95,8 +95,11 @@ REPORTS = tuple(f"/api/reports/{name}" for name in (
 # DELETE stay the app's.
 EXPENSES = ("/api/expense-types", "/api/expenses/summary", "/api/expenses/profit",
             "/api/expenses")
+# The goal routes' seven reads, all under `dashboard:view`.
+GOALS = tuple(f"/api/goals{name}" for name in (
+    "", "/history", "/smart", "/seasonality", "/growth", "/weekly-patterns", "/forecast"))
 PORTED = ({("GET", TREND), ("GET", "/{path:path}")}
-          | {("GET", path) for path in MARGIN + PRODUCTS_INTEL + REPORTS + EXPENSES})
+          | {("GET", path) for path in MARGIN + PRODUCTS_INTEL + REPORTS + EXPENSES + GOALS})
 PASSED = 299
 # Explicit dates: both services read the real clock, and a range does not move.
 TREND_QUERY = "start_date=2026-01-05&end_date=2026-01-11"
@@ -325,6 +328,12 @@ def _differs(py, rs, ported: bool) -> Optional[str]:
             f"CSV bodies differ: {py.content[:160]!r} | {rs.content[:160]!r}")
     if py.status_code == 200:
         a, b = json.loads(py.content), json.loads(rs.content)
+        # A smart goal says when it was computed, to the microsecond of each
+        # service's own clock: the goals harness compares it under a pinned
+        # one, this one compares everything else.
+        for answer in (a, b):
+            if isinstance(answer, dict) and isinstance(answer.get("metadata"), dict):
+                answer["metadata"].pop("calculatedAt", None)
         if json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True):
             return None
         return _first_difference(a, b) or "the same values, differently serialised"
@@ -510,6 +519,7 @@ async def services(world, duckdb_off, monkeypatch):
     monkeypatch.setenv("KS_READ_MARKETING", "postgres")
     monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
     monkeypatch.setenv("KS_READ_EXPENSES", "postgres")
+    monkeypatch.setenv("KS_READ_GOALS", "postgres")
     # `backfilled()` latches per process: ask it afresh, as the pilot does
     # on every read.
     from core import pg_expenses_read

@@ -39,6 +39,7 @@ use crate::access::ratelimit::{Limiter, client_key};
 use crate::access::routing::{Captures, Resolution, Router};
 use crate::access::store::PgAccess;
 use crate::expenses;
+use crate::goals;
 use crate::gold::PgGold;
 use crate::margin::{self, PgMargin};
 use crate::pgread::PgReads;
@@ -371,6 +372,10 @@ async fn endpoint(
             let which = expenses::Route::from_endpoint(name).expect("matched above");
             expenses_route(state, which, route, query, headers, peer).await
         }
+        name if goals::Route::from_endpoint(name).is_some() => {
+            let which = goals::Route::from_endpoint(name).expect("matched above");
+            goals_route(state, which, route, query, headers, peer).await
+        }
         SPA_CATCH_ALL => {
             // `path == "api" or path.startswith("api/")`, before any session check.
             let spa = captures.get("path").map_or("", String::as_str);
@@ -504,6 +509,28 @@ async fn reports_route(
     match reports::answer(which, &state.reads, query, now, admit).await {
         Ok(reports::Answer::Json(body)) => raw_json(StatusCode::OK, body),
         Ok(reports::Answer::Csv { body, filename }) => csv(body, &filename),
+        Err(failure) => failure.into_response(),
+    }
+}
+
+/// One of the goal routes' seven GETs, past the gates.
+async fn goals_route(
+    state: &AppState,
+    which: goals::Route,
+    route: &ApiRoute,
+    query: &str,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+) -> Response {
+    let Some(now) = state.trend_now(headers) else {
+        return detail(
+            StatusCode::BAD_REQUEST,
+            "X-Pilot-Now must be an RFC 3339 instant",
+        );
+    };
+    let admit = admitter(state, route, headers, peer);
+    match goals::answer(which, &state.reads, query, now, admit).await {
+        Ok(body) => raw_json(StatusCode::OK, body),
         Err(failure) => failure.into_response(),
     }
 }
