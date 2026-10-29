@@ -462,16 +462,9 @@ _WIDTH = "Python's int has no width{}; Rust's i64 does not parse it"
 DIVERGENCES: Dict[str, Divergence] = {
     "source_id past 64 bits": Divergence(400, 422, _WIDTH.format(
         ", so validate_source_id refuses it as no source")),
-    # A Python defect, described in the PR and not fixed: the expense type
-    # is bound against `bronze.expenses.expense_type_id`, an integer; asyncpg
-    # refuses the bind, `_expenses_run` reads that as the engine failing, and
-    # the 503 counts a refusal (`read_refused` on the canary). Rust binds an
-    # int8 and finds no expense of that type.
-    "expense_type_id past int32": Divergence(503, 200, (
-        "Python's int reaches asyncpg as an int4 bind and overflows, answered "
-        "as Postgres unreadable; Rust binds an int8 and finds no such expense")),
-    "expense_type_id past 64 bits": Divergence(503, 422, _WIDTH.format(
-        " and overflows the bind the same way")),
+    # Not listed since #335: an expense_type_id past int32, or past 64 bits,
+    # is validate_db_int's 400 on both sides; BAD_INPUT compares it byte for
+    # byte.
 }
 
 
@@ -489,3 +482,23 @@ async def test_hostile_input_differs_only_where_listed(pair):
     unlisted, stale = rust_wave1.judge_hostile(answers, DIVERGENCES)
     assert not unlisted, "differences no entry lists:\n" + "\n".join(unlisted)
     assert not stale, f"entries that no longer hold: {stale}"
+
+
+# #335's 400s, byte for byte: an expense type past `bronze.expenses`'
+# int32, either way, and past 64 bits, in the summary's order of checks;
+# and a NUL anywhere in a query, which the middleware refuses before routing.
+BAD_INPUT = ((SUMMARY, "expense_type_id=2147483648"), (SUMMARY, "expense_type_id=-2147483649"),
+             (SUMMARY, "expense_type_id=99999999999999999999&sales_type=x"),
+             (SUMMARY, "source_id=1&expense_type_id=-99999999999999999999"),
+             (MANUAL, "category=a%00b"), (PROFIT, "period=%00"), (TYPES, "x=%00"))
+
+
+@pytest.mark.asyncio
+async def test_bad_input_is_the_same_400_byte_for_byte(pair):
+    rows = []
+    for path, query in BAD_INPUT:
+        py, rs = await pair.ask(path, query)
+        rows.append((f"{path}?{query}", py.status_code, rust_wave1.difference(py, rs)))
+    differences = REPORT.phase("bad_input", rows)
+    assert not differences, "\n".join(differences)
+    assert {status for _, status, _ in rows} == {400}

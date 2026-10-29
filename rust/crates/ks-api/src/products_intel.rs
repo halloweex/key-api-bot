@@ -18,7 +18,7 @@ use sqlx::Row;
 use sqlx::postgres::PgRow;
 
 use crate::gold::decimal_to_float;
-use crate::params::FieldError;
+use crate::params::{FieldError, PyInt, lax_int};
 use crate::period;
 use crate::pgread::{Bind, PgReads};
 use crate::pyrt::{PyNum, round_float};
@@ -70,7 +70,7 @@ struct Query {
     end_date: Option<String>,
     sales_type: String,
     limit: i64,
-    product_id: Option<i64>,
+    product_id: Option<PyInt>,
 }
 
 /// An `Optional[int] = Query(…)`, read as Rust reads an integer.
@@ -85,6 +85,21 @@ fn int(raw: &str, name: &'static str, errors: &mut Vec<FieldError>) -> Option<i6
         });
     }
     parsed
+}
+
+/// `product_id` as Rust reads an integer, and past 64 bits — digits, a
+/// sign at most — the digits Python's unbounded `int` would hold, for the
+/// route's `validate_db_int` to refuse as Python does (#335).
+fn id_or_big(raw: &str, name: &'static str, errors: &mut Vec<FieldError>) -> Option<PyInt> {
+    let digits = raw.strip_prefix(['+', '-']).unwrap_or(raw);
+    if raw.parse::<i64>().is_err()
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(big @ PyInt::Big(_)) = lax_int(raw)
+    {
+        return Some(big);
+    }
+    int(raw, name, errors).map(PyInt::Small)
 }
 
 fn parse(route: Route, raw: &str) -> Result<Query, Failure> {
@@ -107,7 +122,7 @@ fn parse(route: Route, raw: &str) -> Result<Query, Failure> {
         None => 0,
     };
     let product_id = match (route, take("product_id")) {
-        (Route::Pairs, Some(raw)) => int(&raw, "product_id", &mut errors),
+        (Route::Pairs, Some(raw)) => id_or_big(&raw, "product_id", &mut errors),
         _ => None,
     };
     if !errors.is_empty() {
@@ -691,6 +706,10 @@ pub async fn answer(
         Some((_, max)) => validate_limit(q.limit, max).map_err(bad)?,
         None => 0,
     };
+    // `validate_db_int(product_id, "product_id", bits=64)`, after the limit.
+    if let Some(refused) = validate::db_int(q.product_id.as_ref(), "product_id", 64) {
+        return Err(bad(refused));
+    }
     let (start, end) = period::parse_period(
         q.period.as_deref(),
         q.start_date.as_deref(),
@@ -719,7 +738,7 @@ pub async fn answer(
         }
         Route::Pairs => {
             let (filter, limit_at) = match q.product_id {
-                Some(id) => {
+                Some(PyInt::Small(id)) => {
                     binds.push(Bind::Int(id));
                     binds.push(Bind::Int(id));
                     (
@@ -727,7 +746,7 @@ pub async fn answer(
                         next + 2,
                     )
                 }
-                None => (String::new(), next),
+                _ => (String::new(), next),
             };
             binds.push(Bind::Int(limit));
             let sql = pairs_sql(&wh, having, &filter, limit_at);
@@ -801,7 +820,18 @@ mod tests {
         assert_eq!(parse(Route::Momentum, "").unwrap().limit, 5);
         assert_eq!(
             parse(Route::Pairs, "product_id=7").unwrap().product_id,
-            Some(7)
+            Some(PyInt::Small(7))
+        );
+        // Past 64 bits, digits and a sign at most: kept for validate_db_int.
+        assert_eq!(
+            parse(Route::Pairs, "product_id=-99999999999999999999")
+                .unwrap()
+                .product_id,
+            Some(PyInt::Big("-99999999999999999999".to_owned()))
+        );
+        assert_eq!(
+            kinds(Route::Pairs, "product_id=9999999999999999999x"),
+            vec!["int_parsing"]
         );
     }
 

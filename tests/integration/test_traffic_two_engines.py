@@ -57,7 +57,13 @@ ORDERS = [
     (7, 1, 700.0, 8, 1),      # tied on revenue with 5
     (8, 3, 400.0, 9, 1),      # Opencart — inactive source, excluded
     (9, 4, 450.0, 10, 1),     # Shopify, a Klaviyo newsletter → organic / email
+    (10, 4, 650.0, 1, 1),     # buyer 9 again, no tags → pixel_only
 ]
+
+# Every order is its own buyer but one: order 10 is buyer 9 coming back to the
+# website with no tags, so the pixel-only breakdown has a first channel to
+# find in the other engine.
+BUYER_OF = {10: 9}
 
 # (order_id, utm_source, utm_medium, utm_campaign, traffic_type, platform, fbclid)
 UTM = [
@@ -70,6 +76,7 @@ UTM = [
     (8, "fbads", "paid", "spring", "paid_confirmed", "facebook", None),
     (9, "klaviyo", "klaviyo", "[07/28/26] Campaign #12: Beauty roulette",
      "organic", "email", None),
+    (10, None, None, None, "pixel_only", "unattributed", None),
 ]
 
 UTM_COLUMNS = (
@@ -101,7 +108,8 @@ async def _seed_duckdb(store):
             conn.execute(
                 "INSERT INTO orders (id,source_id,status_id,grand_total,"
                 "ordered_at,buyer_id,manager_id) VALUES (?,?,?,?,?,?,NULL)",
-                [oid, src, status, total, now - timedelta(days=days), oid])
+                [oid, src, status, total, now - timedelta(days=days),
+                 BUYER_OF.get(oid, oid)])
         for row in SPEND:
             eid, days, category, etype, amount, platform = row
             conn.execute(
@@ -239,6 +247,8 @@ CALLS = (
     ("get_traffic_organic", {}),
     ("get_traffic_organic", {"sales_type": "retail"}),
     ("get_traffic_organic", {"source_id": 2}),
+    ("get_traffic_pixel_only", {}),
+    ("get_traffic_pixel_only", {"sales_type": "retail"}),
     ("get_traffic_trend", {}),
     ("get_traffic_trend", {"source_id": 2}),
     ("get_traffic_transactions", {}),
@@ -333,7 +343,7 @@ async def test_the_new_buyers_are_not_an_empty_block(both_engines, monkeypatch):
     paid = {u[0] for u in UTM if u[4] in ("paid_confirmed", "paid_likely")}
     for out in (duck, pg):
         new = out["new_customers"]
-        assert new["total"] == len(COUNTED)
+        assert new["total"] == len({BUYER_OF.get(o[0], o[0]) for o in COUNTED})
         assert new["summary"]["paid"] == len(paid & {o[0] for o in COUNTED})
         assert new["by_platform"]["telegram"] == 1
 
@@ -388,3 +398,19 @@ async def test_organic_is_split_the_same_way_in_both(both_engines, monkeypatch):
             "content": "", "orders": 1, "revenue": 450.0,
         }]
         assert out["totals"]["new_customers"] == 2
+
+
+@pytest.mark.asyncio
+async def test_pixel_only_finds_the_first_channel_in_both(both_engines, monkeypatch):
+    """Order 10 is buyer 9's second order, untagged; buyer 9 first came
+    through a Klaviyo newsletter. The ranking of every buyer's first order —
+    a window function over the whole of Silver — is the part one engine could
+    read differently from the other."""
+    duck, pg = await _both(both_engines, monkeypatch, "get_traffic_pixel_only", {})
+    for out in (duck, pg):
+        assert out["first_channels"] == [{
+            "group": "organic", "channel": "email_campaigns",
+            "orders": 1, "revenue": 650.0, "buyers": 1, "new_buyers": 0,
+        }]
+        assert out["returning"] == {"orders": 1, "revenue": 650.0, "buyers": 1}
+        assert out["new"] == {"orders": 0, "revenue": 0.0, "buyers": 0}

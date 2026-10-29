@@ -64,7 +64,8 @@ struct Query {
     start_date: Option<String>,
     end_date: Option<String>,
     source_id: Option<i64>,
-    expense_type_id: Option<i64>,
+    /// Kept past 64 bits: `validate_db_int` refuses it with its value.
+    expense_type_id: Option<PyInt>,
     sales_type: String,
     category: Option<String>,
     limit: i64,
@@ -94,6 +95,18 @@ fn int(raw: String, name: &'static str, errors: &mut Vec<FieldError>) -> Option<
     };
     errors.push(field_error(kind, name, int_message(kind), raw));
     None
+}
+
+/// As `int`, but past 64 bits the digits Python's int would hold, for
+/// `validate_db_int` to refuse as Python's does (#335).
+fn int_or_big(raw: String, name: &'static str, errors: &mut Vec<FieldError>) -> Option<PyInt> {
+    match lax_int(&raw) {
+        Ok(v) => Some(v),
+        Err(kind) => {
+            errors.push(field_error(kind, name, int_message(kind), raw));
+            None
+        }
+    }
 }
 
 /// `limit: int = Query(50, ge=1, le=200)`. pydantic's `ctx` is not carried:
@@ -141,7 +154,7 @@ fn parse(route: Route, raw: &str) -> Result<Query, Failure> {
         _ => None,
     };
     let expense_type_id = match (route, take("expense_type_id")) {
-        (Route::Summary, Some(raw)) => int(raw, "expense_type_id", &mut errors),
+        (Route::Summary, Some(raw)) => int_or_big(raw, "expense_type_id", &mut errors),
         _ => None,
     };
     let sales_type = take("sales_type").unwrap_or_else(|| "retail".to_owned());
@@ -177,6 +190,11 @@ fn window(q: &Query, now: DateTime<Utc>) -> Result<Window, Failure> {
     let bad = Failure::BadRequest;
     validate::period(q.period.as_deref()).map_err(bad)?;
     validate::source_id(q.source_id.map(PyInt::Small).as_ref()).map_err(bad)?;
+    // `validate_db_int(expense_type_id, "expense_type_id")`: the summary's,
+    // before the sales type; the profit route reads no expense type.
+    if let Some(refused) = validate::db_int(q.expense_type_id.as_ref(), "expense_type_id", 32) {
+        return Err(bad(refused));
+    }
     let sales_type = validate::sales_type(&q.sales_type).map_err(bad)?;
     let (start, end) = period::parse_period(
         q.period.as_deref(),
@@ -891,7 +909,11 @@ pub async fn answer(
         Route::Types => Ok(json(&types(store).await?)),
         Route::Summary => {
             let w = window(&q, now)?;
-            Ok(json(&summary(store, &w, q.expense_type_id).await?))
+            let expense_type_id = match q.expense_type_id {
+                Some(PyInt::Small(v)) => Some(v),
+                _ => None,
+            };
+            Ok(json(&summary(store, &w, expense_type_id).await?))
         }
         Route::Profit => {
             let w = window(&q, now)?;

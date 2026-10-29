@@ -855,7 +855,10 @@ def _place_files(data: Path, markers: bool) -> None:
     now = datetime.now(timezone.utc)
     for name, hours in BACKUP_AGES_H.items():
         (data / name).write_text((now - timedelta(hours=hours)).isoformat() + "\n")
-    backup_evidence.DB_DIR = data
+    # `DATA_DIR` since S14-01 (`core.paths`); the capture also runs this
+    # against trees from before it, where the name was `DB_DIR`.
+    setattr(backup_evidence,
+            "DATA_DIR" if hasattr(backup_evidence, "DATA_DIR") else "DB_DIR", data)
     chain_latch.MARKER_DIR.mkdir(parents=True, exist_ok=True)
     chain_latch._latched = None
     if markers:
@@ -1098,7 +1101,7 @@ def production(monkeypatch, tmp_path):
         data.mkdir(exist_ok=True)
         monkeypatch.setattr(duckdb_store, "DB_DIR", data)
         monkeypatch.setattr(duckdb_store, "DB_PATH", data / "analytics.duckdb")
-        monkeypatch.setattr(backup_evidence, "DB_DIR", data)
+        monkeypatch.setattr(backup_evidence, "DATA_DIR", data)
         _place_files(data, markers)
 
     return prepare
