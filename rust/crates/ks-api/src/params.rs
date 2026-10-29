@@ -44,7 +44,8 @@ pub struct FieldError {
     pub kind: &'static str,
     pub loc: (&'static str, &'static str),
     pub msg: &'static str,
-    pub input: String,
+    /// What was sent; `null` for a required parameter that was not.
+    pub input: Option<String>,
 }
 
 /// The route's parameters after FastAPI, before the route's own validators.
@@ -129,7 +130,8 @@ pub fn lax_bool(raw: &str) -> Option<bool> {
     }
 }
 
-fn int_message(kind: &str) -> &'static str {
+/// pydantic's `msg` for an error `lax_int` reports.
+pub fn int_message(kind: &str) -> &'static str {
     if kind == "int_parsing_size" {
         "Unable to parse input string as an integer, exceeded maximum size"
     } else {
@@ -155,7 +157,7 @@ pub fn parse(raw: &str) -> Result<Query, Vec<FieldError>> {
                     kind,
                     loc: ("query", name),
                     msg: int_message(kind),
-                    input: value,
+                    input: Some(value),
                 });
                 None
             }
@@ -178,7 +180,7 @@ pub fn parse(raw: &str) -> Result<Query, Vec<FieldError>> {
                 kind: "bool_parsing",
                 loc: ("query", "include_forecast"),
                 msg: "Input should be a valid boolean, unable to interpret input",
-                input: value,
+                input: Some(value),
             });
             false
         }),

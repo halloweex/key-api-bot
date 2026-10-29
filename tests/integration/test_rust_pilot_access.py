@@ -87,8 +87,12 @@ MARGIN = tuple(f"/api/margin/{name}" for name in (
     "overview", "by-brand", "by-category", "trend", "brand-category", "alerts"))
 PRODUCTS_INTEL = tuple(f"/api/products/intel/{name}" for name in (
     "summary", "pairs", "basket-distribution", "category-combos", "brand-affinity", "momentum"))
+# /reports' four under `reports:view`, /marketing's two under `marketing:view`.
+REPORTS = tuple(f"/api/reports/{name}" for name in (
+    "summary", "top-products", "all-products", "export/csv",
+    "marketing-summary", "marketing-summary/export/csv"))
 PORTED = ({("GET", TREND), ("GET", "/{path:path}")}
-          | {("GET", path) for path in MARGIN + PRODUCTS_INTEL})
+          | {("GET", path) for path in MARGIN + PRODUCTS_INTEL + REPORTS})
 PASSED = 299
 # Explicit dates: both services read the real clock, and a range does not move.
 TREND_QUERY = "start_date=2026-01-05&end_date=2026-01-11"
@@ -104,6 +108,10 @@ SUBJECTS: Dict[str, tuple] = {
     "viewer, blank tabs": (("viewer", "approved", "   "), NO_ROW),
     "viewer, traffic": (("viewer", "approved", "traffic"), NO_ROW),
     "viewer, dashboard and sms": (("viewer", "approved", "dashboard,sms"), NO_ROW),
+    # /reports and /marketing share a router and split on the gate:
+    # `reports:view` on four routes, `marketing:view` on two.
+    "viewer, reports": (("viewer", "approved", "reports"), NO_ROW),
+    "viewer, marketing": (("viewer", "approved", "marketing"), NO_ROW),
     "viewer, untidy tabs": (("viewer", "approved", " Dashboard , TRAFFIC,unknown,,margin "), NO_ROW),
     "editor": (("editor", "approved", None), NO_ROW),
     "editor, traffic and expenses": (("editor", "approved", "traffic,expenses"), NO_ROW),
@@ -302,6 +310,13 @@ def _differs(py, rs, ported: bool) -> Optional[str]:
         where = [urlsplit(r.headers.get("location", "")) for r in (py, rs)]
         if (where[0].path, where[0].query) != (where[1].path, where[1].query):
             return f"redirected to {where[0]} against {where[1]}"
+    if py.status_code == 200 and py.headers.get("content-type", "").startswith("text/csv"):
+        # A download: the bytes, and the name the browser saves it under.
+        names = [r.headers.get("content-disposition") for r in (py, rs)]
+        if names[0] != names[1]:
+            return f"content-disposition {names[0]!r} against {names[1]!r}"
+        return None if py.content == rs.content else (
+            f"CSV bodies differ: {py.content[:160]!r} | {rs.content[:160]!r}")
     if py.status_code == 200:
         a, b = json.loads(py.content), json.loads(rs.content)
         if json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True):
@@ -485,6 +500,9 @@ async def services(world, duckdb_off, monkeypatch):
     monkeypatch.setenv("KS_READ_GOLD", "postgres")
     monkeypatch.setenv("KS_READ_MARGIN", "postgres")
     monkeypatch.setenv("KS_READ_PRODUCTS_INTEL", "postgres")
+    monkeypatch.setenv("KS_READ_REPORTS", "postgres")
+    monkeypatch.setenv("KS_READ_MARKETING", "postgres")
+    monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
     monkeypatch.setenv("KS_USER_STORE", "postgres")
     monkeypatch.setenv("KS_BOT_STORE", "postgres")
     monkeypatch.setattr(limiter, "enabled", True)

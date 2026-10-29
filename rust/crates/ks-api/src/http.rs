@@ -4,8 +4,9 @@
 //! id, a start and an end log line, a 30-second timeout.
 //!
 //! Routing and the gates cover every route the app has
-//! (`rust/contract/access.json`). Past the gates, the pilot answers two
-//! endpoints: `GET /api/revenue/trend`, with its rate limit, and the SPA
+//! (`rust/contract/access.json`). Past the gates, the pilot answers
+//! `GET /api/revenue/trend` and wave 1's tabs — /margin, /products' intel,
+//! /reports and /marketing — each with its rate limit, and the SPA
 //! catch-all's JSON 404 for an unmatched `/api` path. Every other route that
 //! a request is let through to is a 501 naming it — the Python app serves it,
 //! and nginx hands it there (`nginx/rust/proxy.conf`). Two paths of its own,
@@ -40,6 +41,7 @@ use crate::gold::PgGold;
 use crate::margin::{self, PgMargin};
 use crate::pgread::PgReads;
 use crate::products_intel;
+use crate::reports;
 use crate::trend::{self, Failure};
 
 /// `DEFAULT_REQUEST_TIMEOUT` in `web/middleware.py`.
@@ -340,7 +342,7 @@ async fn dispatch(
     }
 }
 
-/// Past the gates: the two endpoints the pilot answers, or a 501.
+/// Past the gates: an endpoint the pilot answers, or a 501.
 async fn endpoint(
     state: &AppState,
     route: &ApiRoute,
@@ -358,6 +360,10 @@ async fn endpoint(
         name if products_intel::Route::from_endpoint(name).is_some() => {
             let which = products_intel::Route::from_endpoint(name).expect("matched above");
             products_route(state, which, route, query, headers, peer).await
+        }
+        name if reports::Route::from_endpoint(name).is_some() => {
+            let which = reports::Route::from_endpoint(name).expect("matched above");
+            reports_route(state, which, route, query, headers, peer).await
         }
         SPA_CATCH_ALL => {
             // `path == "api" or path.startswith("api/")`, before any session check.
@@ -470,6 +476,51 @@ async fn products_route(
     match products_intel::answer(which, &state.reads, query, now, admit).await {
         Ok(body) => raw_json(StatusCode::OK, body),
         Err(failure) => failure.into_response(),
+    }
+}
+
+/// One of `/api/reports/*`, past the gates: JSON, or a CSV download.
+async fn reports_route(
+    state: &AppState,
+    which: reports::Route,
+    route: &ApiRoute,
+    query: &str,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+) -> Response {
+    let Some(now) = state.trend_now(headers) else {
+        return detail(
+            StatusCode::BAD_REQUEST,
+            "X-Pilot-Now must be an RFC 3339 instant",
+        );
+    };
+    let admit = admitter(state, route, headers, peer);
+    match reports::answer(which, &state.reads, query, now, admit).await {
+        Ok(reports::Answer::Json(body)) => raw_json(StatusCode::OK, body),
+        Ok(reports::Answer::Csv { body, filename }) => csv(body, &filename),
+        Err(failure) => failure.into_response(),
+    }
+}
+
+/// `StreamingResponse(…, media_type="text/csv; charset=utf-8",
+/// headers={"Content-Disposition": f"attachment; filename={filename}"})`.
+fn csv(body: Vec<u8>, filename: &str) -> Response {
+    match HeaderValue::from_str(&format!("attachment; filename={filename}")) {
+        Ok(disposition) => (
+            StatusCode::OK,
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/csv; charset=utf-8"),
+                ),
+                (header::CONTENT_DISPOSITION, disposition),
+            ],
+            body,
+        )
+            .into_response(),
+        // A name made of dates is always a header value; Starlette would
+        // have refused anything else while encoding it.
+        Err(_) => json(StatusCode::INTERNAL_SERVER_ERROR, &INTERNAL),
     }
 }
 

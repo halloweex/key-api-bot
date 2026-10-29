@@ -81,7 +81,7 @@ fn int(raw: &str, name: &'static str, errors: &mut Vec<FieldError>) -> Option<i6
             kind: "int_parsing",
             loc: ("query", name),
             msg: "Input should be a valid integer, unable to parse string as an integer",
-            input: raw.to_owned(),
+            input: Some(raw.to_owned()),
         });
     }
     parsed

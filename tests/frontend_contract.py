@@ -104,14 +104,15 @@ def filters_for_path(path: str) -> FrozenSet[str]:
     return frozenset(by_path.get(path, tuple(re.findall(r"'([A-Za-z]+)'", all_m.group(1)))))
 
 
-def hook_calls(hooks: Tuple[str, ...]) -> Dict[str, Tuple[str, Tuple[str, ...]]]:
-    """For each hook in `hooks/useApi.ts`, the one `api.<fn>` it calls and the
-    parameters it adds to `useQueryParams()`'s string.
+def hook_calls(hooks: Tuple[str, ...]) -> Dict[str, Tuple[str, Tuple[str, ...], Tuple[str, ...]]]:
+    """For each hook in `hooks/useApi.ts`, the one `api.<fn>` it calls, the
+    parameters it sets on `useQueryParams()`'s string, and which of those it
+    sets unconditionally.
 
     Two shapes are read, and nothing else: `api.fn(queryParams)`, which adds
     nothing, and `const W = new URLSearchParams(queryParams)`, then
-    `W.set('<name>', …)`, then `const V = W.toString()` and `api.fn(V)` —
-    `useProductPairs`'s, whose `set` appends after the page's parameters.
+    `W.set('<name>', …)` — under an `if (…)` on its line, or not — then
+    `const V = W.toString()` and `api.fn(V)`.
     """
     text = _read("hooks/useApi.ts")
     calls = {}
@@ -124,6 +125,7 @@ def hook_calls(hooks: Tuple[str, ...]) -> Dict[str, Tuple[str, Tuple[str, ...]]]
             raise FrontendShapeError(f"{hook} calls {found}, not one api.<fn>(…)")
         fn, arg = found[0][0], found[0][1].strip()
         extras: Tuple[str, ...] = ()
+        always: Tuple[str, ...] = ()
         if arg != "queryParams":
             built = re.search(rf"const {re.escape(arg)} = (\w+)\.toString\(\)", body)
             source = built and re.search(
@@ -134,8 +136,10 @@ def hook_calls(hooks: Tuple[str, ...]) -> Dict[str, Tuple[str, Tuple[str, ...]]]
             params = built.group(1)
             if re.search(rf"{params}\.(append|delete)\(", body):
                 raise FrontendShapeError(f"{hook} appends or deletes: read it again")
-            extras = tuple(re.findall(rf"{params}\.set\('([a-z_]+)'", body))
-        calls[hook] = (fn, extras)
+            sets = re.findall(rf"^(.*?){params}\.set\('([a-z_]+)'", body, re.M)
+            extras = tuple(name for _, name in sets)
+            always = tuple(name for before, name in sets if "if (" not in before)
+        calls[hook] = (fn, extras, always)
     return calls
 
 
@@ -143,7 +147,7 @@ def client_path(fn: str) -> str:
     """`api/client.ts`: the path `fn` fetches, with the params as passed."""
     m = re.search(
         rf"{fn}:\s*\(params: string, options\?: FetchOptions\)\s*=>\s*"
-        rf"fetchApi<[^>]+>\('([^']+)', params, options\)",
+        rf"fetchApi<[^>]+>\(\s*'([^']+)',\s*params,\s*options\s*\)",
         _read("api/client.ts"),
     )
     if not m:
@@ -158,8 +162,10 @@ class Contract:
     periods: Tuple[str, ...]
     sales_types: Tuple[str, ...]
     params: Tuple[str, ...]
-    # What a hook adds to the page's parameters, by endpoint.
+    # What a hook adds to the page's parameters, by endpoint, and of that
+    # what it sets whatever the value.
     extras: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    always: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
 
 
 def contract(page: str, hooks: Tuple[str, ...]) -> Contract:
@@ -172,10 +178,27 @@ def contract(page: str, hooks: Tuple[str, ...]) -> Contract:
         name for name in global_params()
         if name not in FILTER_PARAMS.values() or name in sent
     )
-    calls = hook_calls(hooks).values()
-    endpoints = tuple("/api" + client_path(fn) for fn, _ in calls)
-    extras = {path: added for path, (_, added) in zip(endpoints, calls) if added}
-    return Contract(page, endpoints, periods(), sales_types(), params, extras)
+    calls = list(hook_calls(hooks).values())
+    endpoints = tuple("/api" + client_path(fn) for fn, _, _ in calls)
+    extras = {path: added for path, (_, added, _) in zip(endpoints, calls) if added}
+    always = {path: forced for path, (_, _, forced) in zip(endpoints, calls) if forced}
+    return Contract(page, endpoints, periods(), sales_types(), params, extras, always)
+
+
+def url_set(pairs: Sequence[Tuple[str, str]], name: str, value: str) -> List[Tuple[str, str]]:
+    """`URLSearchParams.set`: the first pair named `name` takes the value
+    where it stands and any later ones go; with none, it is appended."""
+    out: List[Tuple[str, str]] = []
+    done = False
+    for key, old in pairs:
+        if key != name:
+            out.append((key, old))
+        elif not done:
+            out.append((key, value))
+            done = True
+    if not done:
+        out.append((name, value))
+    return out
 
 
 def query(
@@ -193,13 +216,22 @@ def query(
     extra: Optional[Dict[str, object]] = None,
 ) -> str:
     """The query string `useQueryParams` builds for this state, on `c`'s page,
-    with what the hook for `endpoint` adds (`extra`) after it.
+    with what the hook for `endpoint` sets on it (`extra`).
 
     Its branches, as written there: a period unless it is `custom`, else both
     dates or neither; the sales type always; a filter only when it is set —
     truthy, so `0` and `''` are never sent — and the page applies it. A
-    hook's own parameter is set the same way: when truthy.
+    hook's own parameter is `URLSearchParams.set` (`url_set`): when truthy,
+    or always where the hook sets it unconditionally.
     """
+    return encode(_pairs(c, period=period, start_date=start_date, end_date=end_date,
+                         sales_type=sales_type, source_id=source_id,
+                         category_id=category_id, brand=brand, promocode=promocode,
+                         endpoint=endpoint, extra=extra))
+
+
+def _pairs(c: Contract, *, period, start_date, end_date, sales_type, source_id,
+           category_id, brand, promocode, endpoint, extra) -> List[Tuple[str, str]]:
     pairs: List[Tuple[str, str]] = []
     if period is not None and period != "custom":
         pairs.append(("period", period))
@@ -214,10 +246,19 @@ def query(
     if unknown:
         raise FrontendShapeError(f"{c.page} does not send {sorted(unknown)}")
     added = c.extras.get(endpoint or "", ())
-    for name in set(extra or {}) - set(added):
+    forced = c.always.get(endpoint or "", ())
+    extra = extra or {}
+    for name in set(extra) - set(added):
         raise FrontendShapeError(f"{endpoint} is never sent {name!r}")
-    pairs += [(name, str((extra or {})[name])) for name in added if (extra or {}).get(name)]
-    return encode(pairs)
+    for name in added:
+        value = extra.get(name)
+        if name in forced:
+            if value is None:
+                raise FrontendShapeError(f"{endpoint} always sends {name!r}: give it a value")
+            pairs = url_set(pairs, name, str(value))
+        elif value:
+            pairs = url_set(pairs, name, str(value))
+    return pairs
 
 
 def encode(pairs: Sequence[Tuple[str, str]]) -> str:
@@ -257,3 +298,122 @@ PRODUCTS_HOOKS = (
 
 def products() -> Contract:
     return contract("/products", PRODUCTS_HOOKS)
+
+
+REPORTS_HOOKS = ("useReportSummary", "useReportTopProducts", "useReportAllProducts")
+
+
+def reports() -> Contract:
+    return contract("/reports", REPORTS_HOOKS)
+
+
+def marketing_page() -> Contract:
+    return contract("/marketing", ("useMarketingReport",))
+
+
+def _constant(rel: str, name: str) -> str:
+    m = re.search(rf"const {name}\s*=\s*\[(.*?)\]\s*as const", _read(rel), re.S)
+    if not m:
+        raise FrontendShapeError(f"{rel}: no `const {name} = [ … ] as const`")
+    return m.group(1)
+
+
+def report_sources() -> Tuple[int, ...]:
+    """The source chips of /reports' top products: `SOURCE_FILTERS`' ids,
+    less `null` (all sources, which sends nothing)."""
+    ids = tuple(int(i) for i in re.findall(
+        r"\bid:\s*(\d+)", _constant("components/TopProductsTab.tsx", "SOURCE_FILTERS")))
+    if not ids:
+        raise FrontendShapeError("TopProductsTab.tsx: SOURCE_FILTERS has no ids")
+    return ids
+
+
+def report_limits() -> Tuple[int, ...]:
+    """`LIMIT_OPTIONS`; 0 is "all", which asks /all-products instead."""
+    return tuple(int(n) for n in re.findall(
+        r"\d+", _constant("components/TopProductsTab.tsx", "LIMIT_OPTIONS")))
+
+
+def _require(rel: str, *patterns: str) -> str:
+    """Each regex must match `rel`, or its shape changed under the reader."""
+    text = _read(rel)
+    for pattern in patterns:
+        if not re.search(pattern, text, re.S):
+            raise FrontendShapeError(f"{rel}: no match for {pattern!r}; read it again")
+    return text
+
+
+def download_csv_path() -> str:
+    """`useDownloadCsv`: the page's parameters, `type` set on them, then each
+    of the caller's `extra` set — and the path it fetches. The two callers'
+    extras are read too: the summary sends none, the top products their
+    source chip when one is picked and the limit, 5000 for "all"."""
+    text = _require(
+        "components/useDownloadCsv.ts",
+        r"const params = new URLSearchParams\(queryParams\)",
+        r"params\.set\('type', type\)",
+        r"const extraParams = new URLSearchParams\(extra\)\s*"
+        r"extraParams\.forEach\(\(v, k\) => params\.set\(k, v\)\)",
+    )
+    _require("components/SummaryTab.tsx", r"downloadCsv\('summary'\)")
+    _require(
+        "components/TopProductsTab.tsx",
+        r"const extra = new URLSearchParams\(\)\s*"
+        r"if \(sourceFilter\) extra\.set\('source_id', String\(sourceFilter\)\)\s*"
+        r"extra\.set\('limit', isAll \? '5000' : String\(limit\)\)\s*"
+        r"downloadCsv\('top_products', extra\.toString\(\)\)",
+        r"useReportTopProducts\(sourceFilter, isAll \? 10 : limit\)",
+    )
+    m = re.search(r"exportCsvFromUrl\(`(/api/[^?`]+)\?\$\{params\.toString\(\)\}`", text)
+    if not m:
+        raise FrontendShapeError("useDownloadCsv.ts: the URL is not `/api/…?${params.toString()}`")
+    return m.group(1)
+
+
+def download_csv_query(c: Contract, type_: str, *, chip: Optional[int] = None,
+                       limit: Optional[int] = None, **state) -> str:
+    """The query `useDownloadCsv(type_, extra)` sends from `c`'s page:
+    `state` is the page's (the header's `source_id` among it), `chip` the
+    top products' source chip, which replaces it where it stands."""
+    pairs = url_set(_pairs(c, endpoint=None, extra=None, **{
+        **dict(period=None, start_date=None, end_date=None, source_id=None,
+               category_id=None, brand=None, promocode=None), **state}), "type", type_)
+    if type_ == "top_products":
+        if chip:
+            pairs = url_set(pairs, "source_id", str(chip))
+        pairs = url_set(pairs, "limit", str(limit))
+    return encode(pairs)
+
+
+def marketing_csv_path() -> str:
+    """`MonthlyReport`'s CSV link, built by hand rather than by
+    `useQueryParams`: the sales type first, then a period or both dates, then
+    the category and the brand when set — no source, no promocode."""
+    text = _require(
+        "components/MonthlyReport.tsx",
+        r"const params = new URLSearchParams\(\{ sales_type: salesType \}\)\s*"
+        r"if \(period !== 'custom'\) \{\s*params\.set\('period', period\)\s*"
+        r"\} else if \(startDate && endDate\) \{\s*params\.set\('start_date', startDate\)\s*"
+        r"params\.set\('end_date', endDate\)\s*\}\s*"
+        r"if \(categoryId\) params\.set\('category_id', String\(categoryId\)\)\s*"
+        r"if \(brand\) params\.set\('brand', brand\)",
+    )
+    m = re.search(r"exportCsvFromUrl\(\s*`(/api/[^?`]+)\?\$\{params\}`", text)
+    if not m:
+        raise FrontendShapeError("MonthlyReport.tsx: the CSV URL is not `/api/…?${params}`")
+    return m.group(1)
+
+
+def marketing_csv_query(*, sales_type: str, period: Optional[str] = None,
+                        start_date: Optional[str] = None, end_date: Optional[str] = None,
+                        category_id: Optional[int] = None, brand: Optional[str] = None) -> str:
+    pairs: List[Tuple[str, str]] = [("sales_type", sales_type)]
+    if period is not None and period != "custom":
+        pairs = url_set(pairs, "period", period)
+    elif start_date and end_date:
+        pairs = url_set(url_set(pairs, "start_date", start_date), "end_date", end_date)
+    if category_id:
+        pairs = url_set(pairs, "category_id", str(category_id))
+    if brand:
+        pairs = url_set(pairs, "brand", brand)
+    return encode(pairs)

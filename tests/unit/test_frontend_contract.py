@@ -65,6 +65,43 @@ def test_what_the_products_page_sends_is_what_its_harness_sends():
                  endpoint="/api/products/intel/summary", extra={"product_id": 42})
 
 
+TOP, ALL_PRODUCTS = "/api/reports/top-products", "/api/reports/all-products"
+
+
+def test_what_the_reports_pages_send_is_what_their_harness_sends():
+    c = fc.reports()
+    assert c.params == MARGIN_PARAMS
+    assert c.endpoints == ("/api/reports/summary", TOP, ALL_PRODUCTS)
+    assert c.extras == {TOP: ("source_id", "limit"), ALL_PRODUCTS: ("source_id",)}
+    assert c.always == {TOP: ("limit",)}
+    assert fc.report_sources() == (1, 4, 2)
+    assert fc.report_limits() == (10, 25, 50, 0)
+    # A chip's source replaces the header's where it stands: URLSearchParams.set.
+    assert fc.query(c, period="week", sales_type="retail", source_id=4, brand="X",
+                    endpoint=TOP, extra={"source_id": 1, "limit": 25}) == (
+        "period=week&sales_type=retail&source_id=1&brand=X&limit=25")
+    with pytest.raises(fc.FrontendShapeError):
+        fc.query(c, period="week", sales_type="retail", endpoint=TOP, extra={})
+    m = fc.marketing_page()
+    assert m.endpoints == ("/api/reports/marketing-summary",) and m.params == MARGIN_PARAMS
+    assert fc.download_csv_path() == "/api/reports/export/csv"
+    assert fc.download_csv_query(c, "top_products", chip=2, limit=5000, period="month",
+                                 sales_type="all") == (
+        "period=month&sales_type=all&type=top_products&source_id=2&limit=5000")
+    # The chip replaces the header's source where it stands; the summary
+    # export keeps the header's.
+    assert fc.download_csv_query(c, "top_products", chip=1, limit=10, period="week",
+                                 sales_type="retail", source_id=4) == (
+        "period=week&sales_type=retail&source_id=1&type=top_products&limit=10")
+    assert fc.download_csv_query(c, "summary", period="month", sales_type="all",
+                                 source_id=4) == (
+        "period=month&sales_type=all&source_id=4&type=summary")
+    assert fc.marketing_csv_path() == "/api/reports/marketing-summary/export/csv"
+    assert fc.marketing_csv_query(sales_type="retail", period="custom", start_date="2026-10-01",
+                                  end_date="2026-10-21", brand="Some Brand") == (
+        "sales_type=retail&start_date=2026-10-01&end_date=2026-10-21&brand=Some+Brand")
+
+
 def test_the_value_domains_are_the_frontends_types():
     assert fc.periods() == (
         "today", "yesterday", "week", "last_week", "month", "last_month",

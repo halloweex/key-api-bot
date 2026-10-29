@@ -17,6 +17,7 @@ pub mod products_intel;
 pub mod pyrt;
 #[rustfmt::skip]
 mod pytables;
+pub mod reports;
 pub mod strptime;
 pub mod trend;
 pub mod validate;
