@@ -477,12 +477,24 @@ FRESHNESS_THRESHOLDS: Dict[str, Tuple[float, "Severity"]] = {
     "expense_types": (192, Severity.WARN),
 }
 
+# Entities whose `last_sync_*` VALUE is the source's clock, not the sync's: the
+# order step stores KeyCRM's newest `updated_at` (`SyncService._orders_step`),
+# because that is where its next window starts. It stands still whenever
+# nobody touches an order, so judged at 6 h it paged every night quiet for six
+# hours before 07:00 Kyiv — five CRITICALs from 2026-09-21 to 10-29, each the
+# length of that night's gap in order activity, with the sync landing batches
+# the whole time. These are judged by when the sync last wrote the row
+# (`chain_stamps`, `meta.chain_watermarks.updated_at`), which the order step
+# rewrites on every tick that lands a batch.
+JUDGED_BY_LAST_WRITE: FrozenSet[str] = frozenset({"orders"})
+
 
 def _freshness_check(
     conn,
     now: Optional[datetime] = None,
     *,
     chain_watermarks: Optional[Dict[str, str]] = None,
+    chain_stamps: Optional[Dict[str, str]] = None,
     frozen_rows: Optional[Mapping[str, str]] = None,
 ) -> List[IntegrityIssue]:
     """Flag sync_metadata entities whose last_sync_* is older than its threshold.
@@ -510,6 +522,13 @@ def _freshness_check(
     for its sync window, and the store's getter answers the same stand-in
     (`DuckDBStore.get_last_sync_time`), so this judges what the sync reads.
 
+    `chain_stamps` is `{key: when the row was last written}` out of the same
+    table (`read_values_and_stamps`). An entity in `JUDGED_BY_LAST_WRITE`
+    whose row Postgres holds is judged by that stamp instead of its value,
+    because its value is KeyCRM's clock. Without a stamp — a caller that
+    brought none, or the inherited stand-in, which is frozen on both clocks —
+    its value is judged, as before.
+
     The read and the judgement are apart (`_judge_freshness`), because under
     `KS_DUCKDB=off` DuckDB's `sync_metadata` is not read here at all: its
     rows are `frozen_rows`, the same table as Postgres last copied it
@@ -520,11 +539,12 @@ def _freshness_check(
     """
     if duckdb_switch.is_off():
         return _judge_freshness(frozen_rows, now, chain_watermarks=chain_watermarks,
-                                from_the_copy=True)
+                                chain_stamps=chain_stamps, from_the_copy=True)
     rows = conn.execute(
         "SELECT key, value FROM sync_metadata WHERE key LIKE 'last_sync_%'"
     ).fetchall()
-    return _judge_freshness(dict(rows), now, chain_watermarks=chain_watermarks)
+    return _judge_freshness(dict(rows), now, chain_watermarks=chain_watermarks,
+                            chain_stamps=chain_stamps)
 
 
 def _judge_freshness(
@@ -532,6 +552,7 @@ def _judge_freshness(
     now: Optional[datetime] = None,
     *,
     chain_watermarks: Optional[Dict[str, str]] = None,
+    chain_stamps: Optional[Dict[str, str]] = None,
     from_the_copy: bool = False,
 ) -> List[IntegrityIssue]:
     """`_freshness_check`'s verdict over rows already read — pure.
@@ -628,11 +649,17 @@ def _judge_freshness(
             unverified=tuple(f"freshness_{e}" for e in sorted(blind)),
         ))
     inherited: Set[str] = set()
+    # Entity → its value, for those judged by the row's stamp instead.
+    by_last_write: Dict[str, str] = {}
     for entity in moved:
         frozen = seen.pop(entity, None)
         if chain_watermarks is not None:
             value = chain_watermarks.get(f"last_sync_{entity}")
-            if value:
+            stamp = (chain_stamps or {}).get(f"last_sync_{entity}")
+            if value and stamp and entity in JUDGED_BY_LAST_WRITE:
+                seen[entity] = stamp
+                by_last_write[entity] = value
+            elif value:
                 seen[entity] = value
             elif frozen and entity in inherits:
                 seen[entity] = frozen
@@ -677,6 +704,10 @@ def _judge_freshness(
                 description=(
                     f"{entity} last synced {age_h:.1f}h ago "
                     f"(threshold {max_hours}h) — sync may be stalled"
+                    + (" (when the sync last wrote meta.chain_watermarks; "
+                       "the value, KeyCRM's newest updated_at, is "
+                       f"{by_last_write[entity]})"
+                       if entity in by_last_write else "")
                     + (" (DuckDB's stamp from before the switch"
                        + (", as Postgres copied it" if from_the_copy else "")
                        + ": no sync under the flag has written "
@@ -1578,12 +1609,17 @@ def check_internal_integrity(
     *,
     inventory_calendar: "Optional[Tuple[Optional[date], FrozenSet[date]]]" = None,
     chain_watermarks: Optional[Dict[str, str]] = None,
+    chain_stamps: Optional[Dict[str, str]] = None,
     frozen_sync_rows: Optional[Mapping[str, str]] = None,
     raised_out: Optional[List[str]] = None,
     pairing_out: Optional[Dict[str, Dict[str, int]]] = None,
     stood_down: Optional[AbstractSet[str]] = None,
 ) -> List[IntegrityIssue]:
     """Run all Layer-1 integrity checks. Returns list of issues (empty = clean).
+
+    `chain_stamps` is when each of `chain_watermarks`' rows was last
+    written, which the freshness check judges in place of a value that is
+    the source's clock (`JUDGED_BY_LAST_WRITE`).
 
     `frozen_sync_rows` is what the freshness check judges under
     `KS_DUCKDB=off` in place of DuckDB's `sync_metadata`: its `last_sync_*`
@@ -1692,6 +1728,7 @@ def check_internal_integrity(
 
     # Freshness — catch silent sync-pipeline stalls (e.g. categories 45d stale).
     issues += _freshness_check(conn, chain_watermarks=chain_watermarks,
+                               chain_stamps=chain_stamps,
                                frozen_rows=frozen_sync_rows)
 
     # Cross-metric consistency — revenue and product pages read different

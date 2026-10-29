@@ -2126,14 +2126,19 @@ class BackgroundScheduler:
                     "will report itself unwatched: %s", e)
 
             # Same reason for the sync watermarks a chain took with it: the
-            # freshness check is sync, `meta.chain_watermarks` is not.
+            # freshness check is sync, `meta.chain_watermarks` is not. With
+            # them, when each row was last written: `last_sync_orders` holds
+            # KeyCRM's clock and stands still every quiet night, so the check
+            # judges the order step by its own stamp (JUDGED_BY_LAST_WRITE).
             chain_watermarks = None
+            chain_stamps = None
             try:
                 from core.write_chains import stood_down_sync_keys
                 moved_keys = stood_down_sync_keys()
                 if moved_keys:
-                    from core.pg_chain_watermarks import read_values
-                    chain_watermarks = await read_values(moved_keys)
+                    from core.pg_chain_watermarks import read_values_and_stamps
+                    chain_watermarks, chain_stamps = await read_values_and_stamps(
+                        moved_keys)
             except Exception as e:
                 logger.error(
                     "chain watermarks unreadable, freshness check will report "
@@ -2184,6 +2189,7 @@ class BackgroundScheduler:
                     issues = check_internal_integrity(
                         conn, inventory_calendar=inventory_calendar,
                         chain_watermarks=chain_watermarks,
+                        chain_stamps=chain_stamps,
                         frozen_sync_rows=frozen_sync_rows,
                         raised_out=raised_checks, pairing_out=duckdb_measured,
                         stood_down=stood_down)

@@ -1147,6 +1147,19 @@ whole reason the group is read from the source now.
 | `traffic_report` | daily 09:45 | last complete week's attribution to the admins — sends once, then quiet |
 | `bot_memory_watch` | every 30 min (bot) | бот сторожит свои 512 МБ тем же evaluator'ом; предыдущий сэмпл — в `data/memory-bot-last.json` (OOM-счётчик ядра сбрасывается при recreate) |
 
+**`freshness_orders` judges when the order step last wrote, not the
+watermark's value** (2026-10-29). `last_sync_orders` holds KeyCRM's newest
+`updated_at` — where the next window starts — and stands still whenever
+nobody touches an order. Judged at 6 h it paged CRITICAL on five quiet
+nights from 2026-09-21 to 10-29, each age the length of that night's gap in
+order activity, while the sync landed a batch every minute.
+The integrity job reads `meta.chain_watermarks.updated_at` beside the value
+(`read_values_and_stamps`, one statement) and judges that stamp for
+`data_quality.JUDGED_BY_LAST_WRITE`; every other entity's value is the
+sync's own `now()` and is judged as before. What it no longer sees is a
+KeyCRM that answers while nobody orders: the longest such gap in the year
+to 2026-10-29 was 12.2 h, overnight.
+
 The legacy 06:00 `reconciliation_check` is gone (OD-10, 2026-09-30):
 `dq_reconciliation` is the reconciliation. It repairs only the orders we do
 not hold. The one repair only the legacy job made now belongs to

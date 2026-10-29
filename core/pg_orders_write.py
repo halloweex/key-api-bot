@@ -232,7 +232,9 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_orders", "last_sync_meilisearch_p
 # Not judged by `core.pg_chain_invariants`: `last_sync_orders` holds KeyCRM's
 # newest `updated_at`, not a sync time, and stands still overnight by design,
 # and the search cursor stands still whenever nothing is mirrored.
-# Freshness stays with `freshness_orders` and the order step's own health.
+# Freshness stays with `freshness_orders` — which judges when the step last
+# wrote the row, never this value (`data_quality.JUDGED_BY_LAST_WRITE`) —
+# and the order step's own health.
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
 # Absent from Postgres until the first tick after the flip writes it, and
 # `last_sync_orders` is where the order step's window STARTS. Read as absent
