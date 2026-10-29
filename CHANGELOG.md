@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 3.0.301
+
+- Traffic tab says who the pixel-only buyers are
+- A hung cancel is judged by what the answer did not wait for, not a stopwatch
+- The two preflights are judged by the order they were asked in, not a stopwatch
+
+
+## 3.0.300
+
+- S14-00: every test starts with no SyncService singleton
+- Step 14 S14-00: every mode and verdict is the value production publishes
+- test: the journal readers' Kyiv rendering follows the day's offset
+- test: read job cadences at fixed instants, not the wall clock
+- SMS audience tests read today when they run, not at import
+
+
 ## 3.0.299
 
 - /tg-bot: where newcomers drop off, and after which press people leave
