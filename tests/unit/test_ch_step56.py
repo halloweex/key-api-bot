@@ -142,6 +142,49 @@ class TestTheEngineVerdict:
         assert names == ["ch_engines_gold_extra", "ch_engines_gold_missing"]
 
 
+class TestBothGrainsOfOneDay:
+    """A day whose roll-up (`source_id` NULL) and per-source row both
+    disagree. Their keys tie on date and sales_type, so sorting them compares
+    None with an int; that raised TypeError, and the run filed
+    `gold_values_unwatched` with no samples in place of the finding."""
+
+    DAY = date(2026, 10, 1)
+    SAMPLE = 20261001
+
+    def _grains(self, **overrides):
+        return [_gold_cell(date=self.DAY, source_id=None, **overrides),
+                _gold_cell(date=self.DAY, source_id=4, **overrides)]
+
+    def _only(self, pg, ch, check_name):
+        (issue,) = compare_gold_cells(pg, ch)
+        assert issue.check_name == check_name
+        assert issue.severity is Severity.CRITICAL
+        assert issue.count == 2
+        assert issue.sample_ids == (self.SAMPLE, self.SAMPLE)
+        return issue
+
+    def test_both_missing_from_clickhouse(self):
+        self._only(self._grains(), [], "ch_engines_gold_missing")
+
+    def test_both_extra_in_clickhouse(self):
+        self._only([], self._grains(), "ch_engines_gold_extra")
+
+    def test_both_differing(self):
+        pg = self._grains()
+        ch = self._grains(revenue=Decimal("1834.51"))
+        issue = self._only(pg, ch, "ch_engines_gold_mismatch")
+        assert "revenue" in issue.description
+
+    def test_the_roll_up_sorts_before_its_sources(self):
+        day2 = date(2026, 10, 2)
+        pg = [_gold_cell(date=day2, source_id=1),
+              _gold_cell(date=day2, source_id=None),
+              *self._grains()]
+        (issue,) = compare_gold_cells(pg, [], max_samples=3)
+        assert issue.count == 4
+        assert issue.sample_ids == (self.SAMPLE, self.SAMPLE, 20261002)
+
+
 class _FakePool:
     def __init__(self, rows):
         self._rows = rows

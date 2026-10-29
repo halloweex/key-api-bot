@@ -246,6 +246,13 @@ def _key3(row: Tuple[Any, ...]) -> Tuple[Any, Any, Any]:
     return (row[0], row[1], row[2])
 
 
+def _cell_order(key: Tuple[Any, Any, Any]) -> Tuple[Any, Any, bool, int]:
+    """Sort key for `_key3`: the roll-up's NULL `source_id` before the
+    per-source ints. Both grains of one day tie on date and sales_type, and
+    a plain sort then compares None with an int and raises."""
+    return (key[0], key[1], key[2] is not None, key[2] or 0)
+
+
 def compare_gold_cells(
     pg_cells: Sequence[Tuple[Any, ...]],
     ch_cells: Sequence[Tuple[Any, ...]],
@@ -265,8 +272,8 @@ def compare_gold_cells(
     columns = GOLD_COLUMNS
     avg_i = columns.index("avg_order_value")
 
-    missing = sorted(k for k in want if k not in got)
-    extra = sorted(k for k in got if k not in want)
+    missing = sorted((k for k in want if k not in got), key=_cell_order)
+    extra = sorted((k for k in got if k not in want), key=_cell_order)
     differing = []
     detail = ""
     for k, pg_row in want.items():
@@ -310,7 +317,7 @@ def compare_gold_cells(
             ),
         ))
     if differing:
-        differing.sort()
+        differing.sort(key=_cell_order)
         issues.append(IntegrityIssue(
             check_name="ch_engines_gold_mismatch",
             table_name=GOLD_TABLE, severity=Severity.CRITICAL,
