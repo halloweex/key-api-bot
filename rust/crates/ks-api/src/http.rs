@@ -46,6 +46,7 @@ use crate::margin::{self, PgMargin};
 use crate::pgread::PgReads;
 use crate::products_intel;
 use crate::reports;
+use crate::traffic;
 use crate::trend::{self, Failure};
 
 /// `DEFAULT_REQUEST_TIMEOUT` in `web/middleware.py`.
@@ -390,6 +391,20 @@ async fn endpoint(
         name if goals::Route::from_endpoint(name).is_some() => {
             let which = goals::Route::from_endpoint(name).expect("matched above");
             goals_route(state, which, route, query, headers, peer).await
+        }
+        name if traffic::Route::from_endpoint(name).is_some() => {
+            let which = traffic::Route::from_endpoint(name).expect("matched above");
+            let Some(now) = state.trend_now(headers) else {
+                return detail(
+                    StatusCode::BAD_REQUEST,
+                    "X-Pilot-Now must be an RFC 3339 instant",
+                );
+            };
+            let admit = admitter(state, route, headers, peer);
+            match traffic::answer(which, &state.reads, query, now, admit).await {
+                Ok(body) => raw_json(StatusCode::OK, body),
+                Err(failure) => failure.into_response(),
+            }
         }
         name if inventory::Route::from_endpoint(name).is_some() => {
             let which = inventory::Route::from_endpoint(name).expect("matched above");

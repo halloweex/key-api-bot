@@ -22,6 +22,7 @@ pub mod pyrt;
 mod pytables;
 pub mod reports;
 pub mod strptime;
+pub mod traffic;
 pub mod trend;
 pub mod validate;
 
