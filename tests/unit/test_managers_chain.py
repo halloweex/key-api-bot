@@ -1322,29 +1322,49 @@ class TestHealthPublishesIt:
     @pytest.mark.asyncio
     async def test_the_two_preflights_cost_one_bound_not_two(self, flags, monkeypatch):
         """Concurrently: two hung preflights in a row would cost the canary's
-        whole HEALTH_TIMEOUT_S."""
+        whole HEALTH_TIMEOUT_S. Mutation: await chain 1's and chain 5's in
+        turn.
+
+        Judged by order, not by the clock, as chain 3's twin is
+        (`test_pg_orders_write.py`): both must be asked before the first bound
+        expires. A stopwatch round the block measured everything else it
+        builds too, and a CI runner once took 0.625 s against a limit of
+        0.55 — more than two bounds of 0.3 s in a row would have cost."""
         import asyncio
-        import time as _time
 
         from core import pg_inventory_write, pg_managers_write
         from web.routes.api import health
 
+        seen = []
+
         async def hangs(*a, **kw):
+            seen.append("asked")
             await asyncio.sleep(60)
+
+        bounded = health._bounded_preflight
+
+        async def bounded_and_seen(preflight):
+            answer = await bounded(preflight)
+            if preflight is hangs:          # it never answers: the bound expired
+                seen.append("bound expired")
+            return answer
 
         health._managers_preflight_cache.update(data=None, expires_at=0)
         health._preflight_cache.update(data=None, expires_at=0)
         monkeypatch.setattr(pg_managers_write, "preflight", hangs)
         monkeypatch.setattr(pg_inventory_write, "preflight", hangs)
+        monkeypatch.setattr(health, "_bounded_preflight", bounded_and_seen)
         monkeypatch.setattr(health, "_PREFLIGHT_TIMEOUT_S", 0.3)
-        started = _time.monotonic()
         try:
             block = await health._write_chains_block()
         finally:
             health._managers_preflight_cache.update(data=None, expires_at=0)
             health._preflight_cache.update(data=None, expires_at=0)
-        assert _time.monotonic() - started < 0.55
-        assert "did not answer" in block["pg_managers_write"]["preflight"]["reasons"][0]
+        assert seen == ["asked", "asked", "bound expired", "bound expired"], (
+            f"the second preflight was not asked before the first bound expired: {seen}")
+        for chain in (pg_inventory_write.CHAIN, pg_managers_write.CHAIN):
+            assert block[chain]["preflight"]["ok"] is False
+            assert "did not answer" in block[chain]["preflight"]["reasons"][0]
 
 
 # ─── The review of chain 5 (2026-10-08) ─────────────────────────────────────
