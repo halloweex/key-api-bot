@@ -297,8 +297,9 @@ def _engine_aliases(tree: ast.AST) -> Set[str]:
 
 
 def _engine_names(tree: ast.AST) -> Set[str]:
-    """Every name the file binds to a function of `core.pg` or a `core.pg_*`
-    module, at the top or inside a function: `from core.pg_gold_read import
+    """Every name the file imports from `core.pg` or a `core.pg_*` module,
+    at the top or inside a function — only a call of one counts, so a
+    constant among them changes nothing: `from core.pg_gold_read import
     fetch_series`, `from core.pg import get_pool as gp`. Until the review of
     step 14's S14-06 merge the rule judged `<module>.<fn>(...)` and a bare
     `get_pool(...)` alone, so a call by such a name outside every `try` was
@@ -324,11 +325,11 @@ def _names_an_engine_module(node: ast.AST) -> bool:
     return module == "pg" or module.startswith("pg_")
 
 
-def _engine_calls(fn: ast.AST, aliases: Set[str],
-                  names: Set[str] = frozenset()) -> List[ast.Call]:
+def _engine_calls(fn: ast.AST, aliases: Set[str], names: Set[str]) -> List[ast.Call]:
     """The engine calls in `fn`'s own nodes: a function of an engine module
     by the module's alias or spelled out, a function imported by its name
-    (`names`, `_engine_names`), and `get_pool` however it is reached."""
+    (`names`, `_engine_names` — required, so a caller cannot forget it), and
+    `get_pool` however it is reached."""
     out = []
     for n in _own_nodes(fn):
         if not isinstance(n, ast.Call):
