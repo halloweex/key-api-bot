@@ -39,11 +39,11 @@ WHAT AN ENTRY SAYS
   a chain is registered (`core.write_chains.WRITE_CHAINS`) the test requires
   its tables to carry its variable, so a chain cannot land without saying here
   which tables it took. A SHADOW chain's tables (OD-02 (c): chains 9, 10, 11a,
-  11b) carry their switch like any other, but moving it does not stop DuckDB
-  writing them — Postgres writes first and DuckDB is still handed every row —
-  so `duckdb_written()` reads them True in either mode — while
-  `KS_DUCKDB=on`. Under `off` it reads every table False: the shadow's
-  DuckDB half stands down there (stage 5, PR-4).
+  11b) carry their switch like any other. Until step 14's S14-10 moving it did
+  not stop DuckDB writing them — Postgres wrote first and DuckDB was still
+  handed every row — so `duckdb_written()` read them True under
+  `KS_DUCKDB=on`; S14-10 deleted that DuckDB half, and they read as every
+  latched chain's do. Under `off` it reads every table False.
 - `origin` — what could rebuild the rows if every copy were lost: KeyCRM, a
   computation over other tables, or nothing (IRREPLACEABLE). An irreplaceable
   table must travel off-site; that is chain 12's largest blast radius.
@@ -300,9 +300,9 @@ FATES: Dict[str, TableFate] = {
         switch="KS_WRITE_EXPENSES"),
 
     # ── chain 9: the quality journal and the forensic trail ─────────────────
-    # The journal is a SHADOW chain (OD-02 (c)): under KS_WRITE_DQ_JOURNAL
-    # Postgres writes first and DuckDB is still handed every row, so
-    # `duckdb_written()` reads these True in either mode (under KS_DUCKDB=on).
+    # The journal was a SHADOW chain (OD-02 (c)): under KS_WRITE_DQ_JOURNAL
+    # Postgres wrote first and DuckDB was still handed every row, until step
+    # 14's S14-10 deleted DuckDB's half.
     "data_quality_runs": TableFate(
         MOVED, IRREPLACEABLE, "The journal every check verdict, layer age and "
         "digest delta is read from.",
@@ -327,6 +327,8 @@ FATES: Dict[str, TableFate] = {
         successors=("app.reconciliation_log",), chain="9"),
 
     # ── chain 10: watchdog samples (KS_WRITE_WATCHDOGS, registered, shadow) ─
+    # The reasons below are the manifest's literal (S14-18 freezes it); the
+    # shadow they name went with step 14's S14-10.
     "disk_samples": TableFate(
         MOVED, IRREPLACEABLE, "Bounded samples the disk watchdog differences "
         "against; chain 10 moves the writer to app with the reads beside it, "
@@ -467,10 +469,10 @@ def duckdb_written() -> Dict[str, Optional[bool]]:
     A registered chain answers through `core.write_chains.chain_modes()`, so a
     latch counts exactly as it does for the writers (OD-19 (a)), and a flag
     nobody can read is None: its writers raise rather than pick a store. A
-    shadow chain (`write_chains.is_shadow`, OD-02 (c)) is True whichever store
-    its mode names: under postgres DuckDB is still handed each row after the
-    Postgres commit (`core/shadow_writes.py`), so the file is written until
-    the shadow itself is retired. A store switch asks its own reader; `KS_WRITE_WAREHOUSE` is the mode this
+    shadow chain (`write_chains.is_shadow`, OD-02 (c)) was True whichever
+    store its mode named, while DuckDB was handed each row after the Postgres
+    commit; step 14's S14-10 retired the shadow, and it answers like any
+    other chain. A store switch asks its own reader; `KS_WRITE_WAREHOUSE` is the mode this
     process configured, and None in a process where `configure_modes()` never
     ran — every process but web's. With no switch, DuckDB writes every table
     in its schema except a frozen archive; nothing writes a view, a table
@@ -482,10 +484,8 @@ def duckdb_written() -> Dict[str, Optional[bool]]:
     code has, not to `kind`.
 
     Under KS_DUCKDB=off every entry is False (stage 5, PR-4): this process
-    may not open the file, so it writes no table in it — the shadow chains'
-    copies included, whose DuckDB half stands down there
-    (`core.shadow_writes.into_duckdb`). No None either: a flag nobody can
-    read routes nowhere near a file that is not opened.
+    may not open the file, so it writes no table in it. No None either: a
+    flag nobody can read routes nowhere near a file that is not opened.
     """
     from core import duckdb_switch, write_chains
 
@@ -498,8 +498,6 @@ def duckdb_written() -> Dict[str, Optional[bool]]:
         mode = modes[write_chains.chain_name(chain)]["mode"]
         if mode is None:
             chain_mode[chain.WRITE_ENV] = None
-        elif write_chains.is_shadow(chain):
-            chain_mode[chain.WRITE_ENV] = True
         else:
             chain_mode[chain.WRITE_ENV] = mode == "duckdb"
 

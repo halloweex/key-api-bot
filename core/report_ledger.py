@@ -1,30 +1,13 @@
 """The one door to the two report ledgers: the gate before a send, the record after.
 
 Chains 11a and 11b (`core/pg_weekly_ledger_write.py`,
-`core/pg_traffic_ledger_write.py`, OD-02 (c)) move `weekly_report_sends` and
-`traffic_report_sends` to Postgres, shadowed in DuckDB. Both reports ask
-`already_sent` before they build anything and call `mark_sent` after a
-delivery; `tests/unit/test_report_ledger.py` walks the tree for a ledger read
-or write that goes round this module.
+`core/pg_traffic_ledger_write.py`, OD-02 (c)) keep `weekly_report_sends` and
+`traffic_report_sends` in Postgres. Both reports ask `already_sent` before
+they build anything and call `mark_sent` after a delivery;
+`tests/unit/test_report_ledger.py` walks the tree for a ledger read or write
+that goes round this module.
 
-UNDER `duckdb` (THE DEFAULT) NOTHING CHANGED
-
-The gate and the record are the statements that stood in each job, on one
-`store.connection()` each, with `CURRENT_TIMESTAMP` as `sent_at`. A record that
-raises after a delivery raises out of the job, and tomorrow's tick sends the
-week again — today's exposure, named in the design and left as it is: closing
-it on this path would change the default's behaviour, which is the owner's
-call (the design's §10).
-
-**One addition: a spool left by `postgres` is honoured here too.** A spooled
-row is a delivery that happened, whatever the flag says now, so the gate
-counts a spooled week as sent before it asks the statement that always stood
-here. It used to land the spool in DuckDB first, for a flag put back to
-`duckdb` and for the copy-back; both ways back went with step 14 (S14-00 made
-every chain write Postgres, S14-04 deleted the copy-back), so this branch is
-unreachable and goes with the shadow in S14-10.
-
-UNDER `postgres`: AT LEAST ONCE, NEVER TWICE (OD-16 (a))
+AT LEAST ONCE, NEVER TWICE (OD-16 (a))
 
 - **The record after delivery is retried, then spooled.** `sent_at` is taken
   once, right after the delivery, and carried through every attempt: three
@@ -33,21 +16,26 @@ UNDER `postgres`: AT LEAST ONCE, NEVER TWICE (OD-16 (a))
   directory). The job's result says `pending`; `/api/health` publishes the
   spooled weeks and the canary warns `report_ledger_pending`.
 - **The gate counts a spooled week as sent**, and drains the spool first — a
-  drained entry lands in Postgres with its original `sent_at`, then in DuckDB.
-- **A row only DuckDB holds is adopted, never resent.** DuckDB ⊆ Postgres
-  holds by construction under the shadow, so such a row is a week delivered
-  before the flip and not yet copied — the double send OD-16's window
-  ("Wednesday to Sunday, after a copy") guards by procedure, guarded here in
-  code too. It is written into Postgres with DuckDB's own values, and logged.
-  Not under `KS_DUCKDB=off`, where the file is not opened: by then every
-  chain is latched, and the weeks before the flip reached Postgres by the
-  hourly copy before it — Postgres alone answers (stage 5, PR-5).
+  drained entry lands in Postgres with its original `sent_at`. The spool's
+  path and format are the ones every image before step 14 reads too, so a
+  rollback to one drains what this build spooled.
 - **Postgres unreachable at the gate raises**: the job fails, nothing is sent,
   and tomorrow's tick asks again.
 
 The residual, named: a delivery after which Postgres refuses three times
 **and** the spool cannot be written raises from the job, and the next tick
 sends again.
+
+ONE STORE SINCE STEP 14'S S14-10
+
+Until S14-10 a recorded row was also handed to DuckDB as a shadow
+(`core/shadow_writes.py`), the gate adopted a week only DuckDB held, and a
+chain left at `duckdb` gated and recorded on DuckDB alone, counting a
+still-spooled week as sent. Since S14-00 none of it ran in web, which runs
+`KS_DUCKDB=off` — the adoption was skipped there, the shadow stood down, and
+every chain wrote Postgres — and S14-10 deleted all three, with the `store`
+the two doors took and `Ledger.report_module`, the report module whose DuckDB
+statements they ran.
 """
 from __future__ import annotations
 
@@ -60,7 +48,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Sequence
 
 from core.paths import DATA_DIR
 
@@ -89,28 +77,24 @@ FIND_SQL = (
 
 @dataclass(frozen=True)
 class Ledger:
-    """One report's ledger: the chain module that writes it in Postgres and
-    the report module whose DuckDB statements it has always used."""
+    """One report's ledger: the chain module that writes it in Postgres."""
     chain_module: str
-    report_module: str
 
     def chain(self) -> ModuleType:
         return importlib.import_module(self.chain_module)
 
-    def report(self) -> ModuleType:
-        return importlib.import_module(self.report_module)
 
-
-WEEKLY = Ledger("core.pg_weekly_ledger_write", "core.weekly_report")
-TRAFFIC = Ledger("core.pg_traffic_ledger_write", "core.traffic_report")
+WEEKLY = Ledger("core.pg_weekly_ledger_write")
+TRAFFIC = Ledger("core.pg_traffic_ledger_write")
 LEDGERS = (WEEKLY, TRAFFIC)
 
 
 def check_row(week_start: date, sales_type: str, revenue: Any, orders: Any,
               sent_at: Any) -> None:
-    """Refuse, before any latch, a row either store would read two ways: a
-    naive `sent_at` (DuckDB reads it as Kyiv, asyncpg as UTC), a revenue that
-    is not a Decimal of two places, an order count that is not an int."""
+    """Refuse, before any latch, a row Postgres would store as something else
+    than it was handed: a naive `sent_at` (asyncpg reads it as UTC — a Kyiv
+    wall clock would land three hours off), a revenue that is not a Decimal of
+    two places, an order count that is not an int."""
     if not isinstance(week_start, date) or isinstance(week_start, datetime):
         raise ValueError(f"week_start={week_start!r} is not a date")
     if not isinstance(sales_type, str) or not sales_type:
@@ -124,9 +108,9 @@ def check_row(week_start: date, sales_type: str, revenue: Any, orders: Any,
 
 
 def money(revenue: float) -> Decimal:
-    """Two places, rounded once here, for both stores: DuckDB's DOUBLE→DECIMAL
-    cast and Postgres' float→NUMERIC need not round a half-cent alike, and the
-    comparison is at zero on `revenue`."""
+    """Two places, rounded once here, so the row stores the number the report
+    printed rather than whatever Postgres' float→NUMERIC makes of a half-cent
+    (one rounding for DuckDB's shadow and Postgres alike until S14-10)."""
     return Decimal(str(round(float(revenue), 2)))
 
 
@@ -194,9 +178,9 @@ def pending_of(chain_name: str) -> Dict[str, Any]:
                                  if e.get("unreadable"))}
 
 
-async def drain(store, ledger: Ledger) -> int:
-    """Land every spooled row: Postgres, then DuckDB, then delete the file.
-    Never raises; returns how many landed."""
+async def drain(ledger: Ledger) -> int:
+    """Land every spooled row in Postgres, then delete the file. Never
+    raises; returns how many landed."""
     chain = ledger.chain()
     landed = 0
     for entry in _spooled(chain.CHAIN):
@@ -209,8 +193,6 @@ async def drain(store, ledger: Ledger) -> int:
             logger.warning("report ledger: %s still pending (%s)",
                            entry["path"].name, type(exc).__name__)
             continue
-        await _shadow(store, ledger, entry["week_start"], entry["sales_type"],
-                      entry["revenue"], entry["orders"], entry["sent_at"])
         try:
             entry["path"].unlink()
         except OSError as exc:
@@ -222,75 +204,37 @@ async def drain(store, ledger: Ledger) -> int:
     return landed
 
 
-async def _shadow(store, ledger: Ledger, week_start, sales_type, revenue,
-                  orders, sent_at) -> bool:
-    from core import shadow_writes
-
-    report = ledger.report()
-    return await shadow_writes.into_duckdb(
-        store, ledger.chain().CHAIN,
-        lambda conn: report.mark_sent(conn, week_start, sales_type, revenue,
-                                      orders, sent_at=sent_at))
-
-
 # ─── The gate and the record ─────────────────────────────────────────────────
 
 
-async def already_sent(store, ledger: Ledger, week_start: date, sales_type: str) -> bool:
-    """Has this week gone out? Asked before anything is built."""
-    chain = ledger.chain()
-    report = ledger.report()
-    if not chain.writes_postgres():
-        # duckdb — unreachable since S14-00 (module docstring). A spool here
-        # was left by `postgres`: a week still spooled counts as sent.
-        if is_spooled(chain.CHAIN, week_start, sales_type):
-            logger.info("Report ledger: %s/%s delivered under postgres, its "
-                        "row still spooled", week_start, sales_type)
-            return True
-        # The job's block, moved unchanged.
-        async with store.connection() as conn:
-            return report.already_sent(conn, week_start, sales_type)
+async def already_sent(ledger: Ledger, week_start: date, sales_type: str) -> bool:
+    """Has this week gone out? Asked before anything is built.
 
-    await drain(store, ledger)
+    Each report's job runs daily and reports the last *complete* week, so six
+    of seven firings find their week already sent and go quiet. That is the
+    design: a weekly CronTrigger that misses its instant does not run late,
+    it does not run at all — the next fire is computed a week out, and
+    misfire grace has nothing to forgive. A daily tick plus this ledger turns
+    a missed Monday into a Tuesday delivery instead of a silent gap.
+
+    The spool is drained first, and a week still spooled counts as sent: it
+    went out, and only its row is late. Then Postgres answers, and a Postgres
+    that cannot raises — the job fails and nothing is sent.
+    """
+    chain = ledger.chain()
+    await drain(ledger)
     if is_spooled(chain.CHAIN, week_start, sales_type):
         logger.info("Report ledger: %s/%s delivered, its row still spooled",
                     week_start, sales_type)
         return True
-    if await chain.find_sent(week_start, sales_type) is not None:
-        return True
-    from core import duckdb_switch
-
-    if duckdb_switch.is_off():
-        # No adopting under KS_DUCKDB=off (stage 5, PR-5): Postgres is the
-        # authority, and a week delivered before the flip reached it by the
-        # hourly copy before the flip did. The file is not opened.
-        return False
-    async with store.connection() as conn:
-        dk = report.fetch_sent(conn, week_start, sales_type)
-    if dk is not None:
-        logger.warning(
-            "Report ledger: %s/%s is in DuckDB's %s and not in Postgres — a week "
-            "delivered before the flip and not yet copied; adopting it rather "
-            "than sending it again", week_start, sales_type, chain.TABLE)
-        await chain.mark_sent(dk["week_start"], dk["sales_type"],
-                              money(dk["revenue"]), int(dk["orders"]),
-                              dk["sent_at"] or datetime.now(timezone.utc))
-        return True
-    return False
+    return await chain.find_sent(week_start, sales_type) is not None
 
 
-async def mark_sent(store, ledger: Ledger, week_start: date, sales_type: str,
+async def mark_sent(ledger: Ledger, week_start: date, sales_type: str,
                     revenue: float, orders: int) -> str:
     """Record a delivery that happened. `recorded`, or `pending` when the row
     is spooled for the next tick to land."""
     chain = ledger.chain()
-    report = ledger.report()
-    if not chain.writes_postgres():
-        # duckdb — the job's block, moved unchanged.
-        async with store.connection() as conn:
-            report.mark_sent(conn, week_start, sales_type, revenue, orders)
-        return "recorded"
-
     sent_at = datetime.now(timezone.utc)
     amount = money(revenue)
     orders = int(orders)
@@ -303,7 +247,6 @@ async def mark_sent(store, ledger: Ledger, week_start: date, sales_type: str,
             logger.warning("Report ledger: recording %s/%s failed (%s)",
                            week_start, sales_type, type(exc).__name__)
             continue
-        await _shadow(store, ledger, week_start, sales_type, amount, orders, sent_at)
         return "recorded"
     path = spool(chain.CHAIN, week_start, sales_type, amount, orders, sent_at)
     logger.error("Report ledger: %s/%s delivered and not recorded; spooled to %s "

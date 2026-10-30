@@ -1,19 +1,22 @@
-"""Chain 11b: the traffic report's send ledger, written to Postgres and shadowed in DuckDB.
+"""Chain 11b: the traffic report's send ledger, written to Postgres.
 
 `traffic_report_sends` is what keeps a daily-ticking job to one message a week:
 six firings out of seven find their week recorded and go quiet. Lose a row
 and every approved user gets the same report again; invent one and a week is
 never reported. Nothing re-derives a row — it says a message went out.
 
-THE SHAPE: SHADOW (owner decision OD-02 (c), 2026-10-01)
+THE SHAPE: SHADOW, UNTIL STEP 14'S S14-10 (owner decision OD-02 (c), 2026-10-01)
 
-Under `KS_WRITE_TRAFFIC_LEDGER=postgres` a delivery is recorded in Postgres
-first and DuckDB is handed the same row right after (`core/shadow_writes.py`);
-the hourly copy stands down and the daily comparison keeps comparing, facing
-Postgres→DuckDB. The ledger behaviour around this module — the gate that also
-counts a spooled week and adopts a row only DuckDB holds, the retried write
-after delivery and its local spool (OD-16 (a): at-least-once, never a second
-send) — lives in `core/report_ledger.py`, shared with chain 11a.
+Under `KS_WRITE_TRAFFIC_LEDGER=postgres` a delivery was recorded in Postgres
+first and DuckDB was handed the same row right after (`core/shadow_writes.py`),
+while the hourly copy stood down and the daily comparison compared the two,
+facing Postgres→DuckDB. Since S14-00 the shadow stood down in web, which runs
+`KS_DUCKDB=off`, and the comparison compared nothing (`compared_in_shadow()`
+empty); S14-10 deleted both, and the row is Postgres's alone. The ledger
+behaviour around this module — the gate that counts a spooled week as sent,
+the retried write after delivery and its local spool (OD-16 (a):
+at-least-once, never a second send) — lives in `core/report_ledger.py`,
+shared with chain 11a.
 
 Two chains rather than one flag (the chain map: "two small steps"), because
 the two reports deliver on their own days and either may be rolled back alone.
@@ -33,6 +36,8 @@ from core import chain_latch
 WRITE_ENV = "KS_WRITE_TRAFFIC_LEDGER"
 CHAIN = "pg_traffic_ledger_write"
 CHAIN_TABLES: Tuple[str, ...] = ("app.traffic_report_sends",)
+# The shape the registry publishes as `shadow` in `/api/health` until S14-11
+# reshapes the block. Nothing feeds DuckDB since S14-10.
 CHAIN_SHADOW = True
 
 # The revision that refuses every image built before this chain; the flag
@@ -79,8 +84,11 @@ def unmet_precondition() -> Optional[str]:
 def writes_postgres() -> bool:
     """True, a constant since step 14's S14-00: neither the flag, nor the
     latch, nor the lock-out routes any more; the first write in a process
-    still takes the latch (decision 3). Last consumers: the traffic report's
-    ledger gate and the registry — S14-10."""
+    still takes the latch (decision 3). Its last production consumer, the
+    report ledger's gate, stopped asking in S14-10; the registry's walk
+    (`tests/unit/test_write_chains.py`, a chain is a module declaring
+    `CHAIN_TABLES` and this) and the routing tests read it until S14-11
+    reshapes the registry."""
     return True
 
 

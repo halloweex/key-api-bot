@@ -526,11 +526,11 @@ class Forecast:
 
 @dataclass(frozen=True)
 class Journal:
-    """Chain 9 (OD-02 (c)): findings whose run Postgres does not hold. The
-    daily comparison still compares the journal — DuckDB is its shadow — so
-    this is only what a comparison of two copies cannot see: the property a
-    run and its findings land in one transaction, checked where it now
-    lives."""
+    """Chain 9 (OD-02 (c)): findings whose run Postgres does not hold — the
+    property a run and its findings land in one transaction, checked where it
+    lives. While DuckDB was the journal's shadow the daily comparison of the
+    two copies watched the rest; since step 14's S14-10 there is one copy,
+    and this is its watch."""
     orphan_issues: int = 0
     orphan_diffs: int = 0
     orphan_sample: Tuple[int, ...] = ()

@@ -421,15 +421,13 @@ class BackgroundScheduler:
                 inventory_today = await _inventory_snapshot_taken_today_pg()
                 ages = await dq_journal.last_success_ages_pg()
             else:
-                from core.data_quality import fetch_last_success_ages
                 from core.duckdb_store import get_store
                 from core.pg_inventory_write import writes_postgres
 
                 store = await get_store()
                 async with store.connection() as conn:
-                    ages = fetch_last_success_ages(conn)
                     # Nested: a missing inventory_sku_history must not disable the
-                    # data-quality catch-ups above it.
+                    # data-quality catch-ups below it.
                     try:
                         inventory_today = conn.execute(
                             "SELECT 1 FROM inventory_sku_history "
@@ -445,11 +443,10 @@ class BackgroundScheduler:
                 # table that is being written correctly somewhere else.
                 if writes_postgres():
                     inventory_today = await _inventory_snapshot_taken_today_pg()
-                # The same rule for the quality journal (chain 9): the ages come
-                # from the store that writes it. DuckDB's, read above inside the
-                # connection the probe needed anyway, are replaced — never merged.
-                if dq_journal.reads_postgres():
-                    ages = await dq_journal.last_success_ages_pg()
+                # The quality journal's ages come from Postgres, which writes
+                # it (chain 9). DuckDB's, read inside the connection above and
+                # then replaced, went with step 14's S14-10.
+                ages = await dq_journal.last_success_ages_pg()
         except Exception as e:
             logger.warning(f"Catch-up check skipped: {e}")
             return
@@ -2271,7 +2268,6 @@ class BackgroundScheduler:
             run_id = None
             try:
                 run_id = await dq_journal.journal_run(
-                    store,
                     started_at=started_at, ended_at=ended_at,
                     as_of=ended_at,
                     window_start=window_day, window_end=window_day,
@@ -2368,7 +2364,8 @@ class BackgroundScheduler:
 
         Skips when there is no Postgres configured at all. That is a developer's
         machine, and persisting a failed run every morning there would teach
-        `fetch_last_success_ages` that the layer is broken rather than absent.
+        the layer ages (`dq_journal.last_success_ages_pg`) that the layer is
+        broken rather than absent.
         """
         from datetime import datetime, timezone
         from core.data_quality import (
@@ -2634,7 +2631,6 @@ class BackgroundScheduler:
             run_id = None
             try:
                 run_id = await dq_journal.journal_run(
-                    store,
                     started_at=started_at, ended_at=ended_at,
                     as_of=ended_at,
                     window_start=window_day, window_end=window_day,
@@ -2844,12 +2840,10 @@ class BackgroundScheduler:
                 disk_used_bytes=sample.get("disk_used_bytes"),
             )
 
-            # The insert, its prune and the differencing reads beside them,
-            # from whichever store writes the samples (chain 10, OD-02 (c)):
-            # DuckDB's one connection as it always was, or one Postgres
-            # transaction shadowed into DuckDB. Under Postgres a store that
+            # The insert, its prune and the differencing reads beside them, in
+            # one Postgres transaction (chain 10, OD-02 (c)). A Postgres that
             # refuses hands back no history, and capacity is judged anyway.
-            reads = await watchdog_samples.disk_tick(store, sample, dir_now)
+            reads = await watchdog_samples.disk_tick(sample, dir_now)
             history = reads["history"]
             deleted = reads["deleted"]
             dir_week_ago = reads["dir_week_ago"]
@@ -3148,14 +3142,12 @@ class BackgroundScheduler:
             machine_attempts_note,
             overall_severity,
         )
-        from core.duckdb_store import get_store
 
         layer = "reconciliation_pg"
         issues = result["issues"]
         discrepancies = result["discrepancies"]
         error_message = result["error"]
 
-        store = await get_store()
         # The run's id goes into the alert's evidence, so the agent can read the
         # findings behind it. These two layers once passed `run_id` without ever
         # assigning it: the first CRITICAL raised NameError before the page went
@@ -3163,7 +3155,6 @@ class BackgroundScheduler:
         run_id = None
         try:
             run_id = await dq_journal.journal_run(
-                store,
                 started_at=started_at,
                 ended_at=datetime.now(timezone.utc),
                 as_of=as_of,
@@ -3340,14 +3331,12 @@ class BackgroundScheduler:
             machine_attempts_note,
             overall_severity,
         )
-        from core.duckdb_store import get_store
 
         layer = "reconciliation_ch"
         issues = result["issues"]
         discrepancies = result["discrepancies"]
         error_message = result["error"]
 
-        store = await get_store()
         # The run's id goes into the alert's evidence, so the agent can read the
         # findings behind it. These two layers once passed `run_id` without ever
         # assigning it: the first CRITICAL raised NameError before the page went
@@ -3355,7 +3344,6 @@ class BackgroundScheduler:
         run_id = None
         try:
             run_id = await dq_journal.journal_run(
-                store,
                 started_at=started_at,
                 ended_at=datetime.now(timezone.utc),
                 as_of=as_of,
@@ -3503,7 +3491,6 @@ class BackgroundScheduler:
             try:
                 if duckdb_arm:
                     run_id = await dq_journal.journal_run(
-                        store,
                         started_at=started_at, ended_at=ended_at,
                         as_of=as_of,
                         window_start=window_start, window_end=window_end,
@@ -3693,10 +3680,8 @@ class BackgroundScheduler:
             build_digest,
             WATCHED_LAYERS,
         )
-        from core.duckdb_store import get_store
 
         with correlation_context():
-            store = await get_store()
             now = datetime.now(timezone.utc)
             from core.pg_orders_write import stood_down_layers
 
@@ -3708,11 +3693,10 @@ class BackgroundScheduler:
                 if layer in stood_down:
                     continue
                 layers.append(layer)
-            # The beat and every layer's runs, from whichever store writes the
-            # journal (chain 9): one DuckDB connection, as it always was, or
-            # Postgres with the beat inherited from DuckDB until it moves.
-            last_sent_at, sections = await dq_journal.digest_inputs(
-                store, layers, now)
+            # The beat and every layer's runs, from Postgres (chain 9): the
+            # beat inherited from the copy of DuckDB's `sync_metadata` while
+            # `meta.chain_watermarks` lacks it.
+            last_sent_at, sections = await dq_journal.digest_inputs(layers, now)
 
             message = build_digest(sections, last_sent_at=last_sent_at, now=now)
             if message:
@@ -3741,7 +3725,7 @@ class BackgroundScheduler:
                 # Only a delivered digest moves the beat. Marking a failed
                 # send as delivered would mute the next seven days on the
                 # strength of a message nobody received.
-                await dq_journal.mark_digest_sent(store, now.isoformat())
+                await dq_journal.mark_digest_sent(now.isoformat())
 
             result = {
                 "layers": len(sections),
@@ -3785,15 +3769,13 @@ class BackgroundScheduler:
             week_start, week_end = last_complete_week(today)
             week = week_start.isoformat()
 
-            # The ledger, from whichever store writes it (chain 11a, OD-02
-            # (c)): DuckDB's one connection as always, or Postgres — counting
-            # a spooled week as sent and adopting a row only DuckDB holds.
-            # `warehouse_max_date` and `build_report` stay outside any store
-            # block: until step 14's S14-07 both were routed by KS_READ_WEEKLY,
-            # and the DuckDB side of that router took `store.connection()`
-            # itself. They read Postgres alone now.
+            # The ledger, in Postgres (chain 11a, OD-02 (c)), counting a
+            # spooled week as sent. `warehouse_max_date` and `build_report`
+            # stay outside any store block: until step 14's S14-07 both were
+            # routed by KS_READ_WEEKLY, and the DuckDB side of that router
+            # took `store.connection()` itself. They read Postgres alone now.
             if await report_ledger.already_sent(
-                    store, report_ledger.WEEKLY, week_start, sales_type):
+                    report_ledger.WEEKLY, week_start, sales_type):
                 logger.debug("Weekly report for %s already sent", week)
                 return {"sent": False, "week": week, "reason": "already_sent"}
 
@@ -3932,7 +3914,7 @@ class BackgroundScheduler:
             # that fails is retried and then spooled, and the gate counts a
             # spooled week as sent.
             ledger = await report_ledger.mark_sent(
-                store, report_ledger.WEEKLY, week_start, sales_type,
+                report_ledger.WEEKLY, week_start, sales_type,
                 report.current.revenue, report.current.orders,
             )
 
@@ -4000,14 +3982,12 @@ class BackgroundScheduler:
                 )
                 return {"sent": False, "week": week, "reason": "before_first_week"}
 
-            # The ledger, from whichever store writes it (chain 11b).
+            # The ledger, in Postgres (chain 11b).
             if await report_ledger.already_sent(
-                    store, report_ledger.TRAFFIC, week_start, sales_type):
+                    report_ledger.TRAFFIC, week_start, sales_type):
                 logger.debug("Traffic report for %s already sent", week)
                 return {"sent": False, "week": week, "reason": "already_sent"}
 
-            # Outside the block, for the weekly job's reason: the gate is
-            # routed now and its DuckDB path takes the same non-reentrant lock.
             # A refusal under KS_READ_FALLBACK=off defers, as in the sales
             # report: the tab's router would otherwise answer from DuckDB, and
             # the ledger is written only after a delivery (DN-20c).
@@ -4091,7 +4071,7 @@ class BackgroundScheduler:
                 return {"sent": False, "week": week, "reason": "not_delivered"}
 
             ledger = await report_ledger.mark_sent(
-                store, report_ledger.TRAFFIC, week_start, sales_type,
+                report_ledger.TRAFFIC, week_start, sales_type,
                 report.revenue, report.orders)
 
             result = {
@@ -4196,10 +4176,8 @@ class BackgroundScheduler:
         previous_oom = None
         peak_24h = None
         try:
-            from core.duckdb_store import get_store
-            store = await get_store()
-            # From whichever store writes the samples (chain 10, OD-02 (c)).
-            reads = await watchdog_samples.memory_tick(store, mem)
+            # From Postgres, where chain 10 keeps the samples (OD-02 (c)).
+            reads = await watchdog_samples.memory_tick(mem)
             last = reads["last"]
             previous_oom = last["oom_kills"] if last else None
             peak_24h = reads["peak_24h"]

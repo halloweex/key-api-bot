@@ -1,29 +1,30 @@
-"""The one door to the data-quality journal: which store writes it, which reads it.
+"""The one door to the data-quality journal: Postgres writes it, Postgres reads it.
 
-Chain 9 (`core/pg_dq_journal_write.py`, OD-02 (c)) moves the journal's writer
-to Postgres and keeps DuckDB fed as a shadow. Every writer and reader of the
-journal comes through here, so the five check jobs, the digest, the health
-endpoints and the startup catch-up cannot come to disagree about where the
-journal lives — `tests/unit/test_dq_journal.py` walks `core/`, `web/`, `bot/`
-and `scripts/` and fails on a writer or reader that goes round this module.
+Chain 9 (`core/pg_dq_journal_write.py`, OD-02 (c)) moved the journal's writer
+to Postgres. Every writer and reader of the journal comes through here, so the
+five check jobs, the digest, the health endpoints and the startup catch-up
+cannot come to disagree about where the journal lives —
+`tests/unit/test_dq_journal.py` walks `core/`, `web/`, `bot/` and `scripts/`
+and fails on a writer or reader that goes round this module.
 
-UNDER `duckdb` (THE DEFAULT) NOTHING CHANGED
+ONE STORE SINCE STEP 14'S S14-10
 
-Each branch below marked "duckdb" is the block that stood at its call site,
-moved here: one `store.connection()`, the same statements, the same order.
-Postgres is not asked anything, not even for a pool.
-
-UNDER `postgres`
-
-- **Writes**: Postgres commits the run first; then DuckDB is handed the same
-  rows (`core.shadow_writes.into_duckdb`), whose failure is counted and never
-  raised. A Postgres failure raises and DuckDB is not written, so DuckDB ⊆
-  Postgres holds by construction.
-- **Reads** go to Postgres, with no fallback to DuckDB (the chain module's
-  docstring says why). A Postgres error raises into each caller's own
-  handling: the digest job fails and logs, the health endpoint returns its
-  error, the catch-up logs "skipped", and `/api/health`'s `data_quality`
-  becomes null — which the canary pages as `dq_block_missing`, honestly.
+- **Writes**: Postgres commits the run, its findings and its id in one
+  transaction (`pg_dq_journal_write.persist_run`). Until S14-10 DuckDB was
+  then handed the same rows as a shadow (`core/shadow_writes.py`), and a
+  chain left at `duckdb` wrote DuckDB alone; since S14-00 neither ran in
+  web, which runs `KS_DUCKDB=off`, and S14-10 deleted both, with the `store`
+  every door here used to take. A Postgres failure raises into each job's
+  own handling, as it always did.
+- **Reads** go to Postgres, with no fallback (the chain module's docstring
+  says why). A Postgres error raises into each caller's own handling: the
+  digest job fails and logs, the health endpoint returns its error, the
+  catch-up logs "skipped", and `/api/health`'s `data_quality` becomes null —
+  which the canary pages as `dq_block_missing`, honestly.
+- **The digest's beat** lives in `meta.chain_watermarks`; while the key is
+  absent there it is inherited from `app.sync_metadata`, DuckDB's
+  `sync_metadata` as the hourly copy last shipped it, whatever `KS_DUCKDB`
+  says (S14-10: the inheritance used to read DuckDB's own table under `on`).
 """
 from __future__ import annotations
 
@@ -33,34 +34,15 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
-# The beat's key in either store. `core.scheduler.DQ_DIGEST_LAST_SENT_KEY`
-# names the same string; one spelling lives here, beside its two readers.
+# The beat's key. `core.scheduler.DQ_DIGEST_LAST_SENT_KEY` names the same
+# string; one spelling lives here, beside its two readers.
 DIGEST_MARKER_KEY = "dq_digest_last_sent"
-
-# DuckDB's two statements for the beat, as they stood in the digest job.
-_DK_MARKER_READ = "SELECT value FROM sync_metadata WHERE key = ?"
-_DK_MARKER_WRITE = """
-                        INSERT OR REPLACE INTO sync_metadata (key, value, updated_at)
-                        VALUES (?, ?, CURRENT_TIMESTAMP)
-                    """
 
 
 def _chain():
     from core import pg_dq_journal_write
 
     return pg_dq_journal_write
-
-
-def writes_postgres() -> bool:
-    """Where the journal is written. Raises on a flag nobody can read and no
-    latch (OD-18 (a)): the run is then journaled nowhere, the page still goes
-    out, and `write_chain_flag_invalid` says why."""
-    return _chain().writes_postgres()
-
-
-def reads_postgres() -> bool:
-    """Where the journal is read — never raises (`pg_dq_journal_write.reads_postgres`)."""
-    return _chain().reads_postgres()
 
 
 # ─── Writing ──────────────────────────────────────────────────────────────────
@@ -116,7 +98,6 @@ def one_finding_per_key(issues: List[Any]) -> List[Any]:
 
 
 async def journal_run(
-    store,
     *,
     started_at: datetime,
     ended_at: datetime,
@@ -129,84 +110,26 @@ async def journal_run(
     api_calls_used: int = 0,
     error_message: Optional[str] = None,
 ) -> int:
-    """Journal one run; returns its id. The five check jobs' only door."""
-    from core.data_quality import insert_journal_rows, persist_run, run_values
+    """Journal one run in Postgres; returns its id. The five check jobs' only door."""
+    from core.data_quality import run_values
 
     issues = one_finding_per_key(issues)
-    chain = _chain()
-    if not chain.writes_postgres():
-        # duckdb — the block each site held, moved here unchanged.
-        async with store.connection() as conn:
-            return persist_run(
-                conn,
-                started_at=started_at, ended_at=ended_at, as_of=as_of,
-                window_start=window_start, window_end=window_end,
-                layer=layer, issues=issues, discrepancies=discrepancies,
-                api_calls_used=api_calls_used, error_message=error_message,
-            )
-
-    from core import shadow_writes
-
     values = run_values(
         started_at=started_at, ended_at=ended_at, as_of=as_of,
         window_start=window_start, window_end=window_end, layer=layer,
         issues=issues, discrepancies=discrepancies,
         api_calls_used=api_calls_used, error_message=error_message,
     )
-    rows = await chain.persist_run(values, issues, discrepancies)
-    # After the commit, never before; never inside `store.connection()`.
-    await shadow_writes.into_duckdb(
-        store, chain.CHAIN, lambda conn: insert_journal_rows(conn, rows))
+    rows = await _chain().persist_run(values, issues, discrepancies)
     return rows.run_id
 
 
-async def mark_digest_sent(store, value: str) -> None:
-    """Move the digest's beat — after a delivered digest only."""
-    chain = _chain()
-    if not chain.writes_postgres():
-        # duckdb — as it stood in the digest job.
-        async with store.connection() as conn:
-            conn.execute(_DK_MARKER_WRITE, [DIGEST_MARKER_KEY, value])
-        return
-
-    from core import shadow_writes
-
-    await chain.set_digest_marker(value)
-    await shadow_writes.into_duckdb(
-        store, chain.CHAIN,
-        lambda conn: conn.execute(_DK_MARKER_WRITE, [DIGEST_MARKER_KEY, value]))
+async def mark_digest_sent(value: str) -> None:
+    """Move the digest's beat in Postgres — after a delivered digest only."""
+    await _chain().set_digest_marker(value)
 
 
-# ─── Reading: one loop, two stores ────────────────────────────────────────────
-
-
-class _DuckReader:
-    """DuckDB's readers behind the async face the loops below call. Each
-    method is the sync call that stood at the site, on the held connection."""
-
-    def __init__(self, conn):
-        self.conn = conn
-
-    async def latest_run(self, layer):
-        from core.data_quality import fetch_latest_run
-
-        return fetch_latest_run(self.conn, layer=layer)
-
-    async def baseline_run(self, layer, *, sent_at, before_run_id):
-        from core.data_quality import fetch_baseline_run
-
-        return fetch_baseline_run(self.conn, layer, sent_at=sent_at,
-                                  before_run_id=before_run_id)
-
-    async def run_issues(self, run_id, limit):
-        from core.data_quality import fetch_run_issues
-
-        return fetch_run_issues(self.conn, run_id, limit=limit)
-
-    async def run_diffs(self, run_id, limit):
-        from core.data_quality import fetch_run_diffs
-
-        return fetch_run_diffs(self.conn, run_id, limit=limit)
+# ─── Reading ─────────────────────────────────────────────────────────────────
 
 
 class _PgReader:
@@ -282,44 +205,28 @@ async def _sections(reader, layers: Sequence[str], now: datetime,
 
 
 async def digest_inputs(
-    store, layers: Sequence[str], now: datetime,
+    layers: Sequence[str], now: datetime,
 ) -> Tuple[Optional[datetime], List[Any]]:
-    """`(last_sent_at, sections)` for the 09:00 digest, from the writer's store.
+    """`(last_sent_at, sections)` for the 09:00 digest, from Postgres.
 
-    Under Postgres the beat is read from `meta.chain_watermarks` and, while
-    the key is absent there, **inherited from DuckDB's `sync_metadata`** —
-    the beat as of the flip, which the shadow keeps current anyway. Without
-    the inherit the first digest after a flip would restate every standing
-    finding as new.
-
-    Under `KS_DUCKDB=off` the inherited beat is DuckDB's `sync_metadata` as
-    Postgres last copied it (`app.sync_metadata`, `core.pg_frozen_metadata`),
-    read on the same connection: DuckDB's value as of the last hourly copy,
-    and the file is not opened (stage 5, PR-5). It is asked only while
-    Postgres has never recorded a digest under the chain.
+    The beat is read from `meta.chain_watermarks` and, while the key is
+    absent there, **inherited from `app.sync_metadata`** — DuckDB's
+    `sync_metadata` as Postgres last copied it (`core.pg_frozen_metadata`),
+    read on the same connection: the beat as of the flip. Without the inherit
+    the first digest after a flip would restate every standing finding as
+    new. Production has held the key in `meta.chain_watermarks` since chain
+    9's first delivered digest (H6, 2026-10-29), so the copy is asked only
+    for a key that went missing. Until step 14's S14-10 a process running
+    `KS_DUCKDB=on` read DuckDB's own table here instead; web has run `off`
+    since S14-00, so production's answer does not move.
     """
+    from core.pg_frozen_metadata import values_on
+
     chain = _chain()
-    if not chain.reads_postgres():
-        # duckdb — the digest job's block, moved: one connection, same order.
-        async with store.connection() as conn:
-            row = conn.execute(_DK_MARKER_READ, [DIGEST_MARKER_KEY]).fetchone()
-            last_sent_at = _parse_marker(row[0] if row else None)
-            sections = await _sections(_DuckReader(conn), layers, now, last_sent_at)
-        return last_sent_at, sections
-
-    from core import duckdb_switch
-
-    off = duckdb_switch.is_off()
     async with chain.reading() as conn:
         raw = await chain.digest_marker(conn)
-        if raw is None and off:
-            from core.pg_frozen_metadata import values_on
-
+        if raw is None:
             raw = (await values_on(conn, (DIGEST_MARKER_KEY,))).get(DIGEST_MARKER_KEY)
-    if raw is None and not off:
-        async with store.connection() as conn:
-            row = conn.execute(_DK_MARKER_READ, [DIGEST_MARKER_KEY]).fetchone()
-        raw = row[0] if row else None
     last_sent_at = _parse_marker(raw)
     async with chain.reading() as conn:
         sections = await _sections(_PgReader(conn), layers, now, last_sent_at)
@@ -376,22 +283,26 @@ async def _health_runs(reader) -> Dict[str, Any]:
     }
 
 
-async def health_runs(store) -> Dict[str, Any]:
-    """The latest run per layer with its top findings, from the writer's store."""
-    chain = _chain()
-    if not chain.reads_postgres():
-        async with store.connection() as conn:
-            return await _health_runs(_DuckReader(conn))
-    async with chain.reading() as conn:
+async def health_runs() -> Dict[str, Any]:
+    """The latest run per layer with its top findings, from Postgres."""
+    async with _chain().reading() as conn:
         return await _health_runs(_PgReader(conn))
 
 
 async def last_success_ages_pg(
     layers: Optional[Sequence[str]] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """The layer ages out of Postgres — for the callers that read DuckDB's
-    inside a connection they already hold (`get_stats`, the catch-up) and
-    replace them with these while the chain reads Postgres."""
+    """The age of the last **successful** run per layer, out of Postgres —
+    what `/api/health` publishes for the canary and what the startup catch-up
+    reads. Keyed on `error_message IS NULL`, not on a row's existence: a
+    failed run writes a row too, so a plain "when did this job last run"
+    watchdog stayed silent through all 57 consecutive `429 Too Many
+    Attempts` failures of the reconciliation job. One entry per requested
+    layer; a layer that never succeeded reads `last_success_at=None,
+    age_seconds=None`, so "never ran" is not a missing key. (Until step 14's
+    S14-10 DuckDB's twin, `data_quality.fetch_last_success_ages`, answered
+    for a process on `KS_DUCKDB=on`; the two callers replaced its answer
+    with this one since chain 9 moved.)"""
     from core.data_quality import WATCHED_LAYERS
 
     chain = _chain()
