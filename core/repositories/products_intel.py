@@ -13,37 +13,34 @@ logger = logging.getLogger(__name__)
 
 class ProductsIntelMixin:
 
-    # ─── Which engine answers the product-intelligence reads ─────────────
+    # ─── What answers the product-intelligence reads ─────────────────────
     #
-    # Five of the six needed only table names; `get_product_momentum` needed
-    # its Gold replaced by the line level (see `core/pg_products_intel_read`).
-    #
-    # The choice is made BEFORE any connection is taken — `/inventory`'s §34
-    # invariant. **Never call this from inside `self.connection()`**: the store
-    # lock is not reentrant and the deadlock does not raise, it hangs.
+    # Postgres: `silver.order_lines` and `bronze.products`;
+    # `get_product_momentum` reads the line level in place of the DuckDB-only
+    # Gold it once read (see `core/pg_products_intel_read`).
 
     async def _intel_run(
         self, sql: str, params: "list | None" = None, *, mode: str = "all",
     ):
-        """Run one statement against whichever engine the flag names."""
-        from core.sql_dialect import DUCKDB, POSTGRES, render_tables
+        """Run one statement against Postgres.
+
+        One path since step 14's S14-05: the Postgres read, and on any
+        failure a refusal — the 503 naming `products_intel` that `fall_back`
+        gave under `KS_READ_FALLBACK=off`, production's mode since
+        2026-10-09. `KS_READ_PRODUCTS_INTEL` is not read here; without
+        `KS_PG_DSN` the pool raises and that is the refusal.
+        """
+        from core.sql_dialect import POSTGRES, render_tables
 
         from core import pg_products_intel_read
 
         params = list(params or [])
-        read_fallback.no_address("products_intel", pg_products_intel_read)
-        if pg_products_intel_read.enabled() and pg_products_intel_read.available():
-            try:
-                rows = await pg_products_intel_read.fetch(
-                    render_tables(sql, POSTGRES), params,
-                )
-                return (rows[0] if rows else None) if mode == "one" else rows
-            except Exception as exc:  # noqa: BLE001
-                read_fallback.fall_back("products_intel", exc)
-
-        async with self.connection() as conn:
-            cursor = conn.execute(render_tables(sql, DUCKDB), params)
-            return cursor.fetchone() if mode == "one" else cursor.fetchall()
+        try:
+            rows = await pg_products_intel_read.fetch(
+                render_tables(sql, POSTGRES), params)
+        except Exception as exc:  # noqa: BLE001 — every failure is the refusal
+            raise read_fallback.refuse("products_intel", exc)
+        return (rows[0] if rows else None) if mode == "one" else rows
 
     async def get_basket_summary(
         self,

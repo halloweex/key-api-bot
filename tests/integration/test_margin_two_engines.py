@@ -1,4 +1,4 @@
-"""`/margin` means the same thing in DuckDB and Postgres.
+"""`/margin` answers in Postgres what DuckDB answered.
 
 The cheapest port and the one with the sharpest arithmetic: margin is revenue
 minus COGS, COGS comes from `offer_stocks.purchased_price` joined by SKU, and
@@ -7,8 +7,17 @@ of zero, a product whose SKU is NULL. Each of those decides whether a line
 counts toward `costed_revenue`, and a difference of one line moves the
 percentage the page shows.
 
-`tests/unit/test_pg_margin_read.py` proves the wiring and that every hole
-survived its f-string. This proves the two engines agree on the numbers.
+ONE ENGINE SINCE STEP 14 (S14-05)
+
+The tab reads Postgres and nothing else. Every call is compared with a literal
+(`tests/integration/golden/margin.json`): DuckDB's answer on this fixture,
+recorded while this file still asserted Postgres answered the same (rule 9 of
+the step-14 plan). Postgres derives Silver from the seeded Bronze, the
+production path (`tests/integration/pg_tab_seed.py`), and the store's DuckDB
+connection is a trap.
+
+`tests/unit/test_pg_margin_read.py` proves the statements. This proves the
+numbers.
 
 Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` supplies one.
 """
@@ -19,9 +28,11 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch
 
 from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import (
+    call_key, comparable, derive, golden, seed, tab_in_postgres,
+)
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -30,7 +41,10 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# Pinned (step 14, S14-05): the answers are literals taken from DuckDB on
+# this fixture, so the calendar under them cannot move with the run.
+TODAY = date(2026, 9, 15)
+NOW = datetime(2026, 9, 15, 9, 0, tzinfo=timezone.utc)   # midday Kyiv
 W = (TODAY - timedelta(days=25), TODAY)
 
 CATEGORIES = [(1, "Care", None), (2, "Serums", 1), (3, "Makeup", None)]
@@ -58,124 +72,36 @@ LINES = [
 ]
 
 
-async def _seed_duckdb(store):
-    now = datetime.now(timezone.utc)
-    async with store.connection() as conn:
-        conn.executemany("INSERT INTO categories (id,name,parent_id) VALUES (?,?,?)",
-                         CATEGORIES)
-        conn.executemany("INSERT INTO products (id,name,category_id,brand,sku,price)"
-                         " VALUES (?,?,?,?,?,?)", PRODUCTS)
-        conn.executemany("INSERT INTO offer_stocks (id,sku,price,purchased_price,"
-                         "quantity,reserve) VALUES (?,?,?,?,0,0)", STOCKS)
-        for oid, src, total, days in ORDERS:
-            conn.execute("INSERT INTO orders (id,source_id,status_id,grand_total,"
-                         "ordered_at,buyer_id,manager_id) VALUES (?,?,1,?,?,?,NULL)",
-                         [oid, src, total, now - timedelta(days=days), oid])
-        conn.executemany(
-            "INSERT INTO order_products (id,order_id,product_id,name,quantity,"
-            "price_sold) SELECT ?,?,?,p.name,?,? FROM products p WHERE p.id = ?",
-            [(lid, oid, pid, q, pr, pid) for lid, oid, pid, q, pr in LINES])
-    await store.refresh_warehouse_layers(trigger="manual")
-
-
-async def _seed_postgres(conn, store):
-    for t in ("silver.orders", "bronze.order_products", "bronze.products",
-              "bronze.categories", "bronze.offer_stocks"):
-        await conn.execute(f"DELETE FROM {t}")
-
-    async with store.connection() as duck:
-        silver = duck.execute(
-            "SELECT id, source_id, status_id, grand_total, ordered_at, buyer_id,"
-            " manager_id, order_date, is_return, sales_type, is_active_source,"
-            " source_name, is_new_customer, buyer_first_order_date, promocode"
-            " FROM silver_orders ORDER BY id").fetchall()
-        lines = duck.execute(
-            "SELECT id, order_id, product_id, name, quantity, price_sold"
-            " FROM order_products ORDER BY id").fetchall()
-
-    await conn.executemany(
-        "INSERT INTO bronze.categories (id,name,parent_id) VALUES ($1,$2,$3)",
-        CATEGORIES)
-    await conn.executemany(
-        "INSERT INTO bronze.products (id,name,category_id,brand,sku,price)"
-        " VALUES ($1,$2,$3,$4,$5,$6)", PRODUCTS)
-    await conn.executemany(
-        "INSERT INTO bronze.offer_stocks (id,sku,price,purchased_price,quantity,"
-        "reserve) VALUES ($1,$2,$3,$4,0,0)", STOCKS)
-    await conn.executemany(
-        "INSERT INTO bronze.order_products (id,order_id,product_id,name,quantity,"
-        "price_sold) VALUES ($1,$2,$3,$4,$5,$6)", [tuple(r) for r in lines])
-    await conn.executemany(
-        "INSERT INTO silver.orders (id,source_id,status_id,grand_total,ordered_at,"
-        "buyer_id,manager_id,order_date,is_return,sales_type,is_active_source,"
-        "source_name,is_new_customer,buyer_first_order_date,promocode)"
-        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
-        [tuple(r) for r in silver])
+async def _populate(conn, pool):
+    names = {p[0]: p[1] for p in PRODUCTS}
+    await seed(
+        conn, categories=CATEGORIES, products=PRODUCTS,
+        stocks=STOCKS,
+        orders=[(oid, src, 1, total, NOW - timedelta(days=days), oid, None, None)
+                for oid, src, total, days in ORDERS],
+        lines=[(lid, oid, pid, names[pid], q, pr) for lid, oid, pid, q, pr in LINES])
+    await derive(pool)
 
 
 @pytest_asyncio.fixture
-async def both_engines(tmp_path, monkeypatch):
-    monkeypatch.setenv("KS_PG_DSN", DSN)
+async def in_postgres(tmp_path, monkeypatch):
+    """The tab's store, never connected: its DuckDB connection is a trap, so
+    an answer below can only be Postgres's."""
     store = DuckDBStore(db_path=tmp_path / "margin.duckdb")
-    await store.connect()
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
-    try:
-        await _seed_duckdb(store)
-        async with pool.acquire() as conn:
-            await _seed_postgres(conn, store)
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
-            yield store
-    finally:
-        async with pool.acquire() as conn:
-            for t in ("silver.orders", "bronze.order_products", "bronze.products",
-                      "bronze.categories", "bronze.offer_stocks"):
-                await conn.execute(f"DELETE FROM {t}")
-        await pool.close()
-        await store.close()
-
-
-async def _both(store, monkeypatch, name, kwargs):
-    """Each engine once — and the Postgres leg with DuckDB made fatal.
-
-    THE FLAW THIS CLOSES, WHICH IS WORSE THAN ANY QUERY BUG
-
-    These tabs fall back to DuckDB when Postgres raises. So a comparison that
-    merely calls the method twice can pass while Postgres never answers at
-    all: the second call falls back, returns the DuckDB answer, and the two
-    "engines" agree because they were the same engine.
-
-    That is not hypothetical. `get_margin_trend` used `strftime`, which
-    PostgreSQL does not have; this file's parametrised comparison passed, the
-    gate went green, and the method was found on production only by making the
-    fallback fatal. So the fallback is fatal here too.
-    """
-    monkeypatch.delenv("KS_READ_MARGIN", raising=False)
-    duck = await getattr(store, name)(*W, **kwargs)
-
-    monkeypatch.setenv("KS_READ_MARGIN", "postgres")
 
     def _no_duckdb(*_a, **_k):
-        raise AssertionError(
-            f"{name} fell back to DuckDB — Postgres did not answer, so the "
-            f"comparison below would have compared DuckDB with itself"
-        )
+        raise AssertionError("the margin tab reached for DuckDB")
 
-    with patch.object(type(store), "connection", _no_duckdb):
-        postgres = await getattr(store, name)(*W, **kwargs)
-    monkeypatch.delenv("KS_READ_MARGIN", raising=False)
-    return duck, postgres
+    monkeypatch.setattr(type(store), "connection", _no_duckdb)
+    async with tab_in_postgres(DSN, monkeypatch, _populate):
+        yield store
 
 
-def _comparable(v):
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, dict):
-        return {k: _comparable(x) for k, x in v.items()}
-    if isinstance(v, (list, tuple)):
-        return [_comparable(x) for x in v]
-    if hasattr(v, "as_tuple") or isinstance(v, float):
-        return round(float(v), 6)
-    return v
+async def _answer(store, name, kwargs):
+    return await getattr(store, name)(*W, **kwargs)
+
+
+GOLDEN = golden("margin")
 
 
 CALLS = (
@@ -196,20 +122,21 @@ CALLS = (
     "name,kwargs", CALLS,
     ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in CALLS],
 )
-async def test_both_engines_return_the_same_answer(
-    both_engines, monkeypatch, name, kwargs,
-):
-    duck, postgres = await _both(both_engines, monkeypatch, name, kwargs)
-    assert _comparable(postgres) == _comparable(duck)
+async def test_postgres_answers_what_duckdb_answered(in_postgres, name, kwargs):
+    assert comparable(await _answer(in_postgres, name, kwargs)) == \
+        GOLDEN[call_key(name, kwargs)]
+
+
+def test_every_literal_is_a_call_and_every_call_has_one():
+    assert set(GOLDEN) == {call_key(n, k) for n, k in CALLS}
 
 
 @pytest.mark.asyncio
-async def test_the_three_kinds_of_missing_cost_all_land(both_engines, monkeypatch):
+async def test_the_three_kinds_of_missing_cost_all_land(in_postgres):
     """Each is a different reason a line has no COGS, and each has to be
     excluded from `costed_revenue` while still counting toward revenue — that
     difference is what `coverage_pct` measures."""
-    overview, pg = await _both(both_engines, monkeypatch, "get_margin_overview", {})
-    assert overview == pg
+    overview = await _answer(in_postgres, "get_margin_overview", {})
 
     priced = sum(q * p for _l, _o, pid, q, p in LINES
                  if pid in (100, 200))                    # the two with real cost
@@ -221,20 +148,16 @@ async def test_the_three_kinds_of_missing_cost_all_land(both_engines, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_an_empty_result_agrees_too(both_engines, monkeypatch):
-    """The threshold nobody clears: two engines must return the same nothing."""
-    duck, postgres = await _both(
-        both_engines, monkeypatch, "get_margin_brand_category",
-        {"min_revenue": 100000})
-    assert duck == postgres == []
+async def test_an_empty_result_is_an_empty_list(in_postgres):
+    """The threshold nobody clears."""
+    assert await _answer(in_postgres, "get_margin_brand_category",
+                         {"min_revenue": 100000}) == []
 
 
 @pytest.mark.asyncio
-async def test_the_fixture_is_not_empty(both_engines, monkeypatch):
-    by_brand, _ = await _both(both_engines, monkeypatch, "get_margin_by_brand", {})
+async def test_the_fixture_is_not_empty(in_postgres):
+    by_brand = await _answer(in_postgres, "get_margin_by_brand", {})
     assert by_brand, "no brands"
     assert {b["brand"] for b in by_brand} >= {"BrandA", "BrandB"}
-    by_cat, _ = await _both(both_engines, monkeypatch, "get_margin_by_category", {})
-    assert by_cat, "no categories"
-    trend, _ = await _both(both_engines, monkeypatch, "get_margin_trend", {})
-    assert trend, "no trend"
+    assert await _answer(in_postgres, "get_margin_by_category", {}), "no categories"
+    assert await _answer(in_postgres, "get_margin_trend", {}), "no trend"

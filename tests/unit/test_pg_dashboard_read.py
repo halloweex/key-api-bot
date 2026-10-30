@@ -150,12 +150,11 @@ class TestItDoesNotTakeTheDuckDbLock:
         self, tmp_path, monkeypatch, name, kwargs,
     ):
         monkeypatch.setenv("KS_READ_DASHBOARD", "postgres")
-        # The category walk needs `KS_READ_LOOKUPS` too, and that is the
-        # point rather than a nuisance: the tree is filter chrome, so it
-        # belongs to the filter bar's flag and not to whichever tab happens
-        # to be asking. It rode `KS_READ_REPORTS` until this test caught it
-        # reaching for DuckDB with this tab's flag on.
-        monkeypatch.setenv("KS_READ_LOOKUPS", "postgres")
+        # The category walk is filter chrome, so it belongs to the filter
+        # bar's router and not to whichever tab is asking (it rode
+        # `KS_READ_REPORTS` until this test caught it reaching for DuckDB
+        # with this tab's flag on). Since step 14's S14-05 that router reads
+        # Postgres whatever `KS_READ_LOOKUPS` says; its fetch is stubbed below.
         monkeypatch.setenv("KS_PG_DSN", "postgresql://x/y")
         store = DuckDBStore(db_path=tmp_path / f"d-{name}-{len(kwargs)}.duckdb")
         await store.connect()
@@ -185,7 +184,11 @@ class TestEveryMethodReturns:
         store = DuckDBStore(db_path=tmp_path / f"d-ret-{name}-{len(kwargs)}.duckdb")
         await store.connect()
         try:
-            await asyncio.wait_for(_call(store, name, kwargs), timeout=TIMEOUT_S)
+            # The category walk is the filter bar's, which reads Postgres
+            # alone since step 14's S14-05; what this asks is whether the
+            # DuckDB tail beside it hangs.
+            with patch("core.pg_lookups_read.fetch", new=AsyncMock(return_value=[])):
+                await asyncio.wait_for(_call(store, name, kwargs), timeout=TIMEOUT_S)
         finally:
             await store.close()
 

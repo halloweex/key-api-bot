@@ -3242,6 +3242,13 @@ PG 17.2 + CH 24.8.14.39: 730 дней, 5 225 ячеек в обоих движк
 
 ### Вкладка /traffic: слой, который убрали, а не скопировали
 
+**С S14-05 шага 14 вкладка читает только Postgres** — каждый её метод,
+разбивка органики и «Тільки піксель» тоже, одним роутером `_traffic_run`:
+`KS_READ_TRAFFIC` движок больше не выбирает (до S14-15 его читает только
+готовность шага 13 на `/api/warehouse/status`), сбой — отказ 503
+`surface=traffic` (см. «Every read that falls back to DuckDB is counted»).
+Ниже — история переноса и блоки вкладки.
+
 `KS_READ_TRAFFIC=postgres` переводит все пять методов вкладки. Две из них
 читали `gold_daily_traffic`, которой в Postgres нет — **и не будет**.
 
@@ -3595,6 +3602,28 @@ exc)`: one uniform ERROR line carrying that phrase, and a per-surface counter
 `/api/health` publishes as `read_fallbacks {surface: {count, last_at}}` — no
 exception text, the endpoint is public. **Under the default, nothing a read
 returns changed.**
+
+**Since step 14's S14-05 six routers have no DuckDB tail at all** —
+`_traffic_run`, `_margin_run`, `_intel_run` (product intelligence),
+`_reports_run`, `_marketing_run` and `_lookups_run` (the filter bar and the
+category tree). Each runs its statement in Postgres and, on any exception,
+`raise read_fallback.refuse(surface, exc)`: the refusal `fall_back` made of
+the same failure under `off` — same body, so the same count under
+`read_fallback_mode.refused`, the same log line and the same 503 naming the
+surface. `KS_READ_TRAFFIC`, `_MARGIN`, `_PRODUCTS_INTEL`, `_REPORTS`,
+`_MARKETING` and `_LOOKUPS` route nothing: no router reads them and their
+modules carry no `ENV`. One reader is left, step 13's readiness on
+`/api/warehouse/status` (`cutover`, a `reader:*` key per switch not at
+`postgres`), until S14-15. The `.env` lines stay while an image from before
+step 14 is a rollback target. Without `KS_PG_DSN` the pool refuses to guess
+a database, and that is the failure refused — where `no_address` used to
+name the switch. The `/marketing` goal read has no branch of its own any
+more: a failure there is the page's counted 503, where it used to escape as
+an uncounted 500. Rule 5 of `tests/unit/test_read_fallback_sites.py` holds
+every engine call of a router with no tail inside a `try` whose handler is
+exactly that `raise`; the six tabs' numbers are literals DuckDB answered on
+their fixtures before its side went (`tests/integration/golden/`). The rest
+of this section is the history of the routers that still have a tail.
 
 **The week `off` waits for is proven by the canary, not by the log** (OD-07
 (a), 2026-09-30). The condition for `KS_READ_FALLBACK=off` is a covered, clean

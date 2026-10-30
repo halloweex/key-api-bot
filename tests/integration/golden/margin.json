@@ -1,0 +1,158 @@
+{
+ "source": "DuckDB's answer to every call of tests/integration/test_margin_two_engines.py's equality test, on that file's fixture pinned to 2026-09-15, recorded at step 14's S14-05 on the code before it (d6057d53) while the same run asserted Postgres answered each one equally. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it.",
+ "answers": {
+  "get_margin_alerts{\"min_revenue\": 0}": [],
+  "get_margin_brand_category{\"min_revenue\": 0}": [
+   {
+    "brand": "BrandA",
+    "category": "Care",
+    "total_units": 3,
+    "total_revenue": 1450.0,
+    "costed_revenue": 1450.0,
+    "cogs": 600.0,
+    "profit": 850.0,
+    "margin_pct": 58.6,
+    "coverage_pct": 100.0
+   },
+   {
+    "brand": "BrandB",
+    "category": "Makeup",
+    "total_units": 4,
+    "total_revenue": 550.0,
+    "costed_revenue": 300.0,
+    "cogs": 120.0,
+    "profit": 180.0,
+    "margin_pct": 60.0,
+    "coverage_pct": 54.5
+   },
+   {
+    "brand": "BrandC",
+    "category": "Makeup",
+    "total_units": 4,
+    "total_revenue": 900.0,
+    "costed_revenue": 0.0,
+    "cogs": 0.0,
+    "profit": 0.0,
+    "margin_pct": null,
+    "coverage_pct": 0.0
+   }
+  ],
+  "get_margin_brand_category{\"min_revenue\": 100000}": [],
+  "get_margin_by_brand{\"limit\": 2}": [
+   {
+    "brand": "BrandA",
+    "total_units": 3,
+    "total_revenue": 1450.0,
+    "costed_units": 3,
+    "costed_revenue": 1450.0,
+    "cogs": 600.0,
+    "profit": 850.0,
+    "margin_pct": 58.6,
+    "coverage_pct": 100.0
+   },
+   {
+    "brand": "BrandC",
+    "total_units": 4,
+    "total_revenue": 900.0,
+    "costed_units": 0,
+    "costed_revenue": 0.0,
+    "cogs": 0.0,
+    "profit": 0.0,
+    "margin_pct": null,
+    "coverage_pct": 0.0
+   }
+  ],
+  "get_margin_by_brand{}": [
+   {
+    "brand": "BrandA",
+    "total_units": 3,
+    "total_revenue": 1450.0,
+    "costed_units": 3,
+    "costed_revenue": 1450.0,
+    "cogs": 600.0,
+    "profit": 850.0,
+    "margin_pct": 58.6,
+    "coverage_pct": 100.0
+   },
+   {
+    "brand": "BrandC",
+    "total_units": 4,
+    "total_revenue": 900.0,
+    "costed_units": 0,
+    "costed_revenue": 0.0,
+    "cogs": 0.0,
+    "profit": 0.0,
+    "margin_pct": null,
+    "coverage_pct": 0.0
+   },
+   {
+    "brand": "BrandB",
+    "total_units": 4,
+    "total_revenue": 550.0,
+    "costed_units": 3,
+    "costed_revenue": 300.0,
+    "cogs": 120.0,
+    "profit": 180.0,
+    "margin_pct": 60.0,
+    "coverage_pct": 54.5
+   }
+  ],
+  "get_margin_by_category{}": [
+   {
+    "category": "Care",
+    "total_units": 3,
+    "total_revenue": 1450.0,
+    "costed_revenue": 1450.0,
+    "cogs": 600.0,
+    "profit": 850.0,
+    "margin_pct": 58.6,
+    "coverage_pct": 100.0,
+    "rev_share_pct": 50.0
+   },
+   {
+    "category": "Makeup",
+    "total_units": 8,
+    "total_revenue": 1450.0,
+    "costed_revenue": 300.0,
+    "cogs": 120.0,
+    "profit": 180.0,
+    "margin_pct": 60.0,
+    "coverage_pct": 20.7,
+    "rev_share_pct": 50.0
+   }
+  ],
+  "get_margin_overview{\"sales_type\": \"all\"}": {
+   "total_revenue": 2900.0,
+   "costed_revenue": 1750.0,
+   "cogs": 720.0,
+   "profit": 1030.0,
+   "margin_pct": 58.9,
+   "coverage_pct": 60.3,
+   "skus_with_cost": 2,
+   "total_skus": 4,
+   "total_units": 11
+  },
+  "get_margin_overview{}": {
+   "total_revenue": 2900.0,
+   "costed_revenue": 1750.0,
+   "cogs": 720.0,
+   "profit": 1030.0,
+   "margin_pct": 58.9,
+   "coverage_pct": 60.3,
+   "skus_with_cost": 2,
+   "total_skus": 4,
+   "total_units": 11
+  },
+  "get_margin_trend{}": [
+   {
+    "month": "2026-09",
+    "revenue": 1750.0,
+    "cogs": 720.0,
+    "profit": 1030.0,
+    "margin_pct": 58.9,
+    "total_revenue": 2900.0,
+    "coverage_pct": 60.3
+   }
+  ]
+ }
+}

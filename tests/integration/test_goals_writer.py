@@ -408,6 +408,10 @@ class TestTheReadsFollowTheChain:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("read_flag", ["postgres", "duckdb"])
     async def test_the_target_line_raises_too(self, stores, read_flag):
+        """Since step 14's S14-05 the target line is read on `/marketing`'s
+        one path, which refuses any failure: the same 503 naming `marketing`
+        as the rest of the page, counted — where the goal's own branch let
+        the driver's exception out uncounted. Still never DuckDB's goal."""
         from core import pg_marketing_read, read_fallback
 
         store, _pool, env = stores
@@ -422,9 +426,12 @@ class TestTheReadsFollowTheChain:
             return await real(sql, params)
 
         with patch.object(pg_marketing_read, "fetch", new=goals_table_down):
-            with pytest.raises(ConnectionError, match="pg down"):
+            with pytest.raises(read_fallback.ReadUnavailable) as raised:
                 await store.get_marketing_report(2026, 8)
+        assert raised.value.surface == "marketing"
+        assert isinstance(raised.value.__cause__, ConnectionError)
         assert "marketing" not in read_fallback.counts(), "it fell back to DuckDB"
+        assert read_fallback.refusals()["marketing"]["count"] == 1
 
 
 class TestTheHourlyReplaceCannotRollItBack:

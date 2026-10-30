@@ -1,13 +1,12 @@
-"""`/traffic` means the same thing in DuckDB and Postgres.
+"""`/traffic` answers in Postgres what DuckDB answered.
 
-The port with the sharpest structural claim: DuckDB aggregates this tab out of
+The port with the sharpest structural claim: DuckDB aggregated this tab out of
 `gold_daily_traffic`, and Postgres never had such a table *on purpose* —
 DuckDB no longer has one either, since the layer was retired once this port
-left it with no reader. Both readers
-folded that Gold — `SUM(orders_count)` grouped by a subset of its own primary
-key — and `silver_order_utm` is keyed on `order_id`, so every order lands in
-exactly one cell and the fold is the same arithmetic as the aggregate over the
-orders underneath. Both engines therefore read the join now.
+left it with no reader. Both readers folded that Gold — `SUM(orders_count)`
+grouped by a subset of its own primary key — and `silver_order_utm` is keyed
+on `order_id`, so every order lands in exactly one cell and the fold is the
+same arithmetic as the aggregate over the orders underneath.
 
 That claim is what this file exists to attack, so the fixture is built to break
 it if it is wrong: an order with no UTM row at all (falls through the COALESCE
@@ -16,8 +15,20 @@ no channel of its own, a return and an inactive source that must not count, and
 two campaigns tied on revenue to catch a pagination cut that is not
 deterministic.
 
-`tests/unit/test_pg_traffic_read.py` proves the wiring and that every hole
-survived its f-string. This proves the numbers.
+ONE ENGINE SINCE STEP 14 (S14-05)
+
+The tab reads Postgres and nothing else, so the two engines are no longer run
+side by side. Every call is compared with a literal instead
+(`tests/integration/golden/traffic.json`): DuckDB's answer on this fixture,
+recorded while this file still asserted Postgres answered the same (rule 9 of
+the step-14 plan) — re-recorded whole, the same way, when the pixel-only
+breakdown (#327) added order 10 to the fixture. Postgres derives its Silver
+and Gold from the seeded Bronze, the production path
+(`tests/integration/pg_tab_seed.py`), and the store's DuckDB connection is a
+trap.
+
+`tests/unit/test_pg_traffic_read.py` proves the statements. This proves the
+numbers.
 
 Skipped without `KS_PG_DSN`; `deploy/gate_with_stores.sh` supplies one.
 """
@@ -28,9 +39,11 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, patch
 
 from core.duckdb_store import DuckDBStore
+from tests.integration.pg_tab_seed import (
+    call_key, comparable, derive, golden, seed, tab_in_postgres,
+)
 
 asyncpg = pytest.importorskip("asyncpg")
 
@@ -39,7 +52,10 @@ pytestmark = pytest.mark.skipif(
     not DSN, reason="needs a live PostgreSQL at KS_PG_DSN",
 )
 
-TODAY = date.today()
+# Pinned (step 14, S14-05): the answers are literals taken from DuckDB on
+# this fixture, so the calendar under them cannot move with the run.
+TODAY = date(2026, 9, 15)
+NOW = datetime(2026, 9, 15, 9, 0, tzinfo=timezone.utc)   # midday Kyiv
 W = (TODAY - timedelta(days=25), TODAY)
 
 # (id, source_id, grand_total, days_ago, status_id)
@@ -62,7 +78,7 @@ ORDERS = [
 
 # Every order is its own buyer but one: order 10 is buyer 9 coming back to the
 # website with no tags, so the pixel-only breakdown has a first channel to
-# find in the other engine.
+# find.
 BUYER_OF = {10: 9}
 
 # (order_id, utm_source, utm_medium, utm_campaign, traffic_type, platform, fbclid)
@@ -97,147 +113,55 @@ SPEND = [
 def _utm_row(row):
     oid, src, medium, campaign, ttype, platform, fbclid = row
     return (oid, src, medium, campaign, None, None, None,
-            None, None, None, fbclid, ttype, platform,
-            datetime.now(timezone.utc))
+            None, None, None, fbclid, ttype, platform, NOW)
 
 
-async def _seed_duckdb(store):
-    now = datetime.now(timezone.utc)
-    async with store.connection() as conn:
-        for oid, src, total, days, status in ORDERS:
-            conn.execute(
-                "INSERT INTO orders (id,source_id,status_id,grand_total,"
-                "ordered_at,buyer_id,manager_id) VALUES (?,?,?,?,?,?,NULL)",
-                [oid, src, status, total, now - timedelta(days=days),
-                 BUYER_OF.get(oid, oid)])
-        for row in SPEND:
-            eid, days, category, etype, amount, platform = row
-            conn.execute(
-                "INSERT INTO manual_expenses (id,expense_date,category,"
-                "expense_type,amount,currency,note,platform)"
-                " VALUES (?,?,?,?,?,'UAH',NULL,?)",
-                [eid, TODAY - timedelta(days=days), category, etype,
-                 amount, platform])
-    await store.refresh_warehouse_layers(trigger="manual")
-    # After Silver, because the UTM rows are keyed on orders Silver has to
-    # hold — and *not* through `refresh_utm_silver_layer`, which would parse
-    # them out of `manager_comment` and is not what this file is testing.
-    async with store.connection() as conn:
-        conn.execute("DELETE FROM silver_order_utm")
-        conn.executemany(
-            f"INSERT INTO silver_order_utm ({', '.join(UTM_COLUMNS)}) "
-            f"VALUES ({', '.join('?' * len(UTM_COLUMNS))})",
-            [_utm_row(r) for r in UTM])
+async def _populate(conn, pool):
+    """Bronze as KeyCRM lands it, Silver and Gold derived from it; then the
+    UTM rows and the typed ad spend, the two tables the tab reads beside them.
 
-
-async def _seed_postgres(conn, store, pool):
-    for t in ("silver.order_utm", "silver.orders", "gold.daily_revenue",
-              "app.manual_expenses"):
-        await conn.execute(f"DELETE FROM {t}")
-
-    async with store.connection() as duck:
-        silver = duck.execute(
-            "SELECT id, source_id, status_id, grand_total, ordered_at, buyer_id,"
-            " manager_id, order_date, is_return, sales_type, is_active_source,"
-            " source_name, is_new_customer, buyer_first_order_date, promocode"
-            " FROM silver_orders ORDER BY id").fetchall()
-        utm = duck.execute(
-            f"SELECT {', '.join(UTM_COLUMNS)} FROM silver_order_utm "
-            "ORDER BY order_id").fetchall()
-        spend = duck.execute(
-            "SELECT id, expense_date, category, expense_type, amount, currency,"
-            " note, created_at, updated_at, platform FROM manual_expenses"
-            " ORDER BY id").fetchall()
-
-    await conn.executemany(
-        "INSERT INTO silver.orders (id,source_id,status_id,grand_total,ordered_at,"
-        "buyer_id,manager_id,order_date,is_return,sales_type,is_active_source,"
-        "source_name,is_new_customer,buyer_first_order_date,promocode)"
-        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)",
-        [tuple(r) for r in silver])
+    The UTM rows go in directly, after Silver, and not through the parser
+    reading `manager_comment`, which is not what this file is testing. Gold is
+    derived rather than written because ROAS reads it, and the two Golds are
+    not the same shape: this one carries `source_id` as a dimension *and* a
+    `source_id IS NULL` roll-up row, and only with the fine rows there is the
+    double-count the query's predicate prevents armed."""
+    await seed(conn, orders=[
+        (oid, src, status, total, NOW - timedelta(days=days),
+         BUYER_OF.get(oid, oid), None, None)
+        for oid, src, total, days, status in ORDERS])
+    await derive(pool)
     await conn.executemany(
         f"INSERT INTO silver.order_utm ({', '.join(UTM_COLUMNS)}) VALUES "
         f"({', '.join(f'${i}' for i in range(1, len(UTM_COLUMNS) + 1))})",
-        [tuple(r) for r in utm])
+        [_utm_row(r) for r in UTM])
     await conn.executemany(
         "INSERT INTO app.manual_expenses (id,expense_date,category,expense_type,"
         "amount,currency,note,created_at,updated_at,platform)"
-        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
-        [tuple(r) for r in spend])
-
-    # ROAS reads the revenue Gold, and the two Golds are not the same shape:
-    # this one carries `source_id` as a dimension *and* a `source_id IS NULL`
-    # roll-up row. It is *derived* here rather than copied, because writing
-    # only the roll-up would hide the double-count the query's predicate
-    # exists to prevent — the fine rows have to be there for the trap to be
-    # armed.
-    from core.pg_gold import rebuild_gold
-    await rebuild_gold(pool)
+        " VALUES ($1,$2,$3,$4,$5,'UAH',NULL,$6,$6,$7)",
+        [(eid, TODAY - timedelta(days=days), category, etype, amount, NOW, platform)
+         for eid, days, category, etype, amount, platform in SPEND])
 
 
 @pytest_asyncio.fixture
-async def both_engines(tmp_path, monkeypatch):
-    monkeypatch.setenv("KS_PG_DSN", DSN)
+async def in_postgres(tmp_path, monkeypatch):
+    """The tab's store, never connected: its DuckDB connection is a trap, so
+    an answer below can only be Postgres's."""
     store = DuckDBStore(db_path=tmp_path / "traffic.duckdb")
-    await store.connect()
-    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
-    try:
-        await _seed_duckdb(store)
-        with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
-            async with pool.acquire() as conn:
-                await _seed_postgres(conn, store, pool)
-            yield store
-    finally:
-        async with pool.acquire() as conn:
-            for t in ("silver.order_utm", "silver.orders", "gold.daily_revenue",
-                      "app.manual_expenses"):
-                await conn.execute(f"DELETE FROM {t}")
-        await pool.close()
-        await store.close()
-
-
-async def _both(store, monkeypatch, name, kwargs):
-    """Each engine once — and the Postgres leg with DuckDB made fatal.
-
-    THE FLAW THIS CLOSES, WHICH IS WORSE THAN ANY QUERY BUG
-
-    This tab falls back to DuckDB when Postgres raises. So a comparison that
-    merely calls the method twice can pass while Postgres never answers at
-    all: the second call falls back, returns the DuckDB answer, and the two
-    "engines" agree because they were the same engine.
-
-    That is not hypothetical. `get_margin_trend` used `strftime`, which
-    PostgreSQL does not have; the equivalent comparison passed, the gate went
-    green, and the method was found on production only by making the fallback
-    fatal. So the fallback is fatal here too.
-    """
-    monkeypatch.delenv("KS_READ_TRAFFIC", raising=False)
-    duck = await getattr(store, name)(*W, **kwargs)
-
-    monkeypatch.setenv("KS_READ_TRAFFIC", "postgres")
 
     def _no_duckdb(*_a, **_k):
-        raise AssertionError(
-            f"{name} fell back to DuckDB — Postgres did not answer, so the "
-            f"comparison below would have compared DuckDB with itself"
-        )
+        raise AssertionError("the traffic tab reached for DuckDB")
 
-    with patch.object(type(store), "connection", _no_duckdb):
-        postgres = await getattr(store, name)(*W, **kwargs)
-    monkeypatch.delenv("KS_READ_TRAFFIC", raising=False)
-    return duck, postgres
+    monkeypatch.setattr(type(store), "connection", _no_duckdb)
+    async with tab_in_postgres(DSN, monkeypatch, _populate):
+        yield store
 
 
-def _comparable(v):
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, dict):
-        return {k: _comparable(x) for k, x in v.items()}
-    if isinstance(v, (list, tuple)):
-        return [_comparable(x) for x in v]
-    if hasattr(v, "as_tuple") or isinstance(v, float):
-        return round(float(v), 6)
-    return v
+async def _answer(store, name, kwargs):
+    return await getattr(store, name)(*W, **kwargs)
+
+
+GOLDEN = golden("traffic")
 
 
 CALLS = (
@@ -269,42 +193,36 @@ CALLS = (
     "name,kwargs", CALLS,
     ids=[f"{n}{tuple(k.values()) if k else ''}" for n, k in CALLS],
 )
-async def test_both_engines_return_the_same_answer(
-    both_engines, monkeypatch, name, kwargs,
-):
-    duck, postgres = await _both(both_engines, monkeypatch, name, kwargs)
-    assert _comparable(postgres) == _comparable(duck)
+async def test_postgres_answers_what_duckdb_answered(in_postgres, name, kwargs):
+    assert comparable(await _answer(in_postgres, name, kwargs)) == \
+        GOLDEN[call_key(name, kwargs)]
+
+
+def test_every_literal_is_a_call_and_every_call_has_one():
+    assert set(GOLDEN) == {call_key(n, k) for n, k in CALLS}
 
 
 # `test_postgres_matches_the_gold_duckdb_still_keeps` stood here.
 #
 # It read `gold_daily_traffic` directly and checked that folding its cells gave
 # what Postgres computes from the join — the arithmetic behind the decision not
-# to build that Gold in Postgres at all. The layer has now been retired in
-# DuckDB too, so there is no second computation left to compare against and the
-# check cannot be written.
-#
-# **That is a real loss, and it is the price of retiring the layer.** What
-# remains is not nothing: the two readers are still compared DuckDB against
-# Postgres above, on the same fixture, with the fallback made fatal. What is
-# gone is the comparison against the *old shape* — a migration-time check that
-# has served its purpose, since the line-level read is now the only definition
-# there is.
-
+# to build that Gold in Postgres at all. The layer has been retired in DuckDB
+# too, so there is no second computation left to compare against. What is left
+# is the literal above: DuckDB's answers on the same fixture, recorded while the
+# two engines were still compared.
 
 
 @pytest.mark.asyncio
-async def test_an_order_with_no_utm_row_still_counts(both_engines, monkeypatch):
-    """Order 3 has no row in `silver_order_utm` at all, and the LEFT JOIN
-    renders it NULL. The COALESCE has to make it `organic`/`telegram` in both
-    engines — an INNER JOIN anywhere here would drop it silently, and that is
-    the commonest order in production."""
-    duck, pg = await _both(both_engines, monkeypatch, "get_traffic_analytics", {})
-    for out in (duck, pg):
-        assert out["by_platform"]["telegram"]["orders"] == 1
-        assert out["by_platform"]["telegram"]["revenue"] == 300.0
-        # Order 3, and order 9's newsletter, which has a UTM row of its own.
-        assert out["summary"]["organic"]["orders"] == 2
+async def test_an_order_with_no_utm_row_still_counts(in_postgres):
+    """Order 3 has no row in `silver.order_utm` at all, and the LEFT JOIN
+    renders it NULL. The COALESCE has to make it `organic`/`telegram` — an
+    INNER JOIN anywhere here would drop it silently, and that is the
+    commonest order in production."""
+    out = await _answer(in_postgres, "get_traffic_analytics", {})
+    assert out["by_platform"]["telegram"]["orders"] == 1
+    assert out["by_platform"]["telegram"]["revenue"] == 300.0
+    # Order 3, and order 9's newsletter, which has a UTM row of its own.
+    assert out["summary"]["organic"]["orders"] == 2
 
 
 # Derived from ORDERS rather than written out, because writing it out is how
@@ -320,97 +238,89 @@ COUNTED = [
 
 
 @pytest.mark.asyncio
-async def test_the_return_and_the_inactive_source_are_both_absent(
-    both_engines, monkeypatch,
-):
+async def test_the_return_and_the_inactive_source_are_both_absent(in_postgres):
     """Orders 6 and 8 carry ₴1 300 between them and must reach no chart. The
     predicate that drops them used to live in the Gold's own WHERE; it lives
     in the query now, which is exactly the kind of move that loses a filter."""
-    duck, pg = await _both(both_engines, monkeypatch, "get_traffic_analytics", {})
-    for out in (duck, pg):
-        assert out["totals"]["orders"] == len(COUNTED)
-        assert out["totals"]["revenue"] == sum(o[2] for o in COUNTED)
+    out = await _answer(in_postgres, "get_traffic_analytics", {})
+    assert out["totals"]["orders"] == len(COUNTED)
+    assert out["totals"]["revenue"] == sum(o[2] for o in COUNTED)
 
 
 @pytest.mark.asyncio
-async def test_the_new_buyers_are_not_an_empty_block(both_engines, monkeypatch):
-    """Every order here has a buyer of its own (`buyer_id = id`), so every
-    counted order is a new buyer. That is what keeps the whole-payload
-    comparison above from passing on two empty `new_customers` blocks — and
-    it puts the return and Opencart's order, whose buyers are never new, on
-    the wrong side of the predicate in either engine that loses it."""
-    duck, pg = await _both(both_engines, monkeypatch, "get_traffic_analytics", {})
+async def test_the_new_buyers_are_not_an_empty_block(in_postgres):
+    """Every order here but order 10 has a buyer of its own (`buyer_id =
+    id`), so every counted buyer is a new one; order 10 is buyer 9's second.
+    That is what keeps the whole-payload
+    comparison above from passing on an empty `new_customers` block — and it
+    puts the return and Opencart's order, whose buyers are never new, on the
+    wrong side of the predicate if it is lost."""
+    out = await _answer(in_postgres, "get_traffic_analytics", {})
     paid = {u[0] for u in UTM if u[4] in ("paid_confirmed", "paid_likely")}
-    for out in (duck, pg):
-        new = out["new_customers"]
-        assert new["total"] == len({BUYER_OF.get(o[0], o[0]) for o in COUNTED})
-        assert new["summary"]["paid"] == len(paid & {o[0] for o in COUNTED})
-        assert new["by_platform"]["telegram"] == 1
+    new = out["new_customers"]
+    assert new["total"] == len({BUYER_OF.get(o[0], o[0]) for o in COUNTED})
+    assert new["summary"]["paid"] == len(paid & {o[0] for o in COUNTED})
+    assert new["by_platform"]["telegram"] == 1
 
 
 @pytest.mark.asyncio
-async def test_the_blended_roas_is_not_doubled(both_engines, monkeypatch):
+async def test_the_blended_roas_is_not_doubled(in_postgres):
     """The trap the port nearly shipped: Postgres' revenue Gold holds a
     per-source row *and* a roll-up row, so `SUM(revenue)` without the
     predicate counts every order twice — and the ROAS would read exactly
     half, since spend is the divisor."""
-    duck, pg = await _both(both_engines, monkeypatch, "get_traffic_roas", {})
-    assert pg["blended"]["revenue"] == duck["blended"]["revenue"]
-    assert pg["blended"]["spend"] == 750.0      # marketing, non-NULL platform
-    assert pg["has_spend_data"] is True
+    out = await _answer(in_postgres, "get_traffic_roas", {})
+    assert out["blended"]["revenue"] == sum(o[2] for o in COUNTED)
+    assert out["blended"]["spend"] == 750.0      # marketing, non-NULL platform
+    assert out["has_spend_data"] is True
 
 
 @pytest.mark.asyncio
-async def test_two_campaigns_tied_on_revenue_paginate_the_same_way(
-    both_engines, monkeypatch,
-):
+async def test_two_campaigns_tied_on_revenue_paginate_once_each(in_postgres):
     """Orders 5 and 7 are ₴700 each on different campaigns. Under a `LIMIT`
-    with no tiebreaker the two engines can put a different one on page 1 —
-    which is not a reordering, it is a campaign missing from the page."""
-    first = await _both(both_engines, monkeypatch, "get_traffic_utm_campaigns",
-                        {"limit": 2})
-    second = await _both(both_engines, monkeypatch, "get_traffic_utm_campaigns",
-                         {"limit": 2, "offset": 2})
-    for duck, pg in (first, second):
-        assert [c["campaign"] for c in pg["campaigns"]] == \
-               [c["campaign"] for c in duck["campaigns"]]
+    with no tiebreaker one could land on both pages or on neither — which is
+    not a reordering, it is a campaign missing from the page."""
+    first = await _answer(in_postgres, "get_traffic_utm_campaigns", {"limit": 2})
+    second = await _answer(in_postgres, "get_traffic_utm_campaigns",
+                           {"limit": 2, "offset": 2})
+    every = await _answer(in_postgres, "get_traffic_utm_campaigns", {})
+    paged = [c["campaign"] for c in first["campaigns"] + second["campaigns"]]
+    assert paged == [c["campaign"] for c in every["campaigns"]][:4]
+    assert {"alpha", "beta"} <= set(paged)
 
 
 @pytest.mark.asyncio
-async def test_organic_is_split_the_same_way_in_both(both_engines, monkeypatch):
+async def test_organic_is_split_into_its_channels(in_postgres):
     """Order 3 is organic only through the COALESCE — no UTM row, source 2 —
     and order 9 through its tags. The channel is decided in Python from what
-    each engine returns, so what this attacks is the statement: the boolean
-    that says "tagged", the COALESCE it is grouped on, and GROUP BY ordinals,
-    any of which one engine could read differently from the other."""
-    duck, pg = await _both(both_engines, monkeypatch, "get_traffic_organic", {})
-    for out in (duck, pg):
-        channels = {c["channel"]: c for c in out["channels"]}
-        assert set(channels) == {"telegram", "email_campaigns"}
-        assert channels["telegram"]["revenue"] == 300.0
-        assert channels["telegram"]["details"] == [{
-            "source": "", "medium": "", "campaign": "", "content": "",
-            "orders": 1, "revenue": 300.0,
-        }]
-        assert channels["email_campaigns"]["details"] == [{
-            "source": "klaviyo", "medium": "klaviyo",
-            "campaign": "[07/28/26] Campaign #12: Beauty roulette",
-            "content": "", "orders": 1, "revenue": 450.0,
-        }]
-        assert out["totals"]["new_customers"] == 2
+    the engine returns, so what this attacks is the statement: the boolean
+    that says "tagged", the COALESCE it is grouped on, and GROUP BY ordinals."""
+    out = await _answer(in_postgres, "get_traffic_organic", {})
+    channels = {c["channel"]: c for c in out["channels"]}
+    assert set(channels) == {"telegram", "email_campaigns"}
+    assert channels["telegram"]["revenue"] == 300.0
+    assert channels["telegram"]["details"] == [{
+        "source": "", "medium": "", "campaign": "", "content": "",
+        "orders": 1, "revenue": 300.0,
+    }]
+    assert channels["email_campaigns"]["details"] == [{
+        "source": "klaviyo", "medium": "klaviyo",
+        "campaign": "[07/28/26] Campaign #12: Beauty roulette",
+        "content": "", "orders": 1, "revenue": 450.0,
+    }]
+    assert out["totals"]["new_customers"] == 2
 
 
 @pytest.mark.asyncio
-async def test_pixel_only_finds_the_first_channel_in_both(both_engines, monkeypatch):
+async def test_pixel_only_finds_the_first_channel(in_postgres):
     """Order 10 is buyer 9's second order, untagged; buyer 9 first came
     through a Klaviyo newsletter. The ranking of every buyer's first order —
-    a window function over the whole of Silver — is the part one engine could
-    read differently from the other."""
-    duck, pg = await _both(both_engines, monkeypatch, "get_traffic_pixel_only", {})
-    for out in (duck, pg):
-        assert out["first_channels"] == [{
-            "group": "organic", "channel": "email_campaigns",
-            "orders": 1, "revenue": 650.0, "buyers": 1, "new_buyers": 0,
-        }]
-        assert out["returning"] == {"orders": 1, "revenue": 650.0, "buyers": 1}
-        assert out["new"] == {"orders": 0, "revenue": 0.0, "buyers": 0}
+    a window function over the whole of Silver — is the part a statement
+    could get wrong."""
+    out = await _answer(in_postgres, "get_traffic_pixel_only", {})
+    assert out["first_channels"] == [{
+        "group": "organic", "channel": "email_campaigns",
+        "orders": 1, "revenue": 650.0, "buyers": 1, "new_buyers": 0,
+    }]
+    assert out["returning"] == {"orders": 1, "revenue": 650.0, "buyers": 1}
+    assert out["new"] == {"orders": 0, "revenue": 0.0, "buyers": 0}

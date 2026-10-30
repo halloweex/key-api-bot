@@ -1,0 +1,392 @@
+{
+ "source": "DuckDB's answer to every call of tests/integration/test_reports_two_engines.py's equality test, on that file's fixture pinned to 2026-09-15, recorded at step 14's S14-05 on the code before it (d6057d53) while the same run asserted Postgres answered each one equally. Rule 9 of the step-14 plan: not to be edited by hand, and not regenerated from the code after it.",
+ "answers": {
+  "get_report_products_by_source{\"sales_type\": \"all\"}": {
+   "1": [
+    {
+     "product_name": "Lipstick",
+     "quantity": 3
+    },
+    {
+     "product_name": "Unbranded",
+     "quantity": 3
+    },
+    {
+     "product_name": "Serum",
+     "quantity": 2
+    }
+   ],
+   "2": [
+    {
+     "product_name": "Serum",
+     "quantity": 1
+    }
+   ]
+  },
+  "get_report_products_by_source{}": {
+   "1": [
+    {
+     "product_name": "Lipstick",
+     "quantity": 3
+    },
+    {
+     "product_name": "Serum",
+     "quantity": 2
+    }
+   ],
+   "2": [
+    {
+     "product_name": "Serum",
+     "quantity": 1
+    }
+   ]
+  },
+  "get_report_summary{\"brand\": \"BrandA\", \"category_id\": 1}": {
+   "sources": [
+    {
+     "source_id": 1,
+     "source_name": "Instagram",
+     "orders_count": 1,
+     "products_sold": 5,
+     "revenue": 1200.0,
+     "avg_check": 1200.0,
+     "returns_count": 0,
+     "return_rate": 0.0
+    },
+    {
+     "source_id": 2,
+     "source_name": "Telegram",
+     "orders_count": 1,
+     "products_sold": 1,
+     "revenue": 600.0,
+     "avg_check": 600.0,
+     "returns_count": 0,
+     "return_rate": 0.0
+    }
+   ],
+   "totals": {
+    "orders_count": 2,
+    "products_sold": 6,
+    "revenue": 1800.0,
+    "avg_check": 900.0,
+    "returns_count": 0,
+    "return_rate": 0.0
+   }
+  },
+  "get_report_summary{\"brand\": \"BrandA\"}": {
+   "sources": [
+    {
+     "source_id": 1,
+     "source_name": "Instagram",
+     "orders_count": 1,
+     "products_sold": 5,
+     "revenue": 1200.0,
+     "avg_check": 1200.0,
+     "returns_count": 0,
+     "return_rate": 0.0
+    },
+    {
+     "source_id": 2,
+     "source_name": "Telegram",
+     "orders_count": 1,
+     "products_sold": 1,
+     "revenue": 600.0,
+     "avg_check": 600.0,
+     "returns_count": 0,
+     "return_rate": 0.0
+    }
+   ],
+   "totals": {
+    "orders_count": 2,
+    "products_sold": 6,
+    "revenue": 1800.0,
+    "avg_check": 900.0,
+    "returns_count": 0,
+    "return_rate": 0.0
+   }
+  },
+  "get_report_summary{\"brand\": \"Unknown\"}": {
+   "sources": [],
+   "totals": {
+    "orders_count": 0,
+    "products_sold": 0,
+    "revenue": 0.0,
+    "avg_check": 0,
+    "returns_count": 0,
+    "return_rate": 0
+   }
+  },
+  "get_report_summary{\"category_id\": 1}": {
+   "sources": [
+    {
+     "source_id": 1,
+     "source_name": "Instagram",
+     "orders_count": 1,
+     "products_sold": 5,
+     "revenue": 1200.0,
+     "avg_check": 1200.0,
+     "returns_count": 0,
+     "return_rate": 0.0
+    },
+    {
+     "source_id": 2,
+     "source_name": "Telegram",
+     "orders_count": 1,
+     "products_sold": 1,
+     "revenue": 600.0,
+     "avg_check": 600.0,
+     "returns_count": 0,
+     "return_rate": 0.0
+    }
+   ],
+   "totals": {
+    "orders_count": 2,
+    "products_sold": 6,
+    "revenue": 1800.0,
+    "avg_check": 900.0,
+    "returns_count": 0,
+    "return_rate": 0.0
+   }
+  },
+  "get_report_summary{\"category_id\": 3}": {
+   "sources": [
+    {
+     "source_id": 1,
+     "source_name": "Instagram",
+     "orders_count": 1,
+     "products_sold": 5,
+     "revenue": 1200.0,
+     "avg_check": 1200.0,
+     "returns_count": 1,
+     "return_rate": 50.0
+    }
+   ],
+   "totals": {
+    "orders_count": 1,
+    "products_sold": 5,
+    "revenue": 1200.0,
+    "avg_check": 1200.0,
+    "returns_count": 1,
+    "return_rate": 50.0
+   }
+  },
+  "get_report_summary{\"category_id\": 99999}": {
+   "sources": [],
+   "totals": {
+    "orders_count": 0,
+    "products_sold": 0,
+    "revenue": 0.0,
+    "avg_check": 0,
+    "returns_count": 0,
+    "return_rate": 0
+   }
+  },
+  "get_report_summary{\"sales_type\": \"all\"}": {
+   "sources": [
+    {
+     "source_id": 1,
+     "source_name": "Instagram",
+     "orders_count": 2,
+     "products_sold": 8,
+     "revenue": 1500.0,
+     "avg_check": 750.0,
+     "returns_count": 1,
+     "return_rate": 33.3
+    },
+    {
+     "source_id": 4,
+     "source_name": "Shopify",
+     "orders_count": 1,
+     "products_sold": 0,
+     "revenue": 750.0,
+     "avg_check": 750.0,
+     "returns_count": 0,
+     "return_rate": 0.0
+    },
+    {
+     "source_id": 2,
+     "source_name": "Telegram",
+     "orders_count": 1,
+     "products_sold": 1,
+     "revenue": 600.0,
+     "avg_check": 600.0,
+     "returns_count": 0,
+     "return_rate": 0.0
+    }
+   ],
+   "totals": {
+    "orders_count": 4,
+    "products_sold": 9,
+    "revenue": 2850.0,
+    "avg_check": 712.5,
+    "returns_count": 1,
+    "return_rate": 20.0
+   }
+  },
+  "get_report_summary{\"source_id\": 1}": {
+   "sources": [
+    {
+     "source_id": 1,
+     "source_name": "Instagram",
+     "orders_count": 1,
+     "products_sold": 5,
+     "revenue": 1200.0,
+     "avg_check": 1200.0,
+     "returns_count": 1,
+     "return_rate": 50.0
+    }
+   ],
+   "totals": {
+    "orders_count": 1,
+    "products_sold": 5,
+    "revenue": 1200.0,
+    "avg_check": 1200.0,
+    "returns_count": 1,
+    "return_rate": 50.0
+   }
+  },
+  "get_report_summary{}": {
+   "sources": [
+    {
+     "source_id": 1,
+     "source_name": "Instagram",
+     "orders_count": 1,
+     "products_sold": 5,
+     "revenue": 1200.0,
+     "avg_check": 1200.0,
+     "returns_count": 1,
+     "return_rate": 50.0
+    },
+    {
+     "source_id": 4,
+     "source_name": "Shopify",
+     "orders_count": 1,
+     "products_sold": 0,
+     "revenue": 750.0,
+     "avg_check": 750.0,
+     "returns_count": 0,
+     "return_rate": 0.0
+    },
+    {
+     "source_id": 2,
+     "source_name": "Telegram",
+     "orders_count": 1,
+     "products_sold": 1,
+     "revenue": 600.0,
+     "avg_check": 600.0,
+     "returns_count": 0,
+     "return_rate": 0.0
+    }
+   ],
+   "totals": {
+    "orders_count": 3,
+    "products_sold": 6,
+    "revenue": 2550.0,
+    "avg_check": 850.0,
+    "returns_count": 1,
+    "return_rate": 25.0
+   }
+  },
+  "get_report_top_products{\"brand\": \"Unknown\"}": [],
+  "get_report_top_products{\"category_id\": 1}": [
+   {
+    "rank": 1,
+    "product_name": "Serum",
+    "sku": "SKU-A",
+    "quantity": 3,
+    "percentage": 100.0,
+    "revenue": 1500.0,
+    "orders_count": 2
+   }
+  ],
+  "get_report_top_products{\"limit\": 2}": [
+   {
+    "rank": 1,
+    "product_name": "Lipstick",
+    "sku": "SKU-B",
+    "quantity": 3,
+    "percentage": 50.0,
+    "revenue": 300.0,
+    "orders_count": 1
+   },
+   {
+    "rank": 2,
+    "product_name": "Serum",
+    "sku": "SKU-A",
+    "quantity": 3,
+    "percentage": 50.0,
+    "revenue": 1500.0,
+    "orders_count": 2
+   }
+  ],
+  "get_report_top_products{\"sales_type\": \"all\"}": [
+   {
+    "rank": 1,
+    "product_name": "Lipstick",
+    "sku": "SKU-B",
+    "quantity": 3,
+    "percentage": 33.3,
+    "revenue": 300.0,
+    "orders_count": 1
+   },
+   {
+    "rank": 2,
+    "product_name": "Serum",
+    "sku": "SKU-A",
+    "quantity": 3,
+    "percentage": 33.3,
+    "revenue": 1500.0,
+    "orders_count": 2
+   },
+   {
+    "rank": 3,
+    "product_name": "Unbranded",
+    "sku": "SKU-C",
+    "quantity": 3,
+    "percentage": 33.3,
+    "revenue": 300.0,
+    "orders_count": 1
+   }
+  ],
+  "get_report_top_products{\"source_id\": 1}": [
+   {
+    "rank": 1,
+    "product_name": "Lipstick",
+    "sku": "SKU-B",
+    "quantity": 3,
+    "percentage": 60.0,
+    "revenue": 300.0,
+    "orders_count": 1
+   },
+   {
+    "rank": 2,
+    "product_name": "Serum",
+    "sku": "SKU-A",
+    "quantity": 2,
+    "percentage": 40.0,
+    "revenue": 1000.0,
+    "orders_count": 1
+   }
+  ],
+  "get_report_top_products{}": [
+   {
+    "rank": 1,
+    "product_name": "Lipstick",
+    "sku": "SKU-B",
+    "quantity": 3,
+    "percentage": 50.0,
+    "revenue": 300.0,
+    "orders_count": 1
+   },
+   {
+    "rank": 2,
+    "product_name": "Serum",
+    "sku": "SKU-A",
+    "quantity": 3,
+    "percentage": 50.0,
+    "revenue": 1500.0,
+    "orders_count": 2
+   }
+  ]
+ }
+}
