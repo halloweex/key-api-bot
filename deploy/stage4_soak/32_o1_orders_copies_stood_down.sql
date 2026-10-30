@@ -60,9 +60,8 @@
 -- and there the writes follow the flag back to DuckDB and the sync's per-tick
 -- mirror, which asks only that local answer, ships DuckDB's orders over the
 -- chain's on every tick — DN-22a's `order_owner_row_without_marker`,
--- CRITICAL. The four other O-checks stay
--- "not applicable" (no chain writes Postgres for them to judge); this one
--- FAILs.
+-- CRITICAL. The four other O-checks stay "not applicable" (no chain writes
+-- Postgres for them to judge); this one FAILs.
 --
 -- And with orders_on=pending: the flag at postgres and no marker is the marker
 -- lost too once owner rows stand, not a flip waiting for its first write. In
@@ -71,8 +70,9 @@
 -- met — and always in a step-14 image, which has none since S14-09 — the
 -- chain's next write takes the marker again. Either way UNKNOWN would send
 -- the operator to the preconditions while the lever is the marker, so it
--- FAILs. The detail's pointer to `unmet_precondition` is an image from before
--- step 14's; a step-14 `/api/health` publishes it null. O1 goes in S14-13.
+-- FAILs. The detail's pointer to `unmet_precondition` names what an image
+-- from before step 14 publishes; a step-14 `/api/health` publishes it null.
+-- O1 itself goes in S14-13.
 --
 -- Except owner rows dated after the script read the marker (chain 3's soak
 -- review, 2026-10-10). The script reads the marker, then runs the log check

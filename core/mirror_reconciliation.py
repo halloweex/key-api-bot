@@ -1697,8 +1697,8 @@ def _orders_stood_down(
     and the owner rows — because both stand the same two tables down. What
     they file differs, because what is true differs.
 
-    **On the local answer, `mirror_stood_down` (INFO).** The marker routes
-    an image from before step 14's order writes to the chain, and that
+    **On the local answer, `mirror_stood_down` (INFO).** In an image from
+    before step 14 the marker routes the order writes to the chain, and that
     image's sync mirror asks the same answer, so it has stopped too: a
     decision somebody took, with nothing left writing DuckDB's copy over the
     chain's rows. A step-14 image has no such mirror (S14-09).
