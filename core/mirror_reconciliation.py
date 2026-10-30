@@ -1288,10 +1288,12 @@ async def reconcile_mirror(
 #
 # WHY NOT `updated_at`, WHICH WOULD BE EXACT AND CHEAP
 #
-# Because it lies here, and the code says so out loud: `upsert_orders` takes
-# `force_update` "for status refresh since KeyCRM doesn't update updated_at when
-# status changes". An order can move from status 12 to status 20 — from revenue
-# to revenue, or out of it — with `updated_at` untouched on both sides. A
+# Because it lies here, and the code says so out loud: the order writer takes
+# `force_update` for the status refresh, "since KeyCRM doesn't update
+# updated_at when order status changes" (`SyncService._upsert_orders_with_expenses`,
+# which hands it to chain 3's writer; DuckDB's `upsert_orders` took it too,
+# until step 14's S14-09). An order can move from status 12 to status 20 — from
+# revenue to revenue, or out of it — with `updated_at` untouched on both sides. A
 # comparison keyed on it would have been blind to precisely the field the
 # business cares about most.
 #
@@ -1695,21 +1697,27 @@ def _orders_stood_down(
     and the owner rows — because both stand the same two tables down. What
     they file differs, because what is true differs.
 
-    **On the local answer, `mirror_stood_down` (INFO).** The marker or the
-    flag routes the order writes to the chain, and the sync's mirror asks
-    that same answer, so it has stopped too: a decision somebody took, with
-    nothing left writing DuckDB's copy over the chain's rows.
+    **On the local answer, `mirror_stood_down` (INFO).** The marker routes
+    an image from before step 14's order writes to the chain, and that
+    image's sync mirror asks the same answer, so it has stopped too: a
+    decision somebody took, with nothing left writing DuckDB's copy over the
+    chain's rows. A step-14 image has no such mirror (S14-09).
 
     **On the owner rows alone (`owner_rows_only`),
-    `order_owner_row_without_marker` (CRITICAL).** The per-tick mirror in
-    `upsert_orders` asks only the local answer, which is empty, so it is
-    still shipping DuckDB's copy over the chain's rows and archiving every
-    overwrite in `app.order_versions` — damage done once a minute, not a
-    decision. It was the same INFO once, and every surface a human reads
-    prints the check's name, its label and its lever, never the
-    description: all three said "not a defect" about the one state here that
-    is. One finding, not one per table: it is one fact, and the page would
-    otherwise print the same line twice."""
+    `order_owner_row_without_marker` (CRITICAL).** The marker is lost. In an
+    image from before step 14 — the rollback target — the per-tick mirror in
+    DuckDB's `upsert_orders` asks only the local answer, which is empty, so
+    it ships DuckDB's copy over the chain's rows and archives every overwrite
+    in `app.order_versions` — damage done once a minute, not a decision.
+    Since step 14's S14-09 this image has neither that writer nor its mirror,
+    so here the finding is the lost marker such a rollback would route by;
+    it stays CRITICAL because its lever is the same — restore the marker
+    before anything rolls back — until S14-12 retires the check. It was the
+    same INFO once, and every surface a human reads prints the check's name,
+    its label and its lever, never the description: all three said "not a
+    defect" about the one state here that is. One finding, not one per
+    table: it is one fact, and the page would otherwise print the same line
+    twice."""
     from core import pg_landing
 
     specs = tuple(specs)

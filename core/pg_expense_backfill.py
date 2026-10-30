@@ -1,8 +1,9 @@
 """Carrying the expense history across, once.
 
-`mirror_expenses` ships what a sync fetched — the expenses hanging off the
-orders in that page — so after the first deploy Postgres holds the last few
-days and DuckDB holds 15,020 rows going back to the start. Every row older
+`mirror_expenses` shipped what a sync fetched — the expenses hanging off the
+orders in that page — so after the first deploy Postgres held the last few
+days and DuckDB 15,020 rows going back to the start (since step 14's S14-09
+nothing calls it: chain 3 writes the expenses to Postgres). Every row older
 than the mirror looks exactly like a lost one, which is why
 `reconcile_expenses` is gated on `meta.mirror_state.backfilled_at` and reports
 one `mirror_backfill_pending` instead of fifteen thousand CRITICALs.

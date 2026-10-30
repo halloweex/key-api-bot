@@ -5,10 +5,12 @@ this is the one thing that writes to it.
 
 WHERE THE CHANGES COME FROM, AND WHY NOT FROM A POLL
 
-`DuckDBStore.upsert_orders` already computes `updated_ids` on every tick — the
+`DuckDBStore.upsert_orders` already computed `updated_ids` on every tick — the
 exact set of orders it wrote, with rows that were already in the desired state
-excluded into `skipped_unchanged`. Today that set is used to decide what the
-mirror ships and is then discarded. It is the capture point, and it is free.
+excluded into `skipped_unchanged`. That set decided what the mirror shipped and
+was then discarded. It was the capture point, and it was free. Chain 3's
+writer computes the same set and runs the same capture (`write_orders`' core);
+step 14's S14-09 deleted DuckDB's writer.
 
 The alternative — a periodic scan keyed on `updated_at` — cannot work here, and
 fails on precisely the transitions the archive exists for: KeyCRM does not bump

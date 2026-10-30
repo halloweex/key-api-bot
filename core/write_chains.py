@@ -110,11 +110,14 @@ WRITE_CHAINS = WRITE_CHAINS + (pg_dq_journal_write, pg_watchdog_write,
 
 # Every chain from #280 on — the eight above from 3 to 11b, and any registered
 # after them — names the revision that refuses the images built before it
-# (`LOCKOUT_REVISION`) and counts it among its preconditions
-# (`chain_latch.lockout_unmet`): its flag moves nothing in a build that does
-# not require that revision. #280's own build did not, and nothing but the
-# operator kept its flips after 0035 (batch-E lock review). Chains 1, 4, 6a,
-# 7a and 8 predate the rule; 0034 holds them. `tests/unit/test_chain_lockout.py`.
+# (`LOCKOUT_REVISION`), and until step 14's S14-00 counted it among its
+# preconditions (`chain_latch.lockout_unmet`): its flag moved nothing in a
+# build that did not require that revision. #280's own build did not, and
+# nothing but the operator kept its flips after 0035 (batch-E lock review).
+# Chains 3 and 6 lost the attribute with their routing in S14-09; their
+# lock-out is the literal `LOCKOUT_RETIRED` in `tests/unit/test_chain_lockout.py`,
+# which still holds every chain to a revision that knows its tables. Chains 1,
+# 4, 6a, 7a and 8 predate the rule; 0034 holds them.
 
 def chain_name(chain: ModuleType) -> str:
     return chain.__name__.rsplit(".", 1)[-1]

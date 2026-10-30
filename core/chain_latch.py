@@ -392,7 +392,10 @@ class MirrorStamp:
 # `write_chain_precondition_unmet`. Its writers ask `require_revision()` before
 # the latch, so the database is then at that revision as well: the flip waits
 # for the lock-out at runtime, in every build that carries this rule. A chain
-# that names none is unmet. A latched chain is not held (OD-19 (a)).
+# that names none is unmet. A latched chain is not held (OD-19 (a)). Since
+# step 14's S14-00 no flag moves anything; chains 3 and 6 lost
+# `LOCKOUT_REVISION` with their routing in S14-09, and their lock-out is the
+# literal `LOCKOUT_RETIRED` in `tests/unit/test_chain_lockout.py`.
 #
 # "Or later" is read off the four digits every revision id starts with: the
 # migrations are one line numbered in order, which

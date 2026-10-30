@@ -2207,7 +2207,7 @@ none to ask (below). `SyncService._upsert_orders_with_expenses`
 routed at its first statement; DuckDB's `upsert_orders` and
 `upsert_expenses_batch` raised `ChainOwnsOrders` while it wrote Postgres
 (`upsert_expenses`, which had no caller, is deleted). `record_backfill_misses`
-routes, dated by the web clock rather than `now()` — the clock the copy-back
+writes Postgres, dated by the web clock rather than `now()` — the clock the copy-back
 ordered the two stores by (an image from before step 14 still does). The gap,
 backdated, half-written and checkpoint selections read Postgres
 (`core/pg_orders_read.py`, no `except`), and so does the boot's "do we hold any

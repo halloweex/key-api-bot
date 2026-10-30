@@ -2,11 +2,12 @@
 
 The catalogue needed no backfill: every hourly sync ships the whole 1,003-row
 catalogue, so Postgres was complete one hour after the mirror shipped. Orders
-are the opposite. `DuckDBStore.upsert_orders` mirrors exactly what it wrote —
+are the opposite. `DuckDBStore.upsert_orders` mirrored exactly what it wrote —
 `updated_ids`, the delta — because shipping the whole page every minute would
 re-send thousands of rows nothing had touched. That is the right behaviour for
-a sync and it means Postgres starts at whatever the last few minutes happened
+a sync and it meant Postgres started at whatever the last few minutes happened
 to move, with 46,446 orders and 147,508 line items of history behind it.
+(Step 14's S14-09 deleted that writer: chain 3 writes Postgres alone.)
 
 WHY IT IS A SET DIFFERENCE AND NOT A CURSOR
 

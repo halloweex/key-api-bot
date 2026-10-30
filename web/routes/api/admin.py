@@ -226,9 +226,10 @@ async def backfill_mirror_expenses(
 ):
     """Ship the order-level expenses Postgres is missing. Idempotent.
 
-    Revision 0020. `mirror_expenses` ships what a sync fetched, so after the
-    first deploy Postgres holds the last few days against DuckDB's 15,020 rows
-    — and until this has run, `reconcile_expenses` reports one
+    Revision 0020. `mirror_expenses` shipped what a sync fetched (nothing has
+    called it since step 14's S14-09), so after the first deploy Postgres held
+    the last few days against DuckDB's 15,020 rows — and until this has run,
+    `reconcile_expenses` reports one
     `mirror_backfill_pending` and suppresses the row-level comparison, because
     before it every expense older than the mirror looks exactly like a lost
     one.
