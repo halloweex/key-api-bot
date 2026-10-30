@@ -1031,9 +1031,11 @@ def capture() -> dict:
         "mismatched_chains": sorted(write_chains.mismatched_chains()),
     }
     # Deleted in S14-10 (`RETIRED_FIELDS`); asked where it still exists, so the
-    # capture still runs against the trees before it.
-    if hasattr(write_chains, "compared_in_shadow"):
-        out["registry"]["compared_in_shadow"] = sorted(write_chains.compared_in_shadow())
+    # capture still runs against the trees before it. By name, as S14-09's
+    # are: the import walk reads `write_chains.<name>` as a claim it exists.
+    compared = getattr(write_chains, "compared_in_shadow", None)
+    if compared is not None:
+        out["registry"]["compared_in_shadow"] = sorted(compared())
     out["health"] = _health()
     return json.loads(json.dumps(out, default=str))
 
