@@ -2,11 +2,14 @@
 to a real Postgres (design §3, test A).
 
 The orders go through `SyncService._upsert_orders_with_expenses`, the one call
-site every sync path reaches, so the routing is proved and not the writer
+site every sync path reaches, so the call site is proved and not the writer
 called on its own; the misses through `DuckDBStore.record_backfill_misses`,
-which routes. DuckDB is asked nothing about orders under the flag — a test
-that passed because DuckDB was written in Postgres's place would be the
-defect, so each test that writes also proves DuckDB stayed empty.
+which hands them to the chain. DuckDB is asked nothing about orders, whatever
+the flag says — a test that passed because DuckDB was written in Postgres's
+place would be the defect, so each test that writes also proves DuckDB stayed
+empty. The flag is production's `postgres` here, except in
+`TestTheFlagRoutesNothing`: since step 14's S14-09 nothing reads it to route,
+and that class writes with it absent, at `duckdb` and unreadable.
 
 What only a real server can say is said here: the decider's read under
 `FOR UPDATE` decides exactly what DuckDB decided, the version capture runs in
@@ -436,3 +439,46 @@ class TestTheSelectionsReadPostgres:
         await store.record_backfill_misses({BASE + 1: "not_in_keycrm"})
         gaps = await store.find_order_id_gaps(limit=10)
         assert BASE + 2 in gaps and BASE + 1 not in gaps
+
+
+class TestTheFlagRoutesNothing:
+    """Since step 14's S14-09 chain 3 reads no flag, no precondition and no
+    mode: every door writes Postgres. Proved end to end through the three
+    doors its callers reach — the sync's page, the misses and the comment
+    restore — with `KS_WRITE_ORDERS` absent, at `duckdb` (what routed the
+    orders to DuckDB until S14-00) and at a value its own reader refuses: a
+    writer that asked the flag again would write nothing, or raise, in one of
+    the three."""
+
+    @pytest.mark.parametrize("flag", [None, "duckdb", "pgsql-typo"],
+                             ids=["unset", "duckdb", "pgsql-typo"])
+    @pytest.mark.asyncio
+    async def test_a_page_the_misses_and_a_comment_land_in_postgres(self, stores, flag):
+        store, pool, env = stores
+        if flag is None:
+            env.delenv(chain.WRITE_ENV, raising=False)
+        else:
+            env.setenv(chain.WRITE_ENV, flag)
+        assert os.environ.get(chain.WRITE_ENV) != "postgres"
+
+        (count, expenses), changed = await _sync(
+            store, [_payload(BASE, comment=None), _payload(BASE + 1)])
+        assert (count, expenses) == (2, 2) and sorted(changed) == [BASE, BASE + 1]
+        assert await store.record_backfill_misses({BASE + 2: "not_in_keycrm"}) == 1
+        assert await chain.restore_manager_comments({BASE: "utm_source=fb"}) == [BASE]
+
+        assert await _lines(pool, BASE + 1) == [(BASE + 1) * 1000, (BASE + 1) * 1000 + 1]
+        assert (await _header(pool, BASE))["manager_comment"] == "utm_source=fb"
+        assert await _versions(pool, BASE) == [
+            ("create", 12, None), ("backfill", 12, "utm_source=fb")]
+        async with pool.acquire() as conn:
+            assert sorted(r["id"] for r in await conn.fetch(
+                "SELECT id FROM bronze.expenses WHERE order_id = ANY($1::int[])",
+                [BASE, BASE + 1])) == [BASE * 10, (BASE + 1) * 10]
+            assert await conn.fetchval(
+                "SELECT reason FROM app.order_backfill_misses WHERE order_id = $1",
+                BASE + 2) == "not_in_keycrm"
+        assert chain_latch.marker_path(chain.CHAIN).exists()
+        assert await chain_latch.read_owners(pool) == {
+            t: chain_latch.latched_at(chain.CHAIN) for t in chain.CHAIN_TABLES}
+        assert await _duckdb_counts(store) == (0, 0, 0, 0), "DuckDB was written"

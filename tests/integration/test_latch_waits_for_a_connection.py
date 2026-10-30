@@ -14,9 +14,8 @@ proves what the order buys, per writer, through the repository method every
 caller actually reaches:
 
 - while the writer waits for a connection there is no marker, and an acquire
-  that then fails leaves no marker file and no owner row, and the flag is still
-  the whole answer — for the three ways asyncpg's acquire ends without a
-  connection (the `refusing` fixture);
+  that then fails leaves no marker file and no owner row — for the three ways
+  asyncpg's acquire ends without a connection (the `refusing` fixture);
 - a write that rolls back takes no owner row with it, for every writer: the
   claim is in the writer's transaction, not beside it;
 - a chain's first write that succeeds takes the marker and claims every owner
@@ -27,6 +26,12 @@ Only the writer's own acquire is interfered with. Anything the store reaches
 first — `set_goal` computes a suggestion before it writes — gets the live pool,
 so a test cannot pass because something upstream failed first; the pool counts
 what it handled and every test requires exactly the writer's one.
+
+Chains 3, 6 and 6a route by nothing since step 14's S14-09, so their writers
+are driven in the state step 14 promises: no flag, the flag at `duckdb` and a
+flag nobody can read (`FLAGLESS`). A writer that asked its flag again would
+stop before its acquire, or raise, in one of the three. The other chains keep
+`postgres` until their own step-14 PR.
 """
 from __future__ import annotations
 
@@ -385,6 +390,37 @@ def _writer_name(key: str) -> str:
     return key.split(":", 1)[0]
 
 
+# The chains whose flag routes nothing since step 14's S14-09 (chains 3, 6,
+# 6a), and the values their writers are driven under: absent, `duckdb` — what
+# routed them to DuckDB until S14-00 — and one `env_writes_postgres` raises on.
+# Every other chain keeps the flag at `postgres` until its own step-14 PR
+# (S14-10, S14-11) takes the routing away.
+FLAGLESS = (pg_orders_write, pg_catalogue_write, pg_expense_types_write)
+FLAGLESS_VALUES = (None, "duckdb", "pgsql-typo")
+
+
+def _flags_for(chain) -> tuple:
+    return FLAGLESS_VALUES if chain in FLAGLESS else ("postgres",)
+
+
+def _cases(keys, chain_of) -> list:
+    """`(key, flag)` for every key, each flagless chain's under every value."""
+    return [pytest.param(key, flag, id=f"{key}-{flag or 'unset'}")
+            for key in keys for flag in _flags_for(chain_of(key))]
+
+
+def _set_flag(env, chain, flag) -> None:
+    if flag is None:
+        env.delenv(chain.WRITE_ENV, raising=False)
+    else:
+        env.setenv(chain.WRITE_ENV, flag)
+    if chain in FLAGLESS:
+        # The point of the case: a flagless chain is never driven at the value
+        # that would make a writer reading its flag again look correct.
+        assert os.environ.get(chain.WRITE_ENV) != "postgres"
+    assert chain.writes_postgres(), f"{chain.__name__} does not write Postgres"
+
+
 @pytest_asyncio.fixture
 async def stores(tmp_path, monkeypatch):
     """A real DuckDB, a live Postgres, and no chain's flag set.
@@ -518,16 +554,40 @@ def test_every_writer_the_latch_guard_finds_is_driven_here():
         assert _writer_name(key) in _writers(chain), f"{key} is not {chain.__name__}'s writer"
 
 
+def test_the_flagless_chains_are_driven_with_no_flag(monkeypatch):
+    """Each writer of chains 3, 6 and 6a, and each first write, runs under
+    every value of `FLAGLESS_VALUES` and never under `postgres` — what keeps
+    the proofs below in step 14's state rather than production's flag. The
+    unreadable value is one the flag's own reader refuses, so a writer that
+    asked it again would raise rather than pass."""
+    assert {write_chains.chain_name(c) for c in FLAGLESS} == {
+        "pg_orders_write", "pg_catalogue_write", "pg_expense_types_write"}
+    for key, (chain, _call) in WRITERS.items():
+        flags = {p.values[1] for p in _cases([key], lambda k: WRITERS[k][0])}
+        assert flags == (set(FLAGLESS_VALUES) if chain in FLAGLESS
+                         else {"postgres"}), key
+    for chain_name, (key, *_row) in FIRST_WRITES.items():
+        flags = {p.values[1] for p in _cases([chain_name], _first_write_chain)}
+        assert flags == set(_flags_for(WRITERS[key][0])), chain_name
+    for chain in FLAGLESS:
+        for flag in FLAGLESS_VALUES:
+            _set_flag(monkeypatch, chain, flag)
+            if flag == "pgsql-typo":
+                with pytest.raises(RuntimeError, match=chain.WRITE_ENV):
+                    chain.env_writes_postgres()
+            else:
+                assert chain.env_writes_postgres() is False
+
+
 class TestAnAcquireThatFailsLeavesTheChainUnlatched:
-    @pytest.mark.parametrize("writer", list(WRITERS))
+    @pytest.mark.parametrize("writer, flag", _cases(WRITERS, lambda k: WRITERS[k][0]))
     @pytest.mark.asyncio
     async def test_no_marker_and_no_owner_row(
-        self, stores, refusing, writer,
+        self, stores, refusing, writer, flag,
     ):
         store, live, env = stores
         chain, call = WRITERS[writer]
-        env.setenv(chain.WRITE_ENV, "postgres")
-        assert chain.writes_postgres(), "the flag did not move the chain"
+        _set_flag(env, chain, flag)
         pool = _RefusesTheWriter(live, refusing.pool, chain.__name__)
 
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
@@ -574,12 +634,12 @@ class TestAClaimRollsBackWithItsWrite:
     same thing for one writer per chain on a write that commits; this one
     needs no row to read back, so `delete_expense` is covered too."""
 
-    @pytest.mark.parametrize("writer", list(WRITERS))
+    @pytest.mark.parametrize("writer, flag", _cases(WRITERS, lambda k: WRITERS[k][0]))
     @pytest.mark.asyncio
-    async def test_a_write_that_rolls_back_leaves_no_owner_row(self, stores, writer):
+    async def test_a_write_that_rolls_back_leaves_no_owner_row(self, stores, writer, flag):
         store, live, env = stores
         chain, call = WRITERS[writer]
-        env.setenv(chain.WRITE_ENV, "postgres")
+        _set_flag(env, chain, flag)
         pool = _RollsBackTheWriter(live, chain.__name__)
 
         with patch("core.pg.get_pool", new=AsyncMock(return_value=pool)):
@@ -620,20 +680,24 @@ FIRST_WRITES = {
 }
 
 
+def _first_write_chain(chain_name: str):
+    return WRITERS[FIRST_WRITES[chain_name][0]][0]
+
+
 class TestAFirstWriteLatchesAndClaimsInItsOwnTransaction:
     def test_every_registered_chain_has_a_first_write_here(self):
         assert set(FIRST_WRITES) == {write_chains.chain_name(c)
                                      for c in write_chains.WRITE_CHAINS}
 
-    @pytest.mark.parametrize("chain_name", list(FIRST_WRITES))
+    @pytest.mark.parametrize("chain_name, flag", _cases(FIRST_WRITES, _first_write_chain))
     @pytest.mark.asyncio
     async def test_the_owner_rows_and_the_row_share_one_transaction(
-        self, stores, chain_name,
+        self, stores, chain_name, flag,
     ):
         store, live, env = stores
         writer, table, key_column, key = FIRST_WRITES[chain_name]
         chain, call = WRITERS[writer]
-        env.setenv(chain.WRITE_ENV, "postgres")
+        _set_flag(env, chain, flag)
 
         with patch("core.pg.get_pool", new=AsyncMock(return_value=live)):
             await call(store)
