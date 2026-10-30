@@ -11,7 +11,7 @@ AT LEAST ONCE, NEVER TWICE (OD-16 (a))
 
 - **The record after delivery is retried, then spooled.** `sent_at` is taken
   once, right after the delivery, and carried through every attempt: three
-  tries ~12 s apart, then a file under `data/report-ledger-pending/<chain>/`,
+  tries within ~12 s, then a file under `data/report-ledger-pending/<chain>/`,
   written the way the latch marker is (temp, fsync, rename, fsync the
   directory). The job's result says `pending`; `/api/health` publishes the
   spooled weeks and the canary warns `report_ledger_pending`.
