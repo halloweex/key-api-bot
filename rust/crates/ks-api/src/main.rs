@@ -41,6 +41,10 @@ struct Config {
     pool_min: u32,
     pool_max: u32,
     timeout: Duration,
+    /// How long a request waits for a pooled connection before it is handed
+    /// to Python (`KS_PILOT_POOL_WAIT`, 2.5 s): the review's 2–3 s, not
+    /// asyncpg's 30 s.
+    pool_wait: Duration,
     secret: Vec<u8>,
     admins: BTreeSet<i64>,
     test_clock: bool,
@@ -122,6 +126,7 @@ impl Config {
         .find(|v| !v.is_empty())
         .ok_or("DASHBOARD_SECRET_KEY or BOT_TOKEN must be set")?;
         let timeout: f64 = env_or("KS_PG_TIMEOUT", 30.0)?;
+        let pool_wait: f64 = env_or("KS_PILOT_POOL_WAIT", 2.5)?;
         Ok(Self {
             dsn: dsn.trim().to_owned(),
             listen: env_or("KS_PILOT_LISTEN", SocketAddr::from(([127, 0, 0, 1], 8090)))?,
@@ -129,6 +134,8 @@ impl Config {
             pool_max: env_or("KS_PG_POOL_MAX", 5)?,
             timeout: Duration::try_from_secs_f64(timeout)
                 .map_err(|_| format!("KS_PG_TIMEOUT={timeout} is not a duration"))?,
+            pool_wait: Duration::try_from_secs_f64(pool_wait)
+                .map_err(|_| format!("KS_PILOT_POOL_WAIT={pool_wait} is not a duration"))?,
             secret: secret.into_bytes(),
             admins: hardcoded_admins(contract)?,
             test_clock: cfg!(feature = "test-clock")
@@ -154,7 +161,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let pool = PgPoolOptions::new()
         .min_connections(config.pool_min)
         .max_connections(config.pool_max)
-        .acquire_timeout(config.timeout)
+        .acquire_timeout(config.pool_wait)
         .connect_lazy(&config.dsn)?;
     if config.test_clock {
         tracing::warn!(
@@ -174,7 +181,7 @@ async fn run() -> Result<(), Box<dyn Error>> {
         contract,
     };
     let app = ks_api::router(ks_api::AppState::new(
-        PgGold::new(pool.clone(), config.timeout),
+        PgGold::new(pool.clone(), config.timeout, revision.clone()),
         PgMargin::new(pool.clone(), config.timeout, revision.clone()),
         PgReads::new(pool, config.timeout, revision),
         access,

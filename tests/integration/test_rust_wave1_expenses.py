@@ -366,8 +366,12 @@ async def test_a_postgres_that_cannot_answer_is_the_same_503(pair):
                         "UPDATE meta.mirror_state SET backfilled_at = $1 "
                         "WHERE table_name = 'bronze.expenses'", carried)
             pair.relatch()
-    differences = REPORT.phase("unreadable", rows)
+    differences = REPORT.phase("unreadable", rows, may_hand_over=True)
     assert not differences, "\n".join(differences)
+    # Another revision is a migration window: Rust hands every request to
+    # Python, whose image is the schema's. A table neither can read is the
+    # same answer from both.
+    assert rust_wave1.handed_over(rows) == [r for r, _, _ in rows if r.startswith("revision ")]
     assert {statuses[("revision", path)] for path, _ in asks} == {503}
     # Only the two statements over `bronze.expenses` ask for its history,
     # and only the type list and the summary read the type dictionary.

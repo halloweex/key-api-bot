@@ -16,6 +16,7 @@ use std::future::Future;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 
+use crate::handover::Reason;
 use crate::params::{self, FieldError};
 use crate::period::{self, Raised, Refused};
 use crate::pyrt::{PyNum, py_sum, round_float, round_num};
@@ -33,8 +34,37 @@ pub struct DayRow {
     pub orders: i64,
 }
 
+/// Why a read returned no rows.
 #[derive(Debug)]
-pub struct ReadError(pub String);
+pub enum ReadError {
+    /// It never reached its data — another revision, a revision check
+    /// Postgres did not answer, no connection in time: the request is handed
+    /// to the Python app, which may well answer it.
+    HandOver(Reason, String),
+    /// The statement itself failed: Python's 503 under `KS_READ_FALLBACK=off`.
+    Failed(String),
+}
+
+impl ReadError {
+    /// What a read Python does not guard ends in: the app's 500 — unless
+    /// the read never reached its data, which hands the request over like
+    /// any other read.
+    pub fn raised(self, why: &'static str) -> Failure {
+        match self {
+            ReadError::HandOver(reason, detail) => Failure::HandOver(reason, detail),
+            ReadError::Failed(_) => Failure::Raised(why),
+        }
+    }
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::HandOver(reason, why) => write!(f, "{}: {why}", reason.as_str()),
+            ReadError::Failed(why) => f.write_str(why),
+        }
+    }
+}
 
 /// The one thing the endpoint reads. A trait so the logic is tested without
 /// a database; `gold::PgGold` is the implementation that runs.
@@ -61,6 +91,8 @@ pub enum Failure {
     Unavailable(&'static str, ReadError),
     /// A branch the pilot leaves to Python.
     NotInPilot(&'static str),
+    /// A request the pilot hands to Python (`crate::handover`).
+    HandOver(Reason, String),
     /// slowapi's 429, carrying `str(limit)`.
     RateLimited(String),
 }
