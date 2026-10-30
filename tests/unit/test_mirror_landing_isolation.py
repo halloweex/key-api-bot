@@ -30,20 +30,6 @@ import pytest
 from core.data_quality import IntegrityIssue, Severity
 
 
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is what the mirror-landing and reconciliation jobs
-    file, not where the quality journal lives, and it reads the journal
-    back from DuckDB. So this module keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_dq_journal_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
-
-
 # Every check, in the order the job runs it. `reconcile_mirror` is the landing
 # comparison; the rest are named as they are imported.
 CHECKS_BY_MODULE = {
@@ -121,7 +107,10 @@ async def _run(outcomes, mocks=None, held=None, hook=None, returned=None):
     store = MagicMock()
     store.connection = _conn
 
-    def _persist(conn, **kw):
+    # What the job hands the journal's door. Until step 14's S14-10 this
+    # module routed chain 9 back to DuckDB and caught DuckDB's `persist_run`
+    # behind the door instead.
+    async def _journal_run(**kw):
         persisted.update(kw)
         return 1
 
@@ -129,7 +118,7 @@ async def _run(outcomes, mocks=None, held=None, hook=None, returned=None):
         patch("core.mirror_reconciliation.configured", return_value=True),
         patch("core.mirror_reconciliation.read_duckdb_side", return_value={}),
         patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)),
-        patch("core.data_quality.persist_run", side_effect=_persist),
+        patch("core.dq_journal.journal_run", new=_journal_run),
         patch("core.data_quality.machine_attempts_note", return_value=None),
         patch("core.data_quality.evidence_for_agent", return_value={}),
     ]

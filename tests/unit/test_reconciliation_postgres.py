@@ -34,20 +34,6 @@ from core.reconciliation_io import (
 from core.scheduler import BackgroundScheduler
 
 
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is the Postgres arm's verdict; the run it reads back
-    is written to the quality journal, kept in DuckDB here. So this module
-    keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_dq_journal_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
-
-
 AS_OF = datetime(2026, 8, 24, 3, 0, tzinfo=timezone.utc)
 START, END = date(2026, 5, 26), date(2026, 8, 24)
 
@@ -156,22 +142,16 @@ class TestItCostsNothing:
 
     @pytest.mark.asyncio
     async def test_the_persisted_run_records_zero_api_calls(self):
+        """Through the journal's door, `dq_journal.journal_run` (until step
+        14's S14-10 through DuckDB's `persist_run` behind it, the chain
+        routed back to DuckDB for the test)."""
         captured = {}
 
-        def _persist(conn, **kw):
+        async def journal_run(**kw):
             captured.update(kw)
             return 1
 
-        class _Conn:
-            async def __aenter__(self): return object()
-            async def __aexit__(self, *a): return False
-
-        class _Store:
-            def connection(self): return _Conn()
-
-        with patch("core.data_quality.persist_run", new=_persist), \
-             patch("core.duckdb_store.get_store",
-                   new=AsyncMock(return_value=_Store())):
+        with patch("core.dq_journal.journal_run", new=journal_run):
             await BackgroundScheduler()._persist_postgres_reconciliation(
                 {"issues": [], "discrepancies": [], "error": None},
                 started_at=AS_OF, as_of=AS_OF,

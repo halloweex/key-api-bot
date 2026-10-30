@@ -688,13 +688,10 @@ def test_process(state, sweep_network, sweep_world, production_host, monkeypatch
         return jobs
 
     jobs = asyncio.run(sweep())
-    from core import shadow_writes
-
-    # Which shadow chains reached their DuckDB half and stood it down (PR-4),
-    # and which counted a failure there instead.
-    record.write(jobs=jobs, file=state.unchanged(),
-                 shadow_stood_down=sorted(shadow_writes.stood_down()),
-                 shadow_failures=sorted(shadow_writes.failures()))
+    # Until step 14's S14-10 the record also carried which shadow chains
+    # reached their DuckDB half and stood it down (PR-4); the shadow went, and
+    # what the journal and the samples write is read from `landed` instead.
+    record.write(jobs=jobs, file=state.unchanged())
 
 
 def answer_the_cohorts(monkeypatch) -> None:

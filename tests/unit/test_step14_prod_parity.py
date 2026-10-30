@@ -146,6 +146,9 @@ RETIRED_FIELDS = {
     ("chains", "pg_catalogue_write", "unmet_precondition"): "S14-09",
     ("chains", "pg_expense_types_write", "unmet_precondition"): "S14-09",
     ("health", "write_chains", "pg_orders_write", "preflight"): "S14-09",
+    # S14-10 deleted the shadow chains' comparison and the registry's answer
+    # to which of their tables it compared (empty since S14-00).
+    ("registry", "compared_in_shadow"): "S14-10",
 }
 
 
@@ -1023,11 +1026,14 @@ def capture() -> dict:
                                      "mismatch", "unmet_precondition", "shadow")}
         for name, state in write_chains.chain_modes().items()}
     out["registry"] = {
-        "compared_in_shadow": sorted(write_chains.compared_in_shadow()),
         "stood_down_tables": sorted(write_chains.stood_down_tables()),
         "stood_down_sync_keys": sorted(write_chains.stood_down_sync_keys()),
         "mismatched_chains": sorted(write_chains.mismatched_chains()),
     }
+    # Deleted in S14-10 (`RETIRED_FIELDS`); asked where it still exists, so the
+    # capture still runs against the trees before it.
+    if hasattr(write_chains, "compared_in_shadow"):
+        out["registry"]["compared_in_shadow"] = sorted(write_chains.compared_in_shadow())
     out["health"] = _health()
     return json.loads(json.dumps(out, default=str))
 

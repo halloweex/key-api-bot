@@ -506,11 +506,10 @@ NOT_THE_FILE: Dict[Tuple[str, str], str] = {}
 # write of the three sample tables went dark to the walk until this read them.
 #
 # `{module: renderer}` — `renderer(text)` renders any of the module's texts
-# for DuckDB, its default engine.
-HOLE_RENDERERS = {
-    "core/disk_monitor.py": "sample_sql",
-    "core/memory_monitor.py": "memory_sql",
-}
+# for DuckDB, its default engine. Empty since step 14's S14-10: the
+# watchdogs' renderers (`sample_sql`, `memory_sql`) render for Postgres alone,
+# so their statements are listed in `TEMPLATED_ELSEWHERE` below.
+HOLE_RENDERERS: Dict[str, str] = {}
 # `{(module, constant): renderer}` — a `Dialect` body, rendered by the one
 # function that renders it, as `renderer(sql_dialect.DUCKDB)`.
 DIALECT_BODIES = {
@@ -528,7 +527,15 @@ TEMPLATED_ELSEWHERE = {
     ("core/pg_landing.py", "_UPSERT"): "Postgres: the landing mirror's tables",
     ("core/report_ledger.py", "UPSERT_SQL"):
         "Postgres: the two send ledgers' chain writers (`$n` placeholders); "
-        "DuckDB's half is each report's own literal",
+        "DuckDB's half, each report's own literal, went with S14-10",
+    # Chain 10's statements, rendered by `sample_sql`/`memory_sql` for
+    # Postgres alone since S14-10 deleted their DuckDB callers.
+    ("core/disk_monitor.py", "DISK_INSERT_SQL"): "Postgres: chain 10's tick",
+    ("core/disk_monitor.py", "DISK_PRUNE_SQL"): "Postgres: chain 10's tick",
+    ("core/disk_monitor.py", "DIR_INSERT_SQL"): "Postgres: chain 10's tick",
+    ("core/disk_monitor.py", "DIR_PRUNE_SQL"): "Postgres: chain 10's tick",
+    ("core/memory_monitor.py", "MEMORY_INSERT_SQL"): "Postgres: chain 10's tick",
+    ("core/memory_monitor.py", "MEMORY_PRUNE_SQL"): "Postgres: chain 10's tick",
 }
 # A write keyword whose table is a named `{hole}`. An f-string's own holes
 # read as `HOLE`, which has no name; `{{name}}` in one reads as `{name}`.
@@ -1640,22 +1647,22 @@ class TestTheStoreSwitches:
 
     # ── one text for two engines ──
 
-    def test_the_watchdogs_templates_are_read_as_writes(self, writes):
+    def test_the_watchdogs_templates_are_postgres_alone(self, writes):
         """Chain 10 made each sample statement one `{table}` text for both
-        stores, and the literal pass lost all three tables: `duckdb_written()`
-        said True and the walk said nothing writes them. Mutation: empty
-        `HOLE_RENDERERS`."""
-        expected = {
-            "disk_samples": {("core/disk_monitor.py", "insert_sample"),
-                             ("core/disk_monitor.py", "prune_old_samples")},
-            "data_dir_samples": {("core/disk_monitor.py", "insert_dir_samples"),
-                                 ("core/disk_monitor.py", "prune_old_dir_samples")},
-            "memory_samples": {("core/memory_monitor.py", "insert_sample"),
-                               ("core/memory_monitor.py", "prune_old_samples")},
-        }
-        for table, functions in expected.items():
-            owners = {(s.path, s.owner) for s in writes.writers(table)}
-            assert functions <= owners, (table, owners)
+        stores, and until step 14's S14-10 the walk read them as DuckDB's
+        writes through the module's renderer (`HOLE_RENDERERS`). S14-10 left
+        the renderers Postgres's alone and deleted every DuckDB writer of the
+        three tables. Mutation: put `insert_sample(conn, ...)` back, or the
+        `duckdb` entry back in `SAMPLE_TABLES`."""
+        from core import disk_monitor, memory_monitor
+
+        assert HOLE_RENDERERS == {}
+        for table in ("disk_samples", "data_dir_samples", "memory_samples"):
+            assert not writes.writers(table), table
+        assert disk_monitor.sample_sql(disk_monitor.DISK_INSERT_SQL).startswith(
+            "INSERT INTO app.disk_samples")
+        assert memory_monitor.memory_sql(memory_monitor.MEMORY_INSERT_SQL).startswith(
+            "INSERT INTO app.memory_samples")
 
     def test_a_dialect_body_is_read_for_duckdb(self, writes):
         """Mutation: empty `DIALECT_BODIES`."""
@@ -1798,15 +1805,13 @@ class TestDuckdbWritten:
 
     @pytest.mark.parametrize("duckdb", ["on", "off"])
     def test_a_latched_chain_moves_its_tables(self, duckdb, monkeypatch):
-        """A frozen chain's tables leave DuckDB with its latch. A shadow
-        chain's do not (OD-02 (c)): Postgres writes first and DuckDB is still
-        handed every row (`core/shadow_writes.py`), so the file is written as
-        long as the shadow stands — under `KS_DUCKDB=on`. Under `off` the
-        shadow stands down before the file is opened (stage 5, PR-4), so they
-        leave too, and so does every other table: this process writes none.
-        Mutations: answer `mode == "duckdb"` for every chain (the shadow
-        tables read False under on), or True for every one; or drop the `off`
-        answer in `duckdb_written` (the shadow tables read True under off)."""
+        """A chain's tables leave DuckDB with its latch — a shadow chain's too
+        since step 14's S14-10, which deleted the shadow (OD-02 (c)): until
+        then Postgres wrote first and DuckDB was still handed every row, so
+        the file was written under `KS_DUCKDB=on`. Under `off` this process
+        writes no table at all. Mutations: answer True for the shadow chains
+        again, or for every chain; or drop the `off` answer in
+        `duckdb_written`."""
         from core import chain_latch, duckdb_switch
         from core.write_chains import chain_name, is_shadow
 
@@ -1819,22 +1824,17 @@ class TestDuckdbWritten:
             shadow = is_shadow(chain)
             shapes.add(shadow)
             for name in fates_mod.tables_by_switch(env):
-                assert written[name] is (shadow and duckdb == "on"), (
-                    env, name, shadow, duckdb)
+                assert written[name] is False, (env, name, shadow, duckdb)
         assert shapes == {True, False}, "the family: both shapes are registered"
         if duckdb == "off":
             assert set(fates_mod.duckdb_written().values()) == {False}
 
     # What DuckDB still writes once everything that can move has moved: the
-    # shadow chains' eight tables (9: the journal, 10: the samples, 11a/11b:
-    # the ledgers), the watermarks' `sync_metadata`, and the migration ledger.
-    # Exactly what the week of silence takes away (stage 5, PR-4).
-    TARGET_ON_REMAINDER = frozenset({
-        "data_quality_runs", "data_quality_issues", "data_quality_diffs",
-        "disk_samples", "data_dir_samples", "memory_samples",
-        "weekly_report_sends", "traffic_report_sends",
-        "sync_metadata", "schema_migrations",
-    })
+    # watermarks' `sync_metadata` and the migration ledger. The shadow chains'
+    # eight tables (9: the journal, 10: the samples, 11a/11b: the ledgers)
+    # were here too until step 14's S14-10 deleted the shadow. Exactly what
+    # the week of silence takes away (stage 5, PR-4).
+    TARGET_ON_REMAINDER = frozenset({"sync_metadata", "schema_migrations"})
 
     @pytest.mark.parametrize("duckdb", ["on", "off"])
     def test_in_the_target_state_what_is_left_is_pinned(self, duckdb, monkeypatch):
@@ -1862,10 +1862,12 @@ class TestDuckdbWritten:
             self.TARGET_ON_REMAINDER if duckdb == "on" else frozenset())
         assert self.TARGET_ON_REMAINDER <= set(FATES)
 
-    def test_a_shadow_chains_tables_are_written_by_its_shadow(self, writes):
-        """What makes True the honest answer for a latched shadow chain: the
-        DuckDB statements the shadow runs are the walk's writes of the very
-        tables the chain declares."""
+    def test_a_shadow_chains_tables_have_no_duckdb_writer_left(self, writes):
+        """Until step 14's S14-10 the DuckDB statements the shadow ran were the
+        walk's writes of the very tables the chain declares, which made True
+        the honest answer for a latched shadow chain. S14-10 deleted them all:
+        the walk finds no DuckDB write of any of them. Mutation: put any of
+        them back (`persist_run`, `insert_sample`, a report's `mark_sent`)."""
         from core.write_chains import WRITE_CHAINS, is_shadow
 
         shadow = [c for c in WRITE_CHAINS if is_shadow(c)]
@@ -1873,7 +1875,7 @@ class TestDuckdbWritten:
         by_code = writes.written()
         for chain in shadow:
             tables = fates_mod.tables_by_switch(chain.WRITE_ENV)
-            assert tables and set(tables) <= by_code, (chain.WRITE_ENV, tables)
+            assert tables and not set(tables) & by_code, (chain.WRITE_ENV, tables)
 
 
 # ─── 6. the host check ───────────────────────────────────────────────────────

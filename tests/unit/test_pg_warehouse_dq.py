@@ -21,20 +21,6 @@ from core.pg_warehouse_dq import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _chains_on_duckdb(monkeypatch):
-    """Since step 14's S14-00 every write chain writes Postgres, a constant. This
-    module's subject is the Postgres twins; the integrity job's run record
-    it reads back is written to the quality journal, kept in DuckDB here.
-    So this module keeps DuckDB as the chains' store
-    (`tests.conftest.route_chains_to_duckdb`) until their DuckDB branches
-    go."""
-    from core import pg_dq_journal_write
-    from tests.conftest import route_chains_to_duckdb
-
-    route_chains_to_duckdb(monkeypatch, pg_dq_journal_write)
-
-
 WM = Watermark(today=date(2026, 9, 17), in_flight=2, backfilled=True,
                landing_age_s=120, landing_failures=0)
 ARC_CLEAN = SilverArc(0, 0, 0.0, None, (), 0, 0.0, ())
@@ -1166,7 +1152,9 @@ class TestTheScanSkipsWhatStandsDown:
 class TestTheJobUnderTheStandDown:
     """The integrity job end to end on a real (empty) DuckDB, the twins' facts
     handed in: the scan skips the Silver checks, `duckdb_looked` leaves them
-    out, and the twins file on their own."""
+    out, and the twins file on their own. The run it journals goes through
+    chain 9's door into a list (`tests/journal_fake.py`) — a DuckDB journal
+    until step 14's S14-10."""
 
     LI = LineItems(5, 500.0, (1,), 7, 700.0, (2,))
 
@@ -1181,6 +1169,9 @@ class TestTheJobUnderTheStandDown:
         for env in ("KS_WRITE_EXPENSES", "KS_WRITE_INVENTORY", "KS_WRITE_GOALS"):
             monkeypatch.delenv(env, raising=False)
         monkeypatch.setenv("KS_DQ_PG_WAREHOUSE", "on")
+        from tests.journal_fake import install_journal
+
+        journal = install_journal(monkeypatch)
         store = DuckDBStore(db_path=tmp_path / "integrity.duckdb")
         asyncio.run(store.connect())
         scheduler = BackgroundScheduler()
@@ -1190,21 +1181,15 @@ class TestTheJobUnderTheStandDown:
         with patch("core.duckdb_store.get_store", new=AsyncMock(return_value=store)), \
              patch("core.alerting.resolve_group", AsyncMock(return_value=0)), \
              patch.object(twins, "read_facts", AsyncMock(return_value=facts)):
-            yield scheduler, store
+            yield scheduler, journal
         asyncio.run(store.close())
 
-    def _run(self, scheduler, store):
+    def _run(self, scheduler, journal):
         import asyncio
         import json
 
-        from core.data_quality import fetch_run_issues
-
-        async def go():
-            result = await scheduler._run_dq_integrity()
-            async with store.connection() as conn:
-                return {r["check_name"]: r for r in fetch_run_issues(conn, result["run_id"])}
-
-        persisted = asyncio.run(go())
+        result = asyncio.run(scheduler._run_dq_integrity())
+        persisted = {r["check_name"]: r for r in journal.issues(result["run_id"])}
         record = json.loads(persisted["pg_twin_pairing"]["description"])
         return persisted, record
 

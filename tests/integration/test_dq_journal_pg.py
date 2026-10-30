@@ -297,6 +297,23 @@ def _blind_twice():
             for part in ("the journal", "the watchdogs")]
 
 
+class TestOneTransaction:
+    @pytest.mark.asyncio
+    async def test_a_refused_finding_leaves_no_run_behind(self, pool):
+        """A run and its findings land together or not at all: Postgres
+        refuses a NUL in a text column, and the run row inserted before it in
+        the same transaction is rolled back with it. (DuckDB's `persist_run`
+        was held to the same bracket until step 14's S14-10.) Mutation: write
+        the run in its own transaction — the digest would then read a run
+        with counts and no findings, and call every standing one new."""
+        bad = IntegrityIssue(check_name="pk_uniqueness_orders", table_name="orders",
+                             severity=Severity.WARN, count=1, description="a\x00b")
+        with pytest.raises(asyncpg.PostgresError):
+            await dq_journal.journal_run(**_kwargs(issues=[bad]))
+        for table in TABLES:
+            assert await _pg_rows(pool, table) == [], table
+
+
 class TestOneFindingPerKey:
     """`app.data_quality_issues` is keyed on `(run_id, check_name,
     table_name)`."""

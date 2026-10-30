@@ -892,10 +892,10 @@ _SPEC_TYPES = {"MirroredTable", "BucketedTable"}
 # Reading a spec's Postgres copy, or comparing the two: what makes a function
 # a comparison rather than a reader of DuckDB's side.
 _PG_COMPARE = {"fetch_pg_rows", "pg_fingerprints", "_read_pg_bucket",
-               "compare_table", "compare_bucket",
-               # The shadow chains' comparison, facing Postgres→DuckDB
-               # (OD-02 (c)) — a comparison of the same copies all the same.
-               "fetch_pg_rows_with_clock", "compare_shadow"}
+               "compare_table", "compare_bucket"}
+# The shadow chains' comparison, facing Postgres→DuckDB (OD-02 (c) —
+# `fetch_pg_rows_with_clock`, `compare_shadow`), was one more until step
+# 14's S14-10 deleted it with the shadow.
 
 
 def _spec_tables(modules) -> dict:
@@ -1405,21 +1405,28 @@ class TestTheOwnerRowsStandTheOrderTablesDownToo:
 
 
 async def _persisted(store, issues):
-    """The run as the 07:30 job writes it, read back the way the digest and
-    `/api/health/data-quality` read it: `(run row, issue rows)`."""
+    """The run as the 07:30 job writes it — the journal's door folds the
+    findings, `run_values` sets the status and the counts, `journal_rows` the
+    rows chain 9 commits — shaped the way the digest and
+    `/api/health/data-quality` shape them: `(run row, issue rows)`. Until
+    step 14's S14-10 this wrote a DuckDB journal and read it back; the
+    columns' round trip through Postgres is `test_dq_journal_pg.py`'s."""
     from datetime import datetime, timezone
 
-    from core.data_quality import fetch_latest_run, fetch_run_issues, persist_run
+    from core.data_quality import issue_dicts, journal_rows, run_values
+    from core.dq_journal import one_finding_per_key
     from core.mirror_reconciliation import MIRROR_LAYER
 
     now = datetime.now(timezone.utc)
-    async with store.connection() as conn:
-        run_id = persist_run(
-            conn, started_at=now, ended_at=now, as_of=now,
-            window_start=now.date(), window_end=now.date(),
-            layer=MIRROR_LAYER, issues=issues, discrepancies=[],
-        )
-        return fetch_latest_run(conn, MIRROR_LAYER), fetch_run_issues(conn, run_id)
+    issues = one_finding_per_key(issues)
+    values = run_values(
+        started_at=now, ended_at=now, as_of=now,
+        window_start=now.date(), window_end=now.date(),
+        layer=MIRROR_LAYER, issues=issues, discrepancies=[],
+    )
+    rows = journal_rows(1, values, issues, [])
+    run = {"status": values.status, "critical_count": values.critical_count}
+    return run, issue_dicts(r[1:] for r in rows.issues)
 
 
 def _what_a_human_reads(run, rows) -> str:
