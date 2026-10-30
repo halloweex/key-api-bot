@@ -80,12 +80,11 @@ _DOOR_FUNCS = {
 _DEFINERS = {"core/disk_monitor.py", "core/memory_monitor.py",
              "core/watchdog_samples.py", "core/pg_watchdog_write.py"}
 # SQL over the three tables: their own modules, the router, and the stores'
-# machinery (DDL, migrations, the hourly copy, its comparison, the copy-back,
-# the standing watch).
+# machinery (DDL, migrations, the hourly copy, its comparison, the standing
+# watch; the copy-back went with step 14's S14-04).
 _SQL_ALLOWED = _DEFINERS | {
     "core/migrations.py", "core/mirror_reconciliation.py", "core/pg_operational.py",
-    "core/chain_transfer.py", "core/pg_chain_invariants.py",
-    "core/snapshot_validation.py",
+    "core/pg_chain_invariants.py", "core/snapshot_validation.py",
 }
 _SAMPLES_SQL = re.compile(
     r"\b(SELECT|INSERT|UPDATE|DELETE|FROM)\b[\s\S]*\b"

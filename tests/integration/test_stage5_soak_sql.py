@@ -9,9 +9,10 @@ back transaction per scenario, a read-only check, a fixed Wednesday noon in
 Kyiv in 2030.
 
 What every name and number shared with the code is held to the code: the
-lever rows to `core/lever_journal.py`, the pages and watches to
-`bot/canary.py`, the gaps to the canary's, and the read-fallback half to
-F1's own lists.
+pages and watches to `bot/canary.py`, the gaps to the canary's, and the
+read-fallback half to F1's own lists. The lever rows were held to
+`core/lever_journal.py` until step 14's S14-04 deleted it with the copy-back,
+its only writer: the rows already written are history, read by P2 as before.
 """
 from __future__ import annotations
 
@@ -126,17 +127,6 @@ class TestTheFilesReadWhatTheCodeWrites:
     @staticmethod
     def code(name):
         return _uncommented((SQL_DIR / name).read_text(encoding="utf-8"))
-
-    def test_the_lever_rows_are_core_lever_journals(self):
-        """Mutation: rename `LEVER_USED` or `LEVER_PREFIX`."""
-        from core import lever_journal
-
-        prefix = lever_journal.LEVER_PREFIX
-        for name in (P2, P3, P4):
-            code = self.code(name)
-            assert f"left(e.condition_key, {len(prefix)}) = '{prefix}'" in code, name
-            assert f"e.event_type = '{lever_journal.LEVER_USED}'" in code, name
-            assert f"substr(e.condition_key, {len(prefix) + 1})" in code, name
 
     def test_every_page_key_is_a_registered_condition(self):
         from core.alerting import REGISTRY
@@ -467,20 +457,6 @@ class TestP2RollbackLevers:
             await writer(conn, '{"writer": "postgres", "since": "yesterday"}')
             v, _ = await verdict(conn, P2)
         assert v == "PASS"
-
-    @pytest.mark.asyncio
-    async def test_the_writers_row_is_what_it_reads(self, pool):
-        """`core.lever_journal.record` itself, on the real clock."""
-        from core import lever_journal
-
-        async with scenario(pool) as conn:
-            await clear(conn)
-            await journal(conn)
-            await lever_journal.record(conn, lever_journal.CHAIN_COPY_BACK,
-                                       subject="pg_goals_write",
-                                       outcome=lever_journal.RELEASED)
-            v, detail = await verdict(conn, P2, now=None)
-        assert v == "FAIL" and "chain_copy_back pg_goals_write released" in detail, detail
 
 
 # ── P3: the parallel period ───────────────────────────────────────────────────

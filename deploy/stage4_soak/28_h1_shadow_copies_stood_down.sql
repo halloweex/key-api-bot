@@ -43,8 +43,9 @@
 --   DuckDB's rows over the chain's. Stop it before the next hour: put the
 --   flag of a chain that never latched back, or read the web log for
 --   "replicate_operational". A failure that reads "owned by Postgres since"
---   is the latch with its flag put back — not a rollback; the way back is
---   scripts/chain_copy_back.py.
+--   is the latch with its flag put back — not a rollback. The way back was
+--   scripts/chain_copy_back.py; step 14's S14-04 deleted it, and the lever is
+--   core.rollback_lever.ROLLBACK_LEVER since.
 -- - invalid: a KS_WRITE_* value no chain understands; that chain writes
 --   nowhere (OD-18 (a)). Fix the .env line.
 WITH clock AS (

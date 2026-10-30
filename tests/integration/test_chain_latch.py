@@ -167,7 +167,11 @@ class TestChain8AfterTheFlagGoesBack:
                 "WHERE table_name = $1", EXPENSES)
         assert state["failures_since_ok"] >= 1
         assert "owned by Postgres since" in state["last_error"]
-        assert "chain_copy_back" in state["last_error"]
+        # The lever since step 14's S14-04 deleted the copy-back it named.
+        from core.rollback_lever import ROLLBACK_LEVER
+
+        assert ROLLBACK_LEVER in state["last_error"]
+        assert "chain_copy_back" not in state["last_error"]
         assert state["last_ok_at"] is None, "a stand-down must not look like a shipment"
 
     @pytest.mark.asyncio
@@ -345,6 +349,9 @@ class TestWhenTheFirstWriteFails:
                 "WHERE table_name = $1", EXPENSES)
         assert state["failures_since_ok"] >= 1
         assert "no local marker" in state["last_error"]
+        from core.rollback_lever import ROLLBACK_LEVER
+
+        assert ROLLBACK_LEVER in state["last_error"]
 
     @pytest.mark.asyncio
     async def test_the_comparison_stands_down_on_it_too(self, stores):

@@ -89,11 +89,13 @@ Until all four hold, an unlatched chain runs as duckdb whatever
 
 THE WAY BACK
 
-`scripts/chain_copy_back.py forecast`, the only thing that releases the latch.
-The four tables are small and carried whole. Recalculating
-(`POST /api/goals/recalculate`) and retraining
-(`POST /api/revenue/forecast/train`) are the cheaper way to fix their CONTENT —
-they write wherever the chain writes — but not a way around the copy-back.
+`scripts/chain_copy_back.py forecast` was the only thing that released the
+latch (deleted in step 14's S14-04; the way back since is an image from
+before step 14, `core.rollback_lever`). The four tables are small, and it
+carried them whole. Recalculating (`POST /api/goals/recalculate`) and
+retraining (`POST /api/revenue/forecast/train`) are the cheaper way to fix
+their CONTENT — they write wherever the chain writes — but they were never a
+way around the copy-back, and are not one around the image now.
 
 The model artefact (`data/revenue_model.joblib` and its JSON siblings) is a
 file, not a table, and does not move.
@@ -113,12 +115,13 @@ WRITE_ENV = "KS_WRITE_FORECAST"
 
 # What this chain is called in `core.write_chains`, in the local latch marker
 # and in the `/api/health` block. One spelling, so a marker written by one
-# release is still read by the next. `chain_copy_back.py forecast`.
+# release is still read by the next.
 CHAIN = "pg_forecast_write"
 
 # The tables this chain writes. `core.write_chains` reads this, and through it
-# the hourly shipper, the daily comparison and the copy-back. No sync keys:
-# none of the four has a `last_sync_*` watermark.
+# the hourly shipper and the daily comparison (and the copy-back, until step
+# 14's S14-04 deleted it). No sync keys: none of the four has a `last_sync_*`
+# watermark.
 CHAIN_TABLES: Tuple[str, ...] = (
     "app.seasonal_indices", "app.growth_metrics",
     "app.weekly_patterns", "app.revenue_predictions",

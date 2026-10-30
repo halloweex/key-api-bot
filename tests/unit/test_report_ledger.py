@@ -84,8 +84,8 @@ _ALLOWED = {"core/report_ledger.py", "core/weekly_report.py", "core/traffic_repo
             "core/pg_weekly_ledger_write.py", "core/pg_traffic_ledger_write.py"}
 _SQL_ALLOWED = _ALLOWED | {
     "core/migrations.py", "core/mirror_reconciliation.py", "core/pg_operational.py",
-    "core/chain_transfer.py", "core/pg_chain_invariants.py",
-    "core/snapshot_validation.py", "core/duckdb_store.py",
+    "core/pg_chain_invariants.py", "core/snapshot_validation.py",
+    "core/duckdb_store.py",
 }
 _LEDGER_SQL = re.compile(r"\b(SELECT|INSERT|UPDATE|DELETE|FROM|INTO)\b[\s\S]*\b"
                          r"(weekly_report_sends|traffic_report_sends)\b", re.IGNORECASE)
@@ -496,40 +496,3 @@ class TestASpoolOutlivesItsFlag:
             assert len(sent) == 1
         finally:
             await store.close()
-
-
-class TestTheWayBackSeesTheSpool:
-    def test_every_chain_that_can_spool_declares_both_hooks(self):
-        """The chains whose records `report_ledger` spools are read off its own
-        `LEDGERS`, and each must carry `pending()` and `land_pending()` — the
-        two hooks the handover and the copy-back look for. Mutation: drop
-        `land_pending` from one chain — its copy-back would release the chain
-        with the delivered weeks still in the file."""
-        from core import write_chains
-
-        spoolers = {ledger.chain().CHAIN for ledger in report_ledger.LEDGERS}
-        hooked = {c.CHAIN for c in write_chains.WRITE_CHAINS
-                  if callable(getattr(c, "pending", None))
-                  and callable(getattr(c, "land_pending", None))}
-        assert spoolers == hooked
-
-    def test_the_handover_reports_the_spool(self, flags):
-        """Mutation: drop `_spool_issues` — `--handover` would print "every row
-        DuckDB holds is in Postgres" over a week neither store holds."""
-        from core.chain_transfer import _spool_issues
-        from core.data_quality import Severity
-
-        chain = pg_weekly_ledger_write
-        assert _spool_issues(chain) == []
-        report_ledger.spool(chain.CHAIN, WEEK, "retail", Decimal("5.00"), 1,
-                            datetime.now(timezone.utc))
-        bad = report_ledger._spool_path(chain.CHAIN, WEEK - timedelta(days=7), "retail")
-        bad.write_text("{", encoding="utf-8")
-        issues = {i.check_name: i for i in _spool_issues(chain)}
-        assert issues["handover_ledger_spooled"].severity is Severity.INFO
-        assert "2026-09-21__retail" in issues["handover_ledger_spooled"].description
-        assert issues["handover_ledger_spool_unreadable"].severity is Severity.CRITICAL
-        assert "2026-09-14__retail" in issues["handover_ledger_spool_unreadable"].description
-        from core import pg_expenses_write
-
-        assert _spool_issues(pg_expenses_write) == []

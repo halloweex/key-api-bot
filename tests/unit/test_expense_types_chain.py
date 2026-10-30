@@ -5,7 +5,8 @@ it proves the statements; this proves the routing around them: that the flag
 off changes nothing, that the flag on hands the writer the rows the shared
 parse produced and never touches DuckDB, that a fault in this chain stops this
 chain and not the full sync it rides in, and that the standing watch, the
-shipper, the comparison and the copy-back all see the chain.
+shipper and the comparison see the chain. (The copy-back saw it too, until
+step 14's S14-04 deleted the copy-back and its tests with it.)
 """
 from __future__ import annotations
 
@@ -87,33 +88,6 @@ class TestTheRegistrySeesIt:
 
         assert set(chain.CHAIN_TABLES) <= {pg for pg, _d, _c, _o in _FULL_REPLACE}
         assert set(chain.CHAIN_TABLES) <= {s.pg_table for s in OPERATIONAL_TABLES}
-
-
-class TestTheCopyBackKnowsIt:
-    def test_one_full_replace_spec_with_no_clock(self):
-        """Derived from the shipper and the comparison, never written out. No
-        shared clock: DuckDB's `synced_at` and Postgres's `mirrored_at` are
-        each store's own bookkeeping, so after the latch a difference is taken
-        as Postgres being newer."""
-        from core import chain_transfer
-
-        (spec,) = chain_transfer.chain_specs(chain)
-        assert (spec.pg_table, spec.dk_table, spec.is_append, spec.clock) == (
-            "bronze.expense_types", "expense_types", False, ())
-        assert chain_transfer.chain_sequences(chain) == ()
-
-    def test_the_operator_types_its_short_name(self):
-        from core.chain_transfer import resolve_chain
-
-        assert resolve_chain("expense_types") is chain
-
-    def test_the_runbook_sends_it_to_its_own_tables_not_inventorys(self):
-        from core.chain_transfer import _runbook
-
-        said = " ".join(_runbook(chain, executed=True, released=True))
-        assert "KS_WRITE_EXPENSE_TYPES=duckdb" in said
-        assert "bronze.expense_types" in said
-        assert "I1" not in said and "E1" not in said
 
 
 # ─── full_sync: a fault in this chain stops this chain ─────────────────────

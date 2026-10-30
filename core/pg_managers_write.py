@@ -57,9 +57,11 @@ moves no number, and it goes with this chain.
 ONE CLOCK FOR BOTH STORES
 
 `set_at` is the copy-back's handover clock (`chain_transfer._shared_clock`
-derives it from the daily spec), so it is the web container's clock passed in
-by the caller — `datetime.now(timezone.utc)` — never Postgres' `now()`; DuckDB's
-`CURRENT_TIMESTAMP` default reads the same host clock. Chain 7a's rule.
+derived it from the daily spec; an image from before step 14 still orders by
+it, since S14-04 deleted this build's), so it is the web container's clock
+passed in by the caller — `datetime.now(timezone.utc)` — never Postgres'
+`now()`; DuckDB's `CURRENT_TIMESTAMP` default reads the same host clock.
+Chain 7a's rule.
 
 HELD ON DUCKDB UNTIL WHAT READS THE TABLES FOLLOWS — UNTIL S14-00
 
@@ -77,9 +79,10 @@ bridge, and the goal history is Silver's, which step 13 makes Postgres':
   every image built before the chain (`chain_latch.lockout_unmet`).
 - `step13` — while DuckDB derives Silver it derives `sales_type` from a
   classification this chain would freeze.
-- `chain3` — `update_manager_stats` reads the orders, and the copy-backs must
-  run in reverse order of the flips. Asked of `core.pg_orders_write` by name,
-  so a build without chain 3 reads as unmet rather than failing to import.
+- `chain3` — `update_manager_stats` reads the orders, and the copy-backs had
+  to run in reverse order of the flips (deleted in step 14's S14-04). Asked
+  of `core.pg_orders_write` by name, so a build without chain 3 reads as
+  unmet rather than failing to import.
 - `read_fallback_off` — a failed read must be a 503, never DuckDB's frozen
   classification.
 
@@ -92,9 +95,10 @@ Every write latches the chain (`core/chain_latch.py`, OD-19 (a)) inside
 `pool.acquire()` and before its transaction, and claims both owner rows inside
 that transaction. What can be refused is refused before the latch — a row
 Postgres would reject, a manager that does not exist, a backdate — so a write
-that could not have landed does not spend the rollback. From the first write
-only `scripts/chain_copy_back.py managers` moves the writes back, and it owes
-DuckDB a full warehouse rebuild when it does (`CHAIN_COPY_BACK_OWES_FULL_REBUILD`).
+that could not have landed does not spend the rollback. The copy-back that
+moved the writes back to DuckDB was deleted with the way back in step 14's
+S14-04: a step-14 image has no way back but an image from before step 14
+(`.claude/CLAUDE.md`, "Before any rollback to an image from before step 14").
 """
 from __future__ import annotations
 
@@ -136,11 +140,6 @@ CHAIN_SYNC_KEYS: Tuple[str, ...] = ("last_sync_managers",)
 # watched flip window. A first sync that fails is then "never synced", which is
 # true.
 CHAIN_WATERMARK_MAX_AGE_MIN: Optional[int] = None
-
-# `core.chain_transfer.copy_back` marks DuckDB's warehouse dirty in full in the
-# copy's own transaction: `sales_type` is materialised at rebuild time, and an
-# incremental rebuild never re-derives an order whose classification moved.
-CHAIN_COPY_BACK_OWES_FULL_REBUILD = True
 
 # 'ks' in the high half and the chain's number in the low one, chain 1's
 # convention (`pg_inventory_write.CHAIN_LOCK_KEY` is ...0001).
@@ -441,12 +440,13 @@ def duckdb_orders_frozen() -> FrozenSet[str]:
     stopped at its latch — asked by `DuckDBStore.update_manager_stats` before
     it counts DuckDB's orders while this chain is on DuckDB. Never raises.
 
-    The rollback order runs this chain's copy-back before chain 3's, so the
-    managers come back to DuckDB while the orders are still chain 3's; counted
-    from DuckDB's frozen orders, `last_order_date` and `order_count` would go
-    backwards and the replica would ship them over Postgres's (the chain-5
-    review). The stats are left as they stand instead — after a copy-back, the
-    chain's own last ones — until the orders come back.
+    The rollback order ran this chain's copy-back before chain 3's (both
+    deleted in step 14's S14-04), so the managers came back to DuckDB while
+    the orders were still chain 3's; counted from DuckDB's frozen orders,
+    `last_order_date` and `order_count` would go backwards and the replica
+    would ship them over Postgres's (the chain-5 review). The stats are left
+    as they stand instead — after a copy-back, the chain's own last ones —
+    until the orders come back.
 
     The local answer (`pg_landing.order_tables_stood_down`), as the per-tick
     order mirror takes it: it asks only a chain that declares an order table —
@@ -558,7 +558,8 @@ async def set_manager_retail_status(
             # Replaced, not stacked: the key is (manager_id, valid_from). The
             # only DELETE this chain has, and it is always followed by the
             # INSERT of the same key below — so the key set only grows, which
-            # the copy-back and the restore drill rely on.
+            # the restore drill relies on (and the copy-back did, until step
+            # 14's S14-04 deleted it).
             await conn.execute(
                 "DELETE FROM app.manager_classifications "
                 "WHERE manager_id = $1 AND valid_from = $2",
@@ -595,7 +596,8 @@ async def set_manager_retail_status(
 #   where the next begins (an overlap, an open one with a later row, a gap) or
 #   that covers no day at all;
 # - `disagree`: `bronze.managers.is_retail` against the latest open interval;
-# - `set_at_null`: the copy-back's clock missing;
+# - `set_at_null`: the copy-back's clock missing (an image from before step
+#   14's; S14-04 deleted this build's);
 # - `orphans`: intervals of a manager `bronze.managers` does not hold.
 SHAPE_SQL = """
 WITH iv AS (
@@ -654,12 +656,13 @@ async def preflight() -> Dict[str, Any]:
     that `reasons` names every unmet precondition (asked whatever the flag
     says, and alone while any is: Postgres is asked only once they all hold),
     a replica of either table failing or over a day old, and every
-    shape the standing watch would file after the flip — or that
-    `chain_copy_back.py managers --handover` refuses on: a manager with no
+    shape the standing watch would file after the flip — the shapes
+    `chain_copy_back.py managers --handover` refused on: a manager with no
     interval, not exactly one open, a broken history, a current answer that
     disagrees with the open interval, a missing `set_at`. A Postgres error is
-    named by its class only: the endpoint is public. Not a substitute for
-    `--handover`, which is still the gate.
+    named by its class only: the endpoint is public. It was never a
+    substitute for `--handover`, which was the gate before a flip (deleted
+    with the way back in step 14's S14-04).
     """
     if mode() == "postgres":
         return {"ok": None, "reasons": []}

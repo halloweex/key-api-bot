@@ -10,9 +10,10 @@ What `tests/unit/test_dq_journal.py` cannot prove without a database:
   shadow and named a shadow that failed (since step 14's S14-00 the comparison no longer compares a shadow —
   `compared_in_shadow()` is empty, as it has been in production under
   `KS_DUCKDB=off` — and its test went with it);
-- the standing watch reads an orphaned finding with its real SQL;
-- the way back carries a Postgres-only run into DuckDB, floors DuckDB's
-  allocator above it, carries the digest's beat back and releases.
+- the standing watch reads an orphaned finding with its real SQL.
+
+The way back — a Postgres-only run carried into DuckDB, its allocator floored,
+the digest's beat carried back — went with the copy-back in step 14's S14-04.
 """
 from __future__ import annotations
 
@@ -216,52 +217,6 @@ class TestTheStandingWatch:
         (issue,) = [i for i in inv.check_chain_invariants(facts)
                     if i.check_name == inv.JOURNAL_ORPHANS]
         assert issue.count == 2
-
-
-class TestTheWayBack:
-    @pytest.mark.asyncio
-    async def test_a_postgres_only_run_comes_back_and_the_allocator_clears_it(
-            self, stores):
-        """The copy-back for a shadow chain is a near no-op copy plus the
-        floor: DuckDB already holds every row but those whose shadow failed.
-        Mutation: leave `data_quality_run_seq` where the shadow left it — the
-        next DuckDB run would reissue an id Postgres already used."""
-        from core.chain_transfer import copy_back
-
-        store, pool, env = stores
-        env.setenv(chain.WRITE_ENV, "postgres")
-        old = NOW - timedelta(hours=5)
-        await dq_journal.journal_run(store, **_kwargs(started=old))
-        await dq_journal.mark_digest_sent(store, "2026-10-01T06:00:00+00:00")
-        # The second run's shadow fails: Postgres alone holds run 2.
-        real = shadow_writes.into_duckdb
-
-        async def failing(store_, chain_name, write):
-            return await real(store_, chain_name, lambda conn: (_ for _ in ()).throw(
-                RuntimeError("shadow refused")))
-
-        with patch.object(shadow_writes, "into_duckdb", failing):
-            second = await dq_journal.journal_run(store, **_kwargs(started=old))
-        assert second == 2
-
-        result = await copy_back(store, chain, dry_run=False)
-        assert result["findings"] == [], result["findings"]
-        assert result["released"] is True
-        assert not chain_latch.latched(chain.CHAIN)
-        assert await chain_latch.read_owners(pool) == {}
-        for table in TABLES:
-            pg, dk = await _both(store, pool, table)
-            assert pg == dk, table
-        async with store.connection() as conn:
-            marker = conn.execute("SELECT value FROM sync_metadata WHERE key = ?",
-                                  [chain.DIGEST_MARKER_KEY]).fetchone()[0]
-            nxt = conn.execute("SELECT nextval('data_quality_run_seq')").fetchone()[0]
-        assert marker == "2026-10-01T06:00:00+00:00"
-        assert nxt > 2
-        async with pool.acquire() as conn:
-            assert await conn.fetchval(
-                "SELECT value FROM meta.chain_watermarks WHERE key = $1",
-                chain.DIGEST_MARKER_KEY) is None
 
 
 def _blind_twice():

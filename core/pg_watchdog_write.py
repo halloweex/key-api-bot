@@ -35,8 +35,9 @@ file; the task this was built for put them in Postgres, and the design names
 what the file variant would change.
 
 Everything else — the latch on the first Postgres write (OD-19 (a)), the
-owner rows, the copy-back (`scripts/chain_copy_back.py watchdog`) — is the
-frozen chains' machinery unchanged.
+owner rows and, until step 14's S14-04 deleted it, the copy-back
+(`scripts/chain_copy_back.py watchdog`) — is the frozen chains' machinery
+unchanged.
 """
 from __future__ import annotations
 

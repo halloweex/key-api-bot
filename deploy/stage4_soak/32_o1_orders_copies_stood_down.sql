@@ -82,14 +82,15 @@
 --   stood down and no order is written anywhere. Fix the .env line.
 -- - owner rows and orders_on=0, or pending with the rows older than the
 --   script's read of the marker: the marker is lost. Restore
---   data/write-chain-owners/pg_orders_write (or redeploy the chain's build),
---   else scripts/chain_copy_back.py orders — DN-22a's lever for the same
---   state. Not the flag: at duckdb it is the same state.
+--   data/write-chain-owners/pg_orders_write (or redeploy the chain's build)
+--   — DN-22a's lever for the same state. Not the flag: at duckdb it is the
+--   same state. The copy-back went with step 14's S14-04; the detail names
+--   core.rollback_lever's lever.
 -- - the misses written after the handover: the hourly copy put DuckDB's ledger
 --   over the chain's. Failing after it: read the error — `owned by Postgres
 --   since` is the latch with its flag put back, `no local marker` a lost
---   data/write-chain-owners/pg_orders_write; scripts/chain_copy_back.py orders
---   is the way back from either, never the flag.
+--   data/write-chain-owners/pg_orders_write. Never the flag: the way back
+--   from either is the rollback image, after the markers are checked.
 -- - a backfilled_at after the handover: a DuckDB backfill shipped orders or
 --   expenses over the chain's. Read the web log for 'Backfill finished' and
 --   'Expense backfill'.
@@ -171,8 +172,8 @@ SELECT 'O1 orders copies stood down'::text AS "check",
                    'data/write-chain-owners/pg_orders_write is gone with KS_WRITE_ORDERS not '
                    'postgres: the marker is lost, the writes follow the flag back to DuckDB and '
                    'the sync''s mirror ships DuckDB''s orders over the chain''s every tick '
-                   '(order_owner_row_without_marker). Restore the marker, else '
-                   'scripts/chain_copy_back.py orders',
+                   '(order_owner_row_without_marker). Restore the marker. '
+                   'Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows',
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed || ' ' || since.said, 500)
                               ELSE 'none of the four tables written by a DuckDB copy ' || since.said END
@@ -195,8 +196,8 @@ SELECT 'O1 orders copies stood down'::text AS "check",
                    'the marker is lost. While a precondition is unmet (/api/health '
                    'write_chains.pg_orders_write.unmet_precondition) the writes stay on DuckDB '
                    'and the sync''s mirror ships DuckDB''s orders over the chain''s every tick '
-                   '(order_owner_row_without_marker). Restore the marker, else '
-                   'scripts/chain_copy_back.py orders; taking the flag back changes nothing',
+                   '(order_owner_row_without_marker). Restore the marker; taking the flag '
+                   'back changes nothing. Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows',
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN 'invalid' THEN
                'KS_WRITE_ORDERS is set to a value no chain understands: chain 3 is stood down'

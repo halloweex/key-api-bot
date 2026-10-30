@@ -27,7 +27,8 @@
 -- and KS_WRITE_EXPENSES has been put back, which is no longer a rollback and
 -- undoes nothing — or a fourth, "no local marker": the owner row stands and
 -- data/write-chain-owners/pg_expenses_write is gone. Read E2 before touching
--- anything; the way back is scripts/chain_copy_back.py.
+-- anything. The way back was scripts/chain_copy_back.py; step 14's S14-04
+-- deleted it, and the lever is core.rollback_lever.ROLLBACK_LEVER since.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now

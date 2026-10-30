@@ -507,11 +507,15 @@ class TestChain4Buyers:
         assert issue.table_name == "bronze.buyer_contacts"
 
     def test_a_null_name_names_the_copy_back_it_blocks(self):
+        """The copy-back is the rollback image's since step 14's S14-04, and
+        the row is corrected before any rollback to it."""
         facts = self._facts(UTC_NOW, null_names=1)
         (issue,) = inv.check_chain_invariants(facts)
         assert issue.check_name == inv.COLUMN_NULL
         assert issue.table_name == "bronze.buyers"
-        assert "chain_copy_back.py" in issue.description
+        assert "the copy-back of an image from before step 14" in issue.description
+        assert "before any rollback to rollback-step14" in issue.description
+        assert "chain_copy_back.py" not in issue.description
         assert "landing_rows.buyer_row" in issue.description
         assert "recorded_at" not in issue.description
 
@@ -524,7 +528,7 @@ class TestChain4Buyers:
         (issue,) = inv.check_chain_invariants(facts)
         assert "hand edit or a writer that went round the parse" in issue.description
         assert "carried across" not in issue.description
-        assert "chain_copy_back.py" in issue.description
+        assert "the copy-back of an image from before step 14" in issue.description
 
     def test_an_orphan_says_the_copy_back_leaves_it_behind(self):
         """It does not refuse them: contacts are read through their buyers and
@@ -533,6 +537,8 @@ class TestChain4Buyers:
         (issue,) = inv.check_chain_invariants(facts)
         assert "does not refuse them" in issue.description
         assert "refuses what DuckDB could not hold" not in issue.description
+        assert "before any rollback to rollback-step14" in issue.description
+        assert "chain_copy_back.py" not in issue.description
 
     def test_an_unreadable_buyers_group_is_blindness_not_silence(self):
         facts = inv.Facts(watched=("pg_buyers_write",), now=UTC_NOW,

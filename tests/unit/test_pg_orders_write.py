@@ -96,15 +96,15 @@ class TestTheDeclaration:
 
     def test_the_archive_is_not_a_chain_table(self):
         """`app.order_versions` has one writer in both modes and no DuckDB
-        copy; declaring it would make `chain_specs` raise."""
+        copy (declaring it made the copy-back's `chain_specs` raise, until
+        step 14's S14-04 deleted it)."""
         assert "app.order_versions" not in pow_.CHAIN_TABLES
         assert "bronze.expense_types" not in pow_.CHAIN_TABLES   # chain 6a's
 
-    def test_registered_and_resolved_by_its_short_name(self):
-        from core.chain_transfer import resolve_chain
-
+    def test_registered_and_found_by_its_sync_key(self):
+        """It was resolved by its short name too, by the copy-back that step
+        14's S14-04 deleted."""
         assert pow_ in write_chains.WRITE_CHAINS
-        assert resolve_chain("orders") is pow_
         assert write_chains.chain_for_sync_key("last_sync_orders") is pow_
 
 
@@ -565,11 +565,6 @@ class TestTheSearchCursorMovesWithTheChain:
             assert conn.execute(
                 "SELECT value FROM sync_metadata WHERE key = 'last_sync_meilisearch_pg'"
             ).fetchone()[0] == frozen.isoformat()
-
-    def test_the_copy_back_carries_it_and_the_release_deletes_it(self):
-        from core.chain_transfer import _carried_keys
-
-        assert "last_sync_meilisearch_pg" in _carried_keys(pow_)
 
     @pytest.mark.asyncio
     async def test_the_freshness_check_does_not_call_it_unwatched(self, flags, duck):

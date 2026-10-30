@@ -53,13 +53,13 @@
 -- - `invalid`: the flag is a value no chain understands; DN-01 stands the chain
 --   down, and nothing is being written anywhere by design. Fix the .env line.
 -- - owner rows and inventory_on=0: the marker is lost. Restore
---   data/write-chain-owners/pg_inventory_write, else
---   scripts/chain_copy_back.py inventory.
+--   data/write-chain-owners/pg_inventory_write (the copy-back went with
+--   step 14's S14-04; the detail names core.rollback_lever's lever).
 -- - a table written after the handover, or failing after it within the day:
 --   the stand-down has lapsed, or the latch and the flag disagree. Read the
 --   error — `owned by Postgres since` is the latch with its flag put back, `no
---   local marker` a lost marker; scripts/chain_copy_back.py inventory is the
---   way back from either, never the flag.
+--   local marker` a lost marker. Never the flag: the way back from either is
+--   the rollback image, after the markers are checked against the owner rows.
 WITH clock AS (
     SELECT COALESCE(NULLIF(current_setting('soak.now', true), '')::timestamptz,
                     now()) AS now
@@ -128,8 +128,8 @@ SELECT 'I1 inventory copy stood down'::text AS "check",
                    'data/write-chain-owners/pg_inventory_write is gone with KS_WRITE_INVENTORY not '
                    'postgres: the marker is lost, the stock step writes DuckDB again and the '
                    'hourly copy stands down on the owner rows, so the inventory in Postgres stops '
-                   'moving (chain_latch_disagrees). Restore the marker, else '
-                   'scripts/chain_copy_back.py inventory',
+                   'moving (chain_latch_disagrees). Restore the marker. '
+                   'Investigate with pg_chain_invariants; roll back to rollback-step14 only after checking the markers against the owner rows',
                    to_char(owner.at AT TIME ZONE 'Europe/Kyiv', 'DD.MM HH24:MI')) END
            WHEN '1' THEN CASE WHEN agg.n > 0 THEN left(agg.listed || ' ' || since.said, 500)
                               ELSE 'none of the six tables written by the copy ' || since.said END

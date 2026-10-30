@@ -37,8 +37,10 @@ AND THE FIRST WRITE TAKES THE FLAG'S PLACE
 Every write here latches the chain (`core/chain_latch.py`, OD-19 (a)) once a
 connection has come out of the pool and before the transaction opens. From the
 first typed expense onward the flag cannot move these writes back to DuckDB —
-only `scripts/chain_copy_back.py` can — because a flag flip after a row has
-landed here starts a second writer rather than undoing anything.
+only `scripts/chain_copy_back.py` could (deleted in step 14's S14-04; the way
+back since is an image from before step 14, `core.rollback_lever`) — because a
+flag flip after a row has landed here starts a second writer rather than
+undoing anything.
 """
 from __future__ import annotations
 
@@ -112,7 +114,8 @@ def _latch() -> str:
     believe DuckDB is still the writer.
 
     **Called after the connection is in hand, never before it.** The latch is
-    permanent — only `scripts/chain_copy_back.py` releases it — so taking it for
+    permanent — `scripts/chain_copy_back.py` was all that released it, until
+    step 14's S14-04 deleted it — so taking it for
     a write that never reaches Postgres spends the rollback this chain still
     has. Postgres being unreachable, a wait for a connection that ends without
     one (below) and `require_revision` raising because `web` came up ahead of

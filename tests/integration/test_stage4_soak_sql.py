@@ -33,6 +33,9 @@ from zoneinfo import ZoneInfo
 import pytest
 import pytest_asyncio
 
+# The lever the soak's lost-marker details name since step 14's S14-04.
+from core.rollback_lever import ROLLBACK_LEVER
+
 asyncpg = pytest.importorskip("asyncpg")
 
 DSN = os.getenv("KS_PG_DSN")
@@ -1411,7 +1414,7 @@ class TestI1InventoryCopyStoodDown:
         v, detail = verdicts.pop("15")
         assert v == "FAIL", detail
         assert "data/write-chain-owners/pg_inventory_write" in detail, detail
-        assert "scripts/chain_copy_back.py inventory" in detail, detail
+        assert ROLLBACK_LEVER in detail and "chain_copy_back" not in detail, detail
         assert "since 03.06 12:00 Kyiv" in detail, detail
         assert verdicts and all(v == "PASS" and d.startswith("not applicable")
                                 for v, d in verdicts.values()), verdicts
@@ -1586,7 +1589,7 @@ class TestB1BuyersCopiesStoodDown:
         v, detail = verdicts.pop("23")
         assert v == "FAIL", detail
         assert "data/write-chain-owners/pg_buyers_write" in detail, detail
-        assert "scripts/chain_copy_back.py buyers" in detail, detail
+        assert ROLLBACK_LEVER in detail and "chain_copy_back" not in detail, detail
         assert all(v == "PASS" and d.startswith("not applicable")
                    for v, d in verdicts.values()), verdicts
 
@@ -1610,7 +1613,7 @@ class TestB1BuyersCopiesStoodDown:
         v, detail = verdicts.pop("23")
         assert v == "FAIL", detail
         assert "data/write-chain-owners/pg_buyers_write" in detail, detail
-        assert "scripts/chain_copy_back.py buyers" in detail, detail
+        assert ROLLBACK_LEVER in detail and "chain_copy_back" not in detail, detail
         assert "KS_SMS_STORE" in detail and "since 03.06 12:00 Kyiv" in detail, detail
         assert "so nothing moved" not in detail, detail
         assert all(v == "PASS" and "held on DuckDB" in d for v, d in verdicts.values()), verdicts
@@ -2217,7 +2220,7 @@ class TestM1ManagersCopyStoodDown:
                                         managers_on="0")
         assert v == "FAIL", detail
         assert "data/write-chain-owners/pg_managers_write" in detail, detail
-        assert "scripts/chain_copy_back.py managers" in detail, detail
+        assert ROLLBACK_LEVER in detail and "chain_copy_back" not in detail, detail
         assert v2 == "PASS" and detail2.startswith("not applicable"), detail2
 
     @pytest.mark.asyncio
@@ -2234,7 +2237,7 @@ class TestM1ManagersCopyStoodDown:
             v, detail = await verdict(conn, self.FILE, managers_on="pending")
         assert v == "FAIL", detail
         assert "data/write-chain-owners/pg_managers_write" in detail, detail
-        assert "scripts/chain_copy_back.py managers" in detail, detail
+        assert ROLLBACK_LEVER in detail and "chain_copy_back" not in detail, detail
         assert "since 03.06 12:00 Kyiv" in detail, detail
 
     @pytest.mark.asyncio
@@ -2480,7 +2483,7 @@ class TestChain3IsJudgedOnlyOnceItMoved:
         v, detail = verdicts.pop(O_FILES[0])
         assert v == "FAIL", detail
         assert "data/write-chain-owners/pg_orders_write" in detail, detail
-        assert "scripts/chain_copy_back.py orders" in detail, detail
+        assert ROLLBACK_LEVER in detail and "chain_copy_back" not in detail, detail
         assert "since 03.06 12:00 Kyiv" in detail, detail
         assert all(v == "PASS" and d.startswith("not applicable")
                    for v, d in verdicts.values()), verdicts
@@ -2503,7 +2506,7 @@ class TestChain3IsJudgedOnlyOnceItMoved:
         v, detail = verdicts.pop(O_FILES[0])
         assert v == "FAIL", detail
         assert "data/write-chain-owners/pg_orders_write" in detail, detail
-        assert "scripts/chain_copy_back.py orders" in detail, detail
+        assert ROLLBACK_LEVER in detail and "chain_copy_back" not in detail, detail
         assert "since 03.06 12:00 Kyiv" in detail, detail
         assert all(v == "PASS" and d.startswith("not applicable")
                    for v, d in verdicts.values()), verdicts
@@ -2623,8 +2626,7 @@ class TestO1OrdersCopiesStoodDown:
             await order_owners(conn, ago(days=2))
             await mirror_state(conn, "app.order_backfill_misses", ok_at=ago(days=3),
                                attempted_at=ago(hours=1), failures=2,
-                               error="owned by Postgres since 2030-06-03; "
-                                     "run scripts/chain_copy_back.py")
+                               error=f"owned by Postgres since 2030-06-03; {ROLLBACK_LEVER}")
             v, detail = await verdict(conn, self.FILE, orders_on="1")
         assert v == "FAIL" and "failing (2): owned by Postgres since" in detail, detail
         async with scenario(pool) as conn:
