@@ -651,7 +651,7 @@ class TestTheJobWhenTheDuckDBHalfFails:
 
     @pytest.mark.asyncio
     async def test_a_movement_allocator_at_max_is_persisted_and_pages(self, job):
-        from core.data_quality import fetch_run_issues
+        from core import pg_dq_journal_write
 
         pool, scheduler, store, sent, resolve = job
         async with pool.acquire() as conn:
@@ -664,9 +664,11 @@ class TestTheJobWhenTheDuckDBHalfFails:
             result = await scheduler._run_dq_integrity()
 
         assert "DuckDB file will not open" in result["error"]
-        async with store.connection() as conn:
-            persisted = {r["check_name"]: r
-                         for r in fetch_run_issues(conn, result["run_id"])}
+        # Read back from the journal's one store, Postgres (chain 9); until
+        # step 14's S14-10 from DuckDB's shadow of it.
+        async with pg_dq_journal_write.reading() as conn:
+            persisted = {r["check_name"]: r for r in
+                         await pg_dq_journal_write.run_issues(conn, result["run_id"])}
         assert persisted[inv.SEQUENCE_BEHIND]["severity"] == "CRITICAL"
         assert persisted[inv.SEQUENCE_BEHIND]["table_name"] == "app.stock_movements"
         assert sent.await_count == 1

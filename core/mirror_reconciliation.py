@@ -943,7 +943,7 @@ async def reconcile_mirror(
     Raises rather than swallowing: unlike the mirror itself — which must never
     break a sync — a check that cannot run has produced no verdict, and the job
     above records that as a failed run so the layer goes stale instead of
-    reading clean. See `fetch_last_success_ages`.
+    reading clean. See `dq_journal.last_success_ages_pg`.
 
     Or, with `dk_side=None`, a DuckDB side read only when needed: `read_duckdb`
     is awaited with the specs that survived the stand-down, after it, and not

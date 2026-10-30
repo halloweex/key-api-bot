@@ -900,10 +900,13 @@ class TestTheJobEndToEnd:
         await store.close()
 
     async def _issues(self, store, run_id):
-        from core.data_quality import fetch_run_issues
+        """The run's findings from the journal's one store, Postgres (chain
+        9); until step 14's S14-10 from DuckDB's shadow of it."""
+        from core import pg_dq_journal_write
 
-        async with store.connection() as conn:
-            return {r["check_name"]: r for r in fetch_run_issues(conn, run_id)}
+        async with pg_dq_journal_write.reading() as conn:
+            return {r["check_name"]: r
+                    for r in await pg_dq_journal_write.run_issues(conn, run_id)}
 
     @pytest.mark.asyncio
     async def test_on_a_lost_postgres_row_is_journalled_and_pages(self, pool, job, monkeypatch):
