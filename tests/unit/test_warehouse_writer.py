@@ -739,13 +739,15 @@ class TestEveryDuckdbUtmParseStandsBehindThePredicate:
             "a DuckDB failure there would stand in front of the table /traffic reads")
 
     def test_the_walk_finds_the_doors(self):
-        """Three routes, the CLI, and the way back's own DELETE — a walk that
-        found none would pass on a codebase it cannot read."""
+        """Two routes, the CLI, and the way back's own DELETE — a walk that
+        found none would pass on a codebase it cannot read. (The route's
+        comment backfill was a third route, until step 14's S14-09 deleted its
+        DuckDB walk.)"""
         parses = {where.rsplit(":", 1)[0] for where, _g, fn in
                   _production_nodes(_parses_duckdb_utm) if fn != UTM_TICK}
         assert parses == {"web/routes/api/traffic.py", "scripts/backfill_utm.py"}
         assert len([1 for _w, _g, fn in _production_nodes(_parses_duckdb_utm)
-                    if fn != UTM_TICK]) == 4
+                    if fn != UTM_TICK]) == 3
         deletes = {where.rsplit(":", 1)[0] for where, _g, _fn in
                    _production_nodes(_deletes_duckdb_utm)}
         assert deletes == {"web/routes/api/traffic.py", "scripts/backfill_utm.py",
@@ -825,34 +827,10 @@ class TestTheRecordedWriter:
         asyncio.run(wc.settle_writer(store))
 
 
-def _orders(*ids, comment=None):
-    return [{
-        "id": oid, "source_id": 1, "status_id": 12, "grand_total": "100.00",
-        "ordered_at": "2026-04-01T10:00:00+00:00",
-        "created_at": "2026-04-01T09:00:00+00:00",
-        "updated_at": "2026-04-01T10:00:00+00:00",
-        "buyer": None, "manager": None, "manager_comment": comment, "promocode": None,
-        "products": [{"id": oid * 1000 + 1, "product_id": 1, "name": "p",
-                      "quantity": 1, "price_sold": "100.00"}],
-    } for oid in ids]
-
-
-def _held_store(tmp_path):
-    """A DuckDB with two commented orders, `postgres` recorded, and the way
-    back settled over it: held."""
-    store = _store(tmp_path)
-    asyncio.run(store.upsert_orders(_orders(1, 2, comment="utm_source=instagram")))
-
-    async def seed():
-        async with store.connection() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO sync_metadata (key, value, updated_at) "
-                "VALUES (?, ?, CURRENT_TIMESTAMP)",
-                [wc.WRITER_KEY, json.dumps({"writer": "postgres", "resolved": True})])
-    asyncio.run(seed())
-    asyncio.run(wc.settle_writer(store))
-    assert wc.held()
-    return store
+# `_orders` and `_held_store` stood here: a DuckDB of commented orders,
+# seeded through DuckDB's `upsert_orders`, with the way back held over it. Their
+# last user went with step 13's way back in S14-00; the writer they seeded
+# through went in S14-09.
 
 
 class TestAHoldThatDoesNotEndIsSaid:

@@ -324,4 +324,6 @@ print(json.dumps({"before": before, "after": after}))
         assert done.returncode == 0, done.stderr[-2000:]
         seen = json.loads(done.stdout.strip().splitlines()[-1])
         assert seen["before"] == [], seen
-        assert seen["after"] == ["core.duckdb_store", "duckdb", "pandas"], seen
+        # pandas came with the store until step 14's S14-09 deleted its last
+        # user there (`upsert_orders`); the driver is the control's point.
+        assert seen["after"] == ["core.duckdb_store", "duckdb"], seen

@@ -188,9 +188,10 @@ TICK = ("core/duckdb_store.py", "refresh_warehouse_layers")
 DOORS = {
     ("web/routes/api/traffic.py", "refresh_traffic_data"),
     ("web/routes/api/traffic.py", "reclassify_traffic"),
-    ("web/routes/api/traffic.py", "_run_backfill_inner"),
-    # The CLI's re-parse, shared since chain 3 by its DuckDB path and its
-    # chain-3 path (`backfill_utm` and `_backfill_utm_postgres`).
+    # `_run_backfill_inner` was a door through its DuckDB walk, until step
+    # 14's S14-09 deleted that walk: the route's backfill is chain 3's
+    # (`_run_backfill_postgres`), which re-parses through the router alone.
+    # The CLI's re-parse, its one path since S14-09 (`_backfill_utm_postgres`).
     ("scripts/backfill_utm.py", "_reparse"),
 }
 

@@ -911,9 +911,12 @@ async def mirror_orders(
     decided which ones it wrote. The mirror ships that decision rather than
     making its own, so the two stores cannot disagree about what a sync did.
 
-    It does not ask `order_tables_stood_down()`; its one caller does, before
+    It does not ask `order_tables_stood_down()`; its one caller did, before
     calling it, and `tests/unit/test_write_chains.py` walks for any new caller
-    that does not.
+    that does not. **Since step 14's S14-09 nothing calls it**: that caller,
+    `DuckDBStore.upsert_orders`, went with chain 3's DuckDB half, and this
+    goes with the mirror's half of this module in S14-13 (the walk holds it
+    to having no caller until then).
     """
     tables = [ORDERS_TABLE] + ([ORDER_PRODUCTS_TABLE] if replace_products else [])
     counts = {ORDERS_TABLE: len(orders), ORDER_PRODUCTS_TABLE: len(products)}

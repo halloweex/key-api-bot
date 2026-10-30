@@ -92,16 +92,15 @@ class TestTheInheritedWatermark:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("chain,key", [
         ("pg_orders_write", "orders"),
-        ("pg_catalogue_write", "products"),
-        ("pg_catalogue_write", "categories"),
-        ("pg_expense_types_write", "expense_types"),
+        ("pg_orders_write", "meilisearch_pg"),
     ])
     async def test_under_off_the_copy_stands_in(self, flags, duckdb_off, chain, key):
-        """Chains 3, 6 and 6a inherit while Postgres holds no key: under off
-        the stand-in is DuckDB's stamp as Postgres copied it, read without the
-        file. Mutation: drop the `is_off()` branch — the read goes to DuckDB,
-        is refused, and the order step of every tick fails (the sweep's rows
-        for `get_last_sync_time`)."""
+        """Chain 3 inherits while Postgres holds no key: under off the
+        stand-in is DuckDB's stamp as Postgres copied it, read without the
+        file. Chains 6 and 6a did too, until step 14's S14-09 took the
+        stand-in off them (below). Mutation: drop the `is_off()` branch — the
+        read goes to DuckDB, is refused, and the order step of every tick
+        fails (the sweep's rows for `get_last_sync_time`)."""
         frozen = NOW - timedelta(hours=3)
         chain_latch.latch(chain)
         flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
@@ -133,14 +132,22 @@ class TestTheInheritedWatermark:
         _untouched(duckdb_off)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("chain,key", [
+        ("pg_inventory_write", "offers"),
+        # Since step 14's S14-09 (`tests/unit/test_absent_chain_keys.py`).
+        ("pg_catalogue_write", "products"),
+        ("pg_catalogue_write", "categories"),
+        ("pg_expense_types_write", "expense_types"),
+    ])
     async def test_a_chain_that_does_not_inherit_never_asks_the_copy(
-            self, flags, duckdb_off):
-        """Chain 1's absent key is "never synced" in either mode. Mutation:
-        consult the copy for every moved key."""
-        chain_latch.latch("pg_inventory_write")
+            self, flags, duckdb_off, chain, key):
+        """Chain 1's absent key is "never synced" in either mode, and chains
+        6 and 6a's since S14-09. Mutation: consult the copy for every moved
+        key."""
+        chain_latch.latch(chain)
         flags.setattr(pg_chain_watermarks, "get_value", AsyncMock(return_value=None))
-        copy = Copy(flags, {"last_sync_offers": NOW.isoformat()})
-        assert await DuckDBStore().get_last_sync_time("offers") is None
+        copy = Copy(flags, {f"last_sync_{key}": NOW.isoformat()})
+        assert await DuckDBStore().get_last_sync_time(key) is None
         assert copy.asked == []
         _untouched(duckdb_off)
 
@@ -188,11 +195,12 @@ def _names(issues):
 class TestTheFreshnessCheck:
     def test_under_off_the_copy_is_the_rows_and_conn_is_never_read(
             self, flags, duckdb_off):
-        """Every chain latched, Postgres holding all but the four inherited
-        keys: the copy stands in for those, at the same thresholds. Mutation:
-        read `conn` under off."""
+        """Every chain latched, Postgres holding all but the inherited key
+        (chain 3's; chains 6 and 6a inherited too until step 14's S14-09):
+        the copy stands in for it, at the same threshold. Mutation: read
+        `conn` under off."""
         _latch_every_chain()
-        inherited = ("orders", "products", "categories", "expense_types")
+        inherited = ("orders",)
         watermarks = _rows(**{e: FRESH for e in dq.FRESHNESS_THRESHOLDS
                               if e not in inherited})
         frozen = _rows(**{**ALL_FRESH, "orders": timedelta(hours=7)})
@@ -200,6 +208,21 @@ class TestTheFreshnessCheck:
                                      frozen_rows=frozen)
         assert _names(issues) == ["freshness_orders"]
         assert "as Postgres copied it" in issues[0].description
+        _untouched(duckdb_off)
+
+    def test_under_off_chains_6_and_6a_are_never_synced_without_their_key(
+            self, flags, duckdb_off):
+        """Their stand-in went in S14-09: an absent key is "never synced",
+        however fresh the copy, at the entity's own severity. Mutation: the
+        declaration put back on either chain — the copy then answers and the
+        run is quiet."""
+        _latch_every_chain()
+        gone = ("products", "categories", "expense_types")
+        watermarks = _rows(**{e: FRESH for e in dq.FRESHNESS_THRESHOLDS if e not in gone})
+        issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
+                                     frozen_rows=_rows(**ALL_FRESH))
+        assert _names(issues) == [f"freshness_{e}" for e in sorted(gone)]
+        assert all("never synced" in i.description for i in issues)
         _untouched(duckdb_off)
 
     def test_under_off_postgres_s_own_value_wins_over_the_copy(self, flags, duckdb_off):
@@ -225,20 +248,23 @@ class TestTheFreshnessCheck:
     def test_under_off_an_unreadable_copy_is_unwatched_not_never_synced(
             self, flags, duckdb_off):
         """A copy that failed to read is neither a bootstrap nor "never
-        synced": the inherited entities Postgres holds no key for are named
-        unwatched, and the rest are judged. Mutation: read None as `{}` —
-        the inherited entities read "never synced", and with no watermark in
-        hand the gate would call a failed read a fresh install."""
+        synced": the inherited entity Postgres holds no key for is named
+        unwatched, and the rest are judged — the categories included, whose
+        absent key is "never synced" since S14-09 took their stand-in off, so
+        the copy was never theirs to need. Mutation: read None as `{}` — the
+        inherited entity reads "never synced", and with no watermark in hand
+        the gate would call a failed read a fresh install."""
         _latch_every_chain()
         watermarks = _rows(**{e: FRESH for e in dq.FRESHNESS_THRESHOLDS
                               if e not in ("orders", "categories")})
         watermarks["last_sync_offers"] = (NOW - timedelta(hours=60)).isoformat()
         issues = dq._freshness_check(_NoConn(), NOW, chain_watermarks=watermarks,
                                      frozen_rows=None)
-        assert _names(issues) == ["freshness_offers", "sync_watermarks_unwatched"]
+        assert _names(issues) == ["freshness_categories", "freshness_offers",
+                                  "sync_watermarks_unwatched"]
         (unwatched,) = [i for i in issues if i.check_name == "sync_watermarks_unwatched"]
-        assert unwatched.count == 2
-        assert "categories, orders" in unwatched.description
+        assert unwatched.count == 1
+        assert "of orders " in unwatched.description
         assert "app.sync_metadata" in unwatched.description
         assert "freshness_orders" in dq.unverified_conditions([], issues)
 

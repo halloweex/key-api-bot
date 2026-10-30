@@ -600,11 +600,25 @@ class _Walk:
         seen = set() if seen is None else seen
         if key in self.consulting or key[0] in _chain_modules():
             return True
+        if key in _DEAD_SHIPPERS and not self.callers.get(key):
+            # Nothing reaches it: no path through it is a path at all.
+            return True
         if key in seen:
             return False
         seen = seen | {key}
         callers = self.callers.get(key, set())
         return bool(callers) and all(self.covered(c, seen) for c in callers)
+
+
+# Shippers whose last caller is gone, kept until the PR that deletes them
+# (rule 14). A dead shipper cannot ask on anybody's behalf, so the walk counts
+# it covered only while nothing calls it — `test_the_dead_shippers_are_dead`
+# fails the moment one is called again.
+_DEAD_SHIPPERS = {
+    ("core/pg_landing.py", "mirror_orders"):
+        "its one caller, DuckDB's `upsert_orders`, went in step 14's S14-09; "
+        "the mirror's half of `pg_landing` goes in S14-13",
+}
 
 
 @pytest.fixture(scope="module")
@@ -619,6 +633,13 @@ def _chain_modules() -> set:
 
 
 class TestEveryPostgresWriterAsksTheRegistry:
+    def test_the_dead_shippers_are_dead(self, walk):
+        """Kills: a dead shipper called again — it asks nobody (its caller
+        did), so it would ship round a chain."""
+        for key in _DEAD_SHIPPERS:
+            assert key in walk.fns, f"{key} is gone: take it off the list"
+            assert not walk.callers.get(key), (key, walk.callers.get(key))
+
     def test_each_one_asks_or_is_reached_only_by_askers(self, walk):
         chains = _chain_modules()
         uncovered = sorted(
