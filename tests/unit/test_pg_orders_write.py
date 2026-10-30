@@ -914,6 +914,65 @@ class TestThePreflight:
             assert "did not answer" in block[chain]["preflight"]["reasons"][0]
 
 
+class TestTheCanaryReadsWhatHealthNowPublishes:
+    """S14-09 changed the shape of chain 3's `/api/health` entry (its
+    preflight went): the CRITICAL that is the only page for "nobody writes
+    the orders" must still read it. End to end, through the real block and
+    the real check. Mutations: drop `sync_step` from the entry, or `mode` —
+    the canary then judges nothing."""
+
+    @staticmethod
+    async def _block(monkeypatch, step_state):
+        from types import SimpleNamespace
+
+        from core import sync_service as sync_mod
+        from web.routes.api import health
+
+        TestThePreflight._quiet_preflights(monkeypatch)
+        service = SimpleNamespace(orders_step_health=step_state.published)
+        monkeypatch.setattr(sync_mod, "get_sync_service", AsyncMock(return_value=service))
+        return {"write_chains": await health._write_chains_block()}
+
+    @pytest.mark.asyncio
+    async def test_a_failing_step_pages(self, flags, monkeypatch):
+        from bot import canary
+        from core.sync_service import OrdersStepState
+
+        state = OrdersStepState()
+        for _ in range(3):
+            state.attempted()
+            state.failed(ConnectionRefusedError("down"))
+        payload = await self._block(monkeypatch, state)
+        (key, message), = canary.check_orders_sync_chain(payload)
+        assert key == "orders_sync_failing" and "ConnectionRefusedError" in message
+        assert "orders_sync_failing" not in canary.unjudged_keys(payload)
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_step_is_quiet_and_judged(self, flags, monkeypatch):
+        from bot import canary
+        from core.sync_service import OrdersStepState
+
+        state = OrdersStepState()
+        state.attempted()
+        state.succeeded()
+        payload = await self._block(monkeypatch, state)
+        assert canary.check_orders_sync_chain(payload) == []
+        assert "orders_sync_failing" not in canary.unjudged_keys(payload)
+
+    @pytest.mark.asyncio
+    async def test_no_step_holds_the_key(self, flags, monkeypatch):
+        from bot import canary
+        from core import sync_service as sync_mod
+        from web.routes.api import health
+
+        TestThePreflight._quiet_preflights(monkeypatch)
+        monkeypatch.setattr(sync_mod, "get_sync_service",
+                            AsyncMock(side_effect=RuntimeError("no store")))
+        payload = {"write_chains": await health._write_chains_block()}
+        assert payload["write_chains"][pow_.CHAIN]["sync_step"] is None
+        assert "orders_sync_failing" in canary.unjudged_keys(payload)
+
+
 class TestTheDefaultShipsWhatMainShipped:
     """With the flag at its default every order shipment out of DuckDB runs
     `pg_landing._write_order_rows`, which chain 3 split out of `write_orders`.
